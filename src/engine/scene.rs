@@ -1,5 +1,6 @@
 use crate::audio::mixer::{mix_sources, DistanceModel};
 use crate::engine::commands::Command;
+use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
 use crate::spatial::source::SoundSource;
 use crate::world::room::Room;
@@ -14,7 +15,7 @@ pub struct AudioScene {
     pub master_gain: f32,
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
-    // Future: pub processors: Vec<Box<dyn AudioProcessor>>,
+    pub processors: Vec<Box<dyn AudioProcessor>>,
 }
 
 impl AudioScene {
@@ -31,6 +32,15 @@ impl AudioScene {
                     self.master_gain = gain;
                 }
             }
+        }
+    }
+
+    /// Initialize all processors with room geometry and sample rate.
+    /// Must be called after sample_rate is set and before the audio callback starts.
+    pub fn init_processors(&mut self) {
+        let (room_min, room_max) = self.room.bounds();
+        for processor in &mut self.processors {
+            processor.init(room_min, room_max, &self.listener, self.sample_rate);
         }
     }
 
@@ -56,9 +66,9 @@ impl AudioScene {
             &self.distance_model,
         );
 
-        // Future: run processor chain here
-        // for processor in &mut self.processors {
-        //     processor.process(output, channels, self.sample_rate);
-        // }
+        // Run processor chain (early reflections, reverb, etc.)
+        for processor in &mut self.processors {
+            processor.process(output, channels, self.sample_rate);
+        }
     }
 }

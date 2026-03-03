@@ -10,10 +10,25 @@
 //
 // See REFERENCES.md for full list.
 
+pub mod early_reflections;
+
+use crate::spatial::listener::Listener;
+use crate::world::types::Vec3;
+
 /// Trait for audio processing stages that transform the mixed signal.
-/// Phase 1: defined but not used — no processors active.
-/// Future: EarlyReflections, FdnReverb, RayTracedReflections, ZoneBlender.
+/// Future: FdnReverb, RayTracedReflections, ZoneBlender.
 pub trait AudioProcessor: Send {
+    /// Called once when sample_rate and room geometry are known (before audio callback starts).
+    /// Default no-op for processors that don't need spatial info.
+    fn init(
+        &mut self,
+        _room_min: Vec3,
+        _room_max: Vec3,
+        _listener: &Listener,
+        _sample_rate: f32,
+    ) {
+    }
+
     /// Process a buffer of interleaved samples in place.
     fn process(&mut self, buffer: &mut [f32], channels: usize, sample_rate: f32);
 

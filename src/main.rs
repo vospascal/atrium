@@ -6,6 +6,7 @@ use atrium::audio::mixer::DistanceModel;
 use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::engine::commands::Command;
 use atrium::engine::scene::AudioScene;
+use atrium::processors::early_reflections::EarlyReflections;
 use atrium::spatial::listener::Listener;
 use atrium::spatial::source::TestNode;
 use atrium::world::room::BoxRoom;
@@ -49,6 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         master_gain: 0.7,
         sample_rate: 0.0, // set by output backend
         distance_model: DistanceModel::default(),
+        processors: vec![Box::new(EarlyReflections::new(
+            0.5, // wet_gain: moderate reflection level
+            0.9, // wall_absorption: plaster walls reflect ~90%
+        ))],
     };
 
     // 4. Start audio output
@@ -56,15 +61,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Report
     println!();
-    println!("=== Atrium Phase 2 ===");
+    println!("=== Atrium Phase 3 ===");
     println!("Room: 6x4m | Distance attenuation: inverse (ref=1m, max=10m)");
+    println!("Early reflections: image-source method, 5 wall taps (floor skipped)");
     println!("Listener: center ({}, {})", listener_pos.x, listener_pos.y);
     println!("Sources:");
     println!("  - Djembe:   1.5m radius, clockwise,        ~6.3s orbit");
     println!("  - Campfire: 2.5m radius, counter-clockwise, ~10.5s orbit");
     println!();
-    println!("You should hear two sources orbiting independently in stereo.");
-    println!("The campfire is further out — notice it's quieter due to distance.");
+    println!("The sources should sound like they're in a room now.");
     println!("Press Ctrl+C to stop.");
 
     // Keep the producer alive (future: use for WebSocket commands)

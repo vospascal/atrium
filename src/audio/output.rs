@@ -75,6 +75,7 @@ impl AudioOutput for CpalOutput {
         );
 
         scene.sample_rate = sample_rate as f32;
+        scene.init_processors();
 
         let config = StreamConfig {
             channels,
