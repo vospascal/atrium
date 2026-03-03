@@ -1,4 +1,4 @@
-use crate::audio::mixer::mix_sources;
+use crate::audio::mixer::{mix_sources, DistanceModel};
 use crate::engine::commands::Command;
 use crate::spatial::listener::Listener;
 use crate::spatial::source::SoundSource;
@@ -13,6 +13,7 @@ pub struct AudioScene {
     pub room: Box<dyn Room>,
     pub master_gain: f32,
     pub sample_rate: f32,
+    pub distance_model: DistanceModel,
     // Future: pub processors: Vec<Box<dyn AudioProcessor>>,
 }
 
@@ -52,6 +53,7 @@ impl AudioScene {
             channels,
             self.sample_rate,
             self.master_gain,
+            &self.distance_model,
         );
 
         // Future: run processor chain here

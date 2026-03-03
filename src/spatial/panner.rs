@@ -20,6 +20,26 @@ pub struct StereoGains {
     pub right: f32,
 }
 
+/// Compute distance-based gain attenuation (inverse distance model).
+///
+/// Follows the WebAudio "inverse" distance model:
+///   gain = ref_distance / (ref_distance + rolloff * (distance - ref_distance))
+///
+/// - `ref_distance`: distance at which gain = 1.0 (no attenuation). Sources closer than this are clamped to 1.0.
+/// - `max_distance`: beyond this, gain stays constant (no further attenuation).
+/// - `rolloff`: how quickly sound fades with distance. 1.0 = realistic, higher = faster.
+pub fn distance_gain(
+    listener: &Listener,
+    source_position: Vec3,
+    ref_distance: f32,
+    max_distance: f32,
+    rolloff: f32,
+) -> f32 {
+    let dist = listener.position.distance_to(source_position);
+    let clamped = dist.clamp(ref_distance, max_distance);
+    ref_distance / (ref_distance + rolloff * (clamped - ref_distance))
+}
+
 /// Compute equal-power stereo panning gains from a source position relative to a listener.
 ///
 /// The panning law ensures constant perceived loudness as the source moves:
@@ -109,5 +129,38 @@ mod tests {
                 g.right
             );
         }
+    }
+
+    #[test]
+    fn distance_at_ref_is_unity() {
+        let l = listener_at_origin();
+        // Source at exactly ref_distance → gain = 1.0
+        let g = distance_gain(&l, Vec3::new(1.0, 0.0, 0.0), 1.0, 10.0, 1.0);
+        assert!((g - 1.0).abs() < 0.001, "gain={g}");
+    }
+
+    #[test]
+    fn distance_closer_than_ref_clamps() {
+        let l = listener_at_origin();
+        // Source closer than ref_distance → still 1.0
+        let g = distance_gain(&l, Vec3::new(0.3, 0.0, 0.0), 1.0, 10.0, 1.0);
+        assert!((g - 1.0).abs() < 0.001, "gain={g}");
+    }
+
+    #[test]
+    fn distance_far_away_is_quiet() {
+        let l = listener_at_origin();
+        // Source at 10m with ref=1.0, rolloff=1.0 → gain = 1/(1+1*9) = 0.1
+        let g = distance_gain(&l, Vec3::new(10.0, 0.0, 0.0), 1.0, 10.0, 1.0);
+        assert!((g - 0.1).abs() < 0.001, "gain={g}");
+    }
+
+    #[test]
+    fn distance_beyond_max_clamps() {
+        let l = listener_at_origin();
+        // Source at 20m but max=10m → same gain as at 10m
+        let g_at_max = distance_gain(&l, Vec3::new(10.0, 0.0, 0.0), 1.0, 10.0, 1.0);
+        let g_beyond = distance_gain(&l, Vec3::new(20.0, 0.0, 0.0), 1.0, 10.0, 1.0);
+        assert!((g_at_max - g_beyond).abs() < 0.001);
     }
 }

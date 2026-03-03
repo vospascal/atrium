@@ -6,7 +6,7 @@ Built for a NUC driving 5.1 speakers + per-listener binaural headphones, but wor
 
 ## What it does
 
-A sound source (currently a looping djembe sample) orbits around a listener in a 6x4m virtual room. You hear it pan smoothly in stereo using equal-power panning. The architecture is designed from day one for:
+Two sound sources (djembe + campfire) orbit independently around a listener in a 6x4m virtual room. You hear them pan smoothly in stereo using equal-power panning with distance-based attenuation (inverse distance model). The architecture is designed from day one for:
 
 - Ray-traced reflections from room geometry
 - Acoustic zone transitions (atrium → rainy outdoors)
@@ -29,7 +29,7 @@ A sound source (currently a looping djembe sample) orbits around a listener in a
 # Build
 cargo build
 
-# Run — you should hear a djembe sample orbiting around you in stereo
+# Run — you should hear djembe + campfire orbiting in stereo
 cargo run
 
 # Run optimized (lower CPU, tighter audio timing)
@@ -47,7 +47,7 @@ src/
 │
 ├── audio/
 │   ├── decode.rs            # MP3/WAV/FLAC → mono f32 buffer (symphonia)
-│   ├── mixer.rs             # Mix N sources → stereo output with spatial panning
+│   ├── mixer.rs             # Mix N sources → stereo output with spatial panning + distance attenuation
 │   └── output.rs            # Audio backend trait + cpal implementation
 │
 ├── engine/
@@ -57,7 +57,7 @@ src/
 ├── spatial/
 │   ├── listener.rs          # Listener position + orientation
 │   ├── source.rs            # SoundSource trait + TestNode (orbiting buffer player)
-│   └── panner.rs            # Equal-power stereo panning from 3D positions
+│   └── panner.rs            # Equal-power stereo panning + distance attenuation
 │
 ├── world/
 │   ├── types.rs             # Vec3 math
@@ -67,7 +67,8 @@ src/
     └── mod.rs               # AudioProcessor trait (extension point for reverb, reflections, etc.)
 
 assets/
-└── djembe.mp3               # Test audio source
+├── djembe.mp3               # Percussive test source (close orbit)
+└── campfire.mp3             # Ambient test source (wide orbit)
 ```
 
 ## Architecture

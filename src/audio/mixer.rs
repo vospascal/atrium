@@ -1,14 +1,32 @@
 use crate::spatial::listener::Listener;
-use crate::spatial::panner::stereo_pan;
+use crate::spatial::panner::{distance_gain, stereo_pan};
 use crate::spatial::source::SoundSource;
+
+/// Distance model parameters for attenuation.
+pub struct DistanceModel {
+    pub ref_distance: f32,
+    pub max_distance: f32,
+    pub rolloff: f32,
+}
+
+impl Default for DistanceModel {
+    fn default() -> Self {
+        Self {
+            ref_distance: 1.0,
+            max_distance: 10.0,
+            rolloff: 1.0,
+        }
+    }
+}
 
 /// Mix all active sources into an interleaved stereo output buffer.
 ///
 /// For each sample frame:
 ///   1. Each source produces a mono sample
-///   2. Panned to stereo based on source position vs listener
-///   3. Summed and scaled by master_gain
-///   4. Clamped to [-1.0, 1.0]
+///   2. Attenuated by distance from listener (inverse distance model)
+///   3. Panned to stereo based on source position vs listener
+///   4. Summed and scaled by master_gain
+///   5. Clamped to [-1.0, 1.0]
 pub fn mix_sources(
     sources: &mut [Box<dyn SoundSource>],
     listener: &Listener,
@@ -16,6 +34,7 @@ pub fn mix_sources(
     channels: usize,
     sample_rate: f32,
     master_gain: f32,
+    distance_model: &DistanceModel,
 ) {
     let num_frames = output.len() / channels;
 
@@ -29,10 +48,18 @@ pub fn mix_sources(
             }
 
             let mono = source.next_sample(sample_rate);
-            let gains = stereo_pan(listener, source.position());
+            let pos = source.position();
+            let pan = stereo_pan(listener, pos);
+            let dist = distance_gain(
+                listener,
+                pos,
+                distance_model.ref_distance,
+                distance_model.max_distance,
+                distance_model.rolloff,
+            );
 
-            left_acc += mono * gains.left;
-            right_acc += mono * gains.right;
+            left_acc += mono * pan.left * dist;
+            right_acc += mono * pan.right * dist;
         }
 
         let base = frame_idx * channels;
