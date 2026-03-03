@@ -36,6 +36,10 @@ When implementing a feature, check this list first — someone may have solved i
 | [fyrox-sound](https://github.com/FyroxEngine/Fyrox) | Standalone game sound engine with HRTF, reverb, streaming. | Reference for HRTF rendering pipeline and overlap-save convolution. Note: HRTF is 5-6x slower than simple panning. |
 | [hrtf](https://github.com/mrDIMAS/hrtf) | Dedicated HRTF processor using HRIR spheres + frequency-domain convolution. | Direct dependency candidate when we add binaural headphone mode. |
 | [audionimbus](https://github.com/MaxenceMaire/audionimbus) | Safe Rust wrapper for Valve's Steam Audio. Physics-based propagation, occlusion, HRTF, ambisonics. | Reference for professional-grade spatial audio. Could use as dependency for room simulation if we don't want to build our own ray tracer. |
+| [Mesh2HRTF](https://github.com/Any2HRTF/Mesh2HRTF) | Generates personalized HRTFs from 3D ear/head scans via BEM (boundary element method). Outputs SOFA files. | Personalized per-listener HRTFs from ear scans. Produces anechoic HRTFs — pair with our ray-traced room sim for best results. |
+| [SOFA (AES69)](https://www.sofaconventions.org/) | Spatially Oriented Format for Acoustics. HDF5-based standard for storing HRTFs/BRIRs with spatial metadata. | **Standard HRTF file format.** We should load SOFA files for per-listener HRTFs. Used by Mesh2HRTF, SPARTA, and most HRTF databases (CIPIC, IRCAM LISTEN, TH Köln, York SADIE). |
+| [SPARTA](https://github.com/leomccormack/SPARTA) | VST suite: ambisonic encoding/decoding, binaural rendering with head tracking, room simulation. Consumes SOFA files. | Reference for ambisonic-to-binaural pipeline and CroPaC decoder. Their AmbiRoomSim models distance with disabled reflections — relevant for our direct-sound path. |
+| [sofamyroom](https://github.com/andresperezlopez/sofamyroom) | Room acoustic simulator that applies shoebox-model reflections to SOFA HRTFs. Outputs BRIRs. | Directly relevant architecture: separates anechoic HRTF from room simulation, then convolves. Similar to our intended approach of ray-traced room + per-listener HRTF. |
 
 ## Ray-Traced / Geometry-Based Audio
 
@@ -50,6 +54,15 @@ When implementing a feature, check this list first — someone may have solved i
 |-------|-------------|---------------|
 | [kira](https://github.com/tesselode/kira) | Game audio manager with mixer, tweens, clocks. Lock-free command architecture. | **Study their lock-free patterns:** per-command-type ring buffers, arena pattern (arena on audio thread, controllers cloned to other threads), tween system for smooth parameter transitions. |
 | [rodio](https://github.com/RustAudio/rodio) | High-level playback library on cpal. Source trait, mixer, spatial panning. | Too high-level for us, but the `Source` trait design (iterator of samples with metadata) is worth studying. |
+
+## Measurement & Calibration
+
+| Project | What it does | Useful for us |
+|---------|-------------|---------------|
+| [Impulcifer](https://github.com/jaakkopasanen/Impulcifer) | Creates personalized BRIRs (Binaural Room Impulse Responses) by recording sine sweeps through binaural in-ear mics. Python tool. | Calibrating the physical NUC room — correcting 5.1 speakers for real room acoustics. Also a reference for BRIR processing, channel balancing (`--channel_balance=trend`), headphone compensation, and impulse response validation. |
+| [AutoEQ](https://github.com/jaakkopasanen/AutoEq) | Database of 3000+ headphone frequency response measurements with auto-generated EQ profiles. MIT licensed. By the same author as Impulcifer. | **Headphone compensation for binaural output.** Each listener's headphones need EQ correction to flatten their coloring before HRTF convolution. AutoEQ provides ready-made FIR/parametric EQ profiles. |
+| [HeSuVi](https://sourceforge.net/projects/hesuvi/) | Windows headphone surround virtualizer. 14-channel convolution (7×L ear + 7×R ear) via Equalizer APO. | Reference implementation for multi-channel BRIR convolution routing. Their channel layout (FL-L, FL-R, FR-L, FR-R, ...) is the standard for true-stereo surround virtualization. |
+| [Earful](https://sourceforge.net/projects/earful/) | Matched-frequency loudness comparison tool for A/B testing headphone virtualization vs real speakers. | Validation tool for our binaural output — compare headphone rendering against physical 5.1 speakers at matched loudness per frequency band. |
 
 ## Real-Time Safety
 
@@ -83,18 +96,86 @@ When implementing a feature, check this list first — someone may have solved i
 - **Backend selection**: prioritized list of backends per platform.
 - **Stream abstraction**: `cubeb_stream` + `cubeb_ops` pattern for portable audio I/O.
 
+### From Head-Fi BRIR community (Impulcifer / HeSuVi / Smyth Realiser)
+- **Three-stage rendering**: separate Direct sound (0–3ms, HRTF-convolved) → Early reflections (3–50ms, ray-traced + HRTF) → Late reverb (50ms+, FDN, can be shared/mono across listeners). Different update rates and computational costs per stage.
+- **Bass crossover at ~80Hz**: frequencies below ~80Hz carry no HRTF localization cues. Skip HRTF convolution below crossover — mix mono to both ears (headphones) or route to subwoofer (5.1). Saves significant convolution CPU per listener. Smyth Realiser A16 does this.
+- **Channel balance normalization**: L/R broadband energy matching is the single biggest quality factor for binaural rendering. Use trend-based correction (broadband, preserving narrow peaks/notches that carry HRTF info).
+- **Headphone compensation is mandatory**: raw HRTF convolution without headphone EQ correction sounds wrong. Stack AutoEQ profiles or measure per-listener. Apply as FIR filter after HRTF convolution.
+- **Speaker delay compensation**: for physical 5.1, all speakers must be delay-aligned to within ±20μs at listener position. Haas/precedence effect causes soundstage collapse if delays differ across channels.
+- **True-stereo convolution routing**: each source channel needs 2 convolutions (L-ear, R-ear), so 7.1 surround = 14 FIR filters. HeSuVi's channel layout: odd tracks = left ear, even tracks = right ear.
+- **Frequency-dependent reverb decay**: highs decay faster than lows (air absorption + surface absorption). Our ray tracer should carry per-band absorption coefficients; FDN reverb should have per-band decay times.
+
+---
+
+## IRCAM Panoramix / Spat Architecture
+
+Sources:
+- [Carpentier 2017, LAC paper](research%20papers/panoramix_lac2017.pdf)
+- [Panoramix project page](https://forum.ircam.fr/projects/detail/panoramix/)
+- [IRCAM EAC team (Acoustic & Cognitive Spaces)](https://www.ircam.fr/recherche/equipes-recherche/eac/)
+- [BiLi — Binaural Listening](https://www.ircam.fr/projects/pages/ecoute-binaurale)
+- [WFS + Ambisonics at Espace de Projection](https://www.ircam.fr/projects/pages/systeme-wfs-et-ambisonique-a-lespace-de-projection)
+
+### Spat 4-Segment Room Model (Jot & Warusfel, 1995)
+The foundational architecture that Panoramix, SPAT Revolution, and Spat~ all build on:
+1. **Direct sound** (0–3ms) — point-source panned, per-source filtering (air absorption, distance)
+2. **Early reflections** (3–50ms) — 8 or 16 discrete echoes per source, each individually positioned & panned as point sources
+3. **Late reflections** (50–200ms) — spatially diffuse, transition region
+4. **Reverb tail** (200ms+) — shared FDN reverb across sources for efficiency, diffuse panning
+
+Key: each segment is **individually filtered AND individually spatialized**. Early reflections are not just delays — they have their own 3D positions.
+
+### Panoramix Signal Flow
+- **Tracks** (per-source): Input → Trim → EQ → Compressor → Phase inversion → Air absorption → Doppler → Delay → split to: Direct Gain + Early Reflections (8-16 echoes) + Reverb Send
+- **Busses** (shared rendering): Panning engine (VBAP/HOA/binaural) + Late Reverb FDN → Master
+- **Parallel bussing**: each track feeds up to 3 busses (A/B/C) simultaneously — e.g., VBAP bus for speakers + binaural bus for headphones, rendered in parallel with shared source positions
+- **Hybridization**: blend "true" binaural with conventional stereo to mitigate HRTF artifacts (timbral coloration, front-back confusion, in-head localization) when using non-individual HRTFs
+
+### Binaural Pipeline (IRCAM BiLi Project)
+- SOFA/AES-69 format for HRTFs — supports SimpleFreeFieldHRIR (convolution) and SimpleFreeFieldSOS (IIR sections + ITD)
+- 1680 spatial directions for high-resolution HRTF measurement
+- OpenDAP server for remote HRTF database browsing/downloading
+- HRTF personalization: selection-based (RASPUTIN, pick best match) or deep-learning (HAIKUS, estimate from recordings)
+
+### IRCAM WFS + HOA System (Espace de Projection)
+- 264 horizontal speakers (WFS ring) + 75 dome speakers (HOA) — format-agnostic scene description decoded to multiple output arrays
+- Separation between encoding format and reproduction system
+
+### All parameters controllable via OSC — sessions stored as stringified OSC bundles (human-readable)
+
+## EBU ADM Audio Types
+
+Source: [ADM Audio Definition Model](https://adm.ebu.io/index.html) — [Audio Types](https://adm.ebu.io/background/audio_types.html)
+
+ITU-R BS.2076 standard data model for describing spatial audio content. Directly applicable to our web GUI and scene description:
+
+| ADM Type | Description | Atrium mapping |
+|----------|-------------|----------------|
+| **Objects** | Individual sounds with position/gain/size metadata, can move dynamically | Primary model — each source (campfire, water, birds) is an Object |
+| **DirectSpeakers** | Channels mapped to physical speakers (mono, stereo, 5.1, 7.1, 22.2) | Our 5.1 output bus — rendered signals to specific speakers |
+| **Scene-based (HOA)** | Speaker-independent soundfield (Ambisonics). 1st order=4ch, 2nd=9ch, 3rd=16ch | Potential intermediate format for encoding before decode to 5.1/binaural |
+| **Binaural** | Headphone-optimized 2-channel, hard to convert to speakers | Per-listener headphone output |
+| **Matrix** | Transform matrix between formats (e.g., Mid-Side, Lt/Rt) | Format conversion utilities |
+
+Our WebSocket control protocol should describe sources as ADM-style Objects (position, gain, diffuse, size, importance) rather than low-level DSP parameters. The GUI renders these as draggable objects; the engine renders them to multiple output formats in parallel.
+
 ---
 
 ## Relevance by Future Phase
 
 | Phase | Key References |
 |-------|---------------|
-| Early reflections (image-source) | web-audio-api-rs (ConvolverNode), audionimbus |
+| Early reflections (image-source) | web-audio-api-rs (ConvolverNode), audionimbus, sofamyroom (shoebox model), **Panoramix** (8-16 discrete echoes per source, individually spatialized) |
 | Ray-traced reflections | raytraced-audio (architecture), audionimbus (Steam Audio) |
-| FDN reverb | fundsp (composable DSP), web-audio-api-rs |
-| HRTF binaural | hrtf crate, fyrox-sound, web-audio-api-rs (IRCAM data) |
-| 5.1 output | cubeb-rs (device routing), cpal multichannel |
-| Multiple listeners | basedrop (shared buffers), kira (arena pattern) |
-| WebSocket control | Already using rtrb; add tokio + axum/warp |
+| FDN reverb | fundsp (composable DSP), web-audio-api-rs, Head-Fi patterns (freq-dependent decay), **Panoramix** (Jot-Chaigne FDN, 8 feedback channels, 3-band decay) |
+| HRTF binaural | hrtf crate, fyrox-sound, SOFA format, Mesh2HRTF (personalized), SPARTA (ambisonic decoder), **IRCAM BiLi** (1680-dir HRTFs, SOFA+OpenDAP, RASPUTIN selection, HAIKUS deep-learning personalization) |
+| Headphone compensation | AutoEQ (3000+ profiles), Impulcifer (measurement-based), HeSuVi (routing reference) |
+| Bass crossover | Head-Fi patterns (skip HRTF <80Hz), Smyth Realiser A16 approach |
+| 5.1 output | cubeb-rs (device routing), cpal multichannel, Impulcifer (room calibration), speaker delay compensation |
+| Multiple listeners | basedrop (shared buffers), kira (arena pattern), SOFA per-listener HRTFs, **Panoramix parallel bussing** (simultaneous multi-format render from shared sources) |
+| Validation & tuning | Earful (A/B loudness matching), Impulcifer (BRIR validation) |
+| WebSocket control | Already using rtrb; add tokio + axum/warp, **ADM Object model** for scene description, OSC-style parameter addressing (Panoramix pattern) |
+| Web GUI | **EBU ADM types** (Objects/DirectSpeakers/HOA/Binaural), draggable object positioning, SOFA browser (Panoramix pattern) |
 | Acoustic zones | raytraced-audio (emergent sensing), audionimbus |
 | Props (drips, leaves) | kira (tween system for smooth gain ramps) |
+| Parallel rendering | **Panoramix parallel bussing** — same source tracks rendered to 5.1 + binaural simultaneously, format-agnostic scene description |

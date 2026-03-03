@@ -7,6 +7,7 @@ use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::engine::commands::Command;
 use atrium::engine::scene::AudioScene;
 use atrium::processors::early_reflections::EarlyReflections;
+use atrium::processors::fdn_reverb::FdnReverb;
 use atrium::spatial::listener::Listener;
 use atrium::spatial::source::TestNode;
 use atrium::world::room::BoxRoom;
@@ -50,10 +51,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         master_gain: 0.7,
         sample_rate: 0.0, // set by output backend
         distance_model: DistanceModel::default(),
-        processors: vec![Box::new(EarlyReflections::new(
-            0.5, // wet_gain: moderate reflection level
-            0.9, // wall_absorption: plaster walls reflect ~90%
-        ))],
+        processors: vec![
+            Box::new(EarlyReflections::new(
+                0.5, // wet_gain: moderate reflection level
+                0.9, // wall_absorption: plaster walls reflect ~90%
+            )),
+            Box::new(FdnReverb::new(
+                0.2, // wet_gain: subtle reverb tail
+                0.8, // rt60_low: 0.8s low-freq decay
+                0.3, // rt60_high: 0.3s high-freq decay
+            )),
+        ],
     };
 
     // 4. Start audio output
@@ -61,15 +69,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Report
     println!();
-    println!("=== Atrium Phase 3 ===");
+    println!("=== Atrium Phase 4 ===");
     println!("Room: 6x4m | Distance attenuation: inverse (ref=1m, max=10m)");
     println!("Early reflections: image-source method, 5 wall taps (floor skipped)");
+    println!("Late reverb: 8-line FDN, Hadamard mixing, RT60 0.8s/0.3s (low/high)");
     println!("Listener: center ({}, {})", listener_pos.x, listener_pos.y);
     println!("Sources:");
     println!("  - Djembe:   1.5m radius, clockwise,        ~6.3s orbit");
     println!("  - Campfire: 2.5m radius, counter-clockwise, ~10.5s orbit");
     println!();
-    println!("The sources should sound like they're in a room now.");
+    println!("The sources should now have a warm reverberant tail.");
     println!("Press Ctrl+C to stop.");
 
     // Keep the producer alive (future: use for WebSocket commands)

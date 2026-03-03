@@ -11,6 +11,7 @@
 // See REFERENCES.md for full list.
 
 pub mod early_reflections;
+pub mod fdn_reverb;
 
 use crate::spatial::listener::Listener;
 use crate::world::types::Vec3;
