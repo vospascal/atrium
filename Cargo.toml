@@ -1,0 +1,12 @@
+[package]
+name = "atrium"
+version = "0.1.0"
+edition = "2021"
+description = "Spatial audio engine with acoustic zone simulation"
+
+[dependencies]
+cpal = "0.15"
+rtrb = "0.3"
+
+# Symphonia: only enable the codecs/formats we need
+symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac"] }
