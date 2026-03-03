@@ -33,6 +33,16 @@ impl AudioScene {
                 Command::SetMasterGain { gain } => {
                     self.master_gain = gain;
                 }
+                Command::SetSourceMuted { index, muted } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_muted(muted);
+                    }
+                }
+                Command::SetSourcePosition { index, position } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_position(position);
+                    }
+                }
             }
         }
     }

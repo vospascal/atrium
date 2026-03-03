@@ -9,9 +9,14 @@ pub enum Command {
 
     /// Set master output gain (0.0 to 1.0).
     SetMasterGain { gain: f32 },
+
+    /// Mute or unmute a source by index.
+    SetSourceMuted { index: u8, muted: bool },
+
+    /// Reposition a source by index.
+    SetSourcePosition { index: u8, position: Vec3 },
     // Future:
     // AddSource { id: u32, source_type: SourceType, position: Vec3 },
     // RemoveSource { id: u32 },
-    // SetSourcePosition { id: u32, position: Vec3 },
     // SetRoomGeometry { ... },
 }

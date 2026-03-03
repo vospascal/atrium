@@ -8,6 +8,9 @@ default-run = "atrium"
 [dependencies]
 cpal = "0.15"
 rtrb = "0.3"
+tungstenite = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Symphonia: only enable the codecs/formats we need
 symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac"] }

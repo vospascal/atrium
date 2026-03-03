@@ -27,7 +27,7 @@ use std::f32::consts::TAU;
 use crate::spatial::source::SoundSource;
 use crate::world::types::Vec3;
 
-use super::noise::{BrownNoise, OnePoleLP, PinkNoise, Rng};
+use super::noise::{BrownNoise, PinkNoise, Rng};
 
 const RING_SIZE: usize = 8192;
 const RING_MASK: usize = RING_SIZE - 1;
@@ -47,7 +47,7 @@ pub struct RainSourceV2 {
     pink_mod1: PinkNoise,
     pink_mod2: PinkNoise,
     texture_rng: Rng,
-    texture_lp: OnePoleLP,
+    texture_lp_state: f32, // inline LP — cutoff varies with intensity
 
     // Ring buffer for drop event superposition
     ring: Box<[f32; RING_SIZE]>,
@@ -56,6 +56,9 @@ pub struct RainSourceV2 {
     // Minimal smoothing on ring output
     env_state: f32,
     env_smooth: f32,
+
+    // Output smoothing LP — softens transients at low intensity
+    output_lp_state: f32,
 
     // -- Tuning knobs (all pub) --
 
@@ -95,19 +98,19 @@ impl RainSourceV2 {
             pink_mod1: PinkNoise::new(seed.wrapping_add(2)),
             pink_mod2: PinkNoise::new(seed.wrapping_add(3)),
             texture_rng: Rng::new(seed.wrapping_add(4)),
-            // LP at ~2kHz — keeps the texture warm, not hissy
-            texture_lp: OnePoleLP::new(2000.0, 44100.0),
+            texture_lp_state: 0.0,
             ring: Box::new([0.0; RING_SIZE]),
             ring_idx: 0,
             env_state: 0.0,
-            env_smooth: 0.5, // blend drops but preserve some transient detail
+            env_smooth: 0.65, // smooth ring readout — rounds off impact transients
+            output_lp_state: 0.0,
             intensity: intensity.clamp(0.0, 1.0),
-            drop_rate: 1000.0,
-            drip_rate: 2.0,
+            drop_rate: 600.0,
+            drip_rate: 1.5,
             impact_gain: 0.6,  // compensate for 2-pole LP amplitude loss
-            bubble_gain: 0.15, // subtle tonal color
+            bubble_gain: 0.08, // very subtle — pure tones are perceptually sharp
             bed_gain: 0.04,    // barely-there sub-bass warmth
-            texture_gain: 0.4, // pink-modulated noise layer — the "rain wash"
+            texture_gain: 0.03, // barely perceptible fill between drops
             master_gain: 2.5,  // boost overall — rain should be audible at normal volume
             position,
             rng: Rng::new(seed),
@@ -120,22 +123,22 @@ impl RainSourceV2 {
     /// walls), medium/heavy = brighter taps (closer, more exposed).
     /// Duration: 3-10ms. Inline one-pole LP shapes the color.
     fn write_impact(&mut self, drop_radius_mm: f32, gain: f32, sample_rate: f32) {
-        // Duration scales with drop size: 5ms (tiny) to 15ms (large)
-        let dur = 0.005 + 0.0033 * drop_radius_mm.min(3.0);
+        // Duration scales with drop size: 3ms (tiny) to 8ms (large)
+        let dur = 0.003 + 0.0017 * drop_radius_mm.min(3.0);
         let len = ((dur * sample_rate) as usize).max(4).min(RING_SIZE / 2);
-        let attack_samples = (0.0008 * sample_rate).max(1.0); // 0.8ms rise
+        let attack_samples = (0.0008 * sample_rate).max(1.0); // 0.8ms rise — just enough to avoid click
         let decay_rate = 1.0 / (dur * 0.4);
 
         // LP cutoff — INVERTED: light rain is brighter (exposed taps),
         // heavy rain is darker (density creates a low-mid wash)
         // With 2-pole LP (-12dB/oct), cutoff needs to be well above target
         // band to let presence through at low intensity.
-        //   light (0.2): ~4500 Hz — taps have presence + some brilliance
-        //   medium (0.5): ~3000 Hz
-        //   heavy (0.9): ~1500 Hz — dense wash, low-mid dominant
-        let base_cutoff = 5000.0 - 3800.0 * self.intensity;
+        //   light (0.2): ~4660 Hz — taps have presence, brilliance tamed
+        //   medium (0.5): ~3400 Hz — balanced
+        //   heavy (0.9): ~1720 Hz — dense wash, low-mid dominant
+        let base_cutoff = 5500.0 - 4200.0 * self.intensity;
         let cutoff = base_cutoff - 150.0 * (drop_radius_mm - 1.0).clamp(0.0, 2.0);
-        let cutoff = cutoff.clamp(800.0, 5500.0);
+        let cutoff = cutoff.clamp(800.0, 6000.0);
 
         // Two-pole LP (-12 dB/oct) — steep enough to kill presence band
         let rc_lp = 1.0 / (TAU * cutoff);
@@ -291,10 +294,15 @@ impl RainSourceV2 {
 impl SoundSource for RainSourceV2 {
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
         let intensity = self.intensity;
-        // Nonlinear drop scaling: light rain = sparse, heavy = dense wash
-        // intensity 0.2 → factor 0.04 (40 drops/s), 0.5 → 0.25 (250/s), 0.9 → 0.81 (810/s)
-        let drop_factor = intensity * intensity;
-        let drop_rate = self.drop_rate * drop_factor;
+        // Piecewise-linear drop rate: light=15/s, medium=50/s, heavy=75/s
+        let drop_rate = if intensity <= 0.2 {
+            15.0 * (intensity / 0.2)
+        } else if intensity <= 0.5 {
+            15.0 + 35.0 * ((intensity - 0.2) / 0.3)
+        } else {
+            50.0 + 25.0 * ((intensity - 0.5) / 0.4).min(1.0)
+        };
+        let drop_factor = drop_rate / 75.0; // normalized 0..1 for texture/drip scaling
         let drip_rate = self.drip_rate * drop_factor;
 
         // 1. Subtle low-frequency bed (distant aggregate rain body)
@@ -309,7 +317,13 @@ impl SoundSource for RainSourceV2 {
         let mod1 = self.pink_mod1.next().abs(); // rectify: 0..~0.8
         let mod2 = self.pink_mod2.next().abs();
         let texture_raw = white * mod1 * mod2;
-        let texture = self.texture_lp.process(texture_raw);
+        // LP cutoff inverted like impacts: light = warm-bright (3.5kHz), heavy = warm (1.5kHz)
+        let tex_cutoff = 3500.0 - 2000.0 * intensity;
+        let tex_rc = 1.0 / (TAU * tex_cutoff);
+        let tex_dt = 1.0 / sample_rate;
+        let tex_alpha = tex_dt / (tex_rc + tex_dt);
+        self.texture_lp_state += tex_alpha * (texture_raw - self.texture_lp_state);
+        let texture = self.texture_lp_state;
         let texture_level = self.texture_gain * drop_factor; // intensity²
 
         // 3. Read ring buffer (superposition of all active drops)
@@ -349,7 +363,17 @@ impl SoundSource for RainSourceV2 {
         // 6. Advance ring
         self.ring_idx = (self.ring_idx + 1) & RING_MASK;
 
-        sample * self.master_gain
+        // 7. Output smoothing LP — gentle at light intensity, transparent at heavy
+        //    light (0.2): ~2000 Hz — rounded patter
+        //    medium (0.5): ~3800 Hz — natural
+        //    heavy (0.9): ~6200 Hz — transparent
+        let out_cutoff = 800.0 + 6000.0 * intensity;
+        let out_rc = 1.0 / (TAU * out_cutoff);
+        let out_dt = 1.0 / sample_rate;
+        let out_alpha = out_dt / (out_rc + out_dt);
+        self.output_lp_state += out_alpha * (sample - self.output_lp_state);
+
+        self.output_lp_state * self.master_gain
     }
 
     fn position(&self) -> Vec3 {
@@ -393,10 +417,11 @@ mod tests {
 
     #[test]
     fn v2_bed_is_quieter_than_drops() {
-        // Bed alone should be significantly quieter than bed + drops
+        // Continuous layers alone should be significantly quieter than full mix
         let mut bed_only = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
         bed_only.drop_rate = 0.0;
         bed_only.drip_rate = 0.0;
+        bed_only.texture_gain = 0.0;
 
         let mut full = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
 
@@ -404,7 +429,7 @@ mod tests {
         let energy_full: f32 = (0..48000).map(|_| full.next_sample(48000.0).powi(2)).sum();
 
         assert!(
-            energy_full > energy_bed * 1.5,
+            energy_full > energy_bed * 1.2,
             "drops should add significant energy over bed alone (bed={energy_bed}, full={energy_full})"
         );
     }

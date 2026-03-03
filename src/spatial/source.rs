@@ -31,6 +31,18 @@ pub trait SoundSource: Send {
     fn directivity(&self) -> DirectivityPattern {
         DirectivityPattern::OMNI
     }
+
+    /// Whether this source is muted (silent but still ticking).
+    fn is_muted(&self) -> bool {
+        false
+    }
+
+    /// Mute or unmute this source.
+    fn set_muted(&mut self, _muted: bool) {}
+
+    /// Reposition this source. Interpretation depends on the source type
+    /// (e.g. sets orbit center for orbiting sources, direct position for static).
+    fn set_position(&mut self, _position: Vec3) {}
 }
 
 /// A looping buffer player that orbits a center point.
@@ -43,6 +55,7 @@ pub struct TestNode {
     pub orbit_center: Vec3,
     orbit_angle: f32,
     pub pattern: DirectivityPattern,
+    muted: bool,
 }
 
 impl TestNode {
@@ -61,6 +74,7 @@ impl TestNode {
             orbit_center,
             orbit_angle: 0.0,
             pattern: DirectivityPattern::OMNI,
+            muted: false,
         }
     }
 }
@@ -87,6 +101,10 @@ impl SoundSource for TestNode {
             self.playback_pos -= samples.len() as f64;
         }
 
+        if self.muted {
+            // Still advance playback so it stays in sync when unmuted
+            return 0.0;
+        }
         sample * self.amplitude
     }
 
@@ -117,5 +135,17 @@ impl SoundSource for TestNode {
 
     fn directivity(&self) -> DirectivityPattern {
         self.pattern
+    }
+
+    fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+    }
+
+    fn set_position(&mut self, position: Vec3) {
+        self.orbit_center = position;
     }
 }

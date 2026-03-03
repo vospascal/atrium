@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atrium Control</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; color: #ccc; font-family: 'SF Mono', 'Fira Code', monospace; overflow: hidden; }
+  canvas { display: block; }
+  #hud {
+    position: absolute; top: 16px; left: 16px;
+    background: rgba(0,0,0,0.7); padding: 12px 16px; border-radius: 8px;
+    font-size: 12px; line-height: 1.6; pointer-events: auto;
+    min-width: 220px;
+  }
+  #hud h2 { font-size: 14px; color: #fff; margin-bottom: 6px; }
+  #hud .row { display: flex; justify-content: space-between; align-items: center; }
+  #hud label { color: #999; }
+  #hud .val { color: #4fc3f7; }
+  #status { margin-top: 8px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .connected { background: #4caf50; }
+  .disconnected { background: #f44336; }
+  input[type=range] { width: 120px; margin-left: 8px; accent-color: #4fc3f7; }
+  .source-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+  .source-name { font-size: 11px; }
+  .mute-btn {
+    background: none; border: 1px solid #555; color: #999; font-size: 10px;
+    padding: 1px 6px; border-radius: 4px; cursor: pointer; font-family: inherit;
+  }
+  .mute-btn:hover { border-color: #888; color: #ccc; }
+  .mute-btn.muted { border-color: #f44336; color: #f44336; }
+  #sources-panel { margin-top: 8px; border-top: 1px solid #333; padding-top: 6px; }
+  #sources-panel h3 { font-size: 12px; color: #999; margin-bottom: 4px; }
+  #help {
+    position: absolute; bottom: 16px; left: 16px;
+    background: rgba(0,0,0,0.7); padding: 10px 14px; border-radius: 8px;
+    font-size: 11px; color: #666; line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <h2>Atrium Control</h2>
+  <div class="row"><label>Listener</label><span class="val" id="listener-pos">0, 0, 0</span></div>
+  <div class="row"><label>Yaw</label><span class="val" id="listener-yaw">0°</span></div>
+  <div class="row">
+    <label>Gain</label>
+    <input type="range" id="gain-slider" min="0" max="100" value="70">
+    <span class="val" id="gain-val">0.70</span>
+  </div>
+  <div id="sources-panel">
+    <h3>Sources</h3>
+  </div>
+  <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span></div>
+</div>
+
+<div id="help">
+  Drag listener (white) or sources to move &middot; Scroll to rotate yaw &middot; Right-drag to orbit camera
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// === Scene constants (must match Rust) ===
+const ROOM = { w: 6, d: 4, h: 3 };
+const SOURCES = [
+  { name: 'Djembe',   color: 0xff6b35, cx: 3, cy: 2, r: 1.5, speed:  1.0, z: 0 },
+  { name: 'Campfire', color: 0xffc107, x: 1.0, y: 1.0, r: 0, speed: 0, z: 0 },
+];
+
+// Atrium is Z-up, Three.js is Y-up.
+// Atrium (x, y, z) -> Three.js (x, z, y)
+function toThree(ax, ay, az) { return new THREE.Vector3(ax, az, ay); }
+function toAtrium(tv) { return { x: tv.x, y: tv.z, z: tv.y }; }
+
+// === State ===
+let listener = { x: 3, y: 2, z: 0, yaw: 0 };
+let ws = null;
+let dragTarget = null; // null | 'listener' | source index (number)
+const sourceMuted = SOURCES.map(() => false);
+const startTime = performance.now() / 1000;
+
+// === Three.js setup ===
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(3, 8, 10);
+camera.lookAt(3, 0, 2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+// Camera controls (right-drag to orbit, scroll to zoom)
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(ROOM.w / 2, 0, ROOM.d / 2);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.update();
+
+// === Lights ===
+scene.add(new THREE.AmbientLight(0x404040, 2));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+dirLight.position.set(5, 10, 5);
+scene.add(dirLight);
+
+// === Room wireframe ===
+const roomGeo = new THREE.BoxGeometry(ROOM.w, ROOM.h, ROOM.d);
+const roomWire = new THREE.LineSegments(
+  new THREE.EdgesGeometry(roomGeo),
+  new THREE.LineBasicMaterial({ color: 0x444444 })
+);
+roomWire.position.set(ROOM.w / 2, ROOM.h / 2, ROOM.d / 2);
+scene.add(roomWire);
+
+// Floor grid — extends 5 tiles beyond room on all sides
+const GRID_PAD = 5;
+const gridW = ROOM.w + GRID_PAD * 2;
+const gridD = ROOM.d + GRID_PAD * 2;
+const gridSize = Math.max(gridW, gridD);
+const gridHelper = new THREE.GridHelper(gridSize, gridSize, 0x333333, 0x222222);
+gridHelper.position.set(ROOM.w / 2, 0, ROOM.d / 2);
+scene.add(gridHelper);
+
+// === Listener mesh ===
+const listenerGroup = new THREE.Group();
+
+// Body sphere
+const listenerSphere = new THREE.Mesh(
+  new THREE.SphereGeometry(0.15, 16, 16),
+  new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333 })
+);
+listenerGroup.add(listenerSphere);
+
+// Direction arrow (cone pointing forward)
+const arrowGeo = new THREE.ConeGeometry(0.08, 0.3, 8);
+arrowGeo.rotateX(Math.PI / 2); // point along +Z in local space
+arrowGeo.translate(0, 0, 0.25);
+const arrowMesh = new THREE.Mesh(
+  arrowGeo,
+  new THREE.MeshStandardMaterial({ color: 0x4fc3f7, emissive: 0x1a6080 })
+);
+listenerGroup.add(arrowMesh);
+
+// Hearing cone (semi-transparent, 90° outer angle)
+const coneAngle = 45 * Math.PI / 180; // outer half-angle in radians
+const coneLen = 1.5;
+const coneRadius = Math.tan(coneAngle) * coneLen;
+const hearingConeGeo = new THREE.ConeGeometry(coneRadius, coneLen, 24, 1, true);
+hearingConeGeo.rotateX(Math.PI / 2);
+hearingConeGeo.translate(0, 0, coneLen / 2);
+const hearingConeMesh = new THREE.Mesh(
+  hearingConeGeo,
+  new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.08, side: THREE.DoubleSide })
+);
+listenerGroup.add(hearingConeMesh);
+
+scene.add(listenerGroup);
+
+// === Source meshes ===
+const sourceMeshes = SOURCES.map(s => {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 16, 16),
+    new THREE.MeshStandardMaterial({ color: s.color, emissive: s.color, emissiveIntensity: 0.3 })
+  );
+  scene.add(mesh);
+
+  // Label sprite
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#' + s.color.toString(16).padStart(6, '0');
+  ctx.font = '20px monospace';
+  ctx.fillText(s.name, 4, 22);
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+  sprite.scale.set(1, 0.25, 1);
+  sprite.position.y = 0.3;
+  mesh.add(sprite);
+
+  return mesh;
+});
+
+// === Source HUD controls (mute buttons) ===
+const sourcesPanel = document.getElementById('sources-panel');
+SOURCES.forEach((s, i) => {
+  const row = document.createElement('div');
+  row.className = 'source-row';
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'source-name';
+  nameSpan.style.color = '#' + s.color.toString(16).padStart(6, '0');
+  nameSpan.textContent = s.name;
+  const btn = document.createElement('button');
+  btn.className = 'mute-btn';
+  btn.textContent = 'mute';
+  btn.addEventListener('click', () => {
+    sourceMuted[i] = !sourceMuted[i];
+    btn.textContent = sourceMuted[i] ? 'muted' : 'mute';
+    btn.classList.toggle('muted', sourceMuted[i]);
+    sourceMeshes[i].material.opacity = sourceMuted[i] ? 0.3 : 1.0;
+    sourceMeshes[i].material.transparent = sourceMuted[i];
+    send({ type: 'set_source_muted', index: i, muted: sourceMuted[i] });
+  });
+  row.appendChild(nameSpan);
+  row.appendChild(btn);
+  sourcesPanel.appendChild(row);
+});
+
+// === Raycaster for dragging ===
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // Y=0 plane (floor)
+const intersection = new THREE.Vector3();
+
+function onPointerDown(e) {
+  if (e.button !== 0) return; // left click only
+
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  // Check listener first
+  if (raycaster.intersectObject(listenerSphere, true).length > 0) {
+    dragTarget = 'listener';
+    controls.enabled = false;
+    return;
+  }
+
+  // Check source spheres
+  for (let i = 0; i < sourceMeshes.length; i++) {
+    if (raycaster.intersectObject(sourceMeshes[i], false).length > 0) {
+      dragTarget = i;
+      controls.enabled = false;
+      return;
+    }
+  }
+}
+
+function onPointerMove(e) {
+  if (dragTarget === null) return;
+
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  if (!raycaster.ray.intersectPlane(dragPlane, intersection)) return;
+
+  if (dragTarget === 'listener') {
+    // Clamp listener to room bounds
+    const margin = 0.2;
+    listener.x = Math.max(margin, Math.min(ROOM.w - margin, intersection.x));
+    listener.y = Math.max(margin, Math.min(ROOM.d - margin, intersection.z));
+    sendListener();
+  } else {
+    // Drag source — free placement, no bounds
+    const i = dragTarget;
+    const s = SOURCES[i];
+    const ax = intersection.x;
+    const ay = intersection.z; // Three Z -> Atrium Y
+    // Update local state so the animation loop uses the new position
+    s.x = ax;
+    s.y = ay;
+    s.cx = ax; // also update orbit center if it had one
+    s.cy = ay;
+    s.r = 0;   // stop orbiting once manually placed
+    s.speed = 0;
+    sourceMeshes[i].position.copy(toThree(ax, ay, s.z));
+    send({ type: 'set_source_position', index: i, x: ax, y: ay, z: s.z });
+  }
+}
+
+function onPointerUp() {
+  if (dragTarget !== null) {
+    dragTarget = null;
+    controls.enabled = true;
+  }
+}
+
+function onWheel(e) {
+  // Only rotate yaw if not over the HUD
+  if (e.target !== renderer.domElement) return;
+  listener.yaw += e.deltaY * 0.003;
+  // Normalize to [0, 2π)
+  listener.yaw = ((listener.yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  sendListener();
+  e.preventDefault();
+}
+
+renderer.domElement.addEventListener('pointerdown', onPointerDown);
+renderer.domElement.addEventListener('pointermove', onPointerMove);
+renderer.domElement.addEventListener('pointerup', onPointerUp);
+renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+
+// === Gain slider ===
+const gainSlider = document.getElementById('gain-slider');
+const gainVal = document.getElementById('gain-val');
+gainSlider.addEventListener('input', () => {
+  const g = parseFloat(gainSlider.value) / 100;
+  gainVal.textContent = g.toFixed(2);
+  send({ type: 'set_gain', gain: g });
+});
+
+// === WebSocket ===
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = () => {
+    document.getElementById('status-dot').className = 'dot connected';
+    document.getElementById('status-text').textContent = 'Connected';
+    // Send current state on reconnect
+    sendListener();
+    send({ type: 'set_gain', gain: parseFloat(gainSlider.value) / 100 });
+  };
+  ws.onclose = () => {
+    document.getElementById('status-dot').className = 'dot disconnected';
+    document.getElementById('status-text').textContent = 'Disconnected';
+    setTimeout(connect, 1000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  }
+}
+
+function sendListener() {
+  send({ type: 'set_listener', x: listener.x, y: listener.y, z: listener.z, yaw: listener.yaw });
+  // Update HUD
+  document.getElementById('listener-pos').textContent =
+    `${listener.x.toFixed(1)}, ${listener.y.toFixed(1)}, ${listener.z.toFixed(1)}`;
+  document.getElementById('listener-yaw').textContent = `${(listener.yaw * 180 / Math.PI).toFixed(0)}°`;
+}
+
+// === Animation loop ===
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now() / 1000;
+  const elapsed = now - startTime;
+
+  // Update listener mesh position and rotation
+  listenerGroup.position.copy(toThree(listener.x, listener.y, listener.z));
+  // Yaw: Atrium 0=+X, Three.js rotation around Y axis
+  // In Atrium coords: forward = (cos(yaw), sin(yaw), 0)
+  // In Three.js coords: forward = (cos(yaw), 0, sin(yaw))
+  // Three.js Group rotateY: 0 = +Z, so we need -yaw + π/2 to map correctly
+  listenerGroup.rotation.y = -listener.yaw + Math.PI / 2;
+
+  // Update source positions (client-side orbit simulation or fixed)
+  SOURCES.forEach((s, i) => {
+    let ax, ay;
+    if (s.r > 0) {
+      const angle = s.speed * elapsed;
+      ax = s.cx + s.r * Math.cos(angle);
+      ay = s.cy + s.r * Math.sin(angle);
+    } else {
+      ax = s.x ?? s.cx;
+      ay = s.y ?? s.cy;
+    }
+    const az = s.z;
+    sourceMeshes[i].position.copy(toThree(ax, ay, az));
+  });
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// === Resize ===
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// === Start ===
+connect();
+animate();
+sendListener(); // update HUD with initial values
+</script>
+</body>
+</html>
