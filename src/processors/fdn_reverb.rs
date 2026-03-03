@@ -17,6 +17,7 @@
 
 use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
+use crate::world::ray::RayMetrics;
 use crate::world::types::Vec3;
 
 /// Number of parallel delay lines.
@@ -99,6 +100,11 @@ pub struct FdnReverb {
     rt60_low: f32,
     /// RT60 at high frequencies (seconds). Always shorter than rt60_low.
     rt60_high: f32,
+    /// Base RT60 values (as passed to new()). Used as anchors for ray-metric scaling.
+    base_rt60_low: f32,
+    base_rt60_high: f32,
+    /// Stored sample rate from init(), needed for recomputing damping.
+    stored_sample_rate: f32,
     /// Whether init() has been called.
     initialized: bool,
 }
@@ -121,6 +127,9 @@ impl FdnReverb {
             wet_gain,
             rt60_low,
             rt60_high,
+            base_rt60_low: rt60_low,
+            base_rt60_high: rt60_high,
+            stored_sample_rate: 0.0,
             initialized: false,
         }
     }
@@ -253,9 +262,41 @@ impl AudioProcessor for FdnReverb {
         _listener: &Listener,
         sample_rate: f32,
     ) {
+        self.stored_sample_rate = sample_rate;
         self.compute_delays(room_min, room_max, sample_rate);
         self.compute_damping(sample_rate);
         self.initialized = true;
+    }
+
+    fn update_metrics(&mut self, metrics: &RayMetrics) {
+        if !self.initialized || self.stored_sample_rate == 0.0 {
+            return;
+        }
+
+        // Reference mean path length for a 6×4×3m room: MFP = 4V/S = 4*72/108 ≈ 2.67m.
+        // Scale RT60 proportionally: larger measured paths → longer reverb.
+        const REFERENCE_PATH: f32 = 2.67;
+        let scale = if metrics.mean_path_length > 0.1 {
+            metrics.mean_path_length / REFERENCE_PATH
+        } else {
+            1.0
+        };
+
+        // Clamp scale to prevent extreme values (0.5× to 2.0× base RT60)
+        let scale = scale.clamp(0.5, 2.0);
+
+        let new_low = self.base_rt60_low * scale;
+        let new_high = self.base_rt60_high * scale;
+
+        // Only recompute damping if RT60 changed significantly (>5%)
+        let low_changed = (new_low - self.rt60_low).abs() / self.rt60_low > 0.05;
+        let high_changed = (new_high - self.rt60_high).abs() / self.rt60_high > 0.05;
+
+        if low_changed || high_changed {
+            self.rt60_low = new_low;
+            self.rt60_high = new_high;
+            self.compute_damping(self.stored_sample_rate);
+        }
     }
 
     fn process(&mut self, buffer: &mut [f32], channels: usize, _sample_rate: f32) {

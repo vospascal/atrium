@@ -1,3 +1,4 @@
+use crate::spatial::directivity::directivity_gain;
 use crate::spatial::listener::Listener;
 use crate::spatial::panner::{distance_gain, stereo_pan};
 use crate::spatial::source::SoundSource;
@@ -58,8 +59,19 @@ pub fn mix_sources(
                 distance_model.rolloff,
             );
 
-            left_acc += mono * pan.left * dist;
-            right_acc += mono * pan.right * dist;
+            // Source directivity: how much energy this source emits toward the listener
+            let src_dir = directivity_gain(
+                pos,
+                source.orientation(),
+                listener.position,
+                &source.directivity(),
+            );
+
+            // Listener hearing cone: how well the listener receives from this direction
+            let hear = listener.hearing_gain(pos);
+
+            left_acc += mono * pan.left * dist * src_dir * hear;
+            right_acc += mono * pan.right * dist * src_dir * hear;
         }
 
         let base = frame_idx * channels;

@@ -11,6 +11,7 @@
 
 use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
+use crate::world::ray::RayMetrics;
 use crate::world::types::Vec3;
 
 /// Maximum number of reflection taps (6 walls of a box room).
@@ -38,6 +39,7 @@ pub struct EarlyReflections {
     taps: [ReflectionTap; MAX_TAPS],
     tap_count: usize,
     initialized: bool,
+    base_wet_gain: f32,
     wet_gain: f32,
     wall_absorption: f32,
 }
@@ -58,6 +60,7 @@ impl EarlyReflections {
             }; MAX_TAPS],
             tap_count: 0,
             initialized: false,
+            base_wet_gain: wet_gain,
             wet_gain,
             wall_absorption,
         }
@@ -123,6 +126,12 @@ impl AudioProcessor for EarlyReflections {
         sample_rate: f32,
     ) {
         self.compute_taps(room_min, room_max, listener, sample_rate);
+    }
+
+    fn update_metrics(&mut self, metrics: &RayMetrics) {
+        // Scale wet_gain by how many rays reach the listener.
+        // If rays aren't reaching (occluded or very large room), reduce reflections.
+        self.wet_gain = self.base_wet_gain * metrics.listener_hit_ratio.clamp(0.1, 1.0);
     }
 
     fn process(&mut self, buffer: &mut [f32], channels: usize, _sample_rate: f32) {

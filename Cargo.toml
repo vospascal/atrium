@@ -3,6 +3,7 @@ name = "atrium"
 version = "0.1.0"
 edition = "2021"
 description = "Spatial audio engine with acoustic zone simulation"
+default-run = "atrium"
 
 [dependencies]
 cpal = "0.15"

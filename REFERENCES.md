@@ -20,6 +20,15 @@ When implementing a feature, check this list first — someone may have solved i
 | [symphonia](https://github.com/pdeljanov/Symphonia) | Pure Rust decoder: MP3, WAV, FLAC, AAC, Vorbis, ALAC, MKV. | **Currently used.** Decodes audio assets at startup. |
 | [hound](https://github.com/ruuda/hound) | WAV-only read/write. Simpler than symphonia. | If we ever need to write WAV files (e.g. recording output). |
 
+## Immersive Audio Formats
+
+| Project | What it does | Useful for us |
+|---------|-------------|---------------|
+| [IAMF spec](https://aomediacodec.github.io/iamf/v1.0.0-errata.html) | AOM open standard for immersive audio delivery. Channel-based (5.1–7.1.4) + scene-based (ambisonics) + multiple mix presentations per stream. | **Distribution/export format.** Package Atrium scenes for playback on YouTube, Samsung TVs, Chrome. Multi-presentation model validates our multi-listener architecture. |
+| [libiamf](https://github.com/AOMediaCodec/libiamf) | Reference C codec library for IAMF decode/demux. | FFI candidate for ingesting IAMF files as Atrium sources. |
+| [iamf-tools](https://github.com/AOMediaCodec/iamf-tools) | C++ encoder, decoder, and binaural web renderer for IAMF. Accepts ADM-BWF input. | Encode Atrium scenes to IAMF; study binaural renderer for our headphone path. |
+| [Eclipsa Audio](https://opensource.googleblog.com/2025/01/introducing-eclipsa-audio-immersive-audio-for-everyone.html) | Google/Samsung branding + open-source tooling around IAMF. YouTube, Samsung TVs, Chrome, Pro Tools plugin. | Ecosystem context. See [detailed writeup](research%20papers/IAMF.md). |
+
 ## DSP Building Blocks
 
 | Crate | What it does | Useful for us |
@@ -179,3 +188,4 @@ Our WebSocket control protocol should describe sources as ADM-style Objects (pos
 | Acoustic zones | raytraced-audio (emergent sensing), audionimbus |
 | Props (drips, leaves) | kira (tween system for smooth gain ramps) |
 | Parallel rendering | **Panoramix parallel bussing** — same source tracks rendered to 5.1 + binaural simultaneously, format-agnostic scene description |
+| Export / distribution | **IAMF/Eclipsa Audio** (open AOM standard, multi-presentation, ADM-BWF input, YouTube/Samsung/Chrome playback) |

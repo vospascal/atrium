@@ -1,4 +1,4 @@
-use std::ops::{Add, Sub, Mul};
+use std::ops::{Add, Neg, Sub, Mul};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
@@ -31,6 +31,24 @@ impl Vec3 {
             self * (1.0 / len)
         }
     }
+
+    pub fn dot(self, other: Vec3) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    /// Reflect this vector about a surface normal (assumes `normal` is unit length).
+    /// Result: self - 2 * dot(self, normal) * normal
+    pub fn reflect(self, normal: Vec3) -> Vec3 {
+        self - normal * (2.0 * self.dot(normal))
+    }
+
+    pub fn cross(self, other: Vec3) -> Vec3 {
+        Vec3::new(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
+    }
 }
 
 impl Add for Vec3 {
@@ -54,6 +72,13 @@ impl Mul<f32> for Vec3 {
     }
 }
 
+impl Neg for Vec3 {
+    type Output = Vec3;
+    fn neg(self) -> Vec3 {
+        Vec3::new(-self.x, -self.y, -self.z)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +95,65 @@ mod tests {
         let v = Vec3::new(3.0, 4.0, 0.0);
         let n = v.normalize();
         assert!((n.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dot_perpendicular_is_zero() {
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 1.0, 0.0);
+        assert!((a.dot(b)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dot_parallel_unit_vectors_is_one() {
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        assert!((a.dot(a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dot_antiparallel_is_negative_one() {
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        let b = Vec3::new(-1.0, 0.0, 0.0);
+        assert!((a.dot(b) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reflect_45_degrees_off_wall() {
+        // Ray going down-right at 45°, reflecting off a horizontal floor (normal = +Y)
+        let incoming = Vec3::new(1.0, -1.0, 0.0).normalize();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let reflected = incoming.reflect(normal);
+        let expected = Vec3::new(1.0, 1.0, 0.0).normalize();
+        assert!((reflected.x - expected.x).abs() < 1e-5);
+        assert!((reflected.y - expected.y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn reflect_head_on() {
+        // Ray going straight into a wall, should bounce straight back
+        let incoming = Vec3::new(-1.0, 0.0, 0.0);
+        let normal = Vec3::new(1.0, 0.0, 0.0);
+        let reflected = incoming.reflect(normal);
+        assert!((reflected.x - 1.0).abs() < 1e-5);
+        assert!(reflected.y.abs() < 1e-5);
+    }
+
+    #[test]
+    fn cross_product_basis_vectors() {
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let y = Vec3::new(0.0, 1.0, 0.0);
+        let z = x.cross(y);
+        assert!((z.x).abs() < 1e-6);
+        assert!((z.y).abs() < 1e-6);
+        assert!((z.z - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn neg_reverses_direction() {
+        let v = Vec3::new(1.0, -2.0, 3.0);
+        let n = -v;
+        assert!((n.x + 1.0).abs() < 1e-6);
+        assert!((n.y - 2.0).abs() < 1e-6);
+        assert!((n.z + 3.0).abs() < 1e-6);
     }
 }

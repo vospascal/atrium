@@ -8,12 +8,23 @@ use atrium::engine::commands::Command;
 use atrium::engine::scene::AudioScene;
 use atrium::processors::early_reflections::EarlyReflections;
 use atrium::processors::fdn_reverb::FdnReverb;
+use atrium::spatial::directivity::DirectivityPattern;
 use atrium::spatial::listener::Listener;
 use atrium::spatial::source::TestNode;
+use atrium::synth::rain_v2::RainSourceV2;
+use atrium::world::ray::RayPool;
 use atrium::world::room::BoxRoom;
 use atrium::world::types::Vec3;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse rain intensity from CLI: cargo run -- light|medium|heavy|0.5
+    let intensity = match std::env::args().nth(1).as_deref() {
+        Some("light") => 0.2,
+        Some("heavy") => 0.9,
+        Some("medium") | None => 0.5,
+        Some(s) => s.parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0),
+    };
+
     // 1. Decode audio assets
     let djembe = Arc::new(decode_file(Path::new("assets/djembe.mp3"))?);
     let campfire = Arc::new(decode_file(Path::new("assets/campfire.mp3"))?);
@@ -34,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1.0,  // 1.0 rad/s (~6.3s orbit)
     );
     djembe_node.amplitude = 0.6;
+    djembe_node.pattern = DirectivityPattern::cardioid();
 
     // Campfire: wider orbit, slower, opposite direction
     let mut campfire_node = TestNode::new(
@@ -44,24 +56,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     campfire_node.amplitude = 0.8;
 
+    // Rain v2: physically-based (impact + Minnaert bubble per drop)
+    let mut rain = RainSourceV2::new(
+        Vec3::new(3.0, 2.0, 0.5), // just overhead — close to listener
+        intensity,
+        0xDEAD_BEEF,               // PRNG seed
+    );
+    rain.master_gain = 3.0;
+
     let scene = AudioScene {
         listener,
-        sources: vec![Box::new(djembe_node), Box::new(campfire_node)],
+        sources: vec![
+            // Box::new(djembe_node),
+            // Box::new(campfire_node),
+            Box::new(rain),
+        ],
         room: Box::new(room),
-        master_gain: 0.7,
+        master_gain: 1.0,
         sample_rate: 0.0, // set by output backend
         distance_model: DistanceModel::default(),
         processors: vec![
-            Box::new(EarlyReflections::new(
-                0.5, // wet_gain: moderate reflection level
-                0.9, // wall_absorption: plaster walls reflect ~90%
-            )),
-            Box::new(FdnReverb::new(
-                0.2, // wet_gain: subtle reverb tail
-                0.8, // rt60_low: 0.8s low-freq decay
-                0.3, // rt60_high: 0.3s high-freq decay
-            )),
+            // Disabled for rain audition — re-enable for full scene
+            // Box::new(EarlyReflections::new(0.5, 0.9)),
+            // Box::new(FdnReverb::new(0.2, 0.8, 0.3)),
         ],
+        ray_pool: RayPool::new(),
     };
 
     // 4. Start audio output
@@ -69,16 +88,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Report
     println!();
-    println!("=== Atrium Phase 4 ===");
-    println!("Room: 6x4m | Distance attenuation: inverse (ref=1m, max=10m)");
-    println!("Early reflections: image-source method, 5 wall taps (floor skipped)");
-    println!("Late reverb: 8-line FDN, Hadamard mixing, RT60 0.8s/0.3s (low/high)");
-    println!("Listener: center ({}, {})", listener_pos.x, listener_pos.y);
-    println!("Sources:");
-    println!("  - Djembe:   1.5m radius, clockwise,        ~6.3s orbit");
-    println!("  - Campfire: 2.5m radius, counter-clockwise, ~10.5s orbit");
+    println!("=== Rain v2 Audition ===");
+    println!("Intensity: {intensity} ({})", match intensity {
+        i if i <= 0.3 => "light",
+        i if i <= 0.7 => "medium",
+        _ => "heavy",
+    });
+    println!("Room: 6x4x3m | Reverb: FDN");
     println!();
-    println!("The sources should now have a warm reverberant tail.");
+    println!("Usage: cargo run -- light|medium|heavy|0.0-1.0");
     println!("Press Ctrl+C to stop.");
 
     // Keep the producer alive (future: use for WebSocket commands)

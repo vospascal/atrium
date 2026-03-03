@@ -14,10 +14,10 @@ pub mod early_reflections;
 pub mod fdn_reverb;
 
 use crate::spatial::listener::Listener;
+use crate::world::ray::RayMetrics;
 use crate::world::types::Vec3;
 
 /// Trait for audio processing stages that transform the mixed signal.
-/// Future: FdnReverb, RayTracedReflections, ZoneBlender.
 pub trait AudioProcessor: Send {
     /// Called once when sample_rate and room geometry are known (before audio callback starts).
     /// Default no-op for processors that don't need spatial info.
@@ -29,6 +29,10 @@ pub trait AudioProcessor: Send {
         _sample_rate: f32,
     ) {
     }
+
+    /// Update processor parameters from ray-traced room metrics.
+    /// Called once per audio buffer, before process().
+    fn update_metrics(&mut self, _metrics: &RayMetrics) {}
 
     /// Process a buffer of interleaved samples in place.
     fn process(&mut self, buffer: &mut [f32], channels: usize, sample_rate: f32);

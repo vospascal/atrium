@@ -3,6 +3,7 @@ use crate::engine::commands::Command;
 use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
 use crate::spatial::source::SoundSource;
+use crate::world::ray::RayPool;
 use crate::world::room::Room;
 
 /// The complete audio state owned by the audio thread.
@@ -16,6 +17,7 @@ pub struct AudioScene {
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
     pub processors: Vec<Box<dyn AudioProcessor>>,
+    pub ray_pool: RayPool,
 }
 
 impl AudioScene {
@@ -53,6 +55,16 @@ impl AudioScene {
         // Advance time-varying state on all sources
         for source in &mut self.sources {
             source.tick(dt);
+        }
+
+        // Update ray pool: emit/bounce rays, compute room metrics
+        self.ray_pool
+            .update(&self.sources, &self.listener, self.room.as_ref());
+
+        // Feed ray metrics to processors (modulates reverb RT60, reflection wet gain)
+        let metrics = self.ray_pool.metrics().clone();
+        for processor in &mut self.processors {
+            processor.update_metrics(&metrics);
         }
 
         // Mix all sources to output

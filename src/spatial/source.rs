@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::audio::decode::AudioBuffer;
+use crate::spatial::directivity::DirectivityPattern;
 use crate::world::types::Vec3;
 
 /// Trait for anything that generates audio samples and has a position.
@@ -19,6 +20,17 @@ pub trait SoundSource: Send {
 
     /// Advance time-varying state (orbit, etc.). Called once per buffer.
     fn tick(&mut self, dt: f32);
+
+    /// Unit vector of the source's forward/facing direction.
+    /// Default: +X (irrelevant for omnidirectional sources).
+    fn orientation(&self) -> Vec3 {
+        Vec3::new(1.0, 0.0, 0.0)
+    }
+
+    /// The source's directivity emission pattern. Default: omnidirectional.
+    fn directivity(&self) -> DirectivityPattern {
+        DirectivityPattern::OMNI
+    }
 }
 
 /// A looping buffer player that orbits a center point.
@@ -30,6 +42,7 @@ pub struct TestNode {
     pub orbit_speed: f32, // radians per second
     pub orbit_center: Vec3,
     orbit_angle: f32,
+    pub pattern: DirectivityPattern,
 }
 
 impl TestNode {
@@ -47,6 +60,7 @@ impl TestNode {
             orbit_speed,
             orbit_center,
             orbit_angle: 0.0,
+            pattern: DirectivityPattern::OMNI,
         }
     }
 }
@@ -89,5 +103,19 @@ impl SoundSource for TestNode {
         if self.orbit_angle > std::f32::consts::TAU {
             self.orbit_angle -= std::f32::consts::TAU;
         }
+    }
+
+    /// Faces the direction of travel (tangent to orbit path).
+    fn orientation(&self) -> Vec3 {
+        let sign = if self.orbit_speed >= 0.0 { 1.0 } else { -1.0 };
+        Vec3::new(
+            -sign * self.orbit_angle.sin(),
+            sign * self.orbit_angle.cos(),
+            0.0,
+        )
+    }
+
+    fn directivity(&self) -> DirectivityPattern {
+        self.pattern
     }
 }
