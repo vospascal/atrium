@@ -32,6 +32,19 @@ pub trait StreamHandle {
     fn channels(&self) -> u16;
 }
 
+/// Decide how many output channels to open.
+///
+/// If the speaker layout requests a different channel count than the device
+/// default (and the layout count is non-zero), prefer the layout.
+/// This allows forcing multichannel output (e.g. 6ch for 5.1) on capable devices.
+pub fn resolve_channels(layout_channels: u16, device_channels: u16) -> u16 {
+    if layout_channels != device_channels && layout_channels > 0 {
+        layout_channels
+    } else {
+        device_channels
+    }
+}
+
 /// cpal-based audio output.
 pub struct CpalOutput;
 
@@ -65,7 +78,16 @@ impl AudioOutput for CpalOutput {
 
         let supported = device.default_output_config()?;
         let sample_rate = supported.sample_rate().0;
-        let channels = supported.channels();
+        let device_channels = supported.channels();
+
+        let layout_channels = scene.speaker_layout.total_channels() as u16;
+        let channels = resolve_channels(layout_channels, device_channels);
+        if channels != device_channels {
+            println!(
+                "Speaker layout requests {} channels (device default: {})",
+                channels, device_channels
+            );
+        }
 
         println!(
             "Output config: {}Hz, {} channels, {:?}",
@@ -118,5 +140,107 @@ impl AudioOutput for CpalOutput {
             sample_rate,
             channels,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atrium_core::speaker::SpeakerLayout;
+    use atrium_core::types::Vec3;
+
+    // ── resolve_channels logic ──────────────────────────────────────────
+
+    #[test]
+    fn resolve_channels_prefers_layout_over_device() {
+        // 5.1 layout (6ch) on a stereo device → should request 6
+        assert_eq!(resolve_channels(6, 2), 6);
+    }
+
+    #[test]
+    fn resolve_channels_uses_device_when_layout_matches() {
+        // layout and device agree → use device default
+        assert_eq!(resolve_channels(2, 2), 2);
+        assert_eq!(resolve_channels(6, 6), 6);
+    }
+
+    #[test]
+    fn resolve_channels_uses_device_when_layout_is_zero() {
+        // layout_channels=0 means no layout configured → fall back to device
+        assert_eq!(resolve_channels(0, 2), 2);
+        assert_eq!(resolve_channels(0, 8), 8);
+    }
+
+    #[test]
+    fn resolve_channels_layout_can_be_fewer_than_device() {
+        // stereo layout on a 7.1 device → should request 2
+        assert_eq!(resolve_channels(2, 8), 2);
+    }
+
+    // ── SpeakerLayout channel counts ────────────────────────────────────
+
+    #[test]
+    fn surround_5_1_has_6_total_channels() {
+        let layout = SpeakerLayout::surround_5_1(
+            Vec3::new(0.0, 4.0, 0.0),
+            Vec3::new(6.0, 4.0, 0.0),
+            Vec3::new(3.0, 4.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(6.0, 0.0, 0.0),
+        );
+        assert_eq!(layout.total_channels(), 6, "5.1 = 5 spatial + 1 LFE = 6 channels");
+        assert_eq!(layout.speaker_count(), 5, "5 spatial speakers (no LFE)");
+        assert_eq!(layout.lfe_channel(), Some(3), "LFE is channel 3");
+    }
+
+    #[test]
+    fn surround_5_1_speaker_channel_assignments() {
+        let layout = SpeakerLayout::surround_5_1(
+            Vec3::new(0.0, 4.0, 0.0),  // FL
+            Vec3::new(6.0, 4.0, 0.0),  // FR
+            Vec3::new(3.0, 4.0, 0.0),  // C
+            Vec3::new(0.0, 0.0, 0.0),  // RL
+            Vec3::new(6.0, 0.0, 0.0),  // RR
+        );
+        // ITU 5.1 channel order: L=0, R=1, C=2, LFE=3, Ls=4, Rs=5
+        let expected_channels = [0, 1, 2, 4, 5]; // spatial speakers (LFE=3 is separate)
+        for (i, &expected_ch) in expected_channels.iter().enumerate() {
+            let speaker = layout.speaker_by_index(i).expect("speaker should exist");
+            assert_eq!(speaker.channel, expected_ch, "speaker {i} should be channel {expected_ch}");
+        }
+    }
+
+    #[test]
+    fn stereo_layout_has_2_channels() {
+        let layout = SpeakerLayout::stereo(
+            Vec3::new(-1.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+        );
+        assert_eq!(layout.total_channels(), 2);
+        assert_eq!(layout.speaker_count(), 2);
+        assert_eq!(layout.lfe_channel(), None);
+    }
+
+    #[test]
+    fn quad_layout_has_4_channels() {
+        let layout = SpeakerLayout::quad(
+            Vec3::new(-1.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+        );
+        assert_eq!(layout.total_channels(), 4);
+        assert_eq!(layout.speaker_count(), 4);
+        assert_eq!(layout.lfe_channel(), None);
+    }
+
+    #[test]
+    fn surround_5_1_resolves_to_6_channels_on_stereo_device() {
+        let layout = SpeakerLayout::surround_5_1(
+            Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO,
+        );
+        let device_default = 2u16;
+        let channels = resolve_channels(layout.total_channels() as u16, device_default);
+        assert_eq!(channels, 6, "5.1 layout should override stereo device default");
     }
 }

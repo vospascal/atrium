@@ -11,7 +11,6 @@
 
 use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
-use crate::world::ray::RayMetrics;
 use crate::world::types::Vec3;
 
 /// Maximum number of reflection taps (6 walls of a box room).
@@ -31,15 +30,15 @@ struct ReflectionTap {
     gain: f32,
 }
 
-/// Early reflections processor using the image-source method on the mixed stereo signal.
+/// Early reflections processor using the image-source method on the mixed signal.
+/// Supports any channel count: one circular delay buffer per output channel.
 pub struct EarlyReflections {
-    buffer_l: Box<[f32; BUFFER_SIZE]>,
-    buffer_r: Box<[f32; BUFFER_SIZE]>,
+    /// Per-channel circular delay buffers. Lazy-initialized on first process() call.
+    buffers: Vec<Box<[f32; BUFFER_SIZE]>>,
     write_pos: usize,
     taps: [ReflectionTap; MAX_TAPS],
     tap_count: usize,
     initialized: bool,
-    base_wet_gain: f32,
     wet_gain: f32,
     wall_absorption: f32,
 }
@@ -51,8 +50,7 @@ impl EarlyReflections {
     /// - `wall_absorption`: wall reflectivity (0.0 = absorbs all, 1.0 = perfect mirror, typical 0.85–0.95 for plaster)
     pub fn new(wet_gain: f32, wall_absorption: f32) -> Self {
         Self {
-            buffer_l: Box::new([0.0; BUFFER_SIZE]),
-            buffer_r: Box::new([0.0; BUFFER_SIZE]),
+            buffers: Vec::new(),
             write_pos: 0,
             taps: [ReflectionTap {
                 delay_samples: 0,
@@ -60,7 +58,6 @@ impl EarlyReflections {
             }; MAX_TAPS],
             tap_count: 0,
             initialized: false,
-            base_wet_gain: wet_gain,
             wet_gain,
             wall_absorption,
         }
@@ -128,47 +125,47 @@ impl AudioProcessor for EarlyReflections {
         self.compute_taps(room_min, room_max, listener, sample_rate);
     }
 
-    fn update_metrics(&mut self, metrics: &RayMetrics) {
-        // Scale wet_gain by how many rays reach the listener.
-        // If rays aren't reaching (occluded or very large room), reduce reflections.
-        self.wet_gain = self.base_wet_gain * metrics.listener_hit_ratio.clamp(0.1, 1.0);
-    }
-
     fn process(&mut self, buffer: &mut [f32], channels: usize, _sample_rate: f32) {
         if !self.initialized || self.tap_count == 0 {
             return;
+        }
+
+        // Lazy-init per-channel delay buffers (only allocates on first call)
+        while self.buffers.len() < channels {
+            self.buffers.push(Box::new([0.0; BUFFER_SIZE]));
         }
 
         let num_frames = buffer.len() / channels;
 
         for frame in 0..num_frames {
             let base = frame * channels;
-            let dry_l = buffer[base];
-            let dry_r = if channels > 1 { buffer[base + 1] } else { dry_l };
 
-            // Write dry signal into circular delay buffer
-            self.buffer_l[self.write_pos] = dry_l;
-            self.buffer_r[self.write_pos] = dry_r;
-
-            // Sum delayed taps
-            let mut wet_l: f32 = 0.0;
-            let mut wet_r: f32 = 0.0;
-
-            for i in 0..self.tap_count {
-                let tap = &self.taps[i];
-                let read_pos = (self.write_pos + BUFFER_SIZE - tap.delay_samples) & BUFFER_MASK;
-                wet_l += self.buffer_l[read_pos] * tap.gain;
-                wet_r += self.buffer_r[read_pos] * tap.gain;
+            // Write dry signal into per-channel circular delay buffers
+            for ch in 0..channels {
+                self.buffers[ch][self.write_pos] = buffer[base + ch];
             }
 
-            // Mix: output = dry + wet * wet_gain
-            buffer[base] = (dry_l + wet_l * self.wet_gain).clamp(-1.0, 1.0);
-            if channels > 1 {
-                buffer[base + 1] = (dry_r + wet_r * self.wet_gain).clamp(-1.0, 1.0);
+            // Sum delayed taps per channel
+            for ch in 0..channels {
+                let mut wet = 0.0f32;
+                for i in 0..self.tap_count {
+                    let tap = &self.taps[i];
+                    let read_pos =
+                        (self.write_pos + BUFFER_SIZE - tap.delay_samples) & BUFFER_MASK;
+                    wet += self.buffers[ch][read_pos] * tap.gain;
+                }
+                buffer[base + ch] = (buffer[base + ch] + wet * self.wet_gain).clamp(-1.0, 1.0);
             }
 
             self.write_pos = (self.write_pos + 1) & BUFFER_MASK;
         }
+    }
+
+    fn reset(&mut self) {
+        for buf in &mut self.buffers {
+            buf.fill(0.0);
+        }
+        self.write_pos = 0;
     }
 
     fn name(&self) -> &str {

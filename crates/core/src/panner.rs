@@ -10,8 +10,8 @@
 
 use std::f32::consts::PI;
 
-use crate::spatial::listener::Listener;
-use crate::world::types::Vec3;
+use crate::listener::Listener;
+use crate::types::Vec3;
 
 /// Stereo gain pair (left, right).
 #[derive(Clone, Copy, Debug)]
@@ -20,14 +20,79 @@ pub struct StereoGains {
     pub right: f32,
 }
 
-/// Compute distance-based gain attenuation (inverse distance model).
+/// W3C Web Audio API distance models.
+/// See: https://www.w3.org/TR/webaudio/#distance-attenuation
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DistanceModelType {
+    /// gain = 1 - rolloff * (distance - refDistance) / (maxDistance - refDistance)
+    /// Straight-line falloff. Good for volumetric sources (rain, wind).
+    Linear,
+    /// gain = refDistance / (refDistance + rolloff * (distance - refDistance))
+    /// Realistic inverse-square-like falloff. Standard for point sources.
+    Inverse,
+    /// gain = pow(distance / refDistance, -rolloff)
+    /// Steeper falloff than inverse. For complex propagation patterns.
+    Exponential,
+}
+
+/// Compute distance-based gain attenuation between two points.
 ///
-/// Follows the WebAudio "inverse" distance model:
-///   gain = ref_distance / (ref_distance + rolloff * (distance - ref_distance))
+/// Implements all three W3C Web Audio API distance models:
+///   - Linear: straight-line falloff from refDistance to maxDistance
+///   - Inverse: 1/r-like falloff (most common for point sources)
+///   - Exponential: power-law falloff (steeper than inverse)
 ///
-/// - `ref_distance`: distance at which gain = 1.0 (no attenuation). Sources closer than this are clamped to 1.0.
-/// - `max_distance`: beyond this, gain stays constant (no further attenuation).
-/// - `rolloff`: how quickly sound fades with distance. 1.0 = realistic, higher = faster.
+/// - `ref_distance`: distance at which gain = 1.0 (no attenuation).
+/// - `max_distance`: beyond this, gain stays constant.
+/// - `rolloff`: how quickly sound fades with distance.
+pub fn distance_gain_at(
+    from: Vec3,
+    to: Vec3,
+    ref_distance: f32,
+    max_distance: f32,
+    rolloff: f32,
+) -> f32 {
+    distance_gain_at_model(from, to, ref_distance, max_distance, rolloff, DistanceModelType::Inverse)
+}
+
+/// Compute distance-based gain using a specific distance model.
+pub fn distance_gain_at_model(
+    from: Vec3,
+    to: Vec3,
+    ref_distance: f32,
+    max_distance: f32,
+    rolloff: f32,
+    model: DistanceModelType,
+) -> f32 {
+    let dist = from.distance_to(to);
+    let clamped = dist.clamp(ref_distance, max_distance);
+
+    let gain = match model {
+        DistanceModelType::Linear => {
+            let range = max_distance - ref_distance;
+            if range <= 0.0 {
+                1.0
+            } else {
+                1.0 - rolloff * (clamped - ref_distance) / range
+            }
+        }
+        DistanceModelType::Inverse => {
+            let denom = ref_distance + rolloff * (clamped - ref_distance);
+            if denom <= 0.0 { 1.0 } else { ref_distance / denom }
+        }
+        DistanceModelType::Exponential => {
+            if ref_distance <= 0.0 {
+                1.0
+            } else {
+                (clamped / ref_distance).powf(-rolloff)
+            }
+        }
+    };
+    gain.clamp(0.0, 1.0)
+}
+
+/// Compute distance-based gain from listener to source.
+/// Convenience wrapper around [`distance_gain_at`].
 pub fn distance_gain(
     listener: &Listener,
     source_position: Vec3,
@@ -35,9 +100,7 @@ pub fn distance_gain(
     max_distance: f32,
     rolloff: f32,
 ) -> f32 {
-    let dist = listener.position.distance_to(source_position);
-    let clamped = dist.clamp(ref_distance, max_distance);
-    ref_distance / (ref_distance + rolloff * (clamped - ref_distance))
+    distance_gain_at(listener.position, source_position, ref_distance, max_distance, rolloff)
 }
 
 /// Compute equal-power stereo panning gains from a source position relative to a listener.

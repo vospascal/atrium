@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/core"]
+
 [package]
 name = "atrium"
 version = "0.1.0"
@@ -6,6 +9,7 @@ description = "Spatial audio engine with acoustic zone simulation"
 default-run = "atrium"
 
 [dependencies]
+atrium-core = { path = "crates/core" }
 cpal = "0.15"
 rtrb = "0.3"
 tungstenite = "0.24"

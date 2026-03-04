@@ -1,4 +1,5 @@
 use crate::world::types::Vec3;
+use atrium_core::speaker::RenderMode;
 
 /// Commands sent from the control thread to the audio thread via rtrb ring buffer.
 /// All variants must be small and Copy — no heap allocations.
@@ -15,6 +16,27 @@ pub enum Command {
 
     /// Reposition a source by index.
     SetSourcePosition { index: u8, position: Vec3 },
+
+    /// Switch rendering mode (SpeakerAsMic or Vbap).
+    SetRenderMode { mode: RenderMode },
+
+    /// Reposition a speaker by channel index.
+    SetSpeakerPosition { channel: u8, position: Vec3 },
+
+    /// Set MDAP spread for a source (0.0 = point, 1.0 = full hemisphere).
+    SetSourceSpread { index: u8, spread: f32 },
+
+    /// Set orbit speed for a source (0 = paused).
+    SetSourceOrbitSpeed { index: u8, speed: f32 },
+
+    /// Set orbit radius for a source.
+    SetSourceOrbitRadius { index: u8, radius: f32 },
+
+    /// Set orbit angle for a source.
+    SetSourceOrbitAngle { index: u8, angle: f32 },
+
+    /// Set atmospheric conditions for ISO 9613-1 air absorption.
+    SetAtmosphere { temperature_c: f32, humidity_pct: f32 },
     // Future:
     // AddSource { id: u32, source_type: SourceType, position: Vec3 },
     // RemoveSource { id: u32 },

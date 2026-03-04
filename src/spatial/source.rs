@@ -4,46 +4,8 @@ use crate::audio::decode::AudioBuffer;
 use crate::spatial::directivity::DirectivityPattern;
 use crate::world::types::Vec3;
 
-/// Trait for anything that generates audio samples and has a position.
-/// Implementations must be Send (moved to audio thread) and must not allocate.
-pub trait SoundSource: Send {
-    /// Generate the next mono sample.
-    fn next_sample(&mut self, sample_rate: f32) -> f32;
-
-    /// Current world-space position.
-    fn position(&self) -> Vec3;
-
-    /// Whether this source is still producing audio.
-    fn is_active(&self) -> bool {
-        true
-    }
-
-    /// Advance time-varying state (orbit, etc.). Called once per buffer.
-    fn tick(&mut self, dt: f32);
-
-    /// Unit vector of the source's forward/facing direction.
-    /// Default: +X (irrelevant for omnidirectional sources).
-    fn orientation(&self) -> Vec3 {
-        Vec3::new(1.0, 0.0, 0.0)
-    }
-
-    /// The source's directivity emission pattern. Default: omnidirectional.
-    fn directivity(&self) -> DirectivityPattern {
-        DirectivityPattern::OMNI
-    }
-
-    /// Whether this source is muted (silent but still ticking).
-    fn is_muted(&self) -> bool {
-        false
-    }
-
-    /// Mute or unmute this source.
-    fn set_muted(&mut self, _muted: bool) {}
-
-    /// Reposition this source. Interpretation depends on the source type
-    /// (e.g. sets orbit center for orbiting sources, direct position for static).
-    fn set_position(&mut self, _position: Vec3) {}
-}
+// Re-export from core so `crate::spatial::source::SoundSource` still resolves.
+pub use atrium_core::source::SoundSource;
 
 /// A looping buffer player that orbits a center point.
 pub struct TestNode {
@@ -55,6 +17,7 @@ pub struct TestNode {
     pub orbit_center: Vec3,
     orbit_angle: f32,
     pub pattern: DirectivityPattern,
+    pub spread: f32,
     muted: bool,
 }
 
@@ -74,6 +37,7 @@ impl TestNode {
             orbit_center,
             orbit_angle: 0.0,
             pattern: DirectivityPattern::OMNI,
+            spread: 0.0,
             muted: false,
         }
     }
@@ -123,14 +87,16 @@ impl SoundSource for TestNode {
         }
     }
 
-    /// Faces the direction of travel (tangent to orbit path).
+    /// Faces toward the orbit center (i.e. toward the listener).
     fn orientation(&self) -> Vec3 {
-        let sign = if self.orbit_speed >= 0.0 { 1.0 } else { -1.0 };
-        Vec3::new(
-            -sign * self.orbit_angle.sin(),
-            sign * self.orbit_angle.cos(),
-            0.0,
-        )
+        let pos = self.position();
+        let d = self.orbit_center - pos;
+        let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+        if len < 1e-6 {
+            Vec3::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3::new(d.x / len, d.y / len, d.z / len)
+        }
     }
 
     fn directivity(&self) -> DirectivityPattern {
@@ -147,5 +113,25 @@ impl SoundSource for TestNode {
 
     fn set_position(&mut self, position: Vec3) {
         self.orbit_center = position;
+    }
+
+    fn spread(&self) -> f32 {
+        self.spread
+    }
+
+    fn set_spread(&mut self, spread: f32) {
+        self.spread = spread;
+    }
+
+    fn set_orbit_speed(&mut self, speed: f32) {
+        self.orbit_speed = speed;
+    }
+
+    fn set_orbit_radius(&mut self, radius: f32) {
+        self.orbit_radius = radius;
+    }
+
+    fn set_orbit_angle(&mut self, angle: f32) {
+        self.orbit_angle = angle;
     }
 }

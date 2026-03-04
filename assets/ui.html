@@ -23,6 +23,7 @@
   .connected { background: #4caf50; }
   .disconnected { background: #f44336; }
   input[type=range] { width: 120px; margin-left: 8px; accent-color: #4fc3f7; }
+  input[type=checkbox] { accent-color: #4fc3f7; margin-left: 8px; }
   .source-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
   .source-name { font-size: 11px; }
   .mute-btn {
@@ -31,8 +32,37 @@
   }
   .mute-btn:hover { border-color: #888; color: #ccc; }
   .mute-btn.muted { border-color: #f44336; color: #f44336; }
+  .gain-readout { font-size: 10px; color: #666; margin-top: 1px; font-variant-numeric: tabular-nums; }
+  #render-panel { margin-top: 8px; border-top: 1px solid #333; padding-top: 6px; }
+  #render-panel h3 { font-size: 12px; color: #999; margin-bottom: 4px; }
+  .mode-btns { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+  .mode-btn {
+    background: none; border: 1px solid #555; color: #999; font-size: 10px;
+    padding: 3px 8px; border-radius: 4px; cursor: pointer; font-family: inherit;
+  }
+  .mode-btn:hover { border-color: #888; color: #ccc; }
+  .mode-btn.active { border-color: #4fc3f7; color: #4fc3f7; background: rgba(79,195,247,0.1); }
   #sources-panel { margin-top: 8px; border-top: 1px solid #333; padding-top: 6px; }
   #sources-panel h3 { font-size: 12px; color: #999; margin-bottom: 4px; }
+  .orbit-controls { margin: 2px 0 4px; }
+  .orbit-controls .row { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+  .orbit-controls label { font-size: 10px; color: #777; min-width: 40px; }
+  .orbit-controls input[type=range] { width: 70px; }
+  .orbit-controls .val { font-size: 10px; color: #aaa; min-width: 30px; }
+  .pause-btn { background: none; border: 1px solid #555; color: #4fc3f7; font-size: 10px;
+    padding: 1px 6px; border-radius: 4px; cursor: pointer; font-family: inherit; }
+  .pause-btn:hover { border-color: #4fc3f7; }
+  .pause-btn.paused { border-color: #ff9800; color: #ff9800; }
+  #ray-panel { margin-top: 8px; border-top: 1px solid #333; padding-top: 6px; }
+  #ray-panel h3 { font-size: 12px; color: #999; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+  .toggle-btn {
+    background: none; border: 1px solid #555; color: #999; font-size: 10px;
+    padding: 1px 8px; border-radius: 4px; cursor: pointer; font-family: inherit;
+  }
+  .toggle-btn:hover { border-color: #888; color: #ccc; }
+  .toggle-btn.active { border-color: #4fc3f7; color: #4fc3f7; }
+  #ray-controls.hidden { display: none; }
+  #ray-stats { font-size: 10px; color: #666; margin-top: 2px; font-variant-numeric: tabular-nums; }
   #help {
     position: absolute; bottom: 16px; left: 16px;
     background: rgba(0,0,0,0.7); padding: 10px 14px; border-radius: 8px;
@@ -54,11 +84,67 @@
   <div id="sources-panel">
     <h3>Sources</h3>
   </div>
+  <div id="render-panel">
+    <h3>Render Mode</h3>
+    <div class="mode-btns">
+      <button class="mode-btn active" data-mode="speaker_as_mic">Spatial</button>
+      <button class="mode-btn" data-mode="vbap">VBAP</button>
+      <button class="mode-btn" data-mode="5.1">5.1</button>
+      <button class="mode-btn" data-mode="4.0">4.0</button>
+      <button class="mode-btn" data-mode="stereo">Stereo</button>
+      <button class="mode-btn" data-mode="mono">Mono</button>
+    </div>
+  </div>
+  <div id="atmosphere-panel" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;">
+    <h3>Atmosphere</h3>
+    <div class="row">
+      <label>Temp</label>
+      <input type="range" id="atmo-temp" min="-10" max="45" step="1" value="20" style="width:80px">
+      <span class="val" id="atmo-temp-val">20°C</span>
+    </div>
+    <div class="row">
+      <label>Humidity</label>
+      <input type="range" id="atmo-humidity" min="0" max="100" step="1" value="50" style="width:80px">
+      <span class="val" id="atmo-humidity-val">50%</span>
+    </div>
+    <div id="atmo-readout" style="font-size:10px;color:#666;margin-top:4px;font-variant-numeric:tabular-nums;">
+      α: 1kHz 0.005 · 4kHz 0.020 · 8kHz 0.060 dB/m
+    </div>
+  </div>
+  <div id="ray-panel">
+    <h3>Ray Tracing <button class="toggle-btn" id="ray-power">OFF</button></h3>
+    <div id="ray-controls" class="hidden">
+      <div class="row">
+        <label>Show Rays</label>
+        <input type="checkbox" id="ray-toggle" checked>
+      </div>
+      <div class="row">
+        <label>Rays/src</label>
+        <input type="range" id="ray-count" min="4" max="64" value="8" style="width:80px">
+        <span class="val" id="ray-count-val">8</span>
+      </div>
+      <div class="row">
+        <label>Show ER</label>
+        <input type="checkbox" id="er-toggle">
+      </div>
+      <div class="row">
+        <label>Dot Size</label>
+        <input type="range" id="particle-size" min="0.5" max="5" value="2.5" step="0.5" style="width:80px">
+        <span class="val" id="particle-size-val">2.5cm</span>
+      </div>
+      <div class="row">
+        <label>Drift</label>
+        <input type="range" id="curl-strength" min="0" max="100" value="100" style="width:80px">
+        <span class="val" id="curl-strength-val">1.00</span>
+      </div>
+      <div id="ray-stats">wasm: loading...</div>
+    </div>
+  </div>
   <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span></div>
 </div>
 
 <div id="help">
-  Drag listener (white) or sources to move &middot; Scroll to rotate yaw &middot; Right-drag to orbit camera
+  Drag listener (white) or sources to move &middot; Space+Scroll to rotate yaw &middot; Scroll to zoom &middot; Right-drag to orbit
 </div>
 
 <script type="importmap">
@@ -77,21 +163,231 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // === Scene constants (must match Rust) ===
 const ROOM = { w: 6, d: 4, h: 3 };
 const SOURCES = [
-  { name: 'Djembe',   color: 0xff6b35, cx: 3, cy: 2, r: 1.5, speed:  1.0, z: 0 },
-  { name: 'Campfire', color: 0xffc107, x: 1.0, y: 1.0, r: 0, speed: 0, z: 0 },
+  { name: 'Djembe',   color: 0xff6b35, cx: 3, cy: 2, r: 1.5, speed: 1.0, z: 0,
+    pattern: { type: 'polar', alpha: 0.5 } },   // cardioid
+  { name: 'Campfire', color: 0xffc107, x: 1.0, y: 1.0, r: 0, speed: 0, z: 0,
+    pattern: { type: 'omni' } },
+  { name: 'Cat',      color: 0xce93d8, x: 5.0, y: 3.0, r: 0, speed: 0, z: 0,
+    pattern: { type: 'omni' } },
 ];
+// Speaker layout (must match main.rs 5.1 positions)
+// Speaker positions are received from Rust via WebSocket ("speaker_layout" message).
+// This is just the fallback until the first message arrives.
+let SPEAKERS = [
+  { label: 'FL', x: 0, y: 4, z: 0, channel: 0, color: 0x66bb6a },
+  { label: 'FR', x: 6, y: 4, z: 0, channel: 1, color: 0x66bb6a },
+  { label: 'C',  x: 3, y: 4, z: 0, channel: 2, color: 0x66bb6a },
+  { label: 'RL', x: 0, y: 0, z: 0, channel: 4, color: 0x66bb6a },
+  { label: 'RR', x: 6, y: 0, z: 0, channel: 5, color: 0x66bb6a },
+];
+let currentRenderMode = 'speaker_as_mic';
+
+// Which speaker channels are visible per render mode
+const MODE_ACTIVE_CHANNELS = {
+  speaker_as_mic: [],                 // binaural headphones — no speakers
+  vbap:           [0, 1, 2, 4, 5],   // all 5 spatial speakers
+  '5.1':          [0, 1, 2, 4, 5],
+  '4.0':          [0, 1, 4, 5],      // no center
+  stereo:         [0, 1],             // FL + FR only
+  mono:           [],                  // headphone mono — no speakers
+};
+
+function updateSpeakerVisibility() {
+  const active = MODE_ACTIVE_CHANNELS[currentRenderMode] || [0, 1, 2, 4, 5];
+  SPEAKERS.forEach((sp, i) => {
+    if (speakerMeshes[i]) speakerMeshes[i].visible = active.includes(sp.channel);
+  });
+}
+
+function createSpeakerMesh(sp) {
+  const group = new THREE.Group();
+  const box = new THREE.Mesh(
+    new THREE.BoxGeometry(0.2, 0.25, 0.15),
+    new THREE.MeshStandardMaterial({ color: sp.color, emissive: sp.color, emissiveIntensity: 0.2 })
+  );
+  group.add(box);
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 24;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#66bb6a';
+  ctx.font = '16px monospace';
+  ctx.fillText(sp.label, 4, 18);
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+  sprite.scale.set(0.6, 0.2, 1);
+  sprite.position.y = 0.25;
+  group.add(sprite);
+  group.position.copy(toThree(sp.x, sp.y, sp.z));
+  return group;
+}
+
+/// Rebuild speaker meshes from data received from Rust.
+function rebuildSpeakers(data) {
+  // Remove old meshes
+  speakerMeshes.forEach(m => scene.remove(m));
+  // Update SPEAKERS array
+  SPEAKERS = data.speakers.map(sp => ({
+    label: sp.label, x: sp.x, y: sp.y, z: sp.z,
+    channel: sp.channel, color: 0x66bb6a,
+  }));
+  // Create new meshes
+  speakerMeshes = SPEAKERS.map(sp => {
+    const group = createSpeakerMesh(sp);
+    scene.add(group);
+    return group;
+  });
+  updateSpeakerVisibility();
+}
+
+const WALL_ABSORPTION = 0.85; // must match Rust WALL_ABSORPTION
+const LISTENER_RADIUS = 0.5;  // must match Rust LISTENER_RADIUS
 
 // Atrium is Z-up, Three.js is Y-up.
-// Atrium (x, y, z) -> Three.js (x, z, y)
-function toThree(ax, ay, az) { return new THREE.Vector3(ax, az, ay); }
-function toAtrium(tv) { return { x: tv.x, y: tv.z, z: tv.y }; }
+// Atrium (x, y, z) → Three.js (x, z, ROOM.d − y)
+// The y-flip puts the front wall (y=ROOM.d) at Three.js z=0 (top of screen)
+// and the rear wall (y=0) at z=ROOM.d (bottom), giving a natural map view.
+function toThree(ax, ay, az) { return new THREE.Vector3(ax, az, ROOM.d - ay); }
+function toAtrium(tv) { return { x: tv.x, y: ROOM.d - tv.z, z: tv.y }; }
+
+// === Directivity pattern evaluation (mirrors Rust DirectivityPattern::gain_at_angle) ===
+function patternGain(pattern, angle) {
+  if (pattern.type === 'omni') return 1.0;
+  if (pattern.type === 'polar') {
+    // gain = alpha + (1 - alpha) * cos(theta), clamped to 0
+    return Math.max(0, pattern.alpha + (1 - pattern.alpha) * Math.cos(angle));
+  }
+  if (pattern.type === 'cone') {
+    if (angle <= pattern.inner) return 1.0;
+    if (angle >= pattern.outer) return pattern.outerGain;
+    const t = (angle - pattern.inner) / (pattern.outer - pattern.inner);
+    return 1.0 + t * (pattern.outerGain - 1.0);
+  }
+  return 1.0;
+}
+
+// Generate a 3D directivity pattern as a wireframe surface of revolution.
+// The polar gain curve is rotated around the forward axis (+Z local).
+const POLAR_STEPS = 48;   // samples around the polar (off-axis) angle, 0 to π
+const RING_STEPS = 24;    // samples around each latitude ring (azimuthal)
+const PATTERN_SCALE = 0.8; // max radius in meters at gain=1.0
+
+function createPatternMesh(pattern, color) {
+  // Build a surface of revolution: for each polar angle θ (0→π),
+  // the gain gives a radius, and we sweep that radius around the forward axis.
+  const vertices = [];
+  const indices = [];
+
+  for (let p = 0; p <= POLAR_STEPS; p++) {
+    const theta = (p / POLAR_STEPS) * Math.PI; // 0 (forward) to π (behind)
+    const gain = patternGain(pattern, theta);
+    const r = gain * PATTERN_SCALE;
+    // r is the distance from the forward axis at this polar angle
+    const rPerp = r * Math.sin(theta); // perpendicular to forward
+    const zAlongFwd = r * Math.cos(theta); // along forward (+Z local)
+
+    for (let a = 0; a <= RING_STEPS; a++) {
+      const phi = (a / RING_STEPS) * Math.PI * 2;
+      vertices.push(
+        rPerp * Math.cos(phi),  // X
+        rPerp * Math.sin(phi),  // Y (Three.js up — becomes height on the lobe)
+        zAlongFwd               // Z (forward)
+      );
+    }
+  }
+
+  // Build wireframe indices: latitude rings + longitude lines
+  for (let p = 0; p < POLAR_STEPS; p++) {
+    for (let a = 0; a < RING_STEPS; a++) {
+      const curr = p * (RING_STEPS + 1) + a;
+      const next = curr + 1;
+      const below = curr + (RING_STEPS + 1);
+      // Latitude ring segment
+      indices.push(curr, next);
+      // Longitude line segment
+      indices.push(curr, below);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  geo.setIndex(indices);
+
+  return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    color, transparent: true, opacity: 0.15,
+  }));
+}
+
+// === Engine constants (must match Rust) ===
+// DistanceModel::default()
+const DIST_MODEL = { ref: 0.3, max: 20.0, rolloff: 1.0 };
+// Listener::HearingCone::default() — Cone { inner: 15°, outer: 45°, outer_gain: 0.3 }
+const HEARING_PATTERN = {
+  type: 'cone', inner: 15 * Math.PI / 180, outer: 45 * Math.PI / 180, outerGain: 0.3
+};
+
+// Mirrors Rust panner::distance_gain (inverse distance model)
+function distanceGain(lx, ly, lz, sx, sy, sz) {
+  const dx = sx - lx, dy = sy - ly, dz = sz - lz;
+  const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  const clamped = Math.max(DIST_MODEL.ref, Math.min(DIST_MODEL.max, dist));
+  return DIST_MODEL.ref / (DIST_MODEL.ref + DIST_MODEL.rolloff * (clamped - DIST_MODEL.ref));
+}
+
+// Angle between two 2D direction vectors (Atrium XY plane)
+function angleBetween(ax, ay, bx, by) {
+  const dot = ax*bx + ay*by;
+  const la = Math.sqrt(ax*ax + ay*ay);
+  const lb = Math.sqrt(bx*bx + by*by);
+  if (la < 1e-6 || lb < 1e-6) return 0;
+  return Math.acos(Math.max(-1, Math.min(1, dot / (la * lb))));
+}
+
+// Full gain chain: mirrors mixer.rs line 73
+//   total = dist × src_dir × hear
+function computeGainChain(srcX, srcY, srcZ, srcFacingX, srcFacingY, srcPattern,
+                          lstX, lstY, lstZ, lstYaw) {
+  const dist = distanceGain(lstX, lstY, lstZ, srcX, srcY, srcZ);
+  // Source directivity: angle from source facing to direction toward listener
+  const toListX = lstX - srcX, toListY = lstY - srcY;
+  const srcAngle = angleBetween(srcFacingX, srcFacingY, toListX, toListY);
+  const srcDir = patternGain(srcPattern, srcAngle);
+  // Listener hearing: angle from listener forward to direction toward source
+  const lstFwdX = Math.cos(lstYaw), lstFwdY = Math.sin(lstYaw);
+  const toSrcX = srcX - lstX, toSrcY = srcY - lstY;
+  const hearAngle = angleBetween(lstFwdX, lstFwdY, toSrcX, toSrcY);
+  const hear = patternGain(HEARING_PATTERN, hearAngle);
+  return { dist, srcDir, hear, total: dist * srcDir * hear };
+}
 
 // === State ===
-let listener = { x: 3, y: 2, z: 0, yaw: 0 };
+let listener = { x: 3, y: 2, z: 0, yaw: Math.PI / 2 };
 let ws = null;
 let dragTarget = null; // null | 'listener' | source index (number)
 const sourceMuted = SOURCES.map(() => false);
 const startTime = performance.now() / 1000;
+
+// === Wasm ray tracer ===
+let wasm = null;
+let wasmMemory = null;
+let rayOutputView = null;  // Float32Array over wasm memory (512 segments × 9 floats)
+let erOutputView = null;   // Float32Array over wasm memory (64 paths × 4 floats)
+
+async function loadWasm() {
+  try {
+    const { instance } = await WebAssembly.instantiateStreaming(fetch('/ray_tracer.wasm'));
+    wasm = instance.exports;
+    wasmMemory = wasm.memory;
+    const rayPtr = wasm.get_ray_output_ptr();
+    const erPtr = wasm.get_er_output_ptr();
+    rayOutputView = new Float32Array(wasmMemory.buffer, rayPtr, 512 * 9);
+    erOutputView = new Float32Array(wasmMemory.buffer, erPtr, 64 * 4);
+    document.getElementById('ray-stats').textContent = 'wasm: ready';
+  } catch (e) {
+    console.warn('Wasm ray tracer not available:', e);
+    document.getElementById('ray-stats').textContent = 'wasm: unavailable';
+  }
+}
+loadWasm();
 
 // === Three.js setup ===
 const scene = new THREE.Scene();
@@ -158,18 +454,9 @@ const arrowMesh = new THREE.Mesh(
 );
 listenerGroup.add(arrowMesh);
 
-// Hearing cone (semi-transparent, 90° outer angle)
-const coneAngle = 45 * Math.PI / 180; // outer half-angle in radians
-const coneLen = 1.5;
-const coneRadius = Math.tan(coneAngle) * coneLen;
-const hearingConeGeo = new THREE.ConeGeometry(coneRadius, coneLen, 24, 1, true);
-hearingConeGeo.rotateX(Math.PI / 2);
-hearingConeGeo.translate(0, 0, coneLen / 2);
-const hearingConeMesh = new THREE.Mesh(
-  hearingConeGeo,
-  new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.08, side: THREE.DoubleSide })
-);
-listenerGroup.add(hearingConeMesh);
+// Hearing pattern — 3D wireframe (matches Rust Cone { inner: 15°, outer: 45°, outer_gain: 0.3 })
+const hearingMesh = createPatternMesh(HEARING_PATTERN, 0x4fc3f7);
+listenerGroup.add(hearingMesh);
 
 scene.add(listenerGroup);
 
@@ -197,8 +484,457 @@ const sourceMeshes = SOURCES.map(s => {
   return mesh;
 });
 
-// === Source HUD controls (mute buttons) ===
+// === Source directivity patterns (3D wireframe) ===
+const patternMeshes = SOURCES.map((s, i) => {
+  const mesh = createPatternMesh(s.pattern, s.color);
+  scene.add(mesh);
+  return mesh;
+});
+
+// === Speaker meshes (green boxes at room positions) ===
+let speakerMeshes = SPEAKERS.map(sp => {
+  const group = createSpeakerMesh(sp);
+  scene.add(group);
+  return group;
+});
+updateSpeakerVisibility();
+
+// === Gain lines (source → listener, opacity = total gain) ===
+const gainLines = SOURCES.map((s, i) => {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,0], 3));
+  const mat = new THREE.LineBasicMaterial({
+    color: s.color, transparent: true, opacity: 0.5,
+  });
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  return line;
+});
+
+// === Distance labels on gain lines ===
+const distLabels = SOURCES.map((s) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 28;
+  const ctx = canvas.getContext('2d');
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sprite.scale.set(0.9, 0.2, 1);
+  sprite.visible = false;
+  scene.add(sprite);
+  return { canvas, ctx, tex, sprite, lastText: '' };
+});
+function updateDistLabel(label, text, color) {
+  if (label.lastText === text) return;
+  label.lastText = text;
+  const { canvas, ctx, tex } = label;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.roundRect(0, 0, canvas.width, canvas.height, 4);
+  ctx.fill();
+  ctx.fillStyle = color;
+  ctx.font = '15px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  tex.needsUpdate = true;
+}
+
+// === FBO Particle System ===
+const MAX_RAY_SEGMENTS = 512;
+const FBO_W = 128, FBO_H = 256; // 32,768 particles
+const SEED_W = 32, SEED_H = 16; // 512 max seeds
+
+// --- Seed textures (CPU-written each frame from wasm output) ---
+const seedData = new Float32Array(SEED_W * SEED_H * 4);      // RGBA: x, y, z, energy
+const seedColorData = new Float32Array(SEED_W * SEED_H * 4);  // RGBA: r, g, b, 1
+const seedDirData = new Float32Array(SEED_W * SEED_H * 4);    // RGBA: dx, dy, dz, 0
+const seedTex = new THREE.DataTexture(seedData, SEED_W, SEED_H, THREE.RGBAFormat, THREE.FloatType);
+seedTex.minFilter = seedTex.magFilter = THREE.NearestFilter;
+const seedColorTex = new THREE.DataTexture(seedColorData, SEED_W, SEED_H, THREE.RGBAFormat, THREE.FloatType);
+seedColorTex.minFilter = seedColorTex.magFilter = THREE.NearestFilter;
+const seedDirTex = new THREE.DataTexture(seedDirData, SEED_W, SEED_H, THREE.RGBAFormat, THREE.FloatType);
+seedDirTex.minFilter = seedDirTex.magFilter = THREE.NearestFilter;
+
+// --- Simulation shaders ---
+const SIM_VERT = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const SIM_FRAG = `
+precision highp float;
+uniform sampler2D u_seedTex;
+uniform sampler2D u_seedColorTex;
+uniform sampler2D u_seedDirTex;
+uniform float u_seedCount;
+uniform float u_time;
+uniform float u_curlStrength;
+uniform vec3 u_roomMin;
+uniform vec3 u_roomMax;
+uniform float u_texW;
+uniform float u_texH;
+uniform float u_seedTexW;
+uniform float u_seedTexH;
+varying vec2 vUv;
+
+// --- Hash-based gradient noise (compact, no textures) ---
+vec3 hash33(vec3 p) {
+  p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+  p += dot(p, p.yxz + 33.33);
+  return fract((p.xxy + p.yxx) * p.zyx) * 2.0 - 1.0;
+}
+
+float gnoise(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(dot(hash33(i), f),
+            dot(hash33(i + vec3(1,0,0)), f - vec3(1,0,0)), u.x),
+        mix(dot(hash33(i + vec3(0,1,0)), f - vec3(0,1,0)),
+            dot(hash33(i + vec3(1,1,0)), f - vec3(1,1,0)), u.x), u.y),
+    mix(mix(dot(hash33(i + vec3(0,0,1)), f - vec3(0,0,1)),
+            dot(hash33(i + vec3(1,0,1)), f - vec3(1,0,1)), u.x),
+        mix(dot(hash33(i + vec3(0,1,1)), f - vec3(0,1,1)),
+            dot(hash33(i + vec3(1,1,1)), f - vec3(1,1,1)), u.x), u.y),
+    u.z);
+}
+
+vec3 curlNoise(vec3 p) {
+  float e = 0.01;
+  // 3 noise fields offset by large primes for proper 3D curl
+  vec3 dx = vec3(e, 0.0, 0.0), dy = vec3(0.0, e, 0.0), dz = vec3(0.0, 0.0, e);
+  float n1a = gnoise(p + dy) - gnoise(p - dy);
+  float n1b = gnoise(p + dz) - gnoise(p - dz);
+  float n2a = gnoise(p + dz + 31.416) - gnoise(p - dz + 31.416);
+  float n2b = gnoise(p + dx + 31.416) - gnoise(p - dx + 31.416);
+  float n3a = gnoise(p + dx + 67.293) - gnoise(p - dx + 67.293);
+  float n3b = gnoise(p + dy + 67.293) - gnoise(p - dy + 67.293);
+  return vec3(n1a - n1b, n2a - n2b, n3a - n3b) / (2.0 * e);
+}
+
+// Deterministic hash for particle→seed mapping
+float hash(float n) { return fract(sin(n) * 43758.5453); }
+
+void main() {
+  // Particle index from UV
+  float idx = floor(vUv.x * u_texW) + floor(vUv.y * u_texH) * u_texW;
+
+  if (u_seedCount < 1.0) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
+
+  // Map particle to a seed (multiple particles share each seed)
+  float seedIdx = floor(mod(hash(idx * 1.731) * u_seedCount, u_seedCount));
+  float su = (mod(seedIdx, u_seedTexW) + 0.5) / u_seedTexW;
+  float sv = (floor(seedIdx / u_seedTexW) + 0.5) / u_seedTexH;
+
+  vec4 seed = texture2D(u_seedTex, vec2(su, sv));
+  vec3 pos = seed.rgb;
+  float energy = seed.a;
+
+  if (energy < 0.01) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
+
+  // Per-particle variation (deterministic from index)
+  float h1 = hash(idx * 0.937);
+  float h2 = hash(idx * 1.471);
+  float h3 = hash(idx * 2.311);
+
+  // Full segment vector (start→end, not normalized)
+  vec3 segVec = texture2D(u_seedDirTex, vec2(su, sv)).xyz;
+
+  // Spread particle along segment: pos is START, segVec is full vector
+  // h1 places it, time makes it flow
+  float along = fract(h1 + u_time * 0.1);
+  pos += segVec * along;
+
+  // Tiny perpendicular jitter for thickness
+  vec3 nDir = normalize(segVec + 0.001);
+  vec3 perp = normalize(cross(nDir, vec3(0.0, 0.0, 1.0) + 0.01));
+  pos += perp * (h2 - 0.5) * u_curlStrength * 0.1;
+
+  // Clamp to room
+  pos = clamp(pos, u_roomMin + 0.01, u_roomMax - 0.01);
+
+  // Life = energy with per-particle variation
+  float life = energy * (0.6 + 0.4 * h1);
+
+  gl_FragColor = vec4(pos, life);
+}`;
+
+// --- Render shaders ---
+const RENDER_VERT = `
+uniform sampler2D u_posTex;
+uniform sampler2D u_colTex;
+uniform float u_worldSize;   // particle diameter in meters
+uniform float u_screenH;    // viewport height in pixels
+uniform float u_fovRad;     // camera vertical FOV in radians
+uniform float u_roomD;      // room depth (Atrium y-axis) for coord flip
+varying vec3 vColor;
+varying float vLife;
+void main() {
+  vec4 posLife = texture2D(u_posTex, position.xy);
+  vec4 col = texture2D(u_colTex, position.xy);
+  vec3 aPos = posLife.xyz;
+  vLife = posLife.w;
+  vColor = col.rgb;
+
+  if (vLife <= 0.0) {
+    gl_Position = vec4(9999.0, 9999.0, 9999.0, 1.0);
+    gl_PointSize = 0.0;
+    return;
+  }
+
+  // Atrium (x,y,z) → Three.js (x, z, roomD − y)
+  vec3 threePos = vec3(aPos.x, aPos.z, u_roomD - aPos.y);
+  vec4 mvPosition = modelViewMatrix * vec4(threePos, 1.0);
+  gl_Position = projectionMatrix * mvPosition;
+  // Real-world sized particles: project world-space diameter to screen pixels
+  float dist = -mvPosition.z;
+  gl_PointSize = (u_worldSize * vLife) * u_screenH / (2.0 * tan(u_fovRad * 0.5) * dist);
+  gl_PointSize = clamp(gl_PointSize, 0.5, 64.0);
+}`;
+
+const RENDER_FRAG = `
+varying vec3 vColor;
+varying float vLife;
+void main() {
+  if (vLife <= 0.0) discard;
+  float r = length(gl_PointCoord - vec2(0.5)) * 2.0;
+  if (r > 1.0) discard;
+  // Solid core with 10% soft edge fade
+  float fade = smoothstep(1.0, 0.7, r);
+  gl_FragColor = vec4(vColor, vLife * fade);
+}`;
+
+// --- FBO setup (adapted from gpu-party) ---
+const simMaterial = new THREE.ShaderMaterial({
+  vertexShader: SIM_VERT,
+  fragmentShader: SIM_FRAG,
+  uniforms: {
+    u_seedTex:      { value: seedTex },
+    u_seedColorTex: { value: seedColorTex },
+    u_seedDirTex:   { value: seedDirTex },
+    u_seedCount:    { value: 0 },
+    u_time:         { value: 0 },
+    u_curlStrength: { value: 0.3 },
+    u_roomMin:      { value: new THREE.Vector3(0, 0, 0) },
+    u_roomMax:      { value: new THREE.Vector3(ROOM.w, ROOM.d, ROOM.h) },
+    u_texW:         { value: FBO_W },
+    u_texH:         { value: FBO_H },
+    u_seedTexW:     { value: SEED_W },
+    u_seedTexH:     { value: SEED_H },
+  },
+  depthWrite: false, depthTest: false,
+});
+
+const renderMaterial = new THREE.ShaderMaterial({
+  vertexShader: RENDER_VERT,
+  fragmentShader: RENDER_FRAG,
+  uniforms: {
+    u_posTex:    { value: null },
+    u_colTex:    { value: seedColorTex },
+    u_worldSize: { value: 0.025 },
+    u_screenH:   { value: window.innerHeight },
+    u_fovRad:    { value: 50 * Math.PI / 180 },
+    u_roomD:     { value: ROOM.d },
+  },
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+
+// Render target
+const fboRTT = new THREE.WebGLRenderTarget(FBO_W, FBO_H, {
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType,
+  depthBuffer: false,
+  stencilBuffer: false,
+});
+
+// Simulation scene (offscreen fullscreen quad)
+const simScene = new THREE.Scene();
+const simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1 / Math.pow(2, 53), 1);
+const simQuadGeo = new THREE.BufferGeometry();
+simQuadGeo.setAttribute('position', new THREE.BufferAttribute(
+  new Float32Array([-1,-1,0, 1,-1,0, 1,1,0, -1,-1,0, 1,1,0, -1,1,0]), 3));
+simQuadGeo.setAttribute('uv', new THREE.BufferAttribute(
+  new Float32Array([0,1, 1,1, 1,0, 0,1, 1,0, 0,0]), 2));
+simScene.add(new THREE.Mesh(simQuadGeo, simMaterial));
+
+// Particle Points (UV coordinates as position — vertex shader reads FBO texture)
+const fboParticleCount = FBO_W * FBO_H;
+const fboUVs = new Float32Array(fboParticleCount * 3);
+for (let i = 0; i < fboParticleCount; i++) {
+  fboUVs[i * 3]     = (i % FBO_W + 0.5) / FBO_W;
+  fboUVs[i * 3 + 1] = (Math.floor(i / FBO_W) + 0.5) / FBO_H;
+  fboUVs[i * 3 + 2] = 0;
+}
+const fboPointsGeo = new THREE.BufferGeometry();
+fboPointsGeo.setAttribute('position', new THREE.BufferAttribute(fboUVs, 3));
+const fboParticles = new THREE.Points(fboPointsGeo, renderMaterial);
+fboParticles.frustumCulled = false;
+fboParticles.visible = false;
+scene.add(fboParticles);
+
+// Color render target (same dimensions, stores per-particle color)
+const colorRTT = new THREE.WebGLRenderTarget(FBO_W, FBO_H, {
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType,
+  depthBuffer: false,
+  stencilBuffer: false,
+});
+
+// Color simulation shader — maps particle→seed color (same mapping as position sim)
+const COLOR_SIM_FRAG = `
+precision highp float;
+uniform sampler2D u_seedColorTex;
+uniform float u_seedCount;
+uniform float u_texW;
+uniform float u_texH;
+uniform float u_seedTexW;
+uniform float u_seedTexH;
+uniform sampler2D u_seedTex;
+varying vec2 vUv;
+
+float hash(float n) { return fract(sin(n) * 43758.5453); }
+
+void main() {
+  float idx = floor(vUv.x * u_texW) + floor(vUv.y * u_texH) * u_texW;
+  if (u_seedCount < 1.0) { gl_FragColor = vec4(0.0); return; }
+  float seedIdx = floor(mod(hash(idx * 1.731) * u_seedCount, u_seedCount));
+  float su = (mod(seedIdx, u_seedTexW) + 0.5) / u_seedTexW;
+  float sv = (floor(seedIdx / u_seedTexW) + 0.5) / u_seedTexH;
+  vec4 seed = texture2D(u_seedTex, vec2(su, sv));
+  if (seed.a < 0.01) { gl_FragColor = vec4(0.0); return; }
+  gl_FragColor = texture2D(u_seedColorTex, vec2(su, sv));
+}`;
+
+const colorSimMaterial = new THREE.ShaderMaterial({
+  vertexShader: SIM_VERT,
+  fragmentShader: COLOR_SIM_FRAG,
+  uniforms: {
+    u_seedTex:      { value: seedTex },
+    u_seedColorTex: { value: seedColorTex },
+    u_seedCount:    { value: 0 },
+    u_texW:         { value: FBO_W },
+    u_texH:         { value: FBO_H },
+    u_seedTexW:     { value: SEED_W },
+    u_seedTexH:     { value: SEED_H },
+  },
+  depthWrite: false, depthTest: false,
+});
+
+const colorSimScene = new THREE.Scene();
+const colorSimQuadGeo = simQuadGeo.clone();
+colorSimScene.add(new THREE.Mesh(colorSimQuadGeo, colorSimMaterial));
+
+// Initialize render material with actual FBO textures (avoid null texture reads)
+renderMaterial.uniforms.u_posTex.value = fboRTT.texture;
+renderMaterial.uniforms.u_colTex.value = colorRTT.texture;
+
+// --- Seed data builder ---
+function buildSeedData(sourcePositions, sources, muted) {
+  let seedIdx = 0;
+  const maxSeeds = SEED_W * SEED_H;
+  seedData.fill(0);
+  seedColorData.fill(0);
+  seedDirData.fill(0);
+
+  sources.forEach((s, i) => {
+    if (muted[i] || seedIdx >= maxSeeds) return;
+    const sp = sourcePositions[i];
+    const { r: cr, g: cg, b: cb } = colorComponents(s.color);
+    const { patType, p1, p2, p3 } = encodePattern(s.pattern);
+
+    const segCount = wasm.trace_rays(
+      sp.ax, sp.ay, sp.az,
+      sp.facingX, sp.facingY, 0,
+      patType, p1, p2, p3,
+      listener.x, listener.y, listener.z,
+      ROOM.w, ROOM.d, ROOM.h,
+      parseInt(rayCountSlider.value),
+      42 + i * 7919
+    );
+
+    for (let j = 0; j < segCount && seedIdx < maxSeeds; j++) {
+      const off = j * 9;
+      const energy = rayOutputView[off + 6];
+      const near = rayOutputView[off + 7] > 0.5;
+      if (energy < 0.02) continue;
+
+      const sx = rayOutputView[off], sy = rayOutputView[off + 1], sz = rayOutputView[off + 2];
+      const ex = rayOutputView[off + 3], ey = rayOutputView[off + 4], ez = rayOutputView[off + 5];
+
+      // Store segment START and full vector (end - start) as direction
+      const si = seedIdx * 4;
+      seedData[si] = sx; seedData[si + 1] = sy; seedData[si + 2] = sz;
+      seedData[si + 3] = energy;
+      seedDirData[si] = ex - sx; seedDirData[si + 1] = ey - sy; seedDirData[si + 2] = ez - sz;
+      seedDirData[si + 3] = 0.0;
+
+      const intensity = Math.pow(energy, 1.2);
+      seedColorData[si]     = near ? 0.3 * intensity : cr * intensity;
+      seedColorData[si + 1] = near ? 1.0 * intensity : cg * intensity;
+      seedColorData[si + 2] = near ? 1.0 * intensity : cb * intensity;
+      seedColorData[si + 3] = 1.0;
+      seedIdx++;
+    }
+
+    // (source emitter seeds removed — particles only live along ray segments)
+  });
+
+  return seedIdx;
+}
+
+// Listener radius sphere (shows the LISTENER_RADIUS detection zone)
+const listenerRadiusMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(LISTENER_RADIUS, 24, 16),
+  new THREE.MeshBasicMaterial({
+    color: 0x4fc3f7, transparent: true, opacity: 0.04, depthWrite: false,
+  })
+);
+scene.add(listenerRadiusMesh);
+const listenerRadiusWire = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.SphereGeometry(LISTENER_RADIUS, 12, 8)),
+  new THREE.LineBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.12 })
+);
+scene.add(listenerRadiusWire);
+
+// Early reflection paths (per source): source → wall reflection point → listener
+const MAX_ER_PATHS = 6;
+const erLinesPerSource = SOURCES.map((s) => {
+  const geo = new THREE.BufferGeometry();
+  // Each ER path = 2 line segments = 4 vertices (src→rp, rp→lst)
+  const positions = new Float32Array(MAX_ER_PATHS * 4 * 3);
+  const colors = new Float32Array(MAX_ER_PATHS * 4 * 3);
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.setDrawRange(0, 0);
+  const line = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false,
+  }));
+  scene.add(line);
+  return line;
+});
+
+// === Source HUD controls (mute buttons + gain readout) ===
 const sourcesPanel = document.getElementById('sources-panel');
+const gainReadouts = [];
+// Track pause state and original speeds per source
+const sourceOrigSpeed = SOURCES.map(s => s.speed);
+const sourcePaused = SOURCES.map(() => false);
+
 SOURCES.forEach((s, i) => {
   const row = document.createElement('div');
   row.className = 'source-row';
@@ -219,7 +955,116 @@ SOURCES.forEach((s, i) => {
   });
   row.appendChild(nameSpan);
   row.appendChild(btn);
+
+  // Pause button for orbiting sources
+  if (s.r > 0 && s.speed !== 0) {
+    const pauseBtn = document.createElement('button');
+    pauseBtn.className = 'pause-btn';
+    pauseBtn.textContent = '\u23F8'; // pause icon
+    pauseBtn.addEventListener('click', () => {
+      sourcePaused[i] = !sourcePaused[i];
+      if (sourcePaused[i]) {
+        // Freeze: capture current angle, set speed to 0
+        s._frozenAngle = (s.speed * (performance.now() / 1000 - startTime)) % (Math.PI * 2);
+        s.speed = 0;
+        send({ type: 'set_source_orbit_speed', index: i, speed: 0 });
+        send({ type: 'set_source_orbit_angle', index: i, angle: s._frozenAngle });
+        pauseBtn.textContent = '\u25B6'; // play icon
+        pauseBtn.classList.add('paused');
+      } else {
+        // Resume: restore speed, adjust startTime offset
+        s.speed = sourceOrigSpeed[i];
+        send({ type: 'set_source_orbit_speed', index: i, speed: s.speed });
+        pauseBtn.textContent = '\u23F8';
+        pauseBtn.classList.remove('paused');
+      }
+    });
+    row.appendChild(pauseBtn);
+  }
+
   sourcesPanel.appendChild(row);
+
+  // Orbit controls (radius + angle sliders) for orbiting sources
+  if (s.r > 0 || s.speed !== 0) {
+    const ctrl = document.createElement('div');
+    ctrl.className = 'orbit-controls';
+
+    // Radius slider
+    const rRow = document.createElement('div');
+    rRow.className = 'row';
+    rRow.innerHTML = `<label>Radius</label><input type="range" min="0.2" max="3" value="${s.r}" step="0.1" class="orbit-radius"><span class="val">${s.r.toFixed(1)}m</span>`;
+    const rSlider = rRow.querySelector('input');
+    const rVal = rRow.querySelector('.val');
+    rSlider.addEventListener('input', () => {
+      s.r = parseFloat(rSlider.value);
+      rVal.textContent = s.r.toFixed(1) + 'm';
+      send({ type: 'set_source_orbit_radius', index: i, radius: s.r });
+    });
+    ctrl.appendChild(rRow);
+
+    // Angle slider (visible when paused)
+    const aRow = document.createElement('div');
+    aRow.className = 'row';
+    aRow.innerHTML = `<label>Angle</label><input type="range" min="0" max="360" value="0" step="1" class="orbit-angle"><span class="val">0°</span>`;
+    const aSlider = aRow.querySelector('input');
+    const aVal = aRow.querySelector('.val');
+    aSlider.addEventListener('input', () => {
+      const deg = parseFloat(aSlider.value);
+      const rad = deg * Math.PI / 180;
+      s._frozenAngle = rad;
+      aVal.textContent = deg.toFixed(0) + '°';
+      send({ type: 'set_source_orbit_angle', index: i, angle: rad });
+    });
+    ctrl.appendChild(aRow);
+
+    sourcesPanel.appendChild(ctrl);
+  }
+
+  // Gain breakdown readout
+  const readout = document.createElement('div');
+  readout.className = 'gain-readout';
+  readout.textContent = 'dist:- emit:- hear:- = -';
+  sourcesPanel.appendChild(readout);
+  gainReadouts.push(readout);
+});
+
+// === Ray HUD controls ===
+const rayToggle = document.getElementById('ray-toggle');
+const erToggle = document.getElementById('er-toggle');
+const rayCountSlider = document.getElementById('ray-count');
+const rayCountVal = document.getElementById('ray-count-val');
+const rayStats = document.getElementById('ray-stats');
+const rayPowerBtn = document.getElementById('ray-power');
+const rayControls = document.getElementById('ray-controls');
+let rayEnabled = false;
+
+rayPowerBtn.addEventListener('click', () => {
+  rayEnabled = !rayEnabled;
+  rayPowerBtn.textContent = rayEnabled ? 'ON' : 'OFF';
+  rayPowerBtn.classList.toggle('active', rayEnabled);
+  rayControls.classList.toggle('hidden', !rayEnabled);
+  send({ type: 'set_ray_tracing', enabled: rayEnabled });
+});
+
+rayCountSlider.addEventListener('input', () => {
+  rayCountVal.textContent = rayCountSlider.value;
+});
+
+// Particle size slider
+const particleSizeSlider = document.getElementById('particle-size');
+const particleSizeVal = document.getElementById('particle-size-val');
+particleSizeSlider.addEventListener('input', () => {
+  const cm = parseFloat(particleSizeSlider.value);
+  particleSizeVal.textContent = cm + 'cm';
+  renderMaterial.uniforms.u_worldSize.value = cm * 0.01; // cm → meters
+});
+
+// Curl strength slider
+const curlStrengthSlider = document.getElementById('curl-strength');
+const curlStrengthVal = document.getElementById('curl-strength-val');
+curlStrengthSlider.addEventListener('input', () => {
+  const v = parseFloat(curlStrengthSlider.value) / 100;
+  curlStrengthVal.textContent = v.toFixed(2);
 });
 
 // === Raycaster for dragging ===
@@ -265,14 +1110,14 @@ function onPointerMove(e) {
     // Clamp listener to room bounds
     const margin = 0.2;
     listener.x = Math.max(margin, Math.min(ROOM.w - margin, intersection.x));
-    listener.y = Math.max(margin, Math.min(ROOM.d - margin, intersection.z));
+    listener.y = Math.max(margin, Math.min(ROOM.d - margin, ROOM.d - intersection.z));
     sendListener();
   } else {
     // Drag source — free placement, no bounds
     const i = dragTarget;
     const s = SOURCES[i];
     const ax = intersection.x;
-    const ay = intersection.z; // Three Z -> Atrium Y
+    const ay = ROOM.d - intersection.z; // Three Z -> Atrium Y (y-flipped)
     // Update local state so the animation loop uses the new position
     s.x = ax;
     s.y = ay;
@@ -292,11 +1137,14 @@ function onPointerUp() {
   }
 }
 
+let spaceHeld = false;
+window.addEventListener('keydown', e => { if (e.code === 'Space') { spaceHeld = true; controls.enableZoom = false; e.preventDefault(); } });
+window.addEventListener('keyup', e => { if (e.code === 'Space') { spaceHeld = false; controls.enableZoom = true; } });
+
 function onWheel(e) {
-  // Only rotate yaw if not over the HUD
   if (e.target !== renderer.domElement) return;
-  listener.yaw += e.deltaY * 0.003;
-  // Normalize to [0, 2π)
+  if (!spaceHeld) return; // let OrbitControls handle zoom
+  listener.yaw -= e.deltaY * 0.003;
   listener.yaw = ((listener.yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
   sendListener();
   e.preventDefault();
@@ -316,6 +1164,64 @@ gainSlider.addEventListener('input', () => {
   send({ type: 'set_gain', gain: g });
 });
 
+// === Render mode buttons ===
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode;
+    if (mode === currentRenderMode) return;
+    currentRenderMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    updateSpeakerVisibility();
+    send({ type: 'set_render_mode', mode });
+  });
+});
+
+// === Atmosphere controls (ISO 9613-1) ===
+const atmoTempSlider = document.getElementById('atmo-temp');
+const atmoHumiditySlider = document.getElementById('atmo-humidity');
+
+// Client-side ISO 9613-1 for readout display
+function iso9613Alpha(freq, tempC, humPct) {
+  const T_REF = 293.15, T_TRIPLE = 273.16, P_REF = 101.325;
+  const tK = tempC + 273.15;
+  const tRel = tK / T_REF;
+  const pSatRatio = Math.pow(10, -6.8346 * Math.pow(T_TRIPLE / tK, 1.261) + 4.6151);
+  const h = humPct * pSatRatio;
+  const frO = 24.0 + 4.04e4 * h * (0.02 + h) / (0.391 + h);
+  const frN = Math.pow(tRel, -0.5) * (9.0 + 280.0 * h * Math.exp(-4.170 * (Math.pow(tRel, -1/3) - 1.0)));
+  const f2 = freq * freq;
+  const classical = 1.84e-11 * Math.sqrt(tRel);
+  const vibO2 = Math.pow(tRel, -2.5) * 0.01275 * Math.exp(-2239.1 / tK) / (frO + f2 / frO);
+  const vibN2 = Math.pow(tRel, -2.5) * 0.1068 * Math.exp(-3352.0 / tK) / (frN + f2 / frN);
+  const alpha = 8.686 * f2 * (classical + vibO2 + vibN2);
+  return isFinite(alpha) ? alpha : 0;
+}
+
+function updateAtmoReadout() {
+  const t = parseFloat(atmoTempSlider.value);
+  const h = parseFloat(atmoHumiditySlider.value);
+  const a1k = iso9613Alpha(1000, t, h).toFixed(3);
+  const a4k = iso9613Alpha(4000, t, h).toFixed(3);
+  const a8k = iso9613Alpha(8000, t, h).toFixed(3);
+  document.getElementById('atmo-readout').textContent =
+    `α: 1kHz ${a1k} · 4kHz ${a4k} · 8kHz ${a8k} dB/m`;
+}
+
+atmoTempSlider.addEventListener('input', () => {
+  const t = parseFloat(atmoTempSlider.value);
+  document.getElementById('atmo-temp-val').textContent = t + '°C';
+  updateAtmoReadout();
+  send({ type: 'set_atmosphere', temperature: t, humidity: parseFloat(atmoHumiditySlider.value) });
+});
+atmoHumiditySlider.addEventListener('input', () => {
+  const h = parseFloat(atmoHumiditySlider.value);
+  document.getElementById('atmo-humidity-val').textContent = h + '%';
+  updateAtmoReadout();
+  send({ type: 'set_atmosphere', temperature: parseFloat(atmoTempSlider.value), humidity: h });
+});
+updateAtmoReadout();
+
 // === WebSocket ===
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws');
@@ -325,6 +1231,13 @@ function connect() {
     // Send current state on reconnect
     sendListener();
     send({ type: 'set_gain', gain: parseFloat(gainSlider.value) / 100 });
+    send({ type: 'set_render_mode', mode: currentRenderMode });
+  };
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'speaker_layout') rebuildSpeakers(msg);
+    } catch (e) { /* ignore non-JSON or unknown messages */ }
   };
   ws.onclose = () => {
     document.getElementById('status-dot').className = 'dot disconnected';
@@ -348,6 +1261,22 @@ function sendListener() {
   document.getElementById('listener-yaw').textContent = `${(listener.yaw * 180 / Math.PI).toFixed(0)}°`;
 }
 
+// === Helper: encode source pattern for wasm C-ABI ===
+function encodePattern(pattern) {
+  if (pattern.type === 'polar') return { patType: 1, p1: pattern.alpha, p2: 0, p3: 0 };
+  if (pattern.type === 'cone')  return { patType: 2, p1: pattern.inner, p2: pattern.outer, p3: pattern.outerGain };
+  return { patType: 0, p1: 0, p2: 0, p3: 0 }; // omni
+}
+
+// === Helper: source color decomposition ===
+function colorComponents(hex) {
+  return {
+    r: ((hex >> 16) & 0xff) / 255,
+    g: ((hex >> 8) & 0xff) / 255,
+    b: (hex & 0xff) / 255,
+  };
+}
+
 // === Animation loop ===
 function animate() {
   requestAnimationFrame(animate);
@@ -359,24 +1288,185 @@ function animate() {
   listenerGroup.position.copy(toThree(listener.x, listener.y, listener.z));
   // Yaw: Atrium 0=+X, Three.js rotation around Y axis
   // In Atrium coords: forward = (cos(yaw), sin(yaw), 0)
-  // In Three.js coords: forward = (cos(yaw), 0, sin(yaw))
-  // Three.js Group rotateY: 0 = +Z, so we need -yaw + π/2 to map correctly
-  listenerGroup.rotation.y = -listener.yaw + Math.PI / 2;
+  // In Three.js coords (y-flipped): forward = (cos(yaw), 0, -sin(yaw))
+  // rotateY(θ) maps local +Z to (sin(θ), 0, cos(θ)), so θ = yaw + π/2
+  listenerGroup.rotation.y = listener.yaw + Math.PI / 2;
 
-  // Update source positions (client-side orbit simulation or fixed)
+  // Update listener radius visualization
+  listenerRadiusMesh.position.copy(toThree(listener.x, listener.y, listener.z));
+  listenerRadiusWire.position.copy(toThree(listener.x, listener.y, listener.z));
+  const showRays = rayEnabled && rayToggle.checked && wasm;
+  const showER = rayEnabled && erToggle.checked && wasm;
+  listenerRadiusMesh.visible = showRays;
+  listenerRadiusWire.visible = showRays;
+
+  // Track source positions for ray tracing
+  const sourcePositions = [];
+
+  // Update source positions and directivity pattern orientation
   SOURCES.forEach((s, i) => {
-    let ax, ay;
-    if (s.r > 0) {
-      const angle = s.speed * elapsed;
-      ax = s.cx + s.r * Math.cos(angle);
-      ay = s.cy + s.r * Math.sin(angle);
+    let ax, ay, facingX, facingY, facingYaw;
+    if (s.r > 0 && (s.speed !== 0 || sourcePaused[i])) {
+      const orbitAngle = sourcePaused[i] ? (s._frozenAngle || 0) : s.speed * elapsed;
+      ax = s.cx + s.r * Math.cos(orbitAngle);
+      ay = s.cy + s.r * Math.sin(orbitAngle);
+      // Facing direction = toward orbit center (matches Rust TestNode::orientation)
+      facingX = s.cx - ax;
+      facingY = s.cy - ay;
+      facingYaw = Math.atan2(facingY, facingX);
     } else {
       ax = s.x ?? s.cx;
       ay = s.y ?? s.cy;
+      facingX = 1; facingY = 0;
+      facingYaw = 0; // stationary sources face +X (Atrium default)
     }
     const az = s.z;
     sourceMeshes[i].position.copy(toThree(ax, ay, az));
+    sourcePositions.push({ ax, ay, az, facingX, facingY, facingYaw });
+
+    // Pattern line follows source position and rotates to match facing direction
+    patternMeshes[i].position.copy(sourceMeshes[i].position);
+    patternMeshes[i].rotation.y = facingYaw + Math.PI / 2;
+    patternMeshes[i].visible = !sourceMuted[i];
+
+    // Compute gain chain (mirrors mixer.rs)
+    const srcFacingX = Math.cos(facingYaw), srcFacingY = Math.sin(facingYaw);
+    const gains = computeGainChain(
+      ax, ay, s.z, srcFacingX, srcFacingY, s.pattern,
+      listener.x, listener.y, listener.z, listener.yaw
+    );
+
+    // Update gain line endpoints and opacity
+    const srcPos = toThree(ax, ay, s.z);
+    const lstPos = toThree(listener.x, listener.y, listener.z);
+    const posArr = gainLines[i].geometry.attributes.position.array;
+    posArr[0] = srcPos.x; posArr[1] = srcPos.y + 0.02; posArr[2] = srcPos.z;
+    posArr[3] = lstPos.x; posArr[4] = lstPos.y + 0.02; posArr[5] = lstPos.z;
+    gainLines[i].geometry.attributes.position.needsUpdate = true;
+    gainLines[i].material.opacity = sourceMuted[i] ? 0.05 : (0.1 + gains.total * 0.7);
+    gainLines[i].visible = true;
+
+    // Update distance label at midpoint of gain line
+    const dl = distLabels[i];
+    const dx = ax - listener.x, dy = ay - listener.y, dz = s.z - listener.z;
+    const rawDist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    const totalDb = gains.total > 0 ? (20 * Math.log10(gains.total)).toFixed(0) : '-∞';
+    const distText = `${rawDist.toFixed(1)}m ${totalDb}dB`;
+    const hexColor = '#' + SOURCES[i].color.toString(16).padStart(6, '0');
+    updateDistLabel(dl, distText, hexColor);
+    dl.sprite.position.set(
+      (srcPos.x + lstPos.x) / 2,
+      (srcPos.y + lstPos.y) / 2 + 0.15,
+      (srcPos.z + lstPos.z) / 2
+    );
+    dl.sprite.visible = !sourceMuted[i];
+
+    // Update HUD gain readout
+    gainReadouts[i].textContent = sourceMuted[i] ? 'muted'
+      : `dist:${gains.dist.toFixed(2)} emit:${gains.srcDir.toFixed(2)} hear:${gains.hear.toFixed(2)} = ${gains.total.toFixed(3)} (${gains.total > 0 ? (20 * Math.log10(gains.total)).toFixed(1) : '-∞'} dB)`;
   });
+
+  // === Wasm ray tracing + FBO particles ===
+  if (wasm && (showRays || showER)) {
+    let totalERPaths = 0;
+
+    // --- FBO Particle simulation (GPU-accelerated) ---
+    if (showRays) {
+      // Build seed textures from wasm ray data
+      const seedCount = buildSeedData(sourcePositions, SOURCES, sourceMuted);
+      seedTex.needsUpdate = true;
+      seedColorTex.needsUpdate = true;
+      seedDirTex.needsUpdate = true;
+
+      // Update simulation uniforms
+      simMaterial.uniforms.u_seedTex.value = seedTex;
+      simMaterial.uniforms.u_seedDirTex.value = seedDirTex;
+      simMaterial.uniforms.u_seedCount.value = seedCount;
+      simMaterial.uniforms.u_time.value = elapsed;
+      simMaterial.uniforms.u_curlStrength.value = parseFloat(curlStrengthSlider.value) / 100;
+
+      // Render position simulation to FBO
+      renderer.setRenderTarget(fboRTT);
+      renderer.render(simScene, simCamera);
+
+      // Render color simulation to color FBO
+      colorSimMaterial.uniforms.u_seedTex.value = seedTex;
+      colorSimMaterial.uniforms.u_seedColorTex.value = seedColorTex;
+      colorSimMaterial.uniforms.u_seedCount.value = seedCount;
+      renderer.setRenderTarget(colorRTT);
+      renderer.render(colorSimScene, simCamera);
+
+      // Reset render target for main scene
+      renderer.setRenderTarget(null);
+
+      // Update render material to read from FBO textures
+      renderMaterial.uniforms.u_posTex.value = fboRTT.texture;
+      renderMaterial.uniforms.u_colTex.value = colorRTT.texture;
+      fboParticles.visible = true;
+
+      const raysPerSrc = parseInt(rayCountSlider.value);
+      const activeSrcs = sourceMuted.filter(m => !m).length;
+      rayStats.textContent = `${raysPerSrc}×${activeSrcs} rays → ${seedCount} seeds → ${fboParticleCount} particles`;
+    } else {
+      fboParticles.visible = false;
+    }
+
+    // --- Early reflections (still CPU line segments) ---
+    SOURCES.forEach((s, i) => {
+      const sp = sourcePositions[i];
+      const { r: cr, g: cg, b: cb } = colorComponents(s.color);
+
+      if (showER && !sourceMuted[i]) {
+        const erCount = wasm.early_reflections(
+          sp.ax, sp.ay, sp.az,
+          listener.x, listener.y, listener.z,
+          ROOM.w, ROOM.d, ROOM.h,
+          WALL_ABSORPTION
+        );
+        totalERPaths += erCount;
+
+        const erPosArr = erLinesPerSource[i].geometry.attributes.position.array;
+        const erColArr = erLinesPerSource[i].geometry.attributes.color.array;
+        let erVerts = 0;
+
+        for (let j = 0; j < erCount && j < MAX_ER_PATHS; j++) {
+          const off = j * 4;
+          const rpx = erOutputView[off], rpy = erOutputView[off + 1], rpz = erOutputView[off + 2];
+          const gain = erOutputView[off + 3];
+
+          const vi = erVerts * 3;
+          erPosArr[vi]     = sp.ax; erPosArr[vi + 1] = sp.az; erPosArr[vi + 2] = ROOM.d - sp.ay;
+          erPosArr[vi + 3] = rpx;   erPosArr[vi + 4] = rpz;   erPosArr[vi + 5] = ROOM.d - rpy;
+          erPosArr[vi + 6]  = rpx;        erPosArr[vi + 7]  = rpz;        erPosArr[vi + 8]  = ROOM.d - rpy;
+          erPosArr[vi + 9]  = listener.x; erPosArr[vi + 10] = listener.z; erPosArr[vi + 11] = ROOM.d - listener.y;
+
+          const intensity = Math.min(1.0, gain * 4);
+          for (let k = 0; k < 4; k++) {
+            erColArr[vi + k * 3]     = cr * intensity;
+            erColArr[vi + k * 3 + 1] = cg * intensity;
+            erColArr[vi + k * 3 + 2] = cb * intensity;
+          }
+          erVerts += 4;
+        }
+
+        erLinesPerSource[i].geometry.attributes.position.needsUpdate = true;
+        erLinesPerSource[i].geometry.attributes.color.needsUpdate = true;
+        erLinesPerSource[i].geometry.setDrawRange(0, erVerts);
+      } else {
+        erLinesPerSource[i].geometry.setDrawRange(0, 0);
+      }
+    });
+
+    if (totalERPaths > 0) {
+      rayStats.textContent += `, ${totalERPaths} ER`;
+    }
+  } else {
+    fboParticles.visible = false;
+    erLinesPerSource.forEach(l => l.geometry.setDrawRange(0, 0));
+    if (!wasm) {
+      rayStats.textContent = 'wasm: loading...';
+    }
+  }
 
   controls.update();
   renderer.render(scene, camera);
@@ -387,6 +1477,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderMaterial.uniforms.u_screenH.value = window.innerHeight;
 });
 
 // === Start ===

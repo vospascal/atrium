@@ -1,0 +1,8 @@
+[package]
+name = "atrium-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core spatial audio math for Atrium — compiles for native and wasm32"
+
+# No dependencies — pure math only.
+[dependencies]

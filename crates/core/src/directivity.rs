@@ -10,7 +10,7 @@
 //
 // See docs/directivity-and-energy-transfer.md for the full derivation.
 
-use crate::world::types::Vec3;
+use crate::types::Vec3;
 
 /// A directivity pattern: a function from angle to gain.
 #[derive(Clone, Copy, Debug)]

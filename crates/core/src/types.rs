@@ -1,4 +1,4 @@
-use std::ops::{Add, Neg, Sub, Mul};
+use std::ops::{Add, Mul, Neg, Sub};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
@@ -8,7 +8,11 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub const ZERO: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ZERO: Vec3 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 
     pub fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
@@ -119,7 +123,6 @@ mod tests {
 
     #[test]
     fn reflect_45_degrees_off_wall() {
-        // Ray going down-right at 45°, reflecting off a horizontal floor (normal = +Y)
         let incoming = Vec3::new(1.0, -1.0, 0.0).normalize();
         let normal = Vec3::new(0.0, 1.0, 0.0);
         let reflected = incoming.reflect(normal);
@@ -130,7 +133,6 @@ mod tests {
 
     #[test]
     fn reflect_head_on() {
-        // Ray going straight into a wall, should bounce straight back
         let incoming = Vec3::new(-1.0, 0.0, 0.0);
         let normal = Vec3::new(1.0, 0.0, 0.0);
         let reflected = incoming.reflect(normal);

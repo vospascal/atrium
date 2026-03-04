@@ -1,5 +1,5 @@
-use crate::spatial::directivity::DirectivityPattern;
-use crate::world::types::Vec3;
+use crate::directivity::DirectivityPattern;
+use crate::types::Vec3;
 
 /// Hearing cone for the listener (models forward-facing ears).
 /// Uses the same DirectivityPattern as sources but applied to reception.

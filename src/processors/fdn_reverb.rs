@@ -17,11 +17,13 @@
 
 use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
-use crate::world::ray::RayMetrics;
 use crate::world::types::Vec3;
 
 /// Number of parallel delay lines.
 const NUM_LINES: usize = 8;
+
+/// Maximum output channels (matches atrium_core::speaker::MAX_CHANNELS).
+const MAX_OUT: usize = 8;
 
 /// Delay buffer size per line. Power of 2 for bitmask wrapping.
 /// 512 samples ≈ 10.7ms at 48kHz, sufficient for max delay of 499 samples.
@@ -76,9 +78,9 @@ impl DampingFilter {
 
 /// FDN late reverb processor.
 ///
-/// Mono-in, stereo-out: L+R averaged to mono, processed through 8-line FDN,
-/// even lines [0,2,4,6] tap to L output, odd lines [1,3,5,7] tap to R for
-/// natural stereo decorrelation.
+/// Mono-in, N-channel out: all input channels averaged to mono, processed through
+/// 8-line FDN. Lines are distributed round-robin across output channels for natural
+/// decorrelation (for stereo: even→L, odd→R; for 5.1: lines spread across 6 channels).
 pub struct FdnReverb {
     /// 8 circular delay line buffers. Boxed to keep 16KB off the stack.
     delay_buffers: Box<[[f32; BUF_SIZE]; NUM_LINES]>,
@@ -100,11 +102,6 @@ pub struct FdnReverb {
     rt60_low: f32,
     /// RT60 at high frequencies (seconds). Always shorter than rt60_low.
     rt60_high: f32,
-    /// Base RT60 values (as passed to new()). Used as anchors for ray-metric scaling.
-    base_rt60_low: f32,
-    base_rt60_high: f32,
-    /// Stored sample rate from init(), needed for recomputing damping.
-    stored_sample_rate: f32,
     /// Whether init() has been called.
     initialized: bool,
 }
@@ -127,9 +124,6 @@ impl FdnReverb {
             wet_gain,
             rt60_low,
             rt60_high,
-            base_rt60_low: rt60_low,
-            base_rt60_high: rt60_high,
-            stored_sample_rate: 0.0,
             initialized: false,
         }
     }
@@ -215,9 +209,14 @@ impl FdnReverb {
         }
     }
 
-    /// Process one mono sample through the FDN. Returns (left, right) reverb output.
+    /// Process one mono sample through the FDN.
+    /// Returns per-channel reverb output distributed across `out_channels` channels.
+    /// Lines are assigned round-robin: line 0 → ch 0, line 1 → ch 1, etc.
+    /// For stereo (2 ch): even lines → L, odd lines → R (same as before).
     #[inline(always)]
-    fn process_sample(&mut self, mono_in: f32) -> (f32, f32) {
+    fn process_sample(&mut self, mono_in: f32, out_channels: usize) -> [f32; MAX_OUT] {
+        let mut output = [0.0f32; MAX_OUT];
+
         // 1. Read delay line outputs
         let mut taps = [0.0_f32; NUM_LINES];
         for i in 0..NUM_LINES {
@@ -230,10 +229,16 @@ impl FdnReverb {
             taps[i] = self.damping[i].process(taps[i]);
         }
 
-        // 3. Tap stereo output BEFORE mixing (maximizes L/R decorrelation)
-        //    L = even lines [0,2,4,6], R = odd lines [1,3,5,7]
-        let out_l = (taps[0] + taps[2] + taps[4] + taps[6]) * 0.25;
-        let out_r = (taps[1] + taps[3] + taps[5] + taps[7]) * 0.25;
+        // 3. Distribute taps to output channels (round-robin for decorrelation)
+        let ch_count = out_channels.max(1).min(MAX_OUT);
+        for i in 0..NUM_LINES {
+            output[i % ch_count] += taps[i];
+        }
+        // Normalize by lines-per-channel
+        let lines_per_ch = ((NUM_LINES + ch_count - 1) / ch_count) as f32;
+        for ch in 0..ch_count {
+            output[ch] /= lines_per_ch;
+        }
 
         // 4. Hadamard mixing matrix (couples all lines for diffusion)
         Self::hadamard_8(&mut taps);
@@ -250,7 +255,7 @@ impl FdnReverb {
         // 6. Advance write position
         self.write_pos = (self.write_pos + 1) & BUF_MASK;
 
-        (out_l, out_r)
+        output
     }
 }
 
@@ -262,41 +267,9 @@ impl AudioProcessor for FdnReverb {
         _listener: &Listener,
         sample_rate: f32,
     ) {
-        self.stored_sample_rate = sample_rate;
         self.compute_delays(room_min, room_max, sample_rate);
         self.compute_damping(sample_rate);
         self.initialized = true;
-    }
-
-    fn update_metrics(&mut self, metrics: &RayMetrics) {
-        if !self.initialized || self.stored_sample_rate == 0.0 {
-            return;
-        }
-
-        // Reference mean path length for a 6×4×3m room: MFP = 4V/S = 4*72/108 ≈ 2.67m.
-        // Scale RT60 proportionally: larger measured paths → longer reverb.
-        const REFERENCE_PATH: f32 = 2.67;
-        let scale = if metrics.mean_path_length > 0.1 {
-            metrics.mean_path_length / REFERENCE_PATH
-        } else {
-            1.0
-        };
-
-        // Clamp scale to prevent extreme values (0.5× to 2.0× base RT60)
-        let scale = scale.clamp(0.5, 2.0);
-
-        let new_low = self.base_rt60_low * scale;
-        let new_high = self.base_rt60_high * scale;
-
-        // Only recompute damping if RT60 changed significantly (>5%)
-        let low_changed = (new_low - self.rt60_low).abs() / self.rt60_low > 0.05;
-        let high_changed = (new_high - self.rt60_high).abs() / self.rt60_high > 0.05;
-
-        if low_changed || high_changed {
-            self.rt60_low = new_low;
-            self.rt60_high = new_high;
-            self.compute_damping(self.stored_sample_rate);
-        }
     }
 
     fn process(&mut self, buffer: &mut [f32], channels: usize, _sample_rate: f32) {
@@ -308,11 +281,13 @@ impl AudioProcessor for FdnReverb {
 
         for frame in 0..num_frames {
             let base = frame * channels;
-            let dry_l = buffer[base];
-            let dry_r = if channels > 1 { buffer[base + 1] } else { dry_l };
 
-            // Sum to mono for FDN input
-            let mono_in = (dry_l + dry_r) * 0.5;
+            // Sum all channels to mono for FDN input
+            let mut mono_sum = 0.0f32;
+            for ch in 0..channels {
+                mono_sum += buffer[base + ch];
+            }
+            let mono_in = mono_sum / channels as f32;
 
             // Pre-delay: write mono, read delayed
             self.pre_delay_buf[self.pre_delay_write_pos] = mono_in;
@@ -323,14 +298,26 @@ impl AudioProcessor for FdnReverb {
             self.pre_delay_write_pos =
                 (self.pre_delay_write_pos + 1) & PRE_DELAY_BUF_MASK;
 
-            // FDN processing
-            let (wet_l, wet_r) = self.process_sample(delayed_in);
+            // FDN processing → multichannel output
+            let wet = self.process_sample(delayed_in, channels);
 
             // Mix: dry + wet * gain, clamped
-            buffer[base] = (dry_l + wet_l * self.wet_gain).clamp(-1.0, 1.0);
-            if channels > 1 {
-                buffer[base + 1] = (dry_r + wet_r * self.wet_gain).clamp(-1.0, 1.0);
+            for ch in 0..channels {
+                buffer[base + ch] =
+                    (buffer[base + ch] + wet[ch] * self.wet_gain).clamp(-1.0, 1.0);
             }
+        }
+    }
+
+    fn reset(&mut self) {
+        for line in self.delay_buffers.iter_mut() {
+            line.fill(0.0);
+        }
+        self.pre_delay_buf.fill(0.0);
+        self.write_pos = 0;
+        self.pre_delay_write_pos = 0;
+        for d in &mut self.damping {
+            d.state = 0.0;
         }
     }
 

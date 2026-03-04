@@ -1,10 +1,11 @@
-use crate::audio::mixer::{mix_sources, DistanceModel};
+use crate::audio::atmosphere::AtmosphericParams;
+use crate::audio::mixer::{mix_sources, DistanceModel, MixerState};
 use crate::engine::commands::Command;
 use crate::processors::AudioProcessor;
 use crate::spatial::listener::Listener;
 use crate::spatial::source::SoundSource;
-use crate::world::ray::RayPool;
 use crate::world::room::Room;
+use atrium_core::speaker::SpeakerLayout;
 
 /// The complete audio state owned by the audio thread.
 /// Updated by draining commands from the ring buffer.
@@ -17,7 +18,9 @@ pub struct AudioScene {
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
     pub processors: Vec<Box<dyn AudioProcessor>>,
-    pub ray_pool: RayPool,
+    pub speaker_layout: SpeakerLayout,
+    pub mixer_state: MixerState,
+    pub atmosphere: AtmosphericParams,
 }
 
 impl AudioScene {
@@ -43,6 +46,38 @@ impl AudioScene {
                         source.set_position(position);
                     }
                 }
+                Command::SetRenderMode { mode } => {
+                    self.speaker_layout.mode = mode;
+                }
+                Command::SetSpeakerPosition { channel, position } => {
+                    if let Some(speaker) = self.speaker_layout.speaker_by_channel_mut(channel as usize) {
+                        speaker.position = position;
+                    }
+                }
+                Command::SetSourceSpread { index, spread } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_spread(spread);
+                    }
+                }
+                Command::SetSourceOrbitSpeed { index, speed } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_orbit_speed(speed);
+                    }
+                }
+                Command::SetSourceOrbitRadius { index, radius } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_orbit_radius(radius);
+                    }
+                }
+                Command::SetSourceOrbitAngle { index, angle } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_orbit_angle(angle);
+                    }
+                }
+                Command::SetAtmosphere { temperature_c, humidity_pct } => {
+                    self.atmosphere.temperature_c = temperature_c;
+                    self.atmosphere.humidity_pct = humidity_pct;
+                }
             }
         }
     }
@@ -67,17 +102,7 @@ impl AudioScene {
             source.tick(dt);
         }
 
-        // Update ray pool: emit/bounce rays, compute room metrics
-        self.ray_pool
-            .update(&self.sources, &self.listener, self.room.as_ref());
-
-        // Feed ray metrics to processors (modulates reverb RT60, reflection wet gain)
-        let metrics = self.ray_pool.metrics().clone();
-        for processor in &mut self.processors {
-            processor.update_metrics(&metrics);
-        }
-
-        // Mix all sources to output
+        // Mix all sources to output (gain-smoothed per sample)
         mix_sources(
             &mut self.sources,
             &self.listener,
@@ -86,6 +111,9 @@ impl AudioScene {
             self.sample_rate,
             self.master_gain,
             &self.distance_model,
+            &self.speaker_layout,
+            &mut self.mixer_state,
+            &self.atmosphere,
         );
 
         // Run processor chain (early reflections, reverb, etc.)

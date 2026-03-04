@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 use crate::engine::commands::Command;
 use crate::world::types::Vec3;
+use atrium_core::speaker::RenderMode;
 
 /// JSON messages received from the browser via WebSocket.
 /// Tagged by the "type" field: {"type": "set_listener", "x": 3.0, ...}
@@ -19,6 +20,30 @@ pub enum ClientMessage {
 
     #[serde(rename = "set_source_position")]
     SetSourcePosition { index: u8, x: f32, y: f32, z: f32 },
+
+    /// Switch rendering mode: "speaker_as_mic" or "vbap".
+    #[serde(rename = "set_render_mode")]
+    SetRenderMode { mode: String },
+
+    /// Reposition a speaker by channel index.
+    #[serde(rename = "set_speaker_position")]
+    SetSpeakerPosition { channel: u8, x: f32, y: f32, z: f32 },
+
+    /// Set orbit speed for a source (0 = paused).
+    #[serde(rename = "set_source_orbit_speed")]
+    SetSourceOrbitSpeed { index: u8, speed: f32 },
+
+    /// Set orbit radius for a source.
+    #[serde(rename = "set_source_orbit_radius")]
+    SetSourceOrbitRadius { index: u8, radius: f32 },
+
+    /// Set orbit angle for a source.
+    #[serde(rename = "set_source_orbit_angle")]
+    SetSourceOrbitAngle { index: u8, angle: f32 },
+
+    /// Set atmospheric conditions (temperature, humidity) for ISO 9613-1 air absorption.
+    #[serde(rename = "set_atmosphere")]
+    SetAtmosphere { temperature: f32, humidity: f32 },
 }
 
 impl ClientMessage {
@@ -40,6 +65,37 @@ impl ClientMessage {
                 index,
                 position: Vec3::new(x, y, z),
             },
+            ClientMessage::SetRenderMode { mode } => {
+                let render_mode = match mode.as_str() {
+                    "vbap" | "5.1" => RenderMode::Vbap,
+                    "stereo" => RenderMode::Stereo,
+                    "mono" => RenderMode::Mono,
+                    "quad" | "4.0" => RenderMode::Quad,
+                    _ => RenderMode::SpeakerAsMic,
+                };
+                Command::SetRenderMode { mode: render_mode }
+            }
+            ClientMessage::SetSpeakerPosition { channel, x, y, z } => {
+                Command::SetSpeakerPosition {
+                    channel,
+                    position: Vec3::new(x, y, z),
+                }
+            }
+            ClientMessage::SetSourceOrbitSpeed { index, speed } => {
+                Command::SetSourceOrbitSpeed { index, speed }
+            }
+            ClientMessage::SetSourceOrbitRadius { index, radius } => {
+                Command::SetSourceOrbitRadius { index, radius }
+            }
+            ClientMessage::SetSourceOrbitAngle { index, angle } => {
+                Command::SetSourceOrbitAngle { index, angle }
+            }
+            ClientMessage::SetAtmosphere { temperature, humidity } => {
+                Command::SetAtmosphere {
+                    temperature_c: temperature.clamp(-20.0, 50.0),
+                    humidity_pct: humidity.clamp(0.0, 100.0),
+                }
+            }
         }
     }
 }
@@ -150,6 +206,74 @@ mod tests {
         match cmd {
             Command::SetMasterGain { gain } => {
                 assert!((gain - 1.0).abs() < 1e-6, "gain should clamp to 1.0");
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn parse_set_render_mode_vbap() {
+        let json = r#"{"type":"set_render_mode","mode":"vbap"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        let cmd = msg.into_command();
+        match cmd {
+            Command::SetRenderMode { mode } => {
+                assert_eq!(mode, RenderMode::Vbap);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn parse_set_render_mode_speaker_as_mic() {
+        let json = r#"{"type":"set_render_mode","mode":"speaker_as_mic"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        let cmd = msg.into_command();
+        match cmd {
+            Command::SetRenderMode { mode } => {
+                assert_eq!(mode, RenderMode::SpeakerAsMic);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn parse_set_speaker_position() {
+        let json = r#"{"type":"set_speaker_position","channel":2,"x":1.5,"y":3.0,"z":0.0}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        let cmd = msg.into_command();
+        match cmd {
+            Command::SetSpeakerPosition { channel, position } => {
+                assert_eq!(channel, 2);
+                assert!((position.x - 1.5).abs() < 1e-6);
+                assert!((position.y - 3.0).abs() < 1e-6);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn parse_set_atmosphere() {
+        let json = r#"{"type":"set_atmosphere","temperature":25.0,"humidity":60.0}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        let cmd = msg.into_command();
+        match cmd {
+            Command::SetAtmosphere { temperature_c, humidity_pct } => {
+                assert!((temperature_c - 25.0).abs() < 1e-6);
+                assert!((humidity_pct - 60.0).abs() < 1e-6);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn into_command_clamps_atmosphere() {
+        let msg = ClientMessage::SetAtmosphere { temperature: 100.0, humidity: -10.0 };
+        let cmd = msg.into_command();
+        match cmd {
+            Command::SetAtmosphere { temperature_c, humidity_pct } => {
+                assert!((temperature_c - 50.0).abs() < 1e-6, "temperature should clamp to 50°C");
+                assert!((humidity_pct - 0.0).abs() < 1e-6, "humidity should clamp to 0%");
             }
             _ => panic!("wrong command variant"),
         }

@@ -49,6 +49,8 @@ When implementing a feature, check this list first — someone may have solved i
 | [SOFA (AES69)](https://www.sofaconventions.org/) | Spatially Oriented Format for Acoustics. HDF5-based standard for storing HRTFs/BRIRs with spatial metadata. | **Standard HRTF file format.** We should load SOFA files for per-listener HRTFs. Used by Mesh2HRTF, SPARTA, and most HRTF databases (CIPIC, IRCAM LISTEN, TH Köln, York SADIE). |
 | [SPARTA](https://github.com/leomccormack/SPARTA) | VST suite: ambisonic encoding/decoding, binaural rendering with head tracking, room simulation. Consumes SOFA files. | Reference for ambisonic-to-binaural pipeline and CroPaC decoder. Their AmbiRoomSim models distance with disabled reflections — relevant for our direct-sound path. |
 | [sofamyroom](https://github.com/andresperezlopez/sofamyroom) | Room acoustic simulator that applies shoebox-model reflections to SOFA HRTFs. Outputs BRIRs. | Directly relevant architecture: separates anechoic HRTF from room simulation, then convolves. Similar to our intended approach of ray-traced room + per-listener HRTF. |
+| [Omnitone](https://github.com/GoogleChrome/omnitone) | Google Chrome's Web Audio ambisonic decoder/renderer. FOA and HOA binaural rendering in real-time using Web Audio API. | Reference for ambisonic-to-binaural decoding in JavaScript. Study their SH rotation and binaural filter application. Could inform our web-based spatial preview. |
+| [Google VR Spatial Audio](https://developers.google.com/vr/ios/spatial-audio) | Google's spatial audio SDK for VR/AR. Ambisonic rendering, room effects, head tracking, HRTF. | Reference implementation for listener-relative spatialization with head tracking. Their room effects model (shoebox + materials) is similar to our ray-traced approach. |
 
 ## Ray-Traced / Geometry-Based Audio
 
@@ -177,7 +179,7 @@ Our WebSocket control protocol should describe sources as ADM-style Objects (pos
 | Early reflections (image-source) | web-audio-api-rs (ConvolverNode), audionimbus, sofamyroom (shoebox model), **Panoramix** (8-16 discrete echoes per source, individually spatialized) |
 | Ray-traced reflections | raytraced-audio (architecture), audionimbus (Steam Audio) |
 | FDN reverb | fundsp (composable DSP), web-audio-api-rs, Head-Fi patterns (freq-dependent decay), **Panoramix** (Jot-Chaigne FDN, 8 feedback channels, 3-band decay) |
-| HRTF binaural | hrtf crate, fyrox-sound, SOFA format, Mesh2HRTF (personalized), SPARTA (ambisonic decoder), **IRCAM BiLi** (1680-dir HRTFs, SOFA+OpenDAP, RASPUTIN selection, HAIKUS deep-learning personalization) |
+| HRTF binaural | hrtf crate, fyrox-sound, SOFA format, Mesh2HRTF (personalized), SPARTA (ambisonic decoder), Omnitone (FOA/HOA binaural), Google VR Spatial Audio (head-tracked rendering), **IRCAM BiLi** (1680-dir HRTFs, SOFA+OpenDAP, RASPUTIN selection, HAIKUS deep-learning personalization) |
 | Headphone compensation | AutoEQ (3000+ profiles), Impulcifer (measurement-based), HeSuVi (routing reference) |
 | Bass crossover | Head-Fi patterns (skip HRTF <80Hz), Smyth Realiser A16 approach |
 | 5.1 output | cubeb-rs (device routing), cpal multichannel, Impulcifer (room calibration), speaker delay compensation |
