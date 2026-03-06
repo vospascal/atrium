@@ -1,6 +1,6 @@
 // Multichannel speaker layout and rendering.
 //
-// Three render modes (RenderMode):
+// Four render modes (RenderMode):
 //   1. WorldLocked — each speaker is a virtual microphone at a fixed position in the room.
 //      Gain = distance_attenuation(source → speaker) × source_directivity(source → speaker).
 //      The listener's position does NOT affect speaker gains (spatial image comes from
@@ -9,6 +9,9 @@
 //      the listener. Source direction from listener determines which speaker pair activates.
 //      Requires 3+ speakers. Valid layouts: quad, 5.1.
 //   3. Hrtf — HRTF convolution for headphone rendering. Always stereo output.
+//   4. Dbap — Distance-Based Amplitude Panning (Lossius 2009, improved 2021). All speakers
+//      active, gains weighted by inverse distance. Listener-independent. Valid layouts:
+//      stereo, quad, 5.1.
 //
 // Speaker positions are configurable per room. Layouts: stereo, quad 4.0, surround 5.1.
 
@@ -98,7 +101,7 @@ impl ChannelMode {
     /// Valid channel modes for a given render mode.
     pub fn valid_for(mode: RenderMode) -> &'static [ChannelMode] {
         match mode {
-            RenderMode::WorldLocked => &[
+            RenderMode::WorldLocked | RenderMode::Dbap => &[
                 ChannelMode::Stereo,
                 ChannelMode::Quad,
                 ChannelMode::Surround51,
@@ -132,10 +135,6 @@ impl ChannelMode {
 ///
 /// Each mode is a distinct spatialization strategy. The output channel count
 /// is determined by the SpeakerLayout, not the render mode.
-///
-/// TODO: Ambisonics — encode sources into spherical harmonics, decode to binaural via HRTF.
-/// Cheaper than per-source HRTF when source count is high (scene encoded once, head rotation
-/// is a matrix multiply, single HRTF decode). Per-source HRTF is more accurate for few sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RenderMode {
     /// Speakers are virtual microphones at fixed world positions.
@@ -149,6 +148,10 @@ pub enum RenderMode {
     /// HRTF convolution for headphones.
     /// Always outputs stereo (channels 0, 1).
     Hrtf,
+    /// DBAP: distance-based amplitude panning. All speakers active, gains
+    /// weighted by inverse distance from source. Listener-independent.
+    /// Valid layouts: stereo, quad, 5.1.
+    Dbap,
 }
 
 impl RenderMode {
@@ -158,10 +161,16 @@ impl RenderMode {
             RenderMode::WorldLocked => 0,
             RenderMode::Vbap => 1,
             RenderMode::Hrtf => 2,
+            RenderMode::Dbap => 3,
         }
     }
 
-    pub const ALL: [RenderMode; 3] = [RenderMode::WorldLocked, RenderMode::Vbap, RenderMode::Hrtf];
+    pub const ALL: [RenderMode; 4] = [
+        RenderMode::WorldLocked,
+        RenderMode::Vbap,
+        RenderMode::Hrtf,
+        RenderMode::Dbap,
+    ];
 
     /// Wire format name for JSON serialization.
     pub fn as_str(self) -> &'static str {
@@ -169,6 +178,7 @@ impl RenderMode {
             RenderMode::WorldLocked => "world_locked",
             RenderMode::Vbap => "vbap",
             RenderMode::Hrtf => "hrtf",
+            RenderMode::Dbap => "dbap",
         }
     }
 }
@@ -312,6 +322,11 @@ impl SpeakerLayout {
     /// Number of spatial speakers (excludes LFE).
     pub fn speaker_count(&self) -> usize {
         self.count
+    }
+
+    /// Spatial speakers as a slice (excludes LFE).
+    pub fn speakers(&self) -> &[Speaker] {
+        &self.speakers[..self.count]
     }
 
     /// LFE channel index, if this layout has one.
@@ -758,7 +773,7 @@ impl SpeakerLayout {
         distance: &DistanceParams,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Hrtf => {
+            RenderMode::WorldLocked | RenderMode::Hrtf | RenderMode::Dbap => {
                 self.compute_gains_stereo(listener, source, distance)
             }
             RenderMode::Vbap => self.compute_gains_vbap(listener, source, distance),
@@ -776,7 +791,7 @@ impl SpeakerLayout {
         spread: f32,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Hrtf => {
+            RenderMode::WorldLocked | RenderMode::Hrtf | RenderMode::Dbap => {
                 self.compute_gains_stereo(listener, source, distance)
             }
             RenderMode::Vbap => self.compute_gains_mdap(listener, source, distance, spread),

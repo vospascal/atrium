@@ -30,6 +30,12 @@
 //!     renderer: MultichannelRenderer
 //!     mix_stages: [LfeCrossover, DelayComp(listener), EarlyReflections, FdnReverb, MasterGain]
 //! }
+//!
+//! Dbap {
+//!     source_stages: [AirAbsorption, GroundEffect, Reflections, DbapGains]
+//!     renderer: DbapRenderer
+//!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
+//! }
 //! ```
 
 pub mod mix_stage;
@@ -50,9 +56,11 @@ use self::renderer::Renderer;
 use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 use self::renderers::binaural::HrtfRenderer;
+use self::renderers::dbap::DbapRenderer;
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
+use self::stages::dbap_gains::DbapGainStage;
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::distance_directivity::DistanceDirectivityPath;
 use self::stages::distance_gains::DistanceGainStage;
@@ -69,7 +77,7 @@ use self::stages::vbap_gains::VbapGainStage;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Rendering approach. Determines which pipeline runs.
-// RenderMode (atrium_core::speaker): WorldLocked, Vbap, Hrtf.
+// RenderMode (atrium_core::speaker): WorldLocked, Vbap, Hrtf, Dbap.
 // index() and ALL defined on RenderMode. Used as pipeline array index.
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,12 +234,13 @@ impl Default for PipelineParams {
     }
 }
 
-/// Build all 3 pipelines. Pre-allocated at startup, zero allocation on mode switch.
-pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 3] {
+/// Build all 4 pipelines. Pre-allocated at startup, zero allocation on mode switch.
+pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 4] {
     [
         build_world_locked(params),
         build_vbap(params),
         build_hrtf(params),
+        build_dbap(params),
     ]
 }
 
@@ -331,6 +340,35 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
                 p.fdn_rt60_low,
                 p.fdn_rt60_high,
             )),
+            Box::new(MasterGainStage),
+        ],
+    }
+}
+
+fn build_dbap(p: &PipelineParams) -> RenderPipeline {
+    let sr = p.sample_rate;
+    let wet = p.er_wet_gain;
+    let abs = p.er_wall_absorption;
+
+    RenderPipeline {
+        source_stages: SourceStageBank::new(
+            vec![
+                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
+                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
+                Box::new(move |_sr| {
+                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
+                }),
+                Box::new(move |_sr| {
+                    Box::new(DbapGainStage::new(atrium_core::dbap::DbapParams::default()))
+                        as Box<dyn SourceStage>
+                }),
+            ],
+            sr,
+        ),
+        renderer: Box::new(DbapRenderer::new()),
+        mix_stages: vec![
+            Box::new(LfeCrossoverStage::new()),
+            Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
         ],
     }
@@ -718,7 +756,7 @@ mod tests {
     fn build_all_pipelines_smoke() {
         let params = PipelineParams::default();
         let pipelines = build_all_pipelines(&params);
-        assert_eq!(pipelines.len(), 3);
+        assert_eq!(pipelines.len(), 4);
         assert_eq!(
             pipelines[RenderMode::WorldLocked.index()].renderer.name(),
             "world_locked"
@@ -728,6 +766,7 @@ mod tests {
             "multichannel"
         );
         assert_eq!(pipelines[RenderMode::Hrtf.index()].renderer.name(), "hrtf");
+        assert_eq!(pipelines[RenderMode::Dbap.index()].renderer.name(), "dbap");
     }
 
     // ── WorldLocked: per-speaker air absorption differs with distance ─────
@@ -811,6 +850,145 @@ mod tests {
         // Both should have nonzero signal (WorldLocked renders to both)
         assert!(near_rms > 1e-10, "Near speaker should have signal");
         assert!(far_rms > 1e-10, "Far speaker should have signal");
+    }
+
+    // ── DBAP: nearest speaker gets loudest output ───────────────────────
+
+    #[test]
+    fn dbap_nearest_speaker_loudest() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+
+        // Source near front-left speaker (0,4)
+        let source_pos = Vec3::new(0.5, 3.5, 0.0);
+        let params = PipelineParams::default();
+        let mut pipeline = build_dbap(&params);
+        pipeline.ensure_topology(1, &layout, 48000.0);
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+            pos: source_pos,
+            val: 1.0,
+        })];
+
+        let channels = 6;
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
+        let rp = RenderParams {
+            listener: &listener,
+            channels,
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::new(-20.0, -20.0, -5.0),
+            room_max: Vec3::new(20.0, 20.0, 5.0),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+
+        // RMS per channel (last quarter, filters settled)
+        let quarter = frames * 3 / 4;
+        let rms = |ch: usize| -> f32 {
+            let sum: f32 = (quarter..frames)
+                .map(|f| buffer[f * channels + ch].powi(2))
+                .sum();
+            (sum / (frames - quarter) as f32).sqrt()
+        };
+
+        let fl_rms = rms(0);
+        let fr_rms = rms(1);
+        let c_rms = rms(2);
+        let rl_rms = rms(4);
+        let rr_rms = rms(5);
+        eprintln!(
+            "DBAP RMS: FL={fl_rms:.6} FR={fr_rms:.6} C={c_rms:.6} RL={rl_rms:.6} RR={rr_rms:.6}"
+        );
+
+        // FL is nearest speaker — it should be loudest
+        assert!(
+            fl_rms > fr_rms,
+            "FL ({fl_rms}) should be louder than FR ({fr_rms})"
+        );
+        assert!(
+            fl_rms > rr_rms,
+            "FL ({fl_rms}) should be louder than RR ({rr_rms})"
+        );
+
+        // All speakers should have signal (DBAP sends to all)
+        assert!(fr_rms > 1e-6, "FR should have signal");
+        assert!(rl_rms > 1e-6, "RL should have signal");
+        assert!(rr_rms > 1e-6, "RR should have signal");
+    }
+
+    #[test]
+    fn dbap_differs_from_world_locked() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+
+        let source_pos = Vec3::new(1.0, 3.0, 0.0);
+        let params = PipelineParams::default();
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
+
+        let channels = 6;
+        let frames = 2048;
+
+        let render = |pipeline: &mut RenderPipeline| -> Vec<f32> {
+            pipeline.ensure_topology(1, &layout, 48000.0);
+            let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+                pos: source_pos,
+                val: 1.0,
+            })];
+            let mut buffer = vec![0.0f32; frames * channels];
+            let rp = RenderParams {
+                listener: &listener,
+                channels,
+                sample_rate: 48000.0,
+                master_gain: 1.0,
+                distance_model: &dm,
+                layout: &layout,
+                atmosphere: &atm,
+                ground: &ground,
+                room_min: Vec3::new(-20.0, -20.0, -5.0),
+                room_max: Vec3::new(20.0, 20.0, 5.0),
+            };
+            render_pipeline(pipeline, &mut sources, &rp, &mut buffer);
+            buffer
+        };
+
+        let wl_buf = render(&mut build_world_locked(&params));
+        let dbap_buf = render(&mut build_dbap(&params));
+
+        // Compare RMS per channel (last quarter)
+        let quarter = frames * 3 / 4;
+        let rms = |buf: &[f32], ch: usize| -> f32 {
+            let sum: f32 = (quarter..frames)
+                .map(|f| buf[f * channels + ch].powi(2))
+                .sum();
+            (sum / (frames - quarter) as f32).sqrt()
+        };
+
+        // They must differ on at least some channels
+        let mut total_diff = 0.0f32;
+        for ch in [0, 1, 2, 4, 5] {
+            let wl = rms(&wl_buf, ch);
+            let db = rms(&dbap_buf, ch);
+            eprintln!(
+                "ch{ch}: WorldLocked={wl:.6} DBAP={db:.6} diff={:.6}",
+                (wl - db).abs()
+            );
+            total_diff += (wl - db).abs();
+        }
+        assert!(
+            total_diff > 0.01,
+            "DBAP and WorldLocked should produce different output (total_diff={total_diff})"
+        );
     }
 }
 

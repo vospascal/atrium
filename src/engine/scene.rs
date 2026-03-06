@@ -51,8 +51,8 @@ pub struct AudioScene {
     pub initial_atmosphere: AtmosphericParams,
     pub initial_render_mode: RenderMode,
     // ── Composable pipeline ──
-    /// All 3 pipelines (WorldLocked, Vbap, Hrtf), pre-allocated.
-    pub pipelines: [RenderPipeline; 3],
+    /// All 4 pipelines (WorldLocked, Vbap, Hrtf, Dbap), pre-allocated.
+    pub pipelines: [RenderPipeline; 4],
     /// Which pipeline is active.
     pub active_pipeline: RenderMode,
     /// Ground properties for pipeline propagation stages.

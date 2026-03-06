@@ -699,6 +699,7 @@ fn parse_render_mode(s: &str) -> RenderMode {
         "world_locked" => RenderMode::WorldLocked,
         "vbap" => RenderMode::Vbap,
         "hrtf" => RenderMode::Hrtf,
+        "dbap" => RenderMode::Dbap,
         _ => RenderMode::Vbap,
     }
 }

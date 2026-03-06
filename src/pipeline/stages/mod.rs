@@ -12,6 +12,7 @@ pub mod master_gain;
 
 // SourceStages (per-source, before routing)
 pub mod air_absorption;
+pub mod dbap_gains;
 pub mod distance_gains;
 pub mod ground_effect;
 pub mod reflections;

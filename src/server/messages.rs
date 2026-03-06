@@ -77,6 +77,7 @@ impl ClientMessage {
                     "world_locked" => RenderMode::WorldLocked,
                     "vbap" => RenderMode::Vbap,
                     "hrtf" => RenderMode::Hrtf,
+                    "dbap" => RenderMode::Dbap,
                     _ => RenderMode::WorldLocked,
                 };
                 Command::SetRenderMode { mode: render_mode }
