@@ -502,9 +502,9 @@ impl SpeakerLayout {
             best_gb /= norm;
         }
 
-        // Per-speaker distance compensation: scale gains so all speakers
+        // Per-speaker distance compensation: attenuate closer speakers so all
         // deliver equal SPL at the listener. Uses farthest speaker as reference
-        // (attenuates nearer speakers rather than boosting distant ones).
+        // (closer speakers get scaled down since they naturally arrive louder).
         let d_a = (self.speakers[best_a].position - listener.position)
             .length()
             .max(0.1);
@@ -516,9 +516,9 @@ impl SpeakerLayout {
             d_a
         };
         let d_ref = d_a.max(d_b);
-        best_ga *= d_ref / d_a;
+        best_ga *= d_a / d_ref;
         if best_b != best_a {
-            best_gb *= d_ref / d_b;
+            best_gb *= d_b / d_ref;
         }
         // Re-normalize to maintain constant power after compensation
         let norm2 = (best_ga * best_ga + best_gb * best_gb).sqrt();
