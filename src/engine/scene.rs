@@ -218,8 +218,9 @@ impl AudioScene {
         if self.telemetry_counter >= self.telemetry_interval {
             self.telemetry_counter = 0;
             if let Some(ref mut producer) = self.telemetry_out {
-                let frame =
+                let mut frame =
                     compute_telemetry(&self.sources, &self.listener, &self.distance_model);
+                frame.render_mode = self.speaker_layout.mode;
                 let _ = producer.push(frame); // silent drop if full
             }
         }

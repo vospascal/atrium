@@ -53,6 +53,7 @@ struct CpalStreamHandle {
     _stream: Stream,
     sample_rate: u32,
     channels: u16,
+    device_name: String,
 }
 
 impl StreamHandle for CpalStreamHandle {
@@ -61,6 +62,9 @@ impl StreamHandle for CpalStreamHandle {
     }
     fn channels(&self) -> u16 {
         self.channels
+    }
+    fn device_name(&self) -> &str {
+        &self.device_name
     }
 }
 
@@ -75,7 +79,8 @@ impl AudioOutput for CpalOutput {
             .default_output_device()
             .ok_or("no output device found")?;
 
-        println!("Audio device: {}", device.name().unwrap_or_default());
+        let device_name = device.name().unwrap_or_default();
+        println!("Audio device: {}", device_name);
 
         let supported = device.default_output_config()?;
         let sample_rate = supported.sample_rate().0;
@@ -146,6 +151,7 @@ impl AudioOutput for CpalOutput {
             _stream: stream,
             sample_rate,
             channels,
+            device_name,
         }))
     }
 }

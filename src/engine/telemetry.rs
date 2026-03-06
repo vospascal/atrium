@@ -11,6 +11,7 @@ use crate::spatial::listener::Listener;
 use crate::spatial::source::SoundSource;
 use atrium_core::directivity::directivity_gain;
 use atrium_core::panner::distance_gain_at_model;
+use atrium_core::speaker::RenderMode;
 
 /// Per-source telemetry snapshot.
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +52,8 @@ pub const MAX_SOURCES: usize = 16;
 pub struct TelemetryFrame {
     pub sources: [SourceTelemetry; MAX_SOURCES],
     pub source_count: u8,
+    /// Current render mode (may change at runtime via SetRenderMode command).
+    pub render_mode: RenderMode,
 }
 
 impl Default for TelemetryFrame {
@@ -58,6 +61,7 @@ impl Default for TelemetryFrame {
         Self {
             sources: [SourceTelemetry::default(); MAX_SOURCES],
             source_count: 0,
+            render_mode: RenderMode::Stereo,
         }
     }
 }

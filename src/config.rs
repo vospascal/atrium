@@ -298,6 +298,11 @@ fn default_pressure() -> f32 {
 pub struct BuildResult {
     pub scene: AudioScene,
     pub scene_json: String,
+    pub source_names: Vec<String>,
+    /// Pipeline stages before the panning/spatialization stage.
+    pub pipeline_pre: Vec<String>,
+    /// Pipeline stages after the panning/spatialization stage.
+    pub pipeline_post: Vec<String>,
 }
 
 /// Default color palette for sources when no color is specified in YAML.
@@ -438,9 +443,30 @@ impl SceneConfig {
             hrtf_path: self.hrtf,
         };
 
+        let source_names: Vec<String> = source_metas.iter().map(|m| m.name.clone()).collect();
+
+        // Build pipeline description for TUI display (split around the dynamic panning stage)
+        let mut pipeline_pre = vec![
+            "Distance Atten".to_string(),
+            "Air Absorption".to_string(),
+            "Ground Effect".to_string(),
+        ];
+        if er_params.is_some() {
+            pipeline_pre.push("Early Reflections".to_string());
+        }
+        // Panning stage is dynamic (inserted by TUI based on current render mode)
+        let mut pipeline_post: Vec<String> = scene.processors
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        pipeline_post.push("Master Gain".to_string());
+
         Ok(BuildResult {
             scene,
             scene_json,
+            source_names,
+            pipeline_pre,
+            pipeline_post,
         })
     }
 

@@ -21,3 +21,8 @@ serde_yaml = "0.9"
 symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac"] }
 sofar = "0.2.1"
 fft-convolver = "0.3.0"
+atrium-tui = { path = "crates/tui", optional = true }
+
+[features]
+default = ["tui"]
+tui = ["dep:atrium-tui"]
