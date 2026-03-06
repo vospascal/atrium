@@ -1,15 +1,14 @@
 import type {
   RoomDef, ListenerDef, DistanceModelDef, AtmosphereDef,
   Source, Speaker, SourceTelemetry, SceneStateMessage, SpeakerDef,
-  DirectivityPattern, SourceDef,
+  DirectivityPattern, SourceDef, RenderModeDef,
 } from './types.js';
 
-// Which speaker channels are visible per render mode
-export const MODE_ACTIVE_CHANNELS: Record<string, number[]> = {
-  world_locked: [0, 1, 2, 4, 5],
-  vbap: [0, 1, 2, 4, 5],
+// Channel indices per channel mode (for speaker visibility in 3D view)
+export const CHANNEL_MODE_CHANNELS: Record<string, number[]> = {
   stereo: [0, 1],
-  binaural: [],
+  quad: [0, 1, 4, 5],
+  '5.1': [0, 1, 2, 4, 5],
 };
 
 function parseColor(hex: string): number {
@@ -47,6 +46,8 @@ export class AtriumStore extends EventTarget {
   distModel: DistanceModelDef = { ref_distance: 1.0, max_distance: 20.0, rolloff: 1.0 };
   atmosphere: AtmosphereDef = { temperature_c: 20, humidity_pct: 50 };
   renderMode = 'vbap';
+  channelMode = '5.1';
+  renderModes: RenderModeDef[] = [];
   masterGain = 0.7;
 
   sources: Source[] = [];
@@ -98,6 +99,12 @@ export class AtriumStore extends EventTarget {
     }
     if (msg.render_mode) {
       this.renderMode = msg.render_mode;
+    }
+    if (msg.channel_mode) {
+      this.channelMode = msg.channel_mode;
+    }
+    if (msg.render_modes) {
+      this.renderModes = msg.render_modes;
     }
     if (msg.atmosphere) {
       this.atmosphere = { ...msg.atmosphere };
@@ -152,6 +159,18 @@ export class AtriumStore extends EventTarget {
   setRenderMode(mode: string) {
     this.renderMode = mode;
     this.send({ type: 'set_render_mode', mode });
+    // Auto-select a valid channel mode if current is invalid for new render mode
+    const def = this.renderModes.find(m => m.mode === mode);
+    const valid = def?.channel_modes ?? [];
+    if (!valid.includes(this.channelMode) && valid.length > 0) {
+      this.setChannelMode(valid[valid.length - 1]);
+    }
+    this.emit('update');
+  }
+
+  setChannelMode(mode: string) {
+    this.channelMode = mode;
+    this.send({ type: 'set_channel_mode', mode });
     this.emit('update');
   }
 

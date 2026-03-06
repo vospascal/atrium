@@ -1,4 +1,4 @@
-//! BinauralRenderer — HRTF FFT convolution to stereo headphones.
+//! HrtfRenderer — HRTF FFT convolution to stereo headphones.
 //!
 //! Uses `SourceOutput::distance_gain` for attenuation and performs HRTF
 //! convolution via FFTConvolver. Output is always stereo (channels 0, 1).
@@ -16,15 +16,15 @@ use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 const BLOCK_SIZE: usize = 128;
 const FILTER_UPDATE_INTERVAL: usize = 4;
 
-struct BinauralSource {
+struct HrtfSource {
     conv_left: FFTConvolver<f32>,
     conv_right: FFTConvolver<f32>,
     prev_gain: f32,
 }
 
-pub struct BinauralRenderer {
+pub struct HrtfRenderer {
     sofa: Option<Sofar>,
-    sources: Vec<BinauralSource>,
+    sources: Vec<HrtfSource>,
     filter: Option<Filter>,
     mono_buf: Vec<f32>,
     left_buf: Vec<f32>,
@@ -33,12 +33,12 @@ pub struct BinauralRenderer {
     sample_rate: f32,
 }
 
-impl BinauralRenderer {
+impl HrtfRenderer {
     pub fn new(hrtf_path: &str, sample_rate: f32) -> Self {
         match Self::try_load(hrtf_path, sample_rate) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Binaural HRTF not available: {e}");
+                eprintln!("HRTF not available: {e}");
                 Self {
                     sofa: None,
                     sources: Vec::new(),
@@ -73,7 +73,7 @@ impl BinauralRenderer {
         })
     }
 
-    fn new_source(sofa: &Sofar) -> Option<BinauralSource> {
+    fn new_source(sofa: &Sofar) -> Option<HrtfSource> {
         let filt_len = sofa.filter_len();
         let mut init_filter = Filter::new(filt_len);
         sofa.filter(0.0, 1.0, 0.0, &mut init_filter);
@@ -83,7 +83,7 @@ impl BinauralRenderer {
         conv_left.init(BLOCK_SIZE, &init_filter.left).ok()?;
         conv_right.init(BLOCK_SIZE, &init_filter.right).ok()?;
 
-        Some(BinauralSource {
+        Some(HrtfSource {
             conv_left,
             conv_right,
             prev_gain: 0.0,
@@ -102,7 +102,7 @@ fn to_sofa_coords(source_pos: Vec3, listener: &Listener) -> (f32, f32, f32) {
     (forward, -right, d.z)
 }
 
-impl Renderer for BinauralRenderer {
+impl Renderer for HrtfRenderer {
     fn render_source(
         &mut self,
         source_idx: usize,
@@ -194,7 +194,7 @@ impl Renderer for BinauralRenderer {
     }
 
     fn name(&self) -> &str {
-        "binaural"
+        "hrtf"
     }
 
     fn ensure_topology(&mut self, source_count: usize, _layout: &SpeakerLayout, sample_rate: f32) {

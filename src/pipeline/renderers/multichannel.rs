@@ -1,6 +1,6 @@
 //! MultichannelRenderer — gain ramp × sample per channel.
 //!
-//! Used by VBAP and Stereo modes. SourceStages compute per-channel gains
+//! Used by VBAP mode. SourceStages compute per-channel gains
 //! in `SourceOutput::channel_gains`. This renderer applies those gains with
 //! per-sample linear interpolation from previous to target gains (click-free).
 
@@ -9,7 +9,7 @@ use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
-/// Multichannel gain-ramp renderer for VBAP and Stereo modes.
+/// Multichannel gain-ramp renderer for VBAP mode.
 #[derive(Default)]
 pub struct MultichannelRenderer {
     /// Previous per-channel gains per source. Indexed [source_idx][channel].

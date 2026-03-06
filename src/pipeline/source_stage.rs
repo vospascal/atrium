@@ -2,7 +2,7 @@
 //!
 //! SourceStages run once per source per buffer. They handle source-level DSP
 //! that does NOT depend on the output path (envelopes, EQ, listener-relative
-//! propagation for VBAP/Stereo/Binaural modes).
+//! propagation for VBAP/HRTF modes).
 //!
 //! For WorldLocked mode, propagation lives in PathStages inside the renderer
 //! because it is per-speaker, not per-source.
@@ -38,9 +38,9 @@ pub struct SourceContext<'a> {
 pub struct SourceOutput {
     /// Broadband gain multiplier (ground effect, etc.).
     pub gain_modifier: f32,
-    /// Target channel gains for multichannel rendering (VBAP, Stereo).
+    /// Target channel gains for multichannel rendering (VBAP).
     pub channel_gains: ChannelGains,
-    /// Scalar distance gain for binaural rendering.
+    /// Scalar distance gain for HRTF rendering.
     pub distance_gain: f32,
 }
 

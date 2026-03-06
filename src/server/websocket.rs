@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,7 +9,6 @@ use tungstenite::protocol::Message;
 use crate::engine::commands::Command;
 
 use super::messages::ClientMessage;
-use super::ui::INDEX_HTML;
 
 /// Shared handle to the command producer.
 /// Arc<Mutex<_>> because each WebSocket handler thread needs access.
@@ -61,10 +59,10 @@ impl TelemetryBroadcast {
     }
 }
 
-/// Start the WebSocket/HTTP server. Blocks forever (runs on the main thread).
+/// Start the WebSocket server. Blocks forever (runs on the main thread).
 ///
 /// `initial_state` is a JSON string sent to each WebSocket client on connect
-/// (e.g. speaker layout). Pass an empty string to skip.
+/// (e.g. scene state). Pass an empty string to skip.
 pub fn run_server(
     addr: &str,
     producer: SharedProducer,
@@ -73,7 +71,7 @@ pub fn run_server(
 ) -> std::io::Result<()> {
     let initial_state: Arc<String> = Arc::new(initial_state);
     let listener = TcpListener::bind(addr)?;
-    println!("Control UI: http://{addr}");
+    println!("WebSocket server: ws://{addr}");
 
     for stream in listener.incoming() {
         match stream {
@@ -82,7 +80,7 @@ pub fn run_server(
                 let initial_state = initial_state.clone();
                 let broadcast = broadcast.clone();
                 thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, producer, &initial_state, broadcast) {
+                    if let Err(e) = handle_websocket(stream, producer, &initial_state, broadcast) {
                         eprintln!("Connection error: {e}");
                     }
                 });
@@ -90,36 +88,6 @@ pub fn run_server(
             Err(e) => eprintln!("Accept error: {e}"),
         }
     }
-    Ok(())
-}
-
-fn handle_connection(
-    stream: TcpStream,
-    producer: SharedProducer,
-    initial_state: &str,
-    broadcast: Arc<TelemetryBroadcast>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Peek at the raw bytes to determine if this is a WebSocket upgrade
-    // or a plain HTTP request for the UI page.
-    let mut buf = [0u8; 4096];
-    let n = stream.peek(&mut buf)?;
-    let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
-
-    if request.contains("Upgrade: websocket") || request.contains("upgrade: websocket") {
-        handle_websocket(stream, producer, initial_state, broadcast)
-    } else {
-        handle_http(stream)
-    }
-}
-
-fn handle_http(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        INDEX_HTML.len(),
-        INDEX_HTML,
-    );
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
     Ok(())
 }
 
@@ -134,7 +102,7 @@ fn handle_websocket(
     let mut ws = tungstenite::accept(stream)?;
     let mut last_gen = 0u64;
 
-    // Send initial state (speaker layout etc.) to the newly connected client
+    // Send initial state (scene state etc.) to the newly connected client
     if !initial_state.is_empty() {
         let _ = ws.send(Message::Text(initial_state.into()));
     }

@@ -52,6 +52,11 @@ export interface NormalizationDef {
   spl_threshold: number;
 }
 
+export interface RenderModeDef {
+  mode: string;
+  channel_modes: string[];
+}
+
 export interface SceneStateMessage {
   type: 'scene_state';
   room: RoomDef;
@@ -59,6 +64,8 @@ export interface SceneStateMessage {
   sources: SourceDef[];
   speakers: SpeakerDef[];
   render_mode: string;
+  channel_mode: string;
+  render_modes: RenderModeDef[];
   atmosphere: AtmosphereDef;
   master_gain: number;
   distance_model: DistanceModelDef;

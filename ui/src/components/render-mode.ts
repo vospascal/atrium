@@ -3,12 +3,11 @@ import { customElement, property } from 'lit/decorators.js';
 import type { AtriumStore } from '../store.js';
 import { StoreController } from '../store-controller.js';
 
-const MODES = [
-  { mode: 'world_locked', label: 'WorldLocked' },
-  { mode: 'vbap', label: 'VBAP' },
-  { mode: 'stereo', label: 'Stereo' },
-  { mode: 'binaural', label: 'Binaural' },
-];
+const CHANNEL_LABELS: Record<string, string> = {
+  stereo: 'Stereo',
+  quad: 'Quad',
+  '5.1': '5.1',
+};
 
 @customElement('render-mode')
 export class RenderMode extends LitElement {
@@ -22,6 +21,13 @@ export class RenderMode extends LitElement {
     }
     .mode-btn:hover { border-color: #888; color: #ccc; }
     .mode-btn.active { border-color: #4fc3f7; color: #4fc3f7; background: rgba(79,195,247,0.1); }
+    .channel-btns { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
+    .ch-btn {
+      background: none; border: 1px solid #444; color: #777; font-size: 9px;
+      padding: 2px 6px; border-radius: 3px; cursor: pointer; font-family: inherit;
+    }
+    .ch-btn:hover { border-color: #777; color: #aaa; }
+    .ch-btn.active { border-color: #66bb6a; color: #66bb6a; background: rgba(102,187,106,0.1); }
   `;
 
   private _ctrl = new StoreController(this);
@@ -30,19 +36,34 @@ export class RenderMode extends LitElement {
   get store(): AtriumStore { return this._ctrl.store!; }
   set store(s: AtriumStore) { this._ctrl.store = s; }
 
-  private _onClick(mode: string) {
+  private _onModeClick(mode: string) {
     this.store.setRenderMode(mode);
   }
 
+  private _onChannelClick(mode: string) {
+    this.store.setChannelMode(mode);
+  }
+
   render() {
+    const modes = this.store?.renderModes ?? [];
+    const current = modes.find(m => m.mode === this.store?.renderMode);
+    const channelModes = current?.channel_modes ?? [];
     return html`
       <h3>Render Mode</h3>
       <div class="mode-btns">
-        ${MODES.map(m => html`
+        ${modes.map(m => html`
           <button class="mode-btn ${this.store?.renderMode === m.mode ? 'active' : ''}"
-            @click=${() => this._onClick(m.mode)}>${m.label}</button>
+            @click=${() => this._onModeClick(m.mode)}>${m.mode}</button>
         `)}
       </div>
+      ${channelModes.length > 1 ? html`
+        <div class="channel-btns">
+          ${channelModes.map(ch => html`
+            <button class="ch-btn ${this.store?.channelMode === ch ? 'active' : ''}"
+              @click=${() => this._onChannelClick(ch)}>${CHANNEL_LABELS[ch] ?? ch}</button>
+          `)}
+        </div>
+      ` : ''}
     `;
   }
 }

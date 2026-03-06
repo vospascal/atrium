@@ -27,7 +27,7 @@ use crate::world::types::Vec3;
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::listener::Listener;
 use atrium_core::panner::DistanceModelType;
-use atrium_core::speaker::{RenderMode, SpeakerLayout};
+use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 
 // ── Top-level scene config ──────────────────────────────────────────────────
 
@@ -52,7 +52,7 @@ pub struct SceneConfig {
     /// Path to atmosphere definition file (e.g. "atmospheres/default.yaml").
     /// Omit for standard conditions.
     pub atmosphere: Option<String>,
-    /// Path to SOFA HRTF file for binaural rendering (e.g. "assets/hrtf/default.sofa").
+    /// Path to SOFA HRTF file for HRTF rendering (e.g. "assets/hrtf/default.sofa").
     /// Defaults to "assets/hrtf/default.sofa" if omitted.
     #[serde(default = "default_hrtf_path")]
     pub hrtf: String,
@@ -571,6 +571,15 @@ impl SceneConfig {
                 "target_rms": self.normalization.target_rms,
             },
             "render_mode": self.speakers.render_mode,
+            "channel_mode": ChannelMode::valid_for(parse_render_mode(&self.speakers.render_mode))
+                .last().map(|m| m.as_str()).unwrap_or("5.1"),
+            "render_modes": RenderMode::ALL.iter().map(|m| {
+                serde_json::json!({
+                    "mode": m.as_str(),
+                    "channel_modes": ChannelMode::valid_for(*m).iter()
+                        .map(|c| c.as_str()).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
             "speakers": speakers,
             "total_channels": layout.total_channels(),
             "lfe_channel": layout.lfe_channel(),
@@ -689,8 +698,7 @@ fn parse_render_mode(s: &str) -> RenderMode {
     match s {
         "world_locked" => RenderMode::WorldLocked,
         "vbap" => RenderMode::Vbap,
-        "stereo" => RenderMode::Stereo,
-        "binaural" => RenderMode::Binaural,
+        "hrtf" => RenderMode::Hrtf,
         _ => RenderMode::Vbap,
     }
 }

@@ -33,7 +33,7 @@ distance_model:
 
 speakers:
   layout: "5.1"              # 5.1, quad, or stereo
-  render_mode: vbap           # world_locked, vbap, stereo, binaural
+  render_mode: vbap           # world_locked, vbap, hrtf
   positions:
     fl: [0.0, 4.0, 0.0]   # front-left
     fr: [6.0, 4.0, 0.0]   # front-right

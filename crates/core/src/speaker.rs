@@ -1,15 +1,14 @@
 // Multichannel speaker layout and rendering.
 //
-// Four render modes (RenderMode):
+// Three render modes (RenderMode):
 //   1. WorldLocked — each speaker is a virtual microphone at a fixed position in the room.
 //      Gain = distance_attenuation(source → speaker) × source_directivity(source → speaker).
 //      The listener's position does NOT affect speaker gains (spatial image comes from
-//      physical speaker placement). Best for world-locked atrium installations.
+//      physical speaker placement). Valid layouts: stereo, quad, 5.1.
 //   2. Vbap — 2D Vector Base Amplitude Panning (Pulkki 1997). Speakers form a ring around
 //      the listener. Source direction from listener determines which speaker pair activates.
-//      Distance from listener to source controls volume. Best for listener-centric rendering.
-//   3. Stereo — equal-power L/R panning based on source azimuth from listener.
-//   4. Binaural — HRTF convolution for headphone rendering.
+//      Requires 3+ speakers. Valid layouts: quad, 5.1.
+//   3. Hrtf — HRTF convolution for headphone rendering. Always stereo output.
 //
 // Speaker positions are configurable per room. Layouts: stereo, quad 4.0, surround 5.1.
 
@@ -74,18 +73,82 @@ pub struct SourceSpatial<'a> {
     pub directivity: &'a DirectivityPattern,
 }
 
-/// Rendering mode.
+/// Output channel configuration. Determines which speaker channels are active.
+/// Works by masking channels on the underlying hardware layout (always 5.1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChannelMode {
+    /// Stereo: channels 0 (L), 1 (R) only.
+    Stereo,
+    /// Quad 4.0: channels 0 (FL), 1 (FR), 4 (RL), 5 (RR). Center + LFE masked.
+    Quad,
+    /// Full 5.1 surround: channels 0 (L), 1 (R), 2 (C), 4 (Ls), 5 (Rs). LFE (3) unused.
+    Surround51,
+}
+
+impl ChannelMode {
+    /// Active spatial channel indices for this mode.
+    pub fn active_channels(self) -> &'static [usize] {
+        match self {
+            ChannelMode::Stereo => &[0, 1],
+            ChannelMode::Quad => &[0, 1, 4, 5],
+            ChannelMode::Surround51 => &[0, 1, 2, 4, 5],
+        }
+    }
+
+    /// Valid channel modes for a given render mode.
+    pub fn valid_for(mode: RenderMode) -> &'static [ChannelMode] {
+        match mode {
+            RenderMode::WorldLocked => &[
+                ChannelMode::Stereo,
+                ChannelMode::Quad,
+                ChannelMode::Surround51,
+            ],
+            RenderMode::Vbap => &[ChannelMode::Quad, ChannelMode::Surround51],
+            RenderMode::Hrtf => &[ChannelMode::Stereo],
+        }
+    }
+
+    /// Wire format name for JSON serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelMode::Stereo => "stereo",
+            ChannelMode::Quad => "quad",
+            ChannelMode::Surround51 => "5.1",
+        }
+    }
+
+    /// Parse from wire format string.
+    pub fn parse(s: &str) -> Option<ChannelMode> {
+        match s {
+            "stereo" => Some(ChannelMode::Stereo),
+            "quad" => Some(ChannelMode::Quad),
+            "5.1" => Some(ChannelMode::Surround51),
+            _ => None,
+        }
+    }
+}
+
+/// Rendering algorithm.
+///
+/// Each mode is a distinct spatialization strategy. The output channel count
+/// is determined by the SpeakerLayout, not the render mode.
+///
+/// TODO: Ambisonics — encode sources into spherical harmonics, decode to binaural via HRTF.
+/// Cheaper than per-source HRTF when source count is high (scene encoded once, head rotation
+/// is a matrix multiply, single HRTF decode). Per-source HRTF is more accurate for few sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RenderMode {
     /// Speakers are virtual microphones at fixed world positions.
     /// Propagation is per-speaker (source→speaker path). Listener irrelevant.
+    /// Valid layouts: stereo, quad, 5.1.
     WorldLocked,
     /// VBAP: listener-relative triangulated panning to physical speakers.
+    /// Requires 3+ speakers for triangulation.
+    /// Valid layouts: quad, 5.1.
     Vbap,
-    /// Equal-power L/R stereo pan for headphones (no HRTF). UI label: "Stereo".
-    Stereo,
     /// HRTF convolution for headphones.
-    Binaural,
+    /// Always outputs stereo (channels 0, 1).
+    Hrtf,
 }
 
 impl RenderMode {
@@ -94,17 +157,20 @@ impl RenderMode {
         match self {
             RenderMode::WorldLocked => 0,
             RenderMode::Vbap => 1,
-            RenderMode::Stereo => 2,
-            RenderMode::Binaural => 3,
+            RenderMode::Hrtf => 2,
         }
     }
 
-    pub const ALL: [RenderMode; 4] = [
-        RenderMode::WorldLocked,
-        RenderMode::Vbap,
-        RenderMode::Stereo,
-        RenderMode::Binaural,
-    ];
+    pub const ALL: [RenderMode; 3] = [RenderMode::WorldLocked, RenderMode::Vbap, RenderMode::Hrtf];
+
+    /// Wire format name for JSON serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RenderMode::WorldLocked => "world_locked",
+            RenderMode::Vbap => "vbap",
+            RenderMode::Hrtf => "hrtf",
+        }
+    }
 }
 
 /// Multichannel speaker configuration.
@@ -692,11 +758,10 @@ impl SpeakerLayout {
         distance: &DistanceParams,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Binaural => {
+            RenderMode::WorldLocked | RenderMode::Hrtf => {
                 self.compute_gains_stereo(listener, source, distance)
             }
             RenderMode::Vbap => self.compute_gains_vbap(listener, source, distance),
-            RenderMode::Stereo => self.compute_gains_stereo(listener, source, distance),
         }
     }
 
@@ -711,11 +776,10 @@ impl SpeakerLayout {
         spread: f32,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Binaural => {
+            RenderMode::WorldLocked | RenderMode::Hrtf => {
                 self.compute_gains_stereo(listener, source, distance)
             }
             RenderMode::Vbap => self.compute_gains_mdap(listener, source, distance, spread),
-            RenderMode::Stereo => self.compute_gains_stereo(listener, source, distance),
         }
     }
 }
@@ -750,7 +814,7 @@ mod tests {
         }
     }
 
-    // ── Speaker-as-mic (binaural) tests ─────────────────────────────────
+    // ── Stereo pan (equal-power L/R) tests ────────────────────────────────
 
     #[test]
     fn mic_source_to_listeners_left_is_louder_in_ch0() {
@@ -1170,7 +1234,7 @@ mod tests {
         );
     }
 
-    // ── Speaker-as-mic (binaural) L/R ──
+    // ── Stereo pan L/R ──
 
     #[test]
     fn mic_source_left_of_listener_has_more_ch0() {

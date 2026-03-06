@@ -1,8 +1,8 @@
 //! Renderer implementations.
 //!
-//! - `multichannel`: gain ramp × sample per channel (VBAP, Stereo)
+//! - `multichannel`: gain ramp × sample per channel (VBAP)
 //! - `world_locked`: per-speaker PathStages + gain ramp
-//! - `binaural`: HRTF FFT convolution to stereo
+//! - `hrtf`: HRTF FFT convolution to stereo headphones
 
 pub mod binaural;
 pub mod multichannel;

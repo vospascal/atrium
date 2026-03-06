@@ -51,8 +51,8 @@ pub struct AudioScene {
     pub initial_atmosphere: AtmosphericParams,
     pub initial_render_mode: RenderMode,
     // ── Composable pipeline ──
-    /// All 4 pipelines (WorldLocked, Vbap, Stereo, Binaural), pre-allocated.
-    pub pipelines: [RenderPipeline; 4],
+    /// All 3 pipelines (WorldLocked, Vbap, Hrtf), pre-allocated.
+    pub pipelines: [RenderPipeline; 3],
     /// Which pipeline is active.
     pub active_pipeline: RenderMode,
     /// Ground properties for pipeline propagation stages.
@@ -116,6 +116,10 @@ impl AudioScene {
                     if let Some(source) = self.sources.get_mut(index as usize) {
                         source.set_orbit_angle(angle);
                     }
+                }
+                Command::SetChannelMode { mode } => {
+                    self.speaker_layout
+                        .set_active_channels(mode.active_channels());
                 }
                 Command::SetAtmosphere {
                     temperature_c,

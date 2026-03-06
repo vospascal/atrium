@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { SceneContext } from './scene.js';
 import type { AtriumStore } from '../store.js';
-import { MODE_ACTIVE_CHANNELS } from '../store.js';
+import { CHANNEL_MODE_CHANNELS } from '../store.js';
 import { toThree } from './coords.js';
 import type { Speaker } from '../types.js';
 
@@ -45,7 +45,7 @@ export function buildSpeakers(ctx: SceneContext, store: AtriumStore) {
 }
 
 export function updateSpeakerVisibility(store: AtriumStore) {
-  const active = MODE_ACTIVE_CHANNELS[store.renderMode] ?? [0, 1, 2, 4, 5];
+  const active = CHANNEL_MODE_CHANNELS[store.channelMode] ?? [0, 1, 2, 4, 5];
   store.speakers.forEach((sp, i) => {
     if (speakerMeshes[i]) speakerMeshes[i].visible = active.includes(sp.channel);
   });

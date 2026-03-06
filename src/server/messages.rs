@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use crate::engine::commands::Command;
 use crate::world::types::Vec3;
-use atrium_core::speaker::RenderMode;
+use atrium_core::speaker::{ChannelMode, RenderMode};
 
 /// JSON messages received from the browser via WebSocket.
 /// Tagged by the "type" field: {"type": "set_listener", "x": 3.0, ...}
@@ -21,7 +21,7 @@ pub enum ClientMessage {
     #[serde(rename = "set_source_position")]
     SetSourcePosition { index: u16, x: f32, y: f32, z: f32 },
 
-    /// Switch rendering mode: "world_locked", "vbap", "stereo", "binaural".
+    /// Switch rendering mode: "world_locked", "vbap", "hrtf".
     #[serde(rename = "set_render_mode")]
     SetRenderMode { mode: String },
 
@@ -40,6 +40,10 @@ pub enum ClientMessage {
     /// Set orbit angle for a source.
     #[serde(rename = "set_source_orbit_angle")]
     SetSourceOrbitAngle { index: u16, angle: f32 },
+
+    /// Set channel mode: "stereo", "quad", "5.1".
+    #[serde(rename = "set_channel_mode")]
+    SetChannelMode { mode: String },
 
     /// Set atmospheric conditions (temperature, humidity) for ISO 9613-1 air absorption.
     #[serde(rename = "set_atmosphere")]
@@ -72,8 +76,7 @@ impl ClientMessage {
                 let render_mode = match mode.as_str() {
                     "world_locked" => RenderMode::WorldLocked,
                     "vbap" => RenderMode::Vbap,
-                    "stereo" => RenderMode::Stereo,
-                    "binaural" => RenderMode::Binaural,
+                    "hrtf" => RenderMode::Hrtf,
                     _ => RenderMode::WorldLocked,
                 };
                 Command::SetRenderMode { mode: render_mode }
@@ -90,6 +93,10 @@ impl ClientMessage {
             }
             ClientMessage::SetSourceOrbitAngle { index, angle } => {
                 Command::SetSourceOrbitAngle { index, angle }
+            }
+            ClientMessage::SetChannelMode { mode } => {
+                let channel_mode = ChannelMode::parse(&mode).unwrap_or(ChannelMode::Surround51);
+                Command::SetChannelMode { mode: channel_mode }
             }
             ClientMessage::SetAtmosphere {
                 temperature,
@@ -249,13 +256,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_render_mode_stereo() {
-        let json = r#"{"type":"set_render_mode","mode":"stereo"}"#;
+    fn parse_set_render_mode_hrtf() {
+        let json = r#"{"type":"set_render_mode","mode":"hrtf"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         let cmd = msg.into_command();
         match cmd {
             Command::SetRenderMode { mode } => {
-                assert_eq!(mode, RenderMode::Stereo);
+                assert_eq!(mode, RenderMode::Hrtf);
             }
             _ => panic!("wrong command variant"),
         }

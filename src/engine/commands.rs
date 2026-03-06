@@ -1,5 +1,5 @@
 use crate::world::types::Vec3;
-use atrium_core::speaker::RenderMode;
+use atrium_core::speaker::{ChannelMode, RenderMode};
 
 /// Commands sent from the control thread to the audio thread via rtrb ring buffer.
 /// All variants must be small and Copy — no heap allocations.
@@ -20,7 +20,7 @@ pub enum Command {
     /// Reposition a source by index.
     SetSourcePosition { index: u16, position: Vec3 },
 
-    /// Switch rendering mode (WorldLocked / Vbap / Stereo / Binaural).
+    /// Switch rendering mode (WorldLocked / Vbap / Hrtf).
     SetRenderMode { mode: RenderMode },
 
     /// Reposition a speaker by channel index.
@@ -37,6 +37,9 @@ pub enum Command {
 
     /// Set orbit angle for a source.
     SetSourceOrbitAngle { index: u16, angle: f32 },
+
+    /// Set channel mode (stereo, quad, 5.1). Applies speaker mask.
+    SetChannelMode { mode: ChannelMode },
 
     /// Set atmospheric conditions for ISO 9613-1 air absorption.
     SetAtmosphere {

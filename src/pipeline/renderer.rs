@@ -3,9 +3,9 @@
 //! Handles how a mono source signal becomes multichannel output.
 //! Three implementations:
 //!
-//! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP, Stereo)
+//! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP)
 //! - **WorldLockedRenderer**: per-speaker PathStages + gain ramp (WorldLocked)
-//! - **BinauralRenderer**: HRTF FFT convolution to stereo (Binaural)
+//! - **HrtfRenderer**: HRTF FFT convolution to stereo headphones (Hrtf)
 //!
 //! The renderer owns PathStage instances and manages per-source state
 //! (gain ramps, HRTF convolvers, etc.).

@@ -1,6 +1,6 @@
 //! Per-source first-order reflections via image-source method (Allen & Berkley, 1979).
 //!
-//! SourceStage version: source→listener (VBAP / Stereo / Binaural).
+//! SourceStage version: source→listener (VBAP / HRTF).
 //! PathStage version: source→speaker (WorldLocked).
 
 use crate::pipeline::path_stage::{PathContext, PathStage};

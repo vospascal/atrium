@@ -101,7 +101,7 @@ impl AirAbsorptionFilter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SourceStage: per-source, listener-relative (VBAP / Stereo / Binaural)
+// SourceStage: per-source, listener-relative (VBAP / HRTF)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Per-source air absorption stage. Distance = source → listener.

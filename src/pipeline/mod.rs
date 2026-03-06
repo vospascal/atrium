@@ -4,7 +4,7 @@
 //! render mode. Each pipeline consists of three categories of stages:
 //!
 //! 1. **SourceStages** — per-source, before routing (envelopes, listener-relative
-//!    propagation for VBAP/Stereo/Binaural)
+//!    propagation for VBAP/HRTF)
 //! 2. **PathStages** — per source × output path, inside the renderer
 //!    (per-speaker propagation for WorldLocked)
 //! 3. **MixStages** — post-mix, whole-buffer (LFE crossover, delay comp,
@@ -49,7 +49,7 @@ use self::mix_stage::{MixContext, MixStage};
 use self::renderer::Renderer;
 use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
-use self::renderers::binaural::BinauralRenderer;
+use self::renderers::binaural::HrtfRenderer;
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
@@ -62,7 +62,6 @@ use self::stages::ground_effect::{GroundEffectPath, GroundEffectStage};
 use self::stages::lfe_crossover::LfeCrossoverStage;
 use self::stages::master_gain::MasterGainStage;
 use self::stages::reflections::{ReflectionsPath, ReflectionsStage};
-use self::stages::stereo_gains::StereoGainStage;
 use self::stages::vbap_gains::VbapGainStage;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +69,7 @@ use self::stages::vbap_gains::VbapGainStage;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Rendering approach. Determines which pipeline runs.
-// RenderMode (atrium_core::speaker): WorldLocked, Vbap, Stereo, Binaural.
+// RenderMode (atrium_core::speaker): WorldLocked, Vbap, Hrtf.
 // index() and ALL defined on RenderMode. Used as pipeline array index.
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,13 +226,12 @@ impl Default for PipelineParams {
     }
 }
 
-/// Build all 4 pipelines. Pre-allocated at startup, zero allocation on mode switch.
-pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 4] {
+/// Build all 3 pipelines. Pre-allocated at startup, zero allocation on mode switch.
+pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 3] {
     [
         build_world_locked(params),
         build_vbap(params),
-        build_stereo(params),
-        build_binaural(params),
+        build_hrtf(params),
     ]
 }
 
@@ -308,37 +306,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
     }
 }
 
-fn build_stereo(p: &PipelineParams) -> RenderPipeline {
-    let sr = p.sample_rate;
-    let wet = p.er_wet_gain;
-    let abs = p.er_wall_absorption;
-
-    RenderPipeline {
-        source_stages: SourceStageBank::new(
-            vec![
-                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
-                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-                Box::new(move |_sr| {
-                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
-                }),
-                Box::new(move |_sr| Box::new(StereoGainStage) as Box<dyn SourceStage>),
-            ],
-            sr,
-        ),
-        renderer: Box::new(MultichannelRenderer::new()),
-        mix_stages: vec![
-            Box::new(EarlyReflectionsStage::new(wet, abs)),
-            Box::new(FdnReverbStage::new(
-                p.fdn_wet_gain,
-                p.fdn_rt60_low,
-                p.fdn_rt60_high,
-            )),
-            Box::new(MasterGainStage),
-        ],
-    }
-}
-
-fn build_binaural(p: &PipelineParams) -> RenderPipeline {
+fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let wet = p.er_wet_gain;
     let abs = p.er_wall_absorption;
@@ -355,7 +323,7 @@ fn build_binaural(p: &PipelineParams) -> RenderPipeline {
             ],
             sr,
         ),
-        renderer: Box::new(BinauralRenderer::new(&p.hrtf_path, sr)),
+        renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sr)),
         mix_stages: vec![
             Box::new(EarlyReflectionsStage::new(wet, abs)),
             Box::new(FdnReverbStage::new(
@@ -710,7 +678,7 @@ mod tests {
         let mut bank = SourceStageBank::new(
             vec![
                 Box::new(|_sr| Box::new(VbapGainStage) as Box<dyn SourceStage>),
-                Box::new(|_sr| Box::new(StereoGainStage) as Box<dyn SourceStage>),
+                Box::new(|_sr| Box::new(DistanceGainStage) as Box<dyn SourceStage>),
             ],
             48000.0,
         );
@@ -750,7 +718,7 @@ mod tests {
     fn build_all_pipelines_smoke() {
         let params = PipelineParams::default();
         let pipelines = build_all_pipelines(&params);
-        assert_eq!(pipelines.len(), 4);
+        assert_eq!(pipelines.len(), 3);
         assert_eq!(
             pipelines[RenderMode::WorldLocked.index()].renderer.name(),
             "world_locked"
@@ -759,14 +727,7 @@ mod tests {
             pipelines[RenderMode::Vbap.index()].renderer.name(),
             "multichannel"
         );
-        assert_eq!(
-            pipelines[RenderMode::Stereo.index()].renderer.name(),
-            "multichannel"
-        );
-        assert_eq!(
-            pipelines[RenderMode::Binaural.index()].renderer.name(),
-            "binaural"
-        );
+        assert_eq!(pipelines[RenderMode::Hrtf.index()].renderer.name(), "hrtf");
     }
 
     // ── WorldLocked: per-speaker air absorption differs with distance ─────
@@ -873,7 +834,7 @@ pub struct RenderParams<'a> {
 
 /// Render one buffer through the active pipeline.
 ///
-/// This replaces the monolithic `mix_sources()` + `BinauralMixer::mix()` path.
+/// This replaces the monolithic `mix_sources()` + `HrtfMixer::mix()` path.
 pub fn render_pipeline(
     pipeline: &mut RenderPipeline,
     sources: &mut [Box<dyn atrium_core::source::SoundSource>],

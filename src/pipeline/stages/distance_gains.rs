@@ -1,6 +1,6 @@
-//! Scalar distance gain for binaural rendering.
+//! Scalar distance gain for HRTF rendering.
 //!
-//! Binaural uses HRTF convolution for spatialization, so it doesn't need
+//! HRTF uses FFT convolution for spatialization, so it doesn't need
 //! per-channel gains. It only needs a scalar distance attenuation applied
 //! before the HRTF convolver.
 
@@ -8,7 +8,7 @@ use atrium_core::panner::distance_gain_at_model;
 
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
-/// Scalar distance attenuation for binaural mode.
+/// Scalar distance attenuation for HRTF mode.
 pub struct DistanceGainStage;
 
 impl SourceStage for DistanceGainStage {

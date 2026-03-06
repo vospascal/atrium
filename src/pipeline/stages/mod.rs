@@ -15,7 +15,6 @@ pub mod air_absorption;
 pub mod distance_gains;
 pub mod ground_effect;
 pub mod reflections;
-pub mod stereo_gains;
 pub mod vbap_gains;
 
 // PathStages (per source × output path, inside renderer)
