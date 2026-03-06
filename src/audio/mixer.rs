@@ -512,9 +512,15 @@ mod tests {
         (sum / n as f32).sqrt()
     }
 
-    /// Total RMS across all channels.
+    /// Total RMS across all channels (root of sum of squared per-channel RMS).
     fn total_rms(buf: &[f32], channels: usize) -> f32 {
-        (0..channels).map(|ch| ch_rms(buf, channels, ch)).sum()
+        let sum_sq: f32 = (0..channels)
+            .map(|ch| {
+                let r = ch_rms(buf, channels, ch);
+                r * r
+            })
+            .sum();
+        sum_sq.sqrt()
     }
 
     // ── Binaural render helper ──────────────────────────────────────────────
