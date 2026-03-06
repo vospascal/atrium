@@ -16,10 +16,10 @@ pub enum ClientMessage {
     SetGain { gain: f32 },
 
     #[serde(rename = "set_source_muted")]
-    SetSourceMuted { index: u8, muted: bool },
+    SetSourceMuted { index: u16, muted: bool },
 
     #[serde(rename = "set_source_position")]
-    SetSourcePosition { index: u8, x: f32, y: f32, z: f32 },
+    SetSourcePosition { index: u16, x: f32, y: f32, z: f32 },
 
     /// Switch rendering mode: "speaker_as_mic" or "vbap".
     #[serde(rename = "set_render_mode")]
@@ -31,15 +31,15 @@ pub enum ClientMessage {
 
     /// Set orbit speed for a source (0 = paused).
     #[serde(rename = "set_source_orbit_speed")]
-    SetSourceOrbitSpeed { index: u8, speed: f32 },
+    SetSourceOrbitSpeed { index: u16, speed: f32 },
 
     /// Set orbit radius for a source.
     #[serde(rename = "set_source_orbit_radius")]
-    SetSourceOrbitRadius { index: u8, radius: f32 },
+    SetSourceOrbitRadius { index: u16, radius: f32 },
 
     /// Set orbit angle for a source.
     #[serde(rename = "set_source_orbit_angle")]
-    SetSourceOrbitAngle { index: u8, angle: f32 },
+    SetSourceOrbitAngle { index: u16, angle: f32 },
 
     /// Set atmospheric conditions (temperature, humidity) for ISO 9613-1 air absorption.
     #[serde(rename = "set_atmosphere")]
