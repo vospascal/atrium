@@ -46,6 +46,8 @@ pub struct AudioScene {
     pub initial_source_states: Vec<InitialSourceState>,
     pub initial_atmosphere: AtmosphericParams,
     pub initial_render_mode: RenderMode,
+    /// Path to SOFA HRTF file for binaural rendering.
+    pub hrtf_path: String,
 }
 
 impl AudioScene {
@@ -131,7 +133,7 @@ impl AudioScene {
 
         // Initialize binaural mixer (load SOFA file, create per-source convolvers)
         match BinauralMixer::new(
-            "assets/hrtf/default.sofa",
+            &self.hrtf_path,
             self.sample_rate,
             self.sources.len(),
         ) {

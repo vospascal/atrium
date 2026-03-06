@@ -52,10 +52,18 @@ pub struct SceneConfig {
     /// Path to atmosphere definition file (e.g. "atmospheres/default.yaml").
     /// Omit for standard conditions.
     pub atmosphere: Option<String>,
+    /// Path to SOFA HRTF file for binaural rendering (e.g. "assets/hrtf/default.sofa").
+    /// Defaults to "assets/hrtf/default.sofa" if omitted.
+    #[serde(default = "default_hrtf_path")]
+    pub hrtf: String,
 }
 
 fn default_master_gain() -> f32 {
     1.0
+}
+
+fn default_hrtf_path() -> String {
+    "assets/hrtf/default.sofa".into()
 }
 
 // ── File-loaded configs (rooms/, processors/, atmospheres/) ─────────────────
@@ -405,6 +413,7 @@ impl SceneConfig {
             telemetry_out: None,
             telemetry_counter: 0,
             telemetry_interval: 6, // ~15 Hz at 512-sample buffers; calibrated later
+            hrtf_path: self.hrtf,
         };
 
         Ok(BuildResult {
