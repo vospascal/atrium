@@ -58,7 +58,10 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
             {
                 break;
             }
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("audio decode error: {e}");
+                break;
+            }
         };
 
         if packet.track_id() != track_id {
@@ -67,7 +70,10 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
 
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("audio packet decode error: {e}");
+                continue;
+            }
         };
 
         let spec = *decoded.spec();

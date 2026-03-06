@@ -69,8 +69,7 @@ use self::stages::vbap_gains::VbapGainStage;
 // Pipeline mode — rendering approach (separate from channel layout)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Rendering approach. Determines which pipeline runs.
-///
+// Rendering approach. Determines which pipeline runs.
 // RenderMode (atrium_core::speaker): WorldLocked, Vbap, Stereo, Binaural.
 // index() and ALL defined on RenderMode. Used as pipeline array index.
 
@@ -456,44 +455,43 @@ mod tests {
         let mut buf_a = vec![0.0f32; frames * channels];
         let mut buf_b = vec![0.0f32; frames * channels];
 
+        let room_min = Vec3::new(0.0, 0.0, 0.0);
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+
         // Listener at center of room
         let listener_a = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
-        render_pipeline(
-            &mut pipeline,
-            &mut sources,
-            &listener_a,
-            &mut buf_a,
+        let rp_a = RenderParams {
+            listener: &listener_a,
             channels,
-            48000.0,
-            1.0,
-            &dm,
-            &layout,
-            &atm,
-            &ground,
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(6.0, 4.0, 3.0),
-        );
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min,
+            room_max,
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp_a, &mut buf_a);
 
         // Reset for second pass (clear gain ramp state)
         pipeline.reset();
 
         // Listener at a completely different position
         let listener_b = Listener::new(Vec3::new(5.0, 0.5, 0.0), 0.0);
-        render_pipeline(
-            &mut pipeline,
-            &mut sources,
-            &listener_b,
-            &mut buf_b,
+        let rp_b = RenderParams {
+            listener: &listener_b,
             channels,
-            48000.0,
-            1.0,
-            &dm,
-            &layout,
-            &atm,
-            &ground,
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(6.0, 4.0, 3.0),
-        );
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min,
+            room_max,
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp_b, &mut buf_b);
 
         // Gains should be identical (WorldLocked ignores listener position).
         // We compare per-channel energy (RMS) — the first buffer ramps from 0,
@@ -543,21 +541,19 @@ mod tests {
         let mut buffer = vec![0.0f32; frames * channels];
 
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        render_pipeline(
-            &mut pipeline,
-            &mut sources,
-            &listener,
-            &mut buffer,
+        let rp = RenderParams {
+            listener: &listener,
             channels,
-            48000.0,
-            1.0,
-            &dm,
-            &layout,
-            &atm,
-            &ground,
-            Vec3::ZERO,
-            Vec3::new(6.0, 4.0, 3.0),
-        );
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::ZERO,
+            room_max: Vec3::new(6.0, 4.0, 3.0),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
         // Measure RMS of last quarter (gain ramp settled)
         let quarter = frames * 3 / 4;
@@ -613,21 +609,19 @@ mod tests {
         let mut buffer = vec![0.0f32; frames * channels];
 
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        render_pipeline(
-            &mut pipeline,
-            &mut sources,
-            &listener,
-            &mut buffer,
+        let rp = RenderParams {
+            listener: &listener,
             channels,
-            48000.0,
-            1.0,
-            &dm,
-            &layout,
-            &atm,
-            &ground,
-            Vec3::ZERO,
-            Vec3::new(6.0, 4.0, 3.0),
-        );
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::ZERO,
+            room_max: Vec3::new(6.0, 4.0, 3.0),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
         // Channels 2 and 3 should be completely silent
         for frame in 0..frames {
@@ -675,21 +669,19 @@ mod tests {
         let mut buffer = vec![0.0f32; frames * channels];
 
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
-        render_pipeline(
-            &mut pipeline,
-            &mut sources,
-            &listener,
-            &mut buffer,
+        let rp = RenderParams {
+            listener: &listener,
             channels,
-            48000.0,
-            1.0,
-            &dm,
-            &layout,
-            &atm,
-            &ground,
-            Vec3::ZERO,
-            Vec3::new(6.0, 4.0, 3.0),
-        );
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::ZERO,
+            room_max: Vec3::new(6.0, 4.0, 3.0),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
         // Masked channels 2 and 3 should be silent
         for frame in 0..frames {
@@ -822,21 +814,19 @@ mod tests {
         let mut buffer = vec![0.0f32; frames * channels];
 
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        render_pipeline(
-            &mut pipeline,
-            &mut sources,
-            &listener,
-            &mut buffer,
+        let rp = RenderParams {
+            listener: &listener,
             channels,
-            48000.0,
-            1.0,
-            &dm,
-            &layout,
-            &atm,
-            &ground,
-            Vec3::new(-20.0, -20.0, -5.0),
-            Vec3::new(20.0, 20.0, 5.0),
-        );
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::new(-20.0, -20.0, -5.0),
+            room_max: Vec3::new(20.0, 20.0, 5.0),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
         // Compare RMS of last quarter (filters settled)
         let quarter = frames * 3 / 4;
@@ -867,26 +857,31 @@ mod tests {
 // Pipeline render dispatch
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Scene-level parameters for rendering a single buffer.
+pub struct RenderParams<'a> {
+    pub listener: &'a atrium_core::listener::Listener,
+    pub channels: usize,
+    pub sample_rate: f32,
+    pub master_gain: f32,
+    pub distance_model: &'a DistanceModel,
+    pub layout: &'a SpeakerLayout,
+    pub atmosphere: &'a AtmosphericParams,
+    pub ground: &'a GroundProperties,
+    pub room_min: atrium_core::types::Vec3,
+    pub room_max: atrium_core::types::Vec3,
+}
+
 /// Render one buffer through the active pipeline.
 ///
 /// This replaces the monolithic `mix_sources()` + `BinauralMixer::mix()` path.
 pub fn render_pipeline(
     pipeline: &mut RenderPipeline,
     sources: &mut [Box<dyn atrium_core::source::SoundSource>],
-    listener: &atrium_core::listener::Listener,
+    params: &RenderParams,
     output: &mut [f32],
-    channels: usize,
-    sample_rate: f32,
-    master_gain: f32,
-    distance_model: &DistanceModel,
-    layout: &SpeakerLayout,
-    atmosphere: &AtmosphericParams,
-    ground: &GroundProperties,
-    room_min: atrium_core::types::Vec3,
-    room_max: atrium_core::types::Vec3,
 ) {
     use crate::profile_span;
-    let num_frames = output.len() / channels;
+    let num_frames = output.len() / params.channels;
 
     // Split borrow: source_stages and renderer are independent fields
     let RenderPipeline {
@@ -897,7 +892,7 @@ pub fn render_pipeline(
 
     // Ensure topology
     source_stages.ensure_sources(sources.len());
-    renderer.ensure_topology(sources.len(), layout, sample_rate);
+    renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
 
     // Zero output
     output.fill(0.0);
@@ -909,27 +904,27 @@ pub fn render_pipeline(
         }
 
         let pos = source.position();
-        let dist_to_listener = listener.position.distance_to(pos);
+        let dist_to_listener = params.listener.position.distance_to(pos);
 
         let ctx = SourceContext {
-            listener,
+            listener: params.listener,
             source_pos: pos,
             source_orientation: source.orientation(),
             source_directivity: &source.directivity(),
             source_spread: source.spread(),
             source_ref_distance: source.ref_distance(),
             dist_to_listener,
-            atmosphere,
-            room_min,
-            room_max,
-            ground,
-            sample_rate,
-            distance_model,
-            layout,
+            atmosphere: params.atmosphere,
+            room_min: params.room_min,
+            room_max: params.room_max,
+            ground: params.ground,
+            sample_rate: params.sample_rate,
+            distance_model: params.distance_model,
+            layout: params.layout,
         };
 
         // Buffer-rate source stages
-        let mut src_out = SourceOutput::default_for(layout.total_channels());
+        let mut src_out = SourceOutput::default_for(params.layout.total_channels());
         {
             let _s = profile_span!("source_stages", src = i).entered();
             source_stages.process_all(i, &ctx, &mut src_out);
@@ -941,29 +936,32 @@ pub fn render_pipeline(
         // Renderer: mode-specific spatialization
         {
             let _s = profile_span!("renderer", src = i).entered();
+            let mut out = renderer::OutputBuffer {
+                buffer: output,
+                channels: params.channels,
+                num_frames,
+                sample_rate: params.sample_rate,
+            };
             renderer.render_source(
                 i,
                 source.as_mut(),
                 &mut stage_refs,
                 &ctx,
                 &src_out,
-                output,
-                channels,
-                num_frames,
-                sample_rate,
+                &mut out,
             );
         }
     }
 
     // Post-mix chain
     let mix_ctx = MixContext {
-        listener,
-        layout,
-        sample_rate,
-        channels,
-        room_min,
-        room_max,
-        master_gain,
+        listener: params.listener,
+        layout: params.layout,
+        sample_rate: params.sample_rate,
+        channels: params.channels,
+        room_min: params.room_min,
+        room_max: params.room_max,
+        master_gain: params.master_gain,
     };
     {
         let _s = profile_span!("mix_stages").entered();

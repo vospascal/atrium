@@ -39,6 +39,12 @@ pub struct GroundEffectPath {
     cached_gain: f32,
 }
 
+impl Default for GroundEffectPath {
+    fn default() -> Self {
+        Self { cached_gain: 1.0 }
+    }
+}
+
 impl GroundEffectPath {
     pub fn new() -> Self {
         Self { cached_gain: 1.0 }

@@ -6,6 +6,15 @@
 ///
 /// Reference: <https://www.w3.org/TR/webaudio/#distance-attenuation>
 /// Python reference: python-acoustics ISO 9613-1 implementation
+/// Speed of sound at 20°C, 1 atm (m/s). ISO 9613-1 reference conditions.
+pub const SPEED_OF_SOUND: f32 = 343.0;
+
+/// Temperature-dependent speed of sound (m/s).
+/// Approximation from ISO 9613-1: c ≈ 331.3 + 0.606 × T_celsius.
+#[inline]
+pub fn speed_of_sound(temp_c: f32) -> f32 {
+    331.3 + 0.606 * temp_c
+}
 
 /// ISO 9613-1 constants.
 const T_REF: f32 = 293.15; // Reference temperature (20°C) in Kelvin

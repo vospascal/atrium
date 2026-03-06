@@ -302,6 +302,12 @@ pub struct BuildResult {
     pub pipeline_post: Vec<String>,
 }
 
+/// Result of building sources: (sound sources, metadata for JSON).
+type BuildSourcesResult = (
+    Vec<Box<dyn atrium_core::source::SoundSource>>,
+    Vec<SourceMeta>,
+);
+
 /// Default color palette for sources when no color is specified in YAML.
 const SOURCE_COLORS: &[&str] = &[
     "#ff6b35", "#ffc107", "#ce93d8", "#4fc3f7", "#66bb6a", "#ef5350", "#ff8a65", "#ab47bc",
@@ -328,6 +334,10 @@ struct SourceMeta {
 
 /// Load and deserialize a YAML file into any serde-compatible type.
 fn load_yaml<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Box<dyn std::error::Error>> {
+    // Warn about absolute or parent-traversing paths (not sandboxed, but logged)
+    if std::path::Path::new(path).is_absolute() || path.contains("..") {
+        eprintln!("warning: loading file from non-relative path: {path}");
+    }
     let contents = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
     serde_yaml::from_str(&contents).map_err(|e| format!("{}: {}", path, e).into())
 }
@@ -480,7 +490,7 @@ impl SceneConfig {
                 arr_to_vec3(p.rl.unwrap_or([0.0, 0.0, 0.0])),
                 arr_to_vec3(p.rr.unwrap_or([6.0, 0.0, 0.0])),
             ),
-            "stereo" | _ => SpeakerLayout::stereo(
+            _ => SpeakerLayout::stereo(
                 arr_to_vec3(p.l.or(p.fl).unwrap_or([0.0, 4.0, 0.0])),
                 arr_to_vec3(p.r.or(p.fr).unwrap_or([6.0, 4.0, 0.0])),
             ),
@@ -574,15 +584,7 @@ impl SceneConfig {
         .to_string()
     }
 
-    fn build_sources(
-        &self,
-    ) -> Result<
-        (
-            Vec<Box<dyn atrium_core::source::SoundSource>>,
-            Vec<SourceMeta>,
-        ),
-        Box<dyn std::error::Error>,
-    > {
+    fn build_sources(&self) -> Result<BuildSourcesResult, Box<dyn std::error::Error>> {
         // Load all source definitions first
         let defs: Vec<SourceDef> = self
             .sources

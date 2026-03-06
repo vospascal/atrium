@@ -79,8 +79,8 @@ impl FdnReverbStage {
 
     fn compute_delays(&mut self, sample_rate: f32) {
         let scale = sample_rate / BASE_SAMPLE_RATE;
-        for i in 0..NUM_LINES {
-            let scaled = ((BASE_DELAYS[i] as f32) * scale) as usize;
+        for (i, &base_delay) in BASE_DELAYS.iter().enumerate() {
+            let scaled = ((base_delay as f32) * scale) as usize;
             self.delays[i] = scaled.clamp(1, BUF_SIZE - 1);
         }
         self.pre_delay_samples =
@@ -146,6 +146,7 @@ impl FdnReverbStage {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     #[inline(always)]
     fn process_fdn_sample(&mut self, mono_in: f32, out_channels: usize) -> [f32; MAX_OUT] {
         let mut output = [0.0f32; MAX_OUT];
@@ -160,11 +161,11 @@ impl FdnReverbStage {
             taps[i] = self.damping[i].process(taps[i]);
         }
 
-        let ch_count = out_channels.max(1).min(MAX_OUT);
+        let ch_count = out_channels.clamp(1, MAX_OUT);
         for i in 0..NUM_LINES {
             output[i % ch_count] += taps[i];
         }
-        let lines_per_ch = ((NUM_LINES + ch_count - 1) / ch_count) as f32;
+        let lines_per_ch = NUM_LINES.div_ceil(ch_count) as f32;
         for ch in 0..ch_count {
             output[ch] /= lines_per_ch;
         }

@@ -9,7 +9,7 @@
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
 use crate::pipeline::path_stage::{PathContext, PathStage};
-use crate::pipeline::renderer::Renderer;
+use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// Factory function type for creating PathStage instances.
@@ -48,10 +48,7 @@ impl Renderer for WorldLockedRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         _src_out: &SourceOutput,
-        buffer: &mut [f32],
-        channels: usize,
-        num_frames: usize,
-        sample_rate: f32,
+        out: &mut OutputBuffer,
     ) {
         let layout = ctx.layout;
 
@@ -71,7 +68,7 @@ impl Renderer for WorldLockedRenderer {
                     ground: ctx.ground,
                     room_min: ctx.room_min,
                     room_max: ctx.room_max,
-                    sample_rate,
+                    sample_rate: out.sample_rate,
                 };
 
                 let mut combined_gain = 1.0f32;
@@ -90,12 +87,12 @@ impl Renderer for WorldLockedRenderer {
         }
 
         // 2. Per-sample rendering
-        let inv_frames = 1.0 / num_frames as f32;
+        let inv_frames = 1.0 / out.num_frames as f32;
         let prev = &self.prev_gains[source_idx];
 
-        for frame in 0..num_frames {
+        for frame in 0..out.num_frames {
             let t = frame as f32 * inv_frames;
-            let raw = source.next_sample(sample_rate);
+            let raw = source.next_sample(out.sample_rate);
 
             // Source-level DSP (envelopes, source EQ)
             let mut sample = raw;
@@ -125,7 +122,7 @@ impl Renderer for WorldLockedRenderer {
 
                     // Broadband gain (cached) × gain ramp
                     let gain = prev[ch] + (path_gains[ch] - prev[ch]) * t;
-                    buffer[frame * channels + ch] += spk_sample * gain;
+                    out.buffer[frame * out.channels + ch] += spk_sample * gain;
                 }
             }
         }

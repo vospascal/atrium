@@ -124,7 +124,7 @@ impl RainSourceV2 {
     fn write_impact(&mut self, drop_radius_mm: f32, gain: f32, sample_rate: f32) {
         // Duration scales with drop size: 3ms (tiny) to 8ms (large)
         let dur = 0.003 + 0.0017 * drop_radius_mm.min(3.0);
-        let len = ((dur * sample_rate) as usize).max(4).min(RING_SIZE / 2);
+        let len = ((dur * sample_rate) as usize).clamp(4, RING_SIZE / 2);
         let attack_samples = (0.0008 * sample_rate).max(1.0); // 0.8ms rise — just enough to avoid click
         let decay_rate = 1.0 / (dur * 0.4);
 
@@ -209,6 +209,7 @@ impl RainSourceV2 {
     ///   - Small drops (<1.2mm):  4-10 kHz (gentle sparkle)
     ///   - Medium drops (1.2-2mm): usually no bubble
     ///   - Large drops (>2mm):    1-5 kHz  (warm "plink")
+    ///
     /// Bubble probability and frequency scale with intensity.
     ///
     /// Real data shows:
@@ -274,12 +275,10 @@ impl RainSourceV2 {
             } else {
                 2.4 + self.rng.next_f32() * 1.2
             }
+        } else if r < 0.3 {
+            1.2 + self.rng.next_f32() * 0.6
         } else {
-            if r < 0.3 {
-                1.2 + self.rng.next_f32() * 0.6
-            } else {
-                2.0 + self.rng.next_f32() * 1.5
-            }
+            2.0 + self.rng.next_f32() * 1.5
         }
     }
 }
@@ -299,7 +298,7 @@ impl SoundSource for RainSourceV2 {
         let drip_rate = self.drip_rate * drop_factor;
 
         // 1. Subtle low-frequency bed (distant aggregate rain body)
-        let bed = self.bed_gain * intensity * self.brown.next();
+        let bed = self.bed_gain * intensity * self.brown.next_sample();
 
         // 2. Csound-inspired texture: noise × pink × pink
         // White noise modulated by two pink noise sources creates organic
@@ -307,8 +306,8 @@ impl SoundSource for RainSourceV2 {
         // Scaled by intensity² so light rain stays sparse/transparent
         // while heavy rain gets the dense "wash" between drops.
         let white = self.texture_rng.next_bipolar();
-        let mod1 = self.pink_mod1.next().abs(); // rectify: 0..~0.8
-        let mod2 = self.pink_mod2.next().abs();
+        let mod1 = self.pink_mod1.next_sample().abs(); // rectify: 0..~0.8
+        let mod2 = self.pink_mod2.next_sample().abs();
         let texture_raw = white * mod1 * mod2;
         // LP cutoff inverted like impacts: light = warm-bright (3.5kHz), heavy = warm (1.5kHz)
         let tex_cutoff = 3500.0 - 2000.0 * intensity;

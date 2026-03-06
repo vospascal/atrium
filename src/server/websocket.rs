@@ -23,6 +23,15 @@ pub struct TelemetryBroadcast {
     generation: AtomicU64,
 }
 
+impl Default for TelemetryBroadcast {
+    fn default() -> Self {
+        Self {
+            json: Mutex::new(String::new()),
+            generation: AtomicU64::new(0),
+        }
+    }
+}
+
 impl TelemetryBroadcast {
     pub fn new() -> Self {
         Self {
@@ -137,10 +146,13 @@ fn handle_websocket(
                     Ok(client_msg) => {
                         let resend = client_msg.needs_scene_resend();
                         let cmd = client_msg.into_command();
-                        if let Ok(mut prod) = producer.lock() {
-                            if prod.push(cmd).is_err() {
-                                eprintln!("command queue full, dropping command");
+                        match producer.lock() {
+                            Ok(mut prod) => {
+                                if prod.push(cmd).is_err() {
+                                    eprintln!("command queue full, dropping command");
+                                }
                             }
+                            Err(e) => eprintln!("command producer mutex poisoned: {e}"),
                         }
                         if resend && !initial_state.is_empty() {
                             let _ = ws.send(Message::Text(initial_state.into()));
@@ -162,7 +174,7 @@ fn handle_websocket(
             {
                 // Read timeout — send telemetry if a new frame is available
                 if let Some(json) = broadcast.latest(&mut last_gen) {
-                    if ws.send(Message::Text(json.into())).is_err() {
+                    if ws.send(Message::Text(json)).is_err() {
                         break;
                     }
                 }

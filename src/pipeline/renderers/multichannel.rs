@@ -6,10 +6,11 @@
 
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
-use crate::pipeline::renderer::Renderer;
+use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// Multichannel gain-ramp renderer for VBAP and Stereo modes.
+#[derive(Default)]
 pub struct MultichannelRenderer {
     /// Previous per-channel gains per source. Indexed [source_idx][channel].
     prev_gains: Vec<[f32; MAX_CHANNELS]>,
@@ -17,13 +18,12 @@ pub struct MultichannelRenderer {
 
 impl MultichannelRenderer {
     pub fn new() -> Self {
-        Self {
-            prev_gains: Vec::new(),
-        }
+        Self::default()
     }
 }
 
 impl Renderer for MultichannelRenderer {
+    #[allow(clippy::needless_range_loop)]
     fn render_source(
         &mut self,
         source_idx: usize,
@@ -31,18 +31,15 @@ impl Renderer for MultichannelRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         _ctx: &SourceContext,
         src_out: &SourceOutput,
-        buffer: &mut [f32],
-        channels: usize,
-        num_frames: usize,
-        sample_rate: f32,
+        out: &mut OutputBuffer,
     ) {
-        let inv_frames = 1.0 / num_frames as f32;
+        let inv_frames = 1.0 / out.num_frames as f32;
         let prev = &self.prev_gains[source_idx];
         let target = &src_out.channel_gains;
 
-        for frame in 0..num_frames {
+        for frame in 0..out.num_frames {
             let t = frame as f32 * inv_frames;
-            let raw = source.next_sample(sample_rate);
+            let raw = source.next_sample(out.sample_rate);
 
             // Per-sample source stage DSP (air absorption filter, reflections)
             let mut sample = raw;
@@ -53,10 +50,10 @@ impl Renderer for MultichannelRenderer {
             // Apply ground effect and other broadband modifiers
             sample *= src_out.gain_modifier;
 
-            let base = frame * channels;
-            for ch in 0..channels {
+            let base = frame * out.channels;
+            for ch in 0..out.channels {
                 let gain = prev[ch] + (target.gains[ch] - prev[ch]) * t;
-                buffer[base + ch] += sample * gain;
+                out.buffer[base + ch] += sample * gain;
             }
         }
 

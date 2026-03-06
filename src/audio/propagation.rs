@@ -231,7 +231,7 @@ fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32) -> f32 {
         if distance > 0.1 && height > 0.01 {
             // Path difference for ground reflection: δ ≈ 2h²/d (far-field approx)
             let path_diff = 2.0 * height * height / distance;
-            let lambda = 343.0 / freq_hz;
+            let lambda = super::atmosphere::SPEED_OF_SOUND / freq_hz;
             let phase_ratio = path_diff / lambda;
 
             // Gaussian peak centered at phase_ratio = 0.5 (half-wavelength)
@@ -357,10 +357,7 @@ pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
     /// Real-world single barriers rarely exceed 20-25 dB due to flanking.
     const MAX_BARRIER_DB: f32 = 25.0;
 
-    /// Speed of sound at 20°C, standard conditions.
-    const C: f32 = 343.0;
-
-    let wavelength = C / freq_hz.max(1.0);
+    let wavelength = super::atmosphere::SPEED_OF_SOUND / freq_hz.max(1.0);
 
     // Path lengths
     let d_sr = barrier.source.distance_to(barrier.receiver); // direct
@@ -396,8 +393,7 @@ pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
 ///   N = (2/λ) · δ
 ///   δ = (d_source→barrier + d_barrier→receiver) - d_source→receiver
 pub fn fresnel_number(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
-    const C: f32 = 343.0;
-    let wavelength = C / freq_hz.max(1.0);
+    let wavelength = super::atmosphere::SPEED_OF_SOUND / freq_hz.max(1.0);
 
     let d_sr = barrier.source.distance_to(barrier.receiver);
     let d_sb = barrier.source.distance_to(barrier.barrier_top);

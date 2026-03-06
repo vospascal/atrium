@@ -16,12 +16,15 @@ impl SourceStage for VbapGainStage {
             rolloff: ctx.distance_model.rolloff,
             model: ctx.distance_model.model,
         };
+        let source = atrium_core::speaker::SourceSpatial {
+            position: ctx.source_pos,
+            orientation: ctx.source_orientation,
+            directivity: ctx.source_directivity,
+        };
         output.channel_gains = ctx.layout.compute_gains_with_spread(
             atrium_core::speaker::RenderMode::Vbap,
             ctx.listener,
-            ctx.source_pos,
-            ctx.source_orientation,
-            ctx.source_directivity,
+            &source,
             &dist_params,
             ctx.source_spread,
         );

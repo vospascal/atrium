@@ -61,8 +61,8 @@ impl Dashboard {
         // Determine current render mode from first source (all share the same mode)
         let current_mode = sources
             .first()
-            .map(|s| s.render_mode.clone())
-            .unwrap_or_else(|| self.info.render_mode.clone());
+            .map(|s| s.render_mode.as_str())
+            .unwrap_or(self.info.render_mode.as_str());
 
         // Header line
         Self::clear_line(&mut out);
@@ -75,7 +75,7 @@ impl Dashboard {
         lines += 1;
 
         // Pipeline box
-        let stages = self.pipeline_stages(&current_mode);
+        let stages = self.pipeline_stages(current_mode);
         let max_len = stages.iter().map(|s| s.len()).max().unwrap_or(0);
         let box_width = max_len + 2; // 1 padding each side
 
@@ -94,13 +94,14 @@ impl Dashboard {
             if i < stages.len() - 1 {
                 Self::clear_line(&mut out);
                 let pad_left = max_len / 2;
+                let rest = max_len.saturating_sub(pad_left + 1);
                 writeln!(
                     out,
                     " \u{2502} {:>pad$}\u{25BC}{:<rest$} \u{2502}",
                     "",
                     "",
                     pad = pad_left,
-                    rest = max_len - pad_left - 1,
+                    rest = rest,
                 )
                 .ok();
                 lines += 1;

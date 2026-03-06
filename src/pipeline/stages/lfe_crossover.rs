@@ -73,13 +73,14 @@ impl Biquad {
 ///
 /// Only active when the layout has an LFE channel. Filters the LFE channel
 /// in-place with a 120 Hz Butterworth lowpass. No-op for layouts without LFE.
+#[derive(Default)]
 pub struct LfeCrossoverStage {
     filter: Option<Biquad>,
 }
 
 impl LfeCrossoverStage {
     pub fn new() -> Self {
-        Self { filter: None }
+        Self::default()
     }
 }
 

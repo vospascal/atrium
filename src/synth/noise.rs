@@ -74,11 +74,11 @@ impl PinkNoise {
     }
 
     #[inline(always)]
-    pub fn next(&mut self) -> f32 {
+    pub fn next_sample(&mut self) -> f32 {
         let w = self.rng.next_bipolar();
         self.b0 = 0.997 * self.b0 + 0.02109238 * w;
         self.b1 = 0.985 * self.b1 + 0.07113478 * w;
-        self.b2 = 0.95 * self.b2 + 0.68873558 * w;
+        self.b2 = 0.95 * self.b2 + 0.688_735_6 * w;
         self.b0 + self.b1 + self.b2
     }
 }
@@ -101,7 +101,7 @@ impl BrownNoise {
     }
 
     #[inline(always)]
-    pub fn next(&mut self) -> f32 {
+    pub fn next_sample(&mut self) -> f32 {
         self.val += self.rng.next_bipolar() * 0.01;
         self.val *= 0.998; // leak prevents DC drift
         self.val
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn pink_noise_nonzero() {
         let mut pink = PinkNoise::new(42);
-        let sum: f32 = (0..1000).map(|_| pink.next().abs()).sum();
+        let sum: f32 = (0..1000).map(|_| pink.next_sample().abs()).sum();
         assert!(sum > 0.0, "pink noise is silent");
     }
 
@@ -194,7 +194,7 @@ mod tests {
     fn brown_noise_bounded() {
         let mut brown = BrownNoise::new(42);
         for _ in 0..100_000 {
-            let v = brown.next();
+            let v = brown.next_sample();
             assert!(v.abs() < 1.0, "brown noise unbounded: {v}");
         }
     }

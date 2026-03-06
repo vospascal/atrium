@@ -10,7 +10,7 @@ use atrium_core::listener::Listener;
 use atrium_core::speaker::SpeakerLayout;
 use atrium_core::types::Vec3;
 
-use crate::pipeline::renderer::Renderer;
+use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 const BLOCK_SIZE: usize = 128;
@@ -92,6 +92,8 @@ impl BinauralRenderer {
 }
 
 /// Convert source position to SOFA listener-relative coordinates.
+/// NOTE: Only yaw rotation is applied. Pitch and roll are ignored — the
+/// atrium installation assumes a horizontal listener plane.
 fn to_sofa_coords(source_pos: Vec3, listener: &Listener) -> (f32, f32, f32) {
     let d = source_pos - listener.position;
     let yaw = listener.yaw;
@@ -108,10 +110,7 @@ impl Renderer for BinauralRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         src_out: &SourceOutput,
-        buffer: &mut [f32],
-        channels: usize,
-        num_frames: usize,
-        sample_rate: f32,
+        out: &mut OutputBuffer,
     ) {
         let sofa = match &self.sofa {
             Some(s) => s,
@@ -124,10 +123,10 @@ impl Renderer for BinauralRenderer {
 
         let target_gain = src_out.distance_gain * src_out.gain_modifier;
         let prev_gain = self.sources[source_idx].prev_gain;
-        let inv_frames = 1.0 / num_frames as f32;
+        let inv_frames = 1.0 / out.num_frames as f32;
 
         // Update HRTF filter periodically
-        let should_update = self.update_counter % FILTER_UPDATE_INTERVAL == 0;
+        let should_update = self.update_counter.is_multiple_of(FILTER_UPDATE_INTERVAL);
         if should_update {
             let (sx, sy, sz) = to_sofa_coords(ctx.source_pos, ctx.listener);
             if let Some(ref mut filter) = self.filter {
@@ -143,8 +142,8 @@ impl Renderer for BinauralRenderer {
 
         // Process in blocks of BLOCK_SIZE for FFT convolution
         let mut frame = 0;
-        while frame < num_frames {
-            let block_len = (num_frames - frame).min(BLOCK_SIZE);
+        while frame < out.num_frames {
+            let block_len = (out.num_frames - frame).min(BLOCK_SIZE);
 
             if self.mono_buf.len() < block_len {
                 self.mono_buf.resize(block_len, 0.0);
@@ -156,7 +155,7 @@ impl Renderer for BinauralRenderer {
             for i in 0..block_len {
                 let t = (frame + i) as f32 * inv_frames;
                 let gain = prev_gain + (target_gain - prev_gain) * t;
-                let raw = source.next_sample(sample_rate);
+                let raw = source.next_sample(out.sample_rate);
 
                 let mut sample = raw;
                 for stage in source_stages.iter_mut() {
@@ -181,10 +180,10 @@ impl Renderer for BinauralRenderer {
 
             // Accumulate into interleaved stereo output
             for i in 0..block_len {
-                let base = (frame + i) * channels;
-                buffer[base] += self.left_buf[i];
-                if channels > 1 {
-                    buffer[base + 1] += self.right_buf[i];
+                let base = (frame + i) * out.channels;
+                out.buffer[base] += self.left_buf[i];
+                if out.channels > 1 {
+                    out.buffer[base + 1] += self.right_buf[i];
                 }
             }
 

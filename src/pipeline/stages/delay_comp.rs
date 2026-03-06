@@ -16,7 +16,7 @@ use atrium_core::speaker::MAX_CHANNELS;
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
 
-const SPEED_OF_SOUND: f32 = 343.0;
+use crate::audio::atmosphere::SPEED_OF_SOUND;
 
 /// Delay compensation mode.
 #[derive(Clone, Copy, Debug)]
@@ -63,10 +63,7 @@ impl DelayCompStage {
         let layout = ctx.layout;
         let target_pos = match self.mode {
             // For static: use room center as reference point
-            Mode::Static => {
-                let mid = (ctx.room_min + ctx.room_max) * 0.5;
-                mid
-            }
+            Mode::Static => (ctx.room_min + ctx.room_max) * 0.5,
             // For listener-relative: use actual listener position
             Mode::ListenerRelative => ctx.listener.position,
         };

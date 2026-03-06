@@ -6,7 +6,7 @@ use crate::engine::commands::Command;
 use crate::engine::memprof::{MemProfiler, MemStage};
 use crate::engine::telemetry::{compute_telemetry, TelemetryFrame};
 use crate::pipeline::mix_stage::MixContext;
-use crate::pipeline::{render_pipeline, RenderPipeline};
+use crate::pipeline::{render_pipeline, RenderParams, RenderPipeline};
 use crate::profile_span;
 use crate::world::room::Room;
 use crate::world::types::Vec3;
@@ -191,21 +191,19 @@ impl AudioScene {
             let (room_min, room_max) = self.room.bounds();
             let pipeline = &mut self.pipelines[self.active_pipeline.index()];
             let _s = profile_span!("pipeline", mode = ?self.active_pipeline).entered();
-            render_pipeline(
-                pipeline,
-                &mut self.sources,
-                &self.listener,
-                output,
+            let params = RenderParams {
+                listener: &self.listener,
                 channels,
-                self.sample_rate,
-                self.master_gain,
-                &self.distance_model,
-                &self.speaker_layout,
-                &self.atmosphere,
-                &self.ground,
+                sample_rate: self.sample_rate,
+                master_gain: self.master_gain,
+                distance_model: &self.distance_model,
+                layout: &self.speaker_layout,
+                atmosphere: &self.atmosphere,
+                ground: &self.ground,
                 room_min,
                 room_max,
-            );
+            };
+            render_pipeline(pipeline, &mut self.sources, &params, output);
         }
         #[cfg(feature = "memprof")]
         self.memprof.record_stage(MemStage::Mix);

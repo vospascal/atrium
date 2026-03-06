@@ -131,6 +131,7 @@ pub fn compute_telemetry(
 /// Serialize a telemetry frame to JSON for WebSocket broadcast.
 /// Hand-rolled to avoid serde overhead in the broadcast path.
 pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
+    use std::fmt::Write;
     let mut json = String::with_capacity(256);
     json.push_str(r#"{"type":"telemetry","sources":["#);
 
@@ -139,13 +140,24 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
         if i > 0 {
             json.push(',');
         }
-        json.push_str(&format!(
+        let _ = write!(
+            json,
             r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{}}}"#,
-            s.x, s.y, s.z, s.distance,
-            s.gain_dist, s.gain_emit, s.gain_hear, s.gain_total,
-            if s.gain_db.is_finite() { s.gain_db } else { -999.0 },
+            s.x,
+            s.y,
+            s.z,
+            s.distance,
+            s.gain_dist,
+            s.gain_emit,
+            s.gain_hear,
+            s.gain_total,
+            if s.gain_db.is_finite() {
+                s.gain_db
+            } else {
+                -999.0
+            },
             s.is_muted,
-        ));
+        );
     }
 
     json.push_str("]}");

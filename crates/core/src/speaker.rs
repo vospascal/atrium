@@ -22,7 +22,7 @@ use crate::types::Vec3;
 pub const MAX_CHANNELS: usize = 8;
 
 /// A physical speaker with a position in the virtual atrium.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Speaker {
     /// World position in the atrium (meters).
     pub position: Vec3,
@@ -66,6 +66,14 @@ impl Default for DistanceParams {
     }
 }
 
+/// Source spatial properties for gain computation.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceSpatial<'a> {
+    pub position: Vec3,
+    pub orientation: Vec3,
+    pub directivity: &'a DirectivityPattern,
+}
+
 /// Rendering mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RenderMode {
@@ -100,7 +108,7 @@ impl RenderMode {
 }
 
 /// Multichannel speaker configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SpeakerLayout {
     /// Stereo speakers (excludes LFE).
     speakers: [Speaker; MAX_CHANNELS],
@@ -130,12 +138,12 @@ impl SpeakerLayout {
         let count = speakers.len().min(MAX_CHANNELS);
         arr[..count].copy_from_slice(&speakers[..count]);
         // Validate channel indices are within bounds
-        for i in 0..count {
+        for (i, speaker) in arr.iter().enumerate().take(count) {
             assert!(
-                arr[i].channel < MAX_CHANNELS,
+                speaker.channel < MAX_CHANNELS,
                 "speaker {} channel {} exceeds MAX_CHANNELS ({})",
                 i,
-                arr[i].channel,
+                speaker.channel,
                 MAX_CHANNELS,
             );
         }
@@ -295,11 +303,12 @@ impl SpeakerLayout {
     pub fn compute_gains_vbap(
         &self,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
     ) -> ChannelGains {
+        let source_pos = source.position;
+        let source_orientation = source.orientation;
+        let source_directivity = source.directivity;
         let mut gains = ChannelGains::silent(self.total_channels);
 
         if self.count == 0 {
@@ -320,8 +329,8 @@ impl SpeakerLayout {
 
         // Compute speaker azimuths relative to listener and sort by angle
         let mut speaker_angles: [(f32, usize); MAX_CHANNELS] = [(0.0, 0); MAX_CHANNELS];
-        for i in 0..self.count {
-            let sp = self.speakers[i].position - listener.position;
+        for (i, speaker) in self.speakers.iter().enumerate().take(self.count) {
+            let sp = speaker.position - listener.position;
             let cos_y = listener.yaw.cos();
             let sin_y = listener.yaw.sin();
             let local_x = sp.x * cos_y + sp.y * sin_y;
@@ -383,11 +392,11 @@ impl SpeakerLayout {
         if !found {
             // Fallback: assign to nearest speaker
             let mut min_diff = f32::MAX;
-            for i in 0..self.count {
-                let diff = angle_diff(source_azimuth, speaker_angles[i].0).abs();
+            for &(angle, idx) in speaker_angles.iter().take(self.count) {
+                let diff = angle_diff(source_azimuth, angle).abs();
                 if diff < min_diff {
                     min_diff = diff;
-                    best_a = speaker_angles[i].1;
+                    best_a = idx;
                     best_ga = 1.0;
                     best_gb = 0.0;
                 }
@@ -464,11 +473,12 @@ impl SpeakerLayout {
     pub fn compute_gains_stereo(
         &self,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
     ) -> ChannelGains {
+        let source_pos = source.position;
+        let source_orientation = source.orientation;
+        let source_directivity = source.directivity;
         let mut gains = ChannelGains::silent(self.total_channels);
 
         // Source azimuth in listener's local frame
@@ -521,11 +531,12 @@ impl SpeakerLayout {
     pub fn compute_gains_mono(
         &self,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
     ) -> ChannelGains {
+        let source_pos = source.position;
+        let source_orientation = source.orientation;
+        let source_directivity = source.directivity;
         let mut gains = ChannelGains::silent(self.total_channels);
 
         let dist = distance_gain_at_model(
@@ -567,18 +578,10 @@ impl SpeakerLayout {
     pub fn compute_gains_quad(
         &self,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
     ) -> ChannelGains {
-        let mut gains = self.compute_gains_vbap(
-            listener,
-            source_pos,
-            source_orientation,
-            source_directivity,
-            distance,
-        );
+        let mut gains = self.compute_gains_vbap(listener, source, distance);
 
         // Zero out center channel (ch 2 in ITU 5.1) and redistribute to L/R
         if self.total_channels > 2 {
@@ -610,20 +613,12 @@ impl SpeakerLayout {
     pub fn compute_gains_mdap(
         &self,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
         spread: f32,
     ) -> ChannelGains {
         if spread <= 0.0 || self.count < 2 {
-            return self.compute_gains_vbap(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            );
+            return self.compute_gains_vbap(listener, source, distance);
         }
 
         // Fan angle: spread=1.0 → π radians (180° total arc), spread=0.5 → 90°
@@ -633,16 +628,10 @@ impl SpeakerLayout {
         let mut acc = ChannelGains::silent(self.total_channels);
 
         // Source direction from listener
-        let d = source_pos - listener.position;
+        let d = source.position - listener.position;
         let base_dist = d.length();
         if base_dist < 1e-6 {
-            return self.compute_gains_vbap(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            );
+            return self.compute_gains_vbap(listener, source, distance);
         }
 
         for i in 0..N_PHANTOM {
@@ -656,16 +645,14 @@ impl SpeakerLayout {
             let phantom_pos = Vec3::new(
                 listener.position.x + d.x * cos_a - d.y * sin_a,
                 listener.position.y + d.x * sin_a + d.y * cos_a,
-                source_pos.z,
+                source.position.z,
             );
 
-            let phantom_gains = self.compute_gains_vbap(
-                listener,
-                phantom_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            );
+            let phantom = SourceSpatial {
+                position: phantom_pos,
+                ..*source
+            };
+            let phantom_gains = self.compute_gains_vbap(listener, &phantom, distance);
 
             for ch in 0..self.total_channels {
                 acc.gains[ch] += phantom_gains.gains[ch];
@@ -682,13 +669,7 @@ impl SpeakerLayout {
 
         // Re-normalize so total power matches a single VBAP evaluation
         if power > 1e-12 {
-            let ref_gains = self.compute_gains_vbap(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            );
+            let ref_gains = self.compute_gains_vbap(listener, source, distance);
             let ref_power: f32 = ref_gains.gains[..self.total_channels]
                 .iter()
                 .map(|g| g * g)
@@ -707,33 +688,15 @@ impl SpeakerLayout {
         &self,
         mode: RenderMode,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Binaural => self.compute_gains_stereo(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            ),
-            RenderMode::Vbap => self.compute_gains_vbap(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            ),
-            RenderMode::Stereo => self.compute_gains_stereo(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            ),
+            RenderMode::WorldLocked | RenderMode::Binaural => {
+                self.compute_gains_stereo(listener, source, distance)
+            }
+            RenderMode::Vbap => self.compute_gains_vbap(listener, source, distance),
+            RenderMode::Stereo => self.compute_gains_stereo(listener, source, distance),
         }
     }
 
@@ -743,35 +706,16 @@ impl SpeakerLayout {
         &self,
         mode: RenderMode,
         listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
+        source: &SourceSpatial,
         distance: &DistanceParams,
         spread: f32,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Binaural => self.compute_gains_stereo(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            ),
-            RenderMode::Vbap => self.compute_gains_mdap(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-                spread,
-            ),
-            RenderMode::Stereo => self.compute_gains_stereo(
-                listener,
-                source_pos,
-                source_orientation,
-                source_directivity,
-                distance,
-            ),
+            RenderMode::WorldLocked | RenderMode::Binaural => {
+                self.compute_gains_stereo(listener, source, distance)
+            }
+            RenderMode::Vbap => self.compute_gains_mdap(listener, source, distance, spread),
+            RenderMode::Stereo => self.compute_gains_stereo(listener, source, distance),
         }
     }
 }
@@ -787,6 +731,15 @@ fn angle_diff(a: f32, b: f32) -> f32 {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    fn omni(pos: Vec3, dir: Vec3) -> SourceSpatial<'static> {
+        static OMNI: DirectivityPattern = DirectivityPattern::Omni;
+        SourceSpatial {
+            position: pos,
+            orientation: dir,
+            directivity: &OMNI,
+        }
+    }
 
     fn default_distance() -> DistanceParams {
         DistanceParams {
@@ -809,9 +762,7 @@ mod tests {
         // Source to the listener's left (+Y)
         let gains = layout.compute_gains_stereo(
             &listener,
-            Vec3::new(3.0, 4.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(3.0, 4.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
             &dist,
         );
 
@@ -832,9 +783,7 @@ mod tests {
         // Source directly ahead of listener (+X)
         let gains = layout.compute_gains_stereo(
             &listener,
-            Vec3::new(5.0, 2.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(5.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
             &dist,
         );
 
@@ -852,23 +801,12 @@ mod tests {
         let dist = default_distance();
         // Source at (5, 2). Listener facing +X → source is ahead (centered).
         let listener_fwd = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        let gains_fwd = layout.compute_gains_stereo(
-            &listener_fwd,
-            Vec3::new(5.0, 2.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            &DirectivityPattern::Omni,
-            &dist,
-        );
+        let src = omni(Vec3::new(5.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+        let gains_fwd = layout.compute_gains_stereo(&listener_fwd, &src, &dist);
 
         // Same source, but listener rotated to face +Y → source is now to the RIGHT
         let listener_rotated = Listener::new(Vec3::new(3.0, 2.0, 0.0), PI / 2.0);
-        let gains_rot = layout.compute_gains_stereo(
-            &listener_rotated,
-            Vec3::new(5.0, 2.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            &DirectivityPattern::Omni,
-            &dist,
-        );
+        let gains_rot = layout.compute_gains_stereo(&listener_rotated, &src, &dist);
 
         // When facing forward, should be centered
         assert!(
@@ -923,9 +861,7 @@ mod tests {
         // Source directly ahead of listener
         let gains = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(3.0, 5.0, 0.0), // ahead
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(3.0, 5.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -954,16 +890,14 @@ mod tests {
 
         for angle_deg in (0..360).step_by(30) {
             let angle = (angle_deg as f32).to_radians();
-            let source = Vec3::new(
+            let source_pos = Vec3::new(
                 listener.position.x + r * angle.cos(),
                 listener.position.y + r * angle.sin(),
                 0.0,
             );
             let gains = layout.compute_gains_vbap(
                 &listener,
-                source,
-                Vec3::new(1.0, 0.0, 0.0),
-                &DirectivityPattern::Omni,
+                &omni(source_pos, Vec3::new(1.0, 0.0, 0.0)),
                 &dist,
             );
 
@@ -971,13 +905,13 @@ mod tests {
             // Power = (distance_atten * directivity * hearing_cone)²
             let expected_attenuation = distance_gain_at_model(
                 listener.position,
-                source,
+                source_pos,
                 dist.ref_distance,
                 dist.max_distance,
                 dist.rolloff,
                 dist.model,
             );
-            let hearing = listener.hearing_gain(source);
+            let hearing = listener.hearing_gain(source_pos);
             let expected_power =
                 (expected_attenuation * hearing) * (expected_attenuation * hearing);
             assert!(
@@ -998,16 +932,12 @@ mod tests {
 
         let gains_ahead = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(3.0, 4.0, 0.0), // ahead (+Y)
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(3.0, 4.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
         let gains_behind = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(3.0, 0.0, 0.0), // behind (-Y)
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(3.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1027,9 +957,7 @@ mod tests {
 
         let gains = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(4.0, 3.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(4.0, 3.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
             &dist,
         );
 
@@ -1043,25 +971,10 @@ mod tests {
         let layout = vbap_5_1_layout();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), PI / 2.0); // facing +Y
         let dist = default_distance();
-        let source = Vec3::new(3.0, 4.0, 0.0); // ahead
-        let dir = Vec3::new(0.0, 1.0, 0.0);
+        let src = omni(Vec3::new(3.0, 4.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
 
-        let point_gains = layout.compute_gains_mdap(
-            &listener,
-            source,
-            dir,
-            &DirectivityPattern::Omni,
-            &dist,
-            0.0,
-        );
-        let spread_gains = layout.compute_gains_mdap(
-            &listener,
-            source,
-            dir,
-            &DirectivityPattern::Omni,
-            &dist,
-            0.5,
-        );
+        let point_gains = layout.compute_gains_mdap(&listener, &src, &dist, 0.0);
+        let spread_gains = layout.compute_gains_mdap(&listener, &src, &dist, 0.5);
 
         // With spread, more speakers should have nonzero gain
         let point_active = point_gains.gains[..6]
@@ -1083,25 +996,10 @@ mod tests {
         let layout = vbap_5_1_layout();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), PI / 2.0);
         let dist = default_distance();
-        let source = Vec3::new(3.0, 4.0, 0.0);
-        let dir = Vec3::new(0.0, 1.0, 0.0);
+        let src = omni(Vec3::new(3.0, 4.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
 
-        let point_gains = layout.compute_gains_mdap(
-            &listener,
-            source,
-            dir,
-            &DirectivityPattern::Omni,
-            &dist,
-            0.0,
-        );
-        let spread_gains = layout.compute_gains_mdap(
-            &listener,
-            source,
-            dir,
-            &DirectivityPattern::Omni,
-            &dist,
-            0.5,
-        );
+        let point_gains = layout.compute_gains_mdap(&listener, &src, &dist, 0.0);
+        let spread_gains = layout.compute_gains_mdap(&listener, &src, &dist, 0.5);
 
         let point_power: f32 = point_gains.gains[..6].iter().map(|g| g * g).sum();
         let spread_power: f32 = spread_gains.gains[..6].iter().map(|g| g * g).sum();
@@ -1153,9 +1051,7 @@ mod tests {
         // Source to listener's LEFT: facing +Y, left is -X → (1, 3, 0)
         let gains = layout.compute_gains_stereo(
             &listener,
-            Vec3::new(1.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1176,9 +1072,7 @@ mod tests {
         // Source to listener's RIGHT: facing +Y, right is +X → (5, 3, 0)
         let gains = layout.compute_gains_stereo(
             &listener,
-            Vec3::new(5.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(5.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1201,9 +1095,7 @@ mod tests {
         // Source to listener's LEFT (forward-left): (1, 3, 0)
         let gains = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(1.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1224,9 +1116,7 @@ mod tests {
         // Source to listener's RIGHT (forward-right): (5, 3, 0)
         let gains = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(5.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(5.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1247,9 +1137,7 @@ mod tests {
         // Source rear-left: behind and to the left → (1, 1, 0)
         let gains = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(1.0, 1.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(1.0, 1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1270,9 +1158,7 @@ mod tests {
         // Source rear-right: behind and to the right → (5, 1, 0)
         let gains = layout.compute_gains_vbap(
             &listener,
-            Vec3::new(5.0, 1.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(5.0, 1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1295,9 +1181,7 @@ mod tests {
         // Source to listener's LEFT (-X direction): (1, 3, 0)
         let gains = layout.compute_gains_stereo(
             &listener,
-            Vec3::new(1.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1318,9 +1202,7 @@ mod tests {
         // Source to listener's RIGHT (+X direction): (5, 3, 0)
         let gains = layout.compute_gains_stereo(
             &listener,
-            Vec3::new(5.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(5.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1343,9 +1225,7 @@ mod tests {
         // Source to listener's LEFT: (1, 3, 0)
         let gains = layout.compute_gains_quad(
             &listener,
-            Vec3::new(1.0, 3.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            &DirectivityPattern::Omni,
+            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
             &dist,
         );
 
@@ -1367,9 +1247,7 @@ mod tests {
         // VBAP (distributes across all speaker pairs) clearly diverge.
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
         let dist = default_distance();
-        let source_pos = Vec3::new(1.0, 3.0, 0.0); // front-left of listener
-        let dir = Vec3::new(1.0, 0.0, 0.0);
-        let pat = DirectivityPattern::Omni;
+        let src = omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
 
         let layout = SpeakerLayout::surround_5_1(
             Vec3::new(0.0, 4.0, 0.0),
@@ -1379,16 +1257,8 @@ mod tests {
             Vec3::new(6.0, 0.0, 0.0),
         );
 
-        let mic_gains = layout.compute_gains(
-            RenderMode::WorldLocked,
-            &listener,
-            source_pos,
-            dir,
-            &pat,
-            &dist,
-        );
-        let vbap_gains =
-            layout.compute_gains(RenderMode::Vbap, &listener, source_pos, dir, &pat, &dist);
+        let mic_gains = layout.compute_gains(RenderMode::WorldLocked, &listener, &src, &dist);
+        let vbap_gains = layout.compute_gains(RenderMode::Vbap, &listener, &src, &dist);
 
         // WorldLocked only fills channels 0-1 (stereo), VBAP uses 5.1 speaker pairs.
         // Compare across all channels — they must differ.

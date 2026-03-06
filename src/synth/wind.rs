@@ -214,8 +214,8 @@ impl SoundSource for WindSource {
         }
 
         // Noise sources
-        let brown = self.brown.next();
-        let pink = self.pink.next();
+        let brown = self.brown.next_sample();
+        let pink = self.pink.next_sample();
 
         let sample = env * (rumble_level * brown + hiss_level * pink) + self.turb_gain * turb;
 

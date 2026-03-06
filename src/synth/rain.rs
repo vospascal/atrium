@@ -96,7 +96,7 @@ impl RainSource {
     /// Generate a Gaussian-windowed filtered noise burst into the scratch buffer.
     /// Returns the number of samples written.
     fn generate_burst(&mut self, dur_sec: f32, cut_hz: f32, sample_rate: f32) -> usize {
-        let len = ((dur_sec * sample_rate) as usize).max(8).min(MAX_BURST);
+        let len = ((dur_sec * sample_rate) as usize).clamp(8, MAX_BURST);
         let mid = len as f32 / 2.0;
         let sigma = len as f32 / 4.0; // wide envelope for smooth bursts
 
@@ -181,7 +181,7 @@ impl SoundSource for RainSource {
         let brown_gain = self.brown_gain * intensity;
 
         // 1. Background noise bed
-        let base = hiss_gain * self.pink.next() + brown_gain * self.brown.next();
+        let base = hiss_gain * self.pink.next_sample() + brown_gain * self.brown.next_sample();
 
         // 2. Read ring buffer with envelope smoothing
         let tail = self.ring[self.ring_idx];

@@ -16,13 +16,14 @@ impl SourceStage for StereoGainStage {
             rolloff: ctx.distance_model.rolloff,
             model: ctx.distance_model.model,
         };
-        output.channel_gains = ctx.layout.compute_gains_stereo(
-            ctx.listener,
-            ctx.source_pos,
-            ctx.source_orientation,
-            ctx.source_directivity,
-            &dist_params,
-        );
+        let source = atrium_core::speaker::SourceSpatial {
+            position: ctx.source_pos,
+            orientation: ctx.source_orientation,
+            directivity: ctx.source_directivity,
+        };
+        output.channel_gains = ctx
+            .layout
+            .compute_gains_stereo(ctx.listener, &source, &dist_params);
         ctx.layout.apply_mask(&mut output.channel_gains);
     }
 

@@ -11,7 +11,7 @@ use atrium_core::types::Vec3;
 const MAX_TAPS: usize = 6;
 const BUFFER_SIZE: usize = 4096;
 const BUFFER_MASK: usize = BUFFER_SIZE - 1;
-const SPEED_OF_SOUND: f32 = 343.0;
+use crate::audio::atmosphere::SPEED_OF_SOUND;
 
 #[derive(Clone, Copy)]
 struct ReflectionTap {

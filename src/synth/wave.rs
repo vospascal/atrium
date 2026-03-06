@@ -112,8 +112,8 @@ impl SoundSource for WaveSource {
         }
 
         // 3. Noise sources
-        let roar = self.brown.next();
-        let hiss = self.pink.next();
+        let roar = self.brown.next_sample();
+        let hiss = self.pink.next_sample();
 
         // 4. Mix: noise bed modulated by swell + crash layer
         let sample = (self.roar_level * roar * swell

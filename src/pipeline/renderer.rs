@@ -14,6 +14,14 @@ use atrium_core::speaker::SpeakerLayout;
 
 use super::source_stage::{SourceContext, SourceOutput, SourceStage};
 
+/// Interleaved output buffer with format metadata.
+pub struct OutputBuffer<'a> {
+    pub buffer: &'a mut [f32],
+    pub channels: usize,
+    pub num_frames: usize,
+    pub sample_rate: f32,
+}
+
 /// Renders one source's samples into the output buffer.
 ///
 /// Called after all SourceStages have run for this source.
@@ -25,7 +33,7 @@ pub trait Renderer: Send {
     /// - `source_stages`: per-source stages for `process_sample()` in the inner loop
     /// - `ctx`: full source geometry (position, orientation, directivity)
     /// - `src_out`: gains/modifiers computed by SourceStages
-    /// - `buffer`: interleaved output buffer to accumulate into
+    /// - `out`: interleaved output buffer to accumulate into
     fn render_source(
         &mut self,
         source_idx: usize,
@@ -33,10 +41,7 @@ pub trait Renderer: Send {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         src_out: &SourceOutput,
-        buffer: &mut [f32],
-        channels: usize,
-        num_frames: usize,
-        sample_rate: f32,
+        out: &mut OutputBuffer,
     );
 
     /// Human-readable name for profiling/debugging.
