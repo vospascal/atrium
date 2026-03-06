@@ -30,6 +30,7 @@ pub trait AudioOutput {
 pub trait StreamHandle {
     fn sample_rate(&self) -> u32;
     fn channels(&self) -> u16;
+    fn device_name(&self) -> &str;
 }
 
 /// Decide how many output channels to open.

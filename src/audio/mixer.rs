@@ -1,9 +1,12 @@
 use crate::audio::atmosphere::{iso9613_cutoff, AtmosphericParams};
+use crate::audio::propagation::{ground_effect_gain, GroundProperties};
+use crate::processors::early_reflections::SourceReflections;
 use crate::spatial::panner::distance_gain_at_model;
 use crate::spatial::source::SoundSource;
 use atrium_core::listener::Listener;
 use atrium_core::panner::DistanceModelType;
 use atrium_core::speaker::{DistanceParams, SpeakerLayout, MAX_CHANNELS};
+use atrium_core::types::Vec3;
 
 /// Distance model parameters for attenuation.
 pub struct DistanceModel {
@@ -215,6 +218,16 @@ pub struct MixerState {
     delay_comp: DelayCompensation,
     /// Per-source air absorption filters (high freq drops with distance).
     air_absorption: Vec<AirAbsorption>,
+    /// Per-source first-order reflections (image-source method).
+    /// Empty if reflections are disabled.
+    source_reflections: Vec<SourceReflections>,
+    /// Room bounds for per-source reflection computation.
+    room_min: Vec3,
+    room_max: Vec3,
+    /// Ground surface properties for ISO 9613-2 ground effect.
+    ground: GroundProperties,
+    /// Whether per-source reflections are enabled.
+    reflections_enabled: bool,
 }
 
 impl MixerState {
@@ -224,12 +237,38 @@ impl MixerState {
             lfe_filter: None,
             delay_comp: DelayCompensation::new(MAX_CHANNELS),
             air_absorption: Vec::new(), // initialized once sample_rate is known
+            source_reflections: Vec::new(),
+            room_min: Vec3::ZERO,
+            room_max: Vec3::ZERO,
+            ground: GroundProperties::default(),
+            reflections_enabled: false,
         }
     }
 
     /// Initialize the LFE low-pass filter once sample rate is known.
     pub fn init_lfe_filter(&mut self, sample_rate: f32) {
         self.lfe_filter = Some(Biquad::lowpass(120.0, sample_rate));
+    }
+
+    /// Enable per-source reflections with given parameters.
+    pub fn enable_reflections(&mut self, wet_gain: f32, wall_absorption: f32, num_sources: usize) {
+        self.reflections_enabled = true;
+        self.source_reflections.clear();
+        for _ in 0..num_sources {
+            self.source_reflections
+                .push(SourceReflections::new(wet_gain, wall_absorption));
+        }
+    }
+
+    /// Set room bounds for reflection and ground effect computation.
+    pub fn set_room_bounds(&mut self, room_min: Vec3, room_max: Vec3) {
+        self.room_min = room_min;
+        self.room_max = room_max;
+    }
+
+    /// Set ground surface properties for ISO 9613-2 ground effect.
+    pub fn set_ground(&mut self, ground: GroundProperties) {
+        self.ground = ground;
     }
 
     /// Initialize air absorption filters once sample rate is known.
@@ -239,10 +278,41 @@ impl MixerState {
         }
     }
 
-    /// Grow the gains vector if new sources were added.
+    /// Grow per-source vectors if new sources were added.
     fn ensure_capacity(&mut self, num_sources: usize) {
         while self.prev_gains.len() < num_sources {
             self.prev_gains.push([0.0; MAX_CHANNELS]);
+        }
+    }
+
+    /// Grow reflection buffers if new sources were added.
+    fn ensure_reflections(&mut self, num_sources: usize, wet_gain: f32, wall_absorption: f32) {
+        if !self.reflections_enabled {
+            return;
+        }
+        while self.source_reflections.len() < num_sources {
+            self.source_reflections
+                .push(SourceReflections::new(wet_gain, wall_absorption));
+        }
+    }
+
+    /// Get the ground properties (for mirroring to BinauralMixer).
+    pub fn ground(&self) -> GroundProperties {
+        self.ground
+    }
+
+    /// Whether per-source reflections are enabled.
+    pub fn has_reflections(&self) -> bool {
+        self.reflections_enabled
+    }
+
+    /// Get reflection parameters (wet_gain, wall_absorption) from the first source's config.
+    /// Returns (0.0, 0.0) if no reflections are configured.
+    pub fn reflection_params(&self) -> (f32, f32) {
+        if let Some(sr) = self.source_reflections.first() {
+            sr.params()
+        } else {
+            (0.0, 0.0)
         }
     }
 }
@@ -270,6 +340,7 @@ pub fn mix_sources(
 
     state.ensure_capacity(sources.len());
     state.ensure_air_absorption(sources.len(), sample_rate);
+    state.ensure_reflections(sources.len(), 0.4, 0.9);
 
     // Zero output buffer (sources accumulate into it)
     for sample in output.iter_mut() {
@@ -293,6 +364,26 @@ pub fn mix_sources(
 
         // Update air absorption filter cutoff for this source's distance
         state.air_absorption[src_idx].update(dist_to_listener, atmosphere);
+
+        // ISO 9613-2 ground effect: broadband gain modifier based on source/listener
+        // heights and ground surface type. Assumes z=0 is ground plane.
+        let ground_gain = ground_effect_gain(
+            dist_to_listener,
+            pos.z.max(0.0),
+            listener.position.z.max(0.0),
+            &state.ground,
+        );
+
+        // Update per-source reflection taps (image-source positions change with source movement)
+        if state.reflections_enabled && src_idx < state.source_reflections.len() {
+            state.source_reflections[src_idx].update(
+                state.room_min,
+                state.room_max,
+                pos,
+                listener.position,
+                sample_rate,
+            );
+        }
 
         // Compute target gains for this buffer (once per source)
         // Uses MDAP when spread > 0 in VBAP mode.
@@ -327,12 +418,25 @@ pub fn mix_sources(
             let t = frame as f32 * inv_frames;
             let raw_mono = source.next_sample(sample_rate);
             // Apply air absorption: high frequencies attenuated with distance
-            let mono = state.air_absorption[src_idx].process(raw_mono);
+            let absorbed = state.air_absorption[src_idx].process(raw_mono);
+            // Apply ground effect (ISO 9613-2)
+            let mono = absorbed * ground_gain;
+
+            // Per-source reflections: add delayed copies of the mono signal
+            let reflection_wet = if state.reflections_enabled
+                && src_idx < state.source_reflections.len()
+            {
+                state.source_reflections[src_idx].process_sample(mono)
+            } else {
+                0.0
+            };
+
+            let total_mono = mono + reflection_wet;
             let base = frame * channels;
 
             for ch in 0..channels {
                 let gain = prev[ch] + (target.gains[ch] - prev[ch]) * t;
-                output[base + ch] += mono * gain;
+                output[base + ch] += total_mono * gain;
             }
 
             // LFE: smooth ramp too
@@ -343,7 +447,7 @@ pub fn mix_sources(
                 // We ramp only the LFE-specific part. Since spatial gains are
                 // already ramped above, we add the LFE delta here.
                 let lfe_gain = lfe_prev + (lfe_tgt - lfe_prev) * t;
-                output[base + lfe] += mono * lfe_gain;
+                output[base + lfe] += total_mono * lfe_gain;
             }
         }
 

@@ -137,7 +137,16 @@ impl AudioScene {
             self.sample_rate,
             self.sources.len(),
         ) {
-            Ok(mixer) => self.binaural_mixer = Some(mixer),
+            Ok(mut mixer) => {
+                // Mirror mixer_state's room/ground/reflection config to binaural
+                mixer.set_room_bounds(room_min, room_max);
+                mixer.set_ground(self.mixer_state.ground());
+                if self.mixer_state.has_reflections() {
+                    let (wet, absorption) = self.mixer_state.reflection_params();
+                    mixer.enable_reflections(wet, absorption, self.sources.len());
+                }
+                self.binaural_mixer = Some(mixer);
+            }
             Err(e) => eprintln!("Binaural HRTF not available: {e}"),
         }
     }
@@ -154,6 +163,8 @@ impl AudioScene {
         }
 
         // Binaural mode: HRTF convolution to stereo headphone output
+        // Multichannel mode: VBAP / SpeakerAsMic / Stereo / etc.
+        // Both paths feed into the post-mix processor chain (FDN reverb, etc.)
         if self.speaker_layout.mode == RenderMode::Binaural {
             if let Some(ref mut mixer) = self.binaural_mixer {
                 mixer.mix(
@@ -166,26 +177,38 @@ impl AudioScene {
                     &self.distance_model,
                     &self.atmosphere,
                 );
-                return;
+            } else {
+                // Fallback to multichannel if binaural mixer not available
+                mix_sources(
+                    &mut self.sources,
+                    &self.listener,
+                    output,
+                    channels,
+                    self.sample_rate,
+                    self.master_gain,
+                    &self.distance_model,
+                    &self.speaker_layout,
+                    &mut self.mixer_state,
+                    &self.atmosphere,
+                );
             }
-            // Fall through to multichannel if binaural mixer not available
+        } else {
+            mix_sources(
+                &mut self.sources,
+                &self.listener,
+                output,
+                channels,
+                self.sample_rate,
+                self.master_gain,
+                &self.distance_model,
+                &self.speaker_layout,
+                &mut self.mixer_state,
+                &self.atmosphere,
+            );
         }
 
-        // Multichannel speaker rendering (VBAP, SpeakerAsMic, etc.)
-        mix_sources(
-            &mut self.sources,
-            &self.listener,
-            output,
-            channels,
-            self.sample_rate,
-            self.master_gain,
-            &self.distance_model,
-            &self.speaker_layout,
-            &mut self.mixer_state,
-            &self.atmosphere,
-        );
-
-        // Run processor chain (early reflections, reverb, etc.)
+        // Run post-mix processor chain (FDN reverb, etc.)
+        // Runs for ALL render modes — binaural no longer skips this.
         for processor in &mut self.processors {
             processor.process(output, channels, self.sample_rate);
         }

@@ -11,9 +11,12 @@ use sofar::reader::{Filter, OpenOptions, Sofar};
 
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::mixer::{AirAbsorption, DistanceModel};
+use crate::audio::propagation::{ground_effect_gain, GroundProperties};
+use crate::processors::early_reflections::SourceReflections;
 use crate::spatial::panner::distance_gain_at_model;
 use crate::spatial::source::SoundSource;
 use atrium_core::listener::Listener;
+use atrium_core::types::Vec3;
 
 /// Processing block size for FFT convolution.
 /// 128 samples ≈ 2.67ms at 48kHz — well under the 10ms perceptual threshold.
@@ -49,6 +52,15 @@ pub struct BinauralMixer {
     /// Counter for throttled HRTF filter updates.
     update_counter: usize,
     sample_rate: f32,
+    /// Per-source first-order reflections (image-source method).
+    source_reflections: Vec<SourceReflections>,
+    /// Room bounds for reflection computation.
+    room_min: Vec3,
+    room_max: Vec3,
+    /// Ground surface properties for ISO 9613-2 ground effect.
+    ground: GroundProperties,
+    /// Whether per-source reflections are enabled.
+    reflections_enabled: bool,
 }
 
 impl BinauralMixer {
@@ -93,6 +105,11 @@ impl BinauralMixer {
             right_buf: vec![0.0; BLOCK_SIZE],
             update_counter: 0,
             sample_rate,
+            source_reflections: Vec::new(),
+            room_min: Vec3::ZERO,
+            room_max: Vec3::ZERO,
+            ground: GroundProperties::default(),
+            reflections_enabled: false,
         })
     }
 
@@ -125,6 +142,27 @@ impl BinauralMixer {
         }
     }
 
+    /// Enable per-source reflections with given parameters.
+    pub fn enable_reflections(&mut self, wet_gain: f32, wall_absorption: f32, num_sources: usize) {
+        self.reflections_enabled = true;
+        self.source_reflections.clear();
+        for _ in 0..num_sources {
+            self.source_reflections
+                .push(SourceReflections::new(wet_gain, wall_absorption));
+        }
+    }
+
+    /// Set room bounds for reflection and ground effect computation.
+    pub fn set_room_bounds(&mut self, room_min: Vec3, room_max: Vec3) {
+        self.room_min = room_min;
+        self.room_max = room_max;
+    }
+
+    /// Set ground surface properties.
+    pub fn set_ground(&mut self, ground: GroundProperties) {
+        self.ground = ground;
+    }
+
     /// Render all sources to a stereo interleaved output buffer.
     ///
     /// Writes to channels 0 (left) and 1 (right) of the interleaved buffer.
@@ -148,6 +186,14 @@ impl BinauralMixer {
 
         self.ensure_sources(sources.len());
 
+        // Grow reflection buffers if needed
+        if self.reflections_enabled {
+            while self.source_reflections.len() < sources.len() {
+                self.source_reflections
+                    .push(SourceReflections::new(0.4, 0.9));
+            }
+        }
+
         let should_update = self.update_counter % FILTER_UPDATE_INTERVAL == 0;
 
         for (src_idx, source) in sources.iter_mut().enumerate() {
@@ -162,6 +208,25 @@ impl BinauralMixer {
             self.sources[src_idx]
                 .air_absorption
                 .update(dist_to_listener, atmosphere);
+
+            // ISO 9613-2 ground effect
+            let ground_gain = ground_effect_gain(
+                dist_to_listener,
+                pos.z.max(0.0),
+                listener.position.z.max(0.0),
+                &self.ground,
+            );
+
+            // Update per-source reflection taps
+            if self.reflections_enabled && src_idx < self.source_reflections.len() {
+                self.source_reflections[src_idx].update(
+                    self.room_min,
+                    self.room_max,
+                    pos,
+                    listener.position,
+                    sample_rate,
+                );
+            }
 
             // Distance gain using per-source ref_distance (SPL-derived)
             let target_gain = distance_gain_at_model(
@@ -200,13 +265,24 @@ impl BinauralMixer {
                     self.right_buf.resize(block_len, 0.0);
                 }
 
-                // Generate gain-ramped, air-absorbed mono samples
+                // Generate gain-ramped, air-absorbed, ground-effected mono samples
                 for i in 0..block_len {
                     let t = (frame + i) as f32 * inv_frames;
                     let gain = prev_gain + (target_gain - prev_gain) * t;
                     let raw = source.next_sample(sample_rate);
                     let absorbed = self.sources[src_idx].air_absorption.process(raw);
-                    self.mono_buf[i] = absorbed * gain;
+                    let mono = absorbed * ground_gain;
+
+                    // Per-source reflections
+                    let reflection_wet = if self.reflections_enabled
+                        && src_idx < self.source_reflections.len()
+                    {
+                        self.source_reflections[src_idx].process_sample(mono)
+                    } else {
+                        0.0
+                    };
+
+                    self.mono_buf[i] = (mono + reflection_wet) * gain;
                 }
 
                 // HRTF convolution: mono → left ear, mono → right ear

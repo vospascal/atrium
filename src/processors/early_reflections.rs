@@ -114,6 +114,136 @@ impl EarlyReflections {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-source reflections (image-source method, Allen & Berkley 1979)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-source first-order reflections using the image-source method.
+///
+/// Unlike the post-mix `EarlyReflections` processor, this struct lives in the
+/// mixer and operates on the mono source signal BEFORE panning. Each source gets
+/// its own delay buffer with taps computed from the source's image positions
+/// relative to the listener.
+///
+/// Image-source principle: for each wall, mirror the source position across the
+/// wall plane. The image→listener distance gives the reflection delay; gain is
+/// `wall_absorption / image_distance`.
+pub struct SourceReflections {
+    /// Circular delay buffer (mono, one per source).
+    buffer: Box<[f32; BUFFER_SIZE]>,
+    write_pos: usize,
+    taps: [ReflectionTap; MAX_TAPS],
+    tap_count: usize,
+    wet_gain: f32,
+    wall_absorption: f32,
+}
+
+impl SourceReflections {
+    pub fn new(wet_gain: f32, wall_absorption: f32) -> Self {
+        Self {
+            buffer: Box::new([0.0; BUFFER_SIZE]),
+            write_pos: 0,
+            taps: [ReflectionTap { delay_samples: 0, gain: 0.0 }; MAX_TAPS],
+            tap_count: 0,
+            wet_gain,
+            wall_absorption,
+        }
+    }
+
+    /// Recompute reflection taps from room geometry, source position, and listener.
+    ///
+    /// For a box room with 6 walls, each wall generates one image source:
+    ///   image_pos = source mirrored across the wall plane
+    ///   delay = image_pos.distance_to(listener) / speed_of_sound
+    ///   gain = wall_absorption / image_pos.distance_to(listener)
+    pub fn update(
+        &mut self,
+        room_min: Vec3,
+        room_max: Vec3,
+        source_pos: Vec3,
+        listener_pos: Vec3,
+        sample_rate: f32,
+    ) {
+        let mut count = 0;
+
+        // 6 image sources: mirror source across each wall of the box
+        let images = [
+            Vec3::new(2.0 * room_min.x - source_pos.x, source_pos.y, source_pos.z), // x-min
+            Vec3::new(2.0 * room_max.x - source_pos.x, source_pos.y, source_pos.z), // x-max
+            Vec3::new(source_pos.x, 2.0 * room_min.y - source_pos.y, source_pos.z), // y-min
+            Vec3::new(source_pos.x, 2.0 * room_max.y - source_pos.y, source_pos.z), // y-max
+            Vec3::new(source_pos.x, source_pos.y, 2.0 * room_min.z - source_pos.z), // floor
+            Vec3::new(source_pos.x, source_pos.y, 2.0 * room_max.z - source_pos.z), // ceiling
+        ];
+
+        let direct_dist = source_pos.distance_to(listener_pos);
+
+        for image in &images {
+            let image_dist = image.distance_to(listener_pos);
+
+            // Skip if image is closer than direct (shouldn't happen but guard)
+            // or if image distance is tiny (source at wall)
+            if image_dist < 0.1 || image_dist < direct_dist {
+                continue;
+            }
+
+            // Delay relative to direct sound: (image_path - direct_path) / c
+            let delay_seconds = (image_dist - direct_dist) / SPEED_OF_SOUND;
+            let delay_samples = (delay_seconds * sample_rate) as usize;
+
+            if delay_samples == 0 || delay_samples >= BUFFER_SIZE {
+                continue;
+            }
+
+            // Gain: wall absorption × 1/image_distance (amplitude, not energy)
+            let distance_atten = 1.0 / image_dist;
+
+            self.taps[count] = ReflectionTap {
+                delay_samples,
+                gain: self.wall_absorption * distance_atten,
+            };
+            count += 1;
+            if count >= MAX_TAPS {
+                break;
+            }
+        }
+
+        self.tap_count = count;
+    }
+
+    /// Process one mono sample: write to delay buffer, return wet reflection sum.
+    /// The caller adds `wet * wet_gain` to the output.
+    #[inline]
+    pub fn process_sample(&mut self, input: f32) -> f32 {
+        self.buffer[self.write_pos] = input;
+
+        let mut wet = 0.0f32;
+        for i in 0..self.tap_count {
+            let tap = &self.taps[i];
+            let read_pos = (self.write_pos + BUFFER_SIZE - tap.delay_samples) & BUFFER_MASK;
+            wet += self.buffer[read_pos] * tap.gain;
+        }
+
+        self.write_pos = (self.write_pos + 1) & BUFFER_MASK;
+        wet * self.wet_gain
+    }
+
+    /// Get the wet_gain and wall_absorption parameters.
+    pub fn params(&self) -> (f32, f32) {
+        (self.wet_gain, self.wall_absorption)
+    }
+
+    /// Clear the delay buffer.
+    pub fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Post-mix early reflections processor (legacy — listener-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
 impl AudioProcessor for EarlyReflections {
     fn init(
         &mut self,
@@ -274,5 +404,52 @@ mod tests {
     fn name_returns_expected() {
         let er = EarlyReflections::new(0.5, 0.9);
         assert_eq!(er.name(), "EarlyReflections");
+    }
+
+    // ── SourceReflections (per-source image-source method) ──────────────
+
+    #[test]
+    fn source_reflections_compute_taps() {
+        let mut sr = SourceReflections::new(1.0, 0.9);
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let source = Vec3::new(2.0, 2.0, 1.5);
+        let listener = Vec3::new(4.0, 2.0, 1.5);
+        sr.update(room_min, room_max, source, listener, 48000.0);
+
+        // Source at (2,2,1.5), listener at (4,2,1.5) — all 6 images should
+        // produce valid taps (source is well inside the room)
+        assert!(sr.tap_count >= 4, "expected at least 4 taps, got {}", sr.tap_count);
+
+        for i in 0..sr.tap_count {
+            assert!(sr.taps[i].delay_samples > 0);
+            assert!(sr.taps[i].gain > 0.0);
+        }
+    }
+
+    #[test]
+    fn source_reflections_impulse() {
+        let mut sr = SourceReflections::new(1.0, 1.0);
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let source = Vec3::new(3.0, 2.0, 1.5);
+        let listener = Vec3::new(3.0, 2.0, 1.5); // co-located
+        sr.update(room_min, room_max, source, listener, 48000.0);
+
+        // Feed an impulse
+        let wet0 = sr.process_sample(1.0);
+        // First sample: no delay tap can fire yet (all delays > 0)
+        assert!(wet0.abs() < 1e-6, "no reflection at t=0: got {wet0}");
+
+        // Feed silence until shortest tap fires
+        let mut found_reflection = false;
+        for _ in 1..2048 {
+            let wet = sr.process_sample(0.0);
+            if wet.abs() > 0.001 {
+                found_reflection = true;
+                break;
+            }
+        }
+        assert!(found_reflection, "should find at least one reflection");
     }
 }

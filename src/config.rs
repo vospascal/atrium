@@ -17,14 +17,14 @@ use serde::Deserialize;
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
 use crate::audio::mixer::{DistanceModel, MixerState};
+use crate::audio::propagation::GroundProperties;
 use crate::engine::scene::{AudioScene, InitialSourceState};
-use crate::processors::early_reflections::EarlyReflections;
 use crate::processors::fdn_reverb::FdnReverb;
 use crate::spatial::directivity::DirectivityPattern;
 use crate::spatial::listener::Listener;
 use crate::spatial::sound_profile::SoundProfile;
 use crate::spatial::source::TestNode;
-use crate::world::room::BoxRoom;
+use crate::world::room::{BoxRoom, Room};
 use crate::world::types::Vec3;
 use atrium_core::panner::DistanceModelType;
 use atrium_core::speaker::{RenderMode, SpeakerLayout};
@@ -74,6 +74,10 @@ pub struct RoomConfig {
     pub width: f32,
     pub depth: f32,
     pub height: f32,
+    /// Ground surface factor for ISO 9613-2 ground effect (0.0 = hard, 1.0 = porous).
+    /// Default: 0.0 (hard reflective floor like concrete or tile).
+    #[serde(default)]
+    pub ground_factor: f32,
 }
 
 #[derive(Deserialize)]
@@ -355,11 +359,20 @@ impl SceneConfig {
             model: parse_distance_model(&self.distance_model.model),
         };
 
-        // Load processors from file (or empty if omitted)
+        // Load processors from file, separating per-source (early reflections)
+        // from post-mix (FDN reverb) processors.
+        let mut er_params: Option<(f32, f32)> = None; // (wet_gain, wall_absorption)
         let processors = match &self.processors {
             Some(path) => {
                 let defs: Vec<ProcessorConfig> = load_yaml(path)?;
-                Self::build_processors(&defs)
+                // Extract early reflection params for per-source use
+                for def in &defs {
+                    if let ProcessorConfig::EarlyReflections { wet_gain, wall_absorption } = def {
+                        er_params = Some((*wet_gain, *wall_absorption));
+                    }
+                }
+                // Only keep post-mix processors (FDN reverb, etc.)
+                Self::build_postmix_processors(&defs)
             }
             None => Vec::new(),
         };
@@ -392,6 +405,15 @@ impl SceneConfig {
 
         let render_mode = speaker_layout.mode;
 
+        // Configure MixerState with room bounds, ground effect, and per-source reflections
+        let mut mixer_state = MixerState::new(source_count);
+        let (room_min, room_max) = room.bounds();
+        mixer_state.set_room_bounds(room_min, room_max);
+        mixer_state.set_ground(GroundProperties::mixed(room_cfg.ground_factor));
+        if let Some((wet, absorption)) = er_params {
+            mixer_state.enable_reflections(wet, absorption, source_count);
+        }
+
         let scene = AudioScene {
             initial_listener_pos: listener_pos,
             initial_listener_yaw: self.listener.yaw_degrees.to_radians(),
@@ -407,7 +429,7 @@ impl SceneConfig {
             distance_model,
             processors,
             speaker_layout,
-            mixer_state: MixerState::new(source_count),
+            mixer_state,
             atmosphere,
             binaural_mixer: None,
             telemetry_out: None,
@@ -613,19 +635,19 @@ impl SceneConfig {
         Ok((nodes, metas))
     }
 
-    fn build_processors(defs: &[ProcessorConfig]) -> Vec<Box<dyn crate::processors::AudioProcessor>> {
+    /// Build only post-mix processors (FDN reverb). Early reflections are now
+    /// handled per-source in the mixer via SourceReflections.
+    fn build_postmix_processors(defs: &[ProcessorConfig]) -> Vec<Box<dyn crate::processors::AudioProcessor>> {
         defs.iter()
-            .map(|p| -> Box<dyn crate::processors::AudioProcessor> {
+            .filter_map(|p| -> Option<Box<dyn crate::processors::AudioProcessor>> {
                 match p {
-                    ProcessorConfig::EarlyReflections {
-                        wet_gain,
-                        wall_absorption,
-                    } => Box::new(EarlyReflections::new(*wet_gain, *wall_absorption)),
+                    // Early reflections are now per-source — skip the post-mix version
+                    ProcessorConfig::EarlyReflections { .. } => None,
                     ProcessorConfig::FdnReverb {
                         wet_gain,
                         rt60_low,
                         rt60_high,
-                    } => Box::new(FdnReverb::new(*wet_gain, *rt60_low, *rt60_high)),
+                    } => Some(Box::new(FdnReverb::new(*wet_gain, *rt60_low, *rt60_high))),
                 }
             })
             .collect()

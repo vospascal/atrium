@@ -465,6 +465,42 @@ pub fn total_attenuation_db(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Ground Effect — Real-time linear gain
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compute a broadband ground effect as a linear gain multiplier for real-time use.
+///
+/// Averages the ISO 9613-2 ground effect across octave bands (125 Hz – 4 kHz)
+/// and converts from dB to a linear amplitude factor. This is an approximation
+/// suitable for the per-source mixing loop where we don't have per-band processing.
+///
+/// Returns a gain in (0, ~1.5]. Values > 1.0 indicate constructive interference
+/// over hard ground. Values < 1.0 indicate absorption by soft ground.
+pub fn ground_effect_gain(
+    distance: f32,
+    h_source: f32,
+    h_receiver: f32,
+    ground: &GroundProperties,
+) -> f32 {
+    if distance < 0.01 {
+        return 1.0;
+    }
+
+    // Average ground effect across perceptually important octave bands
+    const BANDS: &[f32] = &[125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
+    let sum_db: f32 = BANDS
+        .iter()
+        .map(|&f| ground_effect_db(distance, h_source, h_receiver, ground, f))
+        .sum();
+    let avg_db = sum_db / BANDS.len() as f32;
+
+    // Convert dB attenuation to linear gain.
+    // ground_effect_db returns positive = loss, negative = gain,
+    // so gain = 10^(-avg_db / 20)
+    10.0_f32.powf(-avg_db / 20.0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -539,6 +575,32 @@ mod tests {
     fn ground_effect_zero_distance() {
         let ground = GroundProperties::hard();
         assert_eq!(ground_effect_db(0.0, 1.5, 1.5, &ground, 500.0), 0.0);
+    }
+
+    #[test]
+    fn ground_effect_gain_hard_boosts() {
+        // Hard ground: constructive interference → gain > 1.0
+        let ground = GroundProperties::hard();
+        let g = ground_effect_gain(10.0, 1.5, 1.5, &ground);
+        assert!(g > 1.0, "hard ground should boost: got {g}");
+    }
+
+    #[test]
+    fn ground_effect_gain_soft_attenuates_relative() {
+        let hard = GroundProperties::hard();
+        let soft = GroundProperties::soft();
+        let g_hard = ground_effect_gain(10.0, 1.5, 1.5, &hard);
+        let g_soft = ground_effect_gain(10.0, 1.5, 1.5, &soft);
+        assert!(
+            g_soft < g_hard,
+            "soft ({g_soft}) should be less than hard ({g_hard})"
+        );
+    }
+
+    #[test]
+    fn ground_effect_gain_zero_distance_is_unity() {
+        let ground = GroundProperties::soft();
+        assert_eq!(ground_effect_gain(0.0, 1.5, 1.5, &ground), 1.0);
     }
 
     // ── Barrier Attenuation ──────────────────────────────────────────────
