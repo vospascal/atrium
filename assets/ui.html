@@ -83,6 +83,7 @@
       <button class="mode-btn" data-mode="4.0">4.0</button>
       <button class="mode-btn" data-mode="stereo">Stereo</button>
       <button class="mode-btn" data-mode="mono">Mono</button>
+      <button class="mode-btn" data-mode="binaural">Binaural</button>
     </div>
   </div>
   <div id="atmosphere-panel" style="margin-top:8px;border-top:1px solid #333;padding-top:6px;">
@@ -102,10 +103,13 @@
     </div>
   </div>
   <div id="status"><span class="dot disconnected" id="status-dot"></span><span id="status-text">Connecting...</span></div>
+  <div style="margin-top:8px;border-top:1px solid #333;padding-top:6px;">
+    <button id="reset-btn" style="background:none;border:1px solid #555;color:#999;font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer;font-family:inherit;width:100%;">Reset Scene</button>
+  </div>
 </div>
 
 <div id="help">
-  Drag listener (white) or sources to move &middot; Space+Scroll to rotate yaw &middot; Scroll to zoom &middot; Right-drag to orbit
+  Drag listener (white) or sources to move &middot; Space+Scroll to rotate yaw &middot; Scroll to zoom &middot; Right-drag to orbit &middot; Space+Right-drag to pan
 </div>
 
 <script type="importmap">
@@ -121,19 +125,13 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// === Scene constants (must match Rust) ===
-const ROOM = { w: 6, d: 4, h: 3 };
-const SOURCES = [
-  { name: 'Djembe',   color: 0xff6b35, cx: 3, cy: 2, r: 1.5, speed: 1.0, z: 0,
-    pattern: { type: 'polar', alpha: 0.5 } },   // cardioid
-  { name: 'Campfire', color: 0xffc107, x: 1.0, y: 1.0, r: 0, speed: 0, z: 0,
-    pattern: { type: 'omni' } },
-  { name: 'Cat',      color: 0xce93d8, x: 5.0, y: 3.0, r: 0, speed: 0, z: 0,
-    pattern: { type: 'omni' } },
-];
-// Speaker layout (must match main.rs 5.1 positions)
-// Speaker positions are received from Rust via WebSocket ("speaker_layout" message).
-// This is just the fallback until the first message arrives.
+// === Scene state (all values received from engine via WebSocket scene_state message) ===
+// No hardcoded physics values — everything comes from the engine's computed scene.
+let ROOM = { w: 6, d: 4, h: 3 };   // updated on scene_state
+let DIST_MODEL = { refDist: 1.0, maxDist: 20.0, rolloff: 1.0 };  // updated on scene_state
+let SOURCES = [];  // populated from engine scene_state
+// Speaker layout — received from engine via scene_state message.
+// These defaults are used only until the first WebSocket message arrives.
 let SPEAKERS = [
   { label: 'FL', x: 0, y: 4, z: 0, channel: 0, color: 0x66bb6a },
   { label: 'FR', x: 6, y: 4, z: 0, channel: 1, color: 0x66bb6a },
@@ -151,6 +149,7 @@ const MODE_ACTIVE_CHANNELS = {
   '4.0':          [0, 1, 4, 5],      // no center
   stereo:         [0, 1],             // FL + FR only
   mono:           [],                  // headphone mono — no speakers
+  binaural:       [],                  // HRTF headphones — no speakers
 };
 
 function updateSpeakerVisibility() {
@@ -275,53 +274,18 @@ function createPatternMesh(pattern, color) {
   }));
 }
 
-// === Engine constants (must match Rust) ===
-// DistanceModel::default()
-const DIST_MODEL = { ref: 0.3, max: 20.0, rolloff: 1.0 };
-// Listener::HearingCone::default() — Cone { inner: 15°, outer: 45°, outer_gain: 0.3 }
+// Hearing pattern constant — only used for the 3D wireframe visualization mesh
 const HEARING_PATTERN = {
   type: 'cone', inner: 15 * Math.PI / 180, outer: 45 * Math.PI / 180, outerGain: 0.3
 };
 
-// Mirrors Rust panner::distance_gain (inverse distance model)
-function distanceGain(lx, ly, lz, sx, sy, sz) {
-  const dx = sx - lx, dy = sy - ly, dz = sz - lz;
-  const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-  const clamped = Math.max(DIST_MODEL.ref, Math.min(DIST_MODEL.max, dist));
-  return DIST_MODEL.ref / (DIST_MODEL.ref + DIST_MODEL.rolloff * (clamped - DIST_MODEL.ref));
-}
-
-// Angle between two 2D direction vectors (Atrium XY plane)
-function angleBetween(ax, ay, bx, by) {
-  const dot = ax*bx + ay*by;
-  const la = Math.sqrt(ax*ax + ay*ay);
-  const lb = Math.sqrt(bx*bx + by*by);
-  if (la < 1e-6 || lb < 1e-6) return 0;
-  return Math.acos(Math.max(-1, Math.min(1, dot / (la * lb))));
-}
-
-// Full gain chain: mirrors mixer.rs line 73
-//   total = dist × src_dir × hear
-function computeGainChain(srcX, srcY, srcZ, srcFacingX, srcFacingY, srcPattern,
-                          lstX, lstY, lstZ, lstYaw) {
-  const dist = distanceGain(lstX, lstY, lstZ, srcX, srcY, srcZ);
-  // Source directivity: angle from source facing to direction toward listener
-  const toListX = lstX - srcX, toListY = lstY - srcY;
-  const srcAngle = angleBetween(srcFacingX, srcFacingY, toListX, toListY);
-  const srcDir = patternGain(srcPattern, srcAngle);
-  // Listener hearing: angle from listener forward to direction toward source
-  const lstFwdX = Math.cos(lstYaw), lstFwdY = Math.sin(lstYaw);
-  const toSrcX = srcX - lstX, toSrcY = srcY - lstY;
-  const hearAngle = angleBetween(lstFwdX, lstFwdY, toSrcX, toSrcY);
-  const hear = patternGain(HEARING_PATTERN, hearAngle);
-  return { dist, srcDir, hear, total: dist * srcDir * hear };
-}
-
 // === State ===
+// Latest telemetry from the engine (per-source gains, positions, distances)
+let latestTelemetry = null;
 let listener = { x: 3, y: 2, z: 0, yaw: Math.PI / 2 };
 let ws = null;
 let dragTarget = null; // null | 'listener' | source index (number)
-const sourceMuted = SOURCES.map(() => false);
+let sourceMuted = [];
 const startTime = performance.now() / 1000;
 
 // === Three.js setup ===
@@ -360,11 +324,8 @@ const roomWire = new THREE.LineSegments(
 roomWire.position.set(ROOM.w / 2, ROOM.h / 2, ROOM.d / 2);
 scene.add(roomWire);
 
-// Floor grid — extends 5 tiles beyond room on all sides
-const GRID_PAD = 5;
-const gridW = ROOM.w + GRID_PAD * 2;
-const gridD = ROOM.d + GRID_PAD * 2;
-const gridSize = Math.max(gridW, gridD);
+// Floor grid — 100×100 meter grid centered on the room
+const gridSize = 100;
 const gridHelper = new THREE.GridHelper(gridSize, gridSize, 0x333333, 0x222222);
 gridHelper.position.set(ROOM.w / 2, 0, ROOM.d / 2);
 scene.add(gridHelper);
@@ -395,36 +356,9 @@ listenerGroup.add(hearingMesh);
 
 scene.add(listenerGroup);
 
-// === Source meshes ===
-const sourceMeshes = SOURCES.map(s => {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.12, 16, 16),
-    new THREE.MeshStandardMaterial({ color: s.color, emissive: s.color, emissiveIntensity: 0.3 })
-  );
-  scene.add(mesh);
-
-  // Label sprite
-  const canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 32;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#' + s.color.toString(16).padStart(6, '0');
-  ctx.font = '20px monospace';
-  ctx.fillText(s.name, 4, 22);
-  const tex = new THREE.CanvasTexture(canvas);
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
-  sprite.scale.set(1, 0.25, 1);
-  sprite.position.y = 0.3;
-  mesh.add(sprite);
-
-  return mesh;
-});
-
-// === Source directivity patterns (3D wireframe) ===
-const patternMeshes = SOURCES.map((s, i) => {
-  const mesh = createPatternMesh(s.pattern, s.color);
-  scene.add(mesh);
-  return mesh;
-});
+// Source visuals — created dynamically from engine scene_state
+let sourceMeshes = [];
+let falloffClouds = [];
 
 // === Speaker meshes (green boxes at room positions) ===
 let speakerMeshes = SPEAKERS.map(sp => {
@@ -434,31 +368,9 @@ let speakerMeshes = SPEAKERS.map(sp => {
 });
 updateSpeakerVisibility();
 
-// === Gain lines (source → listener, opacity = total gain) ===
-const gainLines = SOURCES.map((s, i) => {
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,0], 3));
-  const mat = new THREE.LineBasicMaterial({
-    color: s.color, transparent: true, opacity: 0.5,
-  });
-  const line = new THREE.Line(geo, mat);
-  scene.add(line);
-  return line;
-});
-
-// === Distance labels on gain lines ===
-const distLabels = SOURCES.map((s) => {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 28;
-  const ctx = canvas.getContext('2d');
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  sprite.scale.set(0.9, 0.2, 1);
-  sprite.visible = false;
-  scene.add(sprite);
-  return { canvas, ctx, tex, sprite, lastText: '' };
-});
+// Gain lines and distance labels — created dynamically from engine scene_state
+let gainLines = [];
+let distLabels = [];
 function updateDistLabel(label, text, color) {
   if (label.lastText === text) return;
   label.lastText = text;
@@ -476,105 +388,11 @@ function updateDistLabel(label, text, color) {
 }
 
 
-// === Source HUD controls (mute buttons + gain readout) ===
+// Source HUD controls — created dynamically from engine scene_state
 const sourcesPanel = document.getElementById('sources-panel');
-const gainReadouts = [];
-// Track pause state and original speeds per source
-const sourceOrigSpeed = SOURCES.map(s => s.speed);
-const sourcePaused = SOURCES.map(() => false);
-
-SOURCES.forEach((s, i) => {
-  const row = document.createElement('div');
-  row.className = 'source-row';
-  const nameSpan = document.createElement('span');
-  nameSpan.className = 'source-name';
-  nameSpan.style.color = '#' + s.color.toString(16).padStart(6, '0');
-  nameSpan.textContent = s.name;
-  const btn = document.createElement('button');
-  btn.className = 'mute-btn';
-  btn.textContent = 'mute';
-  btn.addEventListener('click', () => {
-    sourceMuted[i] = !sourceMuted[i];
-    btn.textContent = sourceMuted[i] ? 'muted' : 'mute';
-    btn.classList.toggle('muted', sourceMuted[i]);
-    sourceMeshes[i].material.opacity = sourceMuted[i] ? 0.3 : 1.0;
-    sourceMeshes[i].material.transparent = sourceMuted[i];
-    send({ type: 'set_source_muted', index: i, muted: sourceMuted[i] });
-  });
-  row.appendChild(nameSpan);
-  row.appendChild(btn);
-
-  // Pause button for orbiting sources
-  if (s.r > 0 && s.speed !== 0) {
-    const pauseBtn = document.createElement('button');
-    pauseBtn.className = 'pause-btn';
-    pauseBtn.textContent = '\u23F8'; // pause icon
-    pauseBtn.addEventListener('click', () => {
-      sourcePaused[i] = !sourcePaused[i];
-      if (sourcePaused[i]) {
-        // Freeze: capture current angle, set speed to 0
-        s._frozenAngle = (s.speed * (performance.now() / 1000 - startTime)) % (Math.PI * 2);
-        s.speed = 0;
-        send({ type: 'set_source_orbit_speed', index: i, speed: 0 });
-        send({ type: 'set_source_orbit_angle', index: i, angle: s._frozenAngle });
-        pauseBtn.textContent = '\u25B6'; // play icon
-        pauseBtn.classList.add('paused');
-      } else {
-        // Resume: restore speed, adjust startTime offset
-        s.speed = sourceOrigSpeed[i];
-        send({ type: 'set_source_orbit_speed', index: i, speed: s.speed });
-        pauseBtn.textContent = '\u23F8';
-        pauseBtn.classList.remove('paused');
-      }
-    });
-    row.appendChild(pauseBtn);
-  }
-
-  sourcesPanel.appendChild(row);
-
-  // Orbit controls (radius + angle sliders) for orbiting sources
-  if (s.r > 0 || s.speed !== 0) {
-    const ctrl = document.createElement('div');
-    ctrl.className = 'orbit-controls';
-
-    // Radius slider
-    const rRow = document.createElement('div');
-    rRow.className = 'row';
-    rRow.innerHTML = `<label>Radius</label><input type="range" min="0.2" max="3" value="${s.r}" step="0.1" class="orbit-radius"><span class="val">${s.r.toFixed(1)}m</span>`;
-    const rSlider = rRow.querySelector('input');
-    const rVal = rRow.querySelector('.val');
-    rSlider.addEventListener('input', () => {
-      s.r = parseFloat(rSlider.value);
-      rVal.textContent = s.r.toFixed(1) + 'm';
-      send({ type: 'set_source_orbit_radius', index: i, radius: s.r });
-    });
-    ctrl.appendChild(rRow);
-
-    // Angle slider (visible when paused)
-    const aRow = document.createElement('div');
-    aRow.className = 'row';
-    aRow.innerHTML = `<label>Angle</label><input type="range" min="0" max="360" value="0" step="1" class="orbit-angle"><span class="val">0°</span>`;
-    const aSlider = aRow.querySelector('input');
-    const aVal = aRow.querySelector('.val');
-    aSlider.addEventListener('input', () => {
-      const deg = parseFloat(aSlider.value);
-      const rad = deg * Math.PI / 180;
-      s._frozenAngle = rad;
-      aVal.textContent = deg.toFixed(0) + '°';
-      send({ type: 'set_source_orbit_angle', index: i, angle: rad });
-    });
-    ctrl.appendChild(aRow);
-
-    sourcesPanel.appendChild(ctrl);
-  }
-
-  // Gain breakdown readout
-  const readout = document.createElement('div');
-  readout.className = 'gain-readout';
-  readout.textContent = 'dist:- emit:- hear:- = -';
-  sourcesPanel.appendChild(readout);
-  gainReadouts.push(readout);
-});
+let gainReadouts = [];
+let sourceOrigSpeed = [];
+let sourcePaused = [];
 
 // === Raycaster for dragging ===
 const raycaster = new THREE.Raycaster();
@@ -647,8 +465,21 @@ function onPointerUp() {
 }
 
 let spaceHeld = false;
-window.addEventListener('keydown', e => { if (e.code === 'Space') { spaceHeld = true; controls.enableZoom = false; e.preventDefault(); } });
-window.addEventListener('keyup', e => { if (e.code === 'Space') { spaceHeld = false; controls.enableZoom = true; } });
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    spaceHeld = true;
+    controls.enableZoom = false;
+    controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space') {
+    spaceHeld = false;
+    controls.enableZoom = true;
+    controls.mouseButtons.RIGHT = THREE.MOUSE.ROTATE;
+  }
+});
 
 function onWheel(e) {
   if (e.target !== renderer.domElement) return;
@@ -731,6 +562,323 @@ atmoHumiditySlider.addEventListener('input', () => {
 });
 updateAtmoReadout();
 
+// === Reset scene button ===
+document.getElementById('reset-btn').addEventListener('click', () => {
+  send({ type: 'reset_scene' });
+});
+
+// === Rebuild entire scene from engine state (called on WebSocket scene_state message) ===
+function rebuildFromSceneState(msg) {
+  // Update room dimensions
+  if (msg.room) {
+    ROOM.w = msg.room.width;
+    ROOM.d = msg.room.depth;
+    ROOM.h = msg.room.height;
+  }
+
+  // Update distance model (global params shared across all sources)
+  if (msg.distance_model) {
+    DIST_MODEL.refDist = msg.distance_model.ref_distance;
+    DIST_MODEL.maxDist = msg.distance_model.max_distance;
+    DIST_MODEL.rolloff = msg.distance_model.rolloff;
+  }
+
+  // Update listener from engine
+  if (msg.listener) {
+    listener.x = msg.listener.x;
+    listener.y = msg.listener.y;
+    listener.z = msg.listener.z;
+    listener.yaw = msg.listener.yaw;
+  }
+
+  // Update render mode
+  if (msg.render_mode) {
+    currentRenderMode = msg.render_mode;
+    document.querySelectorAll('.mode-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === currentRenderMode);
+    });
+  }
+
+  // Update atmosphere controls
+  if (msg.atmosphere) {
+    atmoTempSlider.value = msg.atmosphere.temperature_c;
+    document.getElementById('atmo-temp-val').textContent = msg.atmosphere.temperature_c + '°C';
+    atmoHumiditySlider.value = msg.atmosphere.humidity_pct;
+    document.getElementById('atmo-humidity-val').textContent = msg.atmosphere.humidity_pct + '%';
+    updateAtmoReadout();
+  }
+
+  // Update master gain
+  if (msg.master_gain !== undefined) {
+    const pct = Math.round(msg.master_gain * 100);
+    gainSlider.value = pct;
+    gainVal.textContent = msg.master_gain.toFixed(2);
+  }
+
+  // Rebuild speakers
+  if (msg.speakers) rebuildSpeakers(msg);
+
+  // Rebuild sources
+  if (msg.sources) rebuildSourcesFromState(msg.sources);
+}
+
+function rebuildSourcesFromState(srcData) {
+  // Remove old Three.js objects
+  sourceMeshes.forEach(m => scene.remove(m));
+  falloffClouds.forEach(m => scene.remove(m));
+  gainLines.forEach(m => scene.remove(m));
+  distLabels.forEach(d => scene.remove(d.sprite));
+
+  // Parse source color from hex string "#rrggbb" to integer
+  function parseColor(hex) {
+    return parseInt(hex.replace('#', ''), 16);
+  }
+
+  // Build directivity pattern object from engine data
+  function parsePattern(directivity, alpha) {
+    if (directivity === 'omni') return { type: 'omni' };
+    return { type: 'polar', alpha: alpha };
+  }
+
+  // Build SOURCES array from engine data
+  SOURCES = srcData.map(s => ({
+    name: s.name,
+    color: parseColor(s.color),
+    cx: s.position[0],
+    cy: s.position[1],
+    x: s.position[0],
+    y: s.position[1],
+    z: s.position[2],
+    r: s.orbit_radius,
+    speed: s.orbit_speed,
+    spl: s.spl,
+    refDist: s.ref_dist,
+    amplitude: s.amplitude,
+    audibleR: s.audible_radius,
+    pattern: parsePattern(s.directivity, s.directivity_alpha),
+    spread: s.spread,
+  }));
+
+  // Reset state arrays
+  sourceMuted = SOURCES.map(() => false);
+  sourceOrigSpeed = SOURCES.map(s => s.speed);
+  sourcePaused = SOURCES.map(() => false);
+
+  // Create source meshes
+  sourceMeshes = SOURCES.map(s => {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 16, 16),
+      new THREE.MeshStandardMaterial({ color: s.color, emissive: s.color, emissiveIntensity: 0.3 })
+    );
+    scene.add(mesh);
+    // Label sprite
+    const canvas = document.createElement('canvas');
+    canvas.width = 128; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#' + s.color.toString(16).padStart(6, '0');
+    ctx.font = '20px monospace';
+    ctx.fillText(s.name, 4, 22);
+    const tex = new THREE.CanvasTexture(canvas);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+    sprite.scale.set(1, 0.25, 1);
+    sprite.position.y = 0.3;
+    mesh.add(sprite);
+    return mesh;
+  });
+
+  // Audibility boundary: shell at the distance where SPL drops to hearing threshold.
+  // audible_radius is computed by the engine using ISO 9613 free-field propagation:
+  //   d_audible = 10^((reference_spl - spl_threshold) / 20)
+  const FILL_COUNT = 1000;        // volume-fill particles inside audible zone
+  const SHELL_COUNT = 10000;       // boundary shell particles
+
+  falloffClouds = SOURCES.map(s => {
+    const audibleR = s.audibleR;
+    const TOTAL = FILL_COUNT + SHELL_COUNT;
+    const positions = new Float32Array(TOTAL * 3);
+    const alphas = new Float32Array(TOTAL);
+
+    // Volume fill: particles distributed inside the audible zone
+    for (let p = 0; p < FILL_COUNT; p++) {
+      const r = audibleR * Math.cbrt(Math.random());
+      const theta = 2 * Math.PI * Math.random();
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[p * 3]     = r * Math.sin(phi) * Math.cos(theta);
+      positions[p * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[p * 3 + 2] = r * Math.cos(phi);
+      // Alpha from inverse distance gain
+      const dist = Math.max(r, s.refDist);
+      alphas[p] = (s.refDist / dist) * 0.04;
+    }
+
+    // Boundary shell: dense ring at the audibility edge
+    for (let p = 0; p < SHELL_COUNT; p++) {
+      const idx = FILL_COUNT + p;
+      const jitter = 1.0 + (Math.random() - 0.5) * 0.06;  // ±3% thickness
+      const r = audibleR * jitter;
+      const theta = 2 * Math.PI * Math.random();
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[idx * 3]     = r * Math.sin(phi) * Math.cos(theta);
+      positions[idx * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      positions[idx * 3 + 2] = r * Math.cos(phi);
+      alphas[idx] = 0.06;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        color: { value: new THREE.Color(s.color) },
+      },
+      vertexShader: `
+        attribute float alpha;
+        varying float vAlpha;
+        void main() {
+          vAlpha = alpha;
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = 5.0;
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 color;
+        varying float vAlpha;
+        void main() {
+          float d = length(gl_PointCoord - vec2(0.5));
+          if (d > 0.5) discard;
+          gl_FragColor = vec4(color, vAlpha);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const points = new THREE.Points(geometry, material);
+    scene.add(points);
+    return points;
+  });
+
+  // Create gain lines
+  gainLines = SOURCES.map(s => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,0], 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: s.color, transparent: true, opacity: 0.5,
+    });
+    const line = new THREE.Line(geo, mat);
+    scene.add(line);
+    return line;
+  });
+
+  // Create distance labels
+  distLabels = SOURCES.map(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128; canvas.height = 28;
+    const ctx = canvas.getContext('2d');
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    sprite.scale.set(0.9, 0.2, 1);
+    sprite.visible = false;
+    scene.add(sprite);
+    return { canvas, ctx, tex, sprite, lastText: '' };
+  });
+
+  // Rebuild HUD source controls
+  gainReadouts = [];
+  // Remove old source controls from panel (keep the <h3> header)
+  while (sourcesPanel.children.length > 1) {
+    sourcesPanel.removeChild(sourcesPanel.lastChild);
+  }
+
+  SOURCES.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'source-row';
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'source-name';
+    nameSpan.style.color = '#' + s.color.toString(16).padStart(6, '0');
+    nameSpan.textContent = s.name;
+    const btn = document.createElement('button');
+    btn.className = 'mute-btn';
+    btn.textContent = 'mute';
+    btn.addEventListener('click', () => {
+      sourceMuted[i] = !sourceMuted[i];
+      btn.textContent = sourceMuted[i] ? 'muted' : 'mute';
+      btn.classList.toggle('muted', sourceMuted[i]);
+      sourceMeshes[i].material.opacity = sourceMuted[i] ? 0.3 : 1.0;
+      sourceMeshes[i].material.transparent = sourceMuted[i];
+      send({ type: 'set_source_muted', index: i, muted: sourceMuted[i] });
+    });
+    row.appendChild(nameSpan);
+    row.appendChild(btn);
+
+    // Pause button for orbiting sources
+    if (s.r > 0 && s.speed !== 0) {
+      const pauseBtn = document.createElement('button');
+      pauseBtn.className = 'pause-btn';
+      pauseBtn.textContent = '\u23F8';
+      pauseBtn.addEventListener('click', () => {
+        sourcePaused[i] = !sourcePaused[i];
+        if (sourcePaused[i]) {
+          s._frozenAngle = (s.speed * (performance.now() / 1000 - startTime)) % (Math.PI * 2);
+          s.speed = 0;
+          send({ type: 'set_source_orbit_speed', index: i, speed: 0 });
+          send({ type: 'set_source_orbit_angle', index: i, angle: s._frozenAngle });
+          pauseBtn.textContent = '\u25B6';
+          pauseBtn.classList.add('paused');
+        } else {
+          s.speed = sourceOrigSpeed[i];
+          send({ type: 'set_source_orbit_speed', index: i, speed: s.speed });
+          pauseBtn.textContent = '\u23F8';
+          pauseBtn.classList.remove('paused');
+        }
+      });
+      row.appendChild(pauseBtn);
+    }
+
+    sourcesPanel.appendChild(row);
+
+    // Orbit controls for orbiting sources
+    if (s.r > 0 || s.speed !== 0) {
+      const ctrl = document.createElement('div');
+      ctrl.className = 'orbit-controls';
+      const rRow = document.createElement('div');
+      rRow.className = 'row';
+      rRow.innerHTML = `<label>Radius</label><input type="range" min="0.2" max="3" value="${s.r}" step="0.1" class="orbit-radius"><span class="val">${s.r.toFixed(1)}m</span>`;
+      const rSlider = rRow.querySelector('input');
+      const rVal = rRow.querySelector('.val');
+      rSlider.addEventListener('input', () => {
+        s.r = parseFloat(rSlider.value);
+        rVal.textContent = s.r.toFixed(1) + 'm';
+        send({ type: 'set_source_orbit_radius', index: i, radius: s.r });
+      });
+      ctrl.appendChild(rRow);
+      const aRow = document.createElement('div');
+      aRow.className = 'row';
+      aRow.innerHTML = `<label>Angle</label><input type="range" min="0" max="360" value="0" step="1" class="orbit-angle"><span class="val">0°</span>`;
+      const aSlider = aRow.querySelector('input');
+      const aVal = aRow.querySelector('.val');
+      aSlider.addEventListener('input', () => {
+        const deg = parseFloat(aSlider.value);
+        const rad = deg * Math.PI / 180;
+        s._frozenAngle = rad;
+        aVal.textContent = deg.toFixed(0) + '°';
+        send({ type: 'set_source_orbit_angle', index: i, angle: rad });
+      });
+      ctrl.appendChild(aRow);
+      sourcesPanel.appendChild(ctrl);
+    }
+
+    // Gain breakdown readout
+    const readout = document.createElement('div');
+    readout.className = 'gain-readout';
+    readout.textContent = 'dist:- emit:- hear:- = -';
+    sourcesPanel.appendChild(readout);
+    gainReadouts.push(readout);
+  });
+}
+
 // === WebSocket ===
 function connect() {
   ws = new WebSocket('ws://' + location.host + '/ws');
@@ -745,7 +893,9 @@ function connect() {
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'speaker_layout') rebuildSpeakers(msg);
+      if (msg.type === 'scene_state') rebuildFromSceneState(msg);
+      else if (msg.type === 'speaker_layout') rebuildSpeakers(msg);
+      else if (msg.type === 'telemetry') latestTelemetry = msg;
     } catch (e) { /* ignore non-JSON or unknown messages */ }
   };
   ws.onclose = () => {
@@ -785,39 +935,33 @@ function animate() {
   // rotateY(θ) maps local +Z to (sin(θ), 0, cos(θ)), so θ = yaw + π/2
   listenerGroup.rotation.y = listener.yaw + Math.PI / 2;
 
-  // Update source positions and directivity pattern orientation
+  // Update source positions and visuals
+  // Positions come from engine telemetry (authoritative) or local orbit animation (fallback)
   SOURCES.forEach((s, i) => {
-    let ax, ay, facingX, facingY, facingYaw;
-    if (s.r > 0 && (s.speed !== 0 || sourcePaused[i])) {
+    // Use engine telemetry position if available, otherwise local orbit animation
+    let ax, ay, az;
+    const t = latestTelemetry && latestTelemetry.sources[i];
+    if (t) {
+      ax = t.x; ay = t.y; az = t.z;
+    } else if (s.r > 0 && (s.speed !== 0 || sourcePaused[i])) {
       const orbitAngle = sourcePaused[i] ? (s._frozenAngle || 0) : s.speed * elapsed;
       ax = s.cx + s.r * Math.cos(orbitAngle);
       ay = s.cy + s.r * Math.sin(orbitAngle);
-      // Facing direction = toward orbit center (matches Rust TestNode::orientation)
-      facingX = s.cx - ax;
-      facingY = s.cy - ay;
-      facingYaw = Math.atan2(facingY, facingX);
+      az = s.z;
     } else {
       ax = s.x ?? s.cx;
       ay = s.y ?? s.cy;
-      facingX = 1; facingY = 0;
-      facingYaw = 0; // stationary sources face +X (Atrium default)
+      az = s.z;
     }
-    const az = s.z;
     sourceMeshes[i].position.copy(toThree(ax, ay, az));
-    // Pattern line follows source position and rotates to match facing direction
-    patternMeshes[i].position.copy(sourceMeshes[i].position);
-    patternMeshes[i].rotation.y = facingYaw + Math.PI / 2;
-    patternMeshes[i].visible = !sourceMuted[i];
+    falloffClouds[i].position.copy(sourceMeshes[i].position);
+    falloffClouds[i].visible = !sourceMuted[i];
 
-    // Compute gain chain (mirrors mixer.rs)
-    const srcFacingX = Math.cos(facingYaw), srcFacingY = Math.sin(facingYaw);
-    const gains = computeGainChain(
-      ax, ay, s.z, srcFacingX, srcFacingY, s.pattern,
-      listener.x, listener.y, listener.z, listener.yaw
-    );
+    // Gain data from engine telemetry
+    const gains = t || { dist: 0, emit: 0, hear: 0, total: 0, db: -999, distance: 0 };
 
     // Update gain line endpoints and opacity
-    const srcPos = toThree(ax, ay, s.z);
+    const srcPos = toThree(ax, ay, az);
     const lstPos = toThree(listener.x, listener.y, listener.z);
     const posArr = gainLines[i].geometry.attributes.position.array;
     posArr[0] = srcPos.x; posArr[1] = srcPos.y + 0.02; posArr[2] = srcPos.z;
@@ -827,11 +971,16 @@ function animate() {
     gainLines[i].visible = true;
 
     // Update distance label at midpoint of gain line
+    // Received SPL: physics-based inverse square law + directivity/hearing
+    //   SPL(d) = SPL_ref - 20·log₁₀(d) + 20·log₁₀(emit) + 20·log₁₀(hear)
     const dl = distLabels[i];
-    const dx = ax - listener.x, dy = ay - listener.y, dz = s.z - listener.z;
-    const rawDist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    const totalDb = gains.total > 0 ? (20 * Math.log10(gains.total)).toFixed(0) : '-∞';
-    const distText = `${rawDist.toFixed(1)}m ${totalDb}dB`;
+    const d = Math.max(1, gains.distance); // SPL defined at 1m
+    const splAtDist = s.spl - 20 * Math.log10(d);
+    const emitDb = gains.emit > 0 ? 20 * Math.log10(gains.emit) : -999;
+    const hearDb = gains.hear > 0 ? 20 * Math.log10(gains.hear) : -999;
+    const receivedSpl = splAtDist + emitDb + hearDb;
+    const splText = isFinite(receivedSpl) ? receivedSpl.toFixed(0) : '-∞';
+    const distText = `${gains.distance.toFixed(1)}m ${splText}dB`;
     const hexColor = '#' + SOURCES[i].color.toString(16).padStart(6, '0');
     updateDistLabel(dl, distText, hexColor);
     dl.sprite.position.set(
@@ -843,7 +992,7 @@ function animate() {
 
     // Update HUD gain readout
     gainReadouts[i].textContent = sourceMuted[i] ? 'muted'
-      : `dist:${gains.dist.toFixed(2)} emit:${gains.srcDir.toFixed(2)} hear:${gains.hear.toFixed(2)} = ${gains.total.toFixed(3)} (${gains.total > 0 ? (20 * Math.log10(gains.total)).toFixed(1) : '-∞'} dB)`;
+      : `dist:${gains.dist.toFixed(2)} emit:${gains.emit.toFixed(2)} hear:${gains.hear.toFixed(2)} = ${splText} dBSPL`;
   });
 
   controls.update();

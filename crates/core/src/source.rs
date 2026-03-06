@@ -58,4 +58,11 @@ pub trait SoundSource: Send {
 
     /// Set orbit angle (radians).
     fn set_orbit_angle(&mut self, _angle: f32) {}
+
+    /// Per-source reference distance (meters) at which gain = 1.0.
+    /// Derived from SPL: louder sources project further.
+    /// Default: 1.0 m (IEC 61672 standard measurement distance).
+    fn ref_distance(&self) -> f32 {
+        1.0
+    }
 }

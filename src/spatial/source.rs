@@ -18,6 +18,7 @@ pub struct TestNode {
     orbit_angle: f32,
     pub pattern: DirectivityPattern,
     pub spread: f32,
+    pub ref_dist: f32,
     muted: bool,
 }
 
@@ -38,6 +39,7 @@ impl TestNode {
             orbit_angle: 0.0,
             pattern: DirectivityPattern::OMNI,
             spread: 0.0,
+            ref_dist: 1.0,
             muted: false,
         }
     }
@@ -133,5 +135,9 @@ impl SoundSource for TestNode {
 
     fn set_orbit_angle(&mut self, angle: f32) {
         self.orbit_angle = angle;
+    }
+
+    fn ref_distance(&self) -> f32 {
+        self.ref_dist
     }
 }

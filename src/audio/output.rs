@@ -115,21 +115,27 @@ impl AudioOutput for CpalOutput {
                 |err| eprintln!("audio stream error: {err}"),
                 None,
             )?,
-            SampleFormat::I16 => device.build_output_stream(
+            SampleFormat::I16 => {
+            let mut float_buf: Vec<f32> = Vec::new();
+            device.build_output_stream(
                 &config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    // Convert: render to f32 internally, then convert to i16
                     let len = data.len();
-                    let mut float_buf = vec![0.0f32; len]; // TODO: pre-allocate
+                    // Grow once on first callback (or if buffer size changes)
+                    if float_buf.len() < len {
+                        float_buf.resize(len, 0.0);
+                    }
+                    float_buf[..len].fill(0.0);
                     scene.process_commands(&mut commands);
-                    scene.render(&mut float_buf, channels as usize);
+                    scene.render(&mut float_buf[..len], channels as usize);
                     for (out, &sample) in data.iter_mut().zip(float_buf.iter()) {
                         *out = (sample * i16::MAX as f32) as i16;
                     }
                 },
                 |err| eprintln!("audio stream error: {err}"),
                 None,
-            )?,
+            )?
+        }
             format => return Err(format!("unsupported sample format: {format:?}").into()),
         };
 

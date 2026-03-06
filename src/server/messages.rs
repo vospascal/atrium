@@ -44,6 +44,10 @@ pub enum ClientMessage {
     /// Set atmospheric conditions (temperature, humidity) for ISO 9613-1 air absorption.
     #[serde(rename = "set_atmosphere")]
     SetAtmosphere { temperature: f32, humidity: f32 },
+
+    /// Reset scene to initial state.
+    #[serde(rename = "reset_scene")]
+    ResetScene,
 }
 
 impl ClientMessage {
@@ -71,6 +75,7 @@ impl ClientMessage {
                     "stereo" => RenderMode::Stereo,
                     "mono" => RenderMode::Mono,
                     "quad" | "4.0" => RenderMode::Quad,
+                    "binaural" | "hrtf" => RenderMode::Binaural,
                     _ => RenderMode::SpeakerAsMic,
                 };
                 Command::SetRenderMode { mode: render_mode }
@@ -96,7 +101,13 @@ impl ClientMessage {
                     humidity_pct: humidity.clamp(0.0, 100.0),
                 }
             }
+            ClientMessage::ResetScene => Command::ResetScene,
         }
+    }
+
+    /// Returns true if this message should trigger re-sending the initial scene state.
+    pub fn needs_scene_resend(&self) -> bool {
+        matches!(self, ClientMessage::ResetScene)
     }
 }
 
@@ -277,5 +288,14 @@ mod tests {
             }
             _ => panic!("wrong command variant"),
         }
+    }
+
+    #[test]
+    fn parse_reset_scene() {
+        let json = r#"{"type":"reset_scene"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.needs_scene_resend());
+        let cmd = msg.into_command();
+        assert!(matches!(cmd, Command::ResetScene));
     }
 }

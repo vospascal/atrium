@@ -12,6 +12,8 @@ use symphonia::core::probe::Hint;
 pub struct AudioBuffer {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+    /// Root-mean-square level of the decoded samples.
+    pub rms: f32,
 }
 
 /// Decode an audio file (MP3, WAV, FLAC, etc.) into a mono f32 AudioBuffer.
@@ -91,16 +93,24 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
         }
     }
 
+    let rms = if all_samples.is_empty() {
+        0.0
+    } else {
+        (all_samples.iter().map(|s| s * s).sum::<f32>() / all_samples.len() as f32).sqrt()
+    };
+
     println!(
-        "Decoded {}: {} samples, {}Hz, {}ch → mono",
+        "Decoded {}: {} samples, {}Hz, {}ch → mono (RMS: {:.4})",
         path.display(),
         all_samples.len(),
         sample_rate,
-        channels
+        channels,
+        rms,
     );
 
     Ok(AudioBuffer {
         samples: all_samples,
         sample_rate,
+        rms,
     })
 }

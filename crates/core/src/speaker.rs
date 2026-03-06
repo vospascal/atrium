@@ -78,6 +78,8 @@ pub enum RenderMode {
     Mono,
     /// VBAP restricted to quad speakers (skips center channel).
     Quad,
+    /// Binaural HRTF rendering — stereo output for headphones.
+    Binaural,
 }
 
 /// Multichannel speaker configuration.
@@ -592,7 +594,7 @@ impl SpeakerLayout {
         distance: &DistanceParams,
     ) -> ChannelGains {
         match self.mode {
-            RenderMode::SpeakerAsMic => {
+            RenderMode::SpeakerAsMic | RenderMode::Binaural => {
                 self.compute_gains_mic(listener, source_pos, source_orientation, source_directivity, distance)
             }
             RenderMode::Vbap => self.compute_gains_vbap(
@@ -622,7 +624,7 @@ impl SpeakerLayout {
         spread: f32,
     ) -> ChannelGains {
         match self.mode {
-            RenderMode::SpeakerAsMic => {
+            RenderMode::SpeakerAsMic | RenderMode::Binaural => {
                 self.compute_gains_mic(listener, source_pos, source_orientation, source_directivity, distance)
             }
             RenderMode::Vbap => self.compute_gains_mdap(

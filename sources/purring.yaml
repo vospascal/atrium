@@ -1,0 +1,8 @@
+# Source: Cat Purring
+# Very quiet, close-range sound. In reality you'd need to be
+# right next to the cat to hear it — distance attenuation will
+# make this nearly inaudible from across the room.
+
+path: assets/purring.mp3
+reference_spl: 25.0        # ~25 dB SPL at 1m (barely audible)
+directivity: omni           # radiates equally in all directions

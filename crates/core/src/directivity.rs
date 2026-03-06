@@ -43,6 +43,16 @@ impl DirectivityPattern {
         DirectivityPattern::Polar { alpha: 0.37 }
     }
 
+    /// Return the polar alpha coefficient (1.0 for omni, 0.5 for cardioid, etc.).
+    /// Used for serialization to the browser UI.
+    pub fn alpha(&self) -> f32 {
+        match self {
+            DirectivityPattern::Omni => 1.0,
+            DirectivityPattern::Polar { alpha } => *alpha,
+            DirectivityPattern::Cone { .. } => 1.0,
+        }
+    }
+
     /// Evaluate the pattern at a given angle (radians, 0 = forward, π = behind).
     pub fn gain_at_angle(&self, angle: f32) -> f32 {
         let angle = angle.abs();

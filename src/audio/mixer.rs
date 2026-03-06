@@ -178,7 +178,7 @@ pub struct AirAbsorption {
 }
 
 impl AirAbsorption {
-    fn new(sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32) -> Self {
         Self {
             filter: Biquad::lowpass(20000.0, sample_rate),
             current_cutoff: 20000.0,
@@ -187,7 +187,7 @@ impl AirAbsorption {
     }
 
     /// Update the filter cutoff based on distance, using ISO 9613-1 physics.
-    fn update(&mut self, distance: f32, atmosphere: &AtmosphericParams) {
+    pub fn update(&mut self, distance: f32, atmosphere: &AtmosphericParams) {
         let target = iso9613_cutoff(distance, atmosphere);
 
         // Only recalculate filter coefficients if cutoff changed significantly (>5%)
@@ -198,7 +198,7 @@ impl AirAbsorption {
     }
 
     #[inline]
-    fn process(&mut self, sample: f32) -> f32 {
+    pub fn process(&mut self, sample: f32) -> f32 {
         self.filter.process(sample)
     }
 }
@@ -264,7 +264,7 @@ pub fn mix_sources(
     atmosphere: &AtmosphericParams,
 ) {
     let num_frames = output.len() / channels;
-    let dist_params = distance_model.as_params();
+    let base_dist_params = distance_model.as_params();
     let lfe_channel = layout.lfe_channel();
     let inv_frames = 1.0 / num_frames as f32;
 
@@ -284,6 +284,13 @@ pub fn mix_sources(
         let pos = source.position();
         let dist_to_listener = listener.position.distance_to(pos);
 
+        // Per-source distance params: override ref_distance from source's SPL-derived value
+        let src_ref_dist = source.ref_distance();
+        let src_dist_params = DistanceParams {
+            ref_distance: src_ref_dist,
+            ..base_dist_params
+        };
+
         // Update air absorption filter cutoff for this source's distance
         state.air_absorption[src_idx].update(dist_to_listener, atmosphere);
 
@@ -294,7 +301,7 @@ pub fn mix_sources(
             pos,
             source.orientation(),
             &source.directivity(),
-            &dist_params,
+            &src_dist_params,
             source.spread(),
         );
 
@@ -303,7 +310,7 @@ pub fn mix_sources(
             let lfe_dist = distance_gain_at_model(
                 listener.position,
                 pos,
-                distance_model.ref_distance,
+                src_ref_dist,
                 distance_model.max_distance,
                 distance_model.rolloff,
                 distance_model.model,
@@ -375,5 +382,562 @@ pub fn mix_sources(
     // Final pass: apply master gain and clamp
     for sample in output.iter_mut() {
         *sample = (*sample * master_gain).clamp(-1.0, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::binaural::BinauralMixer;
+    use crate::audio::decode::AudioBuffer;
+    use crate::spatial::sound_profile::SoundProfile;
+    use crate::spatial::source::TestNode;
+    use crate::world::types::Vec3;
+    use atrium_core::listener::Listener;
+    use atrium_core::speaker::{RenderMode, SpeakerLayout};
+    use std::sync::Arc;
+
+    const SR: f32 = 48000.0;
+    const FRAMES: usize = 1024;
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    /// 1 kHz sine tone, 1 second. Passes air absorption and isn't LFE-filtered.
+    fn sine_buffer() -> Arc<AudioBuffer> {
+        let n = SR as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR).sin())
+            .collect();
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
+        Arc::new(AudioBuffer { samples, sample_rate: SR as u32, rms })
+    }
+
+    fn make_source(buf: &Arc<AudioBuffer>, spl: f32, pos: Vec3, ceiling: f32) -> Box<dyn SoundSource> {
+        let profile = SoundProfile { reference_spl: spl };
+        let amplitude = profile.amplitude(buf.rms, 0.1, ceiling);
+        let mut node = TestNode::new(Arc::clone(buf), pos, 0.0, 0.0);
+        node.amplitude = amplitude;
+        Box::new(node)
+    }
+
+    /// Listener with omnidirectional hearing (no cone attenuation).
+    fn omni_listener(pos: Vec3, yaw: f32) -> Listener {
+        let mut l = Listener::new(pos, yaw);
+        l.hearing_cone.pattern = atrium_core::directivity::DirectivityPattern::Omni;
+        l
+    }
+
+    fn default_distance() -> DistanceModel {
+        DistanceModel { ref_distance: 1.0, max_distance: 100.0, rolloff: 1.0, model: DistanceModelType::Inverse }
+    }
+
+    fn to_db(linear: f32) -> f32 {
+        20.0 * linear.max(1e-10).log10()
+    }
+
+    // ── Layout factories ────────────────────────────────────────────────────
+
+    /// Listener at origin facing +x. Speakers placed symmetrically.
+    /// In this frame: +x = forward, +y = left, -y = right.
+
+    fn layout_stereo() -> SpeakerLayout {
+        let mut l = SpeakerLayout::stereo(
+            Vec3::new(-10.0, 10.0, 0.0),
+            Vec3::new(10.0, 10.0, 0.0),
+        );
+        l.mode = RenderMode::Stereo;
+        l
+    }
+
+    fn layout_vbap_5_1() -> SpeakerLayout {
+        // Listener at origin facing +x. +x = forward, +y = left.
+        // ITU 5.1: FL(0) FR(1) C(2) LFE(3) RL(4) RR(5)
+        let mut l = SpeakerLayout::surround_5_1(
+            Vec3::new(10.0, 5.0, 0.0),   // FL — front-left  (~27° left)
+            Vec3::new(10.0, -5.0, 0.0),  // FR — front-right (~27° right)
+            Vec3::new(10.0, 0.0, 0.0),   // C  — center      (0°)
+            Vec3::new(-10.0, 5.0, 0.0),  // RL — rear-left   (~153° left)
+            Vec3::new(-10.0, -5.0, 0.0), // RR — rear-right  (~153° right)
+        );
+        l.mode = RenderMode::Vbap;
+        l
+    }
+
+    fn layout_quad() -> SpeakerLayout {
+        // Listener at origin facing +x.
+        let mut l = SpeakerLayout::quad(
+            Vec3::new(10.0, 5.0, 0.0),   // FL
+            Vec3::new(10.0, -5.0, 0.0),  // FR
+            Vec3::new(-10.0, 5.0, 0.0),  // RL
+            Vec3::new(-10.0, -5.0, 0.0), // RR
+        );
+        l.mode = RenderMode::Quad;
+        l
+    }
+
+    fn layout_mono() -> SpeakerLayout {
+        let mut l = SpeakerLayout::stereo(
+            Vec3::new(-10.0, 10.0, 0.0),
+            Vec3::new(10.0, 10.0, 0.0),
+        );
+        l.mode = RenderMode::Mono;
+        l
+    }
+
+    // ── Generic render helper (any channel count) ───────────────────────────
+
+    /// Render two buffers and return the stable second one.
+    fn render(
+        sources: &mut [Box<dyn SoundSource>],
+        listener: &Listener,
+        layout: &SpeakerLayout,
+        dist: &DistanceModel,
+    ) -> Vec<f32> {
+        let ch = layout.total_channels();
+        let atmo = AtmosphericParams::default();
+        let mut state = MixerState::new(sources.len());
+        let mut out = vec![0.0; FRAMES * ch];
+        // First buffer: ramp from 0 → target (discard)
+        mix_sources(sources, listener, &mut out, ch, SR, 1.0, dist, layout, &mut state, &atmo);
+        // Second buffer: stable gains
+        out.fill(0.0);
+        mix_sources(sources, listener, &mut out, ch, SR, 1.0, dist, layout, &mut state, &atmo);
+        out
+    }
+
+    /// RMS of one channel from interleaved multichannel buffer.
+    fn ch_rms(buf: &[f32], channels: usize, ch: usize) -> f32 {
+        let sum: f32 = buf.iter().skip(ch).step_by(channels).map(|s| s * s).sum();
+        let n = buf.len() / channels;
+        (sum / n as f32).sqrt()
+    }
+
+    /// Total RMS across all channels.
+    fn total_rms(buf: &[f32], channels: usize) -> f32 {
+        (0..channels).map(|ch| ch_rms(buf, channels, ch)).sum()
+    }
+
+    // ── Binaural render helper ──────────────────────────────────────────────
+
+    fn render_binaural(
+        sources: &mut [Box<dyn SoundSource>],
+        listener: &Listener,
+        dist: &DistanceModel,
+    ) -> Vec<f32> {
+        let ch = 2;
+        let atmo = AtmosphericParams::default();
+        let mut mixer = BinauralMixer::new("assets/hrtf/default.sofa", SR, sources.len())
+            .expect("failed to load SOFA file");
+        let mut out = vec![0.0; FRAMES * ch];
+        // Run several passes: gain ramp settles + HRTF convolver fully transitions
+        // (HRTF updates every 4 calls, FFT overlap needs a few blocks to flush)
+        for _ in 0..8 {
+            out.fill(0.0);
+            mixer.mix(sources, listener, &mut out, ch, SR, 1.0, dist, &atmo);
+        }
+        out
+    }
+
+    // ── Unit tests: SoundProfile amplitude ──────────────────────────────────
+
+    #[test]
+    fn amplitude_at_ceiling_equals_target_rms() {
+        let buf = sine_buffer();
+        let amp = SoundProfile { reference_spl: 100.0 }.amplitude(buf.rms, 0.1, 100.0);
+        let expected = 0.1 / buf.rms;
+        assert!((amp - expected).abs() < 1e-6, "expected {expected}, got {amp}");
+    }
+
+    #[test]
+    fn amplitude_scales_by_spl_difference() {
+        let buf = sine_buffer();
+        let loud = SoundProfile { reference_spl: 100.0 }.amplitude(buf.rms, 0.1, 100.0);
+        let quiet = SoundProfile { reference_spl: 45.0 }.amplitude(buf.rms, 0.1, 100.0);
+        let db_diff = to_db(quiet / loud);
+        assert!((db_diff - (-55.0)).abs() < 0.1, "expected -55 dB, got {db_diff:.1} dB");
+    }
+
+    #[test]
+    fn amplitude_independent_of_other_sources() {
+        let buf = sine_buffer();
+        let a = SoundProfile { reference_spl: 45.0 }.amplitude(buf.rms, 0.1, 100.0);
+        let b = SoundProfile { reference_spl: 45.0 }.amplitude(buf.rms, 0.1, 100.0);
+        assert!((a - b).abs() < 1e-10);
+    }
+
+    #[test]
+    fn lowering_ceiling_boosts_quiet_sources() {
+        let buf = sine_buffer();
+        let at_100 = SoundProfile { reference_spl: 45.0 }.amplitude(buf.rms, 0.1, 100.0);
+        let at_80 = SoundProfile { reference_spl: 45.0 }.amplitude(buf.rms, 0.1, 80.0);
+        let db_diff = to_db(at_80 / at_100);
+        assert!((db_diff - 20.0).abs() < 0.1, "expected +20 dB, got {db_diff:.1} dB");
+    }
+
+    #[test]
+    fn sources_above_ceiling_are_capped() {
+        // Djembe (100 dB) with ceiling at 60 should be capped to same gain
+        // as a 60 dB source (both get spl_gain = 1.0)
+        let buf = sine_buffer();
+        let rms_correction = 0.1 / buf.rms;
+        let loud = SoundProfile { reference_spl: 100.0 }.amplitude(buf.rms, 0.1, 60.0);
+        let at_ceiling = SoundProfile { reference_spl: 60.0 }.amplitude(buf.rms, 0.1, 60.0);
+        // Both should equal rms_correction (spl_gain capped at 1.0)
+        assert!((loud - rms_correction).abs() < 1e-6, "100 dB should be capped: {loud}");
+        assert!((at_ceiling - rms_correction).abs() < 1e-6, "60 dB at ceiling: {at_ceiling}");
+        // Quiet source below ceiling still scales down
+        let quiet = SoundProfile { reference_spl: 45.0 }.amplitude(buf.rms, 0.1, 60.0);
+        assert!(quiet < loud, "45 dB should be quieter than capped 100 dB");
+        let expected_db = -15.0; // 45 - 60
+        let actual_db = to_db(quiet / loud);
+        assert!((actual_db - expected_db).abs() < 0.5, "expected {expected_db} dB, got {actual_db:.1} dB");
+    }
+
+    // ── Unit tests: SoundProfile ref_distance ────────────────────────────
+
+    #[test]
+    fn ref_distance_scales_with_spl() {
+        let djembe = SoundProfile { reference_spl: 100.0 }.ref_distance(1.0, 40.0);
+        let campfire = SoundProfile { reference_spl: 45.0 }.ref_distance(1.0, 40.0);
+        let cat = SoundProfile { reference_spl: 25.0 }.ref_distance(1.0, 40.0);
+        // Louder sources should have larger ref_distance
+        assert!(djembe > campfire, "djembe should project further than campfire");
+        assert!(campfire > cat, "campfire should project further than cat");
+        // Formula: global_ref * (spl / spl_reference)
+        assert!((djembe - 2.5).abs() < 0.01, "djembe ref_dist: {djembe}");
+        assert!((campfire - 1.125).abs() < 0.01, "campfire ref_dist: {campfire}");
+        assert!((cat - 0.625).abs() < 0.01, "cat ref_dist: {cat}");
+    }
+
+    #[test]
+    fn ref_distance_scales_with_global_ref() {
+        let a = SoundProfile { reference_spl: 60.0 }.ref_distance(1.0, 60.0);
+        let b = SoundProfile { reference_spl: 60.0 }.ref_distance(0.5, 60.0);
+        assert!((a - 1.0).abs() < 1e-6, "at spl=reference, should equal global_ref");
+        assert!((b - 0.5).abs() < 1e-6, "should scale with global_ref");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // STEREO
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn stereo_distance_6db_per_doubling() {
+        let buf = sine_buffer();
+        let layout = layout_stereo();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        let mut s1 = vec![make_source(&buf, 100.0, Vec3::new(1.0, 0.0, 0.0), 100.0)];
+        let mut s2 = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let r1 = total_rms(&render(&mut s1, &listener, &layout, &dist), 2);
+        let r2 = total_rms(&render(&mut s2, &listener, &layout, &dist), 2);
+        let db = to_db(r2 / r1);
+        assert!((db - (-6.0)).abs() < 1.0, "stereo: expected -6 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn stereo_spl_difference_preserved() {
+        let buf = sine_buffer();
+        let layout = layout_stereo();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        let pos = Vec3::new(2.0, 0.0, 0.0);
+
+        let mut loud = vec![make_source(&buf, 100.0, pos, 100.0)];
+        let mut quiet = vec![make_source(&buf, 45.0, pos, 100.0)];
+        let rl = ch_rms(&render(&mut loud, &listener, &layout, &dist), 2, 0);
+        let rq = ch_rms(&render(&mut quiet, &listener, &layout, &dist), 2, 0);
+        let db = to_db(rq / rl);
+        assert!((db - (-55.0)).abs() < 1.5, "stereo: expected -55 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn stereo_left_right_panning() {
+        let buf = sine_buffer();
+        let layout = layout_stereo();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        // Source left (+y)
+        let mut sl = vec![make_source(&buf, 100.0, Vec3::new(1.0, 2.0, 0.0), 100.0)];
+        let ol = render(&mut sl, &listener, &layout, &dist);
+        assert!(ch_rms(&ol, 2, 0) > ch_rms(&ol, 2, 1) * 2.0, "stereo: left source should be louder in L");
+
+        // Source right (-y)
+        let mut sr = vec![make_source(&buf, 100.0, Vec3::new(1.0, -2.0, 0.0), 100.0)];
+        let or = render(&mut sr, &listener, &layout, &dist);
+        assert!(ch_rms(&or, 2, 1) > ch_rms(&or, 2, 0) * 2.0, "stereo: right source should be louder in R");
+    }
+
+    #[test]
+    fn stereo_center_equal() {
+        let buf = sine_buffer();
+        let layout = layout_stereo();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let out = render(&mut s, &listener, &layout, &dist);
+        let diff = to_db(ch_rms(&out, 2, 0) / ch_rms(&out, 2, 1)).abs();
+        assert!(diff < 1.0, "stereo: center L/R diff {diff:.1} dB");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // VBAP 5.1
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn vbap_5_1_distance_6db() {
+        let buf = sine_buffer();
+        let layout = layout_vbap_5_1();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        let mut s1 = vec![make_source(&buf, 100.0, Vec3::new(1.0, 0.0, 0.0), 100.0)];
+        let mut s2 = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let r1 = total_rms(&render(&mut s1, &listener, &layout, &dist), 6);
+        let r2 = total_rms(&render(&mut s2, &listener, &layout, &dist), 6);
+        let db = to_db(r2 / r1);
+        assert!((db - (-6.0)).abs() < 1.5, "5.1: expected -6 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn vbap_5_1_spl_difference() {
+        let buf = sine_buffer();
+        let layout = layout_vbap_5_1();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        let pos = Vec3::new(2.0, 0.0, 0.0);
+
+        let mut loud = vec![make_source(&buf, 100.0, pos, 100.0)];
+        let mut quiet = vec![make_source(&buf, 45.0, pos, 100.0)];
+        let rl = total_rms(&render(&mut loud, &listener, &layout, &dist), 6);
+        let rq = total_rms(&render(&mut quiet, &listener, &layout, &dist), 6);
+        let db = to_db(rq / rl);
+        assert!((db - (-55.0)).abs() < 2.0, "5.1: expected -55 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn vbap_5_1_front_left_panning() {
+        let buf = sine_buffer();
+        let layout = layout_vbap_5_1();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source at front-left: should activate FL(0) more than FR(1) and rears
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(2.0, 3.0, 0.0), 100.0)];
+        let out = render(&mut s, &listener, &layout, &dist);
+        let fl = ch_rms(&out, 6, 0);
+        let fr = ch_rms(&out, 6, 1);
+        let rl = ch_rms(&out, 6, 4);
+        let rr = ch_rms(&out, 6, 5);
+        assert!(fl > fr, "5.1: FL ({fl:.4}) > FR ({fr:.4}) for front-left source");
+        assert!(fl > rl, "5.1: FL ({fl:.4}) > RL ({rl:.4}) for front-left source");
+        assert!(fl > rr, "5.1: FL ({fl:.4}) > RR ({rr:.4}) for front-left source");
+    }
+
+    #[test]
+    fn vbap_5_1_rear_right_panning() {
+        let buf = sine_buffer();
+        let layout = layout_vbap_5_1();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source behind and to the right
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(-2.0, -3.0, 0.0), 100.0)];
+        let out = render(&mut s, &listener, &layout, &dist);
+        let fl = ch_rms(&out, 6, 0);
+        let rr = ch_rms(&out, 6, 5);
+        assert!(rr > fl, "5.1: RR ({rr:.4}) > FL ({fl:.4}) for rear-right source");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // QUAD 4.0
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn quad_distance_6db() {
+        let buf = sine_buffer();
+        let layout = layout_quad();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        let mut s1 = vec![make_source(&buf, 100.0, Vec3::new(1.0, 0.0, 0.0), 100.0)];
+        let mut s2 = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let r1 = total_rms(&render(&mut s1, &listener, &layout, &dist), 4);
+        let r2 = total_rms(&render(&mut s2, &listener, &layout, &dist), 4);
+        let db = to_db(r2 / r1);
+        assert!((db - (-6.0)).abs() < 1.5, "quad: expected -6 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn quad_spl_difference() {
+        let buf = sine_buffer();
+        let layout = layout_quad();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        let pos = Vec3::new(2.0, 0.0, 0.0);
+
+        let mut loud = vec![make_source(&buf, 100.0, pos, 100.0)];
+        let mut quiet = vec![make_source(&buf, 45.0, pos, 100.0)];
+        let rl = total_rms(&render(&mut loud, &listener, &layout, &dist), 4);
+        let rq = total_rms(&render(&mut quiet, &listener, &layout, &dist), 4);
+        let db = to_db(rq / rl);
+        assert!((db - (-55.0)).abs() < 2.0, "quad: expected -55 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn quad_front_left_panning() {
+        let buf = sine_buffer();
+        let layout = layout_quad();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source front-left
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(2.0, 3.0, 0.0), 100.0)];
+        let out = render(&mut s, &listener, &layout, &dist);
+        let fl = ch_rms(&out, 4, 0); // ch 0
+        let fr = ch_rms(&out, 4, 1); // ch 1
+        let rl = ch_rms(&out, 4, 2); // ch 2
+        let rr = ch_rms(&out, 4, 3); // ch 3
+        assert!(fl > fr, "quad: FL > FR for front-left source");
+        assert!(fl > rl, "quad: FL > RL for front-left source");
+        assert!(fl > rr, "quad: FL > RR for front-left source");
+    }
+
+    #[test]
+    fn quad_rear_right_panning() {
+        let buf = sine_buffer();
+        let layout = layout_quad();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source behind-right
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(-2.0, -3.0, 0.0), 100.0)];
+        let out = render(&mut s, &listener, &layout, &dist);
+        let fl = ch_rms(&out, 4, 0);
+        let rr = ch_rms(&out, 4, 3);
+        assert!(rr > fl, "quad: RR ({rr:.4}) > FL ({fl:.4}) for rear-right source");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // MONO
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn mono_distance_6db() {
+        let buf = sine_buffer();
+        let layout = layout_mono();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        let mut s1 = vec![make_source(&buf, 100.0, Vec3::new(1.0, 0.0, 0.0), 100.0)];
+        let mut s2 = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let r1 = total_rms(&render(&mut s1, &listener, &layout, &dist), 2);
+        let r2 = total_rms(&render(&mut s2, &listener, &layout, &dist), 2);
+        let db = to_db(r2 / r1);
+        assert!((db - (-6.0)).abs() < 1.5, "mono: expected -6 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn mono_spl_difference() {
+        let buf = sine_buffer();
+        let layout = layout_mono();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        let pos = Vec3::new(2.0, 0.0, 0.0);
+
+        let mut loud = vec![make_source(&buf, 100.0, pos, 100.0)];
+        let mut quiet = vec![make_source(&buf, 45.0, pos, 100.0)];
+        let rl = total_rms(&render(&mut loud, &listener, &layout, &dist), 2);
+        let rq = total_rms(&render(&mut quiet, &listener, &layout, &dist), 2);
+        let db = to_db(rq / rl);
+        assert!((db - (-55.0)).abs() < 2.0, "mono: expected -55 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn mono_equal_channels_regardless_of_position() {
+        let buf = sine_buffer();
+        let layout = layout_mono();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source hard left — mono should still be equal in both channels
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(0.0, 3.0, 0.0), 100.0)];
+        let out = render(&mut s, &listener, &layout, &dist);
+        let l = ch_rms(&out, 2, 0);
+        let r = ch_rms(&out, 2, 1);
+        let diff = to_db(l / r).abs();
+        assert!(diff < 0.5, "mono: L/R diff should be ~0 dB, got {diff:.1} dB");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // BINAURAL (HRTF)
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn binaural_distance_6db() {
+        let buf = sine_buffer();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        let mut s1 = vec![make_source(&buf, 100.0, Vec3::new(1.0, 0.0, 0.0), 100.0)];
+        let mut s2 = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let r1 = total_rms(&render_binaural(&mut s1, &listener, &dist), 2);
+        let r2 = total_rms(&render_binaural(&mut s2, &listener, &dist), 2);
+        let db = to_db(r2 / r1);
+        assert!((db - (-6.0)).abs() < 2.0, "binaural: expected -6 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn binaural_spl_difference() {
+        let buf = sine_buffer();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        let pos = Vec3::new(2.0, 0.0, 0.0);
+
+        let mut loud = vec![make_source(&buf, 100.0, pos, 100.0)];
+        let mut quiet = vec![make_source(&buf, 45.0, pos, 100.0)];
+        let rl = total_rms(&render_binaural(&mut loud, &listener, &dist), 2);
+        let rq = total_rms(&render_binaural(&mut quiet, &listener, &dist), 2);
+        let db = to_db(rq / rl);
+        assert!((db - (-55.0)).abs() < 2.0, "binaural: expected -55 dB, got {db:.1}");
+    }
+
+    #[test]
+    fn binaural_left_source_louder_in_left_ear() {
+        let buf = sine_buffer();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source to the left (+y = left when facing +x)
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(0.0, 2.0, 0.0), 100.0)];
+        let out = render_binaural(&mut s, &listener, &dist);
+        let l = ch_rms(&out, 2, 0);
+        let r = ch_rms(&out, 2, 1);
+        assert!(l > r, "binaural: left ear ({l:.4}) > right ear ({r:.4}) for left source");
+    }
+
+    #[test]
+    fn binaural_right_source_louder_in_right_ear() {
+        let buf = sine_buffer();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source to the right (-y)
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(0.0, -2.0, 0.0), 100.0)];
+        let out = render_binaural(&mut s, &listener, &dist);
+        let l = ch_rms(&out, 2, 0);
+        let r = ch_rms(&out, 2, 1);
+        assert!(r > l, "binaural: right ear ({r:.4}) > left ear ({l:.4}) for right source");
+    }
+
+    #[test]
+    fn binaural_center_roughly_equal() {
+        let buf = sine_buffer();
+        let dist = default_distance();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+        // Source directly ahead
+        let mut s = vec![make_source(&buf, 100.0, Vec3::new(2.0, 0.0, 0.0), 100.0)];
+        let out = render_binaural(&mut s, &listener, &dist);
+        let l = ch_rms(&out, 2, 0);
+        let r = ch_rms(&out, 2, 1);
+        let diff = to_db(l / r).abs();
+        // HRTF may not be perfectly symmetric, allow 3 dB
+        assert!(diff < 3.0, "binaural: center L/R diff {diff:.1} dB (expected < 3)");
     }
 }

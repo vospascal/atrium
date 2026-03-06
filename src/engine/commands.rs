@@ -37,6 +37,9 @@ pub enum Command {
 
     /// Set atmospheric conditions for ISO 9613-1 air absorption.
     SetAtmosphere { temperature_c: f32, humidity_pct: f32 },
+
+    /// Reset the scene to its initial state (positions, orbits, gains, etc.).
+    ResetScene,
     // Future:
     // AddSource { id: u32, source_type: SourceType, position: Vec3 },
     // RemoveSource { id: u32 },

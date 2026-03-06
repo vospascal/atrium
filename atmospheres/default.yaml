@@ -1,0 +1,8 @@
+# Atmosphere: Standard Conditions
+# ISO 9613-1 atmospheric absorption parameters.
+# Controls how air absorbs high frequencies over distance —
+# sounds further away lose treble, simulating real acoustic propagation.
+
+temperature_c: 20.0       # degrees Celsius (higher = slightly more absorption)
+humidity_pct: 50.0         # relative humidity 0–100% (affects absorption curve shape)
+pressure_kpa: 101.325      # air pressure in kPa (sea level standard)

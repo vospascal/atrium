@@ -1,0 +1,82 @@
+# Scene: Default Atrium
+# Wires together room geometry, sound sources, processors, and atmosphere.
+# Each section either defines inline config or references a separate file.
+#
+# Usage:  cargo run                         (loads this file)
+#         cargo run -- scenes/other.yaml    (loads a different scene)
+
+room: rooms/atrium_6x4.yaml
+
+listener:
+  position: [3.0, 2.0, 0.0]  # center of room
+  yaw_degrees: 90.0           # facing +Y (toward front wall)
+
+master_gain: 1.0
+
+distance_model:
+  # Attenuation model. Inverse = real-world 1/r energy decay (inverse square law, ISO 9613).
+  # Options: inverse, linear, exponential
+  model: inverse
+
+  # Base distance at which gain = 1.0 (no attenuation).
+  # Real-world standard: 1.0 m (IEC 61672 SPL measurement distance).
+  # Each source gets: source_ref = this x (source_spl / spl_reference).
+  ref_distance: 1.0
+
+  # Maximum simulation distance. Beyond this, gain stays constant.
+  # Should match or exceed room diagonal.
+  max_distance: 20.0
+
+  # Rolloff factor. 1.0 = physically correct inverse square law.
+  # >1.0 = exaggerated falloff, <1.0 = gentler falloff.
+  rolloff: 1.0
+
+speakers:
+  layout: "5.1"              # 5.1, quad, or stereo
+  render_mode: vbap           # vbap, speaker_as_mic, stereo, mono, quad
+  positions:
+    fl: [0.0, 4.0, 0.0]   # front-left
+    fr: [6.0, 4.0, 0.0]   # front-right
+    c:  [3.0, 4.0, 0.0]   # front-center
+    rl: [0.0, 0.0, 0.0]   # rear-left
+    rr: [6.0, 0.0, 0.0]   # rear-right
+
+normalization:
+  # RMS target for digital normalization of raw audio buffers.
+  # Corrects for mastering differences between MP3 files.
+  # Real-world standard: 0.1 (-20 dBFS RMS, ~17 dB peak headroom).
+  # Raise for louder output; lower for more headroom.
+  target_rms: 0.5
+
+  # SPL reference level — the SPL that maps to 0 dBFS (digital full scale).
+  # Real-world standard: 94.0 dB (IEC 61672 calibration tone level).
+  # Lower = quiet sources get more gain (louder sources cap at 1.0).
+  # Also scales per-source ref_distance: source_ref = global_ref x (spl / this).
+  # At 94: only ~94 dB sources are loud; 25 dB cat is -69 dBFS (inaudible).
+  # At 40: cat (25 dB) is at -15 dBFS (audible); djembe caps at 0 dBFS.
+  spl_reference: 40.0
+
+  # SPL hearing threshold in dB — below this a source is inaudible.
+  # Used to compute audible_radius via ISO 9613 free-field propagation:
+  #   d_audible = 10^((reference_spl - spl_threshold) / 20)
+  # 20 dB ≈ quiet room / rustling leaves.
+  spl_threshold: 20.0
+
+sources:
+  - source: sources/djembe.yaml
+    color: "#ff6b35"
+    position: [3.0, 2.0, 0.0]   # orbits around listener
+    orbit_radius: 1.5
+    orbit_speed: 1.0             # rad/s (~6.3s per orbit)
+
+  - source: sources/campfire.yaml
+    color: "#ffc107"
+    position: [1.0, 1.0, 0.0]   # near corner
+
+  - source: sources/purring.yaml
+    color: "#ce93d8"
+    position: [5.0, 3.0, 0.0]   # front-right area
+
+processors: processors/small_room.yaml
+
+atmosphere: atmospheres/default.yaml

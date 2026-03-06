@@ -4,4 +4,5 @@ pub use atrium_core::listener;
 pub use atrium_core::panner;
 
 // source stays local — TestNode depends on the audio crate.
+pub mod sound_profile;
 pub mod source;
