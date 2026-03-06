@@ -120,8 +120,8 @@ impl GroundProperties {
 
 /// Compute ground effect attenuation in dB per octave band.
 ///
-/// ISO 9613-2 §7.3 divides the ground between source and receiver into three
-/// regions and sums their contributions:
+/// Implements ISO 9613-2 §7.3 (detailed method) using the three-region
+/// decomposition with Table 3 anchor values:
 ///
 ///   A_ground = A_s + A_r + A_m
 ///
@@ -129,6 +129,15 @@ impl GroundProperties {
 ///   A_s = source region ground effect (within 30·h_s of source)
 ///   A_r = receiver region ground effect (within 30·h_r of receiver)
 ///   A_m = middle region ground effect (everything in between)
+///
+/// Source/receiver regions use the octave-band structure from Table 3:
+///   - f ≤ 125 Hz:  A = -1.5 - 3.0·G  (porous ground boosts low-freq reflections)
+///   - f ≥ 2000 Hz: A = -1.5·(1-G)     (porous ground absorbs high-freq reflections)
+///   - Transition zone (250–1000 Hz) includes a height-dependent ground dip
+///     from destructive interference at the frequency where path_diff ≈ λ/2.
+///
+/// Middle region uses the ISO threshold at d = 30·(h_s + h_r), smoothed
+/// to avoid discontinuities in real-time rendering.
 ///
 /// # Parameters
 /// - `distance`: horizontal distance source→receiver (m)
@@ -139,33 +148,7 @@ impl GroundProperties {
 ///
 /// # Returns
 /// Ground effect attenuation in dB (positive = loss, can be negative for
-/// constructive interference at low frequencies over soft ground).
-///
-/// # ISO 9613-2 Table 3 — Ground attenuation coefficients
-///
-/// | Freq (Hz) |  a'   |  b'   |  c'   |  d'   |  e'   |
-/// |-----------|-------|-------|-------|-------|-------|
-/// |    63     | -1.5  | -3.0G | -1.5  | -3.0G | -1.5(1-G) |
-/// |   125     | -1.5  | -3.0G | -1.5  | -3.0G | -1.5(1-G) |
-/// |   250     | -1.5  | -3.0G | -1.5  | -3.0G | -1.5(1-G) |
-/// |   500     | -1.5  | -3.0G | -1.5  | -3.0G | -1.5(1-G) |
-/// |  1000     | -1.5  |  a·G  | -1.5  |  b·G  | -1.5(1-G) |
-/// |  2000     | -1.5+G·c | ... | -1.5+G·d | ... | -1.5(1-G) |
-/// |  4000     | -1.5+G·c | ... | -1.5+G·d | ... | -1.5(1-G) |
-/// |  8000     | -1.5+G·c | ... | -1.5+G·d | ... | -1.5(1-G) |
-///
-/// The full table is complex; this implementation uses the simplified
-/// alternative method from ISO 9613-2 §7.3.2 (Equation 9) which provides
-/// a single broadband correction suitable for A-weighted levels.
-///
-/// # Simplified formula (ISO 9613-2, Equation 9)
-///
-///   A_ground = 4.8 - (2·h_m/d)·(17 + 300/d)   for  h_m/d ≤ 0.0
-///   A_ground = 4.8 - (2·h_m/d)·(17 + 300/d)·(1-G_m)  otherwise
-///
-/// where h_m = mean height of propagation path above ground.
-///
-/// For the full octave-band method, see the detailed implementation below.
+/// constructive interference over reflective ground).
 pub fn ground_effect_db(
     distance: f32,
     h_source: f32,
@@ -184,21 +167,21 @@ pub fn ground_effect_db(
     a_s + a_r + a_m
 }
 
-/// Source region ground effect (ISO 9613-2, Equation 4).
+/// Source region ground effect (ISO 9613-2, Table 3).
 ///
-///   A_s = -1.5 + G_s · q_s
+/// Uses the octave-band anchor values from ISO 9613-2 Table 3:
+///   - f ≤ 125 Hz: A_s = -1.5 - 3.0·G_s  (porous ground boosts low-freq reflections)
+///   - f ≥ 2000 Hz: A_s = -1.5·(1 - G_s)  (porous ground absorbs high-freq reflections)
+///   - 125 < f < 2000 Hz: interpolation with height-dependent ground dip
 ///
-/// where q_s depends on frequency and height. For the simplified broadband
-/// method, q_s models the interference between direct and ground-reflected
-/// paths near the source.
+/// The -1.5 dB base term is the coherent ground reflection gain (present for
+/// all surface types). The G-dependent correction captures how porous surfaces
+/// behave differently at low vs. high frequencies.
 fn ground_region_source(distance: f32, h_source: f32, g_source: f32, freq_hz: f32) -> f32 {
-    let q = ground_q(distance, h_source, freq_hz);
-    -1.5 + g_source * q
+    iso_ground_region(g_source, freq_hz, h_source, distance)
 }
 
-/// Receiver region ground effect (ISO 9613-2, Equation 5).
-///
-///   A_r = -1.5 + G_r · q_r
+/// Receiver region ground effect (ISO 9613-2, Table 3).
 ///
 /// Symmetric to A_s but evaluated at the receiver height.
 fn ground_region_receiver(
@@ -207,73 +190,87 @@ fn ground_region_receiver(
     g_receiver: f32,
     freq_hz: f32,
 ) -> f32 {
-    let q = ground_q(distance, h_receiver, freq_hz);
-    -1.5 + g_receiver * q
+    iso_ground_region(g_receiver, freq_hz, h_receiver, distance)
 }
 
-/// Middle region ground effect (ISO 9613-2, Equation 6).
+/// Compute source or receiver region ground effect per ISO 9613-2 Table 3.
 ///
-///   A_m = -3·q_m · (1 - G_m)
+/// The attenuation has two components:
+///   A = -1.5 + G × C(f, h, d)
 ///
-/// where q_m depends on the distance. Over hard ground (G_m=0), A_m = -3·q_m
-/// (constructive interference adds energy). Over soft ground (G_m=1), A_m = 0.
+/// where C is a frequency-dependent correction factor:
+///   - C = -3.0 at f ≤ 125 Hz (Table 3 rows 63–125 Hz)
+///   - C = +1.5 at f ≥ 2000 Hz (Table 3 rows 2000–8000 Hz)
+///   - C interpolates through the transition zone (250–1000 Hz) where the
+///     "ground dip" occurs — destructive interference when the path difference
+///     between direct and ground-reflected waves ≈ λ/2.
+fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32) -> f32 {
+    // Table 3 anchor values for the G-dependent correction term
+    const C_LOW: f32 = -3.0;  // f ≤ 125 Hz
+    const C_HIGH: f32 = 1.5;  // f ≥ 2000 Hz
+
+    let correction = if freq_hz <= 125.0 {
+        C_LOW
+    } else if freq_hz >= 2000.0 {
+        C_HIGH
+    } else {
+        // Log-frequency interpolation between Table 3 anchor points
+        // ln(2000/125) = ln(16) ≈ 2.773
+        let t = (freq_hz / 125.0).ln() / (2000.0_f32 / 125.0).ln();
+        let base = C_LOW + (C_HIGH - C_LOW) * t;
+
+        // Ground dip: additional attenuation near the destructive interference
+        // frequency, where the path difference ≈ λ/2.
+        // This models the height-dependent terms in Table 3 rows 250–1000 Hz.
+        if distance > 0.1 && height > 0.01 {
+            // Path difference for ground reflection: δ ≈ 2h²/d (far-field approx)
+            let path_diff = 2.0 * height * height / distance;
+            let lambda = 343.0 / freq_hz;
+            let phase_ratio = path_diff / lambda;
+
+            // Gaussian peak centered at phase_ratio = 0.5 (half-wavelength)
+            // Width tuned so dip spans roughly one octave around the dip frequency
+            let dip = (-((phase_ratio - 0.5) * 4.0).powi(2)).exp() * 3.0;
+            base + dip
+        } else {
+            base
+        }
+    };
+
+    -1.5 + g * correction
+}
+
+/// Middle region ground effect (ISO 9613-2, §7.3, Equation 6).
+///
+///   A_m = -3 · q · (1 - G_m)
+///
+/// The middle region exists only when the propagation distance exceeds
+/// 30·(h_s + h_r) — i.e., source and receiver ground-interaction zones
+/// don't overlap. Over hard ground (G_m=0), A_m = -3·q (constructive
+/// interference adds energy). Over soft ground (G_m=1), A_m = 0.
+///
+/// ISO specifies a hard threshold at d = 30·(h_s + h_r). This implementation
+/// uses a smooth ramp (±20%) to avoid discontinuities in real-time rendering.
 fn ground_region_middle(
     distance: f32,
     h_source: f32,
     h_receiver: f32,
     g_middle: f32,
 ) -> f32 {
-    let h_mean = (h_source + h_receiver) / 2.0;
-    let q_m = if distance > 0.01 {
-        // Simplified: middle region effect diminishes with height/distance ratio
-        1.0 - (30.0 * h_mean / distance).min(1.0)
+    let h_sum = h_source + h_receiver;
+
+    // ISO 9613-2: middle region exists when d > 30·(h_s + h_r)
+    // Smoothed: linear ramp from 80% to 120% of threshold
+    let q = if h_sum > 0.001 {
+        let threshold = 30.0 * h_sum;
+        let ratio = distance / threshold;
+        ((ratio - 0.8) / 0.4).clamp(0.0, 1.0)
     } else {
-        0.0
-    };
-    -3.0 * q_m * (1.0 - g_middle)
-}
-
-/// Frequency-dependent ground interaction factor.
-///
-/// Approximates the interference pattern between direct and ground-reflected
-/// paths. At low frequencies (long wavelengths), ground effect is weak.
-/// At mid frequencies (~200-600 Hz), destructive interference creates a "ground dip".
-/// At high frequencies, the ground acts more like a simple reflector.
-fn ground_q(distance: f32, height: f32, freq_hz: f32) -> f32 {
-    if distance < 0.01 || height < 0.01 {
-        return 0.0;
-    }
-
-    // Speed of sound (m/s) — standard conditions
-    const C: f32 = 343.0;
-
-    // Wavelength at this frequency
-    let lambda = C / freq_hz.max(1.0);
-
-    // Path length difference between direct and ground-reflected paths
-    // δ = √(d² + (h_s + h_r)²) - √(d² + (h_s - h_r)²)
-    // Simplified for source-region (h_r ≈ 0 at ground):
-    // δ ≈ 2·h²/d for h << d
-    let path_diff = 2.0 * height * height / distance;
-
-    // Phase difference in cycles
-    let phase_cycles = path_diff / lambda;
-
-    // Ground interaction peaks around 0.25-0.5 cycles (destructive interference)
-    // and diminishes for very low or very high frequencies
-    let q = if phase_cycles < 0.05 {
-        // Very low frequency: wavelength >> path difference, minimal effect
-        phase_cycles * 20.0 // ramp from 0
-    } else if phase_cycles < 1.0 {
-        // Ground dip region: interference is significant
-        1.0
-    } else {
-        // High frequency: averaging over many cycles, effect diminishes
-        (1.0 / phase_cycles).min(1.0)
+        // Heights near zero → no ground interaction zones, full middle region
+        if distance > 0.01 { 1.0 } else { 0.0 }
     };
 
-    // Scale: soft ground over porous surface gives up to ~3 dB per region
-    q * 3.0
+    -3.0 * q * (1.0 - g_middle)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
