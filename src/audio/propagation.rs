@@ -28,7 +28,6 @@
 ///
 /// Reference: ISO 9613-2:1996, "Acoustics — Attenuation of sound during
 ///            propagation outdoors — Part 2: General method of calculation"
-
 use atrium_core::types::Vec3;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,18 +102,30 @@ impl Default for GroundProperties {
 impl GroundProperties {
     /// Hard reflective surface (concrete, tile, stone).
     pub fn hard() -> Self {
-        Self { g_source: 0.0, g_middle: 0.0, g_receiver: 0.0 }
+        Self {
+            g_source: 0.0,
+            g_middle: 0.0,
+            g_receiver: 0.0,
+        }
     }
 
     /// Soft porous surface (grass, carpet, soil).
     pub fn soft() -> Self {
-        Self { g_source: 1.0, g_middle: 1.0, g_receiver: 1.0 }
+        Self {
+            g_source: 1.0,
+            g_middle: 1.0,
+            g_receiver: 1.0,
+        }
     }
 
     /// Mixed surface (e.g., wooden floor with rugs).
     pub fn mixed(g: f32) -> Self {
         let g = g.clamp(0.0, 1.0);
-        Self { g_source: g, g_middle: g, g_receiver: g }
+        Self {
+            g_source: g,
+            g_middle: g,
+            g_receiver: g,
+        }
     }
 }
 
@@ -184,12 +195,7 @@ fn ground_region_source(distance: f32, h_source: f32, g_source: f32, freq_hz: f3
 /// Receiver region ground effect (ISO 9613-2, Table 3).
 ///
 /// Symmetric to A_s but evaluated at the receiver height.
-fn ground_region_receiver(
-    distance: f32,
-    h_receiver: f32,
-    g_receiver: f32,
-    freq_hz: f32,
-) -> f32 {
+fn ground_region_receiver(distance: f32, h_receiver: f32, g_receiver: f32, freq_hz: f32) -> f32 {
     iso_ground_region(g_receiver, freq_hz, h_receiver, distance)
 }
 
@@ -206,8 +212,8 @@ fn ground_region_receiver(
 ///     between direct and ground-reflected waves ≈ λ/2.
 fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32) -> f32 {
     // Table 3 anchor values for the G-dependent correction term
-    const C_LOW: f32 = -3.0;  // f ≤ 125 Hz
-    const C_HIGH: f32 = 1.5;  // f ≥ 2000 Hz
+    const C_LOW: f32 = -3.0; // f ≤ 125 Hz
+    const C_HIGH: f32 = 1.5; // f ≥ 2000 Hz
 
     let correction = if freq_hz <= 125.0 {
         C_LOW
@@ -251,12 +257,7 @@ fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32) -> f32 {
 ///
 /// ISO specifies a hard threshold at d = 30·(h_s + h_r). This implementation
 /// uses a smooth ramp (±20%) to avoid discontinuities in real-time rendering.
-fn ground_region_middle(
-    distance: f32,
-    h_source: f32,
-    h_receiver: f32,
-    g_middle: f32,
-) -> f32 {
+fn ground_region_middle(distance: f32, h_source: f32, h_receiver: f32, g_middle: f32) -> f32 {
     let h_sum = h_source + h_receiver;
 
     // ISO 9613-2: middle region exists when d > 30·(h_s + h_r)
@@ -267,7 +268,11 @@ fn ground_region_middle(
         ((ratio - 0.8) / 0.4).clamp(0.0, 1.0)
     } else {
         // Heights near zero → no ground interaction zones, full middle region
-        if distance > 0.01 { 1.0 } else { 0.0 }
+        if distance > 0.01 {
+            1.0
+        } else {
+            0.0
+        }
     };
 
     -3.0 * q * (1.0 - g_middle)
@@ -614,7 +619,10 @@ mod tests {
             barrier_top: Vec3::new(5.0, 0.0, 3.0),
         };
         let a = barrier_attenuation_db(&barrier, 1000.0);
-        assert!(a > 5.0, "barrier should give significant attenuation, got {a}");
+        assert!(
+            a > 5.0,
+            "barrier should give significant attenuation, got {a}"
+        );
         assert!(a <= 25.0, "barrier should not exceed 25 dB cap, got {a}");
     }
 
@@ -632,7 +640,10 @@ mod tests {
         // delta ≈ 0 (path through barrier top ≈ direct path)
         // This tests the near-grazing case
         let a = barrier_attenuation_db(&barrier2, 1000.0);
-        assert!(a < 10.0, "near-grazing barrier should give moderate attenuation, got {a}");
+        assert!(
+            a < 10.0,
+            "near-grazing barrier should give moderate attenuation, got {a}"
+        );
     }
 
     #[test]

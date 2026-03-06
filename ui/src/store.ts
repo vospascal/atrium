@@ -6,12 +6,9 @@ import type {
 
 // Which speaker channels are visible per render mode
 export const MODE_ACTIVE_CHANNELS: Record<string, number[]> = {
-  speaker_as_mic: [],
+  world_locked: [0, 1, 2, 4, 5],
   vbap: [0, 1, 2, 4, 5],
-  '5.1': [0, 1, 2, 4, 5],
-  '4.0': [0, 1, 4, 5],
   stereo: [0, 1],
-  mono: [],
   binaural: [],
 };
 
@@ -49,7 +46,7 @@ export class AtriumStore extends EventTarget {
   listener: ListenerDef = { x: 3, y: 2, z: 0, yaw: Math.PI / 2 };
   distModel: DistanceModelDef = { ref_distance: 1.0, max_distance: 20.0, rolloff: 1.0 };
   atmosphere: AtmosphereDef = { temperature_c: 20, humidity_pct: 50 };
-  renderMode = 'speaker_as_mic';
+  renderMode = 'vbap';
   masterGain = 0.7;
 
   sources: Source[] = [];
@@ -68,6 +65,7 @@ export class AtriumStore extends EventTarget {
   sourceMuted: boolean[] = [];
   sourceOrigSpeed: number[] = [];
   sourcePaused: boolean[] = [];
+  sourceDragging: number | null = null;
 
   // WebSocket send function — injected by connection.ts
   private _send: ((msg: object) => void) | null = null;

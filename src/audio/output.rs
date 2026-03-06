@@ -13,6 +13,7 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 
 use crate::engine::commands::Command;
 use crate::engine::scene::AudioScene;
+use crate::profile_span;
 
 /// Abstraction over audio output backends.
 /// Future: implement for cubeb-rs or other backends.
@@ -103,7 +104,7 @@ impl AudioOutput for CpalOutput {
         );
 
         scene.sample_rate = sample_rate as f32;
-        scene.init_processors();
+        scene.init_pipelines();
 
         let config = StreamConfig {
             channels,
@@ -115,6 +116,7 @@ impl AudioOutput for CpalOutput {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let _cb = profile_span!("callback", samples = data.len()).entered();
                     scene.process_commands(&mut commands);
                     scene.render(data, channels as usize);
                 },
@@ -122,26 +124,27 @@ impl AudioOutput for CpalOutput {
                 None,
             )?,
             SampleFormat::I16 => {
-            let mut float_buf: Vec<f32> = Vec::new();
-            device.build_output_stream(
-                &config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    let len = data.len();
-                    // Grow once on first callback (or if buffer size changes)
-                    if float_buf.len() < len {
-                        float_buf.resize(len, 0.0);
-                    }
-                    float_buf[..len].fill(0.0);
-                    scene.process_commands(&mut commands);
-                    scene.render(&mut float_buf[..len], channels as usize);
-                    for (out, &sample) in data.iter_mut().zip(float_buf.iter()) {
-                        *out = (sample * i16::MAX as f32) as i16;
-                    }
-                },
-                |err| eprintln!("audio stream error: {err}"),
-                None,
-            )?
-        }
+                let mut float_buf: Vec<f32> = Vec::new();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        let _cb = profile_span!("callback", samples = data.len()).entered();
+                        let len = data.len();
+                        // Grow once on first callback (or if buffer size changes)
+                        if float_buf.len() < len {
+                            float_buf.resize(len, 0.0);
+                        }
+                        float_buf[..len].fill(0.0);
+                        scene.process_commands(&mut commands);
+                        scene.render(&mut float_buf[..len], channels as usize);
+                        for (out, &sample) in data.iter_mut().zip(float_buf.iter()) {
+                            *out = (sample * i16::MAX as f32) as i16;
+                        }
+                    },
+                    |err| eprintln!("audio stream error: {err}"),
+                    None,
+                )?
+            }
             format => return Err(format!("unsupported sample format: {format:?}").into()),
         };
 
@@ -201,7 +204,11 @@ mod tests {
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(6.0, 0.0, 0.0),
         );
-        assert_eq!(layout.total_channels(), 6, "5.1 = 5 spatial + 1 LFE = 6 channels");
+        assert_eq!(
+            layout.total_channels(),
+            6,
+            "5.1 = 5 spatial + 1 LFE = 6 channels"
+        );
         assert_eq!(layout.speaker_count(), 5, "5 spatial speakers (no LFE)");
         assert_eq!(layout.lfe_channel(), Some(3), "LFE is channel 3");
     }
@@ -209,26 +216,26 @@ mod tests {
     #[test]
     fn surround_5_1_speaker_channel_assignments() {
         let layout = SpeakerLayout::surround_5_1(
-            Vec3::new(0.0, 4.0, 0.0),  // FL
-            Vec3::new(6.0, 4.0, 0.0),  // FR
-            Vec3::new(3.0, 4.0, 0.0),  // C
-            Vec3::new(0.0, 0.0, 0.0),  // RL
-            Vec3::new(6.0, 0.0, 0.0),  // RR
+            Vec3::new(0.0, 4.0, 0.0), // FL
+            Vec3::new(6.0, 4.0, 0.0), // FR
+            Vec3::new(3.0, 4.0, 0.0), // C
+            Vec3::new(0.0, 0.0, 0.0), // RL
+            Vec3::new(6.0, 0.0, 0.0), // RR
         );
         // ITU 5.1 channel order: L=0, R=1, C=2, LFE=3, Ls=4, Rs=5
         let expected_channels = [0, 1, 2, 4, 5]; // spatial speakers (LFE=3 is separate)
         for (i, &expected_ch) in expected_channels.iter().enumerate() {
             let speaker = layout.speaker_by_index(i).expect("speaker should exist");
-            assert_eq!(speaker.channel, expected_ch, "speaker {i} should be channel {expected_ch}");
+            assert_eq!(
+                speaker.channel, expected_ch,
+                "speaker {i} should be channel {expected_ch}"
+            );
         }
     }
 
     #[test]
     fn stereo_layout_has_2_channels() {
-        let layout = SpeakerLayout::stereo(
-            Vec3::new(-1.0, 1.0, 0.0),
-            Vec3::new(1.0, 1.0, 0.0),
-        );
+        let layout = SpeakerLayout::stereo(Vec3::new(-1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0));
         assert_eq!(layout.total_channels(), 2);
         assert_eq!(layout.speaker_count(), 2);
         assert_eq!(layout.lfe_channel(), None);
@@ -249,11 +256,13 @@ mod tests {
 
     #[test]
     fn surround_5_1_resolves_to_6_channels_on_stereo_device() {
-        let layout = SpeakerLayout::surround_5_1(
-            Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO,
-        );
+        let layout =
+            SpeakerLayout::surround_5_1(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
         let device_default = 2u16;
         let channels = resolve_channels(layout.total_channels() as u16, device_default);
-        assert_eq!(channels, 6, "5.1 layout should override stereo device default");
+        assert_eq!(
+            channels, 6,
+            "5.1 layout should override stereo device default"
+        );
     }
 }

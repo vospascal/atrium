@@ -42,11 +42,7 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
         .ok_or("no audio track found")?;
 
     let track_id = track.id;
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
 
     let mut decoder =

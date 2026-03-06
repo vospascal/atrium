@@ -30,8 +30,9 @@ export function setupInteractions(ctx: SceneContext, store: AtriumStore) {
     // Check sources
     const meshes = getSourceMeshes();
     for (let i = 0; i < meshes.length; i++) {
-      if (raycaster.intersectObject(meshes[i], false).length > 0) {
+      if (raycaster.intersectObject(meshes[i]).length > 0) {
         dragTarget = i;
+        store.sourceDragging = i;
         ctx.controls.enabled = false;
         return;
       }
@@ -62,6 +63,7 @@ export function setupInteractions(ctx: SceneContext, store: AtriumStore) {
 
   function onPointerUp() {
     if (dragTarget !== null) {
+      store.sourceDragging = null;
       dragTarget = null;
       ctx.controls.enabled = true;
     }

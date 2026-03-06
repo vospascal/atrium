@@ -22,12 +22,7 @@ impl SoundProfile {
     ///
     /// Real-world standard for `spl_reference`: 94 dB (IEC 61672).
     /// Lower values make quiet sources louder (loud sources cap at 1.0).
-    pub fn amplitude(
-        &self,
-        buffer_rms: f32,
-        target_rms: f32,
-        spl_reference: f32,
-    ) -> f32 {
+    pub fn amplitude(&self, buffer_rms: f32, target_rms: f32, spl_reference: f32) -> f32 {
         // Step 1: RMS normalization — correct for mastering differences
         let rms_correction = if buffer_rms > 1e-6 {
             target_rms / buffer_rms

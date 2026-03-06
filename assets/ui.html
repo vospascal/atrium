@@ -77,12 +77,9 @@
   <div id="render-panel">
     <h3>Render Mode</h3>
     <div class="mode-btns">
-      <button class="mode-btn active" data-mode="speaker_as_mic">Spatial</button>
+      <button class="mode-btn active" data-mode="world_locked">WorldLocked</button>
       <button class="mode-btn" data-mode="vbap">VBAP</button>
-      <button class="mode-btn" data-mode="5.1">5.1</button>
-      <button class="mode-btn" data-mode="4.0">4.0</button>
       <button class="mode-btn" data-mode="stereo">Stereo</button>
-      <button class="mode-btn" data-mode="mono">Mono</button>
       <button class="mode-btn" data-mode="binaural">Binaural</button>
     </div>
   </div>
@@ -139,17 +136,14 @@ let SPEAKERS = [
   { label: 'RL', x: 0, y: 0, z: 0, channel: 4, color: 0x66bb6a },
   { label: 'RR', x: 6, y: 0, z: 0, channel: 5, color: 0x66bb6a },
 ];
-let currentRenderMode = 'speaker_as_mic';
+let currentRenderMode = 'world_locked';
 
 // Which speaker channels are visible per render mode
 const MODE_ACTIVE_CHANNELS = {
-  speaker_as_mic: [],                 // binaural headphones — no speakers
-  vbap:           [0, 1, 2, 4, 5],   // all 5 spatial speakers
-  '5.1':          [0, 1, 2, 4, 5],
-  '4.0':          [0, 1, 4, 5],      // no center
-  stereo:         [0, 1],             // FL + FR only
-  mono:           [],                  // headphone mono — no speakers
-  binaural:       [],                  // HRTF headphones — no speakers
+  world_locked:   [0, 1, 2, 4, 5],
+  vbap:           [0, 1, 2, 4, 5],
+  stereo:         [0, 1],
+  binaural:       [],
 };
 
 function updateSpeakerVisibility() {

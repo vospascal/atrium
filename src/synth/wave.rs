@@ -9,8 +9,8 @@
 
 use std::f32::consts::TAU;
 
-use crate::spatial::source::SoundSource;
 use crate::world::types::Vec3;
+use atrium_core::source::SoundSource;
 
 use super::noise::{BrownNoise, PinkNoise, Rng};
 
@@ -149,12 +149,8 @@ mod tests {
 
         // With period=1s and crash_prob=0, energy should oscillate.
         // Sample first half-period and second half-period.
-        let first_half: f32 = (0..24000)
-            .map(|_| wave.next_sample(48000.0).powi(2))
-            .sum();
-        let second_half: f32 = (0..24000)
-            .map(|_| wave.next_sample(48000.0).powi(2))
-            .sum();
+        let first_half: f32 = (0..24000).map(|_| wave.next_sample(48000.0).powi(2)).sum();
+        let second_half: f32 = (0..24000).map(|_| wave.next_sample(48000.0).powi(2)).sum();
 
         // The two halves should have noticeably different energy
         // (one includes the swell peak, the other the trough)

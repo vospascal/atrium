@@ -74,8 +74,12 @@ fn analyze_file(path: &str) {
     let chunk = &buf.samples[start..end];
 
     println!("\n=== {} ===", path.rsplit('/').next().unwrap_or(path));
-    println!("  Duration: {:.1}s | Sample rate: {}Hz | Samples: {}",
-        buf.samples.len() as f32 / sr, buf.sample_rate, buf.samples.len());
+    println!(
+        "  Duration: {:.1}s | Sample rate: {}Hz | Samples: {}",
+        buf.samples.len() as f32 / sr,
+        buf.sample_rate,
+        buf.samples.len()
+    );
 
     // RMS level
     let rms: f32 = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
@@ -99,7 +103,11 @@ fn analyze_file(path: &str) {
     let max_energy = energies.iter().map(|e| e.3).fold(0.0_f32, f32::max);
 
     for &(name, f_low, f_high, energy) in &energies {
-        let db = if energy > 0.0 { 10.0 * energy.log10() } else { -120.0 };
+        let db = if energy > 0.0 {
+            10.0 * energy.log10()
+        } else {
+            -120.0
+        };
         let relative_db = if max_energy > 0.0 && energy > 0.0 {
             10.0 * (energy / max_energy).log10()
         } else {
@@ -107,8 +115,10 @@ fn analyze_file(path: &str) {
         };
         let bar_len = ((relative_db + 40.0) / 40.0 * 30.0).clamp(0.0, 30.0) as usize;
         let bar: String = "█".repeat(bar_len);
-        println!("  {name} {:>5.0}-{:<5.0}Hz  {:>7.1} dB    {:>+5.1} dB  {bar}",
-            f_low, f_high, db, relative_db);
+        println!(
+            "  {name} {:>5.0}-{:<5.0}Hz  {:>7.1} dB    {:>+5.1} dB  {bar}",
+            f_low, f_high, db, relative_db
+        );
     }
 
     // Spectral centroid (brightness measure)
@@ -119,16 +129,21 @@ fn analyze_file(path: &str) {
         weighted_sum += center * energy;
         total_weight += energy;
     }
-    let centroid = if total_weight > 0.0 { weighted_sum / total_weight } else { 0.0 };
+    let centroid = if total_weight > 0.0 {
+        weighted_sum / total_weight
+    } else {
+        0.0
+    };
     println!();
-    println!("  Spectral centroid: {:.0} Hz (lower = darker/muddier)", centroid);
+    println!(
+        "  Spectral centroid: {:.0} Hz (lower = darker/muddier)",
+        centroid
+    );
 }
 
 fn main() {
     let base = "research papers";
-    let files = [
-        format!("{base}/light rain youtube.wav"),
-    ];
+    let files = [format!("{base}/light rain youtube.wav")];
 
     println!("╔═══════════════════════════════════════════════╗");
     println!("║  Rain Audio Frequency Analysis                ║");

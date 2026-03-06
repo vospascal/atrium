@@ -7,8 +7,8 @@
 //   • Turbulence bursts          → short Gaussian-gated white-noise puffs
 //   • Speed-dependent spectral mix → calm = mostly rumble, strong = brighter hiss
 
-use crate::spatial::source::SoundSource;
 use crate::world::types::Vec3;
+use atrium_core::source::SoundSource;
 
 use super::noise::{BrownNoise, PinkNoise, Rng};
 
@@ -108,8 +108,7 @@ impl WindSource {
     /// Draw a new random swell cycle and divide into four phases.
     /// Ratio: 35% rise, 20% hold, 25% fall, 20% rest.
     fn schedule_next_cycle(&mut self, sample_rate: f32) {
-        let dur_sec =
-            self.mean_duration + self.rng.next_bipolar() * self.duration_jitter;
+        let dur_sec = self.mean_duration + self.rng.next_bipolar() * self.duration_jitter;
         let total = (dur_sec.max(1.0) * sample_rate) as usize;
         self.len_rise = (total as f32 * 0.35) as usize;
         self.len_hold = (total as f32 * 0.20) as usize;
@@ -218,8 +217,7 @@ impl SoundSource for WindSource {
         let brown = self.brown.next();
         let pink = self.pink.next();
 
-        let sample =
-            env * (rumble_level * brown + hiss_level * pink) + self.turb_gain * turb;
+        let sample = env * (rumble_level * brown + hiss_level * pink) + self.turb_gain * turb;
 
         sample * self.master_gain
     }
@@ -248,8 +246,9 @@ mod tests {
         let mut strong = WindSource::new(Vec3::ZERO, 20.0, 3.0, 42);
 
         let energy_calm: f32 = (0..48000).map(|_| calm.next_sample(48000.0).powi(2)).sum();
-        let energy_strong: f32 =
-            (0..48000).map(|_| strong.next_sample(48000.0).powi(2)).sum();
+        let energy_strong: f32 = (0..48000)
+            .map(|_| strong.next_sample(48000.0).powi(2))
+            .sum();
 
         assert!(
             energy_strong > energy_calm,

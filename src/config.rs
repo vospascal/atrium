@@ -16,16 +16,16 @@ use serde::Deserialize;
 
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
-use crate::audio::mixer::{DistanceModel, MixerState};
+use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
+use crate::audio::sound_profile::SoundProfile;
+use crate::audio::test_node::TestNode;
 use crate::engine::scene::{AudioScene, InitialSourceState};
-use crate::processors::fdn_reverb::FdnReverb;
-use crate::spatial::directivity::DirectivityPattern;
-use crate::spatial::listener::Listener;
-use crate::spatial::sound_profile::SoundProfile;
-use crate::spatial::source::TestNode;
-use crate::world::room::{BoxRoom, Room};
+use crate::pipeline::{build_all_pipelines, PipelineParams};
+use crate::world::room::BoxRoom;
 use crate::world::types::Vec3;
+use atrium_core::directivity::DirectivityPattern;
+use atrium_core::listener::Listener;
 use atrium_core::panner::DistanceModelType;
 use atrium_core::speaker::{RenderMode, SpeakerLayout};
 
@@ -298,16 +298,14 @@ pub struct BuildResult {
     pub scene: AudioScene,
     pub scene_json: String,
     pub source_names: Vec<String>,
-    /// Pipeline stages before the panning/spatialization stage.
-    pub pipeline_pre: Vec<String>,
-    /// Pipeline stages after the panning/spatialization stage.
+    /// Pipeline mix stage names (for TUI display).
     pub pipeline_post: Vec<String>,
 }
 
 /// Default color palette for sources when no color is specified in YAML.
 const SOURCE_COLORS: &[&str] = &[
-    "#ff6b35", "#ffc107", "#ce93d8", "#4fc3f7", "#66bb6a", "#ef5350",
-    "#ff8a65", "#ab47bc", "#26c6da", "#9ccc65",
+    "#ff6b35", "#ffc107", "#ce93d8", "#4fc3f7", "#66bb6a", "#ef5350", "#ff8a65", "#ab47bc",
+    "#26c6da", "#9ccc65",
 ];
 
 /// Metadata collected during source building, serialized to JSON for the browser.
@@ -330,8 +328,7 @@ struct SourceMeta {
 
 /// Load and deserialize a YAML file into any serde-compatible type.
 fn load_yaml<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Box<dyn std::error::Error>> {
-    let contents =
-        std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    let contents = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
     serde_yaml::from_str(&contents).map_err(|e| format!("{}: {}", path, e).into())
 }
 
@@ -349,12 +346,11 @@ impl SceneConfig {
         let listener = Listener::new(listener_pos, self.listener.yaw_degrees.to_radians());
 
         // Build speaker layout
-        let mut speaker_layout = self.build_speakers();
-        speaker_layout.mode = parse_render_mode(&self.speakers.render_mode);
+        let speaker_layout = self.build_speakers();
+        let render_mode = parse_render_mode(&self.speakers.render_mode);
 
         // Decode audio and build sources (also collects metadata for the browser)
         let (sources, source_metas) = self.build_sources()?;
-        let source_count = sources.len();
 
         let distance_model = DistanceModel {
             ref_distance: self.distance_model.ref_distance,
@@ -363,23 +359,29 @@ impl SceneConfig {
             model: parse_distance_model(&self.distance_model.model),
         };
 
-        // Load processors from file, separating per-source (early reflections)
-        // from post-mix (FDN reverb) processors.
+        // Load processor params from file (feeds pipeline construction)
         let mut er_params: Option<(f32, f32)> = None; // (wet_gain, wall_absorption)
-        let processors = match &self.processors {
-            Some(path) => {
-                let defs: Vec<ProcessorConfig> = load_yaml(path)?;
-                // Extract early reflection params for per-source use
-                for def in &defs {
-                    if let ProcessorConfig::EarlyReflections { wet_gain, wall_absorption } = def {
+        let mut fdn_params: (f32, f32, f32) = (0.2, 0.8, 0.3); // (wet, rt60_low, rt60_high)
+        if let Some(path) = &self.processors {
+            let defs: Vec<ProcessorConfig> = load_yaml(path)?;
+            for def in &defs {
+                match def {
+                    ProcessorConfig::EarlyReflections {
+                        wet_gain,
+                        wall_absorption,
+                    } => {
                         er_params = Some((*wet_gain, *wall_absorption));
                     }
+                    ProcessorConfig::FdnReverb {
+                        wet_gain,
+                        rt60_low,
+                        rt60_high,
+                    } => {
+                        fdn_params = (*wet_gain, *rt60_low, *rt60_high);
+                    }
                 }
-                // Only keep post-mix processors (FDN reverb, etc.)
-                Self::build_postmix_processors(&defs)
             }
-            None => Vec::new(),
-        };
+        }
 
         // Load atmosphere from file (or defaults if omitted)
         let atmosphere = match &self.atmosphere {
@@ -395,28 +397,34 @@ impl SceneConfig {
         };
 
         // Build comprehensive JSON for the browser (all computed values)
-        let scene_json = self.build_scene_json(
-            &room_cfg, &speaker_layout, &source_metas, &atmosphere,
-        );
+        let scene_json =
+            self.build_scene_json(&room_cfg, &speaker_layout, &source_metas, &atmosphere);
 
-        let initial_source_states: Vec<InitialSourceState> = self.sources.iter().map(|entry| {
-            InitialSourceState {
+        let initial_source_states: Vec<InitialSourceState> = self
+            .sources
+            .iter()
+            .map(|entry| InitialSourceState {
                 position: arr_to_vec3(entry.position),
                 orbit_radius: entry.orbit_radius,
                 orbit_speed: entry.orbit_speed,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let render_mode = speaker_layout.mode;
+        // Build composable pipelines
+        let ground = GroundProperties::mixed(room_cfg.ground_factor);
 
-        // Configure MixerState with room bounds, ground effect, and per-source reflections
-        let mut mixer_state = MixerState::new(source_count);
-        let (room_min, room_max) = room.bounds();
-        mixer_state.set_room_bounds(room_min, room_max);
-        mixer_state.set_ground(GroundProperties::mixed(room_cfg.ground_factor));
-        if let Some((wet, absorption)) = er_params {
-            mixer_state.enable_reflections(wet, absorption, source_count);
-        }
+        let pipeline_params = PipelineParams {
+            sample_rate: 48000.0, // will be recalibrated in init_pipelines
+            hrtf_path: self.hrtf,
+            er_wet_gain: er_params.map(|(w, _)| w).unwrap_or(0.0),
+            er_wall_absorption: er_params.map(|(_, a)| a).unwrap_or(0.9),
+            fdn_wet_gain: fdn_params.0,
+            fdn_rt60_low: fdn_params.1,
+            fdn_rt60_high: fdn_params.2,
+            distance_model,
+        };
+        let pipelines = build_all_pipelines(&pipeline_params);
+        let active_pipeline = render_mode;
 
         let scene = AudioScene {
             initial_listener_pos: listener_pos,
@@ -431,40 +439,27 @@ impl SceneConfig {
             master_gain: self.master_gain,
             sample_rate: 0.0, // set by audio backend
             distance_model,
-            processors,
             speaker_layout,
-            mixer_state,
             atmosphere,
-            binaural_mixer: None,
             telemetry_out: None,
             telemetry_counter: 0,
             telemetry_interval: 6, // ~15 Hz at 512-sample buffers; calibrated later
-            hrtf_path: self.hrtf,
+            #[cfg(feature = "memprof")]
+            memprof: crate::engine::memprof::MemProfiler::new(),
+            pipelines,
+            active_pipeline,
+            ground,
         };
 
         let source_names: Vec<String> = source_metas.iter().map(|m| m.name.clone()).collect();
 
-        // Build pipeline description for TUI display (split around the dynamic panning stage)
-        let mut pipeline_pre = vec![
-            "Distance Atten".to_string(),
-            "Air Absorption".to_string(),
-            "Ground Effect".to_string(),
-        ];
-        if er_params.is_some() {
-            pipeline_pre.push("Early Reflections".to_string());
-        }
-        // Panning stage is dynamic (inserted by TUI based on current render mode)
-        let mut pipeline_post: Vec<String> = scene.processors
-            .iter()
-            .map(|p| p.name().to_string())
-            .collect();
-        pipeline_post.push("Master Gain".to_string());
+        // Build pipeline description for TUI display
+        let pipeline_post = scene.mix_stage_names();
 
         Ok(BuildResult {
             scene,
             scene_json,
             source_names,
-            pipeline_pre,
             pipeline_post,
         })
     }
@@ -579,7 +574,15 @@ impl SceneConfig {
         .to_string()
     }
 
-    fn build_sources(&self) -> Result<(Vec<Box<dyn crate::spatial::source::SoundSource>>, Vec<SourceMeta>), Box<dyn std::error::Error>> {
+    fn build_sources(
+        &self,
+    ) -> Result<
+        (
+            Vec<Box<dyn atrium_core::source::SoundSource>>,
+            Vec<SourceMeta>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         // Load all source definitions first
         let defs: Vec<SourceDef> = self
             .sources
@@ -593,7 +596,7 @@ impl SceneConfig {
             .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
 
         let norm = &self.normalization;
-        let mut nodes: Vec<Box<dyn crate::spatial::source::SoundSource>> = Vec::new();
+        let mut nodes: Vec<Box<dyn atrium_core::source::SoundSource>> = Vec::new();
         let mut metas: Vec<SourceMeta> = Vec::new();
 
         let global_ref_dist = self.distance_model.ref_distance;
@@ -632,11 +635,7 @@ impl SceneConfig {
 
             println!(
                 "  {} → SPL={:.0} dB, amplitude={:.4}, ref_dist={:.2}m, audible={:.2}m",
-                name,
-                profile.reference_spl,
-                amplitude,
-                ref_dist,
-                audible_radius,
+                name, profile.reference_spl, amplitude, ref_dist, audible_radius,
             );
 
             metas.push(SourceMeta {
@@ -658,24 +657,6 @@ impl SceneConfig {
         }
 
         Ok((nodes, metas))
-    }
-
-    /// Build only post-mix processors (FDN reverb). Early reflections are now
-    /// handled per-source in the mixer via SourceReflections.
-    fn build_postmix_processors(defs: &[ProcessorConfig]) -> Vec<Box<dyn crate::processors::AudioProcessor>> {
-        defs.iter()
-            .filter_map(|p| -> Option<Box<dyn crate::processors::AudioProcessor>> {
-                match p {
-                    // Early reflections are now per-source — skip the post-mix version
-                    ProcessorConfig::EarlyReflections { .. } => None,
-                    ProcessorConfig::FdnReverb {
-                        wet_gain,
-                        rt60_low,
-                        rt60_high,
-                    } => Some(Box::new(FdnReverb::new(*wet_gain, *rt60_low, *rt60_high))),
-                }
-            })
-            .collect()
     }
 }
 
@@ -704,12 +685,10 @@ fn parse_distance_model(s: &str) -> DistanceModelType {
 
 fn parse_render_mode(s: &str) -> RenderMode {
     match s {
+        "world_locked" => RenderMode::WorldLocked,
         "vbap" => RenderMode::Vbap,
-        "speaker_as_mic" => RenderMode::SpeakerAsMic,
-        "binaural" => RenderMode::Binaural,
         "stereo" => RenderMode::Stereo,
-        "mono" => RenderMode::Mono,
-        "quad" => RenderMode::Quad,
+        "binaural" => RenderMode::Binaural,
         _ => RenderMode::Vbap,
     }
 }

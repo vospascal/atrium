@@ -20,7 +20,7 @@ pub enum Command {
     /// Reposition a source by index.
     SetSourcePosition { index: u16, position: Vec3 },
 
-    /// Switch rendering mode (SpeakerAsMic or Vbap).
+    /// Switch rendering mode (WorldLocked / Vbap / Stereo / Binaural).
     SetRenderMode { mode: RenderMode },
 
     /// Reposition a speaker by channel index.
@@ -39,7 +39,10 @@ pub enum Command {
     SetSourceOrbitAngle { index: u16, angle: f32 },
 
     /// Set atmospheric conditions for ISO 9613-1 air absorption.
-    SetAtmosphere { temperature_c: f32, humidity_pct: f32 },
+    SetAtmosphere {
+        temperature_c: f32,
+        humidity_pct: f32,
+    },
 
     /// Reset the scene to its initial state (positions, orbits, gains, etc.).
     ResetScene,

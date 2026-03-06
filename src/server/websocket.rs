@@ -2,8 +2,8 @@ use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 use tungstenite::protocol::Message;
 
@@ -133,23 +133,21 @@ fn handle_websocket(
     loop {
         match ws.read() {
             Ok(msg) => match msg {
-                Message::Text(text) => {
-                    match serde_json::from_str::<ClientMessage>(&text) {
-                        Ok(client_msg) => {
-                            let resend = client_msg.needs_scene_resend();
-                            let cmd = client_msg.into_command();
-                            if let Ok(mut prod) = producer.lock() {
-                                let _ = prod.push(cmd);
-                            }
-                            if resend && !initial_state.is_empty() {
-                                let _ = ws.send(Message::Text(initial_state.into()));
-                            }
+                Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(client_msg) => {
+                        let resend = client_msg.needs_scene_resend();
+                        let cmd = client_msg.into_command();
+                        if let Ok(mut prod) = producer.lock() {
+                            let _ = prod.push(cmd);
                         }
-                        Err(e) => {
-                            eprintln!("Invalid message: {e}");
+                        if resend && !initial_state.is_empty() {
+                            let _ = ws.send(Message::Text(initial_state.into()));
                         }
                     }
-                }
+                    Err(e) => {
+                        eprintln!("Invalid message: {e}");
+                    }
+                },
                 Message::Close(_) => break,
                 Message::Ping(data) => {
                     let _ = ws.send(Message::Pong(data));

@@ -4,12 +4,9 @@ import type { AtriumStore } from '../store.js';
 import { StoreController } from '../store-controller.js';
 
 const MODES = [
-  { mode: 'speaker_as_mic', label: 'Spatial' },
+  { mode: 'world_locked', label: 'WorldLocked' },
   { mode: 'vbap', label: 'VBAP' },
-  { mode: '5.1', label: '5.1' },
-  { mode: '4.0', label: '4.0' },
   { mode: 'stereo', label: 'Stereo' },
-  { mode: 'mono', label: 'Mono' },
   { mode: 'binaural', label: 'Binaural' },
 ];
 

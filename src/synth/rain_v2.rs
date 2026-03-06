@@ -24,8 +24,8 @@
 
 use std::f32::consts::TAU;
 
-use crate::spatial::source::SoundSource;
 use crate::world::types::Vec3;
+use atrium_core::source::SoundSource;
 
 use super::noise::{BrownNoise, PinkNoise, Rng};
 
@@ -61,7 +61,6 @@ pub struct RainSourceV2 {
     output_lp_state: f32,
 
     // -- Tuning knobs (all pub) --
-
     /// Rain intensity 0–1. Scales drop rate and overall level.
     pub intensity: f32,
     /// Base drop impacts per second at intensity=1.
@@ -107,11 +106,11 @@ impl RainSourceV2 {
             intensity: intensity.clamp(0.0, 1.0),
             drop_rate: 600.0,
             drip_rate: 1.5,
-            impact_gain: 0.6,  // compensate for 2-pole LP amplitude loss
-            bubble_gain: 0.08, // very subtle — pure tones are perceptually sharp
-            bed_gain: 0.04,    // barely-there sub-bass warmth
+            impact_gain: 0.6,   // compensate for 2-pole LP amplitude loss
+            bubble_gain: 0.08,  // very subtle — pure tones are perceptually sharp
+            bed_gain: 0.04,     // barely-there sub-bass warmth
             texture_gain: 0.03, // barely perceptible fill between drops
-            master_gain: 2.5,  // boost overall — rain should be audible at normal volume
+            master_gain: 2.5,   // boost overall — rain should be audible at normal volume
             position,
             rng: Rng::new(seed),
         }
@@ -178,13 +177,7 @@ impl RainSourceV2 {
     /// prevents phase-locked artifacts when many bubbles overlap.
     /// A short attack ramp (0.3ms) avoids click at onset.
     /// Higher frequencies are attenuated (air absorption over distance).
-    fn write_bubble(
-        &mut self,
-        freq: f32,
-        decay_rate: f32,
-        gain: f32,
-        sample_rate: f32,
-    ) {
+    fn write_bubble(&mut self, freq: f32, decay_rate: f32, gain: f32, sample_rate: f32) {
         // Higher frequency bubbles are quieter (air absorption + distance)
         let freq_atten = 1.0 - (freq / 20000.0).clamp(0.0, 0.7);
         let gain = gain * freq_atten;
@@ -425,7 +418,9 @@ mod tests {
 
         let mut full = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
 
-        let energy_bed: f32 = (0..48000).map(|_| bed_only.next_sample(48000.0).powi(2)).sum();
+        let energy_bed: f32 = (0..48000)
+            .map(|_| bed_only.next_sample(48000.0).powi(2))
+            .sum();
         let energy_full: f32 = (0..48000).map(|_| full.next_sample(48000.0).powi(2)).sum();
 
         assert!(

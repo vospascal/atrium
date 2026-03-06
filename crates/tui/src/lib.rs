@@ -11,9 +11,7 @@ pub struct DeviceInfo {
     pub render_mode: String,
     pub scene_path: String,
     pub source_names: Vec<String>,
-    /// Pipeline stages before the panning/spatialization stage.
-    pub pipeline_pre: Vec<String>,
-    /// Pipeline stages after the panning/spatialization stage.
+    /// Pipeline mix stage names (for pipeline display).
     pub pipeline_post: Vec<String>,
 }
 
@@ -42,10 +40,9 @@ impl Dashboard {
         }
     }
 
-    /// Build the full pipeline stage list (pre + dynamic panning + post).
+    /// Build the full pipeline stage list: render mode + mix stages.
     fn pipeline_stages<'a>(&'a self, current_mode: &'a str) -> Vec<&'a str> {
-        let mut stages: Vec<&str> = self.info.pipeline_pre.iter().map(|s| s.as_str()).collect();
-        stages.push(current_mode);
+        let mut stages: Vec<&str> = vec![current_mode];
         stages.extend(self.info.pipeline_post.iter().map(|s| s.as_str()));
         stages
     }
@@ -72,10 +69,7 @@ impl Dashboard {
         writeln!(
             out,
             " {} \u{2502} {}Hz/{}ch \u{2502} {}",
-            self.info.device_name,
-            self.info.sample_rate,
-            self.info.channels,
-            current_mode,
+            self.info.device_name, self.info.sample_rate, self.info.channels, current_mode,
         )
         .ok();
         lines += 1;
@@ -135,7 +129,12 @@ impl Dashboard {
             Self::clear_line(&mut out);
             if let Some(s) = sources.get(i) {
                 let bar = meter_bar(s.gain_db, bar_width);
-                writeln!(out, "  {}  {:>5.1}m  {:>6.1} dB", bar, s.distance, s.gain_db).ok();
+                writeln!(
+                    out,
+                    "  {}  {:>5.1}m  {:>6.1} dB",
+                    bar, s.distance, s.gain_db
+                )
+                .ok();
             } else {
                 writeln!(out, "  {:<width$}  --", "", width = bar_width).ok();
             }
@@ -172,7 +171,11 @@ fn meter_bar(db: f32, width: usize) -> String {
         style::Color::Green
     };
 
-    let track_color = style::Color::Rgb { r: 60, g: 60, b: 60 };
+    let track_color = style::Color::Rgb {
+        r: 60,
+        g: 60,
+        b: 60,
+    };
 
     format!(
         "{}{}",
@@ -226,13 +229,19 @@ mod tests {
     fn meter_bar_color_zones() {
         // Green zone (quiet) — ANSI green is \x1b[38;5;10m
         let bar = meter_bar(-40.0, 10);
-        assert!(bar.contains("\x1b["), "bar should contain ANSI escape codes");
+        assert!(
+            bar.contains("\x1b["),
+            "bar should contain ANSI escape codes"
+        );
 
         // Different colors for different levels
         let quiet = meter_bar(-40.0, 10);
         let loud = meter_bar(-3.0, 10);
         // They should produce different color codes
-        assert_ne!(quiet, loud, "quiet and loud bars should have different colors");
+        assert_ne!(
+            quiet, loud,
+            "quiet and loud bars should have different colors"
+        );
     }
 
     #[test]

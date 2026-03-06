@@ -23,6 +23,19 @@ sofar = "0.2.1"
 fft-convolver = "0.3.0"
 atrium-tui = { path = "crates/tui", optional = true }
 
+# Profiling (optional, zero-cost when disabled)
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
+tracing-perfetto = { version = "0.1", optional = true }
+tracing-flame = { version = "0.2", optional = true }
+
 [features]
 default = ["tui"]
 tui = ["dep:atrium-tui"]
+profiler = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-perfetto", "dep:tracing-flame"]
+memprof = []
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

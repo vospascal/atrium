@@ -1,13 +1,17 @@
 use crate::audio::atmosphere::AtmosphericParams;
-use crate::audio::binaural::BinauralMixer;
-use crate::audio::mixer::{mix_sources, DistanceModel, MixerState};
+use crate::audio::distance::DistanceModel;
+use crate::audio::propagation::GroundProperties;
 use crate::engine::commands::Command;
+#[cfg(feature = "memprof")]
+use crate::engine::memprof::{MemProfiler, MemStage};
 use crate::engine::telemetry::{compute_telemetry, TelemetryFrame};
-use crate::processors::AudioProcessor;
-use crate::spatial::listener::Listener;
-use crate::spatial::source::SoundSource;
+use crate::pipeline::mix_stage::MixContext;
+use crate::pipeline::{render_pipeline, RenderPipeline};
+use crate::profile_span;
 use crate::world::room::Room;
 use crate::world::types::Vec3;
+use atrium_core::listener::Listener;
+use atrium_core::source::SoundSource;
 use atrium_core::speaker::{RenderMode, SpeakerLayout};
 
 /// Snapshot of per-source initial state for scene reset.
@@ -28,17 +32,17 @@ pub struct AudioScene {
     pub master_gain: f32,
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
-    pub processors: Vec<Box<dyn AudioProcessor>>,
     pub speaker_layout: SpeakerLayout,
-    pub mixer_state: MixerState,
     pub atmosphere: AtmosphericParams,
-    pub binaural_mixer: Option<BinauralMixer>,
     /// Ring buffer producer for sending telemetry to the main thread.
     pub telemetry_out: Option<rtrb::Producer<TelemetryFrame>>,
     /// Callback counter for throttling telemetry (~15 Hz).
     pub telemetry_counter: u32,
     /// Push telemetry every N callbacks.
     pub telemetry_interval: u32,
+    /// Audio-thread allocation profiler (bytes/allocs per stage).
+    #[cfg(feature = "memprof")]
+    pub memprof: MemProfiler,
     // ── Initial state for scene reset ──
     pub initial_listener_pos: Vec3,
     pub initial_listener_yaw: f32,
@@ -46,14 +50,20 @@ pub struct AudioScene {
     pub initial_source_states: Vec<InitialSourceState>,
     pub initial_atmosphere: AtmosphericParams,
     pub initial_render_mode: RenderMode,
-    /// Path to SOFA HRTF file for binaural rendering.
-    pub hrtf_path: String,
+    // ── Composable pipeline ──
+    /// All 4 pipelines (WorldLocked, Vbap, Stereo, Binaural), pre-allocated.
+    pub pipelines: [RenderPipeline; 4],
+    /// Which pipeline is active.
+    pub active_pipeline: RenderMode,
+    /// Ground properties for pipeline propagation stages.
+    pub ground: GroundProperties,
 }
 
 impl AudioScene {
     /// Drain all pending commands from the consumer.
     /// Called once at the start of each audio callback invocation.
     pub fn process_commands(&mut self, consumer: &mut rtrb::Consumer<Command>) {
+        let _s = profile_span!("process_commands").entered();
         while let Ok(cmd) = consumer.pop() {
             match cmd {
                 Command::SetListenerPose { position, yaw } => {
@@ -74,10 +84,16 @@ impl AudioScene {
                     }
                 }
                 Command::SetRenderMode { mode } => {
-                    self.speaker_layout.mode = mode;
+                    let new_pipeline = mode;
+                    if new_pipeline != self.active_pipeline {
+                        self.pipelines[new_pipeline.index()].reset();
+                        self.active_pipeline = new_pipeline;
+                    }
                 }
                 Command::SetSpeakerPosition { channel, position } => {
-                    if let Some(speaker) = self.speaker_layout.speaker_by_channel_mut(channel as usize) {
+                    if let Some(speaker) =
+                        self.speaker_layout.speaker_by_channel_mut(channel as usize)
+                    {
                         speaker.position = position;
                     }
                 }
@@ -101,7 +117,10 @@ impl AudioScene {
                         source.set_orbit_angle(angle);
                     }
                 }
-                Command::SetAtmosphere { temperature_c, humidity_pct } => {
+                Command::SetAtmosphere {
+                    temperature_c,
+                    humidity_pct,
+                } => {
                     self.atmosphere.temperature_c = temperature_c;
                     self.atmosphere.humidity_pct = humidity_pct;
                 }
@@ -110,7 +129,10 @@ impl AudioScene {
                     self.listener.yaw = self.initial_listener_yaw;
                     self.master_gain = self.initial_master_gain;
                     self.atmosphere = self.initial_atmosphere;
-                    self.speaker_layout.mode = self.initial_render_mode;
+                    self.active_pipeline = self.initial_render_mode;
+                    for p in self.pipelines.iter_mut() {
+                        p.reset();
+                    }
                     for (source, init) in self.sources.iter_mut().zip(&self.initial_source_states) {
                         source.set_position(init.position);
                         source.set_orbit_radius(init.orbit_radius);
@@ -123,77 +145,54 @@ impl AudioScene {
         }
     }
 
-    /// Initialize all processors with room geometry and sample rate.
+    /// Initialize pipelines with room geometry and sample rate.
     /// Must be called after sample_rate is set and before the audio callback starts.
-    pub fn init_processors(&mut self) {
+    pub fn init_pipelines(&mut self) {
         let (room_min, room_max) = self.room.bounds();
-        for processor in &mut self.processors {
-            processor.init(room_min, room_max, &self.listener, self.sample_rate);
-        }
-
-        // Initialize binaural mixer (load SOFA file, create per-source convolvers)
-        match BinauralMixer::new(
-            &self.hrtf_path,
-            self.sample_rate,
-            self.sources.len(),
-        ) {
-            Ok(mut mixer) => {
-                // Mirror mixer_state's room/ground/reflection config to binaural
-                mixer.set_room_bounds(room_min, room_max);
-                mixer.set_ground(self.mixer_state.ground());
-                if self.mixer_state.has_reflections() {
-                    let (wet, absorption) = self.mixer_state.reflection_params();
-                    mixer.enable_reflections(wet, absorption, self.sources.len());
-                }
-                self.binaural_mixer = Some(mixer);
-            }
-            Err(e) => eprintln!("Binaural HRTF not available: {e}"),
+        let mix_ctx = MixContext {
+            listener: &self.listener,
+            layout: &self.speaker_layout,
+            sample_rate: self.sample_rate,
+            channels: self.speaker_layout.total_channels(),
+            room_min,
+            room_max,
+            master_gain: self.master_gain,
+        };
+        for pipeline in self.pipelines.iter_mut() {
+            pipeline.init(&mix_ctx);
+            pipeline.ensure_topology(self.sources.len(), &self.speaker_layout, self.sample_rate);
         }
     }
 
     /// Render one buffer of audio.
     /// `output` is an interleaved sample buffer (e.g. [L, R, L, R, ...] for stereo).
     pub fn render(&mut self, output: &mut [f32], channels: usize) {
+        let _total =
+            profile_span!("render", sources = self.sources.len(), channels = channels).entered();
+
+        #[cfg(feature = "memprof")]
+        self.memprof.begin_callback();
+
         let num_frames = output.len() / channels;
         let dt = num_frames as f32 / self.sample_rate;
 
         // Advance time-varying state on all sources
-        for source in &mut self.sources {
-            source.tick(dt);
-        }
-
-        // Binaural mode: HRTF convolution to stereo headphone output
-        // Multichannel mode: VBAP / SpeakerAsMic / Stereo / etc.
-        // Both paths feed into the post-mix processor chain (FDN reverb, etc.)
-        if self.speaker_layout.mode == RenderMode::Binaural {
-            if let Some(ref mut mixer) = self.binaural_mixer {
-                mixer.mix(
-                    &mut self.sources,
-                    &self.listener,
-                    output,
-                    channels,
-                    self.sample_rate,
-                    self.master_gain,
-                    &self.distance_model,
-                    &self.atmosphere,
-                );
-            } else {
-                // Fallback to multichannel if binaural mixer not available
-                mix_sources(
-                    &mut self.sources,
-                    &self.listener,
-                    output,
-                    channels,
-                    self.sample_rate,
-                    self.master_gain,
-                    &self.distance_model,
-                    &self.speaker_layout,
-                    &mut self.mixer_state,
-                    &self.atmosphere,
-                );
+        {
+            let _s = profile_span!("source_tick").entered();
+            for source in &mut self.sources {
+                source.tick(dt);
             }
-        } else {
-            mix_sources(
+        }
+        #[cfg(feature = "memprof")]
+        self.memprof.record_stage(MemStage::SourceTick);
+
+        // Render through the composable pipeline
+        {
+            let (room_min, room_max) = self.room.bounds();
+            let pipeline = &mut self.pipelines[self.active_pipeline.index()];
+            let _s = profile_span!("pipeline", mode = ?self.active_pipeline).entered();
+            render_pipeline(
+                pipeline,
                 &mut self.sources,
                 &self.listener,
                 output,
@@ -202,28 +201,34 @@ impl AudioScene {
                 self.master_gain,
                 &self.distance_model,
                 &self.speaker_layout,
-                &mut self.mixer_state,
                 &self.atmosphere,
+                &self.ground,
+                room_min,
+                room_max,
             );
         }
-
-        // Run post-mix processor chain (FDN reverb, etc.)
-        // Runs for ALL render modes — binaural no longer skips this.
-        for processor in &mut self.processors {
-            processor.process(output, channels, self.sample_rate);
-        }
+        #[cfg(feature = "memprof")]
+        self.memprof.record_stage(MemStage::Mix);
 
         // Push telemetry at ~15 Hz (every N callbacks)
-        self.telemetry_counter += 1;
-        if self.telemetry_counter >= self.telemetry_interval {
-            self.telemetry_counter = 0;
-            if let Some(ref mut producer) = self.telemetry_out {
-                let mut frame =
-                    compute_telemetry(&self.sources, &self.listener, &self.distance_model);
-                frame.render_mode = self.speaker_layout.mode;
-                let _ = producer.push(frame); // silent drop if full
+        {
+            let _s = profile_span!("telemetry").entered();
+            self.telemetry_counter += 1;
+            if self.telemetry_counter >= self.telemetry_interval {
+                self.telemetry_counter = 0;
+                if let Some(ref mut producer) = self.telemetry_out {
+                    let mut frame =
+                        compute_telemetry(&self.sources, &self.listener, &self.distance_model);
+                    frame.render_mode = self.active_pipeline;
+                    let _ = producer.push(frame); // silent drop if full
+                }
             }
         }
+        #[cfg(feature = "memprof")]
+        self.memprof.record_stage(MemStage::Telemetry);
+
+        #[cfg(feature = "memprof")]
+        self.memprof.finish_callback();
     }
 
     /// Set the telemetry interval based on actual audio parameters.
@@ -232,5 +237,14 @@ impl AudioScene {
         // Target ~15 Hz. callbacks_per_sec = sample_rate / buffer_size
         let callbacks_per_sec = self.sample_rate / buffer_size.max(1) as f32;
         self.telemetry_interval = (callbacks_per_sec / 15.0).round().max(1.0) as u32;
+    }
+
+    /// Collect mix stage names from the active pipeline (for TUI display).
+    pub fn mix_stage_names(&self) -> Vec<String> {
+        self.pipelines[self.active_pipeline.index()]
+            .mix_stages
+            .iter()
+            .map(|s| s.name().to_string())
+            .collect()
     }
 }

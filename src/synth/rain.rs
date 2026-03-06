@@ -10,8 +10,8 @@
 // The TS version included an inline Freeverb — we omit it because the
 // scene's FdnReverb processor handles reverberation with proper room geometry.
 
-use crate::spatial::source::SoundSource;
 use crate::world::types::Vec3;
+use atrium_core::source::SoundSource;
 
 use super::noise::{BrownNoise, OnePoleHP, OnePoleLP, PinkNoise, Rng};
 
@@ -21,8 +21,8 @@ const MAX_BURST: usize = 8192;
 
 /// Procedural rain sound source.
 ///
-/// Place it in the scene like any other `SoundSource` — the mixer spatializes
-/// it and the processor chain adds reverb. For surround rain, place multiple
+/// Place it in the scene like any other `SoundSource` — the pipeline spatializes
+/// it and adds reverb. For surround rain, place multiple
 /// `RainSource`s at different positions around the room.
 pub struct RainSource {
     // Noise generators

@@ -2,9 +2,9 @@
 
 use std::f32::consts::TAU;
 
-use atrium::spatial::source::SoundSource;
 use atrium::synth::rain_v2::RainSourceV2;
 use atrium::world::types::Vec3;
+use atrium_core::source::SoundSource;
 
 const BANDS: &[(f32, f32, &str)] = &[
     (20.0, 100.0, "sub-bass     "),
@@ -58,10 +58,15 @@ fn analyze(label: &str, samples: &[f32], sr: f32) {
     for &(name, f_low, f_high, energy) in &energies {
         let rel = if max_e > 0.0 && energy > 0.0 {
             10.0 * (energy / max_e).log10()
-        } else { -120.0 };
+        } else {
+            -120.0
+        };
         let bar_len = ((rel + 40.0) / 40.0 * 25.0).clamp(0.0, 25.0) as usize;
         let bar: String = "█".repeat(bar_len);
-        println!("    {name} {:>5.0}-{:<5.0}Hz {:>+5.1} dB  {bar}", f_low, f_high, rel);
+        println!(
+            "    {name} {:>5.0}-{:<5.0}Hz {:>+5.1} dB  {bar}",
+            f_low, f_high, rel
+        );
     }
 }
 
@@ -69,7 +74,11 @@ fn main() {
     let sr = 44100.0;
     let n = (sr * 10.0) as usize;
 
-    for &(label, intensity) in &[("Light (0.2)", 0.2_f32), ("Medium (0.5)", 0.5), ("Heavy (0.9)", 0.9)] {
+    for &(label, intensity) in &[
+        ("Light (0.2)", 0.2_f32),
+        ("Medium (0.5)", 0.5),
+        ("Heavy (0.9)", 0.9),
+    ] {
         println!("\n==================================================");
         println!("=== {label} ===");
 
@@ -90,7 +99,9 @@ fn main() {
         let rms_no: f32 = (no_bub.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
         let bubble_contrib = if rms_full > 0.0 {
             ((rms_full - rms_no) / rms_full * 100.0).abs()
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         println!("\n  Bubble contribution to RMS: ~{bubble_contrib:.0}%");
     }
 }

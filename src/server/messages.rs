@@ -21,7 +21,7 @@ pub enum ClientMessage {
     #[serde(rename = "set_source_position")]
     SetSourcePosition { index: u16, x: f32, y: f32, z: f32 },
 
-    /// Switch rendering mode: "speaker_as_mic" or "vbap".
+    /// Switch rendering mode: "world_locked", "vbap", "stereo", "binaural".
     #[serde(rename = "set_render_mode")]
     SetRenderMode { mode: String },
 
@@ -61,31 +61,27 @@ impl ClientMessage {
             ClientMessage::SetGain { gain } => Command::SetMasterGain {
                 gain: gain.clamp(0.0, 1.0),
             },
-            ClientMessage::SetSourceMuted { index, muted } => Command::SetSourceMuted {
-                index,
-                muted,
-            },
+            ClientMessage::SetSourceMuted { index, muted } => {
+                Command::SetSourceMuted { index, muted }
+            }
             ClientMessage::SetSourcePosition { index, x, y, z } => Command::SetSourcePosition {
                 index,
                 position: Vec3::new(x, y, z),
             },
             ClientMessage::SetRenderMode { mode } => {
                 let render_mode = match mode.as_str() {
-                    "vbap" | "5.1" => RenderMode::Vbap,
+                    "world_locked" => RenderMode::WorldLocked,
+                    "vbap" => RenderMode::Vbap,
                     "stereo" => RenderMode::Stereo,
-                    "mono" => RenderMode::Mono,
-                    "quad" | "4.0" => RenderMode::Quad,
-                    "binaural" | "hrtf" => RenderMode::Binaural,
-                    _ => RenderMode::SpeakerAsMic,
+                    "binaural" => RenderMode::Binaural,
+                    _ => RenderMode::WorldLocked,
                 };
                 Command::SetRenderMode { mode: render_mode }
             }
-            ClientMessage::SetSpeakerPosition { channel, x, y, z } => {
-                Command::SetSpeakerPosition {
-                    channel,
-                    position: Vec3::new(x, y, z),
-                }
-            }
+            ClientMessage::SetSpeakerPosition { channel, x, y, z } => Command::SetSpeakerPosition {
+                channel,
+                position: Vec3::new(x, y, z),
+            },
             ClientMessage::SetSourceOrbitSpeed { index, speed } => {
                 Command::SetSourceOrbitSpeed { index, speed }
             }
@@ -95,12 +91,13 @@ impl ClientMessage {
             ClientMessage::SetSourceOrbitAngle { index, angle } => {
                 Command::SetSourceOrbitAngle { index, angle }
             }
-            ClientMessage::SetAtmosphere { temperature, humidity } => {
-                Command::SetAtmosphere {
-                    temperature_c: temperature.clamp(-20.0, 50.0),
-                    humidity_pct: humidity.clamp(0.0, 100.0),
-                }
-            }
+            ClientMessage::SetAtmosphere {
+                temperature,
+                humidity,
+            } => Command::SetAtmosphere {
+                temperature_c: temperature.clamp(-20.0, 50.0),
+                humidity_pct: humidity.clamp(0.0, 100.0),
+            },
             ClientMessage::ResetScene => Command::ResetScene,
         }
     }
@@ -199,7 +196,10 @@ mod tests {
 
     #[test]
     fn into_command_set_source_muted() {
-        let msg = ClientMessage::SetSourceMuted { index: 0, muted: true };
+        let msg = ClientMessage::SetSourceMuted {
+            index: 0,
+            muted: true,
+        };
         let cmd = msg.into_command();
         match cmd {
             Command::SetSourceMuted { index, muted } => {
@@ -236,13 +236,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_set_render_mode_speaker_as_mic() {
-        let json = r#"{"type":"set_render_mode","mode":"speaker_as_mic"}"#;
+    fn parse_set_render_mode_world_locked() {
+        let json = r#"{"type":"set_render_mode","mode":"world_locked"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         let cmd = msg.into_command();
         match cmd {
             Command::SetRenderMode { mode } => {
-                assert_eq!(mode, RenderMode::SpeakerAsMic);
+                assert_eq!(mode, RenderMode::WorldLocked);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn parse_set_render_mode_stereo() {
+        let json = r#"{"type":"set_render_mode","mode":"stereo"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        let cmd = msg.into_command();
+        match cmd {
+            Command::SetRenderMode { mode } => {
+                assert_eq!(mode, RenderMode::Stereo);
             }
             _ => panic!("wrong command variant"),
         }
@@ -269,7 +282,10 @@ mod tests {
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         let cmd = msg.into_command();
         match cmd {
-            Command::SetAtmosphere { temperature_c, humidity_pct } => {
+            Command::SetAtmosphere {
+                temperature_c,
+                humidity_pct,
+            } => {
                 assert!((temperature_c - 25.0).abs() < 1e-6);
                 assert!((humidity_pct - 60.0).abs() < 1e-6);
             }
@@ -279,12 +295,24 @@ mod tests {
 
     #[test]
     fn into_command_clamps_atmosphere() {
-        let msg = ClientMessage::SetAtmosphere { temperature: 100.0, humidity: -10.0 };
+        let msg = ClientMessage::SetAtmosphere {
+            temperature: 100.0,
+            humidity: -10.0,
+        };
         let cmd = msg.into_command();
         match cmd {
-            Command::SetAtmosphere { temperature_c, humidity_pct } => {
-                assert!((temperature_c - 50.0).abs() < 1e-6, "temperature should clamp to 50°C");
-                assert!((humidity_pct - 0.0).abs() < 1e-6, "humidity should clamp to 0%");
+            Command::SetAtmosphere {
+                temperature_c,
+                humidity_pct,
+            } => {
+                assert!(
+                    (temperature_c - 50.0).abs() < 1e-6,
+                    "temperature should clamp to 50°C"
+                );
+                assert!(
+                    (humidity_pct - 0.0).abs() < 1e-6,
+                    "humidity should clamp to 0%"
+                );
             }
             _ => panic!("wrong command variant"),
         }

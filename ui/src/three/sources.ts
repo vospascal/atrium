@@ -3,7 +3,7 @@ import type { SceneContext } from './scene.js';
 import type { AtriumStore } from '../store.js';
 import { toThree } from './coords.js';
 
-let sourceMeshes: THREE.Mesh[] = [];
+let sourceMeshes: THREE.Sprite[] = [];
 let falloffClouds: THREE.Points[] = [];
 let audibleRings: THREE.Line[] = [];
 let gainLines: THREE.Line[] = [];
@@ -17,7 +17,7 @@ interface DistLabel {
   lastText: string;
 }
 
-export function getSourceMeshes(): THREE.Mesh[] {
+export function getSourceMeshes(): THREE.Sprite[] {
   return sourceMeshes;
 }
 
@@ -48,25 +48,36 @@ export function buildSources(ctx: SceneContext, store: AtriumStore) {
 
   // Source meshes
   sourceMeshes = store.sources.map(s => {
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.12, 16, 16),
-      new THREE.MeshStandardMaterial({ color: s.color, emissive: s.color, emissiveIntensity: 0.3 }),
-    );
-    ctx.scene.add(mesh);
+    const hexColor = '#' + s.color.toString(16).padStart(6, '0');
+
+    // Source dot — canvas-textured sprite (2 triangles vs 512 for SphereGeometry)
+    const dotCanvas = document.createElement('canvas');
+    dotCanvas.width = 64; dotCanvas.height = 64;
+    const dctx = dotCanvas.getContext('2d')!;
+    dctx.fillStyle = hexColor;
+    dctx.beginPath();
+    dctx.arc(32, 32, 28, 0, Math.PI * 2);
+    dctx.fill();
+    const dotTex = new THREE.CanvasTexture(dotCanvas);
+    const dot = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: dotTex, transparent: true, depthTest: false,
+    }));
+    dot.scale.set(0.24, 0.24, 1);
+    ctx.scene.add(dot);
 
     // Label sprite
     const canvas = document.createElement('canvas');
     canvas.width = 128; canvas.height = 32;
     const cctx = canvas.getContext('2d')!;
-    cctx.fillStyle = '#' + s.color.toString(16).padStart(6, '0');
+    cctx.fillStyle = hexColor;
     cctx.font = '20px monospace';
     cctx.fillText(s.name, 4, 22);
     const tex = new THREE.CanvasTexture(canvas);
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
-    sprite.scale.set(1, 0.25, 1);
-    sprite.position.y = 0.3;
-    mesh.add(sprite);
-    return mesh;
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+    label.scale.set(1, 0.25, 1);
+    label.position.y = 0.3;
+    dot.add(label);
+    return dot;
   });
 
   // Falloff clouds — disabled for now (re-enable by uncommenting)
@@ -125,9 +136,10 @@ export function updateSources(store: AtriumStore) {
     if (!sourceMeshes[i]) return;
 
     // Position: engine telemetry is authoritative, local orbit as fallback
+    // Skip stale telemetry while dragging to avoid position fighting
     let ax: number, ay: number, az: number;
     const t = store.telemetry?.[i];
-    if (t) {
+    if (t && store.sourceDragging !== i) {
       ax = t.x; ay = t.y; az = t.z;
     } else if (s.r > 0 && (s.speed !== 0 || store.sourcePaused[i])) {
       const orbitAngle = store.sourcePaused[i] ? (s._frozenAngle ?? 0) : s.speed * elapsed;

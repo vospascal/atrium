@@ -1,14 +1,15 @@
 // Multichannel speaker layout and rendering.
 //
-// Two render modes:
-//   1. SpeakerAsMic — each speaker is a virtual microphone at a fixed position in the room.
+// Four render modes (RenderMode):
+//   1. WorldLocked — each speaker is a virtual microphone at a fixed position in the room.
 //      Gain = distance_attenuation(source → speaker) × source_directivity(source → speaker).
 //      The listener's position does NOT affect speaker gains (spatial image comes from
 //      physical speaker placement). Best for world-locked atrium installations.
-//
 //   2. Vbap — 2D Vector Base Amplitude Panning (Pulkki 1997). Speakers form a ring around
 //      the listener. Source direction from listener determines which speaker pair activates.
 //      Distance from listener to source controls volume. Best for listener-centric rendering.
+//   3. Stereo — equal-power L/R panning based on source azimuth from listener.
+//   4. Binaural — HRTF convolution for headphone rendering.
 //
 // Speaker positions are configurable per room. Layouts: stereo, quad 4.0, surround 5.1.
 
@@ -45,7 +46,7 @@ impl ChannelGains {
     }
 }
 
-/// Distance model parameters for attenuation (matches mixer::DistanceModel).
+/// Distance model parameters for attenuation.
 #[derive(Clone, Copy, Debug)]
 pub struct DistanceParams {
     pub ref_distance: f32,
@@ -65,27 +66,43 @@ impl Default for DistanceParams {
     }
 }
 
-/// Rendering mode for the speaker layout.
+/// Rendering mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RenderMode {
-    /// Each speaker picks up sound at its position (virtual microphone).
-    SpeakerAsMic,
-    /// VBAP: pans sources to speakers based on direction from listener.
+    /// Speakers are virtual microphones at fixed world positions.
+    /// Propagation is per-speaker (source→speaker path). Listener irrelevant.
+    WorldLocked,
+    /// VBAP: listener-relative triangulated panning to physical speakers.
     Vbap,
-    /// Simple L/R equal-power stereo pan (only channels 0 and 1).
+    /// Equal-power L/R stereo pan for headphones (no HRTF). UI label: "Stereo".
     Stereo,
-    /// Equal signal to all spatial channels.
-    Mono,
-    /// VBAP restricted to quad speakers (skips center channel).
-    Quad,
-    /// Binaural HRTF rendering — stereo output for headphones.
+    /// HRTF convolution for headphones.
     Binaural,
+}
+
+impl RenderMode {
+    /// Index into the pre-allocated pipeline array.
+    pub fn index(self) -> usize {
+        match self {
+            RenderMode::WorldLocked => 0,
+            RenderMode::Vbap => 1,
+            RenderMode::Stereo => 2,
+            RenderMode::Binaural => 3,
+        }
+    }
+
+    pub const ALL: [RenderMode; 4] = [
+        RenderMode::WorldLocked,
+        RenderMode::Vbap,
+        RenderMode::Stereo,
+        RenderMode::Binaural,
+    ];
 }
 
 /// Multichannel speaker configuration.
 #[derive(Clone, Debug)]
 pub struct SpeakerLayout {
-    /// Spatial speakers (excludes LFE).
+    /// Stereo speakers (excludes LFE).
     speakers: [Speaker; MAX_CHANNELS],
     /// Number of spatial speakers.
     count: usize,
@@ -93,8 +110,10 @@ pub struct SpeakerLayout {
     lfe_channel: Option<usize>,
     /// Total output channels (spatial speakers + LFE if present).
     total_channels: usize,
-    /// Active render mode.
-    pub mode: RenderMode,
+    /// Speaker mask: which channels are active. Inactive channels produce silence.
+    /// Used to run e.g. quad on 5.1 hardware by masking center+LFE.
+    /// Default: all channels active.
+    pub active: [bool; MAX_CHANNELS],
 }
 
 impl SpeakerLayout {
@@ -115,7 +134,7 @@ impl SpeakerLayout {
             count,
             lfe_channel,
             total_channels,
-            mode: RenderMode::Vbap,
+            active: [true; MAX_CHANNELS],
         }
     }
 
@@ -123,8 +142,14 @@ impl SpeakerLayout {
     pub fn stereo(left_pos: Vec3, right_pos: Vec3) -> Self {
         Self::new(
             &[
-                Speaker { position: left_pos, channel: 0 },
-                Speaker { position: right_pos, channel: 1 },
+                Speaker {
+                    position: left_pos,
+                    channel: 0,
+                },
+                Speaker {
+                    position: right_pos,
+                    channel: 1,
+                },
             ],
             None,
             2,
@@ -135,10 +160,22 @@ impl SpeakerLayout {
     pub fn quad(fl: Vec3, fr: Vec3, rl: Vec3, rr: Vec3) -> Self {
         Self::new(
             &[
-                Speaker { position: fl, channel: 0 },
-                Speaker { position: fr, channel: 1 },
-                Speaker { position: rl, channel: 2 },
-                Speaker { position: rr, channel: 3 },
+                Speaker {
+                    position: fl,
+                    channel: 0,
+                },
+                Speaker {
+                    position: fr,
+                    channel: 1,
+                },
+                Speaker {
+                    position: rl,
+                    channel: 2,
+                },
+                Speaker {
+                    position: rr,
+                    channel: 3,
+                },
             ],
             None,
             4,
@@ -149,11 +186,26 @@ impl SpeakerLayout {
     pub fn surround_5_1(l: Vec3, r: Vec3, c: Vec3, ls: Vec3, rs: Vec3) -> Self {
         Self::new(
             &[
-                Speaker { position: l, channel: 0 },
-                Speaker { position: r, channel: 1 },
-                Speaker { position: c, channel: 2 },
-                Speaker { position: ls, channel: 4 },
-                Speaker { position: rs, channel: 5 },
+                Speaker {
+                    position: l,
+                    channel: 0,
+                },
+                Speaker {
+                    position: r,
+                    channel: 1,
+                },
+                Speaker {
+                    position: c,
+                    channel: 2,
+                },
+                Speaker {
+                    position: ls,
+                    channel: 4,
+                },
+                Speaker {
+                    position: rs,
+                    channel: 5,
+                },
             ],
             Some(3),
             6,
@@ -177,7 +229,11 @@ impl SpeakerLayout {
 
     /// Get a reference to a speaker by its array index (0..speaker_count).
     pub fn speaker_by_index(&self, index: usize) -> Option<&Speaker> {
-        if index < self.count { Some(&self.speakers[index]) } else { None }
+        if index < self.count {
+            Some(&self.speakers[index])
+        } else {
+            None
+        }
     }
 
     /// Get a mutable reference to a speaker by channel index.
@@ -187,24 +243,28 @@ impl SpeakerLayout {
             .find(|s| s.channel == channel)
     }
 
-    // ── Speaker-as-mic (binaural headphone) mode ────────────────────────
+    /// Check if a channel is active (not masked).
+    pub fn is_channel_active(&self, channel: usize) -> bool {
+        channel < MAX_CHANNELS && self.active[channel]
+    }
 
-    /// Compute per-channel gains for binaural headphone rendering.
-    ///
-    /// Panning is relative to the listener's position and facing direction:
-    /// - Azimuth from listener to source determines left/right balance
-    /// - Distance attenuation from listener to source
-    /// - Source directivity toward the listener
-    /// - Listener hearing cone
-    pub fn compute_gains_mic(
-        &self,
-        listener: &Listener,
-        source_pos: Vec3,
-        source_orientation: Vec3,
-        source_directivity: &DirectivityPattern,
-        distance: &DistanceParams,
-    ) -> ChannelGains {
-        self.compute_gains_stereo(listener, source_pos, source_orientation, source_directivity, distance)
+    /// Set which channels are active. Channels not in the list are masked.
+    pub fn set_active_channels(&mut self, channels: &[usize]) {
+        self.active = [false; MAX_CHANNELS];
+        for &ch in channels {
+            if ch < MAX_CHANNELS {
+                self.active[ch] = true;
+            }
+        }
+    }
+
+    /// Apply the speaker mask to a gain array: zero out inactive channels.
+    pub fn apply_mask(&self, gains: &mut ChannelGains) {
+        for ch in 0..gains.count {
+            if !self.active[ch] {
+                gains.gains[ch] = 0.0;
+            }
+        }
     }
 
     // ── VBAP mode ──────────────────────────────────────────────────────
@@ -327,9 +387,13 @@ impl SpeakerLayout {
         // Per-speaker distance compensation: scale gains so all speakers
         // deliver equal SPL at the listener. Uses farthest speaker as reference
         // (attenuates nearer speakers rather than boosting distant ones).
-        let d_a = (self.speakers[best_a].position - listener.position).length().max(0.1);
+        let d_a = (self.speakers[best_a].position - listener.position)
+            .length()
+            .max(0.1);
         let d_b = if best_b != best_a {
-            (self.speakers[best_b].position - listener.position).length().max(0.1)
+            (self.speakers[best_b].position - listener.position)
+                .length()
+                .max(0.1)
         } else {
             d_a
         };
@@ -410,11 +474,19 @@ impl SpeakerLayout {
 
         // Distance, directivity, hearing attenuation
         let dist = distance_gain_at_model(
-            listener.position, source_pos,
-            distance.ref_distance, distance.max_distance, distance.rolloff,
+            listener.position,
+            source_pos,
+            distance.ref_distance,
+            distance.max_distance,
+            distance.rolloff,
             distance.model,
         );
-        let dir = directivity_gain(source_pos, source_orientation, listener.position, source_directivity);
+        let dir = directivity_gain(
+            source_pos,
+            source_orientation,
+            listener.position,
+            source_directivity,
+        );
         let hearing = listener.hearing_gain(source_pos);
         let atten = dist * dir * hearing;
 
@@ -439,11 +511,19 @@ impl SpeakerLayout {
         let mut gains = ChannelGains::silent(self.total_channels);
 
         let dist = distance_gain_at_model(
-            listener.position, source_pos,
-            distance.ref_distance, distance.max_distance, distance.rolloff,
+            listener.position,
+            source_pos,
+            distance.ref_distance,
+            distance.max_distance,
+            distance.rolloff,
             distance.model,
         );
-        let dir = directivity_gain(source_pos, source_orientation, listener.position, source_directivity);
+        let dir = directivity_gain(
+            source_pos,
+            source_orientation,
+            listener.position,
+            source_directivity,
+        );
         let hearing = listener.hearing_gain(source_pos);
         let atten = dist * dir * hearing;
 
@@ -475,7 +555,11 @@ impl SpeakerLayout {
         distance: &DistanceParams,
     ) -> ChannelGains {
         let mut gains = self.compute_gains_vbap(
-            listener, source_pos, source_orientation, source_directivity, distance,
+            listener,
+            source_pos,
+            source_orientation,
+            source_directivity,
+            distance,
         );
 
         // Zero out center channel (ch 2 in ITU 5.1) and redistribute to L/R
@@ -516,7 +600,11 @@ impl SpeakerLayout {
     ) -> ChannelGains {
         if spread <= 0.0 || self.count < 2 {
             return self.compute_gains_vbap(
-                listener, source_pos, source_orientation, source_directivity, distance,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             );
         }
 
@@ -531,7 +619,11 @@ impl SpeakerLayout {
         let base_dist = d.length();
         if base_dist < 1e-6 {
             return self.compute_gains_vbap(
-                listener, source_pos, source_orientation, source_directivity, distance,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             );
         }
 
@@ -550,7 +642,11 @@ impl SpeakerLayout {
             );
 
             let phantom_gains = self.compute_gains_vbap(
-                listener, phantom_pos, source_orientation, source_directivity, distance,
+                listener,
+                phantom_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             );
 
             for ch in 0..self.total_channels {
@@ -569,7 +665,11 @@ impl SpeakerLayout {
         // Re-normalize so total power matches a single VBAP evaluation
         if power > 1e-12 {
             let ref_gains = self.compute_gains_vbap(
-                listener, source_pos, source_orientation, source_directivity, distance,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             );
             let ref_power: f32 = ref_gains.gains[..self.total_channels]
                 .iter()
@@ -584,38 +684,46 @@ impl SpeakerLayout {
         acc
     }
 
-    /// Compute per-channel gains using the active render mode.
+    /// Compute per-channel gains for the given render mode.
     pub fn compute_gains(
         &self,
+        mode: RenderMode,
         listener: &Listener,
         source_pos: Vec3,
         source_orientation: Vec3,
         source_directivity: &DirectivityPattern,
         distance: &DistanceParams,
     ) -> ChannelGains {
-        match self.mode {
-            RenderMode::SpeakerAsMic | RenderMode::Binaural => {
-                self.compute_gains_mic(listener, source_pos, source_orientation, source_directivity, distance)
-            }
+        match mode {
+            RenderMode::WorldLocked | RenderMode::Binaural => self.compute_gains_stereo(
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
+            ),
             RenderMode::Vbap => self.compute_gains_vbap(
-                listener, source_pos, source_orientation, source_directivity, distance,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             ),
             RenderMode::Stereo => self.compute_gains_stereo(
-                listener, source_pos, source_orientation, source_directivity, distance,
-            ),
-            RenderMode::Mono => self.compute_gains_mono(
-                listener, source_pos, source_orientation, source_directivity, distance,
-            ),
-            RenderMode::Quad => self.compute_gains_quad(
-                listener, source_pos, source_orientation, source_directivity, distance,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             ),
         }
     }
 
     /// Compute per-channel gains with MDAP support.
-    /// Uses spread > 0 for wider images, falls through to the active mode otherwise.
+    /// Uses spread > 0 for wider images, falls through to the given mode otherwise.
     pub fn compute_gains_with_spread(
         &self,
+        mode: RenderMode,
         listener: &Listener,
         source_pos: Vec3,
         source_orientation: Vec3,
@@ -623,38 +731,29 @@ impl SpeakerLayout {
         distance: &DistanceParams,
         spread: f32,
     ) -> ChannelGains {
-        match self.mode {
-            RenderMode::SpeakerAsMic | RenderMode::Binaural => {
-                self.compute_gains_mic(listener, source_pos, source_orientation, source_directivity, distance)
-            }
+        match mode {
+            RenderMode::WorldLocked | RenderMode::Binaural => self.compute_gains_stereo(
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
+            ),
             RenderMode::Vbap => self.compute_gains_mdap(
-                listener, source_pos, source_orientation, source_directivity, distance, spread,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
+                spread,
             ),
             RenderMode::Stereo => self.compute_gains_stereo(
-                listener, source_pos, source_orientation, source_directivity, distance,
+                listener,
+                source_pos,
+                source_orientation,
+                source_directivity,
+                distance,
             ),
-            RenderMode::Mono => self.compute_gains_mono(
-                listener, source_pos, source_orientation, source_directivity, distance,
-            ),
-            RenderMode::Quad => {
-                // Quad with MDAP: compute spread gains then zero center
-                let mut gains = self.compute_gains_mdap(
-                    listener, source_pos, source_orientation, source_directivity, distance, spread,
-                );
-                if self.total_channels > 2 {
-                    let center = gains.gains[2];
-                    if center.abs() > 1e-8 {
-                        let half_power = center * std::f32::consts::FRAC_1_SQRT_2;
-                        gains.gains[0] += half_power;
-                        gains.gains[1] += half_power;
-                        gains.gains[2] = 0.0;
-                    }
-                }
-                if let Some(lfe) = self.lfe_channel {
-                    gains.gains[lfe] = 0.0;
-                }
-                gains
-            }
         }
     }
 }
@@ -689,16 +788,13 @@ mod tests {
 
     #[test]
     fn mic_source_to_listeners_left_is_louder_in_ch0() {
-        let layout = SpeakerLayout::stereo(
-            Vec3::new(0.0, 2.0, 0.0),
-            Vec3::new(6.0, 2.0, 0.0),
-        );
+        let layout = SpeakerLayout::stereo(Vec3::new(0.0, 2.0, 0.0), Vec3::new(6.0, 2.0, 0.0));
         let dist = default_distance();
         // Listener at (3, 2) facing +X (yaw=0). Left ear = +Y direction.
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         // Source to the listener's left (+Y)
-        let gains = layout.compute_gains_mic(
+        let gains = layout.compute_gains_stereo(
             &listener,
             Vec3::new(3.0, 4.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -716,15 +812,12 @@ mod tests {
 
     #[test]
     fn mic_source_ahead_is_centered() {
-        let layout = SpeakerLayout::stereo(
-            Vec3::new(0.0, 2.0, 0.0),
-            Vec3::new(6.0, 2.0, 0.0),
-        );
+        let layout = SpeakerLayout::stereo(Vec3::new(0.0, 2.0, 0.0), Vec3::new(6.0, 2.0, 0.0));
         let dist = default_distance();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         // Source directly ahead of listener (+X)
-        let gains = layout.compute_gains_mic(
+        let gains = layout.compute_gains_stereo(
             &listener,
             Vec3::new(5.0, 2.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -742,14 +835,11 @@ mod tests {
 
     #[test]
     fn mic_panning_follows_listener_yaw() {
-        let layout = SpeakerLayout::stereo(
-            Vec3::new(0.0, 2.0, 0.0),
-            Vec3::new(6.0, 2.0, 0.0),
-        );
+        let layout = SpeakerLayout::stereo(Vec3::new(0.0, 2.0, 0.0), Vec3::new(6.0, 2.0, 0.0));
         let dist = default_distance();
         // Source at (5, 2). Listener facing +X → source is ahead (centered).
         let listener_fwd = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        let gains_fwd = layout.compute_gains_mic(
+        let gains_fwd = layout.compute_gains_stereo(
             &listener_fwd,
             Vec3::new(5.0, 2.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -759,7 +849,7 @@ mod tests {
 
         // Same source, but listener rotated to face +Y → source is now to the RIGHT
         let listener_rotated = Listener::new(Vec3::new(3.0, 2.0, 0.0), PI / 2.0);
-        let gains_rot = layout.compute_gains_mic(
+        let gains_rot = layout.compute_gains_stereo(
             &listener_rotated,
             Vec3::new(5.0, 2.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -771,13 +861,15 @@ mod tests {
         assert!(
             (gains_fwd.gains[0] - gains_fwd.gains[1]).abs() < 0.01,
             "facing source: left={} right={} should be equal",
-            gains_fwd.gains[0], gains_fwd.gains[1]
+            gains_fwd.gains[0],
+            gains_fwd.gains[1]
         );
         // When rotated, source is to the right → ch1 louder
         assert!(
             gains_rot.gains[1] > gains_rot.gains[0],
             "source to right: right={} should be louder than left={}",
-            gains_rot.gains[1], gains_rot.gains[0]
+            gains_rot.gains[1],
+            gains_rot.gains[0]
         );
     }
 
@@ -800,13 +892,12 @@ mod tests {
     fn vbap_5_1_layout() -> SpeakerLayout {
         // Room 6×4m, speakers on walls at standard ITU angles
         let mut layout = SpeakerLayout::surround_5_1(
-            Vec3::new(1.0, 3.5, 0.0),  // L: front-left
-            Vec3::new(5.0, 3.5, 0.0),  // R: front-right
-            Vec3::new(3.0, 4.0, 0.0),  // C: front-center
-            Vec3::new(0.5, 0.5, 0.0),  // Ls: rear-left
-            Vec3::new(5.5, 0.5, 0.0),  // Rs: rear-right
+            Vec3::new(1.0, 3.5, 0.0), // L: front-left
+            Vec3::new(5.0, 3.5, 0.0), // R: front-right
+            Vec3::new(3.0, 4.0, 0.0), // C: front-center
+            Vec3::new(0.5, 0.5, 0.0), // Ls: rear-left
+            Vec3::new(5.5, 0.5, 0.0), // Rs: rear-right
         );
-        layout.mode = RenderMode::Vbap;
         layout
     }
 
@@ -836,11 +927,7 @@ mod tests {
 
     #[test]
     fn vbap_constant_power() {
-        let mut layout = SpeakerLayout::stereo(
-            Vec3::new(1.0, 3.0, 0.0),
-            Vec3::new(5.0, 3.0, 0.0),
-        );
-        layout.mode = RenderMode::Vbap;
+        let layout = SpeakerLayout::stereo(Vec3::new(1.0, 3.0, 0.0), Vec3::new(5.0, 3.0, 0.0));
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         // Fixed distance (2m), vary angle — power should stay roughly constant
@@ -878,7 +965,8 @@ mod tests {
                 dist.model,
             );
             let hearing = listener.hearing_gain(source);
-            let expected_power = (expected_attenuation * hearing) * (expected_attenuation * hearing);
+            let expected_power =
+                (expected_attenuation * hearing) * (expected_attenuation * hearing);
             assert!(
                 (power - expected_power).abs() < 0.05,
                 "angle={}° power={} expected={}",
@@ -946,15 +1034,31 @@ mod tests {
         let dir = Vec3::new(0.0, 1.0, 0.0);
 
         let point_gains = layout.compute_gains_mdap(
-            &listener, source, dir, &DirectivityPattern::Omni, &dist, 0.0,
+            &listener,
+            source,
+            dir,
+            &DirectivityPattern::Omni,
+            &dist,
+            0.0,
         );
         let spread_gains = layout.compute_gains_mdap(
-            &listener, source, dir, &DirectivityPattern::Omni, &dist, 0.5,
+            &listener,
+            source,
+            dir,
+            &DirectivityPattern::Omni,
+            &dist,
+            0.5,
         );
 
         // With spread, more speakers should have nonzero gain
-        let point_active = point_gains.gains[..6].iter().filter(|g| g.abs() > 0.01).count();
-        let spread_active = spread_gains.gains[..6].iter().filter(|g| g.abs() > 0.01).count();
+        let point_active = point_gains.gains[..6]
+            .iter()
+            .filter(|g| g.abs() > 0.01)
+            .count();
+        let spread_active = spread_gains.gains[..6]
+            .iter()
+            .filter(|g| g.abs() > 0.01)
+            .count();
         assert!(
             spread_active >= point_active,
             "spread should activate >= as many speakers: point={point_active} spread={spread_active}"
@@ -970,10 +1074,20 @@ mod tests {
         let dir = Vec3::new(0.0, 1.0, 0.0);
 
         let point_gains = layout.compute_gains_mdap(
-            &listener, source, dir, &DirectivityPattern::Omni, &dist, 0.0,
+            &listener,
+            source,
+            dir,
+            &DirectivityPattern::Omni,
+            &dist,
+            0.0,
         );
         let spread_gains = layout.compute_gains_mdap(
-            &listener, source, dir, &DirectivityPattern::Omni, &dist, 0.5,
+            &listener,
+            source,
+            dir,
+            &DirectivityPattern::Omni,
+            &dist,
+            0.5,
         );
 
         let point_power: f32 = point_gains.gains[..6].iter().map(|g| g * g).sum();
@@ -1002,11 +1116,11 @@ mod tests {
     fn room_layout() -> SpeakerLayout {
         // 6×4m room. Audience faces front wall (+Y). Left = -X, Right = +X.
         SpeakerLayout::surround_5_1(
-            Vec3::new(0.0, 4.0, 0.0),  // FL (ch 0): front-left  (low x = left)
-            Vec3::new(6.0, 4.0, 0.0),  // FR (ch 1): front-right (high x = right)
-            Vec3::new(3.0, 4.0, 0.0),  // C  (ch 2): front-center
-            Vec3::new(0.0, 0.0, 0.0),  // RL (ch 4): rear-left
-            Vec3::new(6.0, 0.0, 0.0),  // RR (ch 5): rear-right
+            Vec3::new(0.0, 4.0, 0.0), // FL (ch 0): front-left  (low x = left)
+            Vec3::new(6.0, 4.0, 0.0), // FR (ch 1): front-right (high x = right)
+            Vec3::new(3.0, 4.0, 0.0), // C  (ch 2): front-center
+            Vec3::new(0.0, 0.0, 0.0), // RL (ch 4): rear-left
+            Vec3::new(6.0, 0.0, 0.0), // RR (ch 5): rear-right
         )
     }
 
@@ -1019,8 +1133,7 @@ mod tests {
 
     #[test]
     fn stereo_source_left_has_more_ch0() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Stereo;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1036,14 +1149,14 @@ mod tests {
         assert!(
             gains.gains[0] > gains.gains[1],
             "source LEFT of listener → ch0 (L) should be louder: ch0={}, ch1={}",
-            gains.gains[0], gains.gains[1]
+            gains.gains[0],
+            gains.gains[1]
         );
     }
 
     #[test]
     fn stereo_source_right_has_more_ch1() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Stereo;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1059,7 +1172,8 @@ mod tests {
         assert!(
             gains.gains[1] > gains.gains[0],
             "source RIGHT of listener → ch1 (R) should be louder: ch0={}, ch1={}",
-            gains.gains[0], gains.gains[1]
+            gains.gains[0],
+            gains.gains[1]
         );
     }
 
@@ -1067,8 +1181,7 @@ mod tests {
 
     #[test]
     fn vbap_source_left_has_more_fl_than_fr() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Vbap;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1084,14 +1197,14 @@ mod tests {
         assert!(
             gains.gains[0] > gains.gains[1],
             "source LEFT → FL (ch0) should be louder than FR (ch1): ch0={}, ch1={}",
-            gains.gains[0], gains.gains[1]
+            gains.gains[0],
+            gains.gains[1]
         );
     }
 
     #[test]
     fn vbap_source_right_has_more_fr_than_fl() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Vbap;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1107,14 +1220,14 @@ mod tests {
         assert!(
             gains.gains[1] > gains.gains[0],
             "source RIGHT → FR (ch1) should be louder than FL (ch0): ch0={}, ch1={}",
-            gains.gains[0], gains.gains[1]
+            gains.gains[0],
+            gains.gains[1]
         );
     }
 
     #[test]
     fn vbap_source_rear_left_has_more_rl_than_rr() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Vbap;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1130,14 +1243,14 @@ mod tests {
         assert!(
             gains.gains[4] > gains.gains[5],
             "source REAR-LEFT → RL (ch4) should be louder than RR (ch5): ch4={}, ch5={}",
-            gains.gains[4], gains.gains[5]
+            gains.gains[4],
+            gains.gains[5]
         );
     }
 
     #[test]
     fn vbap_source_rear_right_has_more_rr_than_rl() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Vbap;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1153,7 +1266,8 @@ mod tests {
         assert!(
             gains.gains[5] > gains.gains[4],
             "source REAR-RIGHT → RR (ch5) should be louder than RL (ch4): ch4={}, ch5={}",
-            gains.gains[4], gains.gains[5]
+            gains.gains[4],
+            gains.gains[5]
         );
     }
 
@@ -1166,7 +1280,7 @@ mod tests {
         let dist = default_distance();
 
         // Source to listener's LEFT (-X direction): (1, 3, 0)
-        let gains = layout.compute_gains_mic(
+        let gains = layout.compute_gains_stereo(
             &listener,
             Vec3::new(1.0, 3.0, 0.0),
             Vec3::new(0.0, 1.0, 0.0),
@@ -1177,7 +1291,8 @@ mod tests {
         assert!(
             gains.gains[0] > gains.gains[1],
             "source to listener's left → ch0 should be loudest: ch0={}, ch1={}",
-            gains.gains[0], gains.gains[1]
+            gains.gains[0],
+            gains.gains[1]
         );
     }
 
@@ -1188,7 +1303,7 @@ mod tests {
         let dist = default_distance();
 
         // Source to listener's RIGHT (+X direction): (5, 3, 0)
-        let gains = layout.compute_gains_mic(
+        let gains = layout.compute_gains_stereo(
             &listener,
             Vec3::new(5.0, 3.0, 0.0),
             Vec3::new(0.0, 1.0, 0.0),
@@ -1199,7 +1314,8 @@ mod tests {
         assert!(
             gains.gains[1] > gains.gains[0],
             "source to listener's right → ch1 should be loudest: ch0={}, ch1={}",
-            gains.gains[0], gains.gains[1]
+            gains.gains[0],
+            gains.gains[1]
         );
     }
 
@@ -1207,8 +1323,7 @@ mod tests {
 
     #[test]
     fn quad_source_left_has_more_left_channels() {
-        let mut layout = room_layout();
-        layout.mode = RenderMode::Quad;
+        let layout = room_layout();
         let listener = room_listener();
         let dist = default_distance();
 
@@ -1221,12 +1336,13 @@ mod tests {
             &dist,
         );
 
-        let left_sum = gains.gains[0] + gains.gains[4];   // FL + RL
-        let right_sum = gains.gains[1] + gains.gains[5];  // FR + RR
+        let left_sum = gains.gains[0] + gains.gains[4]; // FL + RL
+        let right_sum = gains.gains[1] + gains.gains[5]; // FR + RR
         assert!(
             left_sum > right_sum,
             "source LEFT → left channels (FL+RL={}) should be louder than right (FR+RR={})",
-            left_sum, right_sum
+            left_sum,
+            right_sum
         );
     }
 
@@ -1234,7 +1350,7 @@ mod tests {
 
     #[test]
     fn compute_gains_dispatches_on_mode() {
-        // Use 5.1 layout so SpeakerAsMic (stereo, channels 0+1 only) and
+        // Use 5.1 layout so WorldLocked (stereo, channels 0+1 only) and
         // VBAP (distributes across all speaker pairs) clearly diverge.
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
         let dist = default_distance();
@@ -1242,7 +1358,7 @@ mod tests {
         let dir = Vec3::new(1.0, 0.0, 0.0);
         let pat = DirectivityPattern::Omni;
 
-        let mut layout = SpeakerLayout::surround_5_1(
+        let layout = SpeakerLayout::surround_5_1(
             Vec3::new(0.0, 4.0, 0.0),
             Vec3::new(6.0, 4.0, 0.0),
             Vec3::new(3.0, 4.0, 0.0),
@@ -1250,13 +1366,18 @@ mod tests {
             Vec3::new(6.0, 0.0, 0.0),
         );
 
-        layout.mode = RenderMode::SpeakerAsMic;
-        let mic_gains = layout.compute_gains(&listener, source_pos, dir, &pat, &dist);
+        let mic_gains = layout.compute_gains(
+            RenderMode::WorldLocked,
+            &listener,
+            source_pos,
+            dir,
+            &pat,
+            &dist,
+        );
+        let vbap_gains =
+            layout.compute_gains(RenderMode::Vbap, &listener, source_pos, dir, &pat, &dist);
 
-        layout.mode = RenderMode::Vbap;
-        let vbap_gains = layout.compute_gains(&listener, source_pos, dir, &pat, &dist);
-
-        // SpeakerAsMic only fills channels 0-1 (stereo), VBAP uses 5.1 speaker pairs.
+        // WorldLocked only fills channels 0-1 (stereo), VBAP uses 5.1 speaker pairs.
         // Compare across all channels — they must differ.
         let diff: f32 = (0..layout.total_channels())
             .map(|i| (mic_gains.gains[i] - vbap_gains.gains[i]).abs())

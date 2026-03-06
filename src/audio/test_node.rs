@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
 use crate::audio::decode::AudioBuffer;
-use crate::spatial::directivity::DirectivityPattern;
 use crate::world::types::Vec3;
-
-// Re-export from core so `crate::spatial::source::SoundSource` still resolves.
-pub use atrium_core::source::SoundSource;
+use atrium_core::directivity::DirectivityPattern;
+use atrium_core::source::SoundSource;
 
 /// A looping buffer player that orbits a center point.
 pub struct TestNode {
@@ -46,7 +44,7 @@ impl TestNode {
 }
 
 impl SoundSource for TestNode {
-    fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+    fn next_sample(&mut self, sample_rate: f32) -> f32 {
         let samples = &self.buffer.samples;
         if samples.is_empty() {
             return 0.0;
@@ -62,7 +60,7 @@ impl SoundSource for TestNode {
         let sample = s0 + (s1 - s0) * frac;
 
         // Advance playback position (use buffer's native sample rate)
-        self.playback_pos += self.buffer.sample_rate as f64 / _sample_rate as f64;
+        self.playback_pos += self.buffer.sample_rate as f64 / sample_rate as f64;
         if self.playback_pos >= samples.len() as f64 {
             self.playback_pos -= samples.len() as f64;
         }

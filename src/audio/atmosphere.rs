@@ -49,9 +49,7 @@ pub fn iso9613_alpha(freq: f32, params: &AtmosphericParams) -> f32 {
 
     // 1. Saturation vapour pressure: p_sat / p_ref = 10^C
     //    C = -6.8346 * (T_triple / T)^1.261 + 4.6151
-    let p_sat_ratio = 10.0_f32.powf(
-        -6.8346 * (T_TRIPLE / t_k).powf(1.261) + 4.6151,
-    );
+    let p_sat_ratio = 10.0_f32.powf(-6.8346 * (T_TRIPLE / t_k).powf(1.261) + 4.6151);
 
     // 2. Molar concentration of water vapour: h = humidity * p_sat / p_ambient
     let h = params.humidity_pct * p_sat_ratio * (P_REF / params.pressure_kpa);
@@ -71,20 +69,18 @@ pub fn iso9613_alpha(freq: f32, params: &AtmosphericParams) -> f32 {
     let classical = 1.84e-11 * p_rel.recip() * t_rel.sqrt();
 
     // Vibrational absorption (O2)
-    let vib_o2 = t_rel.powf(-2.5)
-        * 0.01275
-        * (-2239.1 / t_k).exp()
-        * (fr_o + f2 / fr_o).recip();
+    let vib_o2 = t_rel.powf(-2.5) * 0.01275 * (-2239.1 / t_k).exp() * (fr_o + f2 / fr_o).recip();
 
     // Vibrational absorption (N2)
-    let vib_n2 = t_rel.powf(-2.5)
-        * 0.1068
-        * (-3352.0 / t_k).exp()
-        * (fr_n + f2 / fr_n).recip();
+    let vib_n2 = t_rel.powf(-2.5) * 0.1068 * (-3352.0 / t_k).exp() * (fr_n + f2 / fr_n).recip();
 
     let alpha = 8.686 * f2 * (classical + vib_o2 + vib_n2);
 
-    if alpha.is_finite() { alpha } else { 0.0 }
+    if alpha.is_finite() {
+        alpha
+    } else {
+        0.0
+    }
 }
 
 /// Derive a low-pass filter cutoff frequency from ISO 9613-1 absorption.
@@ -159,8 +155,14 @@ mod tests {
 
     #[test]
     fn humidity_affects_absorption() {
-        let dry = AtmosphericParams { humidity_pct: 10.0, ..Default::default() };
-        let humid = AtmosphericParams { humidity_pct: 80.0, ..Default::default() };
+        let dry = AtmosphericParams {
+            humidity_pct: 10.0,
+            ..Default::default()
+        };
+        let humid = AtmosphericParams {
+            humidity_pct: 80.0,
+            ..Default::default()
+        };
         let a_dry = iso9613_alpha(8000.0, &dry);
         let a_humid = iso9613_alpha(8000.0, &humid);
         // Both should be positive and different
@@ -173,8 +175,14 @@ mod tests {
 
     #[test]
     fn temperature_affects_absorption() {
-        let cold = AtmosphericParams { temperature_c: 0.0, ..Default::default() };
-        let warm = AtmosphericParams { temperature_c: 35.0, ..Default::default() };
+        let cold = AtmosphericParams {
+            temperature_c: 0.0,
+            ..Default::default()
+        };
+        let warm = AtmosphericParams {
+            temperature_c: 35.0,
+            ..Default::default()
+        };
         let a_cold = iso9613_alpha(4000.0, &cold);
         let a_warm = iso9613_alpha(4000.0, &warm);
         assert!(a_cold > 0.0 && a_warm > 0.0);

@@ -52,7 +52,14 @@ pub fn distance_gain_at(
     max_distance: f32,
     rolloff: f32,
 ) -> f32 {
-    distance_gain_at_model(from, to, ref_distance, max_distance, rolloff, DistanceModelType::Inverse)
+    distance_gain_at_model(
+        from,
+        to,
+        ref_distance,
+        max_distance,
+        rolloff,
+        DistanceModelType::Inverse,
+    )
 }
 
 /// Compute distance-based gain using a specific distance model.
@@ -78,7 +85,11 @@ pub fn distance_gain_at_model(
         }
         DistanceModelType::Inverse => {
             let denom = ref_distance + rolloff * (clamped - ref_distance);
-            if denom <= 0.0 { 1.0 } else { ref_distance / denom }
+            if denom <= 0.0 {
+                1.0
+            } else {
+                ref_distance / denom
+            }
         }
         DistanceModelType::Exponential => {
             if ref_distance <= 0.0 {
@@ -100,7 +111,13 @@ pub fn distance_gain(
     max_distance: f32,
     rolloff: f32,
 ) -> f32 {
-    distance_gain_at(listener.position, source_position, ref_distance, max_distance, rolloff)
+    distance_gain_at(
+        listener.position,
+        source_position,
+        ref_distance,
+        max_distance,
+        rolloff,
+    )
 }
 
 /// Compute equal-power stereo panning gains from a source position relative to a listener.

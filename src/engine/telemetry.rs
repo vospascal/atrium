@@ -6,11 +6,11 @@
 //!
 //! All types are fixed-size and Copy — no heap allocations, real-time safe.
 
-use crate::audio::mixer::DistanceModel;
-use crate::spatial::listener::Listener;
-use crate::spatial::source::SoundSource;
+use crate::audio::distance::DistanceModel;
 use atrium_core::directivity::directivity_gain;
+use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
+use atrium_core::source::SoundSource;
 use atrium_core::speaker::RenderMode;
 
 /// Per-source telemetry snapshot.
@@ -52,7 +52,7 @@ pub const MAX_SOURCES: usize = 16;
 pub struct TelemetryFrame {
     pub sources: [SourceTelemetry; MAX_SOURCES],
     pub source_count: u8,
-    /// Current render mode (may change at runtime via SetRenderMode command).
+    /// Current pipeline mode (may change at runtime via SetRenderMode command).
     pub render_mode: RenderMode,
 }
 
@@ -61,13 +61,13 @@ impl Default for TelemetryFrame {
         Self {
             sources: [SourceTelemetry::default(); MAX_SOURCES],
             source_count: 0,
-            render_mode: RenderMode::Stereo,
+            render_mode: RenderMode::WorldLocked,
         }
     }
 }
 
 /// Compute a telemetry frame from current scene state.
-/// Calls the same core gain functions the mixer uses, but decomposes them
+/// Calls the same core gain functions the pipeline uses, but decomposes them
 /// into individual components for the UI.
 pub fn compute_telemetry(
     sources: &[Box<dyn SoundSource>],
@@ -83,7 +83,7 @@ pub fn compute_telemetry(
         let dist = listener.position.distance_to(pos);
         let src_ref_dist = source.ref_distance();
 
-        // Distance attenuation (same model as mixer)
+        // Distance attenuation
         let gain_dist = distance_gain_at_model(
             listener.position,
             pos,
@@ -156,14 +156,14 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
 mod tests {
     use super::*;
     use crate::audio::decode::AudioBuffer;
-    use crate::spatial::sound_profile::SoundProfile;
-    use crate::spatial::source::TestNode;
+    use crate::audio::sound_profile::SoundProfile;
+    use crate::audio::test_node::TestNode;
     use crate::world::types::Vec3;
     use atrium_core::listener::Listener;
     use atrium_core::panner::DistanceModelType;
     use std::sync::Arc;
 
-    /// 1 kHz sine tone, 1 second (same as mixer tests).
+    /// 1 kHz sine tone, 1 second.
     fn sine_buffer() -> Arc<AudioBuffer> {
         let sr = 48000.0_f32;
         let n = sr as usize;
@@ -178,7 +178,12 @@ mod tests {
         })
     }
 
-    fn make_source(buf: &Arc<AudioBuffer>, spl: f32, pos: Vec3, ceiling: f32) -> Box<dyn SoundSource> {
+    fn make_source(
+        buf: &Arc<AudioBuffer>,
+        spl: f32,
+        pos: Vec3,
+        ceiling: f32,
+    ) -> Box<dyn SoundSource> {
         let profile = SoundProfile { reference_spl: spl };
         let amplitude = profile.amplitude(buf.rms, 0.1, ceiling);
         let ref_dist = profile.ref_distance(1.0);
@@ -210,9 +215,8 @@ mod tests {
         let buf = sine_buffer();
         let listener = omni_listener(Vec3::ZERO);
         let dist = default_distance();
-        let sources: Vec<Box<dyn SoundSource>> = vec![
-            make_source(&buf, 80.0, Vec3::new(5.0, 0.0, 0.0), 100.0),
-        ];
+        let sources: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, 80.0, Vec3::new(5.0, 0.0, 0.0), 100.0)];
         let frame = compute_telemetry(&sources, &listener, &dist);
         assert!((frame.sources[0].distance - 5.0).abs() < 0.01);
     }
@@ -222,9 +226,8 @@ mod tests {
         let buf = sine_buffer();
         let listener = omni_listener(Vec3::ZERO);
         let dist = default_distance();
-        let sources: Vec<Box<dyn SoundSource>> = vec![
-            make_source(&buf, 80.0, Vec3::new(3.0, 2.0, 0.0), 100.0),
-        ];
+        let sources: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, 80.0, Vec3::new(3.0, 2.0, 0.0), 100.0)];
         let frame = compute_telemetry(&sources, &listener, &dist);
         assert!((frame.sources[0].gain_emit - 1.0).abs() < 0.001);
     }
@@ -234,9 +237,8 @@ mod tests {
         let buf = sine_buffer();
         let listener = omni_listener(Vec3::ZERO);
         let dist = default_distance();
-        let sources: Vec<Box<dyn SoundSource>> = vec![
-            make_source(&buf, 80.0, Vec3::new(3.0, 2.0, 0.0), 100.0),
-        ];
+        let sources: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, 80.0, Vec3::new(3.0, 2.0, 0.0), 100.0)];
         let frame = compute_telemetry(&sources, &listener, &dist);
         assert!((frame.sources[0].gain_hear - 1.0).abs() < 0.001);
     }
@@ -301,12 +303,10 @@ mod tests {
         let dist = default_distance();
         let spl = 80.0;
 
-        let sources_near: Vec<Box<dyn SoundSource>> = vec![
-            make_source(&buf, spl, Vec3::new(5.0, 0.0, 0.0), 100.0),
-        ];
-        let sources_far: Vec<Box<dyn SoundSource>> = vec![
-            make_source(&buf, spl, Vec3::new(10.0, 0.0, 0.0), 100.0),
-        ];
+        let sources_near: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, spl, Vec3::new(5.0, 0.0, 0.0), 100.0)];
+        let sources_far: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, spl, Vec3::new(10.0, 0.0, 0.0), 100.0)];
 
         let frame_near = compute_telemetry(&sources_near, &listener, &dist);
         let frame_far = compute_telemetry(&sources_far, &listener, &dist);
@@ -330,9 +330,8 @@ mod tests {
         let buf = sine_buffer();
         let listener = omni_listener(Vec3::ZERO);
         let dist = default_distance();
-        let sources: Vec<Box<dyn SoundSource>> = vec![
-            make_source(&buf, 80.0, Vec3::new(3.0, 0.0, 0.0), 100.0),
-        ];
+        let sources: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, 80.0, Vec3::new(3.0, 0.0, 0.0), 100.0)];
         let frame = compute_telemetry(&sources, &listener, &dist);
         let json = telemetry_to_json(&frame);
 

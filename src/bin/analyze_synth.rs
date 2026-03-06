@@ -3,9 +3,9 @@
 
 use std::f32::consts::TAU;
 
-use atrium::spatial::source::SoundSource;
 use atrium::synth::rain_v2::RainSourceV2;
 use atrium::world::types::Vec3;
+use atrium_core::source::SoundSource;
 
 const BANDS: &[(f32, f32, &str)] = &[
     (20.0, 100.0, "sub-bass     "),
@@ -73,7 +73,11 @@ fn analyze_synth(label: &str, intensity: f32) {
     let max_energy = energies.iter().map(|e| e.3).fold(0.0_f32, f32::max);
 
     for &(name, f_low, f_high, energy) in &energies {
-        let db = if energy > 0.0 { 10.0 * energy.log10() } else { -120.0 };
+        let db = if energy > 0.0 {
+            10.0 * energy.log10()
+        } else {
+            -120.0
+        };
         let relative_db = if max_energy > 0.0 && energy > 0.0 {
             10.0 * (energy / max_energy).log10()
         } else {
@@ -81,8 +85,10 @@ fn analyze_synth(label: &str, intensity: f32) {
         };
         let bar_len = ((relative_db + 40.0) / 40.0 * 30.0).clamp(0.0, 30.0) as usize;
         let bar: String = "█".repeat(bar_len);
-        println!("  {name} {:>5.0}-{:<5.0}Hz  {:>7.1} dB    {:>+5.1} dB  {bar}",
-            f_low, f_high, db, relative_db);
+        println!(
+            "  {name} {:>5.0}-{:<5.0}Hz  {:>7.1} dB    {:>+5.1} dB  {bar}",
+            f_low, f_high, db, relative_db
+        );
     }
 
     let mut weighted_sum = 0.0_f32;
@@ -92,7 +98,11 @@ fn analyze_synth(label: &str, intensity: f32) {
         weighted_sum += center * energy;
         total_weight += energy;
     }
-    let centroid = if total_weight > 0.0 { weighted_sum / total_weight } else { 0.0 };
+    let centroid = if total_weight > 0.0 {
+        weighted_sum / total_weight
+    } else {
+        0.0
+    };
     println!();
     println!("  Spectral centroid: {:.0} Hz", centroid);
 }
