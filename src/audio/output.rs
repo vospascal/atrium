@@ -116,6 +116,14 @@ impl AudioOutput for CpalOutput {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        // Enable FTZ (bit 15) and DAZ (bit 6) in the MXCSR register to flush
+                        // denormal floats to zero. Without this, reverb tail decay produces
+                        // denormals that cause 10-100× slowdowns on x86 microcode assist paths.
+                        // Reference: Intel® 64 and IA-32 Architectures SDM, Vol. 1, §10.2.3.
+                        std::arch::x86_64::_mm_setcsr(std::arch::x86_64::_mm_getcsr() | 0x8040);
+                    }
                     let _cb = profile_span!("callback", samples = data.len()).entered();
                     scene.process_commands(&mut commands);
                     scene.render(data, channels as usize);
@@ -124,10 +132,16 @@ impl AudioOutput for CpalOutput {
                 None,
             )?,
             SampleFormat::I16 => {
-                let mut float_buf: Vec<f32> = Vec::new();
+                // Pre-allocate for typical buffer sizes to avoid allocation in audio callback
+                let mut float_buf: Vec<f32> = vec![0.0; 2048];
                 device.build_output_stream(
                     &config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        #[cfg(target_arch = "x86_64")]
+                        unsafe {
+                            // FTZ | DAZ — see F32 callback above for rationale.
+                            std::arch::x86_64::_mm_setcsr(std::arch::x86_64::_mm_getcsr() | 0x8040);
+                        }
                         let _cb = profile_span!("callback", samples = data.len()).entered();
                         let len = data.len();
                         // Grow once on first callback (or if buffer size changes)
@@ -138,7 +152,7 @@ impl AudioOutput for CpalOutput {
                         scene.process_commands(&mut commands);
                         scene.render(&mut float_buf[..len], channels as usize);
                         for (out, &sample) in data.iter_mut().zip(float_buf.iter()) {
-                            *out = (sample * i16::MAX as f32) as i16;
+                            *out = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                         }
                     },
                     |err| eprintln!("audio stream error: {err}"),

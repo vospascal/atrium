@@ -129,6 +129,24 @@ impl SpeakerLayout {
         }; MAX_CHANNELS];
         let count = speakers.len().min(MAX_CHANNELS);
         arr[..count].copy_from_slice(&speakers[..count]);
+        // Validate channel indices are within bounds
+        for i in 0..count {
+            assert!(
+                arr[i].channel < MAX_CHANNELS,
+                "speaker {} channel {} exceeds MAX_CHANNELS ({})",
+                i,
+                arr[i].channel,
+                MAX_CHANNELS,
+            );
+        }
+        if let Some(lfe) = lfe_channel {
+            assert!(
+                lfe < MAX_CHANNELS,
+                "LFE channel {} exceeds MAX_CHANNELS ({})",
+                lfe,
+                MAX_CHANNELS,
+            );
+        }
         Self {
             speakers: arr,
             count,
@@ -760,14 +778,9 @@ impl SpeakerLayout {
 
 /// Shortest signed angular difference, normalized to [-π, π].
 fn angle_diff(a: f32, b: f32) -> f32 {
-    let mut d = a - b;
-    while d > std::f32::consts::PI {
-        d -= 2.0 * std::f32::consts::PI;
-    }
-    while d < -std::f32::consts::PI {
-        d += 2.0 * std::f32::consts::PI;
-    }
-    d
+    use std::f32::consts::{PI, TAU};
+    let d = a - b;
+    (d + PI).rem_euclid(TAU) - PI
 }
 
 #[cfg(test)]

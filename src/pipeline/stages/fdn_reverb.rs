@@ -87,14 +87,29 @@ impl FdnReverbStage {
             ((PRE_DELAY_SECONDS * sample_rate) as usize).min(PRE_DELAY_BUF_SIZE - 1);
     }
 
+    /// Compute per-line one-pole damping filters for frequency-dependent decay.
+    ///
+    /// Each filter has gain `k` and pole `p` derived from the RT60 at DC and Nyquist:
+    ///   g_dc  = 10^(-3m / (RT60_low  × fs))   — gain per sample at 0 Hz
+    ///   g_nyq = 10^(-3m / (RT60_high × fs))   — gain per sample at Nyquist
+    ///   k = 2·g_dc·g_nyq / (g_dc + g_nyq)     — filter gain (harmonic mean)
+    ///   p = (g_dc - g_nyq) / (g_dc + g_nyq)   — pole location
+    ///
+    /// Reference: Jot, "Digital Delay Networks for Designing Artificial Reverberators",
+    /// AES 90th Convention (1991), §3.2; extended in Jot's PhD thesis (1992), Ch. 4.
     fn compute_damping(&mut self, sample_rate: f32) {
         for i in 0..NUM_LINES {
             let m = self.delays[i] as f32;
             let g_dc = 10.0_f32.powf(-3.0 * m / (self.rt60_low * sample_rate));
             let g_nyq = 10.0_f32.powf(-3.0 * m / (self.rt60_high * sample_rate));
             let sum = g_dc + g_nyq;
-            self.damping[i].k = 2.0 * g_dc * g_nyq / sum;
-            self.damping[i].p = (g_dc - g_nyq) / sum;
+            if sum < f32::EPSILON {
+                self.damping[i].k = 0.0;
+                self.damping[i].p = 0.0;
+            } else {
+                self.damping[i].k = 2.0 * g_dc * g_nyq / sum;
+                self.damping[i].p = (g_dc - g_nyq) / sum;
+            }
             self.damping[i].state = 0.0;
         }
     }

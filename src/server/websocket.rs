@@ -138,7 +138,9 @@ fn handle_websocket(
                         let resend = client_msg.needs_scene_resend();
                         let cmd = client_msg.into_command();
                         if let Ok(mut prod) = producer.lock() {
-                            let _ = prod.push(cmd);
+                            if prod.push(cmd).is_err() {
+                                eprintln!("command queue full, dropping command");
+                            }
                         }
                         if resend && !initial_state.is_empty() {
                             let _ = ws.send(Message::Text(initial_state.into()));

@@ -1,4 +1,4 @@
-//! Per-source first-order reflections via image-source method.
+//! Per-source first-order reflections via image-source method (Allen & Berkley, 1979).
 //!
 //! SourceStage version: source→listener (VBAP / Stereo / Binaural).
 //! PathStage version: source→speaker (WorldLocked).
@@ -78,7 +78,7 @@ impl ReflectionCore {
             }
             self.taps[count] = ReflectionTap {
                 delay_samples,
-                gain: self.wall_absorption / image_dist,
+                gain: (self.wall_absorption / image_dist).min(1.0),
             };
             count += 1;
             if count >= MAX_TAPS {

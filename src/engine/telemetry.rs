@@ -105,7 +105,7 @@ pub fn compute_telemetry(
         let gain_hear = listener.hearing_gain(pos);
 
         let gain_total = gain_dist * gain_emit * gain_hear;
-        let gain_db = if gain_total > 0.0 {
+        let gain_db = if gain_total.is_finite() && gain_total > 0.0 {
             20.0 * gain_total.log10()
         } else {
             f32::NEG_INFINITY

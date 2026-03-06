@@ -77,7 +77,7 @@ impl EarlyReflectionsStage {
             if delay_samples == 0 || delay_samples >= BUFFER_SIZE {
                 continue;
             }
-            let distance_atten = 1.0 / round_trip;
+            let distance_atten = (1.0 / round_trip).min(1.0);
             self.taps[count] = ReflectionTap {
                 delay_samples,
                 gain: self.wall_absorption * distance_atten,

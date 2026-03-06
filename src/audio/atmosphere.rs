@@ -43,6 +43,7 @@ impl Default for AtmosphericParams {
 /// 2. Oxygen vibrational relaxation — peaks around fr_O
 /// 3. Nitrogen vibrational relaxation — peaks around fr_N
 pub fn iso9613_alpha(freq: f32, params: &AtmosphericParams) -> f32 {
+    let freq = freq.max(1.0); // Guard against zero/negative frequency
     let t_k = params.temperature_c + 273.15; // Temperature in Kelvin
     let t_rel = t_k / T_REF; // T / T_ref
     let p_rel = params.pressure_kpa / P_REF; // p / p_ref
