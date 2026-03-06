@@ -431,6 +431,11 @@ pub fn mix_sources(
                 0.0
             };
 
+            // TODO: Directional reflection panning — currently reflections share the
+            // direct signal's spatial gains. Each reflection should be panned to its
+            // image-source direction via separate VBAP lookups (6 extra gain vectors
+            // per source). This would give correct spatial placement of wall reflections
+            // at the cost of ~6× more VBAP evaluations per source per buffer.
             let total_mono = mono + reflection_wet;
             let base = frame * channels;
 

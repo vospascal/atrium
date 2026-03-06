@@ -282,6 +282,10 @@ impl BinauralMixer {
                         0.0
                     };
 
+                    // TODO: Directional reflection panning — reflections share the
+                    // direct signal's HRTF. Each reflection should get its own HRTF
+                    // lookup from its image-source direction, giving correct spatial
+                    // placement at the cost of 6 extra HRTF convolutions per source.
                     self.mono_buf[i] = (mono + reflection_wet) * gain;
                 }
 
