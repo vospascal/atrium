@@ -181,7 +181,7 @@ mod tests {
     fn make_source(buf: &Arc<AudioBuffer>, spl: f32, pos: Vec3, ceiling: f32) -> Box<dyn SoundSource> {
         let profile = SoundProfile { reference_spl: spl };
         let amplitude = profile.amplitude(buf.rms, 0.1, ceiling);
-        let ref_dist = profile.ref_distance(1.0, 40.0);
+        let ref_dist = profile.ref_distance(1.0);
         let mut node = TestNode::new(Arc::clone(buf), pos, 0.0, 0.0);
         node.amplitude = amplitude;
         node.ref_dist = ref_dist;

@@ -382,13 +382,6 @@ pub fn mix_sources(
         let pos = source.position();
         let dist_to_listener = listener.position.distance_to(pos);
 
-        // Per-source distance params: override ref_distance from source's SPL-derived value
-        let src_ref_dist = source.ref_distance();
-        let src_dist_params = DistanceParams {
-            ref_distance: src_ref_dist,
-            ..base_dist_params
-        };
-
         // Update air absorption filter cutoff for this source's distance
         state.air_absorption[src_idx].update(dist_to_listener, atmosphere);
 
@@ -414,12 +407,15 @@ pub fn mix_sources(
 
         // Compute target gains for this buffer (once per source)
         // Uses MDAP when spread > 0 in VBAP mode.
+        // ref_distance is constant for all sources (IEC 61672: fixed 1m measurement point).
+        // SPL differences are encoded in amplitude only — the distance rolloff curve
+        // (ISO 9613 inverse-square law) is identical for every source.
         let mut target = layout.compute_gains_with_spread(
             listener,
             pos,
             source.orientation(),
             &source.directivity(),
-            &src_dist_params,
+            &base_dist_params,
             source.spread(),
         );
 
@@ -429,7 +425,7 @@ pub fn mix_sources(
             let lfe_dist = distance_gain_at_model(
                 listener.position,
                 pos,
-                src_ref_dist,
+                base_dist_params.ref_distance,
                 distance_model.max_distance,
                 distance_model.rolloff,
                 distance_model.model,
@@ -719,27 +715,29 @@ mod tests {
         assert!((actual_db - expected_db).abs() < 0.5, "expected {expected_db} dB, got {actual_db:.1} dB");
     }
 
-    // ── Unit tests: SoundProfile ref_distance ────────────────────────────
+    // ── Unit tests: SoundProfile ref_distance (IEC 61672) ────────────────
+    //
+    // ref_distance is constant for all sources — it's the standard measurement
+    // distance (IEC 61672), not a per-source property. SPL differences are
+    // encoded solely in amplitude. The inverse-square rolloff (ISO 9613) is
+    // identical for every source.
 
     #[test]
-    fn ref_distance_scales_with_spl() {
-        let djembe = SoundProfile { reference_spl: 100.0 }.ref_distance(1.0, 40.0);
-        let campfire = SoundProfile { reference_spl: 45.0 }.ref_distance(1.0, 40.0);
-        let cat = SoundProfile { reference_spl: 25.0 }.ref_distance(1.0, 40.0);
-        // Louder sources should have larger ref_distance
-        assert!(djembe > campfire, "djembe should project further than campfire");
-        assert!(campfire > cat, "campfire should project further than cat");
-        // Formula: global_ref * (spl / spl_reference)
-        assert!((djembe - 2.5).abs() < 0.01, "djembe ref_dist: {djembe}");
-        assert!((campfire - 1.125).abs() < 0.01, "campfire ref_dist: {campfire}");
-        assert!((cat - 0.625).abs() < 0.01, "cat ref_dist: {cat}");
+    fn ref_distance_constant_regardless_of_spl() {
+        let djembe = SoundProfile { reference_spl: 100.0 }.ref_distance(1.0);
+        let campfire = SoundProfile { reference_spl: 45.0 }.ref_distance(1.0);
+        let cat = SoundProfile { reference_spl: 25.0 }.ref_distance(1.0);
+        // All sources share the same ref_distance (the global value)
+        assert!((djembe - 1.0).abs() < 1e-6, "djembe ref_dist should be global: {djembe}");
+        assert!((campfire - 1.0).abs() < 1e-6, "campfire ref_dist should be global: {campfire}");
+        assert!((cat - 1.0).abs() < 1e-6, "cat ref_dist should be global: {cat}");
     }
 
     #[test]
     fn ref_distance_scales_with_global_ref() {
-        let a = SoundProfile { reference_spl: 60.0 }.ref_distance(1.0, 60.0);
-        let b = SoundProfile { reference_spl: 60.0 }.ref_distance(0.5, 60.0);
-        assert!((a - 1.0).abs() < 1e-6, "at spl=reference, should equal global_ref");
+        let a = SoundProfile { reference_spl: 60.0 }.ref_distance(1.0);
+        let b = SoundProfile { reference_spl: 60.0 }.ref_distance(0.5);
+        assert!((a - 1.0).abs() < 1e-6, "should equal global_ref");
         assert!((b - 0.5).abs() < 1e-6, "should scale with global_ref");
     }
 

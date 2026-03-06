@@ -153,7 +153,6 @@ pub struct NormalizationConfig {
     #[serde(default = "default_target_rms")]
     pub target_rms: f32,
     /// SPL reference level — the SPL that maps to 0 dBFS (digital full scale).
-    /// Also scales per-source ref_distance: source_ref = global_ref × (spl / this).
     /// Real-world standard: 94.0 dB (IEC 61672). Lower = quiet sources get more gain.
     #[serde(default = "default_spl_reference")]
     pub spl_reference: f32,
@@ -603,7 +602,7 @@ impl SceneConfig {
             let buffer = Arc::new(decode_file(Path::new(&def.path))?);
             let profile = resolve_spl(def.reference_spl);
             let amplitude = profile.amplitude(buffer.rms, norm.target_rms, norm.spl_reference);
-            let ref_dist = profile.ref_distance(global_ref_dist, norm.spl_reference);
+            let ref_dist = profile.ref_distance(global_ref_dist);
             let pattern = parse_directivity(&def.directivity);
 
             let mut node = TestNode::new(

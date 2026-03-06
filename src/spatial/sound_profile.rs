@@ -5,7 +5,9 @@
 /// SoundProfile first RMS-normalizes the raw audio, then applies a gain based
 /// on the sound's real-world SPL mapped to a configurable reference level.
 ///
-/// It also computes per-source `ref_distance` so louder sources project further.
+/// Distance attenuation uses a fixed reference distance (IEC 61672: 1m standard
+/// measurement distance). SPL only controls amplitude — louder sources are louder
+/// at every distance, but the inverse-square rolloff curve is identical for all.
 pub struct SoundProfile {
     /// Approximate SPL at 1 meter in dB (IEC 61672 measurement distance).
     pub reference_spl: f32,
@@ -40,19 +42,14 @@ impl SoundProfile {
         rms_correction * spl_gain
     }
 
-    /// Compute per-source reference distance.
+    /// Return the reference distance for distance attenuation.
     ///
-    /// Scales the global `ref_distance` proportionally to SPL: louder sources
-    /// get a larger ref_distance, so their gain stays at 1.0 over a wider radius.
-    ///
-    /// Formula: `global_ref × (reference_spl / spl_reference)`
-    ///
-    /// With spl_reference=40, global_ref=1.0:
-    ///   - Djembe (100 dB) → 2.5 m (fills room)
-    ///   - Campfire (35 dB) → 0.88 m (nearby)
-    ///   - Cat (25 dB) → 0.63 m (close range only)
-    pub fn ref_distance(&self, global_ref: f32, spl_reference: f32) -> f32 {
-        global_ref * (self.reference_spl / spl_reference.max(1.0))
+    /// Per IEC 61672, this is the standard measurement distance (typically 1m)
+    /// and is constant for all sources. SPL differences are handled solely by
+    /// amplitude scaling — the inverse-square rolloff curve (ISO 9613) is
+    /// identical regardless of source loudness.
+    pub fn ref_distance(&self, global_ref: f32) -> f32 {
+        global_ref
     }
 
     /// Compute the audible radius — maximum distance at which this source is heard.
