@@ -1,3 +1,4 @@
+pub mod ambisonics;
 pub mod dbap;
 pub mod directivity;
 pub mod listener;

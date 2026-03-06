@@ -1,6 +1,6 @@
 // Multichannel speaker layout and rendering.
 //
-// Four render modes (RenderMode):
+// Five render modes (RenderMode):
 //   1. WorldLocked — each speaker is a virtual microphone at a fixed position in the room.
 //      Gain = distance_attenuation(source → speaker) × source_directivity(source → speaker).
 //      The listener's position does NOT affect speaker gains (spatial image comes from
@@ -12,6 +12,9 @@
 //   4. Dbap — Distance-Based Amplitude Panning (Lossius 2009, improved 2021). All speakers
 //      active, gains weighted by inverse distance. Listener-independent. Valid layouts:
 //      stereo, quad, 5.1.
+//   5. Ambisonics — First-Order Ambisonics (FOA). Encodes sources into B-format (W, Y, X),
+//      then decodes to any speaker layout via mode-matching pseudo-inverse decoder.
+//      Listener-relative. All speakers active. Valid layouts: stereo, quad, 5.1.
 //
 // Speaker positions are configurable per room. Layouts: stereo, quad 4.0, surround 5.1.
 
@@ -101,7 +104,7 @@ impl ChannelMode {
     /// Valid channel modes for a given render mode.
     pub fn valid_for(mode: RenderMode) -> &'static [ChannelMode] {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Dbap => &[
+            RenderMode::WorldLocked | RenderMode::Dbap | RenderMode::Ambisonics => &[
                 ChannelMode::Stereo,
                 ChannelMode::Quad,
                 ChannelMode::Surround51,
@@ -152,6 +155,10 @@ pub enum RenderMode {
     /// weighted by inverse distance from source. Listener-independent.
     /// Valid layouts: stereo, quad, 5.1.
     Dbap,
+    /// FOA: first-order ambisonics. Encodes to B-format, decodes via
+    /// mode-matching pseudo-inverse. Listener-relative, all speakers active.
+    /// Valid layouts: stereo, quad, 5.1.
+    Ambisonics,
 }
 
 impl RenderMode {
@@ -162,14 +169,16 @@ impl RenderMode {
             RenderMode::Vbap => 1,
             RenderMode::Hrtf => 2,
             RenderMode::Dbap => 3,
+            RenderMode::Ambisonics => 4,
         }
     }
 
-    pub const ALL: [RenderMode; 4] = [
+    pub const ALL: [RenderMode; 5] = [
         RenderMode::WorldLocked,
         RenderMode::Vbap,
         RenderMode::Hrtf,
         RenderMode::Dbap,
+        RenderMode::Ambisonics,
     ];
 
     /// Wire format name for JSON serialization.
@@ -179,6 +188,7 @@ impl RenderMode {
             RenderMode::Vbap => "vbap",
             RenderMode::Hrtf => "hrtf",
             RenderMode::Dbap => "dbap",
+            RenderMode::Ambisonics => "ambisonics",
         }
     }
 }
@@ -773,9 +783,10 @@ impl SpeakerLayout {
         distance: &DistanceParams,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Hrtf | RenderMode::Dbap => {
-                self.compute_gains_stereo(listener, source, distance)
-            }
+            RenderMode::WorldLocked
+            | RenderMode::Hrtf
+            | RenderMode::Dbap
+            | RenderMode::Ambisonics => self.compute_gains_stereo(listener, source, distance),
             RenderMode::Vbap => self.compute_gains_vbap(listener, source, distance),
         }
     }
@@ -791,9 +802,10 @@ impl SpeakerLayout {
         spread: f32,
     ) -> ChannelGains {
         match mode {
-            RenderMode::WorldLocked | RenderMode::Hrtf | RenderMode::Dbap => {
-                self.compute_gains_stereo(listener, source, distance)
-            }
+            RenderMode::WorldLocked
+            | RenderMode::Hrtf
+            | RenderMode::Dbap
+            | RenderMode::Ambisonics => self.compute_gains_stereo(listener, source, distance),
             RenderMode::Vbap => self.compute_gains_mdap(listener, source, distance, spread),
         }
     }

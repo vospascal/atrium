@@ -52,7 +52,7 @@ pub struct AudioScene {
     pub initial_render_mode: RenderMode,
     // ── Composable pipeline ──
     /// All 4 pipelines (WorldLocked, Vbap, Hrtf, Dbap), pre-allocated.
-    pub pipelines: [RenderPipeline; 4],
+    pub pipelines: [RenderPipeline; 5],
     /// Which pipeline is active.
     pub active_pipeline: RenderMode,
     /// Ground properties for pipeline propagation stages.

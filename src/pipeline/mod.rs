@@ -36,6 +36,12 @@
 //!     renderer: DbapRenderer
 //!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
 //! }
+//!
+//! Ambisonics {
+//!     source_stages: [AirAbsorption, GroundEffect, Reflections, AmbisonicsEncode]
+//!     renderer: AmbisonicsRenderer
+//!     mix_stages: [LfeCrossover, DelayComp(listener), EarlyReflections, FdnReverb, MasterGain]
+//! }
 //! ```
 
 pub mod mix_stage;
@@ -55,11 +61,13 @@ use self::mix_stage::{MixContext, MixStage};
 use self::renderer::Renderer;
 use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
+use self::renderers::ambisonics::AmbisonicsRenderer;
 use self::renderers::binaural::HrtfRenderer;
 use self::renderers::dbap::DbapRenderer;
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
+use self::stages::ambisonics_encode::AmbisonicsEncodeStage;
 use self::stages::dbap_gains::DbapGainStage;
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::distance_directivity::DistanceDirectivityPath;
@@ -77,7 +85,7 @@ use self::stages::vbap_gains::VbapGainStage;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Rendering approach. Determines which pipeline runs.
-// RenderMode (atrium_core::speaker): WorldLocked, Vbap, Hrtf, Dbap.
+// RenderMode (atrium_core::speaker): WorldLocked, Vbap, Hrtf, Dbap, Ambisonics.
 // index() and ALL defined on RenderMode. Used as pipeline array index.
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -234,13 +242,14 @@ impl Default for PipelineParams {
     }
 }
 
-/// Build all 4 pipelines. Pre-allocated at startup, zero allocation on mode switch.
-pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 4] {
+/// Build all 5 pipelines. Pre-allocated at startup, zero allocation on mode switch.
+pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 5] {
     [
         build_world_locked(params),
         build_vbap(params),
         build_hrtf(params),
         build_dbap(params),
+        build_ambisonics(params),
     ]
 }
 
@@ -369,6 +378,38 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::static_calibration()),
+            Box::new(MasterGainStage),
+        ],
+    }
+}
+
+fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
+    let sr = p.sample_rate;
+    let wet = p.er_wet_gain;
+    let abs = p.er_wall_absorption;
+
+    RenderPipeline {
+        source_stages: SourceStageBank::new(
+            vec![
+                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
+                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
+                Box::new(move |_sr| {
+                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
+                }),
+                Box::new(move |_sr| Box::new(AmbisonicsEncodeStage) as Box<dyn SourceStage>),
+            ],
+            sr,
+        ),
+        renderer: Box::new(AmbisonicsRenderer::new()),
+        mix_stages: vec![
+            Box::new(LfeCrossoverStage::new()),
+            Box::new(DelayCompStage::listener_relative()),
+            Box::new(EarlyReflectionsStage::new(wet, abs)),
+            Box::new(FdnReverbStage::new(
+                p.fdn_wet_gain,
+                p.fdn_rt60_low,
+                p.fdn_rt60_high,
+            )),
             Box::new(MasterGainStage),
         ],
     }
@@ -756,7 +797,7 @@ mod tests {
     fn build_all_pipelines_smoke() {
         let params = PipelineParams::default();
         let pipelines = build_all_pipelines(&params);
-        assert_eq!(pipelines.len(), 4);
+        assert_eq!(pipelines.len(), 5);
         assert_eq!(
             pipelines[RenderMode::WorldLocked.index()].renderer.name(),
             "world_locked"
@@ -767,6 +808,120 @@ mod tests {
         );
         assert_eq!(pipelines[RenderMode::Hrtf.index()].renderer.name(), "hrtf");
         assert_eq!(pipelines[RenderMode::Dbap.index()].renderer.name(), "dbap");
+        assert_eq!(
+            pipelines[RenderMode::Ambisonics.index()].renderer.name(),
+            "ambisonics"
+        );
+    }
+
+    // ── Ambisonics: all speakers get signal ─────────────────────────────
+
+    #[test]
+    fn ambisonics_all_speakers_active() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+
+        let source_pos = Vec3::new(1.0, 3.0, 0.0);
+        let params = PipelineParams::default();
+        let mut pipeline = build_ambisonics(&params);
+        pipeline.ensure_topology(1, &layout, 48000.0);
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+            pos: source_pos,
+            val: 1.0,
+        })];
+
+        let channels = 6;
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let rp = RenderParams {
+            listener: &listener,
+            channels,
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::new(-20.0, -20.0, -5.0),
+            room_max: Vec3::new(20.0, 20.0, 5.0),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+
+        // All spatial speakers (not LFE ch3) should have signal
+        let quarter = frames * 3 / 4;
+        let has_signal = |ch: usize| -> bool {
+            (quarter..frames).any(|f| buffer[f * channels + ch].abs() > 1e-10)
+        };
+        assert!(has_signal(0), "FL should have signal");
+        assert!(has_signal(1), "FR should have signal");
+        assert!(has_signal(2), "C should have signal");
+        assert!(has_signal(4), "RL should have signal");
+        assert!(has_signal(5), "RR should have signal");
+    }
+
+    #[test]
+    fn ambisonics_differs_from_vbap() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+
+        let source_pos = Vec3::new(1.0, 3.0, 0.0);
+        let params = PipelineParams::default();
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
+
+        let channels = 6;
+        let frames = 2048;
+
+        let render = |pipeline: &mut RenderPipeline| -> Vec<f32> {
+            pipeline.ensure_topology(1, &layout, 48000.0);
+            let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+                pos: source_pos,
+                val: 1.0,
+            })];
+            let mut buffer = vec![0.0f32; frames * channels];
+            let rp = RenderParams {
+                listener: &listener,
+                channels,
+                sample_rate: 48000.0,
+                master_gain: 1.0,
+                distance_model: &dm,
+                layout: &layout,
+                atmosphere: &atm,
+                ground: &ground,
+                room_min: Vec3::new(-20.0, -20.0, -5.0),
+                room_max: Vec3::new(20.0, 20.0, 5.0),
+            };
+            render_pipeline(pipeline, &mut sources, &rp, &mut buffer);
+            buffer
+        };
+
+        let vbap_buf = render(&mut build_vbap(&params));
+        let ambi_buf = render(&mut build_ambisonics(&params));
+
+        let quarter = frames * 3 / 4;
+        let rms = |buf: &[f32], ch: usize| -> f32 {
+            let sum: f32 = (quarter..frames)
+                .map(|f| buf[f * channels + ch].powi(2))
+                .sum();
+            (sum / (frames - quarter) as f32).sqrt()
+        };
+
+        let mut total_diff = 0.0f32;
+        for ch in [0, 1, 2, 4, 5] {
+            let v = rms(&vbap_buf, ch);
+            let a = rms(&ambi_buf, ch);
+            total_diff += (v - a).abs();
+        }
+        assert!(
+            total_diff > 0.01,
+            "Ambisonics and VBAP should produce different output (total_diff={total_diff})"
+        );
     }
 
     // ── WorldLocked: per-speaker air absorption differs with distance ─────

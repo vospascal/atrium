@@ -700,6 +700,7 @@ fn parse_render_mode(s: &str) -> RenderMode {
         "vbap" => RenderMode::Vbap,
         "hrtf" => RenderMode::Hrtf,
         "dbap" => RenderMode::Dbap,
+        "ambisonics" => RenderMode::Ambisonics,
         _ => RenderMode::Vbap,
     }
 }
