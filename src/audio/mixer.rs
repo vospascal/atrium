@@ -86,6 +86,9 @@ impl Biquad {
 
 /// Per-channel delay lines for speaker distance compensation.
 /// Nearer speakers get delayed so all channels arrive at the listener simultaneously.
+///
+/// Buffer is sized from the maximum possible delay (room diameter / speed of sound).
+/// Uses power-of-2 capacity for branch-free bitmask wrapping.
 pub struct DelayCompensation {
     /// Per-channel circular buffers. Outer len = num channels.
     buffers: Vec<Vec<f32>>,
@@ -98,10 +101,19 @@ pub struct DelayCompensation {
 }
 
 impl DelayCompensation {
+    /// Speed of sound in air at 20°C, 1 atm (ISO 9613-1).
+    const SPEED_OF_SOUND: f32 = 343.0;
+
     /// Create delay compensation for `num_channels` channels.
-    /// Buffer size of 1024 covers ~23ms at 44.1kHz (rooms up to ~8m diameter).
-    pub fn new(num_channels: usize) -> Self {
-        let capacity = 1024;
+    ///
+    /// `max_distance` is the room's maximum speaker-to-listener distance (metres).
+    /// `sample_rate` is the audio sample rate (Hz).
+    ///
+    /// The buffer is sized to hold the worst-case delay: `max_distance / 343 m/s`,
+    /// rounded up to the next power of 2 (minimum 1024 samples).
+    pub fn new(num_channels: usize, max_distance: f32, sample_rate: f32) -> Self {
+        let max_delay_samples = (max_distance / Self::SPEED_OF_SOUND * sample_rate).ceil() as usize;
+        let capacity = max_delay_samples.next_power_of_two().max(1024);
         Self {
             buffers: vec![vec![0.0; capacity]; num_channels],
             write_pos: vec![0; num_channels],
@@ -154,8 +166,10 @@ impl DelayCompensation {
         if delay < 0.5 {
             return input; // no meaningful delay
         }
-        let delay_int = delay as usize;
-        let frac = delay - delay_int as f32;
+        // Clamp to buffer capacity to prevent wrap-around aliasing
+        let delay_clamped = delay.min((cap - 2) as f32);
+        let delay_int = delay_clamped as usize;
+        let frac = delay_clamped - delay_int as f32;
 
         // Read positions (backwards from write position)
         let idx0 = (wp + cap - delay_int) & mask;
@@ -232,16 +246,28 @@ pub struct MixerState {
 
 impl MixerState {
     pub fn new(num_sources: usize) -> Self {
+        // Delay compensation is initialized with default capacity (1024 samples).
+        // It will be resized on first mix_sources() call when sample_rate and
+        // max_distance are known, matching the deferred-init pattern of lfe_filter.
         Self {
             prev_gains: vec![[0.0; MAX_CHANNELS]; num_sources],
             lfe_filter: None,
-            delay_comp: DelayCompensation::new(MAX_CHANNELS),
+            delay_comp: DelayCompensation::new(MAX_CHANNELS, 8.0, 48000.0),
             air_absorption: Vec::new(), // initialized once sample_rate is known
             source_reflections: Vec::new(),
             room_min: Vec3::ZERO,
             room_max: Vec3::ZERO,
             ground: GroundProperties::default(),
             reflections_enabled: false,
+        }
+    }
+
+    /// Resize the delay compensation buffer if needed for the given room size.
+    /// Called once per mix_sources() — only reallocates when capacity is insufficient.
+    fn ensure_delay_capacity(&mut self, max_distance: f32, sample_rate: f32) {
+        let needed = ((max_distance / DelayCompensation::SPEED_OF_SOUND) * sample_rate).ceil() as usize;
+        if needed > self.delay_comp.capacity {
+            self.delay_comp = DelayCompensation::new(MAX_CHANNELS, max_distance, sample_rate);
         }
     }
 
@@ -341,6 +367,7 @@ pub fn mix_sources(
     state.ensure_capacity(sources.len());
     state.ensure_air_absorption(sources.len(), sample_rate);
     state.ensure_reflections(sources.len(), 0.4, 0.9);
+    state.ensure_delay_capacity(distance_model.max_distance, sample_rate);
 
     // Zero output buffer (sources accumulate into it)
     for sample in output.iter_mut() {
@@ -1104,5 +1131,67 @@ mod tests {
                 smoothed[0], smoothed[1]
             );
         }
+    }
+
+    // ── Delay compensation (speaker distance alignment) ─────────────────────
+
+    /// Verify delay compensation sizes its buffer for large rooms (up to max_distance).
+    ///
+    /// Per the speed of sound in air (343 m/s, ISO 9613-1), a 20m room can produce
+    /// delays up to ~58ms (~2800 samples at 48kHz). The buffer must accommodate this
+    /// without wrap-around aliasing.
+    #[test]
+    fn delay_compensation_large_room() {
+        let max_distance = 20.0; // metres
+        let sample_rate = 48000.0;
+        let max_delay_samples = (max_distance / 343.0_f32 * sample_rate).ceil() as usize;
+
+        let mut dc = DelayCompensation::new(2, max_distance, sample_rate);
+        assert!(
+            dc.capacity >= max_delay_samples,
+            "buffer capacity {} too small for max delay {} samples",
+            dc.capacity, max_delay_samples
+        );
+
+        // Set a delay near the maximum
+        dc.delays[0] = max_delay_samples as f32 - 1.0;
+
+        // Feed an impulse: one 1.0 followed by zeros
+        let out0 = dc.process(0, 1.0);
+        assert_eq!(out0, 0.0, "impulse should not appear immediately with large delay");
+
+        // Feed zeros until the impulse should appear
+        let mut found_impulse = false;
+        for i in 1..=max_delay_samples {
+            let out = dc.process(0, 0.0);
+            if out.abs() > 0.5 {
+                // Impulse arrived — should be at approximately the delay time
+                let expected = max_delay_samples - 1;
+                assert!(
+                    (i as i32 - expected as i32).unsigned_abs() <= 2,
+                    "impulse at sample {i}, expected near {expected}"
+                );
+                found_impulse = true;
+                break;
+            }
+        }
+        assert!(found_impulse, "delayed impulse never arrived");
+    }
+
+    /// Verify that delays exceeding capacity are clamped rather than wrapping.
+    #[test]
+    fn delay_compensation_clamps_overflow() {
+        // Small room → small buffer, then force an oversized delay to test the clamp.
+        let mut dc = DelayCompensation::new(1, 2.0, 48000.0);
+        let cap = dc.capacity; // 1024 (minimum)
+
+        // Force a delay well beyond capacity (shouldn't happen in practice after
+        // the dynamic sizing, but tests the safety clamp in process())
+        dc.delays[0] = (cap * 2) as f32;
+
+        // Feed an impulse — should not panic or read garbage
+        let out = dc.process(0, 1.0);
+        // With clamped delay, output should be 0.0 (reading from zero-initialized buffer)
+        assert_eq!(out, 0.0, "clamped delay should read zeros, not garbage");
     }
 }
