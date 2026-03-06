@@ -387,7 +387,7 @@ pub fn mix_sources(
 
         // Compute target gains for this buffer (once per source)
         // Uses MDAP when spread > 0 in VBAP mode.
-        let target = layout.compute_gains_with_spread(
+        let mut target = layout.compute_gains_with_spread(
             listener,
             pos,
             source.orientation(),
@@ -396,8 +396,9 @@ pub fn mix_sources(
             source.spread(),
         );
 
-        // LFE target: omnidirectional distance-only at -6dB
-        let lfe_target = if let Some(lfe) = lfe_channel {
+        // LFE target: omnidirectional distance-only at -6dB.
+        // Inject into target.gains so the main ramp loop handles LFE uniformly.
+        if let Some(lfe) = lfe_channel {
             let lfe_dist = distance_gain_at_model(
                 listener.position,
                 pos,
@@ -406,10 +407,8 @@ pub fn mix_sources(
                 distance_model.rolloff,
                 distance_model.model,
             );
-            (lfe, lfe_dist * 0.5)
-        } else {
-            (0, 0.0)
-        };
+            target.gains[lfe] = lfe_dist * 0.5;
+        }
 
         let prev = &state.prev_gains[src_idx];
 
@@ -443,25 +442,10 @@ pub fn mix_sources(
                 let gain = prev[ch] + (target.gains[ch] - prev[ch]) * t;
                 output[base + ch] += total_mono * gain;
             }
-
-            // LFE: smooth ramp too
-            if lfe_channel.is_some() {
-                let (lfe, lfe_tgt) = lfe_target;
-                let lfe_prev = prev[lfe];
-                // LFE prev already includes the spatial gain + LFE contribution.
-                // We ramp only the LFE-specific part. Since spatial gains are
-                // already ramped above, we add the LFE delta here.
-                let lfe_gain = lfe_prev + (lfe_tgt - lfe_prev) * t;
-                output[base + lfe] += total_mono * lfe_gain;
-            }
         }
 
         // Store target as prev for next buffer
-        let mut new_prev = target.gains;
-        if let Some(lfe) = lfe_channel {
-            new_prev[lfe] = lfe_target.1;
-        }
-        state.prev_gains[src_idx] = new_prev;
+        state.prev_gains[src_idx] = target.gains;
     }
 
     // Initialize LFE filter on first call (sample_rate now known)
@@ -1054,5 +1038,71 @@ mod tests {
         let diff = to_db(l / r).abs();
         // HRTF may not be perfectly symmetric, allow 3 dB
         assert!(diff < 3.0, "binaural: center L/R diff {diff:.1} dB (expected < 3)");
+    }
+
+    // ── LFE ramp correctness (ITU-R BS.775 5.1 channel ordering) ────────────
+
+    /// Verify LFE channel ramps linearly from prev to target without double-application.
+    ///
+    /// In ITU 5.1, LFE (channel 3) is driven omnidirectionally at -6 dB relative
+    /// to the distance gain. The ramp must be monotonic across the buffer — any
+    /// spike at frame 0 would indicate double-application of the previous gain.
+    #[test]
+    fn lfe_ramp_no_double_application() {
+        let buf = sine_buffer();
+        let layout = layout_vbap_5_1();
+        let ch = layout.total_channels(); // 6 for 5.1
+        let lfe_ch = layout.lfe_channel().expect("5.1 layout must have LFE");
+        let dist = default_distance();
+        let atmo = AtmosphericParams::default();
+        let listener = omni_listener(Vec3::ZERO, 0.0);
+
+        // Place source at 2m ahead — well within ref_distance, so gains are near-max.
+        let mut sources: Vec<Box<dyn SoundSource>> =
+            vec![make_source(&buf, 80.0, Vec3::new(2.0, 0.0, 0.0), 80.0)];
+
+        let mut state = MixerState::new(sources.len());
+        let mut out = vec![0.0; FRAMES * ch];
+
+        // Buffer 1: ramps from silence (prev=0) → target. Establishes prev_gains.
+        mix_sources(&mut sources, &listener, &mut out, ch, SR, 1.0, &dist, &layout, &mut state, &atmo);
+
+        // Move source to 5m — changes LFE target, forcing a ramp in buffer 2.
+        sources[0].set_position(Vec3::new(5.0, 0.0, 0.0));
+
+        out.fill(0.0);
+        // Buffer 2: ramps from old target → new target. This is where double-application would show.
+        mix_sources(&mut sources, &listener, &mut out, ch, SR, 1.0, &dist, &layout, &mut state, &atmo);
+
+        // Extract LFE gain envelope: |output[lfe]| per frame.
+        // Use absolute values since the sine source oscillates.
+        let lfe_abs: Vec<f32> = (0..FRAMES)
+            .map(|f| out[f * ch + lfe_ch].abs())
+            .collect();
+
+        // The gain envelope should be monotonic (decreasing, since source moved farther).
+        // Check that frame 0 doesn't spike above the envelope trend.
+        // Use a smoothed envelope (max of 8-sample windows) to account for sine oscillation.
+        let window = 8;
+        let smoothed: Vec<f32> = (0..FRAMES / window)
+            .map(|w| {
+                let start = w * window;
+                lfe_abs[start..start + window]
+                    .iter()
+                    .cloned()
+                    .fold(0.0f32, f32::max)
+            })
+            .collect();
+
+        // Frame-0 window should not exceed 1.5× the frame-1 window (allowing some ramp headroom).
+        // A double-application bug would produce ~2× at frame 0.
+        if smoothed.len() >= 2 && smoothed[1] > 1e-8 {
+            let ratio = smoothed[0] / smoothed[1];
+            assert!(
+                ratio < 1.5,
+                "LFE frame-0 spike: window[0]={:.6}, window[1]={:.6}, ratio={ratio:.2} (expected < 1.5)",
+                smoothed[0], smoothed[1]
+            );
+        }
     }
 }
