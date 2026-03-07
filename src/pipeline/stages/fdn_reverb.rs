@@ -7,6 +7,7 @@
 //! Chain order: Direct (0–3ms) → EarlyReflections (3–50ms) → FdnReverb (50ms+)
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
+use crate::pipeline::stages::soft_clip;
 
 const NUM_LINES: usize = 8;
 const MAX_OUT: usize = 8;
@@ -219,7 +220,7 @@ impl MixStage for FdnReverbStage {
             let wet = self.process_fdn_sample(delayed_in, channels);
 
             for ch in 0..channels {
-                buffer[base + ch] = (buffer[base + ch] + wet[ch] * self.wet_gain).clamp(-1.0, 1.0);
+                buffer[base + ch] = soft_clip(buffer[base + ch] + wet[ch] * self.wet_gain);
             }
         }
     }

@@ -130,10 +130,18 @@ pub struct SpeakerConfig {
     pub render_mode: String,
     #[serde(default)]
     pub positions: SpeakerPositions,
+    /// DBAP rolloff in dB per doubling of distance.
+    /// 6.0 = free-field (default), 3–5 for reverberant spaces.
+    #[serde(default = "default_dbap_rolloff")]
+    pub dbap_rolloff_db: f32,
 }
 
 fn default_render_mode() -> String {
     "vbap".into()
+}
+
+fn default_dbap_rolloff() -> f32 {
+    6.0
 }
 
 #[derive(Deserialize, Default)]
@@ -432,6 +440,7 @@ impl SceneConfig {
             fdn_rt60_low: fdn_params.1,
             fdn_rt60_high: fdn_params.2,
             distance_model,
+            dbap_rolloff_db: self.speakers.dbap_rolloff_db,
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;
@@ -571,6 +580,7 @@ impl SceneConfig {
                 "target_rms": self.normalization.target_rms,
             },
             "render_mode": self.speakers.render_mode,
+            "dbap_rolloff_db": self.speakers.dbap_rolloff_db,
             "channel_mode": ChannelMode::valid_for(parse_render_mode(&self.speakers.render_mode))
                 .last().map(|m| m.as_str()).unwrap_or("5.1"),
             "render_modes": RenderMode::ALL.iter().map(|m| {

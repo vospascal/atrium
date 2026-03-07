@@ -231,6 +231,9 @@ pub struct PipelineParams {
     pub fdn_rt60_low: f32,
     pub fdn_rt60_high: f32,
     pub distance_model: DistanceModel,
+    /// DBAP rolloff in dB per doubling of distance.
+    /// 6.0 = free-field inverse distance law, 3–5 dB for reverberant spaces.
+    pub dbap_rolloff_db: f32,
 }
 
 impl Default for PipelineParams {
@@ -244,6 +247,7 @@ impl Default for PipelineParams {
             fdn_rt60_low: 0.8,
             fdn_rt60_high: 0.3,
             distance_model: DistanceModel::default(),
+            dbap_rolloff_db: 6.0,
         }
     }
 }
@@ -359,7 +363,10 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             ],
             sr,
         ),
-        renderer: Box::new(DbapRenderer::new(atrium_core::dbap::DbapParams::default())),
+        renderer: Box::new(DbapRenderer::new(atrium_core::dbap::DbapParams {
+            rolloff_db: p.dbap_rolloff_db,
+            ..Default::default()
+        })),
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::static_calibration()),

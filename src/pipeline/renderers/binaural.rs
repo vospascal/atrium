@@ -7,9 +7,9 @@
 //! reflection's apparent direction, with the reflection's energy carried
 //! by path.gain.
 //!
-//! Each path gets its own pair of L/R FFT convolvers (stateful overlap-save
-//! tails can't be shared). Filter updates happen periodically, with linear
-//! gain ramping per-sample for click-free transitions.
+//! Each path gets two pairs of L/R FFT convolvers (A/B double-buffer) for
+//! click-free IR crossfading. When a new HRIR is loaded, it goes into the
+//! inactive slot and output is blended from old→new over one block.
 
 use fft_convolver::FFTConvolver;
 use sofar::reader::{Filter, OpenOptions, Sofar};
@@ -26,10 +26,72 @@ use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 const BLOCK_SIZE: usize = 128;
 const FILTER_UPDATE_INTERVAL: usize = 4;
+/// Ring buffer size for per-ear ITD delay. Max human ITD ≈ 0.7ms = 34 samples @ 48kHz.
+const DELAY_BUF_SIZE: usize = 64;
+const DELAY_BUF_MASK: usize = DELAY_BUF_SIZE - 1;
+
+struct ConvPair {
+    left: FFTConvolver<f32>,
+    right: FFTConvolver<f32>,
+}
+
+/// Per-ear fractional delay line for ITD rendering.
+struct ItdDelay {
+    buf: [f32; DELAY_BUF_SIZE],
+    write_pos: usize,
+    /// Current delay in fractional samples, smoothed toward target.
+    delay_samples: f32,
+    /// Target delay in fractional samples (from SOFA).
+    target_delay_samples: f32,
+}
+
+impl ItdDelay {
+    fn new() -> Self {
+        Self {
+            buf: [0.0; DELAY_BUF_SIZE],
+            write_pos: 0,
+            delay_samples: 0.0,
+            target_delay_samples: 0.0,
+        }
+    }
+
+    /// Write a sample and read with fractional delay (linear interpolation).
+    #[inline]
+    fn process(&mut self, input: f32) -> f32 {
+        self.buf[self.write_pos] = input;
+        self.write_pos = (self.write_pos + 1) & DELAY_BUF_MASK;
+
+        // Smooth delay changes to avoid clicks
+        self.delay_samples += (self.target_delay_samples - self.delay_samples) * 0.01;
+
+        let d = self.delay_samples;
+        let int_d = d as usize;
+        let frac = d - int_d as f32;
+
+        let idx0 = (self.write_pos + DELAY_BUF_SIZE - 1 - int_d) & DELAY_BUF_MASK;
+        let idx1 = (idx0 + DELAY_BUF_SIZE - 1) & DELAY_BUF_MASK;
+
+        self.buf[idx0] * (1.0 - frac) + self.buf[idx1] * frac
+    }
+
+    fn reset(&mut self) {
+        self.buf.fill(0.0);
+        self.write_pos = 0;
+        self.delay_samples = 0.0;
+        self.target_delay_samples = 0.0;
+    }
+}
 
 struct HrtfPath {
-    conv_left: FFTConvolver<f32>,
-    conv_right: FFTConvolver<f32>,
+    /// Double-buffered convolver pairs for crossfading IR changes.
+    conv: [ConvPair; 2],
+    /// Which slot (0 or 1) has the most recent IR.
+    active: usize,
+    /// Samples remaining in crossfade (0 = no crossfade active).
+    xfade_remaining: usize,
+    /// Per-ear ITD delay lines (from SOFA delay metadata).
+    itd_left: ItdDelay,
+    itd_right: ItdDelay,
     prev_gain: f32,
 }
 
@@ -45,6 +107,9 @@ pub struct HrtfRenderer {
     mono_buf: Vec<f32>,
     left_buf: Vec<f32>,
     right_buf: Vec<f32>,
+    /// Extra buffers for the retiring convolver during crossfade.
+    xfade_left_buf: Vec<f32>,
+    xfade_right_buf: Vec<f32>,
     update_counter: usize,
     sample_rate: f32,
 }
@@ -63,6 +128,8 @@ impl HrtfRenderer {
                     mono_buf: vec![0.0; BLOCK_SIZE],
                     left_buf: vec![0.0; BLOCK_SIZE],
                     right_buf: vec![0.0; BLOCK_SIZE],
+                    xfade_left_buf: vec![0.0; BLOCK_SIZE],
+                    xfade_right_buf: vec![0.0; BLOCK_SIZE],
                     update_counter: 0,
                     sample_rate,
                 }
@@ -86,6 +153,8 @@ impl HrtfRenderer {
             mono_buf: vec![0.0; BLOCK_SIZE],
             left_buf: vec![0.0; BLOCK_SIZE],
             right_buf: vec![0.0; BLOCK_SIZE],
+            xfade_left_buf: vec![0.0; BLOCK_SIZE],
+            xfade_right_buf: vec![0.0; BLOCK_SIZE],
             update_counter: 0,
             sample_rate,
         })
@@ -98,13 +167,29 @@ impl HrtfRenderer {
 
         let mut paths = Vec::with_capacity(MAX_PATHS);
         for _ in 0..MAX_PATHS {
-            let mut conv_left = FFTConvolver::default();
-            let mut conv_right = FFTConvolver::default();
-            conv_left.init(BLOCK_SIZE, &init_filter.left).ok()?;
-            conv_right.init(BLOCK_SIZE, &init_filter.right).ok()?;
+            let mut a_left = FFTConvolver::default();
+            let mut a_right = FFTConvolver::default();
+            let mut b_left = FFTConvolver::default();
+            let mut b_right = FFTConvolver::default();
+            a_left.init(BLOCK_SIZE, &init_filter.left).ok()?;
+            a_right.init(BLOCK_SIZE, &init_filter.right).ok()?;
+            b_left.init(BLOCK_SIZE, &init_filter.left).ok()?;
+            b_right.init(BLOCK_SIZE, &init_filter.right).ok()?;
             paths.push(HrtfPath {
-                conv_left,
-                conv_right,
+                conv: [
+                    ConvPair {
+                        left: a_left,
+                        right: a_right,
+                    },
+                    ConvPair {
+                        left: b_left,
+                        right: b_right,
+                    },
+                ],
+                active: 0,
+                xfade_remaining: 0,
+                itd_left: ItdDelay::new(),
+                itd_right: ItdDelay::new(),
                 prev_gain: 0.0,
             });
         }
@@ -172,7 +257,8 @@ impl Renderer for HrtfRenderer {
             };
         }
 
-        // Update HRTF filters periodically (per-path directions)
+        // Update HRTF filters periodically — load new IR into inactive slot,
+        // start crossfade from old slot.
         let should_update = self.update_counter.is_multiple_of(FILTER_UPDATE_INTERVAL);
         if should_update {
             if let Some(ref mut filter) = self.filter {
@@ -183,12 +269,19 @@ impl Renderer for HrtfRenderer {
                     };
                     let (sx, sy, sz) = to_sofa_coords(apparent_pos, ctx.listener);
                     sofa.filter(sx, sy, sz, filter);
-                    let _ = self.sources[source_idx].paths[pi]
-                        .conv_left
-                        .set_response(&filter.left);
-                    let _ = self.sources[source_idx].paths[pi]
-                        .conv_right
-                        .set_response(&filter.right);
+
+                    let hpath = &mut self.sources[source_idx].paths[pi];
+                    // Swap active slot: new IR goes into the previously inactive slot.
+                    let new_active = 1 - hpath.active;
+                    let _ = hpath.conv[new_active].left.set_response(&filter.left);
+                    let _ = hpath.conv[new_active].right.set_response(&filter.right);
+                    hpath.active = new_active;
+                    hpath.xfade_remaining = BLOCK_SIZE;
+
+                    // Update ITD delay targets from SOFA metadata.
+                    let sr = self.sample_rate;
+                    hpath.itd_left.target_delay_samples = filter.ldelay * sr;
+                    hpath.itd_right.target_delay_samples = filter.rdelay * sr;
                 }
             }
         }
@@ -206,6 +299,8 @@ impl Renderer for HrtfRenderer {
                 self.mono_buf.resize(block_len, 0.0);
                 self.left_buf.resize(block_len, 0.0);
                 self.right_buf.resize(block_len, 0.0);
+                self.xfade_left_buf.resize(block_len, 0.0);
+                self.xfade_right_buf.resize(block_len, 0.0);
             }
 
             // 1. Fill base samples (consumed once from source)
@@ -218,7 +313,7 @@ impl Renderer for HrtfRenderer {
                 self.base_buf[i] = sample * src_out.gain_modifier;
             }
 
-            // 2. For each path: gain-ramp → convolve → accumulate
+            // 2. For each path: gain-ramp → convolve → crossfade → ITD delay → accumulate
             for (pi, _path) in path_slice.iter().enumerate() {
                 let prev_gain = self.sources[source_idx].paths[pi].prev_gain;
                 let tgt = target_gains[pi];
@@ -230,24 +325,62 @@ impl Renderer for HrtfRenderer {
                     self.mono_buf[i] = self.base_buf[i] * gain;
                 }
 
-                // HRTF convolution: mono → L/R
+                let active = self.sources[source_idx].paths[pi].active;
+
+                // Convolve with active (new) IR
                 self.left_buf[..block_len].fill(0.0);
-                let _ = self.sources[source_idx].paths[pi]
-                    .conv_left
+                let _ = self.sources[source_idx].paths[pi].conv[active]
+                    .left
                     .process(&self.mono_buf[..block_len], &mut self.left_buf[..block_len]);
-
                 self.right_buf[..block_len].fill(0.0);
-                let _ = self.sources[source_idx].paths[pi].conv_right.process(
-                    &self.mono_buf[..block_len],
-                    &mut self.right_buf[..block_len],
-                );
+                let _ = self.sources[source_idx].paths[pi].conv[active]
+                    .right
+                    .process(
+                        &self.mono_buf[..block_len],
+                        &mut self.right_buf[..block_len],
+                    );
 
-                // Accumulate into interleaved stereo output
+                // If crossfading, also convolve with retiring IR and blend
+                let xfade_rem = self.sources[source_idx].paths[pi].xfade_remaining;
+                if xfade_rem > 0 {
+                    let retiring = 1 - active;
+                    self.xfade_left_buf[..block_len].fill(0.0);
+                    let _ = self.sources[source_idx].paths[pi].conv[retiring]
+                        .left
+                        .process(
+                            &self.mono_buf[..block_len],
+                            &mut self.xfade_left_buf[..block_len],
+                        );
+                    self.xfade_right_buf[..block_len].fill(0.0);
+                    let _ = self.sources[source_idx].paths[pi].conv[retiring]
+                        .right
+                        .process(
+                            &self.mono_buf[..block_len],
+                            &mut self.xfade_right_buf[..block_len],
+                        );
+
+                    // Linear crossfade: retiring → active over xfade_remaining samples
+                    let xfade_len = xfade_rem.min(block_len);
+                    let inv_xfade = 1.0 / xfade_rem as f32;
+                    for i in 0..xfade_len {
+                        let new_weight = (i + 1) as f32 * inv_xfade;
+                        let old_weight = 1.0 - new_weight;
+                        self.left_buf[i] =
+                            self.left_buf[i] * new_weight + self.xfade_left_buf[i] * old_weight;
+                        self.right_buf[i] =
+                            self.right_buf[i] * new_weight + self.xfade_right_buf[i] * old_weight;
+                    }
+                    self.sources[source_idx].paths[pi].xfade_remaining =
+                        xfade_rem.saturating_sub(block_len);
+                }
+
+                // Apply per-ear ITD delay and accumulate into interleaved stereo output
+                let itd = &mut self.sources[source_idx].paths[pi];
                 for i in 0..block_len {
                     let base = (frame + i) * out.channels;
-                    out.buffer[base] += self.left_buf[i];
+                    out.buffer[base] += itd.itd_left.process(self.left_buf[i]);
                     if out.channels > 1 {
-                        out.buffer[base + 1] += self.right_buf[i];
+                        out.buffer[base + 1] += itd.itd_right.process(self.right_buf[i]);
                     }
                 }
             }
@@ -282,8 +415,13 @@ impl Renderer for HrtfRenderer {
         for src in &mut self.sources {
             for path in &mut src.paths {
                 path.prev_gain = 0.0;
-                path.conv_left.reset();
-                path.conv_right.reset();
+                path.xfade_remaining = 0;
+                path.itd_left.reset();
+                path.itd_right.reset();
+                for slot in &mut path.conv {
+                    slot.left.reset();
+                    slot.right.reset();
+                }
             }
         }
         self.update_counter = 0;

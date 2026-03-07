@@ -3,25 +3,35 @@
 //! Used by VBAP mode. Iterates over propagation paths from the PathResolver.
 //! For the **direct path**, computes full VBAP gains (angular panning +
 //! distance attenuation + directivity + hearing). For **reflection paths**,
-//! computes angular-only VBAP gains (panning direction from path.direction),
+//! uses a pre-computed 1° gain lookup table for fast angular panning,
 //! with the reflection's energy carried by path.gain.
 //!
 //! Each path gets its own set of per-channel gains, interpolated per-sample
 //! (click-free gain ramp). With `DirectPathResolver` (1 path, gain=1.0),
 //! output is identical to the pre-path architecture.
 
-use atrium_core::speaker::{RenderMode, SpeakerLayout, MAX_CHANNELS};
+use atrium_core::speaker::{RenderMode, SpeakerLayout, VbapLookup, MAX_CHANNELS};
 
 use crate::pipeline::path::{PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// Multichannel per-path gain-ramp renderer for VBAP mode.
-#[derive(Default)]
 pub struct MultichannelRenderer {
     /// Previous per-channel gains per source per path.
     /// Indexed [source_idx][path_idx][channel].
     prev_gains: Vec<[[f32; MAX_CHANNELS]; MAX_PATHS]>,
+    /// Pre-computed VBAP panning gains at 1° resolution for reflection paths.
+    vbap_lut: Option<VbapLookup>,
+}
+
+impl Default for MultichannelRenderer {
+    fn default() -> Self {
+        Self {
+            prev_gains: Vec::new(),
+            vbap_lut: None,
+        }
+    }
 }
 
 impl MultichannelRenderer {
@@ -43,6 +53,11 @@ impl Renderer for MultichannelRenderer {
         out: &mut OutputBuffer,
     ) {
         let path_slice = paths.as_slice();
+
+        // Update VBAP lookup table if listener has moved
+        if let Some(ref mut lut) = self.vbap_lut {
+            lut.update(ctx.layout, ctx.listener);
+        }
 
         // Compute per-path VBAP gains for this buffer
         let mut target_gains = [[0.0f32; MAX_CHANNELS]; MAX_PATHS];
@@ -72,10 +87,13 @@ impl Renderer for MultichannelRenderer {
                     g
                 }
                 _ => {
-                    // Reflection/diffraction: angular panning only, energy in path.gain
-                    let mut g = ctx
-                        .layout
-                        .compute_vbap_panning(ctx.listener, path.direction);
+                    // Reflection/diffraction: use LUT for fast angular panning
+                    let mut g = if let Some(ref lut) = self.vbap_lut {
+                        lut.lookup(path.direction)
+                    } else {
+                        ctx.layout
+                            .compute_vbap_panning(ctx.listener, path.direction)
+                    };
                     ctx.layout.apply_mask(&mut g);
                     g
                 }
@@ -118,9 +136,12 @@ impl Renderer for MultichannelRenderer {
         "multichannel"
     }
 
-    fn ensure_topology(&mut self, source_count: usize, _layout: &SpeakerLayout, _sample_rate: f32) {
+    fn ensure_topology(&mut self, source_count: usize, layout: &SpeakerLayout, _sample_rate: f32) {
         while self.prev_gains.len() < source_count {
             self.prev_gains.push([[0.0; MAX_CHANNELS]; MAX_PATHS]);
+        }
+        if self.vbap_lut.is_none() {
+            self.vbap_lut = Some(VbapLookup::new(layout.total_channels()));
         }
     }
 
