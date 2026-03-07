@@ -2,6 +2,7 @@
 //!
 //! - `AirAbsorptionEffect`: ISO 9613-1 frequency-dependent atmospheric absorption.
 //! - `DistanceAttenuationEffect`: distance-based gain (inverse, linear, exponential).
+//! - `PropagationDelayEffect`: fractional-delay line for reflection timing.
 
 use atrium_core::panner::DistanceModelType;
 
@@ -114,6 +115,78 @@ impl PathEffect for DistanceAttenuationEffect {
 
     fn reset(&mut self) {
         self.gain = 1.0;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PropagationDelayEffect
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fractional-delay line for propagation delay (reflections, diffraction).
+///
+/// Uses a circular buffer with linear interpolation between adjacent samples,
+/// following the pattern from `delay_comp.rs:118-126`. The delay is derived
+/// from `path.delay_seconds * sample_rate` each buffer.
+///
+/// Buffer capacity is 8192 samples (~170ms at 48kHz), enough for room-scale
+/// first-order reflections. Delays beyond capacity are clamped.
+pub struct PropagationDelayEffect {
+    buffer: Box<[f32; Self::CAPACITY]>,
+    write_pos: usize,
+    delay_samples: f32,
+    sample_rate: f32,
+}
+
+impl PropagationDelayEffect {
+    const CAPACITY: usize = 8192;
+    const MASK: usize = Self::CAPACITY - 1;
+
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            buffer: Box::new([0.0; Self::CAPACITY]),
+            write_pos: 0,
+            delay_samples: 0.0,
+            sample_rate,
+        }
+    }
+}
+
+impl PathEffect for PropagationDelayEffect {
+    fn update(&mut self, ctx: &PathEffectContext) {
+        self.sample_rate = ctx.sample_rate;
+        self.delay_samples = ctx.path.delay_seconds * ctx.sample_rate;
+    }
+
+    #[inline]
+    fn process_sample(&mut self, sample: f32) -> f32 {
+        let wp = self.write_pos;
+        self.buffer[wp] = sample;
+        self.write_pos = (wp + 1) & Self::MASK;
+
+        if self.delay_samples < 0.5 {
+            return sample;
+        }
+
+        let delay_clamped = self.delay_samples.min((Self::CAPACITY - 2) as f32);
+        let delay_int = delay_clamped as usize;
+        let frac = delay_clamped - delay_int as f32;
+
+        let idx0 = (wp + Self::CAPACITY - delay_int) & Self::MASK;
+        let idx1 = (wp + Self::CAPACITY - delay_int - 1) & Self::MASK;
+
+        let s0 = self.buffer[idx0];
+        let s1 = self.buffer[idx1];
+        s0 + (s1 - s0) * frac
+    }
+
+    fn name(&self) -> &str {
+        "propagation_delay"
+    }
+
+    fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+        self.delay_samples = 0.0;
     }
 }
 
@@ -319,5 +392,174 @@ mod tests {
         assert!(effect.process_sample(1.0) < 1.0);
         effect.reset();
         assert!((effect.process_sample(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    // ── PropagationDelayEffect ──────────────────────────────────────────
+
+    fn make_delay_ctx(
+        delay_seconds: f32,
+    ) -> (PathContribution, AtmosphericParams, GroundProperties) {
+        let path = PathContribution {
+            kind: PathKind::Reflection,
+            direction: Vec3::new(-1.0, 0.0, 0.0),
+            distance: 10.0,
+            delay_seconds,
+            gain: 0.9,
+        };
+        (
+            path,
+            AtmosphericParams::default(),
+            GroundProperties::default(),
+        )
+    }
+
+    #[test]
+    fn propagation_delay_zero_is_passthrough() {
+        let (path, atmo, ground) = make_delay_ctx(0.0);
+        let mut effect = PropagationDelayEffect::new(48000.0);
+        let ctx = PathEffectContext {
+            path: &path,
+            atmosphere: &atmo,
+            ground: &ground,
+            sample_rate: 48000.0,
+        };
+        effect.update(&ctx);
+
+        // With zero delay, output should equal input immediately
+        let out = effect.process_sample(0.5);
+        assert!(
+            (out - 0.5).abs() < 1e-6,
+            "zero delay should pass through, got {out}"
+        );
+    }
+
+    #[test]
+    fn propagation_delay_integer_samples() {
+        let sample_rate = 48000.0;
+        let delay_samples = 10.0;
+        let delay_seconds = delay_samples / sample_rate;
+
+        let (path, atmo, ground) = make_delay_ctx(delay_seconds);
+        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let ctx = PathEffectContext {
+            path: &path,
+            atmosphere: &atmo,
+            ground: &ground,
+            sample_rate,
+        };
+        effect.update(&ctx);
+
+        // Feed an impulse at sample 0, then silence
+        let _ = effect.process_sample(1.0);
+        for _ in 1..10 {
+            let out = effect.process_sample(0.0);
+            assert!(out.abs() < 1e-6, "should be silent before delay, got {out}");
+        }
+        // At sample 10 (after 10 samples of delay), the impulse should appear
+        let out = effect.process_sample(0.0);
+        assert!(
+            (out - 1.0).abs() < 1e-6,
+            "impulse should appear at delay offset, got {out}"
+        );
+    }
+
+    #[test]
+    fn propagation_delay_fractional_interpolates() {
+        let sample_rate = 48000.0;
+        let delay_samples = 5.5;
+        let delay_seconds = delay_samples / sample_rate;
+
+        let (path, atmo, ground) = make_delay_ctx(delay_seconds);
+        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let ctx = PathEffectContext {
+            path: &path,
+            atmosphere: &atmo,
+            ground: &ground,
+            sample_rate,
+        };
+        effect.update(&ctx);
+
+        // Feed an impulse, then silence
+        let _ = effect.process_sample(1.0);
+        for _ in 1..5 {
+            let _ = effect.process_sample(0.0);
+        }
+        // At sample 5 (integer part of 5.5): should get partial impulse
+        let out5 = effect.process_sample(0.0);
+        // At sample 6: should get the complementary part
+        let out6 = effect.process_sample(0.0);
+
+        // Linear interpolation: sample 5 gets 0.5, sample 6 gets 0.5
+        assert!(
+            (out5 - 0.5).abs() < 1e-6,
+            "fractional delay at int part: expected 0.5, got {out5}"
+        );
+        assert!(
+            (out6 - 0.5).abs() < 1e-6,
+            "fractional delay at int+1: expected 0.5, got {out6}"
+        );
+    }
+
+    #[test]
+    fn propagation_delay_reset_clears_buffer() {
+        let sample_rate = 48000.0;
+        let delay_seconds = 10.0 / sample_rate;
+
+        let (path, atmo, ground) = make_delay_ctx(delay_seconds);
+        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let ctx = PathEffectContext {
+            path: &path,
+            atmosphere: &atmo,
+            ground: &ground,
+            sample_rate,
+        };
+        effect.update(&ctx);
+
+        // Fill buffer with signal
+        for _ in 0..20 {
+            effect.process_sample(1.0);
+        }
+
+        // Reset should clear everything
+        effect.reset();
+        effect.update(&ctx);
+
+        // After reset, feeding silence should produce silence (no stale data)
+        for _ in 0..20 {
+            let out = effect.process_sample(0.0);
+            assert!(out.abs() < 1e-6, "after reset, should be silent, got {out}");
+        }
+    }
+
+    #[test]
+    fn propagation_delay_preserves_signal_energy() {
+        let sample_rate = 48000.0;
+        let delay_seconds = 100.0 / sample_rate;
+
+        let (path, atmo, ground) = make_delay_ctx(delay_seconds);
+        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let ctx = PathEffectContext {
+            path: &path,
+            atmosphere: &atmo,
+            ground: &ground,
+            sample_rate,
+        };
+        effect.update(&ctx);
+
+        // Feed N samples of DC, then enough silence for the delay to drain
+        let n = 200;
+        let mut total_out = 0.0;
+        for _ in 0..n {
+            total_out += effect.process_sample(1.0);
+        }
+        for _ in 0..200 {
+            total_out += effect.process_sample(0.0);
+        }
+
+        // Total energy out should equal total energy in (delay is lossless)
+        assert!(
+            (total_out - n as f32).abs() < 1e-3,
+            "delay should preserve energy: expected {n}, got {total_out}"
+        );
     }
 }
