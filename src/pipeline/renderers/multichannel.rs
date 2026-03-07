@@ -1,8 +1,13 @@
-//! MultichannelRenderer — gain ramp × sample per channel.
+//! MultichannelRenderer — path-based gain ramp × sample per channel.
 //!
-//! Used by VBAP mode. SourceStages compute per-channel gains
-//! in `SourceOutput::channel_gains`. This renderer applies those gains with
-//! per-sample linear interpolation from previous to target gains (click-free).
+//! Used by VBAP mode. Iterates over propagation paths from the PathResolver,
+//! multiplying each sample by the path's geometric gain. SourceStages compute
+//! per-channel VBAP gains in `SourceOutput::channel_gains`. This renderer
+//! applies those gains with per-sample linear interpolation (click-free).
+//!
+//! With `DirectPathResolver` (1 path, gain=1.0), output is identical to the
+//! pre-path architecture. With `ImageSourceResolver`, each reflection path
+//! will be panned to its own direction.
 
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
@@ -32,7 +37,7 @@ impl Renderer for MultichannelRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         _ctx: &SourceContext,
         src_out: &SourceOutput,
-        _paths: &PathSet,
+        paths: &PathSet,
         out: &mut OutputBuffer,
     ) {
         let inv_frames = 1.0 / out.num_frames as f32;
@@ -52,10 +57,16 @@ impl Renderer for MultichannelRenderer {
             // Apply ground effect and other broadband modifiers
             sample *= src_out.gain_modifier;
 
-            let base = frame * out.channels;
-            for ch in 0..out.channels {
-                let gain = prev[ch] + (target.gains[ch] - prev[ch]) * t;
-                out.buffer[base + ch] += sample * gain;
+            // Accumulate all propagation paths (direct + reflections).
+            // Each path contributes its geometric gain (wall reflectivity, etc.).
+            for path in paths.as_slice() {
+                let path_sample = sample * path.gain;
+
+                let base = frame * out.channels;
+                for ch in 0..out.channels {
+                    let gain = prev[ch] + (target.gains[ch] - prev[ch]) * t;
+                    out.buffer[base + ch] += path_sample * gain;
+                }
             }
         }
 
