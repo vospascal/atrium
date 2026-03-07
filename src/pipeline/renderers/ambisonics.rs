@@ -20,6 +20,9 @@ pub struct AmbisonicsRenderer {
     prev_gains: Vec<[f32; MAX_CHANNELS]>,
     /// Cached layout info for decoder rebuild.
     speaker_count: usize,
+    /// Set to false at the start of each buffer (in ensure_topology).
+    /// The first active source triggers the decoder rebuild.
+    decoder_built: bool,
 }
 
 impl AmbisonicsRenderer {
@@ -39,14 +42,14 @@ impl Renderer for AmbisonicsRenderer {
         src_out: &SourceOutput,
         out: &mut OutputBuffer,
     ) {
-        // Rebuild decoder with current listener position/yaw.
-        // Only on first source per buffer (all sources share the same listener).
-        if source_idx == 0 {
+        // Rebuild decoder once per buffer with current listener position/yaw.
+        if !self.decoder_built {
             self.decoder = Some(FoaDecoder::from_listener(
                 ctx.layout.speakers(),
                 self.speaker_count,
                 ctx.listener,
             ));
+            self.decoder_built = true;
         }
 
         let decoder = match &self.decoder {
@@ -92,6 +95,7 @@ impl Renderer for AmbisonicsRenderer {
 
     fn ensure_topology(&mut self, source_count: usize, layout: &SpeakerLayout, _sample_rate: f32) {
         self.speaker_count = layout.speaker_count();
+        self.decoder_built = false;
 
         while self.prev_gains.len() < source_count {
             self.prev_gains.push([0.0; MAX_CHANNELS]);
