@@ -40,9 +40,10 @@
 //! }
 //!
 //! Ambisonics {
-//!     source_stages: [AirAbsorption, GroundEffect, Reflections, AmbisonicsEncode]
-//!     renderer: AmbisonicsRenderer
-//!     mix_stages: [LfeCrossover, DelayComp(listener), EarlyReflections, FdnReverb, MasterGain]
+//!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
+//!     source_stages: [AirAbsorption, GroundEffect]
+//!     renderer: AmbisonicsRenderer (per-path FOA encode + decode)
+//!     mix_stages: [LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
 //! }
 //! ```
 
@@ -73,7 +74,6 @@ use self::renderers::dbap::DbapRenderer;
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
-use self::stages::ambisonics_encode::AmbisonicsEncodeStage;
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::distance_directivity::DistanceDirectivityPath;
 use self::stages::distance_gains::DistanceGainStage;
@@ -390,7 +390,6 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
 
 fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
-    let wet = p.er_wet_gain;
     let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
@@ -398,10 +397,6 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             vec![
                 Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
                 Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-                Box::new(move |_sr| {
-                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
-                }),
-                Box::new(move |_sr| Box::new(AmbisonicsEncodeStage) as Box<dyn SourceStage>),
             ],
             sr,
         ),
@@ -409,7 +404,6 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
-            Box::new(EarlyReflectionsStage::new(wet, abs)),
             Box::new(FdnReverbStage::new(
                 p.fdn_wet_gain,
                 p.fdn_rt60_low,
@@ -417,7 +411,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(DirectPathResolver),
+        resolver: Box::new(ImageSourceResolver::new(abs)),
     }
 }
 
