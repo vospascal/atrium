@@ -211,7 +211,8 @@ impl Renderer for HrtfRenderer {
     fn reset(&mut self) {
         for src in &mut self.sources {
             src.prev_gain = 0.0;
-            // FFTConvolver doesn't have a reset — we accept the brief tail artifact
+            src.conv_left.reset();
+            src.conv_right.reset();
         }
         self.update_counter = 0;
     }
