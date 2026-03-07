@@ -161,7 +161,6 @@ impl Renderer for HrtfRenderer {
                 for stage in source_stages.iter_mut() {
                     sample = stage.process_sample(sample);
                 }
-                sample *= src_out.gain_modifier;
 
                 self.mono_buf[i] = sample * gain;
             }
