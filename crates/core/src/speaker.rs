@@ -555,6 +555,135 @@ impl SpeakerLayout {
         gains
     }
 
+    /// Compute angular VBAP panning gains only (no distance attenuation,
+    /// no directivity, no hearing gain). Used by per-path rendering where
+    /// each path carries its own gain factor.
+    pub fn compute_vbap_panning(&self, listener: &Listener, direction: Vec3) -> ChannelGains {
+        let mut gains = ChannelGains::silent(self.total_channels);
+
+        if self.count == 0 {
+            return gains;
+        }
+
+        // Source azimuth in listener's local frame from direction vector
+        let source_azimuth = if direction.x * direction.x + direction.y * direction.y < 1e-10 {
+            0.0
+        } else {
+            let cos_y = listener.yaw.cos();
+            let sin_y = listener.yaw.sin();
+            let local_x = direction.x * cos_y + direction.y * sin_y;
+            let local_y = -direction.x * sin_y + direction.y * cos_y;
+            local_y.atan2(local_x)
+        };
+
+        // Compute speaker azimuths relative to listener and sort by angle
+        let mut speaker_angles: [(f32, usize); MAX_CHANNELS] = [(0.0, 0); MAX_CHANNELS];
+        for (i, speaker) in self.speakers.iter().enumerate().take(self.count) {
+            let sp = speaker.position - listener.position;
+            let cos_y = listener.yaw.cos();
+            let sin_y = listener.yaw.sin();
+            let local_x = sp.x * cos_y + sp.y * sin_y;
+            let local_y = -sp.x * sin_y + sp.y * cos_y;
+            speaker_angles[i] = (local_y.atan2(local_x), i);
+        }
+        for i in 1..self.count {
+            let key = speaker_angles[i];
+            let mut j = i;
+            while j > 0 && speaker_angles[j - 1].0 > key.0 {
+                speaker_angles[j] = speaker_angles[j - 1];
+                j -= 1;
+            }
+            speaker_angles[j] = key;
+        }
+
+        // Find the speaker pair that straddles the source azimuth
+        let mut best_a = 0usize;
+        let mut best_b = 0usize;
+        let mut best_ga = 0.0f32;
+        let mut best_gb = 0.0f32;
+        let mut found = false;
+
+        for pair_idx in 0..self.count {
+            let idx_a = pair_idx;
+            let idx_b = (pair_idx + 1) % self.count;
+            let (angle_a, si_a) = speaker_angles[idx_a];
+            let (angle_b, si_b) = speaker_angles[idx_b];
+
+            let (ax, ay) = (angle_a.cos(), angle_a.sin());
+            let (bx, by) = (angle_b.cos(), angle_b.sin());
+
+            let det = ax * by - bx * ay;
+            if det.abs() < 1e-8 {
+                continue;
+            }
+            let inv_det = 1.0 / det;
+
+            let (sx, sy) = (source_azimuth.cos(), source_azimuth.sin());
+
+            let ga = (by * sx - bx * sy) * inv_det;
+            let gb = (-ay * sx + ax * sy) * inv_det;
+
+            if ga >= -1e-6 && gb >= -1e-6 {
+                found = true;
+                best_a = si_a;
+                best_b = si_b;
+                best_ga = ga.max(0.0);
+                best_gb = gb.max(0.0);
+                break;
+            }
+        }
+
+        if !found {
+            let mut min_diff = f32::MAX;
+            for &(angle, idx) in speaker_angles.iter().take(self.count) {
+                let diff = angle_diff(source_azimuth, angle).abs();
+                if diff < min_diff {
+                    min_diff = diff;
+                    best_a = idx;
+                    best_ga = 1.0;
+                    best_gb = 0.0;
+                }
+            }
+            best_b = best_a;
+        }
+
+        // Normalize for constant power
+        let norm = (best_ga * best_ga + best_gb * best_gb).sqrt();
+        if norm > 1e-8 {
+            best_ga /= norm;
+            best_gb /= norm;
+        }
+
+        // Per-speaker distance compensation (same as compute_gains_vbap)
+        let d_a = (self.speakers[best_a].position - listener.position)
+            .length()
+            .max(0.1);
+        let d_b = if best_b != best_a {
+            (self.speakers[best_b].position - listener.position)
+                .length()
+                .max(0.1)
+        } else {
+            d_a
+        };
+        let d_ref = d_a.max(d_b);
+        best_ga *= d_a / d_ref;
+        if best_b != best_a {
+            best_gb *= d_b / d_ref;
+        }
+        let norm2 = (best_ga * best_ga + best_gb * best_gb).sqrt();
+        if norm2 > 1e-8 {
+            best_ga /= norm2;
+            best_gb /= norm2;
+        }
+
+        gains.gains[self.speakers[best_a].channel] += best_ga;
+        if best_b != best_a {
+            gains.gains[self.speakers[best_b].channel] += best_gb;
+        }
+
+        gains
+    }
+
     // ── Stereo mode ────────────────────────────────────────────────────
 
     /// Compute per-channel gains for simple L/R stereo panning.

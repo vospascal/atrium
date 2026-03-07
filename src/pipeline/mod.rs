@@ -26,9 +26,10 @@
 //! }
 //!
 //! Vbap {
-//!     source_stages: [AirAbsorption, GroundEffect, Reflections, VbapGains]
-//!     renderer: MultichannelRenderer
-//!     mix_stages: [LfeCrossover, DelayComp(listener), EarlyReflections, FdnReverb, MasterGain]
+//!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
+//!     source_stages: [AirAbsorption, GroundEffect]
+//!     renderer: MultichannelRenderer (per-path VBAP gains)
+//!     mix_stages: [LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
 //! }
 //!
 //! Dbap {
@@ -61,6 +62,7 @@ use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 
 use self::mix_stage::{MixContext, MixStage};
+use self::path::PathResolver;
 use self::renderer::Renderer;
 use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -81,7 +83,8 @@ use self::stages::ground_effect::{GroundEffectPath, GroundEffectStage};
 use self::stages::lfe_crossover::LfeCrossoverStage;
 use self::stages::master_gain::MasterGainStage;
 use self::stages::reflections::{ReflectionsPath, ReflectionsStage};
-use self::stages::vbap_gains::VbapGainStage;
+
+use self::path_resolvers::{DirectPathResolver, ImageSourceResolver};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline mode — rendering approach (separate from channel layout)
@@ -182,6 +185,7 @@ pub struct RenderPipeline {
     pub source_stages: SourceStageBank,
     pub renderer: Box<dyn Renderer>,
     pub mix_stages: Vec<Box<dyn MixStage>>,
+    pub resolver: Box<dyn PathResolver>,
 }
 
 impl RenderPipeline {
@@ -292,31 +296,31 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
             Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
         ],
+        resolver: Box::new(DirectPathResolver),
     }
 }
 
 fn build_vbap(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
-    let wet = p.er_wet_gain;
     let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
+        // VBAP: AirAbsorption + GroundEffect only. Reflections and VBAP gains
+        // are handled by the path architecture: ImageSourceResolver produces
+        // per-path directions, MultichannelRenderer computes VBAP gains per path.
         source_stages: SourceStageBank::new(
             vec![
                 Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
                 Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-                Box::new(move |_sr| {
-                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
-                }),
-                Box::new(move |_sr| Box::new(VbapGainStage) as Box<dyn SourceStage>),
             ],
             sr,
         ),
         renderer: Box::new(MultichannelRenderer::new()),
+        // EarlyReflectionsStage removed — reflections now come from ImageSourceResolver
+        // as individual paths, each panned to its own direction.
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
-            Box::new(EarlyReflectionsStage::new(wet, abs)),
             Box::new(FdnReverbStage::new(
                 p.fdn_wet_gain,
                 p.fdn_rt60_low,
@@ -324,6 +328,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
+        resolver: Box::new(ImageSourceResolver::new(abs)),
     }
 }
 
@@ -354,6 +359,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
+        resolver: Box::new(DirectPathResolver),
     }
 }
 
@@ -383,6 +389,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
         ],
+        resolver: Box::new(DirectPathResolver),
     }
 }
 
@@ -415,6 +422,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
+        resolver: Box::new(DirectPathResolver),
     }
 }
 
@@ -433,6 +441,7 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
+    use crate::pipeline::stages::vbap_gains::VbapGainStage;
 
     /// Constant-value test source.
     struct ConstSource {
@@ -1177,19 +1186,17 @@ pub fn render_pipeline(
     params: &RenderParams,
     output: &mut [f32],
 ) {
-    use self::path::PathResolver;
     use self::path::{PathSet, ResolveContext};
-    use self::path_resolvers::DirectPathResolver;
     use crate::profile_span;
 
     let num_frames = output.len() / params.channels;
-    let resolver = DirectPathResolver;
 
-    // Split borrow: source_stages and renderer are independent fields
+    // Split borrow: source_stages, renderer, resolver are independent fields
     let RenderPipeline {
         source_stages,
         renderer,
         mix_stages,
+        resolver,
     } = pipeline;
 
     // Ensure topology
