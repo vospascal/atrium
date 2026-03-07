@@ -26,11 +26,11 @@ struct ReflectionCore {
     taps: [ReflectionTap; MAX_TAPS],
     tap_count: usize,
     wet_gain: f32,
-    wall_absorption: f32,
+    wall_reflectivity: f32,
 }
 
 impl ReflectionCore {
-    fn new(wet_gain: f32, wall_absorption: f32) -> Self {
+    fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
         Self {
             buffer: Box::new([0.0; BUFFER_SIZE]),
             write_pos: 0,
@@ -40,7 +40,7 @@ impl ReflectionCore {
             }; MAX_TAPS],
             tap_count: 0,
             wet_gain,
-            wall_absorption,
+            wall_reflectivity,
         }
     }
 
@@ -78,7 +78,7 @@ impl ReflectionCore {
             }
             self.taps[count] = ReflectionTap {
                 delay_samples,
-                gain: (self.wall_absorption / image_dist).min(1.0),
+                gain: (self.wall_reflectivity / image_dist).min(1.0),
             };
             count += 1;
             if count >= MAX_TAPS {
@@ -117,9 +117,9 @@ pub struct ReflectionsStage {
 }
 
 impl ReflectionsStage {
-    pub fn new(wet_gain: f32, wall_absorption: f32) -> Self {
+    pub fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
         Self {
-            core: ReflectionCore::new(wet_gain, wall_absorption),
+            core: ReflectionCore::new(wet_gain, wall_reflectivity),
         }
     }
 }
@@ -160,9 +160,9 @@ pub struct ReflectionsPath {
 }
 
 impl ReflectionsPath {
-    pub fn new(wet_gain: f32, wall_absorption: f32) -> Self {
+    pub fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
         Self {
-            core: ReflectionCore::new(wet_gain, wall_absorption),
+            core: ReflectionCore::new(wet_gain, wall_reflectivity),
         }
     }
 }

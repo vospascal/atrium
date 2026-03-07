@@ -33,12 +33,12 @@ pub struct EarlyReflectionsStage {
     tap_count: usize,
     initialized: bool,
     wet_gain: f32,
-    wall_absorption: f32,
+    wall_reflectivity: f32,
     last_listener_pos: Vec3,
 }
 
 impl EarlyReflectionsStage {
-    pub fn new(wet_gain: f32, wall_absorption: f32) -> Self {
+    pub fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
         Self {
             buffers: Vec::new(),
             write_pos: 0,
@@ -49,7 +49,7 @@ impl EarlyReflectionsStage {
             tap_count: 0,
             initialized: false,
             wet_gain,
-            wall_absorption,
+            wall_reflectivity,
             last_listener_pos: Vec3::ZERO,
         }
     }
@@ -85,7 +85,7 @@ impl EarlyReflectionsStage {
             let distance_atten = (1.0 / round_trip).min(1.0);
             self.taps[count] = ReflectionTap {
                 delay_samples,
-                gain: self.wall_absorption * distance_atten,
+                gain: self.wall_reflectivity * distance_atten,
             };
             count += 1;
         }

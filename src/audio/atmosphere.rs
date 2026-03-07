@@ -100,7 +100,7 @@ pub fn iso9613_alpha(freq: f32, params: &AtmosphericParams) -> f32 {
 ///   cutoff = 20kHz × 10^(-absorption_dB / 20)
 ///
 /// Each ~6 dB of absorption halves the cutoff.
-pub fn iso9613_cutoff(distance: f32, params: &AtmosphericParams) -> f32 {
+pub fn air_absorption_lp_cutoff(distance: f32, params: &AtmosphericParams) -> f32 {
     const REFERENCE_FREQ: f32 = 4000.0;
     const MAX_CUTOFF: f32 = 20000.0;
     const MIN_CUTOFF: f32 = 200.0;
@@ -146,9 +146,9 @@ mod tests {
     #[test]
     fn cutoff_decreases_with_distance() {
         let p = standard_conditions();
-        let c1 = iso9613_cutoff(1.0, &p);
-        let c5 = iso9613_cutoff(5.0, &p);
-        let c20 = iso9613_cutoff(20.0, &p);
+        let c1 = air_absorption_lp_cutoff(1.0, &p);
+        let c5 = air_absorption_lp_cutoff(5.0, &p);
+        let c20 = air_absorption_lp_cutoff(20.0, &p);
         assert!(c1 > c5, "1m cutoff ({c1}) should > 5m ({c5})");
         assert!(c5 > c20, "5m cutoff ({c5}) should > 20m ({c20})");
     }
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn zero_distance_is_transparent() {
         let p = standard_conditions();
-        let cutoff = iso9613_cutoff(0.0, &p);
+        let cutoff = air_absorption_lp_cutoff(0.0, &p);
         assert!(
             (cutoff - 20000.0).abs() < 1.0,
             "cutoff at 0m should be ~20kHz, got {cutoff}"

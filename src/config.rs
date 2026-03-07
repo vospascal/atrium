@@ -232,8 +232,8 @@ pub enum ProcessorConfig {
     EarlyReflections {
         #[serde(default = "default_er_wet")]
         wet_gain: f32,
-        #[serde(default = "default_er_absorption")]
-        wall_absorption: f32,
+        #[serde(default = "default_er_reflectivity")]
+        wall_reflectivity: f32,
     },
     #[serde(rename = "fdn_reverb")]
     FdnReverb {
@@ -249,7 +249,7 @@ pub enum ProcessorConfig {
 fn default_er_wet() -> f32 {
     0.5
 }
-fn default_er_absorption() -> f32 {
+fn default_er_reflectivity() -> f32 {
     0.9
 }
 fn default_fdn_wet() -> f32 {
@@ -370,7 +370,7 @@ impl SceneConfig {
         };
 
         // Load processor params from file (feeds pipeline construction)
-        let mut er_params: Option<(f32, f32)> = None; // (wet_gain, wall_absorption)
+        let mut er_params: Option<(f32, f32)> = None; // (wet_gain, wall_reflectivity)
         let mut fdn_params: (f32, f32, f32) = (0.2, 0.8, 0.3); // (wet, rt60_low, rt60_high)
         if let Some(path) = &self.processors {
             let defs: Vec<ProcessorConfig> = load_yaml(path)?;
@@ -378,9 +378,9 @@ impl SceneConfig {
                 match def {
                     ProcessorConfig::EarlyReflections {
                         wet_gain,
-                        wall_absorption,
+                        wall_reflectivity,
                     } => {
-                        er_params = Some((*wet_gain, *wall_absorption));
+                        er_params = Some((*wet_gain, *wall_reflectivity));
                     }
                     ProcessorConfig::FdnReverb {
                         wet_gain,
@@ -427,7 +427,7 @@ impl SceneConfig {
             sample_rate: 48000.0, // will be recalibrated in init_pipelines
             hrtf_path: self.hrtf,
             er_wet_gain: er_params.map(|(w, _)| w).unwrap_or(0.0),
-            er_wall_absorption: er_params.map(|(_, a)| a).unwrap_or(0.9),
+            er_wall_reflectivity: er_params.map(|(_, a)| a).unwrap_or(0.9),
             fdn_wet_gain: fdn_params.0,
             fdn_rt60_low: fdn_params.1,
             fdn_rt60_high: fdn_params.2,

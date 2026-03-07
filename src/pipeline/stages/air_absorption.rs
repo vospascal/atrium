@@ -3,7 +3,7 @@
 //! Shared inner filter used by both SourceStage (per-source, listener-relative)
 //! and PathStage (per source × speaker, world-locked).
 
-use crate::audio::atmosphere::{iso9613_cutoff, AtmosphericParams};
+use crate::audio::atmosphere::{air_absorption_lp_cutoff, AtmosphericParams};
 use crate::pipeline::path_stage::{PathContext, PathStage};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -98,7 +98,7 @@ impl AirAbsorptionFilter {
     }
 
     fn update(&mut self, distance: f32, atmosphere: &AtmosphericParams) {
-        let target = iso9613_cutoff(distance, atmosphere);
+        let target = air_absorption_lp_cutoff(distance, atmosphere);
         if (target - self.current_cutoff).abs() / self.current_cutoff > 0.05 {
             self.filter.set_lowpass(target, self.sample_rate);
             self.current_cutoff = target;

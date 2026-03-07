@@ -6,7 +6,7 @@
 # Simulates first-order wall reflections — gives the brain cues about room size.
 - type: early_reflections
   wet_gain: 0.5            # reflection mix level (0.0–1.0, typical 0.3–0.5)
-  wall_absorption: 0.9     # wall reflectivity (0.0 = absorbs all, 1.0 = perfect mirror)
+  wall_reflectivity: 0.9   # wall reflectivity (0.0 = absorbs all, 1.0 = perfect mirror)
 
 # Feedback Delay Network reverb (8-line)
 # Simulates late diffuse reverberation — the "tail" after early reflections.

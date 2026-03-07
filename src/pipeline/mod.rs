@@ -220,7 +220,7 @@ pub struct PipelineParams {
     pub sample_rate: f32,
     pub hrtf_path: String,
     pub er_wet_gain: f32,
-    pub er_wall_absorption: f32,
+    pub er_wall_reflectivity: f32,
     pub fdn_wet_gain: f32,
     pub fdn_rt60_low: f32,
     pub fdn_rt60_high: f32,
@@ -233,7 +233,7 @@ impl Default for PipelineParams {
             sample_rate: 48000.0,
             hrtf_path: "assets/hrtf/default.sofa".into(),
             er_wet_gain: 0.4,
-            er_wall_absorption: 0.9,
+            er_wall_reflectivity: 0.9,
             fdn_wet_gain: 0.2,
             fdn_rt60_low: 0.8,
             fdn_rt60_high: 0.3,
@@ -257,7 +257,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let dm = &p.distance_model;
     let wet = p.er_wet_gain;
-    let abs = p.er_wall_absorption;
+    let abs = p.er_wall_reflectivity;
     let ref_dist = dm.ref_distance;
     let max_dist = dm.max_distance;
     let rolloff = dm.rolloff;
@@ -295,7 +295,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
 fn build_vbap(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let wet = p.er_wet_gain;
-    let abs = p.er_wall_absorption;
+    let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
         source_stages: SourceStageBank::new(
@@ -327,7 +327,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
 fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let wet = p.er_wet_gain;
-    let abs = p.er_wall_absorption;
+    let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
         source_stages: SourceStageBank::new(
@@ -357,7 +357,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 fn build_dbap(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let wet = p.er_wet_gain;
-    let abs = p.er_wall_absorption;
+    let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
         source_stages: SourceStageBank::new(
@@ -386,7 +386,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
 fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let wet = p.er_wet_gain;
-    let abs = p.er_wall_absorption;
+    let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
         source_stages: SourceStageBank::new(
