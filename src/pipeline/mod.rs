@@ -33,8 +33,9 @@
 //! }
 //!
 //! Dbap {
-//!     source_stages: [AirAbsorption, GroundEffect, Reflections, DbapGains]
-//!     renderer: DbapRenderer
+//!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
+//!     source_stages: [AirAbsorption, GroundEffect]
+//!     renderer: DbapRenderer (per-path DBAP gains)
 //!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
 //! }
 //!
@@ -73,7 +74,6 @@ use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
 use self::stages::ambisonics_encode::AmbisonicsEncodeStage;
-use self::stages::dbap_gains::DbapGainStage;
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::distance_directivity::DistanceDirectivityPath;
 use self::stages::distance_gains::DistanceGainStage;
@@ -365,31 +365,26 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 
 fn build_dbap(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
-    let wet = p.er_wet_gain;
     let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
+        // DBAP: AirAbsorption + GroundEffect only. Reflections and DBAP gains
+        // are handled by the path architecture: ImageSourceResolver produces
+        // per-path positions, DbapRenderer computes DBAP gains per path.
         source_stages: SourceStageBank::new(
             vec![
                 Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
                 Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-                Box::new(move |_sr| {
-                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
-                }),
-                Box::new(move |_sr| {
-                    Box::new(DbapGainStage::new(atrium_core::dbap::DbapParams::default()))
-                        as Box<dyn SourceStage>
-                }),
             ],
             sr,
         ),
-        renderer: Box::new(DbapRenderer::new()),
+        renderer: Box::new(DbapRenderer::new(atrium_core::dbap::DbapParams::default())),
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(DirectPathResolver),
+        resolver: Box::new(ImageSourceResolver::new(abs)),
     }
 }
 

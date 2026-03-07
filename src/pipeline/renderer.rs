@@ -6,7 +6,7 @@
 //! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP)
 //! - **WorldLockedRenderer**: per-speaker PathStages + gain ramp (WorldLocked)
 //! - **HrtfRenderer**: HRTF FFT convolution to stereo headphones (Hrtf)
-//! - **DbapRenderer**: DBAP gain ramp × sample per channel (DBAP)
+//! - **DbapRenderer**: per-path DBAP gain ramp × sample per channel (DBAP)
 //! - **AmbisonicsRenderer**: FOA decode + gain ramp (Ambisonics)
 //!
 //! The renderer owns PathStage instances and manages per-source state
