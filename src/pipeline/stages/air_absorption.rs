@@ -8,7 +8,7 @@ use crate::pipeline::path_stage::{PathContext, PathStage};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// 2nd-order IIR biquad lowpass (Direct Form I).
-struct Biquad {
+pub(crate) struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -21,7 +21,7 @@ struct Biquad {
 }
 
 impl Biquad {
-    fn lowpass(cutoff_hz: f32, sample_rate: f32) -> Self {
+    pub(crate) fn lowpass(cutoff_hz: f32, sample_rate: f32) -> Self {
         let omega = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate;
         let cos_w = omega.cos();
         let sin_w = omega.sin();
@@ -44,7 +44,7 @@ impl Biquad {
     }
 
     #[inline]
-    fn process(&mut self, x: f32) -> f32 {
+    pub(crate) fn process(&mut self, x: f32) -> f32 {
         let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
@@ -56,7 +56,7 @@ impl Biquad {
     }
 
     /// Update coefficients only, preserving filter state.
-    fn set_lowpass(&mut self, cutoff_hz: f32, sample_rate: f32) {
+    pub(crate) fn set_lowpass(&mut self, cutoff_hz: f32, sample_rate: f32) {
         let omega = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate;
         let cos_w = omega.cos();
         let sin_w = omega.sin();
@@ -72,7 +72,7 @@ impl Biquad {
         self.a2 = (1.0 - alpha) / a0;
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.x1 = 0.0;
         self.x2 = 0.0;
         self.y1 = 0.0;
@@ -82,14 +82,14 @@ impl Biquad {
 
 /// Shared filter core: tracks cutoff with hysteresis to avoid unnecessary
 /// coefficient recomputation.
-struct AirAbsorptionFilter {
+pub(crate) struct AirAbsorptionFilter {
     filter: Biquad,
     current_cutoff: f32,
     sample_rate: f32,
 }
 
 impl AirAbsorptionFilter {
-    fn new(sample_rate: f32) -> Self {
+    pub(crate) fn new(sample_rate: f32) -> Self {
         Self {
             filter: Biquad::lowpass(20000.0, sample_rate),
             current_cutoff: 20000.0,
@@ -97,7 +97,7 @@ impl AirAbsorptionFilter {
         }
     }
 
-    fn update(&mut self, distance: f32, atmosphere: &AtmosphericParams) {
+    pub(crate) fn update(&mut self, distance: f32, atmosphere: &AtmosphericParams) {
         let target = air_absorption_lp_cutoff(distance, atmosphere);
         if (target - self.current_cutoff).abs() / self.current_cutoff > 0.05 {
             self.filter.set_lowpass(target, self.sample_rate);
@@ -106,11 +106,11 @@ impl AirAbsorptionFilter {
     }
 
     #[inline]
-    fn process(&mut self, sample: f32) -> f32 {
+    pub(crate) fn process(&mut self, sample: f32) -> f32 {
         self.filter.process(sample)
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.filter.reset();
         self.current_cutoff = 20000.0;
         self.filter = Biquad::lowpass(20000.0, self.sample_rate);
