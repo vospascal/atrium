@@ -197,17 +197,25 @@ impl MixStage for FdnReverbStage {
         }
 
         let channels = ctx.channels;
+        let render_channels = ctx.render_channels;
         let num_frames = buffer.len() / channels;
 
         for frame in 0..num_frames {
             let base = frame * channels;
 
-            // Sum to mono
+            // Sum to mono from active channels only (respects non-contiguous masks like quad on 5.1)
             let mut mono_sum = 0.0f32;
-            for ch in 0..channels {
-                mono_sum += buffer[base + ch];
+            let mut active_count = 0u32;
+            for ch in 0..render_channels {
+                if ctx.layout.is_channel_active(ch) {
+                    mono_sum += buffer[base + ch];
+                    active_count += 1;
+                }
             }
-            let mono_in = mono_sum / channels as f32;
+            if active_count == 0 {
+                continue;
+            }
+            let mono_in = mono_sum / active_count as f32;
 
             // Pre-delay
             self.pre_delay_buf[self.pre_delay_write_pos] = mono_in;
@@ -216,11 +224,13 @@ impl MixStage for FdnReverbStage {
             let delayed_in = self.pre_delay_buf[read_pos];
             self.pre_delay_write_pos = (self.pre_delay_write_pos + 1) & PRE_DELAY_BUF_MASK;
 
-            // FDN → multichannel
-            let wet = self.process_fdn_sample(delayed_in, channels);
+            // FDN → only active channels within render range
+            let wet = self.process_fdn_sample(delayed_in, render_channels);
 
-            for ch in 0..channels {
-                buffer[base + ch] = soft_clip(buffer[base + ch] + wet[ch] * self.wet_gain);
+            for ch in 0..render_channels {
+                if ctx.layout.is_channel_active(ch) {
+                    buffer[base + ch] = soft_clip(buffer[base + ch] + wet[ch] * self.wet_gain);
+                }
             }
         }
     }
@@ -239,5 +249,231 @@ impl MixStage for FdnReverbStage {
 
     fn name(&self) -> &str {
         "fdn_reverb"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atrium_core::listener::Listener;
+    use atrium_core::speaker::SpeakerLayout;
+    use atrium_core::types::Vec3;
+
+    fn make_ctx(channels: usize, _render_channels: usize) -> (SpeakerLayout, Listener) {
+        let layout = if channels >= 6 {
+            SpeakerLayout::surround_5_1(
+                Vec3::new(0.0, 4.0, 0.0),
+                Vec3::new(6.0, 4.0, 0.0),
+                Vec3::new(3.0, 4.0, 0.0),
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(6.0, 0.0, 0.0),
+            )
+        } else {
+            SpeakerLayout::stereo(Vec3::new(-1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0))
+        };
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        (layout, listener)
+    }
+
+    fn mix_ctx<'a>(
+        layout: &'a SpeakerLayout,
+        listener: &'a Listener,
+        channels: usize,
+        render_channels: usize,
+    ) -> MixContext<'a> {
+        MixContext {
+            listener,
+            layout,
+            sample_rate: 48000.0,
+            channels,
+            room_min: Vec3::new(-5.0, -5.0, -5.0),
+            room_max: Vec3::new(5.0, 5.0, 5.0),
+            master_gain: 1.0,
+            render_channels,
+        }
+    }
+
+    /// FDN with render_channels < channels must not touch channels beyond render_channels.
+    #[test]
+    fn render_channels_limits_wet_output() {
+        let channels = 6;
+        let render_channels = 2; // HRTF on 5.1 device
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let ctx = mix_ctx(&layout, &listener, channels, render_channels);
+
+        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        fdn.init(&ctx);
+
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        // Put signal only in channels 0 and 1 (stereo HRTF output)
+        for frame in 0..frames {
+            buffer[frame * channels] = 0.5;
+            buffer[frame * channels + 1] = 0.5;
+        }
+
+        fdn.process(&mut buffer, &ctx);
+
+        // Channels 2-5 must remain exactly zero
+        for frame in 0..frames {
+            for ch in 2..channels {
+                assert_eq!(
+                    buffer[frame * channels + ch], 0.0,
+                    "channel {ch} at frame {frame} should be zero when render_channels={render_channels}"
+                );
+            }
+        }
+
+        // Channels 0-1 should have been modified (dry + wet)
+        let energy_ch0: f32 = buffer.iter().step_by(channels).map(|s| s * s).sum();
+        let energy_ch1: f32 = buffer.iter().skip(1).step_by(channels).map(|s| s * s).sum();
+        assert!(energy_ch0 > 0.0, "channel 0 should have signal");
+        assert!(energy_ch1 > 0.0, "channel 1 should have signal");
+    }
+
+    /// When render_channels == channels, all channels get wet signal (normal behavior).
+    #[test]
+    fn full_channels_all_get_wet() {
+        let channels = 6;
+        let render_channels = 6;
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let ctx = mix_ctx(&layout, &listener, channels, render_channels);
+
+        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        fdn.init(&ctx);
+
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        // Put signal in all channels
+        for sample in buffer.iter_mut() {
+            *sample = 0.5;
+        }
+
+        fdn.process(&mut buffer, &ctx);
+
+        // All channels should have been processed (not just passthrough)
+        for ch in 0..channels {
+            let max_abs = (0..frames)
+                .map(|f| buffer[f * channels + ch].abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs > 0.0,
+                "channel {ch} should have signal with render_channels={render_channels}"
+            );
+        }
+    }
+
+    /// FDN only sums mono from render_channels, ignoring higher channels.
+    #[test]
+    fn mono_sum_only_from_render_channels() {
+        let channels = 6;
+        let render_channels = 2;
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let ctx = mix_ctx(&layout, &listener, channels, render_channels);
+
+        let mut fdn_a = FdnReverbStage::new(0.3, 0.8, 0.3);
+        let mut fdn_b = FdnReverbStage::new(0.3, 0.8, 0.3);
+        fdn_a.init(&ctx);
+        fdn_b.init(&ctx);
+
+        let frames = 1024;
+
+        // Buffer A: signal in channels 0-1, noise in channels 2-5
+        let mut buffer_a = vec![0.0f32; frames * channels];
+        for frame in 0..frames {
+            buffer_a[frame * channels] = 0.5;
+            buffer_a[frame * channels + 1] = 0.5;
+            for ch in 2..channels {
+                buffer_a[frame * channels + ch] = 99.0; // should be ignored
+            }
+        }
+
+        // Buffer B: same signal in channels 0-1, zeros in 2-5
+        let mut buffer_b = vec![0.0f32; frames * channels];
+        for frame in 0..frames {
+            buffer_b[frame * channels] = 0.5;
+            buffer_b[frame * channels + 1] = 0.5;
+        }
+
+        fdn_a.process(&mut buffer_a, &ctx);
+        fdn_b.process(&mut buffer_b, &ctx);
+
+        // Channels 0-1 should be identical regardless of what's in channels 2-5
+        for frame in 0..frames {
+            for ch in 0..2 {
+                let a = buffer_a[frame * channels + ch];
+                let b = buffer_b[frame * channels + ch];
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "ch{ch} frame {frame}: content beyond render_channels should not affect output ({a} vs {b})"
+                );
+            }
+        }
+    }
+
+    /// Quad channel mode on 5.1 hardware: FDN only writes to active channels [0,1,4,5].
+    /// Channels 2 (C) and 3 (LFE) must stay silent despite render_channels=6.
+    #[test]
+    fn active_mask_respects_quad_on_5_1() {
+        let channels = 6;
+        let render_channels = 6;
+        let (mut layout, listener) = make_ctx(channels, render_channels);
+        // Quad channel mode: only FL(0), FR(1), RL(4), RR(5) active
+        layout.set_active_channels(&[0, 1, 4, 5]);
+        let ctx = mix_ctx(&layout, &listener, channels, render_channels);
+
+        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        fdn.init(&ctx);
+
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        // Signal in active channels only
+        for frame in 0..frames {
+            buffer[frame * channels] = 0.5; // FL
+            buffer[frame * channels + 1] = 0.5; // FR
+            buffer[frame * channels + 4] = 0.5; // RL
+            buffer[frame * channels + 5] = 0.5; // RR
+        }
+
+        fdn.process(&mut buffer, &ctx);
+
+        // Channels 2 (C) and 3 (LFE) must remain zero
+        for frame in 0..frames {
+            for ch in [2, 3] {
+                assert_eq!(
+                    buffer[frame * channels + ch],
+                    0.0,
+                    "channel {ch} at frame {frame} should be zero in quad mode"
+                );
+            }
+        }
+
+        // Active channels should have signal
+        for ch in [0, 1, 4, 5] {
+            let has_signal = (0..frames).any(|f| buffer[f * channels + ch].abs() > 1e-10);
+            assert!(has_signal, "active channel {ch} should have signal");
+        }
+    }
+
+    /// Silent input produces silent output (no self-oscillation).
+    #[test]
+    fn silent_input_silent_output() {
+        let channels = 6;
+        let render_channels = 2;
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let ctx = mix_ctx(&layout, &listener, channels, render_channels);
+
+        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        fdn.init(&ctx);
+
+        let frames = 512;
+        let mut buffer = vec![0.0f32; frames * channels];
+        fdn.process(&mut buffer, &ctx);
+
+        let max = buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max < 1e-10, "silent input should produce silent output");
     }
 }

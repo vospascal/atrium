@@ -48,6 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let render_mode = format!("{:?}", result.scene.active_pipeline);
     #[cfg(feature = "tui")]
     let pipeline_post = result.pipeline_post.clone();
+    #[cfg(feature = "tui")]
+    let channel_labels = result.channel_labels.clone();
 
     // Start audio output
     let (producer, consumer) = rtrb::RingBuffer::<Command>::new(256);
@@ -76,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scene_path: scene_path.clone(),
             source_names,
             pipeline_post,
+            channel_labels,
         }))
     } else {
         None
@@ -111,7 +114,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     })
                     .collect();
-                dash.update(&statuses);
+                let channel_statuses: Vec<atrium_tui::ChannelStatus> = (0..frame.channel_count
+                    as usize)
+                    .map(|ch| {
+                        let peak = frame.channel_peaks[ch];
+                        let peak_db = if peak > 0.0 {
+                            20.0 * peak.log10()
+                        } else {
+                            -60.0
+                        };
+                        atrium_tui::ChannelStatus { peak_db }
+                    })
+                    .collect();
+                dash.update(&statuses, &channel_statuses);
             }
         }
     });

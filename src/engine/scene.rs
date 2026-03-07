@@ -157,16 +157,23 @@ impl AudioScene {
     /// Must be called after sample_rate is set and before the audio callback starts.
     pub fn init_pipelines(&mut self) {
         let (room_min, room_max) = self.room.bounds();
-        let mix_ctx = MixContext {
-            listener: &self.listener,
-            layout: &self.speaker_layout,
-            sample_rate: self.sample_rate,
-            channels: self.speaker_layout.total_channels(),
-            room_min,
-            room_max,
-            master_gain: self.master_gain,
-        };
+        let total_channels = self.speaker_layout.total_channels();
         for pipeline in self.pipelines.iter_mut() {
+            let render_channels = if pipeline.render_channels > 0 {
+                pipeline.render_channels
+            } else {
+                total_channels
+            };
+            let mix_ctx = MixContext {
+                listener: &self.listener,
+                layout: &self.speaker_layout,
+                sample_rate: self.sample_rate,
+                channels: total_channels,
+                room_min,
+                room_max,
+                master_gain: self.master_gain,
+                render_channels,
+            };
             pipeline.init(&mix_ctx);
             pipeline.ensure_topology(self.sources.len(), &self.speaker_layout, self.sample_rate);
         }
@@ -228,6 +235,9 @@ impl AudioScene {
                     let mut frame =
                         compute_telemetry(&self.sources, &self.listener, &self.distance_model);
                     frame.render_mode = self.active_pipeline;
+                    frame.channel_peaks =
+                        crate::engine::telemetry::compute_channel_peaks(output, channels);
+                    frame.channel_count = channels as u8;
                     let _ = producer.push(frame); // silent drop if full
                 }
             }

@@ -46,6 +46,7 @@ impl Default for SourceTelemetry {
 }
 
 pub const MAX_SOURCES: usize = 16;
+pub const MAX_TELEM_CHANNELS: usize = 8;
 
 /// Complete telemetry frame: all sources for one update tick.
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +55,10 @@ pub struct TelemetryFrame {
     pub source_count: u8,
     /// Current pipeline mode (may change at runtime via SetRenderMode command).
     pub render_mode: RenderMode,
+    /// Per-channel peak amplitude (linear) from the most recent render buffer.
+    pub channel_peaks: [f32; MAX_TELEM_CHANNELS],
+    /// Number of output channels.
+    pub channel_count: u8,
 }
 
 impl Default for TelemetryFrame {
@@ -62,8 +67,25 @@ impl Default for TelemetryFrame {
             sources: [SourceTelemetry::default(); MAX_SOURCES],
             source_count: 0,
             render_mode: RenderMode::WorldLocked,
+            channel_peaks: [0.0; MAX_TELEM_CHANNELS],
+            channel_count: 0,
         }
     }
+}
+
+/// Compute per-channel peak amplitudes from an interleaved output buffer.
+pub fn compute_channel_peaks(output: &[f32], channels: usize) -> [f32; MAX_TELEM_CHANNELS] {
+    let mut peaks = [0.0f32; MAX_TELEM_CHANNELS];
+    let n = channels.min(MAX_TELEM_CHANNELS);
+    for frame in output.chunks_exact(channels) {
+        for ch in 0..n {
+            let abs = frame[ch].abs();
+            if abs > peaks[ch] {
+                peaks[ch] = abs;
+            }
+        }
+    }
+    peaks
 }
 
 /// Compute a telemetry frame from current scene state.

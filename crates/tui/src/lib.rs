@@ -13,6 +13,8 @@ pub struct DeviceInfo {
     pub source_names: Vec<String>,
     /// Pipeline mix stage names (for pipeline display).
     pub pipeline_post: Vec<String>,
+    /// Labels for each output channel (e.g. ["FL", "FR", "C", "LFE", "RL", "RR"]).
+    pub channel_labels: Vec<String>,
 }
 
 /// Per-source live status from telemetry.
@@ -23,6 +25,13 @@ pub struct SourceStatus {
     pub is_muted: bool,
     /// Current render mode name (changes at runtime).
     pub render_mode: String,
+}
+
+/// Per-channel peak level from telemetry.
+#[derive(Clone, Debug)]
+pub struct ChannelStatus {
+    /// Peak amplitude in dBFS.
+    pub peak_db: f32,
 }
 
 /// Terminal dashboard that updates in place.
@@ -48,7 +57,7 @@ impl Dashboard {
     }
 
     /// Render one frame of the dashboard. Call at ~15 Hz from the telemetry loop.
-    pub fn update(&mut self, sources: &[SourceStatus]) {
+    pub fn update(&mut self, sources: &[SourceStatus], channels: &[ChannelStatus]) {
         let mut out = io::stdout();
 
         // Move cursor up to overwrite previous frame
@@ -113,32 +122,30 @@ impl Dashboard {
         writeln!(out, " \u{2514}{}\u{2518}", "\u{2500}".repeat(box_width)).ok();
         lines += 1;
 
-        // Source meters (two lines each: name, then bar + stats)
+        // Channel output meters
         let bar_width = 40;
-        for (i, name) in self.info.source_names.iter().enumerate() {
-            // Name line
-            Self::clear_line(&mut out);
-            if let Some(s) = sources.get(i) {
-                let muted = if s.is_muted { " [M]" } else { "" };
-                writeln!(out, " {}{}", name, muted).ok();
-            } else {
-                writeln!(out, " {}", name).ok();
-            }
-            lines += 1;
+        Self::clear_line(&mut out);
+        writeln!(out, " \u{2500}\u{2500} Channels \u{2500}\u{2500}").ok();
+        lines += 1;
 
-            // Bar line
+        for (i, ch) in channels.iter().enumerate() {
+            let label = self
+                .info
+                .channel_labels
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            let bar = meter_bar(ch.peak_db, bar_width);
             Self::clear_line(&mut out);
-            if let Some(s) = sources.get(i) {
-                let bar = meter_bar(s.gain_db, bar_width);
-                writeln!(
-                    out,
-                    "  {}  {:>5.1}m  {:>6.1} dB",
-                    bar, s.distance, s.gain_db
-                )
-                .ok();
-            } else {
-                writeln!(out, "  {:<width$}  --", "", width = bar_width).ok();
-            }
+            writeln!(out, " {:<4} {} {:>6.1} dB", label, bar, ch.peak_db).ok();
+            lines += 1;
+        }
+
+        // Source summary (one line)
+        if !sources.is_empty() {
+            Self::clear_line(&mut out);
+            let active = sources.iter().filter(|s| !s.is_muted).count();
+            writeln!(out, " {active}/{} sources active", sources.len()).ok();
             lines += 1;
         }
 

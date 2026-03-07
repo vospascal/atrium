@@ -19,6 +19,10 @@ pub struct MixContext<'a> {
     pub room_max: Vec3,
     /// Runtime master gain from AudioScene. Flows through each render call.
     pub master_gain: f32,
+    /// Number of channels the renderer actually writes to.
+    /// HRTF always renders stereo (2) even on multichannel layouts.
+    /// FDN reverb uses this to avoid spreading wet signal to unused channels.
+    pub render_channels: usize,
 }
 
 /// Post-mix processing stage. Processes the full interleaved output buffer in-place.

@@ -137,8 +137,9 @@ impl MixStage for AmbiMultiDelayStage {
     }
 
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
-        // No-op for <4 channels (stereo bilateral mode).
-        if ctx.channels < 4 || !self.initialized {
+        // No-op for <4 render channels (stereo bilateral mode).
+        // Use render_channels (layout-based), not channels (hardware output).
+        if ctx.render_channels < 4 || !self.initialized {
             return;
         }
 
@@ -269,6 +270,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 4,
         };
         stage.init(&ctx);
 
@@ -295,6 +297,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 4,
         };
         stage.init(&ctx);
 
@@ -335,6 +338,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 4,
         };
         stage.init(&ctx);
 
@@ -370,6 +374,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 2,
         };
         stage.init(&ctx);
 

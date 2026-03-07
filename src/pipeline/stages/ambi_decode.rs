@@ -39,15 +39,17 @@ impl MixStage for AmbisonicsDecodeStage {
     }
 
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
-        // Only decode if we have ≥4 channels (B-format in channels 0-3).
-        // For 2-channel, the renderer does inline bilateral decode.
-        if ctx.channels < 4 {
+        // Only decode if the renderer wrote B-format (≥4 render channels).
+        // For stereo layouts, the renderer does inline bilateral decode.
+        // Use render_channels (layout-based), not channels (hardware output).
+        if ctx.render_channels < 4 {
             return;
         }
 
         // Rebuild decoder per-buffer (listener-relative speaker angles).
         let num_frames = buffer.len() / ctx.channels;
         let speaker_count = ctx.layout.speaker_count();
+        let render_channels = ctx.render_channels;
 
         if speaker_count >= 3 {
             let decoder =
@@ -65,8 +67,9 @@ impl MixStage for AmbisonicsDecodeStage {
                 let mut decoded = decoder.decode(&bformat);
                 ctx.layout.apply_mask(&mut decoded);
 
-                // Overwrite buffer with decoded speaker gains.
-                buffer[base..base + ctx.channels].copy_from_slice(&decoded.gains[..ctx.channels]);
+                // Overwrite only the render channels, not all hardware channels.
+                buffer[base..base + render_channels]
+                    .copy_from_slice(&decoded.gains[..render_channels]);
             }
         } else {
             // 2-channel bilateral decode.
@@ -143,6 +146,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 4,
         };
         stage.init(&ctx);
 
@@ -187,6 +191,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 4,
         };
         stage.init(&ctx);
 
@@ -221,6 +226,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+            render_channels: 2,
         };
         stage.init(&ctx);
 

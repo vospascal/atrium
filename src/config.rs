@@ -316,6 +316,8 @@ pub struct BuildResult {
     pub source_names: Vec<String>,
     /// Pipeline mix stage names (for TUI display).
     pub pipeline_post: Vec<String>,
+    /// Channel labels for TUI display (e.g. ["FL", "FR", "C", "LFE", "RL", "RR"]).
+    pub channel_labels: Vec<String>,
 }
 
 /// Result of building sources: (sound sources, metadata for JSON).
@@ -490,11 +492,20 @@ impl SceneConfig {
         // Build pipeline description for TUI display
         let pipeline_post = scene.mix_stage_names();
 
+        let channel_labels: Vec<String> = match self.speakers.layout.as_str() {
+            "5.1" => ["FL", "FR", "C", "LFE", "RL", "RR"].iter(),
+            "quad" => ["FL", "FR", "RL", "RR"].iter(),
+            _ => ["L", "R"].iter(),
+        }
+        .map(|s| s.to_string())
+        .collect();
+
         Ok(BuildResult {
             scene,
             scene_json,
             source_names,
             pipeline_post,
+            channel_labels,
         })
     }
 

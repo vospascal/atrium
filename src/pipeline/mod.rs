@@ -25,30 +25,30 @@
 //!
 //! Vbap {
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
-//!     source_stages: [AirAbsorption, GroundEffect]
+//!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: MultichannelRenderer (per-path VBAP gains)
 //!     mix_stages: [LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
 //! }
 //!
 //! Hrtf {
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
-//!     source_stages: [AirAbsorption, GroundEffect]
+//!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: HrtfRenderer (per-path HRTF convolution to stereo)
 //!     mix_stages: [FdnReverb, MasterGain]
 //! }
 //!
 //! Dbap {
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
-//!     source_stages: [AirAbsorption, GroundEffect]
+//!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: DbapRenderer (per-path DBAP gains)
 //!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
 //! }
 //!
 //! Ambisonics {
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
-//!     source_stages: [AirAbsorption, GroundEffect]
+//!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: AmbisonicsRenderer (per-path FOA encode + decode)
-//!     mix_stages: [LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
+//!     mix_stages: [AmbiMultiDelay, AmbiDecode, LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
 //! }
 //! ```
 
@@ -190,6 +190,10 @@ pub struct RenderPipeline {
     /// Per-source × per-path effect chains. Grown by ensure_topology.
     /// Indexed: [source_idx][path_idx].
     path_effects: Vec<[PathEffectChain; MAX_PATHS]>,
+    /// How many output channels the renderer uses. 0 = use ctx.channels (default).
+    /// HRTF sets this to 2 so post-mix stages like FDN reverb don't spread
+    /// wet signal to channels the renderer never wrote to.
+    pub render_channels: usize,
 }
 
 impl RenderPipeline {
@@ -314,6 +318,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
         resolver: Box::new(DirectPathResolver),
         path_effect_factories: vec![],
         path_effects: Vec::new(),
+        render_channels: 0,
     }
 }
 
@@ -338,6 +343,10 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
@@ -349,6 +358,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
             }),
         ],
         path_effects: Vec::new(),
+        render_channels: 0,
     }
 }
 
@@ -371,6 +381,10 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
@@ -382,6 +396,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
             }),
         ],
         path_effects: Vec::new(),
+        render_channels: 2,
     }
 }
 
@@ -404,6 +419,10 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
@@ -415,6 +434,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             }),
         ],
         path_effects: Vec::new(),
+        render_channels: 0,
     }
 }
 
@@ -441,6 +461,10 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
@@ -452,6 +476,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             }),
         ],
         path_effects: Vec::new(),
+        render_channels: 0,
     }
 }
 
@@ -497,6 +522,7 @@ pub fn render_pipeline(
         resolver,
         path_effect_factories,
         path_effects,
+        render_channels,
     } = pipeline;
 
     // Ensure topology
@@ -611,6 +637,11 @@ pub fn render_pipeline(
     }
 
     // Post-mix chain
+    let effective_render_channels = if *render_channels > 0 {
+        *render_channels
+    } else {
+        params.layout.total_channels()
+    };
     let mix_ctx = MixContext {
         listener: params.listener,
         layout: params.layout,
@@ -619,6 +650,7 @@ pub fn render_pipeline(
         room_min: params.room_min,
         room_max: params.room_max,
         master_gain: params.master_gain,
+        render_channels: effective_render_channels,
     };
     {
         let _s = profile_span!("mix_stages").entered();
@@ -1381,6 +1413,323 @@ mod tests {
         assert!(
             total_diff > 0.01,
             "DBAP and WorldLocked should produce different output (total_diff={total_diff})"
+        );
+    }
+
+    // ── HRTF: only stereo channels have signal on 5.1 layout ─────────
+
+    #[test]
+    fn hrtf_no_bleed_to_surround_channels() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+
+        let source_pos = Vec3::new(1.0, 3.0, 0.0);
+        let params = PipelineParams::default();
+        let mut pipeline = build_hrtf(&params);
+        pipeline.ensure_topology(1, &layout, 48000.0);
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+            pos: source_pos,
+            val: 1.0,
+        })];
+
+        let channels = 6;
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let rp = RenderParams {
+            listener: &listener,
+            channels,
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::new(-20.0, -20.0, -5.0),
+            room_max: Vec3::new(20.0, 20.0, 5.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+
+        // Channels 2-5 (C, LFE, RL, RR) must be silent — HRTF only writes to L/R
+        for ch in 2..channels {
+            let max_abs = (0..frames)
+                .map(|f| buffer[f * channels + ch].abs())
+                .fold(0.0f32, f32::max);
+            assert_eq!(
+                max_abs, 0.0,
+                "HRTF should not bleed to channel {ch}, but got max abs {max_abs}"
+            );
+        }
+
+        // Stereo channels should have signal
+        let has_signal =
+            |ch: usize| -> bool { (0..frames).any(|f| buffer[f * channels + ch].abs() > 1e-10) };
+        assert!(has_signal(0), "L should have signal in HRTF mode");
+        assert!(has_signal(1), "R should have signal in HRTF mode");
+    }
+
+    // ── VBAP: FDN reverb stays within speaker channels ───────────────
+
+    #[test]
+    fn vbap_fdn_no_bleed_beyond_channels() {
+        // Stereo layout on a 2-channel device — FDN should not bleed beyond ch 0-1
+        let layout = SpeakerLayout::stereo(Vec3::new(-1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0));
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+
+        let source_pos = Vec3::new(0.0, 2.0, 0.0);
+        let params = PipelineParams::default();
+        let mut pipeline = build_vbap(&params);
+        pipeline.ensure_topology(1, &layout, 48000.0);
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+            pos: source_pos,
+            val: 1.0,
+        })];
+
+        let channels = 2;
+        let frames = 2048;
+        let mut buffer = vec![0.0f32; frames * channels];
+
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let rp = RenderParams {
+            listener: &listener,
+            channels,
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::new(-5.0, -5.0, -5.0),
+            room_max: Vec3::new(5.0, 5.0, 5.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+
+        // Both stereo channels should have signal (renderer + FDN wet)
+        let has_signal =
+            |ch: usize| -> bool { (0..frames).any(|f| buffer[f * channels + ch].abs() > 1e-10) };
+        assert!(has_signal(0), "L should have signal");
+        assert!(has_signal(1), "R should have signal");
+    }
+
+    // ── Mode × Layout channel output matrix (12 combinations) ─────────
+
+    /// Run a single render mode through the full pipeline on a 5.1 layout
+    /// with the given channel mode (active channels), using a 6-channel buffer.
+    ///
+    /// `active_channels`: which channels should have signal (e.g. [0,1] for stereo).
+    /// `silent_channels`: which channels must be silent (e.g. [2,3,4,5] for stereo).
+    fn assert_mode_channel_output(
+        mode: RenderMode,
+        active_channels: &[usize],
+        silent_channels: &[usize],
+        label: &str,
+    ) {
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+        let params = PipelineParams::default();
+
+        let mut pipeline = match mode {
+            RenderMode::WorldLocked => build_world_locked(&params),
+            RenderMode::Vbap => build_vbap(&params),
+            RenderMode::Hrtf => build_hrtf(&params),
+            RenderMode::Dbap => build_dbap(&params),
+            RenderMode::Ambisonics => build_ambisonics(&params),
+        };
+
+        // Always 5.1 layout (6 hardware channels) with active mask applied
+        let mut layout = layout_5_1();
+        layout.set_active_channels(active_channels);
+        let hardware_channels = 6;
+        pipeline.ensure_topology(1, &layout, 48000.0);
+
+        let source_pos = Vec3::new(1.0, 3.0, 0.0);
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let frames = 2048;
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+            pos: source_pos,
+            val: 1.0,
+        })];
+        let mut buffer = vec![0.0f32; frames * hardware_channels];
+
+        let rp = RenderParams {
+            listener: &listener,
+            channels: hardware_channels,
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min: Vec3::new(-20.0, -20.0, -5.0),
+            room_max: Vec3::new(20.0, 20.0, 5.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+
+        // Silent channels must have no signal
+        for &ch in silent_channels {
+            let max_abs = (0..frames)
+                .map(|f| buffer[f * hardware_channels + ch].abs())
+                .fold(0.0f32, f32::max);
+            assert_eq!(
+                max_abs, 0.0,
+                "{label}: channel {ch} should be silent, got max {max_abs}"
+            );
+        }
+
+        // At least one active channel should have signal
+        let has_any_signal = active_channels
+            .iter()
+            .any(|&ch| (0..frames).any(|f| buffer[f * hardware_channels + ch].abs() > 1e-10));
+        assert!(
+            has_any_signal,
+            "{label}: should produce signal in at least one active channel"
+        );
+    }
+
+    // Channel modes on 5.1 hardware:
+    //   Stereo = [0, 1] active, [2, 3, 4, 5] silent
+    //   Quad   = [0, 1, 4, 5] active, [2, 3] silent
+    //   5.1    = [0, 1, 2, 4, 5] active, [3] silent (LFE gets crossover only)
+
+    const STEREO_ACTIVE: &[usize] = &[0, 1];
+    const STEREO_SILENT: &[usize] = &[2, 3, 4, 5];
+    const QUAD_ACTIVE: &[usize] = &[0, 1, 4, 5];
+    const QUAD_SILENT: &[usize] = &[2, 3];
+    const SURROUND_ACTIVE: &[usize] = &[0, 1, 2, 3, 4, 5];
+    const SURROUND_SILENT: &[usize] = &[];
+
+    // ── WorldLocked: Stereo, Quad, 5.1 ──────────────────────────────
+
+    #[test]
+    fn world_locked_stereo_output() {
+        assert_mode_channel_output(
+            RenderMode::WorldLocked,
+            STEREO_ACTIVE,
+            STEREO_SILENT,
+            "WorldLocked×Stereo",
+        );
+    }
+
+    #[test]
+    fn world_locked_quad_output() {
+        assert_mode_channel_output(
+            RenderMode::WorldLocked,
+            QUAD_ACTIVE,
+            QUAD_SILENT,
+            "WorldLocked×Quad",
+        );
+    }
+
+    #[test]
+    fn world_locked_5_1_output() {
+        assert_mode_channel_output(
+            RenderMode::WorldLocked,
+            SURROUND_ACTIVE,
+            SURROUND_SILENT,
+            "WorldLocked×5.1",
+        );
+    }
+
+    // ── VBAP: Quad, 5.1 (no stereo — needs ≥3 speakers) ────────────
+
+    #[test]
+    fn vbap_quad_output() {
+        assert_mode_channel_output(RenderMode::Vbap, QUAD_ACTIVE, QUAD_SILENT, "Vbap×Quad");
+    }
+
+    #[test]
+    fn vbap_5_1_output() {
+        assert_mode_channel_output(
+            RenderMode::Vbap,
+            SURROUND_ACTIVE,
+            SURROUND_SILENT,
+            "Vbap×5.1",
+        );
+    }
+
+    // ── HRTF: always stereo (channels 0-1) ──────────────────────────
+
+    #[test]
+    fn hrtf_stereo_output() {
+        assert_mode_channel_output(
+            RenderMode::Hrtf,
+            STEREO_ACTIVE,
+            STEREO_SILENT,
+            "Hrtf×Stereo",
+        );
+    }
+
+    // ── DBAP: Stereo, Quad, 5.1 ─────────────────────────────────────
+
+    #[test]
+    fn dbap_stereo_output() {
+        assert_mode_channel_output(
+            RenderMode::Dbap,
+            STEREO_ACTIVE,
+            STEREO_SILENT,
+            "Dbap×Stereo",
+        );
+    }
+
+    #[test]
+    fn dbap_quad_output() {
+        assert_mode_channel_output(RenderMode::Dbap, QUAD_ACTIVE, QUAD_SILENT, "Dbap×Quad");
+    }
+
+    #[test]
+    fn dbap_5_1_output() {
+        assert_mode_channel_output(
+            RenderMode::Dbap,
+            SURROUND_ACTIVE,
+            SURROUND_SILENT,
+            "Dbap×5.1",
+        );
+    }
+
+    // ── Ambisonics: Stereo, Quad, 5.1 ───────────────────────────────
+
+    #[test]
+    fn ambisonics_stereo_output() {
+        assert_mode_channel_output(
+            RenderMode::Ambisonics,
+            STEREO_ACTIVE,
+            STEREO_SILENT,
+            "Ambisonics×Stereo",
+        );
+    }
+
+    #[test]
+    fn ambisonics_quad_output() {
+        assert_mode_channel_output(
+            RenderMode::Ambisonics,
+            QUAD_ACTIVE,
+            QUAD_SILENT,
+            "Ambisonics×Quad",
+        );
+    }
+
+    #[test]
+    fn ambisonics_5_1_output() {
+        assert_mode_channel_output(
+            RenderMode::Ambisonics,
+            SURROUND_ACTIVE,
+            SURROUND_SILENT,
+            "Ambisonics×5.1",
         );
     }
 }
