@@ -128,7 +128,7 @@ pub fn dbap_gains(
     let d_max = distances.iter().cloned().fold(f32::MIN, f32::max);
     let epsilon = blur / n as f32;
 
-    let mut u_values: Vec<f32> = distances
+    let u_values: Vec<f32> = distances
         .iter()
         .map(|&d| {
             let diff = d_max - d;
@@ -136,33 +136,24 @@ pub fn dbap_gains(
         })
         .collect();
 
-    // Find median u value for the pivot
+    // Median u value as pivot (Eq 10: u_m)
     let mut u_sorted = u_values.clone();
     u_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let u_median = if n.is_multiple_of(2) {
+    let u_m = if n.is_multiple_of(2) {
         (u_sorted[n / 2 - 1] + u_sorted[n / 2]) / 2.0
     } else {
         u_sorted[n / 2]
     };
-    let u_median = u_median.max(epsilon); // prevent division by zero
+    let u_m = u_m.max(epsilon);
 
-    // Normalize u values by their sum for numerical stability
-    let u_sum: f32 = u_values.iter().sum();
-    if u_sum > 0.0 {
-        for u in &mut u_values {
-            *u /= u_sum;
-        }
-    }
-    let u_median_norm = u_median / u_sum.max(epsilon);
-
+    // Biasing factors (Eq 10): b_i = (u_i / u_m * (1/p - 1))^2 + 1
     let biases: Vec<f32> = u_values
         .iter()
         .map(|&u_i| {
             if (p - 1.0).abs() < 1e-10 {
-                // Source inside array: no biasing needed
                 1.0
             } else {
-                let term = (u_i / u_median_norm) * (1.0 / p - 1.0);
+                let term = (u_i / u_m) * (1.0 / p - 1.0);
                 term * term + 1.0
             }
         })
