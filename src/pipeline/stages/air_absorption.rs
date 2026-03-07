@@ -55,6 +55,23 @@ impl Biquad {
         y
     }
 
+    /// Update coefficients only, preserving filter state.
+    fn set_lowpass(&mut self, cutoff_hz: f32, sample_rate: f32) {
+        let omega = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate;
+        let cos_w = omega.cos();
+        let sin_w = omega.sin();
+        let alpha = sin_w / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let b0 = (1.0 - cos_w) / 2.0;
+        let b1 = 1.0 - cos_w;
+        let b2 = b0;
+        let a0 = 1.0 + alpha;
+        self.b0 = b0 / a0;
+        self.b1 = b1 / a0;
+        self.b2 = b2 / a0;
+        self.a1 = -2.0 * cos_w / a0;
+        self.a2 = (1.0 - alpha) / a0;
+    }
+
     fn reset(&mut self) {
         self.x1 = 0.0;
         self.x2 = 0.0;
@@ -83,7 +100,7 @@ impl AirAbsorptionFilter {
     fn update(&mut self, distance: f32, atmosphere: &AtmosphericParams) {
         let target = iso9613_cutoff(distance, atmosphere);
         if (target - self.current_cutoff).abs() / self.current_cutoff > 0.05 {
-            self.filter = Biquad::lowpass(target, self.sample_rate);
+            self.filter.set_lowpass(target, self.sample_rate);
             self.current_cutoff = target;
         }
     }
