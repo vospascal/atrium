@@ -191,6 +191,7 @@ impl Renderer for HrtfRenderer {
         }
 
         self.sources[source_idx].prev_gain = target_gain;
+        self.update_counter += 1;
     }
 
     fn name(&self) -> &str {
