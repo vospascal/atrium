@@ -101,7 +101,7 @@ pub fn dbap_gains(
         .map(|&p| blurred_distance(source_pos, p, blur))
         .collect();
 
-    // Reference distance: mean distance from centroid to speakers (used as d_rs in Eq 7)
+    // Reference distance: max distance from centroid to any speaker (Eq 7: max(d_s))
     let centroid = {
         let mut c = Vec3::ZERO;
         for &p in &positions {
@@ -112,8 +112,7 @@ pub fn dbap_gains(
     let d_rs: f32 = positions
         .iter()
         .map(|&p| p.distance_to(centroid))
-        .sum::<f32>()
-        / n as f32;
+        .fold(0.0_f32, f32::max);
     let d_rs = d_rs.max(0.01); // prevent division by zero
 
     // Distance from source to centroid
