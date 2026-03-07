@@ -1,10 +1,9 @@
 //! ISO 9613-1 air absorption — frequency-dependent atmospheric absorption.
 //!
-//! Shared inner filter used by both SourceStage (per-source, listener-relative)
-//! and PathStage (per source × speaker, world-locked).
+//! Inner filter (`AirAbsorptionFilter`) is shared by the SourceStage
+//! (listener-relative modes) and WorldLockedRenderer (per-speaker).
 
 use crate::audio::atmosphere::{air_absorption_lp_cutoff, AtmosphericParams};
-use crate::pipeline::path_stage::{PathContext, PathStage};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// 2nd-order IIR biquad lowpass (Direct Form I).
@@ -146,43 +145,6 @@ impl SourceStage for AirAbsorptionStage {
 
     fn name(&self) -> &str {
         "air_absorption"
-    }
-
-    fn reset(&mut self) {
-        self.inner.reset();
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PathStage: per source × speaker, world-locked
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-path air absorption. Distance = source → speaker (target).
-pub struct AirAbsorptionPath {
-    inner: AirAbsorptionFilter,
-}
-
-impl AirAbsorptionPath {
-    pub fn new(sample_rate: f32) -> Self {
-        Self {
-            inner: AirAbsorptionFilter::new(sample_rate),
-        }
-    }
-}
-
-impl PathStage for AirAbsorptionPath {
-    fn update(&mut self, ctx: &PathContext) {
-        let dist = ctx.source_pos.distance_to(ctx.target_pos);
-        self.inner.update(dist, ctx.atmosphere);
-    }
-
-    #[inline]
-    fn process_sample(&mut self, sample: f32) -> f32 {
-        self.inner.process(sample)
-    }
-
-    fn name(&self) -> &str {
-        "air_absorption_path"
     }
 
     fn reset(&mut self) {

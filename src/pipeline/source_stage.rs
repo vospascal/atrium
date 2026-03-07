@@ -4,7 +4,7 @@
 //! that does NOT depend on the output path (envelopes, EQ, listener-relative
 //! propagation for VBAP/HRTF modes).
 //!
-//! For WorldLocked mode, propagation lives in PathStages inside the renderer
+//! For WorldLocked mode, propagation is inlined in the renderer
 //! because it is per-speaker, not per-source.
 
 use atrium_core::directivity::DirectivityPattern;

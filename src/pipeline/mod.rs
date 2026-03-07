@@ -1,7 +1,7 @@
 //! Composable render pipeline.
 //!
 //! A render pipeline defines the complete audio processing chain for a given
-//! render mode. Each pipeline consists of three categories of stages:
+//! render mode. Each pipeline consists of two categories of stages:
 //!
 //! 1. **SourceStages** — per-source, before routing (envelopes, listener-relative
 //!    propagation for VBAP/HRTF)
@@ -56,7 +56,6 @@ pub mod mix_stage;
 pub mod path;
 pub mod path_effects;
 pub mod path_resolvers;
-pub mod path_stage;
 pub mod renderer;
 pub mod renderers;
 pub mod source_stage;
@@ -302,8 +301,6 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
             sr,
         ),
         renderer: Box::new(MultichannelRenderer::new()),
-        // EarlyReflectionsStage removed — reflections now come from ImageSourceResolver
-        // as individual paths, each panned to its own direction.
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
@@ -414,8 +411,6 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
-    use crate::pipeline::stages::distance_gains::DistanceGainStage;
-    use crate::pipeline::stages::vbap_gains::VbapGainStage;
 
     /// Constant-value test source.
     struct ConstSource {
@@ -742,8 +737,8 @@ mod tests {
     fn source_stage_bank_grows_with_sources() {
         let mut bank = SourceStageBank::new(
             vec![
-                Box::new(|_sr| Box::new(VbapGainStage) as Box<dyn SourceStage>),
-                Box::new(|_sr| Box::new(DistanceGainStage) as Box<dyn SourceStage>),
+                Box::new(|sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
+                Box::new(|_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
             ],
             48000.0,
         );

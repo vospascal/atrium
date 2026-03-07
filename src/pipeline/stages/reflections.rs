@@ -1,10 +1,7 @@
-//! Per-source first-order reflections via image-source method (Allen & Berkley, 1979).
+//! First-order reflections via image-source method (Allen & Berkley, 1979).
 //!
-//! SourceStage version: source→listener (VBAP / HRTF).
-//! PathStage version: source→speaker (WorldLocked).
-
-use crate::pipeline::path_stage::{PathContext, PathStage};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
+//! `ReflectionCore` is the shared delay-buffer engine used by
+//! WorldLockedRenderer (per-speaker reflections).
 
 use atrium_core::types::Vec3;
 
@@ -104,90 +101,5 @@ impl ReflectionCore {
     pub(crate) fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_pos = 0;
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SourceStage: per-source, listener-relative
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-source reflections. Image sources relative to listener.
-pub struct ReflectionsStage {
-    core: ReflectionCore,
-}
-
-impl ReflectionsStage {
-    pub fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
-        Self {
-            core: ReflectionCore::new(wet_gain, wall_reflectivity),
-        }
-    }
-}
-
-impl SourceStage for ReflectionsStage {
-    fn process(&mut self, ctx: &SourceContext, _output: &mut SourceOutput) {
-        self.core.update(
-            ctx.room_min,
-            ctx.room_max,
-            ctx.source_pos,
-            ctx.listener.position,
-            ctx.sample_rate,
-        );
-    }
-
-    #[inline]
-    fn process_sample(&mut self, sample: f32) -> f32 {
-        // Return direct + wet reflection
-        sample + self.core.process_sample(sample)
-    }
-
-    fn name(&self) -> &str {
-        "reflections"
-    }
-
-    fn reset(&mut self) {
-        self.core.reset();
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PathStage: per source × speaker, world-locked
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-path reflections. Image sources relative to speaker (target).
-pub struct ReflectionsPath {
-    core: ReflectionCore,
-}
-
-impl ReflectionsPath {
-    pub fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
-        Self {
-            core: ReflectionCore::new(wet_gain, wall_reflectivity),
-        }
-    }
-}
-
-impl PathStage for ReflectionsPath {
-    fn update(&mut self, ctx: &PathContext) {
-        self.core.update(
-            ctx.room_min,
-            ctx.room_max,
-            ctx.source_pos,
-            ctx.target_pos,
-            ctx.sample_rate,
-        );
-    }
-
-    #[inline]
-    fn process_sample(&mut self, sample: f32) -> f32 {
-        sample + self.core.process_sample(sample)
-    }
-
-    fn name(&self) -> &str {
-        "reflections_path"
-    }
-
-    fn reset(&mut self) {
-        self.core.reset();
     }
 }

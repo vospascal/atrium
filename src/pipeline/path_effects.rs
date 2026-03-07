@@ -17,7 +17,7 @@ use crate::pipeline::stages::air_absorption::AirAbsorptionFilter;
 /// Per-path air absorption using ISO 9613-1 lowpass filter.
 ///
 /// Reuses `AirAbsorptionFilter` — the same biquad + hysteresis logic used by
-/// the existing SourceStage and PathStage implementations.
+/// the SourceStage and WorldLockedRenderer.
 pub struct AirAbsorptionEffect {
     inner: AirAbsorptionFilter,
 }
