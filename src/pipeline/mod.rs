@@ -32,6 +32,13 @@
 //!     mix_stages: [LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
 //! }
 //!
+//! Hrtf {
+//!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
+//!     source_stages: [AirAbsorption, GroundEffect]
+//!     renderer: HrtfRenderer (per-path HRTF convolution to stereo)
+//!     mix_stages: [FdnReverb, MasterGain]
+//! }
+//!
 //! Dbap {
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
 //!     source_stages: [AirAbsorption, GroundEffect]
@@ -76,13 +83,11 @@ use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::distance_directivity::DistanceDirectivityPath;
-use self::stages::distance_gains::DistanceGainStage;
-use self::stages::early_reflections::EarlyReflectionsStage;
 use self::stages::fdn_reverb::FdnReverbStage;
 use self::stages::ground_effect::{GroundEffectPath, GroundEffectStage};
 use self::stages::lfe_crossover::LfeCrossoverStage;
 use self::stages::master_gain::MasterGainStage;
-use self::stages::reflections::{ReflectionsPath, ReflectionsStage};
+use self::stages::reflections::ReflectionsPath;
 
 use self::path_resolvers::{DirectPathResolver, ImageSourceResolver};
 
@@ -334,24 +339,22 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
 
 fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
-    let wet = p.er_wet_gain;
     let abs = p.er_wall_reflectivity;
 
     RenderPipeline {
+        // HRTF: AirAbsorption + GroundEffect only. Reflections and distance
+        // attenuation are handled by the path architecture: ImageSourceResolver
+        // produces per-path directions, HrtfRenderer convolves each path with
+        // its own directional HRIR.
         source_stages: SourceStageBank::new(
             vec![
                 Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
                 Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-                Box::new(move |_sr| {
-                    Box::new(ReflectionsStage::new(wet, abs)) as Box<dyn SourceStage>
-                }),
-                Box::new(move |_sr| Box::new(DistanceGainStage) as Box<dyn SourceStage>),
             ],
             sr,
         ),
         renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sr)),
         mix_stages: vec![
-            Box::new(EarlyReflectionsStage::new(wet, abs)),
             Box::new(FdnReverbStage::new(
                 p.fdn_wet_gain,
                 p.fdn_rt60_low,
@@ -359,7 +362,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(DirectPathResolver),
+        resolver: Box::new(ImageSourceResolver::new(abs)),
     }
 }
 
@@ -430,6 +433,7 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
+    use crate::pipeline::stages::distance_gains::DistanceGainStage;
     use crate::pipeline::stages::vbap_gains::VbapGainStage;
 
     /// Constant-value test source.

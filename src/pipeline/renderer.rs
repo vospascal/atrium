@@ -5,7 +5,7 @@
 //!
 //! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP)
 //! - **WorldLockedRenderer**: per-speaker PathStages + gain ramp (WorldLocked)
-//! - **HrtfRenderer**: HRTF FFT convolution to stereo headphones (Hrtf)
+//! - **HrtfRenderer**: per-path HRTF convolution to stereo headphones (Hrtf)
 //! - **DbapRenderer**: per-path DBAP gain ramp × sample per channel (DBAP)
 //! - **AmbisonicsRenderer**: per-path FOA encode + decode gain ramp (Ambisonics)
 //!
