@@ -5,13 +5,11 @@
 //!
 //! 1. **SourceStages** — per-source, before routing (envelopes, listener-relative
 //!    propagation for VBAP/HRTF)
-//! 2. **PathStages** — per source × output path, inside the renderer
-//!    (per-speaker propagation for WorldLocked)
-//! 3. **MixStages** — post-mix, whole-buffer (LFE crossover, delay comp,
+//! 2. **MixStages** — post-mix, whole-buffer (LFE crossover, delay comp,
 //!    reverb, master gain)
 //!
 //! Plus a **Renderer** that handles mode-specific spatialization:
-//! multichannel gain ramp, per-speaker path processing, or HRTF convolution.
+//! multichannel gain ramp, per-speaker propagation, or HRTF convolution.
 //!
 //! # Pipeline definitions
 //!
@@ -21,7 +19,7 @@
 //! ```text
 //! WorldLocked {
 //!     source_stages: []
-//!     renderer: WorldLockedRenderer { path_stages: [AirAbsorption, Ground, Reflections, DistanceDirectivity] }
+//!     renderer: WorldLockedRenderer (per-speaker air absorption, ground effect, reflections, distance+directivity)
 //!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
 //! }
 //!
@@ -75,21 +73,18 @@ use self::path::PathResolver;
 use self::renderer::Renderer;
 use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
+use self::path_resolvers::{DirectPathResolver, ImageSourceResolver};
 use self::renderers::ambisonics::AmbisonicsRenderer;
 use self::renderers::binaural::HrtfRenderer;
 use self::renderers::dbap::DbapRenderer;
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
-use self::stages::air_absorption::{AirAbsorptionPath, AirAbsorptionStage};
+use self::stages::air_absorption::AirAbsorptionStage;
 use self::stages::delay_comp::DelayCompStage;
-use self::stages::distance_directivity::DistanceDirectivityPath;
 use self::stages::fdn_reverb::FdnReverbStage;
-use self::stages::ground_effect::{GroundEffectPath, GroundEffectStage};
+use self::stages::ground_effect::GroundEffectStage;
 use self::stages::lfe_crossover::LfeCrossoverStage;
 use self::stages::master_gain::MasterGainStage;
-use self::stages::reflections::ReflectionsPath;
-
-use self::path_resolvers::{DirectPathResolver, ImageSourceResolver};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline mode — rendering approach (separate from channel layout)
@@ -268,34 +263,20 @@ pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 5] {
 fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
     let sr = p.sample_rate;
     let dm = &p.distance_model;
-    let wet = p.er_wet_gain;
-    let abs = p.er_wall_reflectivity;
-    let ref_dist = dm.ref_distance;
-    let max_dist = dm.max_distance;
-    let rolloff = dm.rolloff;
-    let model = dm.model;
 
     RenderPipeline {
         // WorldLocked: no source stages — propagation lives in the renderer
         source_stages: SourceStageBank::new(vec![], sr),
-        renderer: Box::new(WorldLockedRenderer::new(vec![
-            Box::new(move |sr| {
-                Box::new(AirAbsorptionPath::new(sr))
-                    as Box<dyn crate::pipeline::path_stage::PathStage>
-            }),
-            Box::new(move |_sr| {
-                Box::new(GroundEffectPath::new()) as Box<dyn crate::pipeline::path_stage::PathStage>
-            }),
-            Box::new(move |_sr| {
-                Box::new(ReflectionsPath::new(wet, abs))
-                    as Box<dyn crate::pipeline::path_stage::PathStage>
-            }),
-            Box::new(move |_sr| {
-                Box::new(DistanceDirectivityPath::new(
-                    ref_dist, max_dist, rolloff, model,
-                )) as Box<dyn crate::pipeline::path_stage::PathStage>
-            }),
-        ])),
+        renderer: Box::new(WorldLockedRenderer::new(
+            self::renderers::world_locked::WorldLockedParams {
+                ref_distance: dm.ref_distance,
+                max_distance: dm.max_distance,
+                rolloff: dm.rolloff,
+                model: dm.model,
+                wet_gain: p.er_wet_gain,
+                wall_reflectivity: p.er_wall_reflectivity,
+            },
+        )),
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::static_calibration()),

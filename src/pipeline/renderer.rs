@@ -4,13 +4,13 @@
 //! Five implementations:
 //!
 //! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP)
-//! - **WorldLockedRenderer**: per-speaker PathStages + gain ramp (WorldLocked)
+//! - **WorldLockedRenderer**: per-speaker propagation + gain ramp (WorldLocked)
 //! - **HrtfRenderer**: per-path HRTF convolution to stereo headphones (Hrtf)
 //! - **DbapRenderer**: per-path DBAP gain ramp × sample per channel (DBAP)
 //! - **AmbisonicsRenderer**: per-path FOA encode + decode gain ramp (Ambisonics)
 //!
-//! The renderer owns PathStage instances and manages per-source state
-//! (gain ramps, HRTF convolvers, etc.).
+//! The renderer manages per-source state (gain ramps, HRTF convolvers,
+//! per-speaker propagation, etc.).
 
 use atrium_core::speaker::SpeakerLayout;
 

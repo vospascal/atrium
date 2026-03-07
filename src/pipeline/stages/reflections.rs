@@ -20,7 +20,7 @@ struct ReflectionTap {
 }
 
 /// Shared mono delay buffer + tapped readback for image-source reflections.
-struct ReflectionCore {
+pub(crate) struct ReflectionCore {
     buffer: Box<[f32; BUFFER_SIZE]>,
     write_pos: usize,
     taps: [ReflectionTap; MAX_TAPS],
@@ -30,7 +30,7 @@ struct ReflectionCore {
 }
 
 impl ReflectionCore {
-    fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
+    pub(crate) fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
         Self {
             buffer: Box::new([0.0; BUFFER_SIZE]),
             write_pos: 0,
@@ -46,7 +46,7 @@ impl ReflectionCore {
 
     /// Compute taps from image sources (source mirrored across each wall)
     /// relative to a target (listener or speaker).
-    fn update(
+    pub(crate) fn update(
         &mut self,
         room_min: Vec3,
         room_max: Vec3,
@@ -89,7 +89,7 @@ impl ReflectionCore {
     }
 
     #[inline]
-    fn process_sample(&mut self, input: f32) -> f32 {
+    pub(crate) fn process_sample(&mut self, input: f32) -> f32 {
         self.buffer[self.write_pos] = input;
         let mut wet = 0.0f32;
         for i in 0..self.tap_count {
@@ -101,7 +101,7 @@ impl ReflectionCore {
         wet * self.wet_gain
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_pos = 0;
     }
