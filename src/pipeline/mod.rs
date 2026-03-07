@@ -68,7 +68,7 @@ use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 
 use self::mix_stage::{MixContext, MixStage};
-use self::path::PathResolver;
+use self::path::{PathEffect, PathEffectChain, PathEffectFactory, PathResolver, MAX_PATHS};
 use self::renderer::Renderer;
 use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -78,10 +78,10 @@ use self::renderers::binaural::HrtfRenderer;
 use self::renderers::dbap::DbapRenderer;
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
-use self::stages::air_absorption::AirAbsorptionStage;
+use self::stages::ambi_decode::AmbisonicsDecodeStage;
+use self::stages::ambi_multi_delay::AmbiMultiDelayStage;
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::fdn_reverb::FdnReverbStage;
-use self::stages::ground_effect::GroundEffectStage;
 use self::stages::lfe_crossover::LfeCrossoverStage;
 use self::stages::master_gain::MasterGainStage;
 
@@ -185,6 +185,11 @@ pub struct RenderPipeline {
     pub renderer: Box<dyn Renderer>,
     pub mix_stages: Vec<Box<dyn MixStage>>,
     pub resolver: Box<dyn PathResolver>,
+    /// Factories for creating per-path effects (air absorption, ground effect, etc.).
+    pub path_effect_factories: Vec<PathEffectFactory>,
+    /// Per-source × per-path effect chains. Grown by ensure_topology.
+    /// Indexed: [source_idx][path_idx].
+    path_effects: Vec<[PathEffectChain; MAX_PATHS]>,
 }
 
 impl RenderPipeline {
@@ -202,6 +207,11 @@ impl RenderPipeline {
         for stage in &mut self.mix_stages {
             stage.reset();
         }
+        for chains in &mut self.path_effects {
+            for chain in chains.iter_mut() {
+                chain.reset();
+            }
+        }
     }
 
     /// Ensure topology matches current source count and layout.
@@ -214,6 +224,19 @@ impl RenderPipeline {
         self.source_stages.ensure_sources(source_count);
         self.renderer
             .ensure_topology(source_count, layout, sample_rate);
+
+        // Grow per-source path effect chains.
+        while self.path_effects.len() < source_count {
+            let chains: [PathEffectChain; MAX_PATHS] = std::array::from_fn(|_| {
+                let effects: Vec<Box<dyn PathEffect>> = self
+                    .path_effect_factories
+                    .iter()
+                    .map(|f| f(sample_rate))
+                    .collect();
+                PathEffectChain::new(effects)
+            });
+            self.path_effects.push(chains);
+        }
     }
 }
 
@@ -234,6 +257,8 @@ pub struct PipelineParams {
     /// DBAP rolloff in dB per doubling of distance.
     /// 6.0 = free-field inverse distance law, 3–5 dB for reverberant spaces.
     pub dbap_rolloff_db: f32,
+    /// Ambisonics multi-delay wet gain (0.0 = dry only, 1.0 = full wet).
+    pub ambi_wet_gain: f32,
 }
 
 impl Default for PipelineParams {
@@ -248,6 +273,7 @@ impl Default for PipelineParams {
             fdn_rt60_high: 0.3,
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
+            ambi_wet_gain: 0.3,
         }
     }
 }
@@ -264,18 +290,18 @@ pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 5] {
 }
 
 fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
-    let sr = p.sample_rate;
-    let dm = &p.distance_model;
+    let sample_rate = p.sample_rate;
+    let distance_model = &p.distance_model;
 
     RenderPipeline {
         // WorldLocked: no source stages — propagation lives in the renderer
-        source_stages: SourceStageBank::new(vec![], sr),
+        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(WorldLockedRenderer::new(
             self::renderers::world_locked::WorldLockedParams {
-                ref_distance: dm.ref_distance,
-                max_distance: dm.max_distance,
-                rolloff: dm.rolloff,
-                model: dm.model,
+                ref_distance: distance_model.ref_distance,
+                max_distance: distance_model.max_distance,
+                rolloff: distance_model.rolloff,
+                model: distance_model.model,
                 wet_gain: p.er_wet_gain,
                 wall_reflectivity: p.er_wall_reflectivity,
             },
@@ -286,24 +312,18 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
             Box::new(MasterGainStage),
         ],
         resolver: Box::new(DirectPathResolver),
+        path_effect_factories: vec![],
+        path_effects: Vec::new(),
     }
 }
 
 fn build_vbap(p: &PipelineParams) -> RenderPipeline {
-    let sr = p.sample_rate;
-    let abs = p.er_wall_reflectivity;
+    let sample_rate = p.sample_rate;
+    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
-        // VBAP: AirAbsorption + GroundEffect only. Reflections and VBAP gains
-        // are handled by the path architecture: ImageSourceResolver produces
-        // per-path directions, MultichannelRenderer computes VBAP gains per path.
-        source_stages: SourceStageBank::new(
-            vec![
-                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
-                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-            ],
-            sr,
-        ),
+        // VBAP: no source stages — air absorption and ground effect are per-path PathEffects.
+        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(MultichannelRenderer::new()),
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
@@ -315,27 +335,31 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(abs)),
+        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        path_effect_factories: vec![
+            Box::new(|sample_rate| {
+                Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::GroundEffectFilter::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::WallAbsorptionEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+        ],
+        path_effects: Vec::new(),
     }
 }
 
 fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
-    let sr = p.sample_rate;
-    let abs = p.er_wall_reflectivity;
+    let sample_rate = p.sample_rate;
+    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
-        // HRTF: AirAbsorption + GroundEffect only. Reflections and distance
-        // attenuation are handled by the path architecture: ImageSourceResolver
-        // produces per-path directions, HrtfRenderer convolves each path with
-        // its own directional HRIR.
-        source_stages: SourceStageBank::new(
-            vec![
-                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
-                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-            ],
-            sr,
-        ),
-        renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sr)),
+        // HRTF: no source stages — air absorption and ground effect are per-path PathEffects.
+        source_stages: SourceStageBank::new(vec![], sample_rate),
+        renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sample_rate)),
         mix_stages: vec![
             Box::new(FdnReverbStage::new(
                 p.fdn_wet_gain,
@@ -344,25 +368,30 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(abs)),
+        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        path_effect_factories: vec![
+            Box::new(|sample_rate| {
+                Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::GroundEffectFilter::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::WallAbsorptionEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+        ],
+        path_effects: Vec::new(),
     }
 }
 
 fn build_dbap(p: &PipelineParams) -> RenderPipeline {
-    let sr = p.sample_rate;
-    let abs = p.er_wall_reflectivity;
+    let sample_rate = p.sample_rate;
+    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
-        // DBAP: AirAbsorption + GroundEffect only. Reflections and DBAP gains
-        // are handled by the path architecture: ImageSourceResolver produces
-        // per-path positions, DbapRenderer computes DBAP gains per path.
-        source_stages: SourceStageBank::new(
-            vec![
-                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
-                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-            ],
-            sr,
-        ),
+        // DBAP: no source stages — air absorption and ground effect are per-path PathEffects.
+        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(DbapRenderer::new(atrium_core::dbap::DbapParams {
             rolloff_db: p.dbap_rolloff_db,
             ..Default::default()
@@ -372,24 +401,34 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(abs)),
+        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        path_effect_factories: vec![
+            Box::new(|sample_rate| {
+                Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::GroundEffectFilter::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::WallAbsorptionEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+        ],
+        path_effects: Vec::new(),
     }
 }
 
 fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
-    let sr = p.sample_rate;
-    let abs = p.er_wall_reflectivity;
+    let sample_rate = p.sample_rate;
+    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
-        source_stages: SourceStageBank::new(
-            vec![
-                Box::new(move |sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
-                Box::new(move |_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-            ],
-            sr,
-        ),
+        // Ambisonics: no source stages — air absorption and ground effect are per-path PathEffects.
+        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(AmbisonicsRenderer::new()),
         mix_stages: vec![
+            Box::new(AmbiMultiDelayStage::new(p.ambi_wet_gain)),
+            Box::new(AmbisonicsDecodeStage::new()),
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
             Box::new(FdnReverbStage::new(
@@ -399,7 +438,193 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             )),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(abs)),
+        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        path_effect_factories: vec![
+            Box::new(|sample_rate| {
+                Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::GroundEffectFilter::new(sample_rate)) as Box<dyn PathEffect>
+            }),
+            Box::new(|sample_rate| {
+                Box::new(path_effects::WallAbsorptionEffect::new(sample_rate))
+                    as Box<dyn PathEffect>
+            }),
+        ],
+        path_effects: Vec::new(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pipeline render dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Scene-level parameters for rendering a single buffer.
+pub struct RenderParams<'a> {
+    pub listener: &'a atrium_core::listener::Listener,
+    pub channels: usize,
+    pub sample_rate: f32,
+    pub master_gain: f32,
+    pub distance_model: &'a DistanceModel,
+    pub layout: &'a SpeakerLayout,
+    pub atmosphere: &'a AtmosphericParams,
+    pub ground: &'a GroundProperties,
+    pub room_min: atrium_core::types::Vec3,
+    pub room_max: atrium_core::types::Vec3,
+    pub barriers: &'a [crate::audio::propagation::Barrier],
+    pub wall_materials: &'a [path::WallMaterial; 6],
+}
+
+/// Render one buffer through the active pipeline.
+///
+/// This replaces the monolithic `mix_sources()` + `HrtfMixer::mix()` path.
+pub fn render_pipeline(
+    pipeline: &mut RenderPipeline,
+    sources: &mut [Box<dyn atrium_core::source::SoundSource>],
+    params: &RenderParams,
+    output: &mut [f32],
+) {
+    use self::path::{PathSet, ResolveContext};
+    use crate::profile_span;
+
+    let num_frames = output.len() / params.channels;
+
+    // Split borrow: source_stages, renderer, resolver, path_effects are independent fields
+    let RenderPipeline {
+        source_stages,
+        renderer,
+        mix_stages,
+        resolver,
+        path_effect_factories,
+        path_effects,
+    } = pipeline;
+
+    // Ensure topology
+    source_stages.ensure_sources(sources.len());
+    renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
+
+    // Grow per-source path effect chains if needed.
+    while path_effects.len() < sources.len() {
+        let chains: [PathEffectChain; MAX_PATHS] = std::array::from_fn(|_| {
+            let effects: Vec<Box<dyn PathEffect>> = path_effect_factories
+                .iter()
+                .map(|f| f(params.sample_rate))
+                .collect();
+            PathEffectChain::new(effects)
+        });
+        path_effects.push(chains);
+    }
+
+    // Zero output
+    output.fill(0.0);
+
+    // Per-source pipeline
+    for (i, source) in sources.iter_mut().enumerate() {
+        if !source.is_active() {
+            continue;
+        }
+
+        let pos = source.position();
+        let dist_to_listener = params.listener.position.distance_to(pos);
+
+        let ctx = SourceContext {
+            listener: params.listener,
+            source_pos: pos,
+            source_orientation: source.orientation(),
+            source_directivity: &source.directivity(),
+            source_spread: source.spread(),
+            source_ref_distance: source.ref_distance(),
+            dist_to_listener,
+            atmosphere: params.atmosphere,
+            room_min: params.room_min,
+            room_max: params.room_max,
+            ground: params.ground,
+            sample_rate: params.sample_rate,
+            distance_model: params.distance_model,
+            layout: params.layout,
+        };
+
+        // Resolve propagation paths for this source
+        let mut paths = PathSet::new();
+        {
+            let resolve_ctx = ResolveContext {
+                source_pos: pos,
+                target_pos: params.listener.position,
+                room_min: params.room_min,
+                room_max: params.room_max,
+                barriers: params.barriers,
+            };
+            resolver.resolve(&resolve_ctx, &mut paths);
+        }
+
+        // Buffer-rate source stages
+        let mut src_out = SourceOutput::default_for(params.layout.total_channels());
+        {
+            let _s = profile_span!("source_stages", src = i).entered();
+            source_stages.process_all(i, &ctx, &mut src_out);
+        }
+
+        // Collect source stage refs for the inner loop
+        let mut stage_refs = source_stages.for_source(i);
+
+        // Update per-path effect chains at buffer rate
+        if let Some(chains) = path_effects.get_mut(i) {
+            for (pi, path) in paths.as_slice().iter().enumerate() {
+                let effect_ctx = path::PathEffectContext {
+                    path,
+                    atmosphere: params.atmosphere,
+                    ground: params.ground,
+                    sample_rate: params.sample_rate,
+                    source_pos: pos,
+                    target_pos: params.listener.position,
+                    wall_materials: params.wall_materials,
+                };
+                chains[pi].update(&effect_ctx);
+            }
+        }
+
+        // Renderer: mode-specific spatialization
+        {
+            let _s = profile_span!("renderer", src = i).entered();
+            let mut out = renderer::OutputBuffer {
+                buffer: output,
+                channels: params.channels,
+                num_frames,
+                sample_rate: params.sample_rate,
+            };
+            let effect_chains = if let Some(chains) = path_effects.get_mut(i) {
+                &mut chains[..]
+            } else {
+                &mut []
+            };
+            renderer.render_source(
+                i,
+                source.as_mut(),
+                &mut stage_refs,
+                &ctx,
+                &src_out,
+                &paths,
+                effect_chains,
+                &mut out,
+            );
+        }
+    }
+
+    // Post-mix chain
+    let mix_ctx = MixContext {
+        listener: params.listener,
+        layout: params.layout,
+        sample_rate: params.sample_rate,
+        channels: params.channels,
+        room_min: params.room_min,
+        room_max: params.room_max,
+        master_gain: params.master_gain,
+    };
+    {
+        let _s = profile_span!("mix_stages").entered();
+        for stage in mix_stages.iter_mut() {
+            stage.process(output, &mix_ctx);
+        }
     }
 }
 
@@ -418,6 +643,11 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
+    use crate::pipeline::stages::ground_effect::GroundEffectStage;
+
+    fn default_wall_materials() -> [path::WallMaterial; 6] {
+        std::array::from_fn(|_| path::WallMaterial::default())
+    }
 
     /// Constant-value test source.
     struct ConstSource {
@@ -506,6 +736,8 @@ mod tests {
             ground: &ground,
             room_min,
             room_max,
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp_a, &mut buf_a);
 
@@ -525,6 +757,8 @@ mod tests {
             ground: &ground,
             room_min,
             room_max,
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp_b, &mut buf_b);
 
@@ -587,6 +821,8 @@ mod tests {
             ground: &ground,
             room_min: Vec3::ZERO,
             room_max: Vec3::new(6.0, 4.0, 3.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -655,6 +891,8 @@ mod tests {
             ground: &ground,
             room_min: Vec3::ZERO,
             room_max: Vec3::new(6.0, 4.0, 3.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -715,6 +953,8 @@ mod tests {
             ground: &ground,
             room_min: Vec3::ZERO,
             room_max: Vec3::new(6.0, 4.0, 3.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -744,7 +984,7 @@ mod tests {
     fn source_stage_bank_grows_with_sources() {
         let mut bank = SourceStageBank::new(
             vec![
-                Box::new(|sr| Box::new(AirAbsorptionStage::new(sr)) as Box<dyn SourceStage>),
+                Box::new(|_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
                 Box::new(|_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
             ],
             48000.0,
@@ -837,6 +1077,8 @@ mod tests {
             ground: &ground,
             room_min: Vec3::new(-20.0, -20.0, -5.0),
             room_max: Vec3::new(20.0, 20.0, 5.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -884,6 +1126,8 @@ mod tests {
                 ground: &ground,
                 room_min: Vec3::new(-20.0, -20.0, -5.0),
                 room_max: Vec3::new(20.0, 20.0, 5.0),
+                barriers: &[],
+                wall_materials: &default_wall_materials(),
             };
             render_pipeline(pipeline, &mut sources, &rp, &mut buffer);
             buffer
@@ -968,6 +1212,8 @@ mod tests {
             ground: &ground,
             room_min: Vec3::new(-20.0, -20.0, -5.0),
             room_max: Vec3::new(20.0, 20.0, 5.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1031,6 +1277,8 @@ mod tests {
             ground: &ground,
             room_min: Vec3::new(-20.0, -20.0, -5.0),
             room_max: Vec3::new(20.0, 20.0, 5.0),
+            barriers: &[],
+            wall_materials: &default_wall_materials(),
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1100,6 +1348,8 @@ mod tests {
                 ground: &ground,
                 room_min: Vec3::new(-20.0, -20.0, -5.0),
                 room_max: Vec3::new(20.0, 20.0, 5.0),
+                barriers: &[],
+                wall_materials: &default_wall_materials(),
             };
             render_pipeline(pipeline, &mut sources, &rp, &mut buffer);
             buffer
@@ -1132,139 +1382,5 @@ mod tests {
             total_diff > 0.01,
             "DBAP and WorldLocked should produce different output (total_diff={total_diff})"
         );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Pipeline render dispatch
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Scene-level parameters for rendering a single buffer.
-pub struct RenderParams<'a> {
-    pub listener: &'a atrium_core::listener::Listener,
-    pub channels: usize,
-    pub sample_rate: f32,
-    pub master_gain: f32,
-    pub distance_model: &'a DistanceModel,
-    pub layout: &'a SpeakerLayout,
-    pub atmosphere: &'a AtmosphericParams,
-    pub ground: &'a GroundProperties,
-    pub room_min: atrium_core::types::Vec3,
-    pub room_max: atrium_core::types::Vec3,
-}
-
-/// Render one buffer through the active pipeline.
-///
-/// This replaces the monolithic `mix_sources()` + `HrtfMixer::mix()` path.
-pub fn render_pipeline(
-    pipeline: &mut RenderPipeline,
-    sources: &mut [Box<dyn atrium_core::source::SoundSource>],
-    params: &RenderParams,
-    output: &mut [f32],
-) {
-    use self::path::{PathSet, ResolveContext};
-    use crate::profile_span;
-
-    let num_frames = output.len() / params.channels;
-
-    // Split borrow: source_stages, renderer, resolver are independent fields
-    let RenderPipeline {
-        source_stages,
-        renderer,
-        mix_stages,
-        resolver,
-    } = pipeline;
-
-    // Ensure topology
-    source_stages.ensure_sources(sources.len());
-    renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
-
-    // Zero output
-    output.fill(0.0);
-
-    // Per-source pipeline
-    for (i, source) in sources.iter_mut().enumerate() {
-        if !source.is_active() {
-            continue;
-        }
-
-        let pos = source.position();
-        let dist_to_listener = params.listener.position.distance_to(pos);
-
-        let ctx = SourceContext {
-            listener: params.listener,
-            source_pos: pos,
-            source_orientation: source.orientation(),
-            source_directivity: &source.directivity(),
-            source_spread: source.spread(),
-            source_ref_distance: source.ref_distance(),
-            dist_to_listener,
-            atmosphere: params.atmosphere,
-            room_min: params.room_min,
-            room_max: params.room_max,
-            ground: params.ground,
-            sample_rate: params.sample_rate,
-            distance_model: params.distance_model,
-            layout: params.layout,
-        };
-
-        // Resolve propagation paths for this source
-        let mut paths = PathSet::new();
-        {
-            let resolve_ctx = ResolveContext {
-                source_pos: pos,
-                target_pos: params.listener.position,
-                room_min: params.room_min,
-                room_max: params.room_max,
-            };
-            resolver.resolve(&resolve_ctx, &mut paths);
-        }
-
-        // Buffer-rate source stages
-        let mut src_out = SourceOutput::default_for(params.layout.total_channels());
-        {
-            let _s = profile_span!("source_stages", src = i).entered();
-            source_stages.process_all(i, &ctx, &mut src_out);
-        }
-
-        // Collect source stage refs for the inner loop
-        let mut stage_refs = source_stages.for_source(i);
-
-        // Renderer: mode-specific spatialization
-        {
-            let _s = profile_span!("renderer", src = i).entered();
-            let mut out = renderer::OutputBuffer {
-                buffer: output,
-                channels: params.channels,
-                num_frames,
-                sample_rate: params.sample_rate,
-            };
-            renderer.render_source(
-                i,
-                source.as_mut(),
-                &mut stage_refs,
-                &ctx,
-                &src_out,
-                &paths,
-                &mut out,
-            );
-        }
-    }
-
-    // Post-mix chain
-    let mix_ctx = MixContext {
-        listener: params.listener,
-        layout: params.layout,
-        sample_rate: params.sample_rate,
-        channels: params.channels,
-        room_min: params.room_min,
-        room_max: params.room_max,
-        master_gain: params.master_gain,
-    };
-    {
-        let _s = profile_span!("mix_stages").entered();
-        for stage in mix_stages.iter_mut() {
-            stage.process(output, &mix_ctx);
-        }
     }
 }

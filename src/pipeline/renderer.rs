@@ -14,7 +14,7 @@
 
 use atrium_core::speaker::SpeakerLayout;
 
-use super::path::PathSet;
+use super::path::{PathEffectChain, PathSet};
 use super::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// Interleaved output buffer with format metadata.
@@ -38,6 +38,7 @@ pub trait Renderer: Send {
     /// - `ctx`: full source geometry (position, orientation, directivity)
     /// - `src_out`: gains/modifiers computed by SourceStages
     /// - `paths`: resolved propagation paths (direct + reflections)
+    /// - `path_effects`: per-path effect chains (air absorption, ground effect, etc.)
     /// - `out`: interleaved output buffer to accumulate into
     #[allow(clippy::too_many_arguments)]
     fn render_source(
@@ -48,6 +49,7 @@ pub trait Renderer: Send {
         ctx: &SourceContext,
         src_out: &SourceOutput,
         paths: &PathSet,
+        path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
     );
 

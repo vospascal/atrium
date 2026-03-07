@@ -11,10 +11,10 @@
 use atrium_core::types::Vec3;
 
 use crate::audio::atmosphere::AtmosphericParams;
-use crate::audio::propagation::GroundProperties;
+use crate::audio::propagation::{Barrier, GroundProperties};
 
-/// Maximum paths per source (1 direct + 6 first-order reflections).
-pub const MAX_PATHS: usize = 7;
+/// Maximum paths per source (1 direct + 6 reflections + up to 5 diffraction).
+pub const MAX_PATHS: usize = 12;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Path data
@@ -48,6 +48,9 @@ pub struct PathContribution {
     pub delay_seconds: f32,
     /// Geometric gain factor (e.g., wall reflectivity for reflections, 1.0 for direct).
     pub gain: f32,
+    /// Which wall this reflection bounced off (0-5 for the 6 room faces).
+    /// `None` for direct paths and diffraction.
+    pub wall_index: Option<u8>,
 }
 
 /// Fixed-capacity set of propagation paths. No heap allocation.
@@ -71,6 +74,7 @@ impl PathSet {
                 distance: 0.0,
                 delay_seconds: 0.0,
                 gain: 0.0,
+                wall_index: None,
             }; MAX_PATHS],
             len: 0,
         }
@@ -106,11 +110,12 @@ impl PathSet {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Context for resolving propagation paths (geometry only).
-pub struct ResolveContext {
+pub struct ResolveContext<'a> {
     pub source_pos: Vec3,
     pub target_pos: Vec3,
     pub room_min: Vec3,
     pub room_max: Vec3,
+    pub barriers: &'a [Barrier],
 }
 
 /// Resolves propagation paths from source to target.
@@ -121,7 +126,54 @@ pub struct ResolveContext {
 /// - Future: ray-traced resolver, diffraction resolver
 pub trait PathResolver: Send {
     /// Compute propagation paths and write them into `out`.
-    fn resolve(&self, ctx: &ResolveContext, out: &mut PathSet);
+    fn resolve(&self, ctx: &ResolveContext<'_>, out: &mut PathSet);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wall materials
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Surface absorption coefficients at 6 octave bands (125, 250, 500, 1k, 2k, 4k Hz).
+///
+/// Values from Yeoward 2021 / ISO 11654. α ranges from 0.0 (fully reflective)
+/// to 1.0 (fully absorptive).
+#[derive(Clone, Debug)]
+pub struct WallMaterial {
+    pub name: &'static str,
+    /// Absorption coefficients at [125, 250, 500, 1000, 2000, 4000] Hz.
+    pub alpha: [f32; 6],
+}
+
+impl WallMaterial {
+    /// Hard wall (concrete/plaster). Yeoward 2021 Table 1.
+    pub fn hard_wall() -> Self {
+        Self {
+            name: "hard_wall",
+            alpha: [0.02, 0.02, 0.03, 0.04, 0.05, 0.05],
+        }
+    }
+
+    /// Carpet on concrete. Yeoward 2021 Table 1.
+    pub fn carpet() -> Self {
+        Self {
+            name: "carpet",
+            alpha: [0.02, 0.04, 0.08, 0.20, 0.35, 0.40],
+        }
+    }
+
+    /// Acoustic ceiling tile. Yeoward 2021 Table 1.
+    pub fn ceiling_tile() -> Self {
+        Self {
+            name: "ceiling_tile",
+            alpha: [0.20, 0.40, 0.70, 0.80, 0.60, 0.40],
+        }
+    }
+}
+
+impl Default for WallMaterial {
+    fn default() -> Self {
+        Self::hard_wall()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,6 +186,13 @@ pub struct PathEffectContext<'a> {
     pub atmosphere: &'a AtmosphericParams,
     pub ground: &'a GroundProperties,
     pub sample_rate: f32,
+    /// Source position (for geometry-dependent effects like ground reflection).
+    pub source_pos: atrium_core::types::Vec3,
+    /// Target/listener position.
+    pub target_pos: atrium_core::types::Vec3,
+    /// Wall materials for the 6 room faces (indexed by `path.wall_index`).
+    /// Order: -X, +X, -Y, +Y, -Z (floor), +Z (ceiling).
+    pub wall_materials: &'a [WallMaterial; 6],
 }
 
 /// Per-path audio effect (air absorption, propagation delay, etc.).
@@ -208,6 +267,7 @@ mod tests {
             distance: 5.0,
             delay_seconds: 0.0,
             gain: 1.0,
+            wall_index: None,
         });
         set.push(PathContribution {
             kind: PathKind::Reflection,
@@ -215,6 +275,7 @@ mod tests {
             distance: 8.0,
             delay_seconds: 0.009,
             gain: 0.9,
+            wall_index: Some(0),
         });
 
         assert_eq!(set.len(), 2);
@@ -233,6 +294,7 @@ mod tests {
                 distance: i as f32,
                 delay_seconds: 0.0,
                 gain: 1.0,
+                wall_index: None,
             });
         }
         assert_eq!(set.len(), MAX_PATHS);
@@ -247,6 +309,7 @@ mod tests {
             distance: 1.0,
             delay_seconds: 0.0,
             gain: 1.0,
+            wall_index: None,
         });
         assert_eq!(set.len(), 1);
         set.clear();

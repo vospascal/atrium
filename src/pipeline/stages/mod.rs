@@ -4,6 +4,8 @@
 //! `SourceStage` or `MixStage`.
 
 // MixStages (post-mix, whole-buffer)
+pub mod ambi_decode;
+pub mod ambi_multi_delay;
 pub mod delay_comp;
 pub mod fdn_reverb;
 pub mod lfe_crossover;

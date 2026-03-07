@@ -57,6 +57,10 @@ pub struct AudioScene {
     pub active_pipeline: RenderMode,
     /// Ground properties for pipeline propagation stages.
     pub ground: GroundProperties,
+    /// Barriers for occlusion/transmission in propagation.
+    pub barriers: Vec<crate::audio::propagation::Barrier>,
+    /// Wall materials for the 6 room faces (order: -X, +X, -Y, +Y, -Z, +Z).
+    pub wall_materials: [crate::pipeline::path::WallMaterial; 6],
 }
 
 impl AudioScene {
@@ -206,6 +210,8 @@ impl AudioScene {
                 ground: &self.ground,
                 room_min,
                 room_max,
+                barriers: &self.barriers,
+                wall_materials: &self.wall_materials,
             };
             render_pipeline(pipeline, &mut self.sources, &params, output);
         }

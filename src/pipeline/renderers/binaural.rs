@@ -20,7 +20,7 @@ use atrium_core::panner::distance_gain_at_model;
 use atrium_core::speaker::SpeakerLayout;
 use atrium_core::types::Vec3;
 
-use crate::pipeline::path::{PathKind, PathSet, MAX_PATHS};
+use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -219,6 +219,7 @@ impl Renderer for HrtfRenderer {
         ctx: &SourceContext,
         src_out: &SourceOutput,
         paths: &PathSet,
+        path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
     ) {
         let sofa = match &self.sofa {
@@ -318,11 +319,12 @@ impl Renderer for HrtfRenderer {
                 let prev_gain = self.sources[source_idx].paths[pi].prev_gain;
                 let tgt = target_gains[pi];
 
-                // Gain-ramp the base samples into mono_buf
+                // Gain-ramp the base samples into mono_buf, applying per-path effects.
                 for i in 0..block_len {
                     let t = (frame + i) as f32 * inv_frames;
                     let gain = prev_gain + (tgt - prev_gain) * t;
-                    self.mono_buf[i] = self.base_buf[i] * gain;
+                    let filtered = path_effects[pi].process_sample(self.base_buf[i]);
+                    self.mono_buf[i] = filtered * gain;
                 }
 
                 let active = self.sources[source_idx].paths[pi].active;

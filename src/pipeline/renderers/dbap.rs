@@ -12,7 +12,7 @@
 use atrium_core::dbap::{dbap_gains, DbapParams};
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
-use crate::pipeline::path::{PathKind, PathSet, MAX_PATHS};
+use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -45,6 +45,7 @@ impl Renderer for DbapRenderer {
         ctx: &SourceContext,
         src_out: &SourceOutput,
         paths: &PathSet,
+        path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
     ) {
         let path_slice = paths.as_slice();
@@ -80,7 +81,7 @@ impl Renderer for DbapRenderer {
             let t = frame as f32 * inv_frames;
             let raw = source.next_sample(out.sample_rate);
 
-            // Per-sample source stage DSP (air absorption filter, ground effect)
+            // Per-sample source stage DSP (ground effect, etc.)
             let mut sample = raw;
             for stage in source_stages.iter_mut() {
                 sample = stage.process_sample(sample);
@@ -92,7 +93,8 @@ impl Renderer for DbapRenderer {
             // Accumulate all propagation paths, each with its own DBAP gains.
             let base = frame * out.channels;
             for (pi, path) in path_slice.iter().enumerate() {
-                let path_sample = sample * path.gain;
+                let filtered = path_effects[pi].process_sample(sample);
+                let path_sample = filtered * path.gain;
                 for ch in 0..out.channels {
                     let gain = prev[pi][ch] + (target_gains[pi][ch] - prev[pi][ch]) * t;
                     out.buffer[base + ch] += path_sample * gain;

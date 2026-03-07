@@ -299,6 +299,19 @@ pub struct BarrierGeometry {
     pub barrier_top: Vec3,
 }
 
+/// A barrier obstacle defined in the room (wall, column, furniture).
+///
+/// The diffraction edge runs from `base` to `top`. For a simple wall,
+/// `base` is the floor-level edge point and `top` is the top-of-wall
+/// edge point nearest the source-receiver line of sight.
+#[derive(Clone, Copy, Debug)]
+pub struct Barrier {
+    /// Base of the diffraction edge (e.g., floor level).
+    pub base: Vec3,
+    /// Top of the diffraction edge (diffraction point).
+    pub top: Vec3,
+}
+
 /// Compute barrier (screening) attenuation in dB.
 ///
 /// Uses the Maekawa/ISO 9613-2 diffraction formula based on the Fresnel number.
@@ -352,6 +365,33 @@ pub struct BarrierGeometry {
 /// let atten = barrier_attenuation_db(&barrier, 1000.0);
 /// // Expect significant attenuation (wall blocks direct path)
 /// ```
+/// Determine the sign of the Fresnel number: +1.0 if the barrier top is above
+/// (or on) the source-receiver line of sight, -1.0 if below.
+///
+/// Projects the barrier top onto the source-receiver line and compares heights.
+/// This implements the ISO 9613-2 §7.4 sign convention where N > 0 means
+/// shadow zone and N < 0 means illuminated zone.
+fn barrier_sign(source: &Vec3, receiver: &Vec3, barrier_top: &Vec3) -> f32 {
+    // Parameter t: fraction along source→receiver line closest to barrier_top (in XY).
+    let sr = *receiver - *source;
+    let sb = *barrier_top - *source;
+    let sr_len_sq = sr.x * sr.x + sr.y * sr.y + sr.z * sr.z;
+    if sr_len_sq < 1e-10 {
+        return 1.0; // degenerate: source ≈ receiver
+    }
+    let t = (sb.x * sr.x + sb.y * sr.y + sb.z * sr.z) / sr_len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    // Height of LOS at parameter t.
+    let los_z = source.z + t * sr.z;
+
+    if barrier_top.z >= los_z {
+        1.0 // shadow zone (barrier above LOS)
+    } else {
+        -1.0 // illuminated zone (barrier below LOS)
+    }
+}
+
 pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
     /// Maximum single-barrier attenuation (ISO 9613-2 §7.4 note).
     /// Real-world single barriers rarely exceed 20-25 dB due to flanking.
@@ -364,11 +404,16 @@ pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
     let d_sb = barrier.source.distance_to(barrier.barrier_top); // source → barrier
     let d_br = barrier.barrier_top.distance_to(barrier.receiver); // barrier → receiver
 
-    // Path length difference (positive = barrier in shadow zone)
+    // Path length difference (always ≥ 0 by triangle inequality).
     let delta = d_sb + d_br - d_sr;
 
-    // Fresnel number
-    let n = 2.0 * delta / wavelength;
+    // ISO 9613-2 sign convention: N is negative when the barrier top is
+    // below the line of sight (illuminated zone). Determine sign by checking
+    // whether the barrier top is above or below the source-receiver line.
+    let sign = barrier_sign(&barrier.source, &barrier.receiver, &barrier.barrier_top);
+
+    // Fresnel number (signed)
+    let n = sign * 2.0 * delta / wavelength;
 
     if n < -0.05 {
         // Illuminated zone: line of sight is clear, negligible effect
@@ -400,7 +445,8 @@ pub fn fresnel_number(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
     let d_br = barrier.barrier_top.distance_to(barrier.receiver);
 
     let delta = d_sb + d_br - d_sr;
-    2.0 * delta / wavelength
+    let sign = barrier_sign(&barrier.source, &barrier.receiver, &barrier.barrier_top);
+    sign * 2.0 * delta / wavelength
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,6 +543,31 @@ pub fn ground_effect_gain(
 
     // Convert dB attenuation to linear gain.
     // ground_effect_db returns positive = loss, negative = gain,
+    // so gain = 10^(-avg_db / 20)
+    10.0_f32.powf(-avg_db / 20.0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Barrier — Real-time linear gain
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compute a broadband barrier attenuation as a linear gain multiplier.
+///
+/// Averages the ISO 9613-2 §7.4 barrier attenuation across octave bands
+/// (125 Hz – 4 kHz) and converts from dB to a linear amplitude factor.
+/// Same averaging approach as [`ground_effect_gain`].
+///
+/// Returns a gain in (0, 1.0]. 1.0 means no attenuation (barrier not in path
+/// or below line of sight).
+pub fn barrier_attenuation_gain(barrier: &BarrierGeometry) -> f32 {
+    const BANDS: &[f32] = &[125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
+    let sum_db: f32 = BANDS
+        .iter()
+        .map(|&f| barrier_attenuation_db(barrier, f))
+        .sum();
+    let avg_db = sum_db / BANDS.len() as f32;
+
+    // barrier_attenuation_db returns positive = loss,
     // so gain = 10^(-avg_db / 20)
     10.0_f32.powf(-avg_db / 20.0)
 }
@@ -681,6 +752,54 @@ mod tests {
         };
         let n = fresnel_number(&barrier, 1000.0);
         assert!(n > 0.0, "shadow zone should have positive N, got {n}");
+    }
+
+    // ── Barrier Attenuation Gain (broadband) ────────────────────────────
+
+    #[test]
+    fn barrier_gain_unobstructed_near_unity() {
+        // Barrier below line of sight → N < 0 → ~0 dB → gain ≈ 1.0
+        let barrier = BarrierGeometry {
+            source: Vec3::new(0.0, 0.0, 2.0),
+            receiver: Vec3::new(10.0, 0.0, 2.0),
+            barrier_top: Vec3::new(5.0, 0.0, 0.5), // well below LOS
+        };
+        let g = barrier_attenuation_gain(&barrier);
+        assert!(
+            (g - 1.0).abs() < 0.05,
+            "unobstructed barrier should give gain ≈ 1.0, got {g}"
+        );
+    }
+
+    #[test]
+    fn barrier_gain_shadow_zone_attenuates() {
+        let barrier = BarrierGeometry {
+            source: Vec3::new(0.0, 0.0, 0.0),
+            receiver: Vec3::new(10.0, 0.0, 0.0),
+            barrier_top: Vec3::new(5.0, 0.0, 3.0),
+        };
+        let g = barrier_attenuation_gain(&barrier);
+        assert!(
+            g < 0.5,
+            "shadow zone should attenuate significantly, got {g}"
+        );
+        assert!(g > 0.0, "gain should be positive, got {g}");
+    }
+
+    #[test]
+    fn barrier_gain_tall_barrier_near_minimum() {
+        // Very tall barrier → 25 dB cap → gain ≈ 10^(-25/20) ≈ 0.056
+        let barrier = BarrierGeometry {
+            source: Vec3::new(0.0, 0.0, 0.0),
+            receiver: Vec3::new(10.0, 0.0, 0.0),
+            barrier_top: Vec3::new(5.0, 0.0, 10.0),
+        };
+        let g = barrier_attenuation_gain(&barrier);
+        assert!(
+            g < 0.1,
+            "very tall barrier should give gain near minimum, got {g}"
+        );
+        assert!(g > 0.03, "gain should not be unreasonably small, got {g}");
     }
 
     // ── Total Attenuation ────────────────────────────────────────────────

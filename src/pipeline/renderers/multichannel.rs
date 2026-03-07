@@ -12,7 +12,7 @@
 
 use atrium_core::speaker::{RenderMode, SpeakerLayout, VbapLookup, MAX_CHANNELS};
 
-use crate::pipeline::path::{PathKind, PathSet, MAX_PATHS};
+use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -23,6 +23,13 @@ pub struct MultichannelRenderer {
     prev_gains: Vec<[[f32; MAX_CHANNELS]; MAX_PATHS]>,
     /// Pre-computed VBAP panning gains at 1° resolution for reflection paths.
     vbap_lut: Option<VbapLookup>,
+    /// Experimental: enable Gjørup et al. stereo polarity inversion.
+    /// Only applies to stereo (2-speaker) layouts on direct paths.
+    pub extended_vbap: bool,
+    /// Maximum extension as fraction of speaker span (0.0–0.6). Default: 0.4.
+    /// Gjørup et al. validated up to ~40% with 8 participants; beyond 0.6 the
+    /// polarity-inversion illusion breaks down.
+    pub vbap_extension: f32,
 }
 
 impl Default for MultichannelRenderer {
@@ -30,6 +37,8 @@ impl Default for MultichannelRenderer {
         Self {
             prev_gains: Vec::new(),
             vbap_lut: None,
+            extended_vbap: false,
+            vbap_extension: 0.4,
         }
     }
 }
@@ -50,6 +59,7 @@ impl Renderer for MultichannelRenderer {
         ctx: &SourceContext,
         _src_out: &SourceOutput,
         paths: &PathSet,
+        path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
     ) {
         let path_slice = paths.as_slice();
@@ -86,6 +96,16 @@ impl Renderer for MultichannelRenderer {
                     ctx.layout.apply_mask(&mut g);
                     g
                 }
+                _ if self.extended_vbap && ctx.layout.speaker_count() == 2 => {
+                    // Extended VBAP: allow polarity inversion for stereo (Gjørup et al.)
+                    let mut g = ctx.layout.compute_vbap_panning_extended(
+                        ctx.listener,
+                        path.direction,
+                        self.vbap_extension,
+                    );
+                    ctx.layout.apply_mask(&mut g);
+                    g
+                }
                 _ => {
                     // Reflection/diffraction: use LUT for fast angular panning
                     let mut g = if let Some(ref lut) = self.vbap_lut {
@@ -108,7 +128,7 @@ impl Renderer for MultichannelRenderer {
             let t = frame as f32 * inv_frames;
             let raw = source.next_sample(out.sample_rate);
 
-            // Per-sample source stage DSP (air absorption filter, ground effect)
+            // Per-sample source stage DSP (ground effect, etc.)
             let mut sample = raw;
             for stage in source_stages.iter_mut() {
                 sample = stage.process_sample(sample);
@@ -120,7 +140,9 @@ impl Renderer for MultichannelRenderer {
             // Accumulate all propagation paths, each with its own VBAP gains.
             let base = frame * out.channels;
             for (pi, path) in path_slice.iter().enumerate() {
-                let path_sample = sample * path.gain;
+                // Per-path effects (air absorption, etc.) — each path gets its own filter.
+                let filtered = path_effects[pi].process_sample(sample);
+                let path_sample = filtered * path.gain;
                 for ch in 0..out.channels {
                     let gain = prev[pi][ch] + (target_gains[pi][ch] - prev[pi][ch]) * t;
                     out.buffer[base + ch] += path_sample * gain;

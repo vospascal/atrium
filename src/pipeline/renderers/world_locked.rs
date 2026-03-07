@@ -9,7 +9,7 @@ use atrium_core::panner::{distance_gain_at_model, DistanceModelType};
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
 use crate::audio::propagation::ground_effect_gain;
-use crate::pipeline::path::PathSet;
+use crate::pipeline::path::{PathEffectChain, PathSet};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 use crate::pipeline::stages::air_absorption::AirAbsorptionFilter;
@@ -79,6 +79,7 @@ impl Renderer for WorldLockedRenderer {
         ctx: &SourceContext,
         _src_out: &SourceOutput,
         _paths: &PathSet,
+        _path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
     ) {
         let layout = ctx.layout;
