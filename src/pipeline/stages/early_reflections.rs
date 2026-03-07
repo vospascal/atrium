@@ -22,6 +22,9 @@ struct ReflectionTap {
     gain: f32,
 }
 
+/// Minimum listener movement (meters) before recomputing taps.
+const TAP_UPDATE_THRESHOLD: f32 = 0.1;
+
 /// Post-mix early reflections stage.
 pub struct EarlyReflectionsStage {
     buffers: Vec<Box<[f32; BUFFER_SIZE]>>,
@@ -31,6 +34,7 @@ pub struct EarlyReflectionsStage {
     initialized: bool,
     wet_gain: f32,
     wall_absorption: f32,
+    last_listener_pos: Vec3,
 }
 
 impl EarlyReflectionsStage {
@@ -46,6 +50,7 @@ impl EarlyReflectionsStage {
             initialized: false,
             wet_gain,
             wall_absorption,
+            last_listener_pos: Vec3::ZERO,
         }
     }
 
@@ -86,6 +91,7 @@ impl EarlyReflectionsStage {
         }
 
         self.tap_count = count;
+        self.last_listener_pos = listener_pos;
         self.initialized = true;
     }
 }
@@ -101,6 +107,18 @@ impl MixStage for EarlyReflectionsStage {
     }
 
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
+        // Recompute taps when listener moves beyond threshold
+        if self.initialized
+            && ctx.listener.position.distance_to(self.last_listener_pos) > TAP_UPDATE_THRESHOLD
+        {
+            self.compute_taps(
+                ctx.room_min,
+                ctx.room_max,
+                ctx.listener.position,
+                ctx.sample_rate,
+            );
+        }
+
         if !self.initialized || self.tap_count == 0 {
             return;
         }
