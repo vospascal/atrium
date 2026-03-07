@@ -1,14 +1,14 @@
-//! AmbisonicsRenderer — per-path FOA encode + decode gain ramp × sample per channel.
+//! AmbisonicsRenderer — per-path full 3D FOA encode + decode gain ramp × sample per channel.
 //!
 //! Used by Ambisonics mode. Iterates over propagation paths from the PathResolver.
-//! For the **direct path**, computes full FOA encoding (angular panning +
+//! For the **direct path**, computes full FOA encoding (azimuth + elevation +
 //! distance attenuation + directivity). For **reflection paths**, computes
 //! angular-only FOA encoding (direction from path.direction), with the
 //! reflection's energy carried by path.gain.
 //!
-//! Each path's B-format is decoded to speaker gains via FoaDecoder, then
-//! interpolated per-sample (click-free gain ramp). The decoder is rebuilt
-//! per-buffer because speaker azimuths are listener-relative.
+//! Each path's B-format (W, Y, Z, X) is decoded to speaker gains via FoaDecoder,
+//! then interpolated per-sample (click-free gain ramp). The decoder is rebuilt
+//! per-buffer because speaker angles are listener-relative.
 
 use atrium_core::ambisonics::{foa_encode, FoaDecoder};
 use atrium_core::directivity::directivity_gain;
@@ -78,12 +78,15 @@ impl Renderer for AmbisonicsRenderer {
         for (pi, path) in path_slice.iter().enumerate() {
             let bformat = match path.kind {
                 PathKind::Direct => {
-                    // Full encoding: azimuth + distance attenuation + directivity
+                    // Full encoding: azimuth + elevation + distance attenuation + directivity
                     let dx = ctx.source_pos.x - ctx.listener.position.x;
                     let dy = ctx.source_pos.y - ctx.listener.position.y;
+                    let dz = ctx.source_pos.z - ctx.listener.position.z;
                     let local_x = dx * cos_y + dy * sin_y; // forward
                     let local_y = -dx * sin_y + dy * cos_y; // left
                     let azimuth = local_y.atan2(local_x);
+                    let horiz = (local_x * local_x + local_y * local_y).sqrt();
+                    let elevation = dz.atan2(horiz);
 
                     let dist_gain = distance_gain_at_model(
                         ctx.listener.position,
@@ -101,14 +104,17 @@ impl Renderer for AmbisonicsRenderer {
                         ctx.source_directivity,
                     );
 
-                    foa_encode(azimuth, dist_gain * dir_gain)
+                    foa_encode(azimuth, elevation, dist_gain * dir_gain)
                 }
                 _ => {
                     // Reflection/diffraction: angular panning only, energy in path.gain
                     let local_x = path.direction.x * cos_y + path.direction.y * sin_y;
                     let local_y = -path.direction.x * sin_y + path.direction.y * cos_y;
+                    let local_z = path.direction.z;
                     let azimuth = local_y.atan2(local_x);
-                    foa_encode(azimuth, 1.0)
+                    let horiz = (local_x * local_x + local_y * local_y).sqrt();
+                    let elevation = local_z.atan2(horiz);
+                    foa_encode(azimuth, elevation, 1.0)
                 }
             };
 

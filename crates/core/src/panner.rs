@@ -4,7 +4,7 @@
 //   - HRTF binaural: hrtf crate (https://github.com/mrDIMAS/hrtf), fyrox-sound HRTF,
 //     web-audio-api-rs PannerNode (IRCAM LISTEN HRIR database)
 //   - 5.1 surround: VBAP panning (Pulkki 1997), see cubeb-rs for multichannel device routing
-//   - Ambisonics: encode sources → horizontal FOA (W,Y,X) → decode to 5.1 or binaural
+//   - Ambisonics: encode sources → FOA (W,Y,Z,X) → decode to 5.1 or binaural
 //
 // See REFERENCES.md for full list.
 

@@ -12,7 +12,7 @@
 //   4. Dbap — Distance-Based Amplitude Panning (Lossius 2009, improved 2021). All speakers
 //      active, gains weighted by inverse distance. Listener-independent. Valid layouts:
 //      stereo, quad, 5.1.
-//   5. Ambisonics — First-Order Ambisonics (FOA). Encodes sources into B-format (W, Y, X),
+//   5. Ambisonics — First-Order Ambisonics (FOA). Encodes sources into B-format (W, Y, Z, X),
 //      then decodes to any speaker layout via mode-matching pseudo-inverse decoder.
 //      Listener-relative. All speakers active. Valid layouts: stereo, quad, 5.1.
 //
