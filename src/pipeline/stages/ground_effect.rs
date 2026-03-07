@@ -16,8 +16,11 @@ pub struct GroundEffectStage;
 
 impl SourceStage for GroundEffectStage {
     fn process(&mut self, ctx: &SourceContext, output: &mut SourceOutput) {
+        let dx = ctx.source_pos.x - ctx.listener.position.x;
+        let dy = ctx.source_pos.y - ctx.listener.position.y;
+        let horizontal_dist = (dx * dx + dy * dy).sqrt();
         let gain = ground_effect_gain(
-            ctx.dist_to_listener,
+            horizontal_dist,
             ctx.source_pos.z.max(0.0),
             ctx.listener.position.z.max(0.0),
             ctx.ground,
@@ -53,9 +56,11 @@ impl GroundEffectPath {
 
 impl PathStage for GroundEffectPath {
     fn update(&mut self, ctx: &PathContext) {
-        let dist = ctx.source_pos.distance_to(ctx.target_pos);
+        let dx = ctx.source_pos.x - ctx.target_pos.x;
+        let dy = ctx.source_pos.y - ctx.target_pos.y;
+        let horizontal_dist = (dx * dx + dy * dy).sqrt();
         self.cached_gain = ground_effect_gain(
-            dist,
+            horizontal_dist,
             ctx.source_pos.z.max(0.0),
             ctx.target_pos.z.max(0.0),
             ctx.ground,
