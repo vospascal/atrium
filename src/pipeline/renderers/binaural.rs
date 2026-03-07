@@ -10,6 +10,7 @@ use atrium_core::listener::Listener;
 use atrium_core::speaker::SpeakerLayout;
 use atrium_core::types::Vec3;
 
+use crate::pipeline::path::PathSet;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -110,6 +111,7 @@ impl Renderer for HrtfRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         src_out: &SourceOutput,
+        _paths: &PathSet,
         out: &mut OutputBuffer,
     ) {
         let sofa = match &self.sofa {

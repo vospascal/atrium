@@ -1177,8 +1177,13 @@ pub fn render_pipeline(
     params: &RenderParams,
     output: &mut [f32],
 ) {
+    use self::path::PathResolver;
+    use self::path::{PathSet, ResolveContext};
+    use self::path_resolvers::DirectPathResolver;
     use crate::profile_span;
+
     let num_frames = output.len() / params.channels;
+    let resolver = DirectPathResolver;
 
     // Split borrow: source_stages and renderer are independent fields
     let RenderPipeline {
@@ -1220,6 +1225,18 @@ pub fn render_pipeline(
             layout: params.layout,
         };
 
+        // Resolve propagation paths for this source
+        let mut paths = PathSet::new();
+        {
+            let resolve_ctx = ResolveContext {
+                source_pos: pos,
+                target_pos: params.listener.position,
+                room_min: params.room_min,
+                room_max: params.room_max,
+            };
+            resolver.resolve(&resolve_ctx, &mut paths);
+        }
+
         // Buffer-rate source stages
         let mut src_out = SourceOutput::default_for(params.layout.total_channels());
         {
@@ -1245,6 +1262,7 @@ pub fn render_pipeline(
                 &mut stage_refs,
                 &ctx,
                 &src_out,
+                &paths,
                 &mut out,
             );
         }

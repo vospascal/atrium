@@ -8,6 +8,7 @@
 
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
+use crate::pipeline::path::PathSet;
 use crate::pipeline::path_stage::{PathContext, PathStage};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
@@ -48,6 +49,7 @@ impl Renderer for WorldLockedRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         _src_out: &SourceOutput,
+        _paths: &PathSet,
         out: &mut OutputBuffer,
     ) {
         let layout = ctx.layout;

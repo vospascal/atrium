@@ -6,6 +6,7 @@
 
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
+use crate::pipeline::path::PathSet;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -30,6 +31,7 @@ impl Renderer for DbapRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         _ctx: &SourceContext,
         src_out: &SourceOutput,
+        _paths: &PathSet,
         out: &mut OutputBuffer,
     ) {
         let inv_frames = 1.0 / out.num_frames as f32;

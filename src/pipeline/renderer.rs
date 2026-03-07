@@ -1,17 +1,20 @@
 //! Renderer trait — the mode-specific core of the pipeline.
 //!
 //! Handles how a mono source signal becomes multichannel output.
-//! Three implementations:
+//! Five implementations:
 //!
 //! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP)
 //! - **WorldLockedRenderer**: per-speaker PathStages + gain ramp (WorldLocked)
 //! - **HrtfRenderer**: HRTF FFT convolution to stereo headphones (Hrtf)
+//! - **DbapRenderer**: DBAP gain ramp × sample per channel (DBAP)
+//! - **AmbisonicsRenderer**: FOA decode + gain ramp (Ambisonics)
 //!
 //! The renderer owns PathStage instances and manages per-source state
 //! (gain ramps, HRTF convolvers, etc.).
 
 use atrium_core::speaker::SpeakerLayout;
 
+use super::path::PathSet;
 use super::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 /// Interleaved output buffer with format metadata.
@@ -25,6 +28,7 @@ pub struct OutputBuffer<'a> {
 /// Renders one source's samples into the output buffer.
 ///
 /// Called after all SourceStages have run for this source.
+/// Receives resolved propagation paths for the source.
 pub trait Renderer: Send {
     /// Render one source into the output buffer.
     ///
@@ -33,7 +37,9 @@ pub trait Renderer: Send {
     /// - `source_stages`: per-source stages for `process_sample()` in the inner loop
     /// - `ctx`: full source geometry (position, orientation, directivity)
     /// - `src_out`: gains/modifiers computed by SourceStages
+    /// - `paths`: resolved propagation paths (direct + reflections)
     /// - `out`: interleaved output buffer to accumulate into
+    #[allow(clippy::too_many_arguments)]
     fn render_source(
         &mut self,
         source_idx: usize,
@@ -41,6 +47,7 @@ pub trait Renderer: Send {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         src_out: &SourceOutput,
+        paths: &PathSet,
         out: &mut OutputBuffer,
     );
 

@@ -10,6 +10,7 @@
 use atrium_core::ambisonics::{BFormat, FoaDecoder};
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
+use crate::pipeline::path::PathSet;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 
@@ -40,6 +41,7 @@ impl Renderer for AmbisonicsRenderer {
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
         src_out: &SourceOutput,
+        _paths: &PathSet,
         out: &mut OutputBuffer,
     ) {
         // Rebuild decoder once per buffer with current listener position/yaw.
