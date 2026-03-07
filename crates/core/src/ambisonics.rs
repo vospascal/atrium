@@ -1002,6 +1002,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decoder_5_1_energy_variation() {
+        // Baseline energy variation for mode-matching on an asymmetric 5.1 layout.
+        // 5.1 has uneven angular spacing (60° front arc, 140° rear gap), so
+        // mode-matching produces more variation than on symmetric quad.
+        let azimuths = [
+            30.0_f32.to_radians(),
+            -30.0_f32.to_radians(),
+            0.0_f32.to_radians(),
+            110.0_f32.to_radians(),
+            -110.0_f32.to_radians(),
+        ];
+        let dec = FoaDecoder::new(&azimuths, &[0.0; 5], &[0, 1, 2, 4, 5]);
+
+        let mut energies = Vec::new();
+        for deg in (0..360).step_by(10) {
+            let az = (deg as f32).to_radians();
+            let b = foa_encode(az, 0.0, 1.0);
+            let g = dec.decode(&b);
+            let energy: f32 = [0, 1, 2, 4, 5]
+                .iter()
+                .map(|&ch| g.gains[ch] * g.gains[ch])
+                .sum();
+            energies.push((deg, energy));
+        }
+
+        let min_e = energies.iter().map(|e| e.1).fold(f32::MAX, f32::min);
+        let max_e = energies.iter().map(|e| e.1).fold(f32::MIN, f32::max);
+        let ratio_db = 10.0 * (max_e / min_e.max(1e-10)).log10();
+
+        // Mode-matching on 5.1 typically has ~6-9 dB energy variation.
+        // This test documents the baseline; AllRAD (4.6) should improve it.
+        assert!(max_e > 0.0, "decoder should produce nonzero energy");
+        assert!(
+            ratio_db < 12.0,
+            "mode-matching 5.1 energy variation {ratio_db:.1} dB exceeds 12 dB cap \
+             (min={min_e:.4} at {}°, max={max_e:.4} at {}°)",
+            energies
+                .iter()
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap()
+                .0,
+            energies
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap()
+                .0,
+        );
+
+        // Print baseline for reference (visible with cargo test -- --nocapture)
+        eprintln!(
+            "Mode-matching 5.1 energy: min={min_e:.4}, max={max_e:.4}, variation={ratio_db:.1} dB"
+        );
+    }
+
     // -- 3D decoder tests (elevated speakers → 4-channel path) --
 
     #[test]

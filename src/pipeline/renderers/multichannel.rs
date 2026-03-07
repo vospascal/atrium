@@ -10,7 +10,7 @@
 //! (click-free gain ramp). With `DirectPathResolver` (1 path, gain=1.0),
 //! output is identical to the pre-path architecture.
 
-use atrium_core::speaker::{RenderMode, SpeakerLayout, VbapLookup, MAX_CHANNELS};
+use atrium_core::speaker::{SpeakerLayout, VbapLookup, MAX_CHANNELS};
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
@@ -87,7 +87,6 @@ impl Renderer for MultichannelRenderer {
                         directivity: ctx.source_directivity,
                     };
                     let mut g = ctx.layout.compute_gains_with_spread(
-                        RenderMode::Vbap,
                         ctx.listener,
                         &source_spatial,
                         &dist_params,

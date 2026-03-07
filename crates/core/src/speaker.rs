@@ -1028,23 +1028,17 @@ impl SpeakerLayout {
         }
     }
 
-    /// Compute per-channel gains with MDAP support.
-    /// Uses spread > 0 for wider images, falls through to the given mode otherwise.
+    /// Compute VBAP gains with MDAP (Multiple Direction Amplitude Panning) support.
+    /// When spread > 0, pans to multiple directions for a wider image;
+    /// when spread == 0, falls through to standard VBAP.
     pub fn compute_gains_with_spread(
         &self,
-        mode: RenderMode,
         listener: &Listener,
         source: &SourceSpatial,
         distance: &DistanceParams,
         spread: f32,
     ) -> ChannelGains {
-        match mode {
-            RenderMode::WorldLocked
-            | RenderMode::Hrtf
-            | RenderMode::Dbap
-            | RenderMode::Ambisonics => self.compute_gains_stereo(listener, source, distance),
-            RenderMode::Vbap => self.compute_gains_mdap(listener, source, distance, spread),
-        }
+        self.compute_gains_mdap(listener, source, distance, spread)
     }
 }
 
