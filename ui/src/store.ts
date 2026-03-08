@@ -1,7 +1,7 @@
 import type {
   RoomDef, ListenerDef, DistanceModelDef, AtmosphereDef,
   Source, Speaker, SourceTelemetry, SceneStateMessage, SpeakerDef,
-  DirectivityPattern, SourceDef, RenderModeDef,
+  DirectivityPattern, SourceDef, RenderModeDef, ExperimentDef,
 } from './types.js';
 
 // Channel indices per channel mode (for speaker visibility in 3D view)
@@ -48,6 +48,9 @@ export class AtriumStore extends EventTarget {
   renderMode = 'vbap';
   channelMode = '5.1';
   renderModes: RenderModeDef[] = [];
+  experiments: ExperimentDef[] = [];
+  /** Active value per experiment name. */
+  experimentValues: Record<string, string> = {};
   masterGain = 0.7;
 
   sources: Source[] = [];
@@ -105,6 +108,15 @@ export class AtriumStore extends EventTarget {
     }
     if (msg.render_modes) {
       this.renderModes = msg.render_modes;
+    }
+    if (msg.experiments) {
+      this.experiments = msg.experiments;
+      // Default each experiment to its first value if not already set
+      for (const exp of msg.experiments) {
+        if (!this.experimentValues[exp.name] && exp.values.length > 0) {
+          this.experimentValues[exp.name] = exp.values[0];
+        }
+      }
     }
     if (msg.atmosphere) {
       this.atmosphere = { ...msg.atmosphere };
@@ -221,6 +233,12 @@ export class AtriumStore extends EventTarget {
   setAtmosphere(temperature: number, humidity: number) {
     this.atmosphere = { temperature_c: temperature, humidity_pct: humidity };
     this.send({ type: 'set_atmosphere', temperature, humidity });
+    this.emit('update');
+  }
+
+  setExperiment(name: string, value: string) {
+    this.experimentValues[name] = value;
+    this.send({ type: 'set_experiment', name, value });
     this.emit('update');
   }
 

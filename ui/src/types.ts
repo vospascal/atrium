@@ -57,6 +57,11 @@ export interface RenderModeDef {
   channel_modes: string[];
 }
 
+export interface ExperimentDef {
+  name: string;
+  values: string[];
+}
+
 export interface SceneStateMessage {
   type: 'scene_state';
   room: RoomDef;
@@ -66,6 +71,7 @@ export interface SceneStateMessage {
   render_mode: string;
   channel_mode: string;
   render_modes: RenderModeDef[];
+  experiments?: ExperimentDef[];
   atmosphere: AtmosphereDef;
   master_gain: number;
   distance_model: DistanceModelDef;

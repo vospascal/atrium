@@ -52,8 +52,13 @@ impl MixStage for AmbisonicsDecodeStage {
         let render_channels = ctx.render_channels;
 
         if speaker_count >= 3 {
-            let decoder =
-                AllRadDecoder::from_listener(ctx.layout.speakers(), speaker_count, ctx.listener);
+            // Always use EPAD (energy-preserving AllRAD) — equalizes energy
+            // across all source directions with no audible downside.
+            let decoder = AllRadDecoder::from_listener_epad(
+                ctx.layout.speakers(),
+                speaker_count,
+                ctx.listener,
+            );
 
             for frame in 0..num_frames {
                 let base = frame * ctx.channels;
@@ -72,7 +77,7 @@ impl MixStage for AmbisonicsDecodeStage {
                     .copy_from_slice(&decoded.gains[..render_channels]);
             }
         } else {
-            // 2-channel bilateral decode.
+            // 2-channel bilateral binaural decode.
             let bilateral = BilateralDecoder::new();
 
             for frame in 0..num_frames {
@@ -84,8 +89,7 @@ impl MixStage for AmbisonicsDecodeStage {
                     x: buffer[base + 3],
                 };
 
-                // Use a nominal distance for bilateral (no per-source info here).
-                let (l, r) = bilateral.decode_stereo(&bformat, 2.0);
+                let (l, r) = bilateral.decode_stereo(&bformat);
 
                 // Write stereo to channels 0-1, zero others.
                 buffer[base] = l;
@@ -146,6 +150,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+
             render_channels: 4,
         };
         stage.init(&ctx);
@@ -191,6 +196,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+
             render_channels: 4,
         };
         stage.init(&ctx);
@@ -226,6 +232,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
+
             render_channels: 2,
         };
         stage.init(&ctx);

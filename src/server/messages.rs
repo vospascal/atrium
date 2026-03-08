@@ -49,6 +49,11 @@ pub enum ClientMessage {
     #[serde(rename = "set_atmosphere")]
     SetAtmosphere { temperature: f32, humidity: f32 },
 
+    /// Set an experimental parameter by name and value.
+    /// e.g. {"type":"set_experiment","name":"some_knob","value":"option_a"}
+    #[serde(rename = "set_experiment")]
+    SetExperiment { name: String, value: String },
+
     /// Reset scene to initial state.
     #[serde(rename = "reset_scene")]
     ResetScene,
@@ -56,8 +61,9 @@ pub enum ClientMessage {
 
 impl ClientMessage {
     /// Convert a JSON client message into an engine Command.
-    pub fn into_command(self) -> Command {
-        match self {
+    /// Returns `None` for unrecognized experiments.
+    pub fn into_command(self) -> Option<Command> {
+        Some(match self {
             ClientMessage::SetListener { x, y, z, yaw } => Command::SetListenerPose {
                 position: Vec3::new(x, y, z),
                 yaw,
@@ -107,8 +113,12 @@ impl ClientMessage {
                 temperature_c: temperature.clamp(-20.0, 50.0),
                 humidity_pct: humidity.clamp(0.0, 100.0),
             },
+            ClientMessage::SetExperiment { name, value: _ } => {
+                eprintln!("Unknown experiment: {name}");
+                return None;
+            }
             ClientMessage::ResetScene => Command::ResetScene,
-        }
+        })
     }
 
     /// Returns true if this message should trigger re-sending the initial scene state.
@@ -163,7 +173,7 @@ mod tests {
             z: 3.0,
             yaw: 0.5,
         };
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetListenerPose { position, yaw } => {
                 assert!((position.x - 1.0).abs() < 1e-6);
@@ -209,7 +219,7 @@ mod tests {
             index: 0,
             muted: true,
         };
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetSourceMuted { index, muted } => {
                 assert_eq!(index, 0);
@@ -222,7 +232,7 @@ mod tests {
     #[test]
     fn into_command_clamps_gain() {
         let msg = ClientMessage::SetGain { gain: 5.0 };
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetMasterGain { gain } => {
                 assert!((gain - 1.0).abs() < 1e-6, "gain should clamp to 1.0");
@@ -235,7 +245,7 @@ mod tests {
     fn parse_set_render_mode_vbap() {
         let json = r#"{"type":"set_render_mode","mode":"vbap"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetRenderMode { mode } => {
                 assert_eq!(mode, RenderMode::Vbap);
@@ -248,7 +258,7 @@ mod tests {
     fn parse_set_render_mode_world_locked() {
         let json = r#"{"type":"set_render_mode","mode":"world_locked"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetRenderMode { mode } => {
                 assert_eq!(mode, RenderMode::WorldLocked);
@@ -261,7 +271,7 @@ mod tests {
     fn parse_set_render_mode_hrtf() {
         let json = r#"{"type":"set_render_mode","mode":"hrtf"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetRenderMode { mode } => {
                 assert_eq!(mode, RenderMode::Hrtf);
@@ -274,7 +284,7 @@ mod tests {
     fn parse_set_speaker_position() {
         let json = r#"{"type":"set_speaker_position","channel":2,"x":1.5,"y":3.0,"z":0.0}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetSpeakerPosition { channel, position } => {
                 assert_eq!(channel, 2);
@@ -289,7 +299,7 @@ mod tests {
     fn parse_set_atmosphere() {
         let json = r#"{"type":"set_atmosphere","temperature":25.0,"humidity":60.0}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetAtmosphere {
                 temperature_c,
@@ -308,7 +318,7 @@ mod tests {
             temperature: 100.0,
             humidity: -10.0,
         };
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetAtmosphere {
                 temperature_c,
@@ -332,7 +342,14 @@ mod tests {
         let json = r#"{"type":"reset_scene"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         assert!(msg.needs_scene_resend());
-        let cmd = msg.into_command();
+        let cmd = msg.into_command().unwrap();
         assert!(matches!(cmd, Command::ResetScene));
+    }
+
+    #[test]
+    fn set_experiment_unknown_returns_none() {
+        let json = r#"{"type":"set_experiment","name":"unknown_knob","value":"foo"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.into_command().is_none());
     }
 }

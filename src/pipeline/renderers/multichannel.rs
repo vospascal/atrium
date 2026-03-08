@@ -7,8 +7,10 @@
 //! with the reflection's energy carried by path.gain.
 //!
 //! Each path gets its own set of per-channel gains, interpolated per-sample
-//! (click-free gain ramp). With `DirectPathResolver` (1 path, gain=1.0),
-//! output is identical to the pre-path architecture.
+//! (click-free gain ramp over the buffer duration, typically 10.7ms at 512
+//! samples / 48kHz — within the 10–50ms range for zipper-free VBAP panning
+//! per Pulkki 1997 and Gandemer 2018). With `DirectPathResolver` (1 path,
+//! gain=1.0), output is identical to the pre-path architecture.
 
 use atrium_core::speaker::{SpeakerLayout, VbapLookup, MAX_CHANNELS};
 

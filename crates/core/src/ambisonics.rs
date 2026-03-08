@@ -481,10 +481,170 @@ impl AllRadDecoder {
         gains
     }
 
+    /// Build an AllRAD decoder with EPAD (Energy-Preserving AllRAD) correction.
+    ///
+    /// EPAD equalizes the singular values of the combined decode matrix via SVD,
+    /// so that energy is uniform across all source directions. Without EPAD, our
+    /// 5.1 layout shows ~3 dB energy variation; with EPAD this drops to ~0 dB.
+    ///
+    /// Reference: Zotter & Frank 2019, "Ambisonics" §4.9.4.
+    /// Algorithm: D_EPAD = U × (σ_mean × I) × Vᵀ, where USVᵀ = SVD(D_AllRAD).
+    pub fn from_listener_epad(
+        speakers: &[Speaker],
+        speaker_count: usize,
+        listener: &Listener,
+    ) -> Self {
+        let mut decoder = Self::from_listener(speakers, speaker_count, listener);
+        apply_epad(&mut decoder.decode_matrix);
+        decoder
+    }
+
     /// Number of real speakers in this decoder.
     pub fn speaker_count(&self) -> usize {
         self.decode_matrix.len()
     }
+}
+
+/// Apply EPAD (Energy-Preserving AllRAD) correction to a decode matrix.
+///
+/// Replaces all singular values with their mean, equalizing energy across
+/// source directions while preserving the spatial mapping.
+///
+/// For the N×4 decode matrix D:
+///   1. Compute Dᵀ×D (4×4 symmetric positive semi-definite)
+///   2. Eigendecompose via Jacobi rotations → V, λ
+///   3. σᵢ = √λᵢ, σ_mean = mean of non-zero σ
+///   4. D_EPAD = D × V × diag(σ_mean/σᵢ) × Vᵀ
+fn apply_epad(decode_matrix: &mut Vec<[f32; 4]>) {
+    let n = decode_matrix.len();
+    if n == 0 {
+        return;
+    }
+
+    // Compute Dᵀ×D (4×4)
+    let mut dtd = [[0.0f32; 4]; 4];
+    for k in 0..4 {
+        for l in k..4 {
+            let mut sum = 0.0f32;
+            for row in decode_matrix.iter() {
+                sum += row[k] * row[l];
+            }
+            dtd[k][l] = sum;
+            dtd[l][k] = sum;
+        }
+    }
+
+    let (eigenvectors, eigenvalues) = jacobi_eigen_4x4(&dtd);
+
+    // Singular values = √eigenvalues, compute mean of non-zero
+    let mut sigmas = [0.0f32; 4];
+    let mut sigma_sum = 0.0f32;
+    let mut count = 0;
+    for i in 0..4 {
+        sigmas[i] = eigenvalues[i].max(0.0).sqrt();
+        if sigmas[i] > 1e-6 {
+            sigma_sum += sigmas[i];
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    let sigma_mean = sigma_sum / count as f32;
+
+    // Scale factors: σ_mean / σᵢ
+    let mut scales = [0.0f32; 4];
+    for i in 0..4 {
+        scales[i] = if sigmas[i] > 1e-6 {
+            sigma_mean / sigmas[i]
+        } else {
+            0.0
+        };
+    }
+
+    // Apply: D_EPAD = D × V × diag(scales) × Vᵀ
+    let mut new_matrix = vec![[0.0f32; 4]; n];
+    for (i, new_row) in new_matrix.iter_mut().enumerate() {
+        for k in 0..4 {
+            let mut sum = 0.0f32;
+            for j in 0..4 {
+                // (D × V)[i][j] = Σ_l D[i][l] × V[l][j]
+                let dv: f32 = (0..4)
+                    .map(|l| decode_matrix[i][l] * eigenvectors[l][j])
+                    .sum();
+                // × scales[j] × Vᵀ[j][k] = V[k][j]
+                sum += dv * scales[j] * eigenvectors[k][j];
+            }
+            new_row[k] = sum;
+        }
+    }
+    *decode_matrix = new_matrix;
+}
+
+/// Jacobi eigendecomposition of a 4×4 symmetric matrix.
+///
+/// Returns (eigenvectors, eigenvalues) where eigenvectors[col][row] contains
+/// the eigenvector components. Converges in a few sweeps for small matrices.
+#[allow(clippy::needless_range_loop)]
+fn jacobi_eigen_4x4(matrix: &[[f32; 4]; 4]) -> ([[f32; 4]; 4], [f32; 4]) {
+    let mut a = *matrix;
+    let mut v = [[0.0f32; 4]; 4];
+    for i in 0..4 {
+        v[i][i] = 1.0;
+    }
+
+    // 20 sweeps is far more than needed for 4×4 convergence
+    for _ in 0..20 {
+        for p in 0..4 {
+            for q in (p + 1)..4 {
+                if a[p][q].abs() < 1e-12 {
+                    continue;
+                }
+
+                // Compute Jacobi rotation to zero a[p][q]
+                let tau = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+
+                // Update diagonal and zero the (p,q) pair
+                let app = a[p][p] - t * a[p][q];
+                let aqq = a[q][q] + t * a[p][q];
+                a[p][p] = app;
+                a[q][q] = aqq;
+                a[p][q] = 0.0;
+                a[q][p] = 0.0;
+
+                // Update off-diagonal elements in rows/columns p and q
+                for r in 0..4 {
+                    if r == p || r == q {
+                        continue;
+                    }
+                    let arp = a[r][p];
+                    let arq = a[r][q];
+                    a[r][p] = c * arp - s * arq;
+                    a[p][r] = a[r][p];
+                    a[r][q] = s * arp + c * arq;
+                    a[q][r] = a[r][q];
+                }
+
+                // Accumulate eigenvector rotations
+                for r in 0..4 {
+                    let vrp = v[r][p];
+                    let vrq = v[r][q];
+                    v[r][p] = c * vrp - s * vrq;
+                    v[r][q] = s * vrp + c * vrq;
+                }
+            }
+        }
+    }
+
+    let eigenvalues = [a[0][0], a[1][1], a[2][2], a[3][3]];
+    (v, eigenvalues)
 }
 
 /// Angle difference wrapped to [-π, π].
@@ -533,85 +693,44 @@ pub fn foa_rotate_z(b: &BFormat, angle: f32) -> BFormat {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bilateral Ambisonics Decoder (binaural / stereo headphone output)
+// Binaural Ambisonics Decoder (stereo headphone output)
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Default ear offset from head center: ~8.75cm (half of average head width ~17.5cm).
-/// Source: Algazi et al. (2001) KEMAR head model. This is used to compute the
-/// distance-dependent rotation angle δ = arctan(offset / distance), matching how
-/// acoustic parallax works: close sources → large δ → strong ITD, distant sources
-/// → δ ≈ 0 → both ears hear nearly the same angle.
-const DEFAULT_EAR_OFFSET_M: f32 = 0.0875;
 
 /// Bilateral ambisonics decoder for stereo headphone output.
 ///
-/// For each ear:
-/// 1. Rotate B-format by ±ear_angle (accounts for ear offset → ITD)
-/// 2. Decode using a cardioid pickup pattern pointing in each ear's direction
+/// Implements Bilateral Ambisonics (Ben-Hur et al. 2020): rotates B-format
+/// by ±π/2 (90°) per ear, aligning each ear's ipsilateral hemisphere with
+/// the "front" axis. The cardioid decode then naturally emphasizes sounds
+/// on each ear's side.
 ///
-/// The cardioid decode gives: mono = W/√2 + Y·sin(φ_ear) + X·cos(φ_ear)
-/// where φ_ear = ±π/2 (left/right). This produces:
-///   Left  ear: W/√2 + Y  (cardioid toward left)
-///   Right ear: W/√2 - Y  (cardioid toward right)
+/// Without HRTFs, we use forward-facing cardioid weights after rotation:
+///   left  = W/√2 × 0.5 + X' × 0.5
+///   right = W/√2 × 0.5 + X' × 0.5
+/// where X' is the rotated forward axis (was Y before ±90° rotation).
 ///
-/// The ear rotation before decoding introduces a subtle per-ear perspective
-/// shift that creates natural ITD cues.
-pub struct BilateralDecoder {
-    /// Rotation angle for ear offset (radians). Positive = left ear.
-    ear_angle: f32,
-}
+/// Reference: Ben-Hur et al. 2020, "Binaural Reproduction Based on
+/// Bilateral Ambisonics and Ear-Aligned HRTFs."
+#[derive(Clone, Copy)]
+pub struct BilateralDecoder;
 
 impl BilateralDecoder {
     pub fn new() -> Self {
-        Self {
-            ear_angle: DEFAULT_EAR_OFFSET_M,
-        }
-    }
-
-    /// Create with a specific ear offset in meters.
-    pub fn with_ear_offset(ear_offset_m: f32) -> Self {
-        Self {
-            ear_angle: ear_offset_m,
-        }
-    }
-
-    /// Compute the ear rotation angle for a source at the given distance.
-    /// δ = arctan(ear_offset / distance), clamped for very close sources.
-    fn ear_rotation(&self, source_distance: f32) -> f32 {
-        let dist = source_distance.max(0.1);
-        (self.ear_angle / dist).atan()
+        Self
     }
 
     /// Decode B-format to stereo (left, right) for headphone output.
-    ///
-    /// `source_distance` is used to scale the ear rotation angle — closer
-    /// sources produce larger ITD, matching natural acoustics.
-    pub fn decode_stereo(&self, bformat: &BFormat, source_distance: f32) -> (f32, f32) {
-        let delta = self.ear_rotation(source_distance);
-
-        // Rotate B-format to each ear's perspective
-        let b_left = foa_rotate_z(bformat, delta);
-        let b_right = foa_rotate_z(bformat, -delta);
-
-        // Cardioid decode weights, derived from virtual microphone pickup patterns:
-        //
-        // W × √2 × 0.5 — omnidirectional (pressure) component. The √2 undoes
-        //   SN3D normalization (W was encoded as g/√2). The 0.5 prevents clipping
-        //   when W and directional components align.
-        //
-        // ±Y × 0.5 — left-right component. +Y for left ear, -Y for right ear.
-        //   This is the primary ILD mechanism: a source to the left has positive Y,
-        //   so the left ear gets a boost and the right ear gets attenuation.
-        //
-        // X × 0.25 — frontal bias. Without this term, sources directly in front
-        //   and directly behind would produce identical L/R output (front-back
-        //   ambiguity). The X component breaks this symmetry — front sources get
-        //   a subtle boost in both ears. Weighted at 0.25 (half of Y) to keep it
-        //   secondary to the L/R separation.
+    pub fn decode_stereo(&self, bformat: &BFormat) -> (f32, f32) {
         let sqrt2 = std::f32::consts::SQRT_2;
-        let left = b_left.w * sqrt2 * 0.5 + b_left.y * 0.5 + b_left.x * 0.25;
-        let right = b_right.w * sqrt2 * 0.5 - b_right.y * 0.5 + b_right.x * 0.25;
 
+        // ±90° rotation aligns each ear's ipsilateral direction with "front" (X axis).
+        let b_left = foa_rotate_z(bformat, std::f32::consts::FRAC_PI_2);
+        let b_right = foa_rotate_z(bformat, -std::f32::consts::FRAC_PI_2);
+
+        // Forward-facing cardioid decode (X is primary after ±90° rotation):
+        //   W × √2 × 0.5 — omnidirectional pressure
+        //   X' × 0.5 — ipsilateral emphasis (was Y before rotation)
+        let left = b_left.w * sqrt2 * 0.5 + b_left.x * 0.5;
+        let right = b_right.w * sqrt2 * 0.5 + b_right.x * 0.5;
         (left, right)
     }
 }
@@ -1303,7 +1422,7 @@ mod tests {
     fn bilateral_front_source_balanced() {
         let bilateral = BilateralDecoder::new();
         let b = foa_encode(0.0, 0.0, 1.0); // front center
-        let (l, r) = bilateral.decode_stereo(&b, 2.0);
+        let (l, r) = bilateral.decode_stereo(&b);
         assert!(
             (l - r).abs() < 0.05,
             "bilateral front: L={l:.4} and R={r:.4} should be roughly equal"
@@ -1314,7 +1433,7 @@ mod tests {
     fn bilateral_left_source_louder_left() {
         let bilateral = BilateralDecoder::new();
         let b = foa_encode(FRAC_PI_2, 0.0, 1.0); // left
-        let (l, r) = bilateral.decode_stereo(&b, 2.0);
+        let (l, r) = bilateral.decode_stereo(&b);
         assert!(
             l > r,
             "bilateral left source: L={l:.4} should be louder than R={r:.4}"
@@ -1325,7 +1444,7 @@ mod tests {
     fn bilateral_right_source_louder_right() {
         let bilateral = BilateralDecoder::new();
         let b = foa_encode(-FRAC_PI_2, 0.0, 1.0); // right
-        let (l, r) = bilateral.decode_stereo(&b, 2.0);
+        let (l, r) = bilateral.decode_stereo(&b);
         assert!(
             r > l,
             "bilateral right source: R={r:.4} should be louder than L={l:.4}"
@@ -1333,30 +1452,21 @@ mod tests {
     }
 
     #[test]
-    fn bilateral_closer_source_wider_itd() {
-        let bilateral = BilateralDecoder::new();
-        let b = foa_encode(FRAC_PI_2, 0.0, 1.0); // left source
-
-        let (l_far, r_far) = bilateral.decode_stereo(&b, 5.0);
-        let (l_near, r_near) = bilateral.decode_stereo(&b, 0.5);
-
-        let ild_far = l_far - r_far;
-        let ild_near = l_near - r_near;
-        assert!(
-            ild_near.abs() > ild_far.abs(),
-            "closer source should have larger ILD: near={:.4}, far={:.4}",
-            ild_near,
-            ild_far
-        );
-    }
-
-    #[test]
     fn bilateral_nonzero_output() {
         let bilateral = BilateralDecoder::new();
         let b = foa_encode(0.5, 0.0, 1.0);
-        let (l, r) = bilateral.decode_stereo(&b, 2.0);
+        let (l, r) = bilateral.decode_stereo(&b);
         assert!(l.abs() > 0.01, "left output should be nonzero: {l}");
         assert!(r.abs() > 0.01, "right output should be nonzero: {r}");
+    }
+
+    #[test]
+    fn bilateral_strong_ild_at_90_deg() {
+        let bilateral = BilateralDecoder::new();
+        let b = foa_encode(FRAC_PI_2, 0.0, 1.0); // source at 90° left
+        let (l, r) = bilateral.decode_stereo(&b);
+        let ild = (l - r).abs();
+        assert!(ild > 0.5, "bilateral ILD at 90° too low: {ild:.4}");
     }
 
     #[test]
@@ -1390,6 +1500,133 @@ mod tests {
                 "virtual_count={count}: left source FL={:.3} should exceed FR={:.3}",
                 g_left.gains[0],
                 g_left.gains[1]
+            );
+        }
+    }
+
+    // -- Gotcha: independent channel compression destroys spatial image --
+    // (Zotter & Frank 2019: "NEVER compress individual Ambisonics channels
+    // independently — use omnidirectional channel as sidechain for all channels.")
+
+    #[test]
+    fn independent_channel_compression_destroys_direction() {
+        // Encode a source at 45° left.
+        let b = foa_encode(FRAC_PI_4, 0.0, 1.0);
+
+        // "Compress" only the Y channel (simulate independent dynamics).
+        // A compressor hitting Y harder than W/X shifts the perceived direction.
+        let b_compressed = BFormat {
+            w: b.w,
+            y: b.y * 0.5, // Y compressed by 6 dB independently
+            z: b.z,
+            x: b.x,
+        };
+
+        // Decode both with mode-matching on a 5.1 layout.
+        let speakers = test_5_1_speakers();
+        let listener = test_listener();
+        let dec = FoaDecoder::from_listener(&speakers, 6, &listener);
+
+        let g_original = dec.decode(&b);
+        let g_compressed = dec.decode(&b_compressed);
+
+        // The gain distributions should be measurably different — compressing
+        // Y independently shifts the spatial image (Zotter & Frank 2019).
+        let mut total_diff = 0.0_f32;
+        for ch in 0..6 {
+            total_diff += (g_original.gains[ch] - g_compressed.gains[ch]).abs();
+        }
+        assert!(
+            total_diff > 0.1,
+            "independent Y compression should change gain distribution, \
+             but total diff was only {total_diff:.4}"
+        );
+
+        // FL gain (ch0) should change — it carries the Y component most.
+        let fl_diff = (g_original.gains[0] - g_compressed.gains[0]).abs();
+        assert!(
+            fl_diff > 0.01,
+            "FL gain should shift when Y is compressed: \
+             original={:.4}, compressed={:.4}",
+            g_original.gains[0],
+            g_compressed.gains[0]
+        );
+    }
+
+    #[test]
+    fn epad_reduces_energy_variation() {
+        // EPAD should produce significantly more uniform energy than plain AllRAD.
+        let speakers = test_5_1_speakers();
+        let listener = test_listener();
+        let allrad = AllRadDecoder::from_listener(&speakers, 6, &listener);
+        let epad = AllRadDecoder::from_listener_epad(&speakers, 6, &listener);
+
+        let mut allrad_energies = Vec::new();
+        let mut epad_energies = Vec::new();
+
+        for deg in 0..360 {
+            let az = (deg as f32).to_radians();
+            let b = foa_encode(az, 0.0, 1.0);
+
+            let g_allrad = allrad.decode(&b);
+            let e_allrad: f32 = (0..6).map(|ch| g_allrad.gains[ch].powi(2)).sum();
+            allrad_energies.push(e_allrad);
+
+            let g_epad = epad.decode(&b);
+            let e_epad: f32 = (0..6).map(|ch| g_epad.gains[ch].powi(2)).sum();
+            epad_energies.push(e_epad);
+        }
+
+        let allrad_min = allrad_energies.iter().cloned().fold(f32::MAX, f32::min);
+        let allrad_max = allrad_energies.iter().cloned().fold(f32::MIN, f32::max);
+        let allrad_db = 10.0 * (allrad_max / allrad_min.max(1e-10)).log10();
+
+        let epad_min = epad_energies.iter().cloned().fold(f32::MAX, f32::min);
+        let epad_max = epad_energies.iter().cloned().fold(f32::MIN, f32::max);
+        let epad_db = 10.0 * (epad_max / epad_min.max(1e-10)).log10();
+
+        eprintln!("AllRAD energy variation: {allrad_db:.2} dB");
+        eprintln!("EPAD   energy variation: {epad_db:.2} dB");
+
+        // EPAD should be strictly better than AllRAD
+        assert!(
+            epad_db < allrad_db,
+            "EPAD ({epad_db:.2} dB) should have less variation than AllRAD ({allrad_db:.2} dB)"
+        );
+        // EPAD should get energy variation under 1 dB
+        assert!(
+            epad_db < 1.0,
+            "EPAD energy variation {epad_db:.2} dB exceeds 1 dB target"
+        );
+    }
+
+    #[test]
+    fn uniform_compression_preserves_direction() {
+        // Same source at 45° left, but compress ALL channels equally.
+        let b = foa_encode(FRAC_PI_4, 0.0, 1.0);
+        let gain = 0.5; // 6 dB uniform compression
+        let b_compressed = BFormat {
+            w: b.w * gain,
+            y: b.y * gain,
+            z: b.z * gain,
+            x: b.x * gain,
+        };
+
+        let speakers = test_5_1_speakers();
+        let listener = test_listener();
+        let dec = FoaDecoder::from_listener(&speakers, 6, &listener);
+
+        let g_original = dec.decode(&b);
+        let g_compressed = dec.decode(&b_compressed);
+
+        // Per-channel gain ratios should be identical (direction preserved).
+        for ch in 0..6 {
+            let ratio_orig = g_original.gains[ch] / (g_original.gains[0] + 1e-10);
+            let ratio_comp = g_compressed.gains[ch] / (g_compressed.gains[0] + 1e-10);
+            assert!(
+                (ratio_orig - ratio_comp).abs() < 0.01,
+                "ch{ch}: uniform compression should preserve gain ratios: \
+                 orig={ratio_orig:.4}, comp={ratio_comp:.4}"
             );
         }
     }

@@ -1046,12 +1046,16 @@ impl SpeakerLayout {
 
 const LUT_SIZE: usize = 360;
 
-/// Pre-computed VBAP gains at 1° azimuth resolution.
+/// Pre-computed VBAP gains at 1° azimuth resolution (Shukla 2019).
 ///
 /// Eliminates per-source speaker-pair search + matrix inversion on the audio
 /// thread. Build once per buffer (or when listener moves), then index by
 /// azimuth angle. With the path architecture (7 VBAP evaluations per source),
 /// this is ~7× fewer trig + linear-algebra ops per source.
+///
+/// 1° resolution matches Shukla's implementation on Bela Mini (ARM Cortex-A8),
+/// where VBAP outperformed FOA for both ITD error (150 vs 202 μs) and ILD
+/// error (3.18 vs 4.69 dB).
 pub struct VbapLookup {
     entries: Vec<ChannelGains>,
     total_channels: usize,
@@ -1968,5 +1972,71 @@ mod tests {
                 ch
             );
         }
+    }
+
+    // -- Gotcha: VBAP magnetization effect (Gandemer 2018) --
+    // Sources "snap" toward speaker positions during movement. Mitigation:
+    // denser speaker arrays or gain interpolation at <= 10ms intervals.
+    // This test verifies that gains change smoothly (monotonically) when
+    // panning between two speakers — no sudden jumps or plateaus.
+
+    #[test]
+    fn vbap_gains_no_large_discontinuities() {
+        // Verify VBAP gains don't have sudden jumps when sweeping between speakers.
+        // Small bumps are expected (magnetization effect — Gandemer 2018: sources
+        // "snap" toward speaker positions), but large discontinuities (> 0.15)
+        // would indicate a broken speaker-pair selection.
+        let layout = SpeakerLayout::new(
+            &[
+                Speaker {
+                    position: Vec3::new(-1.0, 1.0, 0.0),
+                    channel: 0,
+                },
+                Speaker {
+                    position: Vec3::new(1.0, 1.0, 0.0),
+                    channel: 1,
+                },
+            ],
+            None,
+            2,
+        );
+        let listener = Listener::new(Vec3::new(0.0, 0.0, 0.0), 0.0);
+
+        let steps = 90;
+        let mut prev_gains = [0.0_f32; 2];
+        let mut max_jump = 0.0_f32;
+
+        for step in 0..=steps {
+            let angle =
+                std::f32::consts::FRAC_PI_2 - (step as f32 / steps as f32) * std::f32::consts::PI;
+            let direction = Vec3::new(angle.sin(), angle.cos(), 0.0);
+            let gains = layout.compute_vbap_panning(&listener, direction);
+
+            if step > 0 {
+                for ch in 0..2 {
+                    let jump = (gains.gains[ch] - prev_gains[ch]).abs();
+                    max_jump = max_jump.max(jump);
+                    assert!(
+                        jump < 0.15,
+                        "step {step} ch{ch}: gain discontinuity {jump:.4} \
+                         ({:.4} -> {:.4}) — possible broken pair selection",
+                        prev_gains[ch],
+                        gains.gains[ch]
+                    );
+                }
+            }
+
+            prev_gains = [gains.gains[0], gains.gains[1]];
+        }
+
+        // Energy should be roughly preserved across the sweep.
+        // At endpoints: one speaker at ~1.0. At midpoint: both at ~0.707.
+        let midpoint_dir = Vec3::new(0.0, 1.0, 0.0);
+        let mid_gains = layout.compute_vbap_panning(&listener, midpoint_dir);
+        let energy: f32 = mid_gains.gains[..2].iter().map(|g| g * g).sum();
+        assert!(
+            (energy - 1.0).abs() < 0.1,
+            "midpoint energy {energy:.4} should be ~1.0 (energy preservation)"
+        );
     }
 }

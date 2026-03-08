@@ -113,14 +113,15 @@ fn handle_websocket(
                 Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(client_msg) => {
                         let resend = client_msg.needs_scene_resend();
-                        let cmd = client_msg.into_command();
-                        match producer.lock() {
-                            Ok(mut prod) => {
-                                if prod.push(cmd).is_err() {
-                                    eprintln!("command queue full, dropping command");
+                        if let Some(cmd) = client_msg.into_command() {
+                            match producer.lock() {
+                                Ok(mut prod) => {
+                                    if prod.push(cmd).is_err() {
+                                        eprintln!("command queue full, dropping command");
+                                    }
                                 }
+                                Err(e) => eprintln!("command producer mutex poisoned: {e}"),
                             }
-                            Err(e) => eprintln!("command producer mutex poisoned: {e}"),
                         }
                         if resend && !initial_state.is_empty() {
                             let _ = ws.send(Message::Text(initial_state.into()));

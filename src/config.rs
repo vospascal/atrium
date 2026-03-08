@@ -255,7 +255,7 @@ pub enum ProcessorConfig {
     #[serde(rename = "ambi_multi_delay")]
     AmbiMultiDelay {
         #[serde(default = "default_ambi_wet")]
-        wet_gain: f32,
+        ambi_multi_delay: f32,
     },
 }
 
@@ -275,7 +275,7 @@ fn default_fdn_rt60_high() -> f32 {
     0.3
 }
 fn default_ambi_wet() -> f32 {
-    0.3
+    PipelineParams::DEFAULT_AMBI_WET_GAIN
 }
 
 #[derive(Deserialize)]
@@ -408,8 +408,8 @@ impl SceneConfig {
                     } => {
                         fdn_params = (*wet_gain, *rt60_low, *rt60_high);
                     }
-                    ProcessorConfig::AmbiMultiDelay { wet_gain } => {
-                        ambi_wet_gain = *wet_gain;
+                    ProcessorConfig::AmbiMultiDelay { ambi_multi_delay } => {
+                        ambi_wet_gain = *ambi_multi_delay;
                     }
                 }
             }
@@ -625,6 +625,7 @@ impl SceneConfig {
                 "humidity_pct": atmosphere.humidity_pct,
                 "pressure_kpa": atmosphere.pressure_kpa,
             },
+            "experiments": [],
         })
         .to_string()
     }

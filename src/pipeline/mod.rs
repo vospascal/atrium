@@ -48,7 +48,7 @@
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
 //!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: AmbisonicsRenderer (per-path FOA encode + decode)
-//!     mix_stages: [AmbiMultiDelay, AmbiDecode, LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
+//!     mix_stages: [AmbiMultiDelay, AmbiDecode, LfeCrossover, DelayComp(listener), MasterGain]
 //! }
 //! ```
 
@@ -92,6 +92,20 @@ use self::stages::master_gain::MasterGainStage;
 // Rendering approach. Determines which pipeline runs.
 // RenderMode (atrium_core::speaker): WorldLocked, Vbap, Hrtf, Dbap, Ambisonics.
 // index() and ALL defined on RenderMode. Used as pipeline array index.
+//
+// VBAP vs Ambisonics decision rationale (BBC WHP254, Gandemer 2018, Malecki 2024):
+//
+//   Off-centre listening: VBAP wins (graceful degradation; Ambisonics needs 4th+ order to match)
+//   Trajectory smoothness: Ambisonics wins (VBAP has magnetization effect — sources snap to speakers)
+//   Localization accuracy: VBAP wins at center with good layout; comparable at 3rd+ order Ambisonics
+//   Computational cost: VBAP lower (2–3 speakers active vs all speakers)
+//   Arbitrary layouts: VBAP wins natively; Ambisonics needs AllRAD for irregular arrays
+//   Source width control: VBAP manual (MDAP); Ambisonics natural (order-dependent)
+//   5.1 without height: No significant difference (Malecki 2024); Atmos only wins on 7.1.4
+//
+// We support both because the use cases differ: VBAP for multi-listener 5.1 speaker
+// arrays (off-centre robustness matters), Ambisonics for FOA scenes and spatial effects
+// (multi-delay, rotation operate natively in B-format domain).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SourceStageBank — factory-managed per-source instances
@@ -265,6 +279,10 @@ pub struct PipelineParams {
     pub ambi_wet_gain: f32,
 }
 
+impl PipelineParams {
+    pub const DEFAULT_AMBI_WET_GAIN: f32 = 0.15;
+}
+
 impl Default for PipelineParams {
     fn default() -> Self {
         Self {
@@ -277,7 +295,7 @@ impl Default for PipelineParams {
             fdn_rt60_high: 0.3,
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
-            ambi_wet_gain: 0.3,
+            ambi_wet_gain: Self::DEFAULT_AMBI_WET_GAIN,
         }
     }
 }
@@ -451,11 +469,6 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             Box::new(AmbisonicsDecodeStage::new()),
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
-            Box::new(FdnReverbStage::new(
-                p.fdn_wet_gain,
-                p.fdn_rt60_low,
-                p.fdn_rt60_high,
-            )),
             Box::new(MasterGainStage),
         ],
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),

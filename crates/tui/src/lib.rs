@@ -34,6 +34,10 @@ pub struct ChannelStatus {
     pub peak_db: f32,
 }
 
+/// Active experimental parameters for display.
+#[derive(Clone, Debug, Default)]
+pub struct ExperimentStatus {}
+
 /// Terminal dashboard that updates in place.
 pub struct Dashboard {
     info: DeviceInfo,
@@ -57,7 +61,12 @@ impl Dashboard {
     }
 
     /// Render one frame of the dashboard. Call at ~15 Hz from the telemetry loop.
-    pub fn update(&mut self, sources: &[SourceStatus], channels: &[ChannelStatus]) {
+    pub fn update(
+        &mut self,
+        sources: &[SourceStatus],
+        channels: &[ChannelStatus],
+        _experiments: &ExperimentStatus,
+    ) {
         let mut out = io::stdout();
 
         // Move cursor up to overwrite previous frame

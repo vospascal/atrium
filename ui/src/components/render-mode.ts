@@ -28,6 +28,15 @@ export class RenderMode extends LitElement {
     }
     .ch-btn:hover { border-color: #777; color: #aaa; }
     .ch-btn.active { border-color: #66bb6a; color: #66bb6a; background: rgba(102,187,106,0.1); }
+    .exp-section { margin-top: 6px; }
+    .exp-label { font-size: 10px; color: #777; margin-bottom: 2px; }
+    .exp-btns { display: flex; gap: 3px; flex-wrap: wrap; }
+    .exp-btn {
+      background: none; border: 1px solid #444; color: #777; font-size: 9px;
+      padding: 2px 6px; border-radius: 3px; cursor: pointer; font-family: inherit;
+    }
+    .exp-btn:hover { border-color: #777; color: #aaa; }
+    .exp-btn.active { border-color: #ce93d8; color: #ce93d8; background: rgba(206,147,216,0.1); }
   `;
 
   private _ctrl = new StoreController(this);
@@ -44,10 +53,15 @@ export class RenderMode extends LitElement {
     this.store.setChannelMode(mode);
   }
 
+  private _onExperimentClick(name: string, value: string) {
+    this.store.setExperiment(name, value);
+  }
+
   render() {
     const modes = this.store?.renderModes ?? [];
     const current = modes.find(m => m.mode === this.store?.renderMode);
     const channelModes = current?.channel_modes ?? [];
+    const experiments = this.store?.experiments ?? [];
     return html`
       <h3>Render Mode</h3>
       <div class="mode-btns">
@@ -64,6 +78,17 @@ export class RenderMode extends LitElement {
           `)}
         </div>
       ` : ''}
+      ${experiments.map(exp => html`
+        <div class="exp-section">
+          <div class="exp-label">${exp.name}</div>
+          <div class="exp-btns">
+            ${exp.values.map(v => html`
+              <button class="exp-btn ${this.store?.experimentValues[exp.name] === v ? 'active' : ''}"
+                @click=${() => this._onExperimentClick(exp.name, v)}>${v}</button>
+            `)}
+          </div>
+        </div>
+      `)}
     `;
   }
 }

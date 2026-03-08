@@ -126,7 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         atrium_tui::ChannelStatus { peak_db }
                     })
                     .collect();
-                dash.update(&statuses, &channel_statuses);
+                let experiments = atrium_tui::ExperimentStatus::default();
+                dash.update(&statuses, &channel_statuses, &experiments);
             }
         }
     });

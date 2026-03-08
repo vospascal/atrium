@@ -27,6 +27,7 @@ use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
 const BLOCK_SIZE: usize = 128;
 const FILTER_UPDATE_INTERVAL: usize = 4;
 /// Ring buffer size for per-ear ITD delay. Max human ITD ≈ 0.7ms = 34 samples @ 48kHz.
+/// Perceptual reference: ITD JND ≈ 90μs, ILD JND ≈ 2.5 dB (BBC WHP254).
 const DELAY_BUF_SIZE: usize = 64;
 const DELAY_BUF_MASK: usize = DELAY_BUF_SIZE - 1;
 

@@ -144,7 +144,7 @@ impl Renderer for AmbisonicsRenderer {
 
             self.prev_bformat[source_idx] = target_bf;
         } else {
-            // 2ch: inline bilateral ambisonics decode.
+            // 2ch: inline binaural ambisonics decode.
             let bilateral = match &self.bilateral {
                 Some(b) => b,
                 None => return,
@@ -153,7 +153,7 @@ impl Renderer for AmbisonicsRenderer {
             let mut target_stereo = [[0.0f32; 2]; MAX_PATHS];
             for (pi, path) in path_slice.iter().enumerate() {
                 let bformat = encode_path(path.kind, path.direction, ctx, cos_y, sin_y);
-                let (l, r) = bilateral.decode_stereo(&bformat, path.distance.max(0.5));
+                let (l, r) = bilateral.decode_stereo(&bformat);
                 target_stereo[pi] = [l, r];
             }
 
