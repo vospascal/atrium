@@ -4,15 +4,6 @@
 
 # Image-source early reflections (Allen & Berkley 1979)
 # Simulates first-order wall reflections — gives the brain cues about room size.
+# Reflection gain is physics-based: √wall_reflectivity × distance model.
 - type: early_reflections
-  wet_gain: 0.5            # reflection mix level (0.0–1.0, typical 0.3–0.5)
-  wall_reflectivity: 0.9   # wall reflectivity (0.0 = absorbs all, 1.0 = perfect mirror)
-
-# Feedback Delay Network reverb (8-line)
-# Simulates late diffuse reverberation — the "tail" after early reflections.
-# Used by VBAP, HRTF, and other non-Ambisonics pipelines.
-- type: fdn_reverb
-  wet_gain: 0.2            # reverb mix level (0.0–1.0, typical 0.15–0.3 for small rooms)
-  rt60_low: 0.8            # low-frequency decay time in seconds
-  rt60_high: 0.3           # high-frequency decay time (always <= rt60_low)
-
+  wall_reflectivity: 0.9  # fraction of energy reflected per bounce (0.0–1.0)

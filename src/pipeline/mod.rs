@@ -48,7 +48,7 @@
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
 //!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: AmbisonicsRenderer (per-path FOA encode + decode)
-//!     mix_stages: [AmbiMultiDelay, AmbiDecode, LfeCrossover, DelayComp(listener), MasterGain]
+//!     mix_stages: [AmbiDecorrelation, AmbiDecode, FdnReverb, LfeCrossover, DelayComp(listener), MasterGain]
 //! }
 //! ```
 
@@ -63,6 +63,11 @@ pub mod source_stage;
 pub mod stages;
 
 use atrium_core::speaker::SpeakerLayout;
+
+/// Default wall reflectivity: 0.0 — outdoor scene with no enclosing walls.
+/// Reflections and reverb only activate when a room config is loaded
+/// (e.g. `processors/small_room.yaml` sets wall_reflectivity: 0.9).
+pub const DEFAULT_WALL_REFLECTIVITY: f32 = 0.0;
 
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
@@ -209,9 +214,10 @@ pub struct RenderPipeline {
     /// HRTF sets this to 2 so post-mix stages like FDN reverb don't spread
     /// wet signal to channels the renderer never wrote to.
     pub render_channels: usize,
-    /// Pre-allocated reverb send buffer (same size as output).
-    /// Written by the renderer with distance-weighted per-source FOA signal,
-    /// read by the FDN as its delay line injection input.
+    /// Pre-allocated late-reverb send buffer (same interleaved layout as output).
+    /// For generic FDN modes (HRTF, VBAP, DBAP), channel 0 carries a mono send bus.
+    /// For Ambisonics, the renderer writes a full FOA B-format layout.
+    /// Read by the FDN stage as its delay line injection input.
     pub reverb_send_buffer: Vec<f32>,
     /// Wall reflectivity for critical distance computation.
     pub wall_reflectivity: f32,
@@ -273,11 +279,7 @@ impl RenderPipeline {
 pub struct PipelineParams {
     pub sample_rate: f32,
     pub hrtf_path: String,
-    pub er_wet_gain: f32,
     pub er_wall_reflectivity: f32,
-    pub fdn_wet_gain: f32,
-    pub fdn_rt60_low: f32,
-    pub fdn_rt60_high: f32,
     pub distance_model: DistanceModel,
     /// DBAP rolloff in dB per doubling of distance.
     /// 6.0 = free-field inverse distance law, 3–5 dB for reverberant spaces.
@@ -289,11 +291,7 @@ impl Default for PipelineParams {
         Self {
             sample_rate: 48000.0,
             hrtf_path: "assets/hrtf/default.sofa".into(),
-            er_wet_gain: 0.4,
-            er_wall_reflectivity: 0.9,
-            fdn_wet_gain: 0.2,
-            fdn_rt60_low: 0.8,
-            fdn_rt60_high: 0.3,
+            er_wall_reflectivity: DEFAULT_WALL_REFLECTIVITY,
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
         }
@@ -324,7 +322,6 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
                 max_distance: distance_model.max_distance,
                 rolloff: distance_model.rolloff,
                 model: distance_model.model,
-                wet_gain: p.er_wet_gain,
                 wall_reflectivity: p.er_wall_reflectivity,
             },
         )),
@@ -353,11 +350,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
-            Box::new(FdnReverbStage::new(
-                p.fdn_wet_gain,
-                p.fdn_rt60_low,
-                p.fdn_rt60_high,
-            )),
+            Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
         ],
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
@@ -392,14 +385,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
         // HRTF: no source stages — air absorption and ground effect are per-path PathEffects.
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sample_rate)),
-        mix_stages: vec![
-            Box::new(FdnReverbStage::new(
-                p.fdn_wet_gain,
-                p.fdn_rt60_low,
-                p.fdn_rt60_high,
-            )),
-            Box::new(MasterGainStage),
-        ],
+        mix_stages: vec![Box::new(FdnReverbStage::new()), Box::new(MasterGainStage)],
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
@@ -438,6 +424,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
         mix_stages: vec![
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::static_calibration()),
+            Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
         ],
         resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
@@ -473,8 +460,9 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(AmbisonicsRenderer::new()),
         mix_stages: vec![
-            Box::new(AmbiMultiDelayStage::new(wall_reflectivity)),
+            Box::new(AmbiMultiDelayStage::new()),
             Box::new(AmbisonicsDecodeStage::new()),
+            Box::new(FdnReverbStage::new()),
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
             Box::new(MasterGainStage),
@@ -692,6 +680,7 @@ pub fn render_pipeline(
         master_gain: params.master_gain,
         render_channels: effective_render_channels,
         reverb_input: Some(reverb_send_buffer),
+        wall_reflectivity: *wall_reflectivity,
     };
     {
         let _s = profile_span!("mix_stages").entered();
@@ -1772,5 +1761,134 @@ mod tests {
             SURROUND_SILENT,
             "Ambisonics×5.1",
         );
+    }
+
+    // ── Energy probe: reflections should never exceed direct ──────────────
+
+    /// For each mode with image-source reflections (VBAP, HRTF, DBAP, Ambisonics),
+    /// render a constant source and verify that the total reflection energy does
+    /// not exceed the direct signal energy. This guards against the reflection
+    /// gain formula producing too-hot wall bounces.
+    #[test]
+    fn reflection_energy_bounded_by_direct() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+        let wall_materials = default_wall_materials();
+
+        let source_pos = Vec3::new(4.5, 2.0, 0.0); // 1.5m from listener
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let channels = 6;
+        let frames = 4096;
+
+        // Use the actual atrium room bounds
+        let room_min = Vec3::new(0.0, 0.0, 0.0);
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+
+        let render_mode = |mode: RenderMode, reflectivity: f32| -> Vec<f32> {
+            let params = PipelineParams {
+                er_wall_reflectivity: reflectivity,
+                ..PipelineParams::default()
+            };
+            let mut pipeline = match mode {
+                RenderMode::Vbap => build_vbap(&params),
+                RenderMode::Hrtf => build_hrtf(&params),
+                RenderMode::Dbap => build_dbap(&params),
+                RenderMode::Ambisonics => build_ambisonics(&params),
+                _ => return vec![],
+            };
+            pipeline.ensure_topology(1, &layout, 48000.0);
+            let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+                pos: source_pos,
+                val: 1.0,
+            })];
+            let mut buffer = vec![0.0f32; frames * channels];
+            let rp = RenderParams {
+                listener: &listener,
+                channels,
+                sample_rate: 48000.0,
+                master_gain: 1.0,
+                distance_model: &dm,
+                layout: &layout,
+                atmosphere: &atm,
+                ground: &ground,
+                room_min,
+                room_max,
+                barriers: &[],
+                wall_materials: &wall_materials,
+            };
+            render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+            buffer
+        };
+
+        // Measure RMS over second half (after transients settle)
+        let half = frames / 2;
+        let rms = |buf: &[f32]| -> f32 {
+            let sum: f32 = (half..frames)
+                .flat_map(|f| (0..channels).map(move |ch| buf[f * channels + ch].powi(2)))
+                .sum();
+            (sum / ((frames - half) * channels) as f32).sqrt()
+        };
+
+        eprintln!();
+        eprintln!("═══ Pipeline energy probe: 6×4×3m room ═══");
+        eprintln!(
+            "{:>12}  {:>12}  {:>12}  {:>12}  {:>8}",
+            "mode", "dead(r=0.1)", "mid(r=0.5)", "live(r=0.9)", "refl/dry"
+        );
+        eprintln!("{}", "─".repeat(65));
+
+        for mode in [
+            RenderMode::Vbap,
+            RenderMode::Hrtf,
+            RenderMode::Dbap,
+            RenderMode::Ambisonics,
+        ] {
+            let dead_buf = render_mode(mode, 0.1); // nearly anechoic
+            let mid_buf = render_mode(mode, 0.5); // moderate reflections
+            let live_buf = render_mode(mode, 0.9); // highly reflective
+
+            let dead_rms = rms(&dead_buf);
+            let mid_rms = rms(&mid_buf);
+            let live_rms = rms(&live_buf);
+
+            // Reflection contribution relative to dead room
+            let refl_rms = (live_rms * live_rms - dead_rms * dead_rms).max(0.0).sqrt();
+            let ratio = if dead_rms > 1e-10 {
+                refl_rms / dead_rms
+            } else {
+                0.0
+            };
+
+            eprintln!(
+                "{:>12}  {:>12.6}  {:>12.6}  {:>12.6}  {:>8.3}",
+                format!("{mode:?}"),
+                dead_rms,
+                mid_rms,
+                live_rms,
+                ratio
+            );
+
+            // 1. Increasing reflectivity should monotonically increase total energy.
+            assert!(
+                dead_rms <= mid_rms,
+                "{mode:?}: r=0.1 ({dead_rms:.6}) should produce less energy \
+                 than r=0.5 ({mid_rms:.6})"
+            );
+            assert!(
+                mid_rms <= live_rms,
+                "{mode:?}: r=0.5 ({mid_rms:.6}) should produce less energy \
+                 than r=0.9 ({live_rms:.6})"
+            );
+
+            // 2. Reflection energy should stay bounded (< 5× direct for a small room).
+            assert!(
+                ratio < 5.0,
+                "{mode:?}: reflection energy ({refl_rms:.4}) exceeds 5× \
+                 direct energy ({dead_rms:.4}), got ratio {ratio:.2}"
+            );
+        }
+        eprintln!();
     }
 }

@@ -52,7 +52,7 @@ impl PathResolver for DirectPathResolver {
 /// - **direction**: unit vector from target toward the image source (for panning)
 /// - **distance**: total path length from source to wall to target
 /// - **delay**: propagation delay relative to the direct path
-/// - **gain**: wall reflectivity scaled by inverse distance
+/// - **gain**: √wall_reflectivity (distance applied by renderer)
 ///
 /// Reflections are skipped when the image distance is shorter than the direct
 /// path (source between wall and target) or when the delay would be zero.
@@ -112,7 +112,12 @@ impl PathResolver for ImageSourceResolver {
             }
 
             let direction = image_diff * (1.0 / image_dist);
-            let gain = (self.wall_reflectivity / image_dist).min(1.0);
+            // Reflection gain = √reflectivity (no distance component).
+            // wall_reflectivity is energy-domain (fraction of energy reflected),
+            // so the amplitude reflection coefficient is √reflectivity.
+            // Distance attenuation is applied by the renderer using the same
+            // distance model as the direct path, keeping the gain staging consistent.
+            let gain = self.wall_reflectivity.sqrt();
 
             out.push(PathContribution {
                 kind: PathKind::Reflection,
@@ -390,22 +395,59 @@ mod tests {
     }
 
     #[test]
-    fn image_source_gain_uses_wall_reflectivity_over_distance() {
+    fn image_source_gain_uses_reflectivity_only() {
         let reflectivity = 0.8;
         let resolver = ImageSourceResolver::new(reflectivity);
-        let ctx = make_room_ctx(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        let source = Vec3::new(2.0, 0.0, 0.0);
+        let target = Vec3::new(0.0, 0.0, 0.0);
+        let ctx = make_room_ctx(source, target);
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
+        // wall_reflectivity is energy-domain, so amplitude = √reflectivity
+        let expected = reflectivity.sqrt();
         for p in &paths.as_slice()[1..] {
-            let expected = (reflectivity / p.distance).min(1.0);
             assert!(
                 (p.gain - expected).abs() < 1e-6,
-                "gain {} should equal min(reflectivity/dist, 1.0) = {}",
+                "gain {} should equal √refl = {}",
                 p.gain,
                 expected
             );
         }
+    }
+
+    #[test]
+    fn image_source_reflectivity_scales_gain() {
+        let source = Vec3::new(2.0, 0.0, 0.0);
+        let target = Vec3::new(0.0, 0.0, 0.0);
+        let ctx = make_room_ctx(source, target);
+
+        let resolver_high = ImageSourceResolver::new(0.9);
+        let resolver_low = ImageSourceResolver::new(0.4);
+
+        let mut paths_high = PathSet::new();
+        let mut paths_low = PathSet::new();
+        resolver_high.resolve(&ctx, &mut paths_high);
+        resolver_low.resolve(&ctx, &mut paths_low);
+
+        assert_eq!(paths_high.len(), paths_low.len());
+
+        // Higher reflectivity → higher gain (√0.9 > √0.4)
+        for (high, low) in paths_high.as_slice()[1..]
+            .iter()
+            .zip(paths_low.as_slice()[1..].iter())
+        {
+            assert!(
+                high.gain > low.gain,
+                "higher reflectivity should give higher gain: {} vs {}",
+                high.gain,
+                low.gain
+            );
+        }
+
+        // Direct path unaffected
+        assert_eq!(paths_high.as_slice()[0].gain, 1.0);
+        assert_eq!(paths_low.as_slice()[0].gain, 1.0);
     }
 
     #[test]

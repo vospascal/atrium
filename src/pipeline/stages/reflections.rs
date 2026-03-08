@@ -22,12 +22,11 @@ pub(crate) struct ReflectionCore {
     write_pos: usize,
     taps: [ReflectionTap; MAX_TAPS],
     tap_count: usize,
-    wet_gain: f32,
     wall_reflectivity: f32,
 }
 
 impl ReflectionCore {
-    pub(crate) fn new(wet_gain: f32, wall_reflectivity: f32) -> Self {
+    pub(crate) fn new(wall_reflectivity: f32) -> Self {
         Self {
             buffer: Box::new([0.0; BUFFER_SIZE]),
             write_pos: 0,
@@ -36,7 +35,6 @@ impl ReflectionCore {
                 gain: 0.0,
             }; MAX_TAPS],
             tap_count: 0,
-            wet_gain,
             wall_reflectivity,
         }
     }
@@ -63,6 +61,9 @@ impl ReflectionCore {
         let direct_dist = source_pos.distance_to(target_pos);
         let mut count = 0;
 
+        // √reflectivity: wall_reflectivity is energy-domain, amplitude = √energy.
+        let amplitude_refl = self.wall_reflectivity.sqrt();
+
         for image in &images {
             let image_dist = image.distance_to(target_pos);
             if image_dist < 0.1 || image_dist < direct_dist {
@@ -75,7 +76,7 @@ impl ReflectionCore {
             }
             self.taps[count] = ReflectionTap {
                 delay_samples,
-                gain: (self.wall_reflectivity / image_dist).min(1.0),
+                gain: amplitude_refl,
             };
             count += 1;
             if count >= MAX_TAPS {
@@ -95,7 +96,7 @@ impl ReflectionCore {
             wet += self.buffer[read_pos] * tap.gain;
         }
         self.write_pos = (self.write_pos + 1) & BUFFER_MASK;
-        wet * self.wet_gain
+        wet
     }
 
     pub(crate) fn reset(&mut self) {

@@ -174,6 +174,7 @@ impl AudioScene {
                 master_gain: self.master_gain,
                 render_channels,
                 reverb_input: None,
+                wall_reflectivity: pipeline.wall_reflectivity,
             };
             pipeline.init(&mix_ctx);
             pipeline.ensure_topology(self.sources.len(), &self.speaker_layout, self.sample_rate);

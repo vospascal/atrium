@@ -24,9 +24,11 @@ pub struct MixContext<'a> {
     /// FDN reverb uses this to avoid spreading wet signal to unused channels.
     pub render_channels: usize,
     /// Optional reverb send buffer (pre-weighted by per-source d/d_c).
-    /// The Ambisonics FDN reads from this instead of the main buffer for
+    /// FDN reverb stages read from this instead of the main buffer for
     /// delay line injection, preserving per-source direct-to-reverberant balance.
     pub reverb_input: Option<&'a [f32]>,
+    /// Wall reflectivity (0.0–1.0) for Sabine RT60 computation in FDN stages.
+    pub wall_reflectivity: f32,
 }
 
 /// Post-mix processing stage. Processes the full interleaved output buffer in-place.

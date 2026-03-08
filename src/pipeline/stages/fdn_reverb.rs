@@ -7,6 +7,7 @@
 //! Chain order: Direct (0–3ms) → EarlyReflections (3–50ms) → FdnReverb (50ms+)
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
+use crate::pipeline::room_acoustics;
 use crate::pipeline::stages::soft_clip;
 
 const NUM_LINES: usize = 8;
@@ -45,8 +46,16 @@ impl DampingFilter {
 
 /// Post-mix FDN late reverb stage.
 ///
-/// Mono-in, N-channel out. All input channels averaged to mono, processed
-/// through 8-line FDN. Lines distributed round-robin across output channels.
+/// Fully physics-based gain staging:
+/// - **Send**: d²/(d²+d_c²) per source (bounded reverberant energy fraction)
+/// - **Decay**: Sabine RT60 → Jot per-line damping gains
+/// - **Output normalization**: derived from steady-state energy buildup of the
+///   8-line feedback network (1/RMS of per-line 1/√(1-g²)), so the d/d_c send
+///   law directly controls perceived wet level without an arbitrary wet knob.
+///
+/// High-frequency RT60 is set to 0.5× the low-frequency RT60, modeling
+/// the natural air absorption and surface absorption that causes highs
+/// to decay faster than lows in real rooms.
 pub struct FdnReverbStage {
     delay_buffers: Box<[[f32; BUF_SIZE]; NUM_LINES]>,
     write_pos: usize,
@@ -55,14 +64,26 @@ pub struct FdnReverbStage {
     pre_delay_buf: Box<[f32; PRE_DELAY_BUF_SIZE]>,
     pre_delay_write_pos: usize,
     pre_delay_samples: usize,
-    wet_gain: f32,
-    rt60_low: f32,
-    rt60_high: f32,
+    /// Structural output normalization derived from Jot damping gains.
+    /// Compensates for the FDN's steady-state energy accumulation so that
+    /// the d/d_c send law directly controls the perceived wet level.
+    output_normalization: f32,
     initialized: bool,
 }
 
+/// High-frequency RT60 ratio relative to low-frequency RT60.
+/// 0.5 means highs decay twice as fast as lows — a typical ratio
+/// for rooms with moderate air absorption and surface absorption.
+const RT60_HIGH_RATIO: f32 = 0.5;
+
+impl Default for FdnReverbStage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FdnReverbStage {
-    pub fn new(wet_gain: f32, rt60_low: f32, rt60_high: f32) -> Self {
+    pub fn new() -> Self {
         Self {
             delay_buffers: Box::new([[0.0; BUF_SIZE]; NUM_LINES]),
             write_pos: 0,
@@ -71,9 +92,7 @@ impl FdnReverbStage {
             pre_delay_buf: Box::new([0.0; PRE_DELAY_BUF_SIZE]),
             pre_delay_write_pos: 0,
             pre_delay_samples: 0,
-            wet_gain,
-            rt60_low,
-            rt60_high,
+            output_normalization: 1.0,
             initialized: false,
         }
     }
@@ -88,7 +107,8 @@ impl FdnReverbStage {
             ((PRE_DELAY_SECONDS * sample_rate) as usize).min(PRE_DELAY_BUF_SIZE - 1);
     }
 
-    /// Compute per-line one-pole damping filters for frequency-dependent decay.
+    /// Compute per-line one-pole damping filters for frequency-dependent decay,
+    /// and derive structural output normalization from the loop gains.
     ///
     /// Each filter has gain `k` and pole `p` derived from the RT60 at DC and Nyquist:
     ///   g_dc  = 10^(-3m / (RT60_low  × fs))   — gain per sample at 0 Hz
@@ -96,13 +116,20 @@ impl FdnReverbStage {
     ///   k = 2·g_dc·g_nyq / (g_dc + g_nyq)     — filter gain (harmonic mean)
     ///   p = (g_dc - g_nyq) / (g_dc + g_nyq)   — pole location
     ///
+    /// Output normalization uses g_eff = √((g_dc² + g_nyq²) / 2) per line —
+    /// the RMS of the actual endpoint loop gains, not the filter coefficient `k`.
+    /// Steady-state energy buildup per line is 1/(1 - g_eff²); RMS-averaged across
+    /// lines (Hadamard is orthonormal, so lines don't add coherently).
+    ///
     /// Reference: Jot, "Digital Delay Networks for Designing Artificial Reverberators",
     /// AES 90th Convention (1991), §3.2; extended in Jot's PhD thesis (1992), Ch. 4.
-    fn compute_damping(&mut self, sample_rate: f32) {
+    fn compute_damping(&mut self, sample_rate: f32, rt60_low: f32, rt60_high: f32) {
+        let mut sum_norm_sq = 0.0f32;
+
         for i in 0..NUM_LINES {
             let m = self.delays[i] as f32;
-            let g_dc = 10.0_f32.powf(-3.0 * m / (self.rt60_low * sample_rate));
-            let g_nyq = 10.0_f32.powf(-3.0 * m / (self.rt60_high * sample_rate));
+            let g_dc = 10.0_f32.powf(-3.0 * m / (rt60_low * sample_rate));
+            let g_nyq = 10.0_f32.powf(-3.0 * m / (rt60_high * sample_rate));
             let sum = g_dc + g_nyq;
             if sum < f32::EPSILON {
                 self.damping[i].k = 0.0;
@@ -112,7 +139,23 @@ impl FdnReverbStage {
                 self.damping[i].p = (g_dc - g_nyq) / sum;
             }
             self.damping[i].state = 0.0;
+
+            // Effective broadband loop gain: RMS of DC and Nyquist gains.
+            // This is the correct quantity for energy buildup estimation —
+            // unlike k (harmonic mean), g_eff represents the actual per-sample
+            // loop gain averaged across the spectrum.
+            let g_eff_sq = (g_dc * g_dc + g_nyq * g_nyq) * 0.5;
+            let norm_sq = if g_eff_sq < 0.9999 {
+                1.0 / (1.0 - g_eff_sq)
+            } else {
+                10000.0
+            };
+            sum_norm_sq += norm_sq;
         }
+
+        // Network-level gain: RMS across lines (Hadamard is orthonormal).
+        let rms_gain = (sum_norm_sq / NUM_LINES as f32).sqrt();
+        self.output_normalization = (1.0 / rms_gain).clamp(0.01, 1.0);
     }
 
     #[inline(always)]
@@ -187,7 +230,13 @@ impl FdnReverbStage {
 impl MixStage for FdnReverbStage {
     fn init(&mut self, ctx: &MixContext) {
         self.compute_delays(ctx.sample_rate);
-        self.compute_damping(ctx.sample_rate);
+
+        // Derive RT60 from room geometry via Sabine's equation.
+        let (volume, surface_area) = room_acoustics::room_geometry(ctx.room_min, ctx.room_max);
+        let rt60_low = room_acoustics::sabine_rt60(volume, surface_area, ctx.wall_reflectivity);
+        let rt60_high = rt60_low * RT60_HIGH_RATIO;
+
+        self.compute_damping(ctx.sample_rate, rt60_low, rt60_high);
         self.initialized = true;
     }
 
@@ -203,19 +252,25 @@ impl MixStage for FdnReverbStage {
         for frame in 0..num_frames {
             let base = frame * channels;
 
-            // Sum to mono from active channels only (respects non-contiguous masks like quad on 5.1)
-            let mut mono_sum = 0.0f32;
-            let mut active_count = 0u32;
-            for ch in 0..render_channels {
-                if ctx.layout.is_channel_active(ch) {
-                    mono_sum += buffer[base + ch];
-                    active_count += 1;
+            // Read mono input from the reverb send buffer (pre-weighted by d/d_c)
+            // if available, otherwise fall back to mono-summing the main buffer.
+            // Reverb send is a mono bus on channel 0 for the generic FDN path.
+            let mono_in = if let Some(reverb_input) = ctx.reverb_input {
+                reverb_input[base]
+            } else {
+                let mut mono_sum = 0.0f32;
+                let mut active_count = 0u32;
+                for ch in 0..render_channels {
+                    if ctx.layout.is_channel_active(ch) {
+                        mono_sum += buffer[base + ch];
+                        active_count += 1;
+                    }
                 }
-            }
-            if active_count == 0 {
-                continue;
-            }
-            let mono_in = mono_sum / active_count as f32;
+                if active_count == 0 {
+                    continue;
+                }
+                mono_sum / active_count as f32
+            };
 
             // Pre-delay
             self.pre_delay_buf[self.pre_delay_write_pos] = mono_in;
@@ -229,7 +284,8 @@ impl MixStage for FdnReverbStage {
 
             for ch in 0..render_channels {
                 if ctx.layout.is_channel_active(ch) {
-                    buffer[base + ch] = soft_clip(buffer[base + ch] + wet[ch] * self.wet_gain);
+                    buffer[base + ch] =
+                        soft_clip(buffer[base + ch] + wet[ch] * self.output_normalization);
                 }
             }
         }
@@ -291,6 +347,7 @@ mod tests {
             master_gain: 1.0,
             render_channels,
             reverb_input: None,
+            wall_reflectivity: 0.9,
         }
     }
 
@@ -302,7 +359,7 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
         let ctx = mix_ctx(&layout, &listener, channels, render_channels);
 
-        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        let mut fdn = FdnReverbStage::new();
         fdn.init(&ctx);
 
         let frames = 2048;
@@ -341,7 +398,7 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
         let ctx = mix_ctx(&layout, &listener, channels, render_channels);
 
-        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        let mut fdn = FdnReverbStage::new();
         fdn.init(&ctx);
 
         let frames = 2048;
@@ -374,8 +431,8 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
         let ctx = mix_ctx(&layout, &listener, channels, render_channels);
 
-        let mut fdn_a = FdnReverbStage::new(0.3, 0.8, 0.3);
-        let mut fdn_b = FdnReverbStage::new(0.3, 0.8, 0.3);
+        let mut fdn_a = FdnReverbStage::new();
+        let mut fdn_b = FdnReverbStage::new();
         fdn_a.init(&ctx);
         fdn_b.init(&ctx);
 
@@ -425,7 +482,7 @@ mod tests {
         layout.set_active_channels(&[0, 1, 4, 5]);
         let ctx = mix_ctx(&layout, &listener, channels, render_channels);
 
-        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        let mut fdn = FdnReverbStage::new();
         fdn.init(&ctx);
 
         let frames = 2048;
@@ -467,7 +524,7 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
         let ctx = mix_ctx(&layout, &listener, channels, render_channels);
 
-        let mut fdn = FdnReverbStage::new(0.3, 0.8, 0.3);
+        let mut fdn = FdnReverbStage::new();
         fdn.init(&ctx);
 
         let frames = 512;
@@ -476,5 +533,344 @@ mod tests {
 
         let max = buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         assert!(max < 1e-10, "silent input should produce silent output");
+    }
+
+    /// When reverb_input is provided (DBAP/VBAP/HRTF mono bus on ch0),
+    /// FDN reads ch0 directly and produces wet output on active channels.
+    #[test]
+    fn reverb_input_mono_bus_produces_wet_on_active_channels() {
+        let channels = 6;
+        let render_channels = 6;
+        let (mut layout, listener) = make_ctx(channels, render_channels);
+        // Quad mask: FL(0), FR(1), RL(4), RR(5) active; C(2), LFE(3) masked.
+        layout.set_active_channels(&[0, 1, 4, 5]);
+
+        let frames = 2048;
+        let mut reverb_input = vec![0.0f32; frames * channels];
+        // Write mono signal to ch0 only (mimics renderer mono bus).
+        for frame in 0..frames {
+            reverb_input[frame * channels] = 0.5;
+        }
+
+        let ctx = MixContext {
+            listener: &listener,
+            layout: &layout,
+            sample_rate: 48000.0,
+            channels,
+            room_min: Vec3::new(-5.0, -5.0, -5.0),
+            room_max: Vec3::new(5.0, 5.0, 5.0),
+            master_gain: 1.0,
+            render_channels,
+            reverb_input: Some(&reverb_input),
+            wall_reflectivity: 0.9,
+        };
+
+        let mut fdn = FdnReverbStage::new();
+        fdn.init(&ctx);
+
+        let mut buffer = vec![0.0f32; frames * channels];
+        fdn.process(&mut buffer, &ctx);
+
+        // Active channels (0, 1, 4, 5) should have wet signal.
+        let active_energy: f32 = (0..frames)
+            .map(|f| {
+                let base = f * channels;
+                [0, 1, 4, 5]
+                    .iter()
+                    .map(|&ch| buffer[base + ch].powi(2))
+                    .sum::<f32>()
+            })
+            .sum();
+        assert!(
+            active_energy > 0.01,
+            "active channels should have wet signal"
+        );
+
+        // Masked channels (2, 3) should remain silent.
+        let masked_energy: f32 = (0..frames)
+            .map(|f| {
+                let base = f * channels;
+                buffer[base + 2].powi(2) + buffer[base + 3].powi(2)
+            })
+            .sum();
+        assert!(
+            masked_energy < 1e-10,
+            "masked channels should stay silent, got energy {masked_energy}"
+        );
+    }
+
+    /// Output normalization adapts to room reflectivity: reflective rooms get
+    /// heavier attenuation (lower output_normalization) because the Jot feedback
+    /// gains are higher, causing more steady-state energy buildup in the network.
+    #[test]
+    fn output_normalization_scales_with_reflectivity() {
+        let channels = 2;
+        let render_channels = 2;
+        let (layout, listener) = make_ctx(channels, render_channels);
+
+        // Dead room: low reflectivity → short RT60 → low Jot gains → normalization near 1.0
+        let ctx_dead = MixContext {
+            wall_reflectivity: 0.3,
+            ..mix_ctx(&layout, &listener, channels, render_channels)
+        };
+        let mut fdn_dead = FdnReverbStage::new();
+        fdn_dead.init(&ctx_dead);
+
+        // Reflective room: high reflectivity → long RT60 → high Jot gains → lower normalization
+        let ctx_live = MixContext {
+            wall_reflectivity: 0.95,
+            ..mix_ctx(&layout, &listener, channels, render_channels)
+        };
+        let mut fdn_live = FdnReverbStage::new();
+        fdn_live.init(&ctx_live);
+
+        assert!(
+            fdn_dead.output_normalization > fdn_live.output_normalization,
+            "dead room norm ({}) should exceed live room norm ({})",
+            fdn_dead.output_normalization,
+            fdn_live.output_normalization
+        );
+        // Dead room should need minimal correction (near 1.0)
+        assert!(
+            fdn_dead.output_normalization > 0.5,
+            "dead room norm should be near 1.0, got {}",
+            fdn_dead.output_normalization
+        );
+        // Live room needs substantial attenuation
+        assert!(
+            fdn_live.output_normalization < 0.3,
+            "live room norm should be well below 1.0, got {}",
+            fdn_live.output_normalization
+        );
+    }
+
+    /// Verify the actual output normalization for the default atrium room (6×4×3m, r=0.9).
+    /// This is the generic FDN used by VBAP, HRTF, and DBAP modes.
+    #[test]
+    fn output_normalization_atrium_room() {
+        let channels = 6;
+        let render_channels = 6;
+        let (layout, listener) = make_ctx(channels, render_channels);
+
+        // Actual atrium: 6×4×3m room, wall_reflectivity=0.9
+        let ctx = MixContext {
+            room_min: Vec3::new(0.0, 0.0, 0.0),
+            room_max: Vec3::new(6.0, 4.0, 3.0),
+            wall_reflectivity: 0.9,
+            ..mix_ctx(&layout, &listener, channels, render_channels)
+        };
+
+        let mut fdn = FdnReverbStage::new();
+        fdn.init(&ctx);
+
+        // With g_eff (RMS of g_dc, g_nyq), the 6×4×3m room at r=0.9
+        // should produce normalization around 0.37 (significant attenuation
+        // because RT60≈1.07s creates substantial feedback energy buildup).
+        eprintln!(
+            "Generic FDN output_normalization = {:.4} (atrium 6x4x3, r=0.9)",
+            fdn.output_normalization
+        );
+        assert!(
+            (fdn.output_normalization - 0.37).abs() < 0.05,
+            "atrium room norm should be ~0.37, got {}",
+            fdn.output_normalization
+        );
+    }
+
+    /// Sweep wall_reflectivity and RT60 high-frequency ratio to show how each
+    /// affects normalization and actual wet tail energy.
+    ///
+    /// Feeds a single impulse through the FDN and measures:
+    /// - output_normalization (structural gain compensation)
+    /// - RT60 low (from Sabine)
+    /// - wet tail RMS (actual energy in the reverb tail after the impulse)
+    #[test]
+    fn parameter_sweep_reflectivity_and_hf_ratio() {
+        use crate::pipeline::room_acoustics;
+
+        let channels = 2;
+        let render_channels = 2;
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let sample_rate = 48000.0;
+
+        let room_min = Vec3::new(0.0, 0.0, 0.0);
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, surface_area) = room_acoustics::room_geometry(room_min, room_max);
+
+        let reflectivities = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95];
+        let hf_ratios = [0.3, 0.4, 0.5, 0.6];
+
+        eprintln!();
+        eprintln!("═══ Parameter sweep: 6×4×3m atrium ═══");
+        eprintln!(
+            "{:>6}  {:>8}  {:>8}  {:>8}  {:>12}",
+            "refl", "hf_ratio", "RT60_lo", "norm", "tail_rms_dB"
+        );
+        eprintln!("{}", "─".repeat(50));
+
+        for &refl in &reflectivities {
+            let rt60_low = room_acoustics::sabine_rt60(volume, surface_area, refl);
+
+            for &hf_ratio in &hf_ratios {
+                let rt60_high = rt60_low * hf_ratio;
+
+                let mut fdn = FdnReverbStage::new();
+                fdn.compute_delays(sample_rate);
+                fdn.compute_damping(sample_rate, rt60_low, rt60_high);
+                fdn.initialized = true;
+
+                // Feed a single impulse and measure the tail energy.
+                // Use reverb_input to control exactly what goes in (mono bus on ch0).
+                let frames = 48000; // 1 second
+                let mut buffer = vec![0.0f32; frames * channels];
+                let mut reverb_input = vec![0.0f32; frames * channels];
+                reverb_input[0] = 1.0; // single impulse on ch0
+
+                let ctx = MixContext {
+                    room_min,
+                    room_max,
+                    wall_reflectivity: refl,
+                    reverb_input: Some(&reverb_input),
+                    ..mix_ctx(&layout, &listener, channels, render_channels)
+                };
+
+                fdn.process(&mut buffer, &ctx);
+
+                // Measure wet tail RMS (skip first 50ms to avoid the direct impulse).
+                let skip_samples = (0.05 * sample_rate) as usize;
+                let tail_energy: f32 = buffer[skip_samples * channels..]
+                    .iter()
+                    .step_by(channels) // ch0 only
+                    .map(|s| s * s)
+                    .sum();
+                let tail_samples = (frames - skip_samples) as f32;
+                let tail_rms = (tail_energy / tail_samples).sqrt();
+                let tail_rms_db = if tail_rms > 1e-10 {
+                    20.0 * tail_rms.log10()
+                } else {
+                    -100.0
+                };
+
+                eprintln!(
+                    "{:>6.2}  {:>8.1}  {:>8.3}  {:>8.4}  {:>12.1}",
+                    refl, hf_ratio, rt60_low, fdn.output_normalization, tail_rms_db
+                );
+            }
+        }
+        eprintln!();
+    }
+
+    /// Break down the energy budget between early reflections and FDN late tail
+    /// for the default atrium room. Shows which stage dominates the perceived echo.
+    #[test]
+    fn energy_breakdown_early_vs_late() {
+        use crate::pipeline::path::{PathResolver, PathSet, ResolveContext};
+        use crate::pipeline::path_resolvers::ImageSourceResolver;
+        use crate::pipeline::room_acoustics;
+
+        let channels = 2;
+        let render_channels = 2;
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let sample_rate = 48000.0;
+
+        let room_min = Vec3::new(0.0, 0.0, 0.0);
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, surface_area) = room_acoustics::room_geometry(room_min, room_max);
+
+        let listener_pos = Vec3::new(3.0, 2.0, 0.0); // center of room
+        let source_positions = [
+            ("djembe (center, 1.5m orbit)", Vec3::new(4.5, 2.0, 0.0)),
+            ("campfire (corner)", Vec3::new(1.0, 1.0, 0.0)),
+            ("purring (front-right)", Vec3::new(5.0, 3.0, 0.0)),
+        ];
+
+        let reflectivities = [0.75, 0.90];
+
+        for &refl in &reflectivities {
+            let rt60 = room_acoustics::sabine_rt60(volume, surface_area, refl);
+            let d_c = room_acoustics::critical_distance(volume, rt60, 1.0);
+
+            eprintln!();
+            eprintln!("═══ Energy breakdown: r={refl}, RT60={rt60:.3}s, d_c={d_c:.3}m ═══");
+            eprintln!(
+                "{:>25}  {:>6}  {:>10}  {:>12}  {:>12}  {:>10}",
+                "source", "dist", "send (d/dc)", "refl_energy", "fdn_tail_dB", "ratio E/L"
+            );
+            eprintln!("{}", "─".repeat(85));
+
+            let resolver = ImageSourceResolver::new(refl);
+
+            for (name, source_pos) in &source_positions {
+                let dist = source_pos.distance_to(listener_pos);
+                let send = room_acoustics::reverb_send(dist, d_c);
+
+                // ── Early reflections: path resolver gives us the gains ──
+                let mut paths = PathSet::new();
+                let resolve_ctx = ResolveContext {
+                    source_pos: *source_pos,
+                    target_pos: listener_pos,
+                    room_min,
+                    room_max,
+                    barriers: &[],
+                };
+                resolver.resolve(&resolve_ctx, &mut paths);
+
+                let mut early_energy = 0.0f32;
+                for path in paths.as_slice() {
+                    if path.kind == crate::pipeline::path::PathKind::Reflection {
+                        // Each reflection has gain = reflectivity / image_dist
+                        early_energy += path.gain * path.gain;
+                    }
+                }
+
+                // ── FDN late tail: feed impulse × send, measure tail ──
+                let rt60_high = rt60 * RT60_HIGH_RATIO;
+                let mut fdn = FdnReverbStage::new();
+                fdn.compute_delays(sample_rate);
+                fdn.compute_damping(sample_rate, rt60, rt60_high);
+                fdn.initialized = true;
+
+                let frames = 48000; // 1 second
+                let mut buffer = vec![0.0f32; frames * channels];
+                let mut reverb_input = vec![0.0f32; frames * channels];
+                reverb_input[0] = send; // impulse scaled by d/d_c send law
+
+                let ctx = MixContext {
+                    room_min,
+                    room_max,
+                    wall_reflectivity: refl,
+                    reverb_input: Some(&reverb_input),
+                    ..mix_ctx(&layout, &listener, channels, render_channels)
+                };
+
+                fdn.process(&mut buffer, &ctx);
+
+                // Measure FDN tail energy (skip first 50ms)
+                let skip = (0.05 * sample_rate) as usize;
+                let tail_energy: f32 = buffer[skip * channels..]
+                    .iter()
+                    .step_by(channels)
+                    .map(|s| s * s)
+                    .sum();
+                let tail_rms = (tail_energy / (frames - skip) as f32).sqrt();
+                let tail_db = if tail_rms > 1e-10 {
+                    20.0 * tail_rms.log10()
+                } else {
+                    -100.0
+                };
+
+                let ratio = if tail_energy > 1e-20 {
+                    early_energy / tail_energy
+                } else {
+                    f32::INFINITY
+                };
+
+                eprintln!(
+                    "{:>25}  {:>6.2}  {:>10.4}  {:>12.6}  {:>12.1}  {:>10.1}",
+                    name, dist, send, early_energy, tail_db, ratio
+                );
+            }
+        }
+        eprintln!();
     }
 }

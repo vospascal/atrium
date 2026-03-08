@@ -8,8 +8,8 @@
 //!
 //! Output depends on channel count:
 //! - **≥4 channels:** Writes B-format (W,Y,Z,X) to channels 0-3. Decoding to
-//!   speakers happens later via `AmbisonicsDecodeStage` (allows multi-delay FX
-//!   to operate in B-format domain).
+//!   speakers happens later via `AmbisonicsDecodeStage` (allows B-format
+//!   decorrelation via `AmbiMultiDelayStage` before decode).
 //! - **2 channels (stereo/headphones):** Inline bilateral ambisonics — B-format
 //!   rotated per ear (accounting for head width ITD), then decoded with
 //!   cardioid binaural weights. Multi-delay stage no-ops for stereo.
@@ -49,6 +49,7 @@ impl AmbisonicsRenderer {
 fn encode_path(
     path_kind: PathKind,
     path_direction: atrium_core::types::Vec3,
+    path_distance: f32,
     ctx: &SourceContext,
     cos_y: f32,
     sin_y: f32,
@@ -88,7 +89,17 @@ fn encode_path(
             let azimuth = local_y.atan2(local_x);
             let horiz = (local_x * local_x + local_y * local_y).sqrt();
             let elevation = local_z.atan2(horiz);
-            foa_encode(azimuth, elevation, 1.0)
+            // Distance model for reflections — same law as the direct path.
+            // path.gain carries reflectivity only; distance is applied here.
+            let dist_gain = distance_gain_at_model(
+                ctx.listener.position,
+                ctx.listener.position + path_direction * path_distance,
+                ctx.source_ref_distance,
+                ctx.distance_model.max_distance,
+                ctx.distance_model.rolloff,
+                ctx.distance_model.model,
+            );
+            foa_encode(azimuth, elevation, dist_gain)
         }
     }
 }
@@ -115,7 +126,7 @@ impl Renderer for AmbisonicsRenderer {
             // Decode happens later in AmbisonicsDecodeStage.
             let mut target_bf = [[0.0f32; 4]; MAX_PATHS];
             for (pi, path) in path_slice.iter().enumerate() {
-                let bf = encode_path(path.kind, path.direction, ctx, cos_y, sin_y);
+                let bf = encode_path(path.kind, path.direction, path.distance, ctx, cos_y, sin_y);
                 target_bf[pi] = [bf.w, bf.y, bf.z, bf.x];
             }
 
@@ -139,13 +150,13 @@ impl Renderer for AmbisonicsRenderer {
                         let gain = prev[pi][ch] + (target_bf[pi][ch] - prev[pi][ch]) * t;
                         out.buffer[base + ch] += path_sample * gain;
                     }
-                    // Write distance-weighted FOA to reverb send buffer.
-                    // The FDN reads from this instead of the main buffer,
-                    // preserving per-source direct-to-reverberant balance.
-                    if let Some(ref mut rev) = out.reverb_send {
-                        for ch in 0..4.min(out.channels) {
-                            let gain = prev[pi][ch] + (target_bf[pi][ch] - prev[pi][ch]) * t;
-                            rev[base + ch] += path_sample * gain * src_out.reverb_send;
+                    // Only the direct path feeds the late reverb send.
+                    // Mono only (W channel): late reverb is physically omnidirectional,
+                    // so we don't inject directional B-format into the FDN. The FDN's
+                    // Z-rotation creates spatial decorrelation from the omni input.
+                    if path.kind == PathKind::Direct {
+                        if let Some(ref mut rev) = out.reverb_send {
+                            rev[base] += path_sample * src_out.reverb_send;
                         }
                     }
                 }
@@ -161,7 +172,8 @@ impl Renderer for AmbisonicsRenderer {
 
             let mut target_stereo = [[0.0f32; 2]; MAX_PATHS];
             for (pi, path) in path_slice.iter().enumerate() {
-                let bformat = encode_path(path.kind, path.direction, ctx, cos_y, sin_y);
+                let bformat =
+                    encode_path(path.kind, path.direction, path.distance, ctx, cos_y, sin_y);
                 let (l, r) = bilateral.decode_stereo(&bformat);
                 target_stereo[pi] = [l, r];
             }

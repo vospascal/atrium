@@ -255,7 +255,18 @@ impl Renderer for HrtfRenderer {
                     );
                     dist_gain * dir_gain
                 }
-                _ => path.gain,
+                _ => {
+                    // Distance model for reflections — same law as the direct path.
+                    let dist_gain = distance_gain_at_model(
+                        ctx.listener.position,
+                        ctx.listener.position + path.direction * path.distance,
+                        ctx.source_ref_distance,
+                        ctx.distance_model.max_distance,
+                        ctx.distance_model.rolloff,
+                        ctx.distance_model.model,
+                    );
+                    path.gain * dist_gain
+                }
             };
         }
 
@@ -316,7 +327,7 @@ impl Renderer for HrtfRenderer {
             }
 
             // 2. For each path: gain-ramp → convolve → crossfade → ITD delay → accumulate
-            for (pi, _path) in path_slice.iter().enumerate() {
+            for (pi, path) in path_slice.iter().enumerate() {
                 let prev_gain = self.sources[source_idx].paths[pi].prev_gain;
                 let tgt = target_gains[pi];
 
@@ -326,6 +337,16 @@ impl Renderer for HrtfRenderer {
                     let gain = prev_gain + (tgt - prev_gain) * t;
                     let filtered = path_effects[pi].process_sample(self.base_buf[i]);
                     self.mono_buf[i] = filtered * gain;
+
+                    // Only the direct path feeds the late reverb send.
+                    // Reflection paths are already reverberant energy (handled by
+                    // the early-reflection stage); feeding them again would overcount.
+                    if path.kind == PathKind::Direct {
+                        if let Some(ref mut rev) = out.reverb_send {
+                            let base = (frame + i) * out.channels;
+                            rev[base] += self.mono_buf[i] * src_out.reverb_send;
+                        }
+                    }
                 }
 
                 let active = self.sources[source_idx].paths[pi].active;

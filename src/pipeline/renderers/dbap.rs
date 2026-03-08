@@ -99,6 +99,14 @@ impl Renderer for DbapRenderer {
                     let gain = prev[pi][ch] + (target_gains[pi][ch] - prev[pi][ch]) * t;
                     out.buffer[base + ch] += path_sample * gain;
                 }
+                // Only the direct path feeds the late reverb send.
+                // Reflection paths are already reverberant energy (handled by
+                // the early-reflection stage); feeding them again would overcount.
+                if path.kind == PathKind::Direct {
+                    if let Some(ref mut rev) = out.reverb_send {
+                        rev[base] += path_sample * src_out.reverb_send;
+                    }
+                }
             }
         }
 

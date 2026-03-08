@@ -238,36 +238,13 @@ fn resolve_spl(db: f32) -> SoundProfile {
 pub enum ProcessorConfig {
     #[serde(rename = "early_reflections")]
     EarlyReflections {
-        #[serde(default = "default_er_wet")]
-        wet_gain: f32,
         #[serde(default = "default_er_reflectivity")]
         wall_reflectivity: f32,
     },
-    #[serde(rename = "fdn_reverb")]
-    FdnReverb {
-        #[serde(default = "default_fdn_wet")]
-        wet_gain: f32,
-        #[serde(default = "default_fdn_rt60_low")]
-        rt60_low: f32,
-        #[serde(default = "default_fdn_rt60_high")]
-        rt60_high: f32,
-    },
 }
 
-fn default_er_wet() -> f32 {
-    0.5
-}
 fn default_er_reflectivity() -> f32 {
-    0.9
-}
-fn default_fdn_wet() -> f32 {
-    0.2
-}
-fn default_fdn_rt60_low() -> f32 {
-    0.8
-}
-fn default_fdn_rt60_high() -> f32 {
-    0.3
+    crate::pipeline::DEFAULT_WALL_REFLECTIVITY
 }
 #[derive(Deserialize)]
 pub struct AtmosphereConfig {
@@ -379,24 +356,13 @@ impl SceneConfig {
         };
 
         // Load processor params from file (feeds pipeline construction)
-        let mut er_params: Option<(f32, f32)> = None; // (wet_gain, wall_reflectivity)
-        let mut fdn_params: (f32, f32, f32) = (0.2, 0.8, 0.3); // (wet, rt60_low, rt60_high)
+        let mut er_wall_reflectivity: Option<f32> = None;
         if let Some(path) = &self.processors {
             let defs: Vec<ProcessorConfig> = load_yaml(path)?;
             for def in &defs {
                 match def {
-                    ProcessorConfig::EarlyReflections {
-                        wet_gain,
-                        wall_reflectivity,
-                    } => {
-                        er_params = Some((*wet_gain, *wall_reflectivity));
-                    }
-                    ProcessorConfig::FdnReverb {
-                        wet_gain,
-                        rt60_low,
-                        rt60_high,
-                    } => {
-                        fdn_params = (*wet_gain, *rt60_low, *rt60_high);
+                    ProcessorConfig::EarlyReflections { wall_reflectivity } => {
+                        er_wall_reflectivity = Some(*wall_reflectivity);
                     }
                 }
             }
@@ -435,11 +401,7 @@ impl SceneConfig {
         let pipeline_params = PipelineParams {
             sample_rate: 48000.0, // will be recalibrated in init_pipelines
             hrtf_path: self.hrtf,
-            er_wet_gain: er_params.map(|(w, _)| w).unwrap_or(0.0),
-            er_wall_reflectivity: er_params.map(|(_, a)| a).unwrap_or(0.9),
-            fdn_wet_gain: fdn_params.0,
-            fdn_rt60_low: fdn_params.1,
-            fdn_rt60_high: fdn_params.2,
+            er_wall_reflectivity: er_wall_reflectivity.unwrap_or(0.9),
             distance_model,
             dbap_rolloff_db: self.speakers.dbap_rolloff_db,
         };

@@ -12,6 +12,7 @@
 //! per Pulkki 1997 and Gandemer 2018). With `DirectPathResolver` (1 path,
 //! gain=1.0), output is identical to the pre-path architecture.
 
+use atrium_core::panner::distance_gain_at_model;
 use atrium_core::speaker::{SpeakerLayout, VbapLookup, MAX_CHANNELS};
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
@@ -59,7 +60,7 @@ impl Renderer for MultichannelRenderer {
         source: &mut dyn atrium_core::source::SoundSource,
         source_stages: &mut [&mut dyn SourceStage],
         ctx: &SourceContext,
-        _src_out: &SourceOutput,
+        src_out: &SourceOutput,
         paths: &PathSet,
         path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
@@ -115,6 +116,19 @@ impl Renderer for MultichannelRenderer {
                         ctx.layout
                             .compute_vbap_panning(ctx.listener, path.direction)
                     };
+                    // Apply distance model — same attenuation law as the direct path.
+                    // path.gain carries reflectivity only; distance is applied here.
+                    let dist_gain = distance_gain_at_model(
+                        ctx.listener.position,
+                        ctx.listener.position + path.direction * path.distance,
+                        ctx.source_ref_distance,
+                        ctx.distance_model.max_distance,
+                        ctx.distance_model.rolloff,
+                        ctx.distance_model.model,
+                    );
+                    for ch in 0..g.gains.len() {
+                        g.gains[ch] *= dist_gain;
+                    }
                     ctx.layout.apply_mask(&mut g);
                     g
                 }
@@ -136,7 +150,7 @@ impl Renderer for MultichannelRenderer {
             }
 
             // Apply broadband modifiers (ground effect gain, etc.)
-            sample *= _src_out.gain_modifier;
+            sample *= src_out.gain_modifier;
 
             // Accumulate all propagation paths, each with its own VBAP gains.
             let base = frame * out.channels;
@@ -147,6 +161,14 @@ impl Renderer for MultichannelRenderer {
                 for ch in 0..out.channels {
                     let gain = prev[pi][ch] + (target_gains[pi][ch] - prev[pi][ch]) * t;
                     out.buffer[base + ch] += path_sample * gain;
+                }
+                // Only the direct path feeds the late reverb send.
+                // Reflection paths are already reverberant energy (handled by
+                // the early-reflection stage); feeding them again would overcount.
+                if path.kind == PathKind::Direct {
+                    if let Some(ref mut rev) = out.reverb_send {
+                        rev[base] += path_sample * src_out.reverb_send;
+                    }
                 }
             }
         }
