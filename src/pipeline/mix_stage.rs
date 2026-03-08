@@ -23,6 +23,10 @@ pub struct MixContext<'a> {
     /// HRTF always renders stereo (2) even on multichannel layouts.
     /// FDN reverb uses this to avoid spreading wet signal to unused channels.
     pub render_channels: usize,
+    /// Optional reverb send buffer (pre-weighted by per-source d/d_c).
+    /// The Ambisonics FDN reads from this instead of the main buffer for
+    /// delay line injection, preserving per-source direct-to-reverberant balance.
+    pub reverb_input: Option<&'a [f32]>,
 }
 
 /// Post-mix processing stage. Processes the full interleaved output buffer in-place.

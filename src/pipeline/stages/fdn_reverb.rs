@@ -290,6 +290,7 @@ mod tests {
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
             render_channels,
+            reverb_input: None,
         }
     }
 

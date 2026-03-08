@@ -42,6 +42,9 @@ pub struct SourceOutput {
     pub channel_gains: ChannelGains,
     /// Scalar distance gain for HRTF rendering.
     pub distance_gain: f32,
+    /// Reverb send level (0.0–1.0), computed from d/d_c in render_pipeline.
+    /// Controls how much of this source's signal feeds the FDN reverb bus.
+    pub reverb_send: f32,
 }
 
 impl Default for SourceOutput {
@@ -50,6 +53,7 @@ impl Default for SourceOutput {
             gain_modifier: 1.0,
             channel_gains: ChannelGains::silent(0),
             distance_gain: 1.0,
+            reverb_send: 0.0,
         }
     }
 }
@@ -61,6 +65,7 @@ impl SourceOutput {
             gain_modifier: 1.0,
             channel_gains: ChannelGains::silent(total_channels),
             distance_gain: 1.0,
+            reverb_send: 0.0,
         }
     }
 }

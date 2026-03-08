@@ -150,8 +150,8 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
-
             render_channels: 4,
+            reverb_input: None,
         };
         stage.init(&ctx);
 
@@ -196,8 +196,8 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
-
             render_channels: 4,
+            reverb_input: None,
         };
         stage.init(&ctx);
 
@@ -232,8 +232,8 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
-
             render_channels: 2,
+            reverb_input: None,
         };
         stage.init(&ctx);
 

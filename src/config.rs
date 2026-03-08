@@ -252,11 +252,6 @@ pub enum ProcessorConfig {
         #[serde(default = "default_fdn_rt60_high")]
         rt60_high: f32,
     },
-    #[serde(rename = "ambi_multi_delay")]
-    AmbiMultiDelay {
-        #[serde(default = "default_ambi_wet")]
-        ambi_multi_delay: f32,
-    },
 }
 
 fn default_er_wet() -> f32 {
@@ -274,10 +269,6 @@ fn default_fdn_rt60_low() -> f32 {
 fn default_fdn_rt60_high() -> f32 {
     0.3
 }
-fn default_ambi_wet() -> f32 {
-    PipelineParams::DEFAULT_AMBI_WET_GAIN
-}
-
 #[derive(Deserialize)]
 pub struct AtmosphereConfig {
     #[serde(default = "default_temperature")]
@@ -390,7 +381,6 @@ impl SceneConfig {
         // Load processor params from file (feeds pipeline construction)
         let mut er_params: Option<(f32, f32)> = None; // (wet_gain, wall_reflectivity)
         let mut fdn_params: (f32, f32, f32) = (0.2, 0.8, 0.3); // (wet, rt60_low, rt60_high)
-        let mut ambi_wet_gain: f32 = default_ambi_wet();
         if let Some(path) = &self.processors {
             let defs: Vec<ProcessorConfig> = load_yaml(path)?;
             for def in &defs {
@@ -407,9 +397,6 @@ impl SceneConfig {
                         rt60_high,
                     } => {
                         fdn_params = (*wet_gain, *rt60_low, *rt60_high);
-                    }
-                    ProcessorConfig::AmbiMultiDelay { ambi_multi_delay } => {
-                        ambi_wet_gain = *ambi_multi_delay;
                     }
                 }
             }
@@ -455,7 +442,6 @@ impl SceneConfig {
             fdn_rt60_high: fdn_params.2,
             distance_model,
             dbap_rolloff_db: self.speakers.dbap_rolloff_db,
-            ambi_wet_gain,
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;

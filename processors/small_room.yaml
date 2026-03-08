@@ -16,8 +16,3 @@
   rt60_low: 0.8            # low-frequency decay time in seconds
   rt60_high: 0.3           # high-frequency decay time (always <= rt60_low)
 
-# Ambisonics multi-delay spatial reverb (Rudrich et al. 2016)
-# B-format feedback delay with 72-degree rotation per iteration.
-# Used only by the Ambisonics pipeline (replaces FDN in that mode).
-- type: ambi_multi_delay
-  ambi_multi_delay: 0.15   # reverb mix level (0.0–1.0, typical 0.1–0.2 for small rooms)

@@ -58,6 +58,7 @@ pub mod path_effects;
 pub mod path_resolvers;
 pub mod renderer;
 pub mod renderers;
+pub mod room_acoustics;
 pub mod source_stage;
 pub mod stages;
 
@@ -208,6 +209,12 @@ pub struct RenderPipeline {
     /// HRTF sets this to 2 so post-mix stages like FDN reverb don't spread
     /// wet signal to channels the renderer never wrote to.
     pub render_channels: usize,
+    /// Pre-allocated reverb send buffer (same size as output).
+    /// Written by the renderer with distance-weighted per-source FOA signal,
+    /// read by the FDN as its delay line injection input.
+    pub reverb_send_buffer: Vec<f32>,
+    /// Wall reflectivity for critical distance computation.
+    pub wall_reflectivity: f32,
 }
 
 impl RenderPipeline {
@@ -275,12 +282,6 @@ pub struct PipelineParams {
     /// DBAP rolloff in dB per doubling of distance.
     /// 6.0 = free-field inverse distance law, 3–5 dB for reverberant spaces.
     pub dbap_rolloff_db: f32,
-    /// Ambisonics multi-delay wet gain (0.0 = dry only, 1.0 = full wet).
-    pub ambi_wet_gain: f32,
-}
-
-impl PipelineParams {
-    pub const DEFAULT_AMBI_WET_GAIN: f32 = 0.15;
 }
 
 impl Default for PipelineParams {
@@ -295,7 +296,6 @@ impl Default for PipelineParams {
             fdn_rt60_high: 0.3,
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
-            ambi_wet_gain: Self::DEFAULT_AMBI_WET_GAIN,
         }
     }
 }
@@ -337,6 +337,8 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
         path_effect_factories: vec![],
         path_effects: Vec::new(),
         render_channels: 0,
+        reverb_send_buffer: Vec::new(),
+        wall_reflectivity: p.er_wall_reflectivity,
     }
 }
 
@@ -377,6 +379,8 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         ],
         path_effects: Vec::new(),
         render_channels: 0,
+        reverb_send_buffer: Vec::new(),
+        wall_reflectivity: p.er_wall_reflectivity,
     }
 }
 
@@ -415,6 +419,8 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
         ],
         path_effects: Vec::new(),
         render_channels: 2,
+        reverb_send_buffer: Vec::new(),
+        wall_reflectivity: p.er_wall_reflectivity,
     }
 }
 
@@ -453,6 +459,8 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
         ],
         path_effects: Vec::new(),
         render_channels: 0,
+        reverb_send_buffer: Vec::new(),
+        wall_reflectivity: p.er_wall_reflectivity,
     }
 }
 
@@ -465,7 +473,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(AmbisonicsRenderer::new()),
         mix_stages: vec![
-            Box::new(AmbiMultiDelayStage::new(p.ambi_wet_gain)),
+            Box::new(AmbiMultiDelayStage::new(wall_reflectivity)),
             Box::new(AmbisonicsDecodeStage::new()),
             Box::new(LfeCrossoverStage::new()),
             Box::new(DelayCompStage::listener_relative()),
@@ -490,6 +498,8 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         ],
         path_effects: Vec::new(),
         render_channels: 0,
+        reverb_send_buffer: Vec::new(),
+        wall_reflectivity,
     }
 }
 
@@ -536,6 +546,8 @@ pub fn render_pipeline(
         path_effect_factories,
         path_effects,
         render_channels,
+        reverb_send_buffer,
+        wall_reflectivity,
     } = pipeline;
 
     // Ensure topology
@@ -556,6 +568,16 @@ pub fn render_pipeline(
 
     // Zero output
     output.fill(0.0);
+
+    // Compute critical distance once per buffer for per-source reverb sends.
+    // Uses the same room geometry + wall reflectivity as the FDN's Jot gains.
+    let (volume, surface_area) = room_acoustics::room_geometry(params.room_min, params.room_max);
+    let rt60 = room_acoustics::sabine_rt60(volume, surface_area, *wall_reflectivity);
+    let critical_dist = room_acoustics::critical_distance(volume, rt60, 1.0);
+
+    // Prepare reverb send buffer (same size as output, zeroed).
+    reverb_send_buffer.resize(output.len(), 0.0);
+    reverb_send_buffer.fill(0.0);
 
     // Per-source pipeline
     for (i, source) in sources.iter_mut().enumerate() {
@@ -603,6 +625,10 @@ pub fn render_pipeline(
             source_stages.process_all(i, &ctx, &mut src_out);
         }
 
+        // Per-source reverb send driven entirely by the physics-based d/d_c curve.
+        let send = room_acoustics::reverb_send(dist_to_listener, critical_dist);
+        src_out.reverb_send = send;
+
         // Collect source stage refs for the inner loop
         let mut stage_refs = source_stages.for_source(i);
 
@@ -627,6 +653,7 @@ pub fn render_pipeline(
             let _s = profile_span!("renderer", src = i).entered();
             let mut out = renderer::OutputBuffer {
                 buffer: output,
+                reverb_send: Some(reverb_send_buffer),
                 channels: params.channels,
                 num_frames,
                 sample_rate: params.sample_rate,
@@ -664,6 +691,7 @@ pub fn render_pipeline(
         room_max: params.room_max,
         master_gain: params.master_gain,
         render_channels: effective_render_channels,
+        reverb_input: Some(reverb_send_buffer),
     };
     {
         let _s = profile_span!("mix_stages").entered();

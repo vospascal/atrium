@@ -20,6 +20,10 @@ use super::source_stage::{SourceContext, SourceOutput, SourceStage};
 /// Interleaved output buffer with format metadata.
 pub struct OutputBuffer<'a> {
     pub buffer: &'a mut [f32],
+    /// Optional reverb send buffer (same layout as buffer).
+    /// When present, the renderer writes distance-weighted FOA signal here
+    /// for the FDN to use as its input, preserving per-source D/R balance.
+    pub reverb_send: Option<&'a mut [f32]>,
     pub channels: usize,
     pub num_frames: usize,
     pub sample_rate: f32,

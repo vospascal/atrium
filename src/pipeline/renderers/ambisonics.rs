@@ -139,6 +139,15 @@ impl Renderer for AmbisonicsRenderer {
                         let gain = prev[pi][ch] + (target_bf[pi][ch] - prev[pi][ch]) * t;
                         out.buffer[base + ch] += path_sample * gain;
                     }
+                    // Write distance-weighted FOA to reverb send buffer.
+                    // The FDN reads from this instead of the main buffer,
+                    // preserving per-source direct-to-reverberant balance.
+                    if let Some(ref mut rev) = out.reverb_send {
+                        for ch in 0..4.min(out.channels) {
+                            let gain = prev[pi][ch] + (target_bf[pi][ch] - prev[pi][ch]) * t;
+                            rev[base + ch] += path_sample * gain * src_out.reverb_send;
+                        }
+                    }
                 }
             }
 
