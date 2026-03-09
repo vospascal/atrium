@@ -89,7 +89,7 @@ use self::stages::ambi_decode::AmbisonicsDecodeStage;
 use self::stages::ambi_multi_delay::AmbiMultiDelayStage;
 use self::stages::delay_comp::DelayCompStage;
 use self::stages::fdn_reverb::FdnReverbStage;
-use self::stages::lfe_crossover::LfeCrossoverStage;
+use self::stages::lfe_crossover::LfeBassManagementStage;
 use self::stages::master_gain::MasterGainStage;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,7 +345,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
             },
         )),
         mix_stages: vec![
-            Box::new(LfeCrossoverStage::new()),
+            Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
         ],
@@ -367,7 +367,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(MultichannelRenderer::new()),
         mix_stages: vec![
-            Box::new(LfeCrossoverStage::new()),
+            Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::listener_relative()),
             Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
@@ -445,7 +445,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             ..Default::default()
         })),
         mix_stages: vec![
-            Box::new(LfeCrossoverStage::new()),
+            Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::static_calibration()),
             Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
@@ -488,7 +488,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             Box::new(AmbiMultiDelayStage::new()),
             Box::new(AmbisonicsDecodeStage::new()),
             Box::new(FdnReverbStage::new()),
-            Box::new(LfeCrossoverStage::new()),
+            Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::listener_relative()),
             Box::new(MasterGainStage),
         ],
