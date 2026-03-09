@@ -81,6 +81,54 @@ impl DirectivityPattern {
     }
 }
 
+/// Compute the directivity factor γ for a radiation pattern.
+///
+/// γ measures how focused the pattern is relative to omnidirectional:
+///   γ = 2 / ∫₀^π g(θ)² sin(θ) dθ
+///
+/// where g(θ) is the pattern's gain at angle θ. The integral is evaluated
+/// using composite Simpson's rule with 64 steps (sufficient for smooth patterns).
+///
+/// Known values:
+///   - Omni → 1.0
+///   - Cardioid (α=0.5) → 3.0
+///   - Supercardioid (α=0.37) → ~3.7
+///   - Hypercardioid (α=0.25) → ~4.0
+///
+/// Used in the critical distance formula: d_c = 0.057 × √(γ × V / RT60).
+/// A higher γ means the source's direct sound dominates further from the source.
+pub fn directivity_factor(pattern: &DirectivityPattern) -> f32 {
+    if matches!(pattern, DirectivityPattern::Omni) {
+        return 1.0;
+    }
+
+    // Composite Simpson's rule: ∫₀^π g(θ)² sin(θ) dθ
+    const N: usize = 64; // must be even
+    let h = std::f32::consts::PI / N as f32;
+    let mut sum = 0.0f32;
+
+    for i in 0..=N {
+        let theta = i as f32 * h;
+        let g = pattern.gain_at_angle(theta);
+        let y = g * g * theta.sin();
+
+        let weight = if i == 0 || i == N {
+            1.0
+        } else if i % 2 == 1 {
+            4.0
+        } else {
+            2.0
+        };
+        sum += weight * y;
+    }
+    let integral = sum * h / 3.0;
+
+    if integral < 1e-6 {
+        return 1.0; // degenerate pattern — fallback to omni
+    }
+    2.0 / integral
+}
+
 /// Compute directivity gain from an entity (source or listener) toward a target point.
 ///
 /// Works identically for source emission and listener reception:
@@ -193,6 +241,63 @@ mod tests {
         let p = DirectivityPattern::cardioid();
         let g = directivity_gain(source_pos, source_facing, target, &p);
         assert!(g < 0.01, "expected ~0, got {}", g);
+    }
+
+    // ── Directivity factor tests ────────────────────────────────────────
+
+    #[test]
+    fn directivity_factor_omni_is_one() {
+        let gamma = directivity_factor(&DirectivityPattern::Omni);
+        assert!(
+            (gamma - 1.0).abs() < 1e-4,
+            "omni γ should be 1.0, got {gamma}"
+        );
+    }
+
+    #[test]
+    fn directivity_factor_cardioid_is_three() {
+        // Cardioid: g(θ) = 0.5 + 0.5·cos(θ), known γ = 3.0
+        let gamma = directivity_factor(&DirectivityPattern::cardioid());
+        assert!(
+            (gamma - 3.0).abs() < 0.05,
+            "cardioid γ should be ~3.0, got {gamma}"
+        );
+    }
+
+    #[test]
+    fn directivity_factor_supercardioid_higher_than_cardioid() {
+        let gamma_card = directivity_factor(&DirectivityPattern::cardioid());
+        let gamma_super = directivity_factor(&DirectivityPattern::supercardioid());
+        assert!(
+            gamma_super > gamma_card,
+            "supercardioid γ ({gamma_super}) should exceed cardioid γ ({gamma_card})"
+        );
+    }
+
+    #[test]
+    fn directivity_factor_cone_pattern() {
+        // Tight cone: full gain in front, 0.1 elsewhere → highly directional
+        let tight = DirectivityPattern::Cone {
+            inner: FRAC_PI_4,
+            outer: FRAC_PI_2,
+            outer_gain: 0.1,
+        };
+        let gamma = directivity_factor(&tight);
+        assert!(gamma > 2.0, "tight cone should have γ > 2.0, got {gamma}");
+    }
+
+    #[test]
+    fn critical_distance_scales_with_sqrt_gamma() {
+        // d_c = 0.057 × √(γ × V / RT60)
+        // For same room, d_c_cardioid / d_c_omni = √(γ_cardioid / γ_omni) = √3
+        let gamma_omni = directivity_factor(&DirectivityPattern::Omni);
+        let gamma_card = directivity_factor(&DirectivityPattern::cardioid());
+        let ratio = (gamma_card / gamma_omni).sqrt();
+        let expected = 3.0_f32.sqrt(); // √3 ≈ 1.732
+        assert!(
+            (ratio - expected).abs() < 0.05,
+            "d_c ratio should be √3 ≈ {expected:.3}, got {ratio:.3}"
+        );
     }
 
     #[test]

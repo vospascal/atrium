@@ -552,11 +552,9 @@ pub fn render_pipeline(
     // Zero output
     output.fill(0.0);
 
-    // Compute critical distance once per buffer for per-source reverb sends.
-    // Uses the same room geometry + wall reflectivity as the FDN's Jot gains.
+    // Room geometry + RT60 for per-source reverb send (critical distance).
     let (volume, surface_area) = room_acoustics::room_geometry(params.room_min, params.room_max);
     let rt60 = room_acoustics::sabine_rt60(volume, surface_area, *wall_reflectivity);
-    let critical_dist = room_acoustics::critical_distance(volume, rt60, 1.0);
 
     // Prepare reverb send buffer (same size as output, zeroed).
     reverb_send_buffer.resize(output.len(), 0.0);
@@ -609,7 +607,9 @@ pub fn render_pipeline(
             source_stages.process_all(i, &ctx, &mut src_out);
         }
 
-        // Per-source reverb send driven entirely by the physics-based d/d_c curve.
+        // Per-source reverb send: critical distance scales by √γ (directivity factor).
+        let gamma = atrium_core::directivity::directivity_factor(&source.directivity());
+        let critical_dist = room_acoustics::critical_distance(volume, rt60, gamma);
         let send = room_acoustics::reverb_send(dist_to_listener, critical_dist);
         src_out.reverb_send = send;
 
