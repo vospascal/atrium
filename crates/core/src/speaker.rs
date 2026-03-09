@@ -63,7 +63,7 @@ pub struct DistanceParams {
 impl Default for DistanceParams {
     fn default() -> Self {
         Self {
-            ref_distance: 0.3,
+            ref_distance: 1.0,
             max_distance: 20.0,
             rolloff: 1.0,
             model: DistanceModelType::Inverse,

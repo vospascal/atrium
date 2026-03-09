@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn distance_atten_unity_at_ref_distance() {
-        let dm = DistanceModel::default(); // ref=0.3, max=20, rolloff=1, inverse
+        let dm = DistanceModel::default(); // ref=1.0, max=20, rolloff=1, inverse
         let (path, atmo, ground) = make_ctx(dm.ref_distance);
         let mut effect = DistanceAttenuationEffect::new(dm);
         let ctx = PathEffectContext {
