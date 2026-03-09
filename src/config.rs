@@ -398,12 +398,15 @@ impl SceneConfig {
         // Build composable pipelines
         let ground = GroundProperties::mixed(room_cfg.ground_factor);
 
+        let wall_materials: [crate::pipeline::path::WallMaterial; 6] =
+            std::array::from_fn(|_| crate::pipeline::path::WallMaterial::default());
         let pipeline_params = PipelineParams {
             sample_rate: 48000.0, // will be recalibrated in init_pipelines
             hrtf_path: self.hrtf,
             er_wall_reflectivity: er_wall_reflectivity.unwrap_or(0.9),
             distance_model,
             dbap_rolloff_db: self.speakers.dbap_rolloff_db,
+            wall_materials: wall_materials.clone(),
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;
@@ -432,7 +435,7 @@ impl SceneConfig {
             active_pipeline,
             ground,
             barriers: Vec::new(),
-            wall_materials: std::array::from_fn(|_| crate::pipeline::path::WallMaterial::default()),
+            wall_materials,
         };
 
         let source_names: Vec<String> = source_metas.iter().map(|m| m.name.clone()).collect();

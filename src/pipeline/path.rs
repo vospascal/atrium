@@ -169,6 +169,26 @@ impl WallMaterial {
             alpha: [0.20, 0.40, 0.70, 0.80, 0.60, 0.40],
         }
     }
+
+    /// Broadband reflectivity (energy domain, 0.0–1.0).
+    ///
+    /// Computed as `1.0 - α_broadband`, where α_broadband is the energy-weighted
+    /// average of the mid bands (250 Hz–4 kHz, indices 1–5). The 125 Hz band is
+    /// excluded because it contributes little to perceived broadband reflection level.
+    pub fn broadband_reflectivity(&self) -> f32 {
+        // Energy weights for bands 250, 500, 1k, 2k, 4k Hz.
+        // Flat weighting across these perceptually dominant bands.
+        let alpha_broadband =
+            (self.alpha[1] + self.alpha[2] + self.alpha[3] + self.alpha[4] + self.alpha[5]) / 5.0;
+        (1.0 - alpha_broadband).clamp(0.0, 1.0)
+    }
+
+    /// Broadband amplitude reflection gain: √(broadband_reflectivity).
+    ///
+    /// Used by `ImageSourceResolver` for per-wall reflection energy.
+    pub fn broadband_reflection_gain(&self) -> f32 {
+        self.broadband_reflectivity().sqrt()
+    }
 }
 
 impl Default for WallMaterial {

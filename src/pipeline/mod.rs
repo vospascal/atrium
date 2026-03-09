@@ -284,6 +284,8 @@ pub struct PipelineParams {
     /// DBAP rolloff in dB per doubling of distance.
     /// 6.0 = free-field inverse distance law, 3–5 dB for reverberant spaces.
     pub dbap_rolloff_db: f32,
+    /// Per-wall materials for per-wall reflection gains in ImageSourceResolver.
+    pub wall_materials: [path::WallMaterial; 6],
 }
 
 impl Default for PipelineParams {
@@ -294,6 +296,7 @@ impl Default for PipelineParams {
             er_wall_reflectivity: DEFAULT_WALL_REFLECTIVITY,
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
+            wall_materials: Default::default(),
         }
     }
 }
@@ -336,7 +339,6 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
 
 fn build_vbap(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
-    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
         // VBAP: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -348,7 +350,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
             Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
                 Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
@@ -374,14 +376,13 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
 
 fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
-    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
         // HRTF: no source stages — air absorption and ground effect are per-path PathEffects.
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sample_rate)),
         mix_stages: vec![Box::new(FdnReverbStage::new()), Box::new(MasterGainStage)],
-        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
                 Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
@@ -407,7 +408,6 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 
 fn build_dbap(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
-    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
         // DBAP: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -422,7 +422,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
                 Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
@@ -448,7 +448,6 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
 
 fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
-    let wall_reflectivity = p.er_wall_reflectivity;
 
     RenderPipeline {
         // Ambisonics: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -462,7 +461,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
             Box::new(DelayCompStage::listener_relative()),
             Box::new(MasterGainStage),
         ],
-        resolver: Box::new(ImageSourceResolver::new(wall_reflectivity)),
+        resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
             Box::new(|sample_rate| {
                 Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
@@ -482,7 +481,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         path_effects: Vec::new(),
         render_channels: 0,
         reverb_send_buffer: Vec::new(),
-        wall_reflectivity,
+        wall_reflectivity: p.er_wall_reflectivity,
     }
 }
 

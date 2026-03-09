@@ -7,7 +7,9 @@
 use atrium_core::types::Vec3;
 
 use crate::audio::propagation::{barrier_attenuation_gain, BarrierGeometry};
-use crate::pipeline::path::{PathContribution, PathKind, PathResolver, PathSet, ResolveContext};
+use crate::pipeline::path::{
+    PathContribution, PathKind, PathResolver, PathSet, ResolveContext, WallMaterial,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DirectPathResolver
@@ -51,17 +53,32 @@ impl PathResolver for DirectPathResolver {
 /// - **direction**: unit vector from target toward the image source (for panning)
 /// - **distance**: total path length from source to wall to target
 /// - **delay**: propagation delay relative to the direct path
-/// - **gain**: √wall_reflectivity (distance applied by renderer)
+/// - **gain**: per-wall broadband amplitude reflection gain (distance applied by renderer)
 ///
 /// Reflections are skipped when the image distance is shorter than the direct
 /// path (source between wall and target) or when the delay would be zero.
 pub struct ImageSourceResolver {
-    pub wall_reflectivity: f32,
+    /// Per-wall broadband amplitude reflection gains [−X, +X, −Y, +Y, −Z, +Z].
+    wall_gains: [f32; 6],
 }
 
 impl ImageSourceResolver {
+    /// Create from per-wall materials. Each wall's broadband reflection gain is
+    /// derived from mid-band absorption coefficients (250 Hz–4 kHz).
+    pub fn from_materials(materials: &[WallMaterial; 6]) -> Self {
+        let mut wall_gains = [0.0f32; 6];
+        for (i, mat) in materials.iter().enumerate() {
+            wall_gains[i] = mat.broadband_reflection_gain();
+        }
+        Self { wall_gains }
+    }
+
+    /// Create with uniform reflectivity for all walls (legacy/test convenience).
     pub fn new(wall_reflectivity: f32) -> Self {
-        Self { wall_reflectivity }
+        let gain = wall_reflectivity.sqrt();
+        Self {
+            wall_gains: [gain; 6],
+        }
     }
 }
 
@@ -111,12 +128,10 @@ impl PathResolver for ImageSourceResolver {
             }
 
             let direction = image_diff * (1.0 / image_dist);
-            // Reflection gain = √reflectivity (no distance component).
-            // wall_reflectivity is energy-domain (fraction of energy reflected),
-            // so the amplitude reflection coefficient is √reflectivity.
+            // Per-wall broadband amplitude reflection gain (pre-computed from materials).
             // Distance attenuation is applied by the renderer using the same
             // distance model as the direct path, keeping the gain staging consistent.
-            let gain = self.wall_reflectivity.sqrt();
+            let gain = self.wall_gains[wall_idx];
 
             out.push(PathContribution {
                 kind: PathKind::Reflection,
@@ -720,6 +735,160 @@ mod tests {
             expected_delay
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Per-wall material tests (Phase 3A)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn carpeted_wall_reflection_has_lower_gain_than_hard_walls() {
+        // One carpeted floor (wall index 4 = -Z) + 5 hard walls.
+        // Carpet absorbs more → lower broadband reflection gain for that wall.
+        let mut materials = std::array::from_fn(|_| WallMaterial::hard_wall());
+        materials[4] = WallMaterial::carpet(); // floor = -Z wall
+
+        let resolver = ImageSourceResolver::from_materials(&materials);
+
+        let source = Vec3::new(1.0, 1.0, 2.0);
+        let target = Vec3::new(0.0, 0.0, 0.0);
+        let ctx = ResolveContext {
+            source_pos: source,
+            target_pos: target,
+            room_min: Vec3::new(-5.0, -5.0, -5.0),
+            room_max: Vec3::new(5.0, 5.0, 5.0),
+            barriers: &[],
+            atmosphere: &TEST_ATMOSPHERE,
+        };
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+
+        // Collect reflection gains (skip direct path at index 0).
+        let gains: Vec<f32> = paths.as_slice()[1..].iter().map(|p| p.gain).collect();
+        assert!(gains.len() >= 6, "should have 6 reflections");
+
+        // Hard wall gain = √(1 - broadband_α_hard) > carpet gain = √(1 - broadband_α_carpet)
+        let hard_gain = WallMaterial::hard_wall().broadband_reflection_gain();
+        let carpet_gain = WallMaterial::carpet().broadband_reflection_gain();
+        assert!(
+            carpet_gain < hard_gain,
+            "carpet gain ({carpet_gain}) should be lower than hard wall ({hard_gain})"
+        );
+
+        // At least one reflection should have the lower (carpet) gain.
+        let has_carpet = gains.iter().any(|&g| (g - carpet_gain).abs() < 1e-6);
+        let has_hard = gains.iter().any(|&g| (g - hard_gain).abs() < 1e-6);
+        assert!(
+            has_carpet,
+            "should have a reflection with carpet gain {carpet_gain}, got {gains:?}"
+        );
+        assert!(
+            has_hard,
+            "should have a reflection with hard wall gain {hard_gain}, got {gains:?}"
+        );
+    }
+
+    #[test]
+    fn from_materials_matches_manual_gain_computation() {
+        // Verify that from_materials produces gains consistent with
+        // the broadband_reflection_gain formula: √(1 - avg(α[1..5]))
+        let materials = [
+            WallMaterial::hard_wall(), // 0: -X
+            WallMaterial::hard_wall(), // 1: +X
+            WallMaterial::carpet(),    // 2: -Y
+            WallMaterial::hard_wall(), // 3: +Y
+            WallMaterial::carpet(),    // 4: -Z (floor)
+            WallMaterial::hard_wall(), // 5: +Z (ceiling)
+        ];
+        let resolver = ImageSourceResolver::from_materials(&materials);
+
+        // Resolve paths and check that wall 2 (-Y) and wall 4 (-Z) have carpet gain
+        let ctx = make_room_ctx(Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.0, 0.0, 0.0));
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+
+        let carpet_gain = WallMaterial::carpet().broadband_reflection_gain();
+        let hard_gain = WallMaterial::hard_wall().broadband_reflection_gain();
+
+        // Count how many reflections have each gain level
+        let carpet_count = paths.as_slice()[1..]
+            .iter()
+            .filter(|p| (p.gain - carpet_gain).abs() < 1e-6)
+            .count();
+        let hard_count = paths.as_slice()[1..]
+            .iter()
+            .filter(|p| (p.gain - hard_gain).abs() < 1e-6)
+            .count();
+
+        assert_eq!(carpet_count, 2, "should have 2 carpeted reflections");
+        assert_eq!(hard_count, 4, "should have 4 hard wall reflections");
+    }
+
+    #[test]
+    fn broadband_reflectivity_values_are_physically_correct() {
+        // Hard wall: mid-band α ≈ [0.02, 0.03, 0.04, 0.05, 0.05] → avg ≈ 0.038
+        // reflectivity = 1 - 0.038 = 0.962, gain = √0.962 ≈ 0.981
+        let hard = WallMaterial::hard_wall();
+        let hard_alpha_avg = (0.02 + 0.03 + 0.04 + 0.05 + 0.05) / 5.0;
+        let expected_hard = (1.0 - hard_alpha_avg as f32).sqrt();
+        assert!(
+            (hard.broadband_reflection_gain() - expected_hard).abs() < 1e-6,
+            "hard wall gain {}, expected {}",
+            hard.broadband_reflection_gain(),
+            expected_hard
+        );
+
+        // Carpet: mid-band α = [0.04, 0.08, 0.20, 0.35, 0.40] → avg = 0.214
+        // reflectivity = 1 - 0.214 = 0.786, gain = √0.786 ≈ 0.887
+        let carpet = WallMaterial::carpet();
+        let carpet_alpha_avg = (0.04 + 0.08 + 0.20 + 0.35 + 0.40) / 5.0;
+        let expected_carpet = (1.0 - carpet_alpha_avg as f32).sqrt();
+        assert!(
+            (carpet.broadband_reflection_gain() - expected_carpet).abs() < 1e-6,
+            "carpet gain {}, expected {}",
+            carpet.broadband_reflection_gain(),
+            expected_carpet
+        );
+
+        // Carpet should be significantly more absorptive
+        assert!(
+            hard.broadband_reflection_gain() - carpet.broadband_reflection_gain() > 0.05,
+            "hard wall and carpet should have meaningfully different gains"
+        );
+    }
+
+    #[test]
+    fn uniform_materials_matches_legacy_constructor() {
+        // from_materials with all-same materials should produce identical results
+        // to the legacy new(reflectivity) constructor with the same reflectivity.
+        let materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::hard_wall());
+        let resolver_new = ImageSourceResolver::from_materials(&materials);
+
+        let hard_refl = WallMaterial::hard_wall().broadband_reflectivity();
+        let resolver_legacy = ImageSourceResolver::new(hard_refl);
+
+        let ctx = make_room_ctx(Vec3::new(2.0, 1.0, 0.5), Vec3::new(0.0, 0.0, 0.0));
+
+        let mut paths_new = PathSet::new();
+        let mut paths_legacy = PathSet::new();
+        resolver_new.resolve(&ctx, &mut paths_new);
+        resolver_legacy.resolve(&ctx, &mut paths_legacy);
+
+        assert_eq!(paths_new.len(), paths_legacy.len());
+        for (a, b) in paths_new.as_slice().iter().zip(paths_legacy.as_slice()) {
+            assert!(
+                (a.gain - b.gain).abs() < 1e-6,
+                "gain mismatch: from_materials={}, legacy={}",
+                a.gain,
+                b.gain
+            );
+            assert!((a.distance - b.distance).abs() < 1e-6);
+            assert!((a.delay_seconds - b.delay_seconds).abs() < 1e-6);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-module consistency tests
+    // ─────────────────────────────────────────────────────────────────────────
 
     /// Verify that ImageSourceResolver and ReflectionCore compute identical
     /// reflection delays for the same geometry, confirming that both use
