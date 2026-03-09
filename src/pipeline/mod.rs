@@ -536,6 +536,8 @@ pub struct RenderParams<'a> {
     pub room_max: atrium_core::types::Vec3,
     pub barriers: &'a [crate::audio::propagation::Barrier],
     pub wall_materials: &'a [path::WallMaterial; 6],
+    /// Bypass soft clipping and gain clamping for acoustic measurement.
+    pub measurement_mode: bool,
 }
 
 /// Render one buffer through the active pipeline.
@@ -711,6 +713,7 @@ pub fn render_pipeline(
         wall_reflectivity: *wall_reflectivity,
         wall_materials: params.wall_materials,
         atmosphere: params.atmosphere,
+        measurement_mode: params.measurement_mode,
     };
     {
         let _s = profile_span!("mix_stages").entered();
@@ -830,6 +833,7 @@ mod tests {
             room_max,
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp_a, &mut buf_a);
 
@@ -851,6 +855,7 @@ mod tests {
             room_max,
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp_b, &mut buf_b);
 
@@ -915,6 +920,7 @@ mod tests {
             room_max: Vec3::new(6.0, 4.0, 3.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -985,6 +991,7 @@ mod tests {
             room_max: Vec3::new(6.0, 4.0, 3.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1047,6 +1054,7 @@ mod tests {
             room_max: Vec3::new(6.0, 4.0, 3.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1171,6 +1179,7 @@ mod tests {
             room_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1220,6 +1229,7 @@ mod tests {
                 room_max: Vec3::new(20.0, 20.0, 5.0),
                 barriers: &[],
                 wall_materials: &default_wall_materials(),
+                measurement_mode: false,
             };
             render_pipeline(pipeline, &mut sources, &rp, &mut buffer);
             buffer
@@ -1306,6 +1316,7 @@ mod tests {
             room_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1371,6 +1382,7 @@ mod tests {
             room_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1442,6 +1454,7 @@ mod tests {
                 room_max: Vec3::new(20.0, 20.0, 5.0),
                 barriers: &[],
                 wall_materials: &default_wall_materials(),
+                measurement_mode: false,
             };
             render_pipeline(pipeline, &mut sources, &rp, &mut buffer);
             buffer
@@ -1513,6 +1526,7 @@ mod tests {
             room_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1572,6 +1586,7 @@ mod tests {
             room_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1637,6 +1652,7 @@ mod tests {
             room_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
+            measurement_mode: false,
         };
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
@@ -1847,6 +1863,7 @@ mod tests {
                 room_max,
                 barriers: &[],
                 wall_materials: &wall_materials,
+                measurement_mode: false,
             };
             render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
             buffer

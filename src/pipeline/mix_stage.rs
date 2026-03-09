@@ -35,6 +35,10 @@ pub struct MixContext<'a> {
     /// Per-wall surface materials for frequency-dependent RT60 computation.
     pub wall_materials: &'a [WallMaterial; 6],
     pub atmosphere: &'a AtmosphericParams,
+    /// When true, bypasses soft clipping and gain clamping to preserve
+    /// linear signal levels for acoustic measurement and calibration.
+    /// NaN/Inf sanitization and a ±100.0 stability ceiling remain active.
+    pub measurement_mode: bool,
 }
 
 /// Post-mix processing stage. Processes the full interleaved output buffer in-place.

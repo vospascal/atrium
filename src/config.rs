@@ -439,6 +439,7 @@ impl SceneConfig {
             ground,
             barriers: Vec::new(),
             wall_materials,
+            measurement_mode: false,
         };
 
         let source_names: Vec<String> = source_metas.iter().map(|m| m.name.clone()).collect();

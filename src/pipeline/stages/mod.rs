@@ -16,6 +16,18 @@ pub mod air_absorption;
 pub mod ground_effect;
 pub mod reflections;
 
+/// Sanitize to finite values, clamped to ±100.0 stability ceiling.
+/// Used in measurement mode where soft clipping is bypassed but we still
+/// need to prevent NaN/Inf from reaching the DAC or exploding the FDN.
+#[inline]
+pub fn sanitize_finite(x: f32) -> f32 {
+    if x.is_finite() {
+        x.clamp(-100.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
 /// Soft-clip to [-1, 1] with smooth knee starting at ±0.9.
 /// Linear (transparent) for normal signals; smoothly compresses peaks
 /// using a rational curve x/(1+x) that asymptotes toward ±1.0.

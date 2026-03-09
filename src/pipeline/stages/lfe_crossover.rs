@@ -316,6 +316,7 @@ mod tests {
             wall_reflectivity: 0.9,
             wall_materials: &TEST_MATERIALS,
             atmosphere: &TEST_ATMOSPHERE,
+            measurement_mode: false,
         }
     }
 

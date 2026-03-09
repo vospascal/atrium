@@ -61,6 +61,8 @@ pub struct AudioScene {
     pub barriers: Vec<crate::audio::propagation::Barrier>,
     /// Wall materials for the 6 room faces (order: -X, +X, -Y, +Y, -Z, +Z).
     pub wall_materials: [crate::pipeline::path::WallMaterial; 6],
+    /// Bypass soft clipping and gain clamping for acoustic measurement.
+    pub measurement_mode: bool,
 }
 
 impl AudioScene {
@@ -177,6 +179,7 @@ impl AudioScene {
                 wall_reflectivity: pipeline.wall_reflectivity,
                 wall_materials: &self.wall_materials,
                 atmosphere: &self.atmosphere,
+                measurement_mode: self.measurement_mode,
             };
             pipeline.init(&mix_ctx);
             pipeline.ensure_topology(self.sources.len(), &self.speaker_layout, self.sample_rate);
@@ -223,6 +226,7 @@ impl AudioScene {
                 room_max,
                 barriers: &self.barriers,
                 wall_materials: &self.wall_materials,
+                measurement_mode: self.measurement_mode,
             };
             render_pipeline(pipeline, &mut self.sources, &params, output);
         }

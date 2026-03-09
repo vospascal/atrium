@@ -8,7 +8,7 @@
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
 use crate::pipeline::room_acoustics;
-use crate::pipeline::stages::soft_clip;
+use crate::pipeline::stages::{sanitize_finite, soft_clip};
 
 const NUM_LINES: usize = 8;
 const MAX_OUT: usize = 8;
@@ -71,6 +71,7 @@ pub struct FdnReverbStage {
     /// the d/d_c send law directly controls the perceived wet level.
     output_normalization: f32,
     initialized: bool,
+    measurement_mode: bool,
 }
 
 /// Sabine RT60 band indices for FDN damping.
@@ -96,6 +97,7 @@ impl FdnReverbStage {
             pre_delay_samples: 0,
             output_normalization: 1.0,
             initialized: false,
+            measurement_mode: false,
         }
     }
 
@@ -178,7 +180,17 @@ impl FdnReverbStage {
 
         // Network-level gain: RMS across lines (Hadamard is orthonormal).
         let rms_gain = (sum_norm_sq / NUM_LINES as f32).sqrt();
-        self.output_normalization = (1.0 / rms_gain).clamp(0.01, 1.0);
+        let raw_norm = 1.0 / rms_gain;
+        self.output_normalization = if self.measurement_mode {
+            // Measurement mode: preserve linear gain, only prevent NaN/Inf.
+            if raw_norm.is_finite() {
+                raw_norm
+            } else {
+                1.0
+            }
+        } else {
+            raw_norm.clamp(0.01, 1.0)
+        };
     }
 
     #[inline(always)]
@@ -242,7 +254,13 @@ impl FdnReverbStage {
         let input_scale = 1.0 / (NUM_LINES as f32).sqrt();
         let scaled_input = mono_in * input_scale;
         for i in 0..NUM_LINES {
-            self.delay_buffers[i][self.write_pos] = (taps[i] + scaled_input).clamp(-4.0, 4.0);
+            let v = taps[i] + scaled_input;
+            self.delay_buffers[i][self.write_pos] = if self.measurement_mode {
+                // Stability ceiling only: prevent runaway without soft clipping.
+                v.clamp(-100.0, 100.0)
+            } else {
+                v.clamp(-4.0, 4.0)
+            };
         }
 
         self.write_pos = (self.write_pos + 1) & BUF_MASK;
@@ -252,6 +270,7 @@ impl FdnReverbStage {
 
 impl MixStage for FdnReverbStage {
     fn init(&mut self, ctx: &MixContext) {
+        self.measurement_mode = ctx.measurement_mode;
         self.compute_delays(ctx.sample_rate);
 
         // Derive per-band RT60 from room geometry + wall materials via Sabine's equation.
@@ -326,8 +345,12 @@ impl MixStage for FdnReverbStage {
 
             for ch in 0..render_channels {
                 if ctx.layout.is_channel_active(ch) {
-                    buffer[base + ch] =
-                        soft_clip(buffer[base + ch] + wet[ch] * self.output_normalization);
+                    let mixed = buffer[base + ch] + wet[ch] * self.output_normalization;
+                    buffer[base + ch] = if self.measurement_mode {
+                        sanitize_finite(mixed)
+                    } else {
+                        soft_clip(mixed)
+                    };
                 }
             }
         }
@@ -403,6 +426,7 @@ mod tests {
             wall_reflectivity: 0.9,
             wall_materials: &TEST_MATERIALS,
             atmosphere: &TEST_ATMOSPHERE,
+            measurement_mode: false,
         }
     }
 
@@ -620,6 +644,7 @@ mod tests {
             wall_reflectivity: 0.9,
             wall_materials: &TEST_MATERIALS,
             atmosphere: &AtmosphericParams::default(),
+            measurement_mode: false,
         };
 
         let mut fdn = FdnReverbStage::new();
@@ -1092,6 +1117,7 @@ mod tests {
             wall_reflectivity: 0.9,
             wall_materials: &hard_materials,
             atmosphere: &atmosphere,
+            measurement_mode: false,
         };
         fdn_hard.init(&ctx_hard);
 
@@ -1109,6 +1135,7 @@ mod tests {
             wall_reflectivity: 0.9,
             wall_materials: &carpet_materials,
             atmosphere: &atmosphere,
+            measurement_mode: false,
         };
         fdn_carpet.init(&ctx_carpet);
 
