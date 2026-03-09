@@ -311,17 +311,12 @@ pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 5] {
 
 fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
-    let distance_model = &p.distance_model;
 
     RenderPipeline {
         // WorldLocked: no source stages — propagation lives in the renderer
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(WorldLockedRenderer::new(
             self::renderers::world_locked::WorldLockedParams {
-                ref_distance: distance_model.ref_distance,
-                max_distance: distance_model.max_distance,
-                rolloff: distance_model.rolloff,
-                model: distance_model.model,
                 wall_reflectivity: p.er_wall_reflectivity,
             },
         )),

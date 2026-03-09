@@ -5,7 +5,7 @@
 //! Listener position is irrelevant.
 
 use atrium_core::directivity::directivity_gain;
-use atrium_core::panner::{distance_gain_at_model, DistanceModelType};
+use atrium_core::panner::distance_gain_at_model;
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
 use crate::audio::propagation::ground_effect_gain;
@@ -25,10 +25,6 @@ struct SpeakerPropagation {
 
 /// Configuration for WorldLocked per-speaker propagation.
 pub struct WorldLockedParams {
-    pub ref_distance: f32,
-    pub max_distance: f32,
-    pub rolloff: f32,
-    pub model: DistanceModelType,
     pub wall_reflectivity: f32,
 }
 
@@ -115,14 +111,14 @@ impl Renderer for WorldLockedRenderer {
                     ctx.atmosphere.speed_of_sound(),
                 );
 
-                // Distance + directivity
+                // Distance + directivity (per-source distance model)
                 let dist_gain = distance_gain_at_model(
                     ctx.source_pos,
                     speaker.position,
-                    self.params.ref_distance,
-                    self.params.max_distance,
-                    self.params.rolloff,
-                    self.params.model,
+                    ctx.distance_model.ref_distance,
+                    ctx.distance_model.max_distance,
+                    ctx.distance_model.rolloff,
+                    ctx.distance_model.model,
                 );
                 let dir_gain = directivity_gain(
                     ctx.source_pos,
@@ -215,5 +211,53 @@ impl Renderer for WorldLockedRenderer {
         for gains in &mut self.prev_gains {
             gains.fill(0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use atrium_core::panner::{distance_gain_at_model, DistanceModelType};
+    use atrium_core::types::Vec3;
+
+    /// Verify that WorldLocked distance attenuation uses per-source parameters.
+    /// Two sources at the same position but with different ref_distance values
+    /// must produce different gains.
+    #[test]
+    fn per_source_ref_distance_produces_different_attenuation() {
+        let source_pos = Vec3::new(0.0, 0.0, 0.0);
+        let speaker_pos = Vec3::new(5.0, 0.0, 0.0); // 5m away
+
+        // Source A: ref_distance = 1.0 → gain = 1.0 / 5.0 = 0.2
+        let gain_a = distance_gain_at_model(
+            source_pos,
+            speaker_pos,
+            1.0,  // ref_distance
+            20.0, // max_distance
+            1.0,  // rolloff
+            DistanceModelType::Inverse,
+        );
+
+        // Source B: ref_distance = 3.0 → gain = 3.0 / 5.0 = 0.6
+        let gain_b = distance_gain_at_model(
+            source_pos,
+            speaker_pos,
+            3.0,  // ref_distance
+            20.0, // max_distance
+            1.0,  // rolloff
+            DistanceModelType::Inverse,
+        );
+
+        assert!(
+            (gain_a - 0.2).abs() < 1e-6,
+            "ref=1.0 at 5m: expected 0.2, got {gain_a}"
+        );
+        assert!(
+            (gain_b - 0.6).abs() < 1e-6,
+            "ref=3.0 at 5m: expected 0.6, got {gain_b}"
+        );
+        assert!(
+            gain_b > gain_a,
+            "larger ref_distance should produce higher gain at same distance"
+        );
     }
 }
