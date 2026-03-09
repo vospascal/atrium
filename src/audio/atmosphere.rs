@@ -127,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn atmospheric_params_speed_of_sound_matches_free_fn() {
+        let params = AtmosphericParams {
+            temperature_c: 25.0,
+            ..Default::default()
+        };
+        assert_eq!(params.speed_of_sound(), speed_of_sound(25.0));
+
+        let default_params = AtmosphericParams::default();
+        assert_eq!(default_params.speed_of_sound(), speed_of_sound(20.0));
+    }
+
+    #[test]
     fn iso9613_standard_conditions_order_of_magnitude() {
         let p = standard_conditions();
         let a1k = iso9613_alpha(1000.0, &p);

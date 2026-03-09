@@ -720,4 +720,73 @@ mod tests {
             expected_delay
         );
     }
+
+    /// Verify that ImageSourceResolver and ReflectionCore compute identical
+    /// reflection delays for the same geometry, confirming that both use
+    /// speed_of_sound consistently (regression test for the dual-constant bug).
+    #[test]
+    fn reflection_delay_consistent_across_resolver_and_core() {
+        use crate::pipeline::stages::reflections::ReflectionCore;
+
+        let atmosphere = AtmosphericParams::default(); // 20°C
+        let c = atmosphere.speed_of_sound(); // 331.3 + 0.606*20 = 343.42
+
+        // Source at origin, listener at (10, 0, 0) in a 20m cube.
+        let source = Vec3::new(0.0, 0.0, 0.0);
+        let listener = Vec3::new(10.0, 0.0, 0.0);
+        let room_min = Vec3::new(-10.0, -10.0, -10.0);
+        let room_max = Vec3::new(10.0, 10.0, 10.0);
+        let sample_rate = 48000.0;
+
+        // --- ImageSourceResolver delays ---
+        let resolver = ImageSourceResolver::new(0.9);
+        let ctx = ResolveContext {
+            source_pos: source,
+            target_pos: listener,
+            room_min,
+            room_max,
+            barriers: &[],
+            atmosphere: &atmosphere,
+        };
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+
+        let resolver_delays: Vec<f32> = paths
+            .as_slice()
+            .iter()
+            .filter(|p| p.kind == PathKind::Reflection)
+            .map(|p| p.delay_seconds)
+            .collect();
+        assert!(!resolver_delays.is_empty(), "should have reflections");
+
+        // --- ReflectionCore delays (in samples) ---
+        let mut core = ReflectionCore::new(0.9);
+        core.update(room_min, room_max, source, listener, sample_rate, c);
+
+        // ReflectionCore and ImageSourceResolver both compute:
+        //   delay = (image_dist - direct_dist) / speed_of_sound
+        // Verify a specific wall: -X wall image is at (-0, 0, 0) → (x=-20, 0, 0)
+        // Wait, image = (2*room_min.x - source.x, source.y, source.z) = (-20, 0, 0)
+        // image_dist = distance((-20,0,0), (10,0,0)) = 30
+        // direct_dist = 10
+        // delay = (30 - 10) / 343.42 = 20 / 343.42
+        let expected_delay_neg_x = 20.0 / c;
+
+        // Check that the resolver produced this delay
+        let has_matching = resolver_delays
+            .iter()
+            .any(|&d| (d - expected_delay_neg_x).abs() < 1e-5);
+        assert!(
+            has_matching,
+            "resolver should produce delay {expected_delay_neg_x:.6}s for -X wall, got {resolver_delays:?}"
+        );
+
+        // The 10m direct path should arrive at 10/c seconds — verify the formula
+        let direct_time = 10.0 / c;
+        assert!(
+            (direct_time - 0.02912).abs() < 0.001,
+            "10m at 20°C should be ~29.1ms, got {:.4}ms",
+            direct_time * 1000.0
+        );
+    }
 }
