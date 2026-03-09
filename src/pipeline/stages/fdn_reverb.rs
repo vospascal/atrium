@@ -16,7 +16,8 @@ const BUF_SIZE: usize = 512;
 const BUF_MASK: usize = BUF_SIZE - 1;
 const PRE_DELAY_BUF_SIZE: usize = 2048;
 const PRE_DELAY_BUF_MASK: usize = PRE_DELAY_BUF_SIZE - 1;
-const PRE_DELAY_SECONDS: f32 = 0.020;
+/// Fallback pre-delay when room geometry is degenerate (volume ≈ 0 or surface area ≈ 0).
+const PRE_DELAY_FALLBACK_SECONDS: f32 = 0.020;
 const BASE_DELAYS: [usize; NUM_LINES] = [241, 307, 353, 389, 421, 433, 461, 499];
 const BASE_SAMPLE_RATE: f32 = 48000.0;
 
@@ -103,8 +104,29 @@ impl FdnReverbStage {
             let scaled = ((base_delay as f32) * scale) as usize;
             self.delays[i] = scaled.clamp(1, BUF_SIZE - 1);
         }
-        self.pre_delay_samples =
-            ((PRE_DELAY_SECONDS * sample_rate) as usize).min(PRE_DELAY_BUF_SIZE - 1);
+    }
+
+    /// Compute pre-delay from mean free path time (average time between wall
+    /// bounces in a diffuse field). Falls back to 20ms for degenerate rooms.
+    ///
+    /// Reference: Kuttruff, "Room Acoustics" (5th ed., 2009).
+    fn compute_pre_delay(
+        &mut self,
+        sample_rate: f32,
+        volume: f32,
+        surface_area: f32,
+        speed_of_sound: f32,
+    ) {
+        let pre_delay_seconds = if volume < 1e-6 || surface_area < 1e-6 {
+            PRE_DELAY_FALLBACK_SECONDS
+        } else {
+            room_acoustics::mean_free_path_time(volume, surface_area, speed_of_sound)
+        };
+
+        // Clamp to [5ms, buffer capacity] for safety.
+        let max_seconds = (PRE_DELAY_BUF_SIZE - 1) as f32 / sample_rate;
+        let clamped = pre_delay_seconds.clamp(0.005, max_seconds);
+        self.pre_delay_samples = (clamped * sample_rate) as usize;
     }
 
     /// Compute per-line one-pole damping filters for frequency-dependent decay,
@@ -235,6 +257,10 @@ impl MixStage for FdnReverbStage {
         let (volume, surface_area) = room_acoustics::room_geometry(ctx.room_min, ctx.room_max);
         let rt60_low = room_acoustics::sabine_rt60(volume, surface_area, ctx.wall_reflectivity);
         let rt60_high = rt60_low * RT60_HIGH_RATIO;
+
+        // Pre-delay from mean free path: average time between wall bounces.
+        let speed_of_sound = ctx.atmosphere.speed_of_sound();
+        self.compute_pre_delay(ctx.sample_rate, volume, surface_area, speed_of_sound);
 
         self.compute_damping(ctx.sample_rate, rt60_low, rt60_high);
         self.initialized = true;
@@ -725,6 +751,7 @@ mod tests {
 
                 let mut fdn = FdnReverbStage::new();
                 fdn.compute_delays(sample_rate);
+                fdn.compute_pre_delay(sample_rate, volume, surface_area, 343.42);
                 fdn.compute_damping(sample_rate, rt60_low, rt60_high);
                 fdn.initialized = true;
 
@@ -837,6 +864,7 @@ mod tests {
                 let rt60_high = rt60 * RT60_HIGH_RATIO;
                 let mut fdn = FdnReverbStage::new();
                 fdn.compute_delays(sample_rate);
+                fdn.compute_pre_delay(sample_rate, volume, surface_area, 343.42);
                 fdn.compute_damping(sample_rate, rt60, rt60_high);
                 fdn.initialized = true;
 
@@ -882,5 +910,88 @@ mod tests {
             }
         }
         eprintln!();
+    }
+
+    // ── Pre-delay from room geometry (Phase 4A) ──────────────────────────
+
+    #[test]
+    fn pre_delay_10m_cube() {
+        // 10m cube: V=1000, S=600 → MFP = 4×1000/600 = 6.667m
+        // t = 6.667 / 343.42 ≈ 19.4ms → 932 samples at 48kHz
+        let mut fdn = FdnReverbStage::new();
+        fdn.compute_pre_delay(48000.0, 1000.0, 600.0, 343.42);
+        let expected_ms = 19.4;
+        let actual_ms = fdn.pre_delay_samples as f32 / 48.0;
+        assert!(
+            (actual_ms - expected_ms).abs() < 1.0,
+            "10m cube pre-delay should be ~{expected_ms}ms, got {actual_ms:.1}ms ({} samples)",
+            fdn.pre_delay_samples
+        );
+    }
+
+    #[test]
+    fn pre_delay_small_room() {
+        // 6×4×3m atrium: V=72, S=108 → MFP = 4×72/108 = 2.667m
+        // t = 2.667 / 343.42 ≈ 7.8ms → 373 samples at 48kHz
+        let mut fdn = FdnReverbStage::new();
+        let (volume, surface_area) =
+            room_acoustics::room_geometry(Vec3::ZERO, Vec3::new(6.0, 4.0, 3.0));
+        fdn.compute_pre_delay(48000.0, volume, surface_area, 343.42);
+        let expected_ms = 7.8;
+        let actual_ms = fdn.pre_delay_samples as f32 / 48.0;
+        assert!(
+            (actual_ms - expected_ms).abs() < 1.0,
+            "6×4×3m room pre-delay should be ~{expected_ms}ms, got {actual_ms:.1}ms ({} samples)",
+            fdn.pre_delay_samples
+        );
+    }
+
+    #[test]
+    fn pre_delay_varies_with_room_size() {
+        let mut fdn_small = FdnReverbStage::new();
+        let mut fdn_large = FdnReverbStage::new();
+
+        // Small room: 3×3×3m
+        let (vol_s, sa_s) = room_acoustics::room_geometry(Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0));
+        fdn_small.compute_pre_delay(48000.0, vol_s, sa_s, 343.42);
+
+        // Large room: 20×15×10m
+        let (vol_l, sa_l) = room_acoustics::room_geometry(Vec3::ZERO, Vec3::new(20.0, 15.0, 10.0));
+        fdn_large.compute_pre_delay(48000.0, vol_l, sa_l, 343.42);
+
+        assert!(
+            fdn_large.pre_delay_samples > fdn_small.pre_delay_samples,
+            "larger room should have longer pre-delay: {} vs {} samples",
+            fdn_large.pre_delay_samples,
+            fdn_small.pre_delay_samples
+        );
+    }
+
+    #[test]
+    fn pre_delay_degenerate_room_uses_fallback() {
+        let mut fdn = FdnReverbStage::new();
+        // Zero volume room → should use fallback (20ms)
+        fdn.compute_pre_delay(48000.0, 0.0, 0.0, 343.42);
+        let expected_samples = (PRE_DELAY_FALLBACK_SECONDS * 48000.0) as usize;
+        assert_eq!(
+            fdn.pre_delay_samples, expected_samples,
+            "degenerate room should use fallback pre-delay"
+        );
+    }
+
+    #[test]
+    fn pre_delay_clamped_minimum() {
+        let mut fdn = FdnReverbStage::new();
+        // Very tiny room: 0.1×0.1×0.1m → MFP ≈ 0.067m → t ≈ 0.19ms
+        // Should clamp to 5ms minimum
+        let (volume, surface_area) =
+            room_acoustics::room_geometry(Vec3::ZERO, Vec3::new(0.1, 0.1, 0.1));
+        fdn.compute_pre_delay(48000.0, volume, surface_area, 343.42);
+        let min_samples = (0.005 * 48000.0) as usize;
+        assert!(
+            fdn.pre_delay_samples >= min_samples,
+            "pre-delay should be at least 5ms ({min_samples} samples), got {}",
+            fdn.pre_delay_samples
+        );
     }
 }
