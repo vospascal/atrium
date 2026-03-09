@@ -63,6 +63,7 @@ pub mod source_stage;
 pub mod stages;
 
 use atrium_core::speaker::SpeakerLayout;
+use atrium_core::types::Vec3;
 
 /// Default wall reflectivity: 0.0 — outdoor scene with no enclosing walls.
 /// Reflections and reverb only activate when a room config is loaded
@@ -286,6 +287,9 @@ pub struct PipelineParams {
     pub dbap_rolloff_db: f32,
     /// Per-wall materials for per-wall reflection gains in ImageSourceResolver.
     pub wall_materials: [path::WallMaterial; 6],
+    /// Room bounds for sizing delay buffers from max image-source distance.
+    pub room_min: Vec3,
+    pub room_max: Vec3,
 }
 
 impl Default for PipelineParams {
@@ -297,8 +301,24 @@ impl Default for PipelineParams {
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
             wall_materials: Default::default(),
+            room_min: Vec3::new(-5.0, -5.0, -5.0),
+            room_max: Vec3::new(5.0, 5.0, 5.0),
         }
     }
+}
+
+/// Compute the propagation delay buffer capacity from room geometry.
+fn propagation_delay_capacity(p: &PipelineParams) -> usize {
+    let max_dist = room_acoustics::max_image_source_distance(p.room_min, p.room_max);
+    let speed_of_sound = AtmosphericParams::default().speed_of_sound();
+    room_acoustics::delay_buffer_capacity(max_dist, speed_of_sound, p.sample_rate, 8192)
+}
+
+/// Compute the reflection core buffer capacity from room geometry.
+fn reflection_buffer_capacity(p: &PipelineParams) -> usize {
+    let max_dist = room_acoustics::max_image_source_distance(p.room_min, p.room_max);
+    let speed_of_sound = AtmosphericParams::default().speed_of_sound();
+    room_acoustics::delay_buffer_capacity(max_dist, speed_of_sound, p.sample_rate, 4096)
 }
 
 /// Build all 5 pipelines. Pre-allocated at startup, zero allocation on mode switch.
@@ -321,6 +341,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
         renderer: Box::new(WorldLockedRenderer::new(
             self::renderers::world_locked::WorldLockedParams {
                 wall_reflectivity: p.er_wall_reflectivity,
+                reflection_capacity: reflection_buffer_capacity(p),
             },
         )),
         mix_stages: vec![
@@ -339,6 +360,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
 
 fn build_vbap(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
+    let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
         // VBAP: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -352,9 +374,11 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         ],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
-            Box::new(|sample_rate| {
-                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
-                    as Box<dyn PathEffect>
+            Box::new(move |sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(
+                    sample_rate,
+                    delay_cap,
+                )) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
@@ -376,6 +400,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
 
 fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
+    let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
         // HRTF: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -384,9 +409,11 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
         mix_stages: vec![Box::new(FdnReverbStage::new()), Box::new(MasterGainStage)],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
-            Box::new(|sample_rate| {
-                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
-                    as Box<dyn PathEffect>
+            Box::new(move |sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(
+                    sample_rate,
+                    delay_cap,
+                )) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
@@ -408,6 +435,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 
 fn build_dbap(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
+    let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
         // DBAP: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -424,9 +452,11 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
         ],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
-            Box::new(|sample_rate| {
-                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
-                    as Box<dyn PathEffect>
+            Box::new(move |sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(
+                    sample_rate,
+                    delay_cap,
+                )) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
@@ -448,6 +478,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
 
 fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
     let sample_rate = p.sample_rate;
+    let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
         // Ambisonics: no source stages — air absorption and ground effect are per-path PathEffects.
@@ -463,9 +494,11 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         ],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
-            Box::new(|sample_rate| {
-                Box::new(path_effects::PropagationDelayEffect::new(sample_rate))
-                    as Box<dyn PathEffect>
+            Box::new(move |sample_rate| {
+                Box::new(path_effects::PropagationDelayEffect::new(
+                    sample_rate,
+                    delay_cap,
+                )) as Box<dyn PathEffect>
             }),
             Box::new(|sample_rate| {
                 Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>

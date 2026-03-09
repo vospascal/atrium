@@ -93,6 +93,46 @@ pub fn sabine_rt60(volume: f32, surface_area: f32, wall_reflectivity: f32) -> f3
 /// Indices: [0]=125Hz, [1]=250Hz, [2]=500Hz, [3]=1kHz, [4]=2kHz, [5]=4kHz.
 const OCTAVE_BAND_FREQS: [f32; 6] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
 
+/// Maximum first-order image-source distance for an axis-aligned box room.
+///
+/// For each axis, the worst-case image distance is when the source is at one wall
+/// and the listener is at the opposite corner. The image is mirrored across the wall,
+/// so the image-to-listener distance is:
+///   X-wall: √((2·Lx)² + Ly² + Lz²)
+///   Y-wall: √(Lx² + (2·Ly)² + Lz²)
+///   Z-wall: √(Lx² + Ly² + (2·Lz)²)
+///
+/// Returns the maximum across all three axes.
+pub fn max_image_source_distance(room_min: Vec3, room_max: Vec3) -> f32 {
+    let size = room_max - room_min;
+    let lx = size.x.abs();
+    let ly = size.y.abs();
+    let lz = size.z.abs();
+
+    let dx = ((2.0 * lx).powi(2) + ly.powi(2) + lz.powi(2)).sqrt();
+    let dy = (lx.powi(2) + (2.0 * ly).powi(2) + lz.powi(2)).sqrt();
+    let dz = (lx.powi(2) + ly.powi(2) + (2.0 * lz).powi(2)).sqrt();
+
+    dx.max(dy).max(dz)
+}
+
+/// Compute delay buffer capacity (in samples) from max image-source distance.
+///
+/// Returns a power-of-2 value clamped to `[min_capacity, 65536]`.
+/// The +2 margin accounts for fractional delay interpolation.
+pub fn delay_buffer_capacity(
+    max_distance: f32,
+    speed_of_sound: f32,
+    sample_rate: f32,
+    min_capacity: usize,
+) -> usize {
+    let max_delay_seconds = max_distance / speed_of_sound;
+    let needed = (max_delay_seconds * sample_rate) as usize + 2;
+    let needed = needed.max(min_capacity);
+    // Round up to next power of 2.
+    needed.next_power_of_two().min(65536)
+}
+
 /// Per-wall surface areas for an axis-aligned box room.
 ///
 /// Returns `[S_-X, S_+X, S_-Y, S_+Y, S_-Z, S_+Z]` — matching the wall index
@@ -851,5 +891,60 @@ mod tests {
             );
             prev = send;
         }
+    }
+
+    // ── Max image-source distance & buffer sizing (Phase 5A) ─────────
+
+    #[test]
+    fn max_image_distance_50m_room() {
+        // 50×50×10m room: max is Z-wall = √(50² + 50² + (2×10)²) = √(2500+2500+400) = √5400 ≈ 73.5m
+        // Actually X-wall: √((2×50)² + 50² + 10²) = √(10000+2500+100) = √12600 ≈ 112.2m
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(50.0, 50.0, 10.0);
+        let max_dist = max_image_source_distance(room_min, room_max);
+        let expected = ((100.0_f32).powi(2) + 50.0_f32.powi(2) + 10.0_f32.powi(2)).sqrt();
+        assert!(
+            (max_dist - expected).abs() < 0.1,
+            "50×50×10m room max image distance should be ~{expected:.1}m, got {max_dist:.1}m"
+        );
+    }
+
+    #[test]
+    fn max_image_distance_3m_room() {
+        // 3×3×3m cube: max = √((6)² + 3² + 3²) = √(36+9+9) = √54 ≈ 7.35m
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(3.0, 3.0, 3.0);
+        let max_dist = max_image_source_distance(room_min, room_max);
+        let expected = (36.0 + 9.0 + 9.0_f32).sqrt();
+        assert!(
+            (max_dist - expected).abs() < 0.1,
+            "3m cube max image distance should be ~{expected:.1}m, got {max_dist:.1}m"
+        );
+    }
+
+    #[test]
+    fn delay_buffer_capacity_large_room() {
+        // 50×50×10m room: max distance ≈ 112m → ~327ms at 343 m/s → ~15696 samples at 48kHz
+        // Next power of 2: 16384
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(50.0, 50.0, 10.0);
+        let max_dist = max_image_source_distance(room_min, room_max);
+        let cap = delay_buffer_capacity(max_dist, 343.42, 48000.0, 8192);
+        assert!(
+            cap >= 16384,
+            "50×50×10m room should need ≥16384 samples, got {cap}"
+        );
+        // Should be power of 2
+        assert!(cap.is_power_of_two(), "capacity {cap} should be power of 2");
+    }
+
+    #[test]
+    fn delay_buffer_capacity_small_room_uses_minimum() {
+        // 3m cube: max distance ≈ 7.35m → ~21ms → ~1024 samples. Below 8192 minimum.
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(3.0, 3.0, 3.0);
+        let max_dist = max_image_source_distance(room_min, room_max);
+        let cap = delay_buffer_capacity(max_dist, 343.42, 48000.0, 8192);
+        assert_eq!(cap, 8192, "small room should use minimum capacity");
     }
 }

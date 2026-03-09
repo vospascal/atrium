@@ -26,6 +26,8 @@ struct SpeakerPropagation {
 /// Configuration for WorldLocked per-speaker propagation.
 pub struct WorldLockedParams {
     pub wall_reflectivity: f32,
+    /// Delay buffer capacity for ReflectionCore, sized from room geometry.
+    pub reflection_capacity: usize,
 }
 
 /// WorldLocked renderer with per-speaker propagation.
@@ -51,10 +53,14 @@ impl WorldLockedRenderer {
         }
     }
 
-    fn new_speaker_propagation(sample_rate: f32, wall_reflectivity: f32) -> SpeakerPropagation {
+    fn new_speaker_propagation(
+        sample_rate: f32,
+        wall_reflectivity: f32,
+        reflection_capacity: usize,
+    ) -> SpeakerPropagation {
         SpeakerPropagation {
             air_absorption: AirAbsorptionFilter::new(sample_rate),
-            reflections: ReflectionCore::new(wall_reflectivity),
+            reflections: ReflectionCore::new(wall_reflectivity, reflection_capacity),
             ground_gain: 1.0,
             dist_dir_gain: 0.0,
         }
@@ -182,7 +188,13 @@ impl Renderer for WorldLockedRenderer {
         // Grow source dimension
         while self.propagation.len() < source_count {
             let speakers: Vec<SpeakerPropagation> = (0..self.speaker_count)
-                .map(|_| Self::new_speaker_propagation(sample_rate, refl))
+                .map(|_| {
+                    Self::new_speaker_propagation(
+                        sample_rate,
+                        refl,
+                        self.params.reflection_capacity,
+                    )
+                })
                 .collect();
             self.propagation.push(speakers);
         }
@@ -190,7 +202,11 @@ impl Renderer for WorldLockedRenderer {
         // Grow speaker dimension if layout changed
         for source_props in &mut self.propagation {
             while source_props.len() < self.speaker_count {
-                source_props.push(Self::new_speaker_propagation(sample_rate, refl));
+                source_props.push(Self::new_speaker_propagation(
+                    sample_rate,
+                    refl,
+                    self.params.reflection_capacity,
+                ));
             }
         }
 

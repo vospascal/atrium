@@ -929,7 +929,7 @@ mod tests {
         assert!(!resolver_delays.is_empty(), "should have reflections");
 
         // --- ReflectionCore delays (in samples) ---
-        let mut core = ReflectionCore::new(0.9);
+        let mut core = ReflectionCore::new(0.9, 4096);
         core.update(room_min, room_max, source, listener, sample_rate, c);
 
         // ReflectionCore and ImageSourceResolver both compute:

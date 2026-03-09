@@ -6,8 +6,6 @@
 use atrium_core::types::Vec3;
 
 const MAX_TAPS: usize = 6;
-const BUFFER_SIZE: usize = 4096;
-const BUFFER_MASK: usize = BUFFER_SIZE - 1;
 
 #[derive(Clone, Copy)]
 struct ReflectionTap {
@@ -16,8 +14,14 @@ struct ReflectionTap {
 }
 
 /// Shared mono delay buffer + tapped readback for image-source reflections.
+///
+/// Buffer capacity is dynamically sized from the maximum first-order image-source
+/// distance (via `room_acoustics::delay_buffer_capacity`), with a minimum of 4096
+/// samples (~85ms at 48kHz). Power-of-2 sizing enables fast wrapping via bitmask.
 pub(crate) struct ReflectionCore {
-    buffer: Box<[f32; BUFFER_SIZE]>,
+    buffer: Box<[f32]>,
+    capacity: usize,
+    mask: usize,
     write_pos: usize,
     taps: [ReflectionTap; MAX_TAPS],
     tap_count: usize,
@@ -25,9 +29,15 @@ pub(crate) struct ReflectionCore {
 }
 
 impl ReflectionCore {
-    pub(crate) fn new(wall_reflectivity: f32) -> Self {
+    /// Minimum capacity: 4096 samples (~85ms at 48kHz).
+    const MIN_CAPACITY: usize = 4096;
+
+    pub(crate) fn new(wall_reflectivity: f32, capacity: usize) -> Self {
+        let capacity = capacity.max(Self::MIN_CAPACITY).next_power_of_two();
         Self {
-            buffer: Box::new([0.0; BUFFER_SIZE]),
+            buffer: vec![0.0; capacity].into_boxed_slice(),
+            capacity,
+            mask: capacity - 1,
             write_pos: 0,
             taps: [ReflectionTap {
                 delay_samples: 0,
@@ -71,7 +81,7 @@ impl ReflectionCore {
             }
             let delay_seconds = (image_dist - direct_dist) / speed_of_sound;
             let delay_samples = (delay_seconds * sample_rate) as usize;
-            if delay_samples == 0 || delay_samples >= BUFFER_SIZE {
+            if delay_samples == 0 || delay_samples >= self.capacity {
                 continue;
             }
             self.taps[count] = ReflectionTap {
@@ -92,10 +102,10 @@ impl ReflectionCore {
         let mut wet = 0.0f32;
         for i in 0..self.tap_count {
             let tap = &self.taps[i];
-            let read_pos = (self.write_pos + BUFFER_SIZE - tap.delay_samples) & BUFFER_MASK;
+            let read_pos = (self.write_pos + self.capacity - tap.delay_samples) & self.mask;
             wet += self.buffer[read_pos] * tap.gain;
         }
-        self.write_pos = (self.write_pos + 1) & BUFFER_MASK;
+        self.write_pos = (self.write_pos + 1) & self.mask;
         wet
     }
 

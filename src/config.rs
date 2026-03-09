@@ -22,7 +22,7 @@ use crate::audio::sound_profile::SoundProfile;
 use crate::audio::test_node::TestNode;
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::{build_all_pipelines, PipelineParams};
-use crate::world::room::BoxRoom;
+use crate::world::room::{BoxRoom, Room};
 use crate::world::types::Vec3;
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::listener::Listener;
@@ -400,6 +400,7 @@ impl SceneConfig {
 
         let wall_materials: [crate::pipeline::path::WallMaterial; 6] =
             std::array::from_fn(|_| crate::pipeline::path::WallMaterial::default());
+        let (room_min, room_max) = room.bounds();
         let pipeline_params = PipelineParams {
             sample_rate: 48000.0, // will be recalibrated in init_pipelines
             hrtf_path: self.hrtf,
@@ -407,6 +408,8 @@ impl SceneConfig {
             distance_model,
             dbap_rolloff_db: self.speakers.dbap_rolloff_db,
             wall_materials: wall_materials.clone(),
+            room_min,
+            room_max,
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;

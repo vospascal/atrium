@@ -407,22 +407,28 @@ impl ParametricBiquad {
 /// following the pattern from `delay_comp.rs:118-126`. The delay is derived
 /// from `path.delay_seconds * sample_rate` each buffer.
 ///
-/// Buffer capacity is 8192 samples (~170ms at 48kHz), enough for room-scale
-/// first-order reflections. Delays beyond capacity are clamped.
+/// Buffer capacity is dynamically sized from the maximum first-order image-source
+/// distance (via `room_acoustics::delay_buffer_capacity`), with a minimum of 8192
+/// samples (~170ms at 48kHz). Power-of-2 sizing enables fast wrapping via bitmask.
 pub struct PropagationDelayEffect {
-    buffer: Box<[f32; Self::CAPACITY]>,
+    buffer: Box<[f32]>,
+    capacity: usize,
+    mask: usize,
     write_pos: usize,
     delay_samples: f32,
     sample_rate: f32,
 }
 
 impl PropagationDelayEffect {
-    const CAPACITY: usize = 8192;
-    const MASK: usize = Self::CAPACITY - 1;
+    /// Minimum capacity: 8192 samples (~170ms at 48kHz).
+    const MIN_CAPACITY: usize = 8192;
 
-    pub fn new(sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32, capacity: usize) -> Self {
+        let capacity = capacity.max(Self::MIN_CAPACITY).next_power_of_two();
         Self {
-            buffer: Box::new([0.0; Self::CAPACITY]),
+            buffer: vec![0.0; capacity].into_boxed_slice(),
+            capacity,
+            mask: capacity - 1,
             write_pos: 0,
             delay_samples: 0.0,
             sample_rate,
@@ -440,18 +446,18 @@ impl PathEffect for PropagationDelayEffect {
     fn process_sample(&mut self, sample: f32) -> f32 {
         let wp = self.write_pos;
         self.buffer[wp] = sample;
-        self.write_pos = (wp + 1) & Self::MASK;
+        self.write_pos = (wp + 1) & self.mask;
 
         if self.delay_samples < 0.5 {
             return sample;
         }
 
-        let delay_clamped = self.delay_samples.min((Self::CAPACITY - 2) as f32);
+        let delay_clamped = self.delay_samples.min((self.capacity - 2) as f32);
         let delay_int = delay_clamped as usize;
         let frac = delay_clamped - delay_int as f32;
 
-        let idx0 = (wp + Self::CAPACITY - delay_int) & Self::MASK;
-        let idx1 = (wp + Self::CAPACITY - delay_int - 1) & Self::MASK;
+        let idx0 = (wp + self.capacity - delay_int) & self.mask;
+        let idx1 = (wp + self.capacity - delay_int - 1) & self.mask;
 
         let s0 = self.buffer[idx0];
         let s1 = self.buffer[idx1];
@@ -830,7 +836,7 @@ mod tests {
     #[test]
     fn propagation_delay_zero_is_passthrough() {
         let (path, atmo, ground) = make_delay_ctx(0.0);
-        let mut effect = PropagationDelayEffect::new(48000.0);
+        let mut effect = PropagationDelayEffect::new(48000.0, 8192);
         let ctx = PathEffectContext {
             path: &path,
             atmosphere: &atmo,
@@ -857,7 +863,7 @@ mod tests {
         let delay_seconds = delay_samples / sample_rate;
 
         let (path, atmo, ground) = make_delay_ctx(delay_seconds);
-        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let mut effect = PropagationDelayEffect::new(sample_rate, 8192);
         let ctx = PathEffectContext {
             path: &path,
             atmosphere: &atmo,
@@ -890,7 +896,7 @@ mod tests {
         let delay_seconds = delay_samples / sample_rate;
 
         let (path, atmo, ground) = make_delay_ctx(delay_seconds);
-        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let mut effect = PropagationDelayEffect::new(sample_rate, 8192);
         let ctx = PathEffectContext {
             path: &path,
             atmosphere: &atmo,
@@ -929,7 +935,7 @@ mod tests {
         let delay_seconds = 10.0 / sample_rate;
 
         let (path, atmo, ground) = make_delay_ctx(delay_seconds);
-        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let mut effect = PropagationDelayEffect::new(sample_rate, 8192);
         let ctx = PathEffectContext {
             path: &path,
             atmosphere: &atmo,
@@ -963,7 +969,7 @@ mod tests {
         let delay_seconds = 100.0 / sample_rate;
 
         let (path, atmo, ground) = make_delay_ctx(delay_seconds);
-        let mut effect = PropagationDelayEffect::new(sample_rate);
+        let mut effect = PropagationDelayEffect::new(sample_rate, 8192);
         let ctx = PathEffectContext {
             path: &path,
             atmosphere: &atmo,
