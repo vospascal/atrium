@@ -112,10 +112,13 @@ impl MixStage for AmbisonicsDecodeStage {
 mod tests {
     use super::*;
     use crate::audio::atmosphere::AtmosphericParams;
+    use crate::pipeline::path::WallMaterial;
     use atrium_core::ambisonics::foa_encode;
     use atrium_core::listener::Listener;
     use atrium_core::speaker::{Speaker, SpeakerLayout};
     use atrium_core::types::Vec3;
+
+    const TEST_MATERIALS: [WallMaterial; 6] = [WallMaterial::HARD_WALL; 6];
 
     #[test]
     fn decode_silent_input_silent_output() {
@@ -154,6 +157,7 @@ mod tests {
             render_channels: 4,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
             atmosphere: &AtmosphericParams::default(),
         };
         stage.init(&ctx);
@@ -202,6 +206,7 @@ mod tests {
             render_channels: 4,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
             atmosphere: &AtmosphericParams::default(),
         };
         stage.init(&ctx);
@@ -240,6 +245,7 @@ mod tests {
             render_channels: 2,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
             atmosphere: &AtmosphericParams::default(),
         };
         stage.init(&ctx);

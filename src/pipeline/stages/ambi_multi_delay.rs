@@ -235,9 +235,12 @@ impl MixStage for AmbiMultiDelayStage {
 mod tests {
     use super::*;
     use crate::audio::atmosphere::AtmosphericParams;
+    use crate::pipeline::path::WallMaterial;
     use atrium_core::listener::Listener;
     use atrium_core::speaker::SpeakerLayout;
     use atrium_core::types::Vec3;
+
+    const TEST_MATERIALS: [WallMaterial; 6] = [WallMaterial::HARD_WALL; 6];
 
     fn make_ctx(channels: usize) -> (SpeakerLayout, Listener) {
         let layout = SpeakerLayout::new(&[], None, channels);
@@ -267,6 +270,7 @@ mod tests {
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
             atmosphere: &TEST_ATMOSPHERE,
         }
     }

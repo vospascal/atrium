@@ -29,6 +29,8 @@
 //!   `c = 331.3 + 0.606 × T`
 //!   where T = temperature in °C. At 20°C, c ≈ 343.4 m/s.
 
+use crate::audio::atmosphere::{iso9613_alpha, AtmosphericParams};
+use crate::pipeline::path::WallMaterial;
 use atrium_core::types::Vec3;
 
 /// Compute the volume and total surface area of an axis-aligned room.
@@ -78,6 +80,75 @@ pub fn mean_free_path_time(volume: f32, surface_area: f32, speed_of_sound: f32) 
 pub fn sabine_rt60(volume: f32, surface_area: f32, wall_reflectivity: f32) -> f32 {
     let absorption_coefficient = 1.0 - wall_reflectivity.clamp(0.0, 0.99);
     let total_absorption = surface_area * absorption_coefficient;
+
+    if total_absorption < 1e-6 {
+        return 10.0;
+    }
+
+    let rt60 = 0.161 * volume / total_absorption;
+    rt60.clamp(0.1, 10.0)
+}
+
+/// Octave-band center frequencies for the 6-band absorption model.
+/// Indices: [0]=125Hz, [1]=250Hz, [2]=500Hz, [3]=1kHz, [4]=2kHz, [5]=4kHz.
+const OCTAVE_BAND_FREQS: [f32; 6] = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
+
+/// Per-wall surface areas for an axis-aligned box room.
+///
+/// Returns `[S_-X, S_+X, S_-Y, S_+Y, S_-Z, S_+Z]` — matching the wall index
+/// convention used by `ImageSourceResolver` and `WallMaterial`.
+///
+/// Each axis pair has the same area (e.g., -X and +X walls are both height × depth).
+pub fn wall_surface_areas(room_min: Vec3, room_max: Vec3) -> [f32; 6] {
+    let size = room_max - room_min;
+    let width = size.x.abs(); // X dimension
+    let height = size.y.abs(); // Y dimension
+    let depth = size.z.abs(); // Z dimension
+
+    let yz = height * depth; // -X, +X walls
+    let xz = width * depth; // -Y, +Y walls
+    let xy = width * height; // -Z, +Z walls
+
+    [yz, yz, xz, xz, xy, xy]
+}
+
+/// Sabine RT60 at a specific octave band, using per-wall materials and air absorption.
+///
+/// `RT60(f) = 0.161 × V / A(f)`
+///
+/// where:
+///   `A(f) = Σᵢ Sᵢ × αᵢ(f) + 4 × m(f) × V`
+///
+/// - `Sᵢ` = surface area of wall i
+/// - `αᵢ(f)` = absorption coefficient of wall i's material at band f
+/// - `m(f)` = air absorption coefficient in Nepers/m (ISO 9613, converted from dB/m)
+/// - The `4mV` term accounts for air absorption within the room volume
+///
+/// `band_index` selects from [125, 250, 500, 1000, 2000, 4000] Hz.
+///
+/// Reference: Sabine (1898), extended with air absorption term per Kuttruff (2009).
+pub fn sabine_rt60_at_band(
+    volume: f32,
+    wall_areas: &[f32; 6],
+    wall_materials: &[WallMaterial; 6],
+    atmosphere: &AtmosphericParams,
+    band_index: usize,
+) -> f32 {
+    let freq = OCTAVE_BAND_FREQS[band_index.min(5)];
+
+    // Surface absorption: Σ Sᵢ × αᵢ(f)
+    let mut surface_absorption = 0.0f32;
+    for i in 0..6 {
+        surface_absorption += wall_areas[i] * wall_materials[i].alpha[band_index.min(5)];
+    }
+
+    // Air absorption: 4 × m × V
+    // iso9613_alpha returns dB/m; convert to Nepers/m: m = α_dB / (10 × log10(e)) ≈ α_dB / 4.343
+    let air_alpha_db_per_m = iso9613_alpha(freq, atmosphere);
+    let air_absorption_nepers = air_alpha_db_per_m / 4.343;
+    let air_absorption = 4.0 * air_absorption_nepers * volume;
+
+    let total_absorption = surface_absorption + air_absorption;
 
     if total_absorption < 1e-6 {
         return 10.0;

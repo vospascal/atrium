@@ -676,6 +676,7 @@ pub fn render_pipeline(
         render_channels: effective_render_channels,
         reverb_input: Some(reverb_send_buffer),
         wall_reflectivity: *wall_reflectivity,
+        wall_materials: params.wall_materials,
         atmosphere: params.atmosphere,
     };
     {

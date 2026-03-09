@@ -175,6 +175,7 @@ impl AudioScene {
                 render_channels,
                 reverb_input: None,
                 wall_reflectivity: pipeline.wall_reflectivity,
+                wall_materials: &self.wall_materials,
                 atmosphere: &self.atmosphere,
             };
             pipeline.init(&mix_ctx);

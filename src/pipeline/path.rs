@@ -146,6 +146,12 @@ pub struct WallMaterial {
 }
 
 impl WallMaterial {
+    /// Hard wall as a const for use in static arrays and test fixtures.
+    pub const HARD_WALL: WallMaterial = WallMaterial {
+        name: "hard_wall",
+        alpha: [0.02, 0.02, 0.03, 0.04, 0.05, 0.05],
+    };
+
     /// Hard wall (concrete/plaster). Yeoward 2021 Table 1.
     pub fn hard_wall() -> Self {
         Self {

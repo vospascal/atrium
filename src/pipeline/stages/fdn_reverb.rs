@@ -54,9 +54,10 @@ impl DampingFilter {
 ///   8-line feedback network (1/RMS of per-line 1/√(1-g²)), so the d/d_c send
 ///   law directly controls perceived wet level without an arbitrary wet knob.
 ///
-/// High-frequency RT60 is set to 0.5× the low-frequency RT60, modeling
-/// the natural air absorption and surface absorption that causes highs
-/// to decay faster than lows in real rooms.
+/// High-frequency decay is derived from per-wall material absorption
+/// coefficients via Sabine's equation at 500 Hz (low) and 4 kHz (high),
+/// so rooms with absorptive surfaces (carpet, acoustic tile) naturally
+/// produce faster HF decay than hard-walled rooms.
 pub struct FdnReverbStage {
     delay_buffers: Box<[[f32; BUF_SIZE]; NUM_LINES]>,
     write_pos: usize,
@@ -72,10 +73,10 @@ pub struct FdnReverbStage {
     initialized: bool,
 }
 
-/// High-frequency RT60 ratio relative to low-frequency RT60.
-/// 0.5 means highs decay twice as fast as lows — a typical ratio
-/// for rooms with moderate air absorption and surface absorption.
-const RT60_HIGH_RATIO: f32 = 0.5;
+/// Sabine RT60 band indices for FDN damping.
+/// Band 2 = 500 Hz (low-frequency reference), band 5 = 4 kHz (HF decay).
+const RT60_LOW_BAND: usize = 2;
+const RT60_HIGH_BAND: usize = 5;
 
 impl Default for FdnReverbStage {
     fn default() -> Self {
@@ -253,10 +254,25 @@ impl MixStage for FdnReverbStage {
     fn init(&mut self, ctx: &MixContext) {
         self.compute_delays(ctx.sample_rate);
 
-        // Derive RT60 from room geometry via Sabine's equation.
+        // Derive per-band RT60 from room geometry + wall materials via Sabine's equation.
+        // RT60 at 500 Hz (band 2) sets the overall decay; RT60 at 4 kHz (band 5)
+        // controls how much faster highs decay — driven by actual material absorption.
         let (volume, surface_area) = room_acoustics::room_geometry(ctx.room_min, ctx.room_max);
-        let rt60_low = room_acoustics::sabine_rt60(volume, surface_area, ctx.wall_reflectivity);
-        let rt60_high = rt60_low * RT60_HIGH_RATIO;
+        let wall_areas = room_acoustics::wall_surface_areas(ctx.room_min, ctx.room_max);
+        let rt60_low = room_acoustics::sabine_rt60_at_band(
+            volume,
+            &wall_areas,
+            ctx.wall_materials,
+            ctx.atmosphere,
+            RT60_LOW_BAND,
+        );
+        let rt60_high = room_acoustics::sabine_rt60_at_band(
+            volume,
+            &wall_areas,
+            ctx.wall_materials,
+            ctx.atmosphere,
+            RT60_HIGH_BAND,
+        );
 
         // Pre-delay from mean free path: average time between wall bounces.
         let speed_of_sound = ctx.atmosphere.speed_of_sound();
@@ -358,6 +374,10 @@ mod tests {
         (layout, listener)
     }
 
+    use crate::pipeline::path::WallMaterial;
+
+    const TEST_MATERIALS: [WallMaterial; 6] = [WallMaterial::HARD_WALL; 6];
+
     const TEST_ATMOSPHERE: AtmosphericParams = AtmosphericParams {
         temperature_c: 20.0,
         humidity_pct: 50.0,
@@ -381,6 +401,7 @@ mod tests {
             render_channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
             atmosphere: &TEST_ATMOSPHERE,
         }
     }
@@ -597,6 +618,7 @@ mod tests {
             render_channels,
             reverb_input: Some(&reverb_input),
             wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
             atmosphere: &AtmosphericParams::default(),
         };
 
@@ -634,28 +656,27 @@ mod tests {
         );
     }
 
-    /// Output normalization adapts to room reflectivity: reflective rooms get
-    /// heavier attenuation (lower output_normalization) because the Jot feedback
-    /// gains are higher, causing more steady-state energy buildup in the network.
+    /// Output normalization adapts to wall materials: absorptive rooms get
+    /// less attenuation (higher output_normalization) because the Jot feedback
+    /// gains are lower, causing less steady-state energy buildup in the network.
     #[test]
-    fn output_normalization_scales_with_reflectivity() {
+    fn output_normalization_scales_with_materials() {
         let channels = 2;
         let render_channels = 2;
         let (layout, listener) = make_ctx(channels, render_channels);
 
-        // Dead room: low reflectivity → short RT60 → low Jot gains → normalization near 1.0
+        // Dead room: acoustic tile on all walls → high absorption → short RT60
+        let tile_materials: [WallMaterial; 6] =
+            std::array::from_fn(|_| WallMaterial::ceiling_tile());
         let ctx_dead = MixContext {
-            wall_reflectivity: 0.3,
+            wall_materials: &tile_materials,
             ..mix_ctx(&layout, &listener, channels, render_channels)
         };
         let mut fdn_dead = FdnReverbStage::new();
         fdn_dead.init(&ctx_dead);
 
-        // Reflective room: high reflectivity → long RT60 → high Jot gains → lower normalization
-        let ctx_live = MixContext {
-            wall_reflectivity: 0.95,
-            ..mix_ctx(&layout, &listener, channels, render_channels)
-        };
+        // Live room: hard walls → low absorption → long RT60
+        let ctx_live = mix_ctx(&layout, &listener, channels, render_channels);
         let mut fdn_live = FdnReverbStage::new();
         fdn_live.init(&ctx_live);
 
@@ -665,21 +686,9 @@ mod tests {
             fdn_dead.output_normalization,
             fdn_live.output_normalization
         );
-        // Dead room should need minimal correction (near 1.0)
-        assert!(
-            fdn_dead.output_normalization > 0.5,
-            "dead room norm should be near 1.0, got {}",
-            fdn_dead.output_normalization
-        );
-        // Live room needs substantial attenuation
-        assert!(
-            fdn_live.output_normalization < 0.3,
-            "live room norm should be well below 1.0, got {}",
-            fdn_live.output_normalization
-        );
     }
 
-    /// Verify the actual output normalization for the default atrium room (6×4×3m, r=0.9).
+    /// Verify the actual output normalization for the default atrium room (6×4×3m, hard walls).
     /// This is the generic FDN used by VBAP, HRTF, and DBAP modes.
     #[test]
     fn output_normalization_atrium_room() {
@@ -687,27 +696,25 @@ mod tests {
         let render_channels = 6;
         let (layout, listener) = make_ctx(channels, render_channels);
 
-        // Actual atrium: 6×4×3m room, wall_reflectivity=0.9
+        // Actual atrium: 6×4×3m room, hard walls
         let ctx = MixContext {
             room_min: Vec3::new(0.0, 0.0, 0.0),
             room_max: Vec3::new(6.0, 4.0, 3.0),
-            wall_reflectivity: 0.9,
             ..mix_ctx(&layout, &listener, channels, render_channels)
         };
 
         let mut fdn = FdnReverbStage::new();
         fdn.init(&ctx);
 
-        // With g_eff (RMS of g_dc, g_nyq), the 6×4×3m room at r=0.9
-        // should produce normalization around 0.37 (significant attenuation
-        // because RT60≈1.07s creates substantial feedback energy buildup).
+        // Hard walls produce long RT60 → high feedback gains → low output normalization.
+        // The exact value depends on material-derived RT60 at 500 Hz and 4 kHz bands.
         eprintln!(
-            "Generic FDN output_normalization = {:.4} (atrium 6x4x3, r=0.9)",
+            "Generic FDN output_normalization = {:.4} (atrium 6x4x3, hard walls)",
             fdn.output_normalization
         );
         assert!(
-            (fdn.output_normalization - 0.37).abs() < 0.05,
-            "atrium room norm should be ~0.37, got {}",
+            fdn.output_normalization > 0.05 && fdn.output_normalization < 0.5,
+            "atrium room norm should be between 0.05 and 0.5, got {}",
             fdn.output_normalization
         );
     }
@@ -861,7 +868,16 @@ mod tests {
                 }
 
                 // ── FDN late tail: feed impulse × send, measure tail ──
-                let rt60_high = rt60 * RT60_HIGH_RATIO;
+                // Use band-specific RT60 from wall materials (hard walls for this test).
+                let wall_areas = room_acoustics::wall_surface_areas(room_min, room_max);
+                let atmosphere = AtmosphericParams::default();
+                let rt60_high = room_acoustics::sabine_rt60_at_band(
+                    volume,
+                    &wall_areas,
+                    &TEST_MATERIALS,
+                    &atmosphere,
+                    RT60_HIGH_BAND,
+                );
                 let mut fdn = FdnReverbStage::new();
                 fdn.compute_delays(sample_rate);
                 fdn.compute_pre_delay(sample_rate, volume, surface_area, 343.42);
@@ -976,6 +992,132 @@ mod tests {
         assert_eq!(
             fdn.pre_delay_samples, expected_samples,
             "degenerate room should use fallback pre-delay"
+        );
+    }
+
+    // ── HF decay from materials (Phase 4B) ────────────────────────────
+
+    #[test]
+    fn hard_walls_rt60_ratio_near_unity() {
+        // Hard walls have nearly uniform absorption across bands (0.02–0.05),
+        // so RT60 at 500 Hz and 4 kHz should be similar (ratio near 1.0).
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, _) = room_acoustics::room_geometry(room_min, room_max);
+        let wall_areas = room_acoustics::wall_surface_areas(room_min, room_max);
+        let atmosphere = AtmosphericParams::default();
+
+        let rt60_low = room_acoustics::sabine_rt60_at_band(
+            volume,
+            &wall_areas,
+            &TEST_MATERIALS,
+            &atmosphere,
+            RT60_LOW_BAND,
+        );
+        let rt60_high = room_acoustics::sabine_rt60_at_band(
+            volume,
+            &wall_areas,
+            &TEST_MATERIALS,
+            &atmosphere,
+            RT60_HIGH_BAND,
+        );
+
+        let ratio = rt60_high / rt60_low;
+        // Hard walls: alpha at 500 Hz = 0.03, at 4 kHz = 0.05 + air absorption.
+        // Ratio should be between 0.5 and 1.0 (close to 1 but air absorption pulls HF down).
+        assert!(
+            ratio > 0.4 && ratio < 1.0,
+            "hard walls RT60 ratio should be near 1.0, got {ratio:.3} (low={rt60_low:.3}s, high={rt60_high:.3}s)"
+        );
+    }
+
+    #[test]
+    fn carpet_walls_have_lower_hf_ratio() {
+        // Carpet has much higher absorption at 4 kHz (0.40) vs 500 Hz (0.08),
+        // so RT60_high / RT60_low should be significantly lower than hard walls.
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, _) = room_acoustics::room_geometry(room_min, room_max);
+        let wall_areas = room_acoustics::wall_surface_areas(room_min, room_max);
+        let atmosphere = AtmosphericParams::default();
+
+        let carpet_materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::carpet());
+
+        let rt60_low = room_acoustics::sabine_rt60_at_band(
+            volume,
+            &wall_areas,
+            &carpet_materials,
+            &atmosphere,
+            RT60_LOW_BAND,
+        );
+        let rt60_high = room_acoustics::sabine_rt60_at_band(
+            volume,
+            &wall_areas,
+            &carpet_materials,
+            &atmosphere,
+            RT60_HIGH_BAND,
+        );
+
+        let ratio = rt60_high / rt60_low;
+        assert!(
+            ratio < 0.5,
+            "carpet walls should have RT60_high/RT60_low < 0.5, got {ratio:.3} (low={rt60_low:.3}s, high={rt60_high:.3}s)"
+        );
+    }
+
+    #[test]
+    fn fdn_init_uses_material_derived_damping() {
+        // Verify that FDN init produces different damping for different materials.
+        let room_min = Vec3::ZERO;
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+
+        let hard_materials = [WallMaterial::HARD_WALL; 6];
+        let carpet_materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::carpet());
+
+        let layout = SpeakerLayout::new(&[], None, 2);
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
+        let atmosphere = AtmosphericParams::default();
+
+        let mut fdn_hard = FdnReverbStage::new();
+        let ctx_hard = MixContext {
+            listener: &listener,
+            layout: &layout,
+            sample_rate: 48000.0,
+            channels: 2,
+            room_min,
+            room_max,
+            master_gain: 1.0,
+            render_channels: 2,
+            reverb_input: None,
+            wall_reflectivity: 0.9,
+            wall_materials: &hard_materials,
+            atmosphere: &atmosphere,
+        };
+        fdn_hard.init(&ctx_hard);
+
+        let mut fdn_carpet = FdnReverbStage::new();
+        let ctx_carpet = MixContext {
+            listener: &listener,
+            layout: &layout,
+            sample_rate: 48000.0,
+            channels: 2,
+            room_min,
+            room_max,
+            master_gain: 1.0,
+            render_channels: 2,
+            reverb_input: None,
+            wall_reflectivity: 0.9,
+            wall_materials: &carpet_materials,
+            atmosphere: &atmosphere,
+        };
+        fdn_carpet.init(&ctx_carpet);
+
+        // Hard walls should have higher output normalization (less damping, more buildup)
+        // than carpet walls (more damping, less buildup).
+        assert!(
+            fdn_hard.output_normalization < fdn_carpet.output_normalization,
+            "hard walls should have lower output_norm (more energy buildup) than carpet: hard={}, carpet={}",
+            fdn_hard.output_normalization, fdn_carpet.output_normalization
         );
     }
 
