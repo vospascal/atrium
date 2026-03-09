@@ -10,7 +10,9 @@
 //!
 //! Additionally, `BilateralDecoder` provides ambisonics-to-binaural (stereo
 //! headphone) rendering by rotating B-format per ear and applying binaural
-//! decode weights. This gives ITD from rotation and ILD from asymmetric weights.
+//! decode weights. This produces ILD (inter-aural level difference) from
+//! rotation-based level differences. Note: actual ITD (inter-aural time delay)
+//! is not implemented — that would require per-sample delay lines or HRTF convolution.
 //!
 //! Key equations (Arteaga 2025, Zotter & Frank 2019):
 //!   Encoding:  W = g/√2
