@@ -9,6 +9,8 @@ use atrium_core::listener::Listener;
 use atrium_core::speaker::SpeakerLayout;
 use atrium_core::types::Vec3;
 
+use crate::audio::atmosphere::AtmosphericParams;
+
 /// Context for post-mix stages.
 pub struct MixContext<'a> {
     pub listener: &'a Listener,
@@ -29,6 +31,7 @@ pub struct MixContext<'a> {
     pub reverb_input: Option<&'a [f32]>,
     /// Wall reflectivity (0.0–1.0) for Sabine RT60 computation in FDN stages.
     pub wall_reflectivity: f32,
+    pub atmosphere: &'a AtmosphericParams,
 }
 
 /// Post-mix processing stage. Processes the full interleaved output buffer in-place.

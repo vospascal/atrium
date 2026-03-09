@@ -8,7 +8,6 @@ use atrium_core::types::Vec3;
 const MAX_TAPS: usize = 6;
 const BUFFER_SIZE: usize = 4096;
 const BUFFER_MASK: usize = BUFFER_SIZE - 1;
-use crate::audio::atmosphere::SPEED_OF_SOUND;
 
 #[derive(Clone, Copy)]
 struct ReflectionTap {
@@ -48,6 +47,7 @@ impl ReflectionCore {
         source_pos: Vec3,
         target_pos: Vec3,
         sample_rate: f32,
+        speed_of_sound: f32,
     ) {
         let images = [
             Vec3::new(2.0 * room_min.x - source_pos.x, source_pos.y, source_pos.z),
@@ -69,7 +69,7 @@ impl ReflectionCore {
             if image_dist < 0.1 || image_dist < direct_dist {
                 continue;
             }
-            let delay_seconds = (image_dist - direct_dist) / SPEED_OF_SOUND;
+            let delay_seconds = (image_dist - direct_dist) / speed_of_sound;
             let delay_samples = (delay_seconds * sample_rate) as usize;
             if delay_samples == 0 || delay_samples >= BUFFER_SIZE {
                 continue;

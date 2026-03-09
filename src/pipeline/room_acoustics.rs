@@ -31,9 +31,6 @@
 
 use atrium_core::types::Vec3;
 
-/// Speed of sound at 20°C in m/s (ISO 9613-1: c = 331.3 + 0.606 × T).
-const SPEED_OF_SOUND: f32 = 343.4;
-
 /// Compute the volume and total surface area of an axis-aligned room.
 ///
 /// Returns `(volume_m3, surface_area_m2)`.
@@ -56,12 +53,12 @@ pub fn room_geometry(room_min: Vec3, room_max: Vec3) -> (f32, f32) {
 /// Reference: Kuttruff, "Room Acoustics" (5th ed., 2009).
 ///
 /// Returns time in seconds.
-pub fn mean_free_path_time(volume: f32, surface_area: f32) -> f32 {
+pub fn mean_free_path_time(volume: f32, surface_area: f32, speed_of_sound: f32) -> f32 {
     if surface_area < 1e-6 {
         return 0.0;
     }
     let mean_free_path_meters = 4.0 * volume / surface_area;
-    mean_free_path_meters / SPEED_OF_SOUND
+    mean_free_path_meters / speed_of_sound
 }
 
 /// Sabine's reverberation time (RT60) in seconds.
@@ -210,7 +207,7 @@ mod tests {
     #[test]
     fn mean_free_path_10m_cube() {
         // V=1000, S=600 → d̄ = 4000/600 = 6.667m → t = 6.667/343.4 = 19.4ms
-        let t = mean_free_path_time(1000.0, 600.0);
+        let t = mean_free_path_time(1000.0, 600.0, 343.42);
         assert!(
             (t - 0.0194).abs() < 0.001,
             "10m cube MFP should be ~19.4ms, got {:.1}ms",
@@ -223,7 +220,7 @@ mod tests {
         // Small room: 5.5×6.5×3.5 → V=125.125, S=155.75
         // d̄ = 500.5/155.75 = 3.21m → t = 3.21/343.4 = 9.36ms
         let (volume, surface_area) = room_geometry(Vec3::ZERO, Vec3::new(5.5, 6.5, 3.5));
-        let t = mean_free_path_time(volume, surface_area);
+        let t = mean_free_path_time(volume, surface_area, 343.42);
         assert!(
             (t * 1000.0 - 9.36).abs() < 0.5,
             "small room MFP should be ~9.4ms, got {:.1}ms",
@@ -233,7 +230,7 @@ mod tests {
         // Concert hall: 30×23.8×20 → V=14280, S=3576
         // d̄ = 57120/3576 = 15.97m → t = 15.97/343.4 = 46.5ms
         let (volume, surface_area) = room_geometry(Vec3::ZERO, Vec3::new(30.0, 23.8, 20.0));
-        let t = mean_free_path_time(volume, surface_area);
+        let t = mean_free_path_time(volume, surface_area, 343.42);
         assert!(
             (t * 1000.0 - 46.5).abs() < 1.0,
             "concert hall MFP should be ~46.5ms, got {:.1}ms",
@@ -586,7 +583,7 @@ mod tests {
             let rt60_eyring = eyring_rt60(volume, surface_area, r_eyring);
 
             // Mean free path time for this room
-            let mfp_time = mean_free_path_time(volume, surface_area);
+            let mfp_time = mean_free_path_time(volume, surface_area, 343.42);
 
             // Per-delay-line Jot gains (the correct Jot approach)
             let per_tap: Vec<f32> = delay_times

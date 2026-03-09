@@ -311,6 +311,7 @@ impl MixStage for FdnReverbStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::atmosphere::AtmosphericParams;
     use atrium_core::listener::Listener;
     use atrium_core::speaker::SpeakerLayout;
     use atrium_core::types::Vec3;
@@ -331,6 +332,12 @@ mod tests {
         (layout, listener)
     }
 
+    const TEST_ATMOSPHERE: AtmosphericParams = AtmosphericParams {
+        temperature_c: 20.0,
+        humidity_pct: 50.0,
+        pressure_kpa: 101.325,
+    };
+
     fn mix_ctx<'a>(
         layout: &'a SpeakerLayout,
         listener: &'a Listener,
@@ -348,6 +355,7 @@ mod tests {
             render_channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            atmosphere: &TEST_ATMOSPHERE,
         }
     }
 
@@ -563,6 +571,7 @@ mod tests {
             render_channels,
             reverb_input: Some(&reverb_input),
             wall_reflectivity: 0.9,
+            atmosphere: &AtmosphericParams::default(),
         };
 
         let mut fdn = FdnReverbStage::new();
@@ -812,6 +821,7 @@ mod tests {
                     room_min,
                     room_max,
                     barriers: &[],
+                    atmosphere: &AtmosphericParams::default(),
                 };
                 resolver.resolve(&resolve_ctx, &mut paths);
 

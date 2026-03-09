@@ -116,6 +116,7 @@ pub struct ResolveContext<'a> {
     pub room_min: Vec3,
     pub room_max: Vec3,
     pub barriers: &'a [Barrier],
+    pub atmosphere: &'a AtmosphericParams,
 }
 
 /// Resolves propagation paths from source to target.

@@ -602,6 +602,7 @@ pub fn render_pipeline(
                 room_min: params.room_min,
                 room_max: params.room_max,
                 barriers: params.barriers,
+                atmosphere: params.atmosphere,
             };
             resolver.resolve(&resolve_ctx, &mut paths);
         }
@@ -681,6 +682,7 @@ pub fn render_pipeline(
         render_channels: effective_render_channels,
         reverb_input: Some(reverb_send_buffer),
         wall_reflectivity: *wall_reflectivity,
+        atmosphere: params.atmosphere,
     };
     {
         let _s = profile_span!("mix_stages").entered();

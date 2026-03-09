@@ -166,13 +166,20 @@ pub fn ground_effect_db(
     h_receiver: f32,
     ground: &GroundProperties,
     freq_hz: f32,
+    speed_of_sound: f32,
 ) -> f32 {
     if distance < 0.01 {
         return 0.0;
     }
 
-    let a_s = ground_region_source(distance, h_source, ground.g_source, freq_hz);
-    let a_r = ground_region_receiver(distance, h_receiver, ground.g_receiver, freq_hz);
+    let a_s = ground_region_source(distance, h_source, ground.g_source, freq_hz, speed_of_sound);
+    let a_r = ground_region_receiver(
+        distance,
+        h_receiver,
+        ground.g_receiver,
+        freq_hz,
+        speed_of_sound,
+    );
     let a_m = ground_region_middle(distance, h_source, h_receiver, ground.g_middle);
 
     a_s + a_r + a_m
@@ -188,15 +195,27 @@ pub fn ground_effect_db(
 /// The -1.5 dB base term is the coherent ground reflection gain (present for
 /// all surface types). The G-dependent correction captures how porous surfaces
 /// behave differently at low vs. high frequencies.
-fn ground_region_source(distance: f32, h_source: f32, g_source: f32, freq_hz: f32) -> f32 {
-    iso_ground_region(g_source, freq_hz, h_source, distance)
+fn ground_region_source(
+    distance: f32,
+    h_source: f32,
+    g_source: f32,
+    freq_hz: f32,
+    speed_of_sound: f32,
+) -> f32 {
+    iso_ground_region(g_source, freq_hz, h_source, distance, speed_of_sound)
 }
 
 /// Receiver region ground effect (ISO 9613-2, Table 3).
 ///
 /// Symmetric to A_s but evaluated at the receiver height.
-fn ground_region_receiver(distance: f32, h_receiver: f32, g_receiver: f32, freq_hz: f32) -> f32 {
-    iso_ground_region(g_receiver, freq_hz, h_receiver, distance)
+fn ground_region_receiver(
+    distance: f32,
+    h_receiver: f32,
+    g_receiver: f32,
+    freq_hz: f32,
+    speed_of_sound: f32,
+) -> f32 {
+    iso_ground_region(g_receiver, freq_hz, h_receiver, distance, speed_of_sound)
 }
 
 /// Compute source or receiver region ground effect per ISO 9613-2 Table 3.
@@ -210,7 +229,7 @@ fn ground_region_receiver(distance: f32, h_receiver: f32, g_receiver: f32, freq_
 ///   - C interpolates through the transition zone (250–1000 Hz) where the
 ///     "ground dip" occurs — destructive interference when the path difference
 ///     between direct and ground-reflected waves ≈ λ/2.
-fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32) -> f32 {
+fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32, speed_of_sound: f32) -> f32 {
     // Table 3 anchor values for the G-dependent correction term
     const C_LOW: f32 = -3.0; // f ≤ 125 Hz
     const C_HIGH: f32 = 1.5; // f ≥ 2000 Hz
@@ -231,7 +250,7 @@ fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32) -> f32 {
         if distance > 0.1 && height > 0.01 {
             // Path difference for ground reflection: δ ≈ 2h²/d (far-field approx)
             let path_diff = 2.0 * height * height / distance;
-            let lambda = super::atmosphere::SPEED_OF_SOUND / freq_hz;
+            let lambda = speed_of_sound / freq_hz;
             let phase_ratio = path_diff / lambda;
 
             // Gaussian peak centered at phase_ratio = 0.5 (half-wavelength)
@@ -362,7 +381,7 @@ pub struct Barrier {
 ///     receiver: Vec3::new(10.0, 0.0, 0.0),
 ///     barrier_top: Vec3::new(5.0, 0.0, 2.0),
 /// };
-/// let atten = barrier_attenuation_db(&barrier, 1000.0);
+/// let atten = barrier_attenuation_db(&barrier, 1000.0, 343.42);
 /// // Expect significant attenuation (wall blocks direct path)
 /// ```
 /// Determine the sign of the Fresnel number: +1.0 if the barrier top is above
@@ -392,12 +411,12 @@ fn barrier_sign(source: &Vec3, receiver: &Vec3, barrier_top: &Vec3) -> f32 {
     }
 }
 
-pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
+pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32, speed_of_sound: f32) -> f32 {
     /// Maximum single-barrier attenuation (ISO 9613-2 §7.4 note).
     /// Real-world single barriers rarely exceed 20-25 dB due to flanking.
     const MAX_BARRIER_DB: f32 = 25.0;
 
-    let wavelength = super::atmosphere::SPEED_OF_SOUND / freq_hz.max(1.0);
+    let wavelength = speed_of_sound / freq_hz.max(1.0);
 
     // Path lengths
     let d_sr = barrier.source.distance_to(barrier.receiver); // direct
@@ -437,8 +456,8 @@ pub fn barrier_attenuation_db(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
 ///
 ///   N = (2/λ) · δ
 ///   δ = (d_source→barrier + d_barrier→receiver) - d_source→receiver
-pub fn fresnel_number(barrier: &BarrierGeometry, freq_hz: f32) -> f32 {
-    let wavelength = super::atmosphere::SPEED_OF_SOUND / freq_hz.max(1.0);
+pub fn fresnel_number(barrier: &BarrierGeometry, freq_hz: f32, speed_of_sound: f32) -> f32 {
+    let wavelength = speed_of_sound / freq_hz.max(1.0);
 
     let d_sr = barrier.source.distance_to(barrier.receiver);
     let d_sb = barrier.source.distance_to(barrier.barrier_top);
@@ -495,11 +514,19 @@ pub fn total_attenuation_db(
     ground: &GroundProperties,
     freq_hz: f32,
     barrier: Option<&BarrierGeometry>,
+    speed_of_sound: f32,
 ) -> AttenuationTerms {
     let a_div = geometric_divergence_db(distance);
-    let a_ground = ground_effect_db(distance, h_source, h_receiver, ground, freq_hz);
+    let a_ground = ground_effect_db(
+        distance,
+        h_source,
+        h_receiver,
+        ground,
+        freq_hz,
+        speed_of_sound,
+    );
     let a_bar = barrier
-        .map(|b| barrier_attenuation_db(b, freq_hz))
+        .map(|b| barrier_attenuation_db(b, freq_hz, speed_of_sound))
         .unwrap_or(0.0);
 
     AttenuationTerms {
@@ -528,6 +555,7 @@ pub fn ground_effect_gain(
     h_source: f32,
     h_receiver: f32,
     ground: &GroundProperties,
+    speed_of_sound: f32,
 ) -> f32 {
     if distance < 0.01 {
         return 1.0;
@@ -537,7 +565,7 @@ pub fn ground_effect_gain(
     const BANDS: &[f32] = &[125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
     let sum_db: f32 = BANDS
         .iter()
-        .map(|&f| ground_effect_db(distance, h_source, h_receiver, ground, f))
+        .map(|&f| ground_effect_db(distance, h_source, h_receiver, ground, f, speed_of_sound))
         .sum();
     let avg_db = sum_db / BANDS.len() as f32;
 
@@ -559,11 +587,11 @@ pub fn ground_effect_gain(
 ///
 /// Returns a gain in (0, 1.0]. 1.0 means no attenuation (barrier not in path
 /// or below line of sight).
-pub fn barrier_attenuation_gain(barrier: &BarrierGeometry) -> f32 {
+pub fn barrier_attenuation_gain(barrier: &BarrierGeometry, speed_of_sound: f32) -> f32 {
     const BANDS: &[f32] = &[125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
     let sum_db: f32 = BANDS
         .iter()
-        .map(|&f| barrier_attenuation_db(barrier, f))
+        .map(|&f| barrier_attenuation_db(barrier, f, speed_of_sound))
         .sum();
     let avg_db = sum_db / BANDS.len() as f32;
 
@@ -621,12 +649,14 @@ mod tests {
 
     // ── Ground Effect ────────────────────────────────────────────────────
 
+    const TEST_SPEED: f32 = 343.42;
+
     #[test]
     fn hard_ground_effect_is_negative() {
         // Hard ground (G=0) should give negative A_ground (constructive
         // interference from ground reflection adds energy)
         let ground = GroundProperties::hard();
-        let a = ground_effect_db(10.0, 1.5, 1.5, &ground, 500.0);
+        let a = ground_effect_db(10.0, 1.5, 1.5, &ground, 500.0, TEST_SPEED);
         assert!(a < 0.0, "hard ground should give negative (gain), got {a}");
     }
 
@@ -635,8 +665,8 @@ mod tests {
         // Soft ground should have less constructive interference (more absorption)
         let hard = GroundProperties::hard();
         let soft = GroundProperties::soft();
-        let a_hard = ground_effect_db(10.0, 1.5, 1.5, &hard, 500.0);
-        let a_soft = ground_effect_db(10.0, 1.5, 1.5, &soft, 500.0);
+        let a_hard = ground_effect_db(10.0, 1.5, 1.5, &hard, 500.0, TEST_SPEED);
+        let a_soft = ground_effect_db(10.0, 1.5, 1.5, &soft, 500.0, TEST_SPEED);
         assert!(
             a_soft > a_hard,
             "soft ground ({a_soft}) should attenuate more than hard ({a_hard})"
@@ -646,14 +676,17 @@ mod tests {
     #[test]
     fn ground_effect_zero_distance() {
         let ground = GroundProperties::hard();
-        assert_eq!(ground_effect_db(0.0, 1.5, 1.5, &ground, 500.0), 0.0);
+        assert_eq!(
+            ground_effect_db(0.0, 1.5, 1.5, &ground, 500.0, TEST_SPEED),
+            0.0
+        );
     }
 
     #[test]
     fn ground_effect_gain_hard_boosts() {
         // Hard ground: constructive interference → gain > 1.0
         let ground = GroundProperties::hard();
-        let g = ground_effect_gain(10.0, 1.5, 1.5, &ground);
+        let g = ground_effect_gain(10.0, 1.5, 1.5, &ground, TEST_SPEED);
         assert!(g > 1.0, "hard ground should boost: got {g}");
     }
 
@@ -661,8 +694,8 @@ mod tests {
     fn ground_effect_gain_soft_attenuates_relative() {
         let hard = GroundProperties::hard();
         let soft = GroundProperties::soft();
-        let g_hard = ground_effect_gain(10.0, 1.5, 1.5, &hard);
-        let g_soft = ground_effect_gain(10.0, 1.5, 1.5, &soft);
+        let g_hard = ground_effect_gain(10.0, 1.5, 1.5, &hard, TEST_SPEED);
+        let g_soft = ground_effect_gain(10.0, 1.5, 1.5, &soft, TEST_SPEED);
         assert!(
             g_soft < g_hard,
             "soft ({g_soft}) should be less than hard ({g_hard})"
@@ -672,7 +705,7 @@ mod tests {
     #[test]
     fn ground_effect_gain_zero_distance_is_unity() {
         let ground = GroundProperties::soft();
-        assert_eq!(ground_effect_gain(0.0, 1.5, 1.5, &ground), 1.0);
+        assert_eq!(ground_effect_gain(0.0, 1.5, 1.5, &ground, TEST_SPEED), 1.0);
     }
 
     // ── Barrier Attenuation ──────────────────────────────────────────────
@@ -685,7 +718,7 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 0.0),
             barrier_top: Vec3::new(5.0, 0.0, 3.0),
         };
-        let a = barrier_attenuation_db(&barrier, 1000.0);
+        let a = barrier_attenuation_db(&barrier, 1000.0, TEST_SPEED);
         assert!(
             a > 5.0,
             "barrier should give significant attenuation, got {a}"
@@ -706,7 +739,7 @@ mod tests {
         };
         // delta ≈ 0 (path through barrier top ≈ direct path)
         // This tests the near-grazing case
-        let a = barrier_attenuation_db(&barrier2, 1000.0);
+        let a = barrier_attenuation_db(&barrier2, 1000.0, TEST_SPEED);
         assert!(
             a < 10.0,
             "near-grazing barrier should give moderate attenuation, got {a}"
@@ -720,8 +753,8 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 0.0),
             barrier_top: Vec3::new(5.0, 0.0, 2.0),
         };
-        let a_500 = barrier_attenuation_db(&barrier, 500.0);
-        let a_4000 = barrier_attenuation_db(&barrier, 4000.0);
+        let a_500 = barrier_attenuation_db(&barrier, 500.0, TEST_SPEED);
+        let a_4000 = barrier_attenuation_db(&barrier, 4000.0, TEST_SPEED);
         assert!(
             a_4000 > a_500,
             "higher freq ({a_4000}) should attenuate more than lower ({a_500})"
@@ -736,7 +769,7 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 0.0),
             barrier_top: Vec3::new(5.0, 0.0, 10.0), // very tall
         };
-        let a = barrier_attenuation_db(&barrier, 8000.0);
+        let a = barrier_attenuation_db(&barrier, 8000.0, TEST_SPEED);
         assert!(
             (a - 25.0).abs() < 0.01,
             "should be capped at 25 dB, got {a}"
@@ -750,7 +783,7 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 0.0),
             barrier_top: Vec3::new(5.0, 0.0, 3.0),
         };
-        let n = fresnel_number(&barrier, 1000.0);
+        let n = fresnel_number(&barrier, 1000.0, TEST_SPEED);
         assert!(n > 0.0, "shadow zone should have positive N, got {n}");
     }
 
@@ -764,7 +797,7 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 2.0),
             barrier_top: Vec3::new(5.0, 0.0, 0.5), // well below LOS
         };
-        let g = barrier_attenuation_gain(&barrier);
+        let g = barrier_attenuation_gain(&barrier, TEST_SPEED);
         assert!(
             (g - 1.0).abs() < 0.05,
             "unobstructed barrier should give gain ≈ 1.0, got {g}"
@@ -778,7 +811,7 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 0.0),
             barrier_top: Vec3::new(5.0, 0.0, 3.0),
         };
-        let g = barrier_attenuation_gain(&barrier);
+        let g = barrier_attenuation_gain(&barrier, TEST_SPEED);
         assert!(
             g < 0.5,
             "shadow zone should attenuate significantly, got {g}"
@@ -794,7 +827,7 @@ mod tests {
             receiver: Vec3::new(10.0, 0.0, 0.0),
             barrier_top: Vec3::new(5.0, 0.0, 10.0),
         };
-        let g = barrier_attenuation_gain(&barrier);
+        let g = barrier_attenuation_gain(&barrier, TEST_SPEED);
         assert!(
             g < 0.1,
             "very tall barrier should give gain near minimum, got {g}"
@@ -807,7 +840,7 @@ mod tests {
     #[test]
     fn total_attenuation_sums_correctly() {
         let ground = GroundProperties::hard();
-        let terms = total_attenuation_db(10.0, 0.5, 1.5, 1.5, &ground, 1000.0, None);
+        let terms = total_attenuation_db(10.0, 0.5, 1.5, 1.5, &ground, 1000.0, None, TEST_SPEED);
 
         let expected_total = terms.a_div + terms.a_atm + terms.a_ground + terms.a_bar;
         assert!(
@@ -827,8 +860,17 @@ mod tests {
             barrier_top: Vec3::new(5.0, 0.0, 3.0),
         };
 
-        let without = total_attenuation_db(10.0, 0.5, 1.5, 1.5, &ground, 1000.0, None);
-        let with = total_attenuation_db(10.0, 0.5, 1.5, 1.5, &ground, 1000.0, Some(&barrier));
+        let without = total_attenuation_db(10.0, 0.5, 1.5, 1.5, &ground, 1000.0, None, TEST_SPEED);
+        let with = total_attenuation_db(
+            10.0,
+            0.5,
+            1.5,
+            1.5,
+            &ground,
+            1000.0,
+            Some(&barrier),
+            TEST_SPEED,
+        );
 
         assert!(
             with.a_total > without.a_total,

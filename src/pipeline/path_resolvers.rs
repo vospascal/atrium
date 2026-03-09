@@ -6,7 +6,6 @@
 
 use atrium_core::types::Vec3;
 
-use crate::audio::atmosphere::SPEED_OF_SOUND;
 use crate::audio::propagation::{barrier_attenuation_gain, BarrierGeometry};
 use crate::pipeline::path::{PathContribution, PathKind, PathResolver, PathSet, ResolveContext};
 
@@ -106,7 +105,7 @@ impl PathResolver for ImageSourceResolver {
                 continue;
             }
 
-            let delay_seconds = (image_dist - direct_dist) / SPEED_OF_SOUND;
+            let delay_seconds = (image_dist - direct_dist) / ctx.atmosphere.speed_of_sound();
             if delay_seconds < 1e-6 {
                 continue;
             }
@@ -190,9 +189,9 @@ impl PathResolver for BarrierDiffractionResolver {
                 receiver: ctx.target_pos,
                 barrier_top: barrier.top,
             };
-            let gain = barrier_attenuation_gain(&geom);
+            let gain = barrier_attenuation_gain(&geom, ctx.atmosphere.speed_of_sound());
 
-            let delay_seconds = delta / SPEED_OF_SOUND;
+            let delay_seconds = delta / ctx.atmosphere.speed_of_sound();
             let distance = d_sb + d_br;
 
             out.push(PathContribution {
@@ -210,6 +209,10 @@ impl PathResolver for BarrierDiffractionResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::atmosphere::AtmosphericParams;
+
+    /// Standard speed of sound at 20°C for test assertions.
+    const TEST_SPEED: f32 = 343.42; // speed_of_sound(20.0) = 331.3 + 0.606*20
 
     #[test]
     fn direct_resolver_produces_one_path() {
@@ -220,6 +223,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -241,6 +245,7 @@ mod tests {
             room_min: Vec3::ZERO,
             room_max: Vec3::ZERO,
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -261,6 +266,7 @@ mod tests {
             room_min: Vec3::ZERO,
             room_max: Vec3::ZERO,
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -280,6 +286,7 @@ mod tests {
             room_min: Vec3::ZERO,
             room_max: Vec3::ZERO,
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -291,6 +298,12 @@ mod tests {
     // ImageSourceResolver tests
     // ─────────────────────────────────────────────────────────────────────────
 
+    const TEST_ATMOSPHERE: AtmosphericParams = AtmosphericParams {
+        temperature_c: 20.0,
+        humidity_pct: 50.0,
+        pressure_kpa: 101.325,
+    };
+
     fn make_room_ctx(source: Vec3, target: Vec3) -> ResolveContext<'static> {
         ResolveContext {
             source_pos: source,
@@ -298,6 +311,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
+            atmosphere: &TEST_ATMOSPHERE,
         }
     }
 
@@ -384,7 +398,7 @@ mod tests {
 
         let direct_dist = paths.as_slice()[0].distance;
         for p in &paths.as_slice()[1..] {
-            let expected_delay = (p.distance - direct_dist) / SPEED_OF_SOUND;
+            let expected_delay = (p.distance - direct_dist) / TEST_SPEED;
             assert!(
                 (p.delay_seconds - expected_delay).abs() < 1e-6,
                 "delay {} should equal (dist - direct) / c = {}",
@@ -460,6 +474,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -479,6 +494,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -521,6 +537,7 @@ mod tests {
             room_min: Vec3::new(-5.0, -5.0, -5.0),
             room_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -554,6 +571,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &[],
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -579,6 +597,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -627,6 +646,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -650,6 +670,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -681,6 +702,7 @@ mod tests {
             room_min: Vec3::new(-10.0, -10.0, -10.0),
             room_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
+            atmosphere: &AtmosphericParams::default(),
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -689,7 +711,7 @@ mod tests {
         let d_sb = Vec3::new(0.0, 0.0, 0.0).distance_to(Vec3::new(5.0, 0.0, 3.0));
         let d_br = Vec3::new(5.0, 0.0, 3.0).distance_to(Vec3::new(10.0, 0.0, 0.0));
         let d_sr = 10.0_f32;
-        let expected_delay = (d_sb + d_br - d_sr) / SPEED_OF_SOUND;
+        let expected_delay = (d_sb + d_br - d_sr) / TEST_SPEED;
 
         assert!(
             (diff.delay_seconds - expected_delay).abs() < 1e-6,

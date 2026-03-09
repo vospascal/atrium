@@ -111,6 +111,7 @@ impl MixStage for AmbisonicsDecodeStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::atmosphere::AtmosphericParams;
     use atrium_core::ambisonics::foa_encode;
     use atrium_core::listener::Listener;
     use atrium_core::speaker::{Speaker, SpeakerLayout};
@@ -153,6 +154,7 @@ mod tests {
             render_channels: 4,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            atmosphere: &AtmosphericParams::default(),
         };
         stage.init(&ctx);
 
@@ -200,6 +202,7 @@ mod tests {
             render_channels: 4,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            atmosphere: &AtmosphericParams::default(),
         };
         stage.init(&ctx);
 
@@ -237,6 +240,7 @@ mod tests {
             render_channels: 2,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            atmosphere: &AtmosphericParams::default(),
         };
         stage.init(&ctx);
 

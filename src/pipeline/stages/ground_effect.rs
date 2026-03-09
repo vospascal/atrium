@@ -23,6 +23,7 @@ impl SourceStage for GroundEffectStage {
             ctx.source_pos.z.max(0.0),
             ctx.listener.position.z.max(0.0),
             ctx.ground,
+            ctx.atmosphere.speed_of_sound(),
         );
         output.gain_modifier *= gain;
     }

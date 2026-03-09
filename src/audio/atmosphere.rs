@@ -6,9 +6,6 @@
 ///
 /// Reference: <https://www.w3.org/TR/webaudio/#distance-attenuation>
 /// Python reference: python-acoustics ISO 9613-1 implementation
-/// Speed of sound at 20°C, 1 atm (m/s). ISO 9613-1 reference conditions.
-pub const SPEED_OF_SOUND: f32 = 343.0;
-
 /// Temperature-dependent speed of sound (m/s).
 /// Approximation from ISO 9613-1: c ≈ 331.3 + 0.606 × T_celsius.
 #[inline]
@@ -32,6 +29,15 @@ pub struct AtmosphericParams {
     pub humidity_pct: f32,
     /// Ambient air pressure in kPa.
     pub pressure_kpa: f32,
+}
+
+impl AtmosphericParams {
+    /// Temperature-corrected speed of sound (m/s).
+    /// Delegates to `speed_of_sound(self.temperature_c)`.
+    #[inline]
+    pub fn speed_of_sound(&self) -> f32 {
+        speed_of_sound(self.temperature_c)
+    }
 }
 
 impl Default for AtmosphericParams {

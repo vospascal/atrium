@@ -16,8 +16,6 @@ use atrium_core::speaker::MAX_CHANNELS;
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
 
-use crate::audio::atmosphere::SPEED_OF_SOUND;
-
 /// Delay compensation mode.
 #[derive(Clone, Copy, Debug)]
 enum Mode {
@@ -79,7 +77,7 @@ impl DelayCompStage {
         for i in 0..layout.speaker_count() {
             if let Some(speaker) = layout.speaker_by_index(i) {
                 let d = (speaker.position - target_pos).length();
-                let delay_seconds = (d_max - d) / SPEED_OF_SOUND;
+                let delay_seconds = (d_max - d) / ctx.atmosphere.speed_of_sound();
                 let delay_samples = delay_seconds * ctx.sample_rate;
                 if speaker.channel < self.delays.len() {
                     self.delays[speaker.channel] = delay_samples;
@@ -91,7 +89,8 @@ impl DelayCompStage {
     /// Ensure buffers are large enough for the room geometry.
     fn ensure_capacity(&mut self, ctx: &MixContext) {
         let room_diag = (ctx.room_max - ctx.room_min).length();
-        let max_delay_samples = (room_diag / SPEED_OF_SOUND * ctx.sample_rate).ceil() as usize;
+        let max_delay_samples =
+            (room_diag / ctx.atmosphere.speed_of_sound() * ctx.sample_rate).ceil() as usize;
         let needed = max_delay_samples.next_power_of_two().max(1024);
 
         if needed > self.capacity || self.buffers.len() < ctx.channels {

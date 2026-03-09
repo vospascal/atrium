@@ -102,6 +102,7 @@ impl Renderer for WorldLockedRenderer {
                     ctx.source_pos.z.max(0.0),
                     speaker.position.z.max(0.0),
                     ctx.ground,
+                    ctx.atmosphere.speed_of_sound(),
                 );
 
                 // Reflections tap update
@@ -111,6 +112,7 @@ impl Renderer for WorldLockedRenderer {
                     ctx.source_pos,
                     speaker.position,
                     out.sample_rate,
+                    ctx.atmosphere.speed_of_sound(),
                 );
 
                 // Distance + directivity

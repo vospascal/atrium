@@ -194,7 +194,7 @@ impl PathEffect for GroundEffectFilter {
         let h_avg = (h_source + h_receiver) * 0.5;
         if h_avg > 0.05 && horizontal_dist > 1.0 {
             let path_diff = 2.0 * h_avg * h_avg / horizontal_dist;
-            let f_dip = crate::audio::atmosphere::SPEED_OF_SOUND / (2.0 * path_diff);
+            let f_dip = ctx.atmosphere.speed_of_sound() / (2.0 * path_diff);
             let f_dip_clamped = f_dip.clamp(100.0, 10000.0);
             // Dip depth: up to -6 dB for fully soft ground, proportional to G.
             let dip_db = -6.0 * g;

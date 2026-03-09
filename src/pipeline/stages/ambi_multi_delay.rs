@@ -234,6 +234,7 @@ impl MixStage for AmbiMultiDelayStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::atmosphere::AtmosphericParams;
     use atrium_core::listener::Listener;
     use atrium_core::speaker::SpeakerLayout;
     use atrium_core::types::Vec3;
@@ -243,6 +244,12 @@ mod tests {
         let listener = Listener::new(Vec3::ZERO, 0.0);
         (layout, listener)
     }
+
+    const TEST_ATMOSPHERE: AtmosphericParams = AtmosphericParams {
+        temperature_c: 20.0,
+        humidity_pct: 50.0,
+        pressure_kpa: 101.325,
+    };
 
     fn test_mix_context<'a>(
         layout: &'a SpeakerLayout,
@@ -260,6 +267,7 @@ mod tests {
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
+            atmosphere: &TEST_ATMOSPHERE,
         }
     }
 
