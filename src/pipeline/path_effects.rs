@@ -679,6 +679,78 @@ mod tests {
         );
     }
 
+    /// Verify that the 2-shelf air absorption filter matches ISO 9613
+    /// at octave-band frequencies within 3 dB at 50m distance.
+    #[test]
+    fn air_absorption_multiband_matches_iso9613() {
+        use crate::audio::atmosphere::iso9613_alpha;
+
+        let sample_rate = 48000.0;
+        let distance = 50.0;
+        let atmo = AtmosphericParams::default();
+
+        // Set up the effect at 50m distance.
+        let (path, _, ground) = make_ctx(distance);
+        let mut effect = AirAbsorptionEffect::new(sample_rate);
+        let ctx = PathEffectContext {
+            path: &path,
+            atmosphere: &atmo,
+            ground: &ground,
+            sample_rate,
+            source_pos: Vec3::ZERO,
+            target_pos: Vec3::new(distance, 0.0, 0.0),
+            wall_materials: &default_wall_materials(),
+        };
+        effect.update(&ctx);
+
+        // Measure filter gain at octave-band frequencies by feeding sine waves.
+        let test_freqs = [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
+        let num_frames = 8192;
+
+        for &freq in &test_freqs {
+            effect.reset();
+            effect.update(&ctx);
+
+            // Feed sine, measure steady-state output amplitude.
+            let mut max_out = 0.0f32;
+            for i in 0..num_frames {
+                let t = i as f32 / sample_rate;
+                let input = (2.0 * std::f32::consts::PI * freq * t).sin();
+                let out = effect.process_sample(input);
+                // Only measure in the last quarter (after settling).
+                if i > num_frames * 3 / 4 {
+                    max_out = max_out.max(out.abs());
+                }
+            }
+
+            // Expected attenuation from ISO 9613.
+            let expected_db = -iso9613_alpha(freq, &atmo) * distance;
+            let expected_linear = 10.0_f32.powf(expected_db / 20.0);
+
+            // Filter gain in dB.
+            let filter_db = if max_out > 1e-10 {
+                20.0 * max_out.log10()
+            } else {
+                -100.0
+            };
+
+            let error_db = (filter_db - expected_db).abs();
+
+            eprintln!(
+                "  {freq:>5.0} Hz: filter={filter_db:>6.2} dB, \
+                 ISO={expected_db:>6.2} dB (linear={expected_linear:.4}), \
+                 error={error_db:.2} dB"
+            );
+
+            // Within 3 dB at each octave band (250 Hz–8 kHz).
+            assert!(
+                error_db < 3.0,
+                "Air absorption at {freq} Hz, {distance}m: filter={filter_db:.2} dB, \
+                 expected={expected_db:.2} dB, error={error_db:.2} dB > 3 dB"
+            );
+        }
+    }
+
     // ── DistanceAttenuationEffect ───────────────────────────────────────
 
     #[test]
