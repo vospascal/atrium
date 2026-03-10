@@ -11,6 +11,9 @@ pub mod fdn_reverb;
 pub mod lfe_crossover;
 pub mod master_gain;
 
+// Pipeline analysis (test-only diagnostic tooling)
+mod pipeline_analysis;
+
 // SourceStages (per-source, before routing)
 pub mod air_absorption;
 pub mod ground_effect;

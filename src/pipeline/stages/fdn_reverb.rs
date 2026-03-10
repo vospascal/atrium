@@ -21,6 +21,52 @@ const PRE_DELAY_FALLBACK_SECONDS: f32 = 0.020;
 const BASE_DELAYS: [usize; NUM_LINES] = [241, 307, 353, 389, 421, 433, 461, 499];
 const BASE_SAMPLE_RATE: f32 = 48000.0;
 
+/// Per-line delay modulation parameters.
+/// Irrational rate ratios prevent modulation patterns from repeating.
+/// Rates chosen from golden-ratio-spaced values between 0.5–1.7 Hz
+/// (slow enough to be inaudible, fast enough to smear modes within 1–2s).
+const MOD_RATES_HZ: [f32; NUM_LINES] = [0.51, 0.73, 0.97, 1.13, 1.31, 1.53, 0.67, 1.07];
+/// Modulation depth in samples at 48 kHz. Scaled by sample_rate/48000
+/// at init. ±3 samples at 48 kHz ≈ ±63 µs — enough to smear modes but
+/// not enough to produce audible pitch warble.
+const MOD_DEPTH_SAMPLES_48K: f32 = 3.0;
+
+/// Per-line LFO state for delay modulation.
+#[derive(Clone, Copy)]
+struct DelayModulator {
+    phase: f32,
+    phase_increment: f32,
+    depth: f32,
+}
+
+impl DelayModulator {
+    fn new() -> Self {
+        Self {
+            phase: 0.0,
+            phase_increment: 0.0,
+            depth: 0.0,
+        }
+    }
+
+    /// Initialize the modulator for a given rate and sample rate.
+    fn init(&mut self, rate_hz: f32, sample_rate: f32, starting_phase: f32) {
+        self.phase_increment = rate_hz / sample_rate;
+        self.depth = MOD_DEPTH_SAMPLES_48K * (sample_rate / BASE_SAMPLE_RATE);
+        self.phase = starting_phase;
+    }
+
+    /// Advance phase and return current modulation offset in fractional samples.
+    #[inline(always)]
+    fn next(&mut self) -> f32 {
+        let offset = (self.phase * std::f32::consts::TAU).sin() * self.depth;
+        self.phase += self.phase_increment;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        offset
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DampingFilter {
     k: f32,
@@ -101,6 +147,9 @@ pub struct FdnReverbStage {
     /// Compensates for the FDN's steady-state energy accumulation so that
     /// the d/d_c send law directly controls the perceived wet level.
     output_normalization: f32,
+    /// Per-line delay modulators. Slowly vary each line's read position
+    /// to smear resonant modes, preventing metallic ringing.
+    modulators: [DelayModulator; NUM_LINES],
     initialized: bool,
     measurement_mode: bool,
 }
@@ -129,6 +178,7 @@ impl FdnReverbStage {
             pre_delay_write_pos: 0,
             pre_delay_samples: 0,
             output_normalization: 1.0,
+            modulators: [DelayModulator::new(); NUM_LINES],
             initialized: false,
             measurement_mode: false,
         }
@@ -153,6 +203,18 @@ impl FdnReverbStage {
         for (i, &base_delay) in BASE_DELAYS.iter().enumerate() {
             let scaled = ((base_delay as f32) * scale) as usize;
             self.delays[i] = scaled.clamp(1, self.buffer_size - 1);
+        }
+
+        // Initialize per-line delay modulators with different starting phases
+        // so they don't all begin at the same point in their cycle.
+        for (i, (modulator, &rate)) in self
+            .modulators
+            .iter_mut()
+            .zip(MOD_RATES_HZ.iter())
+            .enumerate()
+        {
+            let starting_phase = i as f32 / NUM_LINES as f32;
+            modulator.init(rate, sample_rate, starting_phase);
         }
     }
 
@@ -277,23 +339,48 @@ impl FdnReverbStage {
     fn process_fdn_sample(&mut self, mono_in: f32, out_channels: usize) -> [f32; MAX_OUT] {
         let mut output = [0.0f32; MAX_OUT];
 
+        // Read from delay lines with modulated positions.
+        // Linear interpolation between adjacent integer samples gives
+        // smooth fractional delay, smearing resonant peaks.
         let mut taps = [0.0_f32; NUM_LINES];
         for i in 0..NUM_LINES {
-            let read_pos = (self.write_pos + self.buffer_size - self.delays[i]) & self.buffer_mask;
-            taps[i] = self.delay_buffers[i][read_pos];
+            let mod_offset = self.modulators[i].next();
+            let base_delay = self.delays[i] as f32 + mod_offset;
+            // Clamp to valid range: at least 1 sample, at most buffer_size - 2
+            // (need room for interpolation neighbor).
+            let clamped_delay = base_delay.clamp(1.0, (self.buffer_size - 2) as f32);
+            let delay_int = clamped_delay as usize;
+            let frac = clamped_delay - delay_int as f32;
+
+            let pos_a = (self.write_pos + self.buffer_size - delay_int) & self.buffer_mask;
+            let pos_b = (self.write_pos + self.buffer_size - delay_int - 1) & self.buffer_mask;
+            taps[i] =
+                self.delay_buffers[i][pos_a] * (1.0 - frac) + self.delay_buffers[i][pos_b] * frac;
         }
 
         for i in 0..NUM_LINES {
             taps[i] = self.damping[i].process(taps[i]);
         }
 
+        // Distribute 8 delay line taps across output channels for a diffuse field.
+        // Each channel accumulates taps via modular assignment (line i → channel i%N).
+        // Normalization: divide each channel by √(taps_in_ch × ch_count).
+        // This simultaneously:
+        //  - Equalizes per-channel level (channels with more taps aren't louder)
+        //  - Preserves total energy (total power across all channels = single-tap power)
+        // Result: the reverb send level directly controls the perceived wet level.
         let ch_count = out_channels.clamp(1, MAX_OUT);
+        let remainder = NUM_LINES % ch_count;
         for i in 0..NUM_LINES {
             output[i % ch_count] += taps[i];
         }
-        let lines_per_ch = NUM_LINES.div_ceil(ch_count) as f32;
         for ch in 0..ch_count {
-            output[ch] /= lines_per_ch;
+            let taps_in_ch = if ch < remainder {
+                (NUM_LINES / ch_count + 1) as f32
+            } else {
+                (NUM_LINES / ch_count) as f32
+            };
+            output[ch] /= (taps_in_ch * ch_count as f32).sqrt();
         }
 
         Self::hadamard_8(&mut taps);
@@ -419,6 +506,44 @@ impl MixStage for FdnReverbStage {
     fn name(&self) -> &str {
         "fdn_reverb"
     }
+}
+
+// ── Test-only diagnostic accessors ──────────────────────────────────────────
+#[cfg(test)]
+impl FdnReverbStage {
+    /// Diagnostic snapshot of FDN internal state for pipeline analysis.
+    pub fn diagnostics(&self) -> FdnDiagnostics {
+        let mut loop_gains = [0.0f32; NUM_LINES];
+        for i in 0..NUM_LINES {
+            // Effective loop gain per line: k / (1 - p) approximation at DC
+            let k = self.damping[i].k;
+            let p = self.damping[i].p;
+            loop_gains[i] = if (1.0 - p).abs() > f32::EPSILON {
+                k / (1.0 - p)
+            } else {
+                k
+            };
+        }
+        FdnDiagnostics {
+            output_normalization: self.output_normalization,
+            pre_delay_samples: self.pre_delay_samples,
+            delays: self.delays,
+            loop_gains,
+            buffer_size: self.buffer_size,
+            initialized: self.initialized,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub struct FdnDiagnostics {
+    pub output_normalization: f32,
+    pub pre_delay_samples: usize,
+    pub delays: [usize; NUM_LINES],
+    pub loop_gains: [f32; NUM_LINES],
+    pub buffer_size: usize,
+    pub initialized: bool,
 }
 
 #[cfg(test)]
