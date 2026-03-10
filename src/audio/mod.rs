@@ -1,4 +1,5 @@
 pub mod atmosphere;
+pub mod convolver;
 pub mod decode;
 pub mod distance;
 pub mod output;

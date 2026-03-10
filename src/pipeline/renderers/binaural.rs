@@ -1,18 +1,18 @@
-//! HrtfRenderer — per-path HRTF FFT convolution to stereo headphones.
+//! HrtfRenderer — binaural rendering to stereo headphones via HRTF convolution.
 //!
-//! Used by HRTF mode. Iterates over propagation paths from the PathResolver.
-//! For the **direct path**, computes full distance attenuation + directivity,
-//! then convolves with the HRIR selected from the source direction.
-//! For **reflection paths**, convolves with the HRIR selected from the
-//! reflection's apparent direction, with the reflection's energy carried
-//! by path.gain.
+//! The **direct path** gets full HRTF convolution: the HRIR for the source's
+//! direction is loaded from a SOFA file and applied via overlap-add FFT.
+//! Two convolver pairs (A/B double-buffer) enable click-free IR crossfading
+//! when the source direction changes.
 //!
-//! Each path gets two pairs of L/R FFT convolvers (A/B double-buffer) for
-//! click-free IR crossfading. When a new HRIR is loaded, it goes into the
-//! inactive slot and output is blended from old→new over one block.
+//! **Reflection paths** use cheap equal-power stereo panning from their
+//! azimuth angle — no FFT convolution. This keeps CPU cost manageable
+//! (reflections contribute spaciousness, not precise localization).
 
-use fft_convolver::FFTConvolver;
+use realfft::num_complex::Complex;
 use sofar::reader::{Filter, OpenOptions, Sofar};
+
+use crate::audio::convolver::Convolver;
 
 use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
@@ -32,8 +32,8 @@ const DELAY_BUF_SIZE: usize = 64;
 const DELAY_BUF_MASK: usize = DELAY_BUF_SIZE - 1;
 
 struct ConvPair {
-    left: FFTConvolver<f32>,
-    right: FFTConvolver<f32>,
+    left: Convolver,
+    right: Convolver,
 }
 
 /// Per-ear fractional delay line for ITD rendering.
@@ -111,6 +111,8 @@ pub struct HrtfRenderer {
     /// Extra buffers for the retiring convolver during crossfade.
     xfade_left_buf: Vec<f32>,
     xfade_right_buf: Vec<f32>,
+    /// Shared input spectrum buffer — one forward FFT per block shared by L/R convolvers.
+    input_spectrum: Vec<Complex<f32>>,
     update_counter: usize,
     sample_rate: f32,
 }
@@ -131,6 +133,7 @@ impl HrtfRenderer {
                     right_buf: vec![0.0; BLOCK_SIZE],
                     xfade_left_buf: vec![0.0; BLOCK_SIZE],
                     xfade_right_buf: vec![0.0; BLOCK_SIZE],
+                    input_spectrum: Vec::new(),
                     update_counter: 0,
                     sample_rate,
                 }
@@ -146,6 +149,10 @@ impl HrtfRenderer {
         let filt_len = sofa.filter_len();
         let filter = Filter::new(filt_len);
 
+        // Compute shared FFT buffer size from the first source's convolver.
+        let fft_size = (BLOCK_SIZE + filt_len - 1).next_power_of_two();
+        let freq_len = fft_size / 2 + 1;
+
         Ok(Self {
             sofa: Some(sofa),
             sources: Vec::new(),
@@ -156,26 +163,26 @@ impl HrtfRenderer {
             right_buf: vec![0.0; BLOCK_SIZE],
             xfade_left_buf: vec![0.0; BLOCK_SIZE],
             xfade_right_buf: vec![0.0; BLOCK_SIZE],
+            input_spectrum: vec![Complex::new(0.0, 0.0); freq_len],
             update_counter: 0,
             sample_rate,
         })
     }
 
-    fn new_source(sofa: &Sofar) -> Option<HrtfSource> {
+    fn new_source(sofa: &Sofar) -> HrtfSource {
         let filt_len = sofa.filter_len();
         let mut init_filter = Filter::new(filt_len);
         sofa.filter(0.0, 1.0, 0.0, &mut init_filter);
-
         let mut paths = Vec::with_capacity(MAX_PATHS);
         for _ in 0..MAX_PATHS {
-            let mut a_left = FFTConvolver::default();
-            let mut a_right = FFTConvolver::default();
-            let mut b_left = FFTConvolver::default();
-            let mut b_right = FFTConvolver::default();
-            a_left.init(BLOCK_SIZE, &init_filter.left).ok()?;
-            a_right.init(BLOCK_SIZE, &init_filter.right).ok()?;
-            b_left.init(BLOCK_SIZE, &init_filter.left).ok()?;
-            b_right.init(BLOCK_SIZE, &init_filter.right).ok()?;
+            let mut a_left = Convolver::new();
+            let mut a_right = Convolver::new();
+            let mut b_left = Convolver::new();
+            let mut b_right = Convolver::new();
+            a_left.init(BLOCK_SIZE, &init_filter.left);
+            a_right.init(BLOCK_SIZE, &init_filter.right);
+            b_left.init(BLOCK_SIZE, &init_filter.left);
+            b_right.init(BLOCK_SIZE, &init_filter.right);
             paths.push(HrtfPath {
                 conv: [
                     ConvPair {
@@ -195,7 +202,7 @@ impl HrtfRenderer {
             });
         }
 
-        Some(HrtfSource { paths })
+        HrtfSource { paths }
     }
 }
 
@@ -270,28 +277,26 @@ impl Renderer for HrtfRenderer {
             };
         }
 
-        // Update HRTF filters periodically — load new IR into inactive slot,
-        // start crossfade from old slot.
+        // Update HRTF filter for the direct path only — reflections use cheap
+        // stereo panning and don't need convolution.
         let should_update = self.update_counter.is_multiple_of(FILTER_UPDATE_INTERVAL);
         if should_update {
             if let Some(ref mut filter) = self.filter {
+                // Find the direct path index (always first, but be safe)
                 for (pi, path) in path_slice.iter().enumerate() {
-                    let apparent_pos = match path.kind {
-                        PathKind::Direct => ctx.source_pos,
-                        _ => ctx.listener.position + path.direction * path.distance,
-                    };
-                    let (sx, sy, sz) = to_sofa_coords(apparent_pos, ctx.listener);
+                    if path.kind != PathKind::Direct {
+                        continue;
+                    }
+                    let (sx, sy, sz) = to_sofa_coords(ctx.source_pos, ctx.listener);
                     sofa.filter(sx, sy, sz, filter);
 
                     let hpath = &mut self.sources[source_idx].paths[pi];
-                    // Swap active slot: new IR goes into the previously inactive slot.
                     let new_active = 1 - hpath.active;
-                    let _ = hpath.conv[new_active].left.set_response(&filter.left);
-                    let _ = hpath.conv[new_active].right.set_response(&filter.right);
+                    hpath.conv[new_active].left.set_response(&filter.left);
+                    hpath.conv[new_active].right.set_response(&filter.right);
                     hpath.active = new_active;
                     hpath.xfade_remaining = BLOCK_SIZE;
 
-                    // Update ITD delay targets from SOFA metadata.
                     let sr = self.sample_rate;
                     hpath.itd_left.target_delay_samples = filter.ldelay * sr;
                     hpath.itd_right.target_delay_samples = filter.rdelay * sr;
@@ -326,7 +331,7 @@ impl Renderer for HrtfRenderer {
                 self.base_buf[i] = sample * src_out.gain_modifier;
             }
 
-            // 2. For each path: gain-ramp → convolve → crossfade → ITD delay → accumulate
+            // 2. For each path: gain-ramp → render → accumulate
             for (pi, path) in path_slice.iter().enumerate() {
                 let prev_gain = self.sources[source_idx].paths[pi].prev_gain;
                 let tgt = target_gains[pi];
@@ -339,8 +344,6 @@ impl Renderer for HrtfRenderer {
                     self.mono_buf[i] = filtered * gain;
 
                     // Only the direct path feeds the late reverb send.
-                    // Reflection paths are already reverberant energy (handled by
-                    // the early-reflection stage); feeding them again would overcount.
                     if path.kind == PathKind::Direct {
                         if let Some(ref mut rev) = out.reverb_send {
                             let base = (frame + i) * out.channels;
@@ -349,62 +352,91 @@ impl Renderer for HrtfRenderer {
                     }
                 }
 
-                let active = self.sources[source_idx].paths[pi].active;
+                if path.kind == PathKind::Direct {
+                    // ── Direct path: full HRTF convolution ──
+                    let active = self.sources[source_idx].paths[pi].active;
 
-                // Convolve with active (new) IR
-                self.left_buf[..block_len].fill(0.0);
-                let _ = self.sources[source_idx].paths[pi].conv[active]
-                    .left
-                    .process(&self.mono_buf[..block_len], &mut self.left_buf[..block_len]);
-                self.right_buf[..block_len].fill(0.0);
-                let _ = self.sources[source_idx].paths[pi].conv[active]
-                    .right
-                    .process(
-                        &self.mono_buf[..block_len],
-                        &mut self.right_buf[..block_len],
-                    );
-
-                // If crossfading, also convolve with retiring IR and blend
-                let xfade_rem = self.sources[source_idx].paths[pi].xfade_remaining;
-                if xfade_rem > 0 {
-                    let retiring = 1 - active;
-                    self.xfade_left_buf[..block_len].fill(0.0);
-                    let _ = self.sources[source_idx].paths[pi].conv[retiring]
+                    // Forward FFT of mono_buf — shared between L/R convolvers.
+                    self.sources[source_idx].paths[pi].conv[active]
                         .left
-                        .process(
-                            &self.mono_buf[..block_len],
-                            &mut self.xfade_left_buf[..block_len],
+                        .forward_fft(&self.mono_buf[..block_len], &mut self.input_spectrum);
+
+                    self.sources[source_idx].paths[pi].conv[active]
+                        .left
+                        .process_with_spectrum(
+                            &self.input_spectrum,
+                            block_len,
+                            &mut self.left_buf[..block_len],
                         );
-                    self.xfade_right_buf[..block_len].fill(0.0);
-                    let _ = self.sources[source_idx].paths[pi].conv[retiring]
+                    self.sources[source_idx].paths[pi].conv[active]
                         .right
-                        .process(
-                            &self.mono_buf[..block_len],
-                            &mut self.xfade_right_buf[..block_len],
+                        .process_with_spectrum(
+                            &self.input_spectrum,
+                            block_len,
+                            &mut self.right_buf[..block_len],
                         );
 
-                    // Linear crossfade: retiring → active over xfade_remaining samples
-                    let xfade_len = xfade_rem.min(block_len);
-                    let inv_xfade = 1.0 / xfade_rem as f32;
-                    for i in 0..xfade_len {
-                        let new_weight = (i + 1) as f32 * inv_xfade;
-                        let old_weight = 1.0 - new_weight;
-                        self.left_buf[i] =
-                            self.left_buf[i] * new_weight + self.xfade_left_buf[i] * old_weight;
-                        self.right_buf[i] =
-                            self.right_buf[i] * new_weight + self.xfade_right_buf[i] * old_weight;
-                    }
-                    self.sources[source_idx].paths[pi].xfade_remaining =
-                        xfade_rem.saturating_sub(block_len);
-                }
+                    // Crossfade if IR was just swapped
+                    let xfade_rem = self.sources[source_idx].paths[pi].xfade_remaining;
+                    if xfade_rem > 0 {
+                        let retiring = 1 - active;
+                        self.sources[source_idx].paths[pi].conv[retiring]
+                            .left
+                            .process_with_spectrum(
+                                &self.input_spectrum,
+                                block_len,
+                                &mut self.xfade_left_buf[..block_len],
+                            );
+                        self.sources[source_idx].paths[pi].conv[retiring]
+                            .right
+                            .process_with_spectrum(
+                                &self.input_spectrum,
+                                block_len,
+                                &mut self.xfade_right_buf[..block_len],
+                            );
 
-                // Apply per-ear ITD delay and accumulate into interleaved stereo output
-                let itd = &mut self.sources[source_idx].paths[pi];
-                for i in 0..block_len {
-                    let base = (frame + i) * out.channels;
-                    out.buffer[base] += itd.itd_left.process(self.left_buf[i]);
-                    if out.channels > 1 {
-                        out.buffer[base + 1] += itd.itd_right.process(self.right_buf[i]);
+                        let xfade_len = xfade_rem.min(block_len);
+                        let inv_xfade = 1.0 / xfade_rem as f32;
+                        for i in 0..xfade_len {
+                            let new_weight = (i + 1) as f32 * inv_xfade;
+                            let old_weight = 1.0 - new_weight;
+                            self.left_buf[i] =
+                                self.left_buf[i] * new_weight + self.xfade_left_buf[i] * old_weight;
+                            self.right_buf[i] = self.right_buf[i] * new_weight
+                                + self.xfade_right_buf[i] * old_weight;
+                        }
+                        self.sources[source_idx].paths[pi].xfade_remaining =
+                            xfade_rem.saturating_sub(block_len);
+                    }
+
+                    // ITD delay + accumulate into stereo output
+                    let itd = &mut self.sources[source_idx].paths[pi];
+                    for i in 0..block_len {
+                        let base = (frame + i) * out.channels;
+                        out.buffer[base] += itd.itd_left.process(self.left_buf[i]);
+                        if out.channels > 1 {
+                            out.buffer[base + 1] += itd.itd_right.process(self.right_buf[i]);
+                        }
+                    }
+                } else {
+                    // ── Reflection paths: cheap stereo panning (no FFT) ──
+                    // Compute L/R pan from the reflection's azimuth relative to listener.
+                    let apparent_pos = ctx.listener.position + path.direction * path.distance;
+                    let (sx, _sy, _sz) = to_sofa_coords(apparent_pos, ctx.listener);
+                    let right_component = -_sy; // positive = right ear
+                    let dist = (sx * sx + _sy * _sy + _sz * _sz).sqrt().max(0.001);
+                    // Equal-power pan: angle → [0, 1] where 0.5 = center
+                    let pan = 0.5 + 0.5 * (right_component / dist).clamp(-1.0, 1.0);
+                    let gain_left = (std::f32::consts::FRAC_PI_2 * (1.0 - pan)).cos();
+                    let gain_right = (std::f32::consts::FRAC_PI_2 * pan).cos();
+
+                    // Accumulate directly into stereo output (no convolution)
+                    for i in 0..block_len {
+                        let base = (frame + i) * out.channels;
+                        out.buffer[base] += self.mono_buf[i] * gain_left;
+                        if out.channels > 1 {
+                            out.buffer[base + 1] += self.mono_buf[i] * gain_right;
+                        }
                     }
                 }
             }
@@ -428,9 +460,7 @@ impl Renderer for HrtfRenderer {
         self.sample_rate = sample_rate;
         if let Some(ref sofa) = self.sofa {
             while self.sources.len() < source_count {
-                if let Some(src) = Self::new_source(sofa) {
-                    self.sources.push(src);
-                }
+                self.sources.push(Self::new_source(sofa));
             }
         }
     }

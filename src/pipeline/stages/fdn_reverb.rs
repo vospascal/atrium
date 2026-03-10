@@ -1458,4 +1458,67 @@ mod tests {
         // Very high sample rate
         assert!(FdnReverbStage::required_buffer_size(192000.0) >= 2048);
     }
+
+    /// Benchmark: measure FDN processing cost per second of audio.
+    /// Run with `cargo test fdn_benchmark -- --nocapture` to see timing.
+    #[test]
+    fn fdn_benchmark() {
+        let channels = 6;
+        let render_channels = 6;
+        let (layout, listener) = make_ctx(channels, render_channels);
+        let ctx = mix_ctx(&layout, &listener, channels, render_channels);
+
+        let mut fdn = FdnReverbStage::new();
+        fdn.init(&ctx);
+
+        let sample_rate = 48000.0;
+        let seconds = 10.0;
+        let total_frames = (sample_rate * seconds) as usize;
+        let frames_per_buffer = 1024;
+        let num_buffers = total_frames / frames_per_buffer;
+
+        // Prepare a buffer with signal and a reverb input
+        let buf_len = frames_per_buffer * channels;
+        let mut buffer = vec![0.3f32; buf_len];
+        let reverb_input = vec![0.2f32; buf_len];
+
+        let ctx_with_reverb = MixContext {
+            reverb_input: Some(&reverb_input),
+            ..mix_ctx(&layout, &listener, channels, render_channels)
+        };
+
+        // Warm up
+        for _ in 0..10 {
+            buffer.fill(0.3);
+            fdn.process(&mut buffer, &ctx_with_reverb);
+        }
+
+        let start = std::time::Instant::now();
+        for _ in 0..num_buffers {
+            buffer.fill(0.3);
+            fdn.process(&mut buffer, &ctx_with_reverb);
+        }
+        let elapsed = start.elapsed();
+
+        let ms_per_second_of_audio = elapsed.as_secs_f64() / seconds * 1000.0;
+        let cpu_percent = elapsed.as_secs_f64() / seconds * 100.0;
+
+        eprintln!();
+        eprintln!("═══ FDN Benchmark (6ch, 48kHz) ═══");
+        eprintln!("  Audio processed: {seconds}s ({total_frames} frames)");
+        eprintln!("  Wall time: {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+        eprintln!("  Per second of audio: {ms_per_second_of_audio:.2}ms");
+        eprintln!("  CPU load: {cpu_percent:.2}%");
+        eprintln!(
+            "  Per sample: {:.0}ns",
+            elapsed.as_nanos() as f64 / total_frames as f64
+        );
+        eprintln!();
+
+        // Sanity: FDN should use less than 10% of a core for 6ch at 48kHz
+        assert!(
+            cpu_percent < 10.0,
+            "FDN should use < 10% CPU, got {cpu_percent:.1}%"
+        );
+    }
 }
