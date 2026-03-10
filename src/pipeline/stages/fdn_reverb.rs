@@ -8,12 +8,12 @@
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
 use crate::pipeline::room_acoustics;
-use crate::pipeline::stages::{sanitize_finite, soft_clip};
+use crate::pipeline::stages::sanitize_finite;
 
 const NUM_LINES: usize = 8;
 const MAX_OUT: usize = 8;
-const BUF_SIZE: usize = 512;
-const BUF_MASK: usize = BUF_SIZE - 1;
+/// Minimum delay buffer size (sufficient for all BASE_DELAYS at 48 kHz).
+const MIN_BUF_SIZE: usize = 512;
 const PRE_DELAY_BUF_SIZE: usize = 2048;
 const PRE_DELAY_BUF_MASK: usize = PRE_DELAY_BUF_SIZE - 1;
 /// Fallback pre-delay when room geometry is degenerate (volume ≈ 0 or surface area ≈ 0).
@@ -45,6 +45,30 @@ impl DampingFilter {
     }
 }
 
+/// Soft clamp for FDN feedback loop stability. Generous ±16.0 ceiling
+/// (~24 dB headroom) with smooth knee starting at ±14.0. Uses the same
+/// rational saturation curve as `soft_clip()` but at a much wider range.
+///
+/// Hard clamping at ±4.0 introduced discontinuities that compound through
+/// the feedback loop, producing audible distortion. This soft version
+/// asymptotes smoothly toward ±16.0, so fed-back signal remains smooth
+/// even when the clamp activates.
+#[inline(always)]
+fn feedback_soft_clamp(x: f32) -> f32 {
+    const CEILING: f32 = 16.0;
+    const KNEE: f32 = 14.0;
+    const WIDTH: f32 = CEILING - KNEE; // 2.0
+    if x > KNEE {
+        let excess = (x - KNEE) / WIDTH;
+        KNEE + WIDTH * excess / (1.0 + excess)
+    } else if x < -KNEE {
+        let excess = (-x - KNEE) / WIDTH;
+        -(KNEE + WIDTH * excess / (1.0 + excess))
+    } else {
+        x
+    }
+}
+
 /// Post-mix FDN late reverb stage.
 ///
 /// Fully physics-based gain staging:
@@ -59,7 +83,14 @@ impl DampingFilter {
 /// so rooms with absorptive surfaces (carpet, acoustic tile) naturally
 /// produce faster HF decay than hard-walled rooms.
 pub struct FdnReverbStage {
-    delay_buffers: Box<[[f32; BUF_SIZE]; NUM_LINES]>,
+    /// Delay line buffers — dynamically sized to accommodate delays at any
+    /// sample rate. At 48 kHz the buffer is 512 samples; at 96 kHz it grows
+    /// to 1024 to preserve the coprime delay ratios.
+    delay_buffers: Vec<Vec<f32>>,
+    /// Current buffer size (always a power of 2).
+    buffer_size: usize,
+    /// Bitmask for wrapping write/read positions: `buffer_size - 1`.
+    buffer_mask: usize,
     write_pos: usize,
     delays: [usize; NUM_LINES],
     damping: [DampingFilter; NUM_LINES],
@@ -88,7 +119,9 @@ impl Default for FdnReverbStage {
 impl FdnReverbStage {
     pub fn new() -> Self {
         Self {
-            delay_buffers: Box::new([[0.0; BUF_SIZE]; NUM_LINES]),
+            delay_buffers: vec![vec![0.0; MIN_BUF_SIZE]; NUM_LINES],
+            buffer_size: MIN_BUF_SIZE,
+            buffer_mask: MIN_BUF_SIZE - 1,
             write_pos: 0,
             delays: [0; NUM_LINES],
             damping: [DampingFilter::new(); NUM_LINES],
@@ -101,11 +134,25 @@ impl FdnReverbStage {
         }
     }
 
+    /// Compute the minimum power-of-2 buffer size needed for the given sample rate.
+    fn required_buffer_size(sample_rate: f32) -> usize {
+        let scale = sample_rate / BASE_SAMPLE_RATE;
+        let max_delay = (BASE_DELAYS[NUM_LINES - 1] as f32 * scale) as usize + 1;
+        max_delay.next_power_of_two().max(MIN_BUF_SIZE)
+    }
+
     fn compute_delays(&mut self, sample_rate: f32) {
+        let needed = Self::required_buffer_size(sample_rate);
+        if needed != self.buffer_size {
+            self.buffer_size = needed;
+            self.buffer_mask = needed - 1;
+            self.delay_buffers = vec![vec![0.0; needed]; NUM_LINES];
+            self.write_pos = 0;
+        }
         let scale = sample_rate / BASE_SAMPLE_RATE;
         for (i, &base_delay) in BASE_DELAYS.iter().enumerate() {
             let scaled = ((base_delay as f32) * scale) as usize;
-            self.delays[i] = scaled.clamp(1, BUF_SIZE - 1);
+            self.delays[i] = scaled.clamp(1, self.buffer_size - 1);
         }
     }
 
@@ -232,7 +279,7 @@ impl FdnReverbStage {
 
         let mut taps = [0.0_f32; NUM_LINES];
         for i in 0..NUM_LINES {
-            let read_pos = (self.write_pos + BUF_SIZE - self.delays[i]) & BUF_MASK;
+            let read_pos = (self.write_pos + self.buffer_size - self.delays[i]) & self.buffer_mask;
             taps[i] = self.delay_buffers[i][read_pos];
         }
 
@@ -259,11 +306,13 @@ impl FdnReverbStage {
                 // Stability ceiling only: prevent runaway without soft clipping.
                 v.clamp(-100.0, 100.0)
             } else {
-                v.clamp(-4.0, 4.0)
+                // Soft clamp: prevents runaway without introducing hard-clip
+                // discontinuities that compound through the feedback loop.
+                feedback_soft_clamp(v)
             };
         }
 
-        self.write_pos = (self.write_pos + 1) & BUF_MASK;
+        self.write_pos = (self.write_pos + 1) & self.buffer_mask;
         output
     }
 }
@@ -346,18 +395,17 @@ impl MixStage for FdnReverbStage {
             for ch in 0..render_channels {
                 if ctx.layout.is_channel_active(ch) {
                     let mixed = buffer[base + ch] + wet[ch] * self.output_normalization;
-                    buffer[base + ch] = if self.measurement_mode {
-                        sanitize_finite(mixed)
-                    } else {
-                        soft_clip(mixed)
-                    };
+                    // Linear output — MasterGainStage is the single point of
+                    // output limiting. sanitize_finite prevents NaN/Inf propagation
+                    // and enforces a ±100.0 stability ceiling for runaway FDN.
+                    buffer[base + ch] = sanitize_finite(mixed);
                 }
             }
         }
     }
 
     fn reset(&mut self) {
-        for line in self.delay_buffers.iter_mut() {
+        for line in &mut self.delay_buffers {
             line.fill(0.0);
         }
         self.pre_delay_buf.fill(0.0);
@@ -1162,5 +1210,127 @@ mod tests {
             "pre-delay should be at least 5ms ({min_samples} samples), got {}",
             fdn.pre_delay_samples
         );
+    }
+
+    /// Values below the knee (±14.0) pass through unchanged.
+    #[test]
+    fn feedback_soft_clamp_transparent_below_knee() {
+        for &v in &[0.0, 1.0, -1.0, 5.0, -10.0, 13.99, -13.99] {
+            let result = feedback_soft_clamp(v);
+            assert_eq!(result, v, "value {v} should pass through unchanged");
+        }
+    }
+
+    /// Extreme values are smoothly limited below ±16.0.
+    #[test]
+    fn feedback_soft_clamp_limits_extreme() {
+        let result_pos = feedback_soft_clamp(100.0);
+        assert!(
+            result_pos > 14.0 && result_pos < 16.0,
+            "100.0 should clamp below 16.0, got {result_pos}"
+        );
+        let result_neg = feedback_soft_clamp(-100.0);
+        assert!(
+            result_neg < -14.0 && result_neg > -16.0,
+            "-100.0 should clamp above -16.0, got {result_neg}"
+        );
+        // Exact knee value passes through
+        assert_eq!(feedback_soft_clamp(14.0), 14.0);
+        assert_eq!(feedback_soft_clamp(-14.0), -14.0);
+    }
+
+    /// FDN output is linear — no soft clipping applied. MasterGainStage is
+    /// the single point of output limiting. Verify that a buffer with values
+    /// above the soft-clip knee (0.9) passes through without compression.
+    #[test]
+    fn fdn_output_is_linear() {
+        let (layout, listener) = make_ctx(2, 2);
+        let ctx = mix_ctx(&layout, &listener, 2, 2);
+        let mut fdn = FdnReverbStage::new();
+        fdn.init(&ctx);
+
+        // Set every sample to 1.5 (well above the 0.9 soft-clip knee).
+        // With no reverb input, the FDN fallback mono-sums the buffer,
+        // but output_normalization is small — the key test is that the
+        // dry signal at 1.5 is NOT compressed by soft_clip.
+        let frames = 64;
+        let channels = 2;
+        let mut buffer = vec![1.5f32; frames * channels];
+
+        fdn.process(&mut buffer, &ctx);
+
+        // If soft_clip were active, no sample could exceed 1.0.
+        // With linear output, dry (1.5) + wet should stay above 1.0.
+        let max_sample = buffer.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            max_sample > 1.0,
+            "FDN output should be linear (no soft-clip at 0.9 knee). \
+             Max sample = {max_sample}, expected > 1.0"
+        );
+        // Stability ceiling still enforced
+        assert!(
+            max_sample <= 100.0,
+            "FDN output should respect ±100.0 stability ceiling. Max = {max_sample}"
+        );
+    }
+
+    /// At 96 kHz, all 8 delay lines must remain distinct (not clamped to the
+    /// same value). The buffer should grow to accommodate scaled delays.
+    #[test]
+    fn delays_preserved_at_96khz() {
+        let (layout, listener) = make_ctx(2, 2);
+        let atmosphere = TEST_ATMOSPHERE;
+        let ctx = MixContext {
+            listener: &listener,
+            layout: &layout,
+            sample_rate: 96000.0,
+            channels: 2,
+            room_min: Vec3::new(-5.0, -5.0, -5.0),
+            room_max: Vec3::new(5.0, 5.0, 5.0),
+            master_gain: 1.0,
+            render_channels: 2,
+            reverb_input: None,
+            wall_reflectivity: 0.9,
+            wall_materials: &TEST_MATERIALS,
+            atmosphere: &atmosphere,
+            measurement_mode: false,
+        };
+        let mut fdn = FdnReverbStage::new();
+        fdn.init(&ctx);
+
+        // All 8 delays should be distinct (coprime ratios preserved)
+        let mut unique_delays: Vec<usize> = fdn.delays.to_vec();
+        unique_delays.sort();
+        unique_delays.dedup();
+        assert_eq!(
+            unique_delays.len(),
+            NUM_LINES,
+            "all 8 delays should be distinct at 96 kHz, got {:?}",
+            fdn.delays
+        );
+
+        // Longest delay should be approximately 499 * 2 = 998
+        let max_delay = *fdn.delays.iter().max().unwrap();
+        assert!(
+            max_delay > 900,
+            "longest delay at 96 kHz should be ~998, got {max_delay}"
+        );
+
+        // Buffer should have grown beyond the 48 kHz minimum of 512
+        assert!(
+            fdn.buffer_size >= 1024,
+            "buffer should be >= 1024 at 96 kHz, got {}",
+            fdn.buffer_size
+        );
+    }
+
+    /// required_buffer_size scales correctly with sample rate.
+    #[test]
+    fn buffer_size_scales_with_sample_rate() {
+        assert_eq!(FdnReverbStage::required_buffer_size(48000.0), 512);
+        assert!(FdnReverbStage::required_buffer_size(96000.0) >= 1024);
+        assert!(FdnReverbStage::required_buffer_size(44100.0) >= 512);
+        // Very high sample rate
+        assert!(FdnReverbStage::required_buffer_size(192000.0) >= 2048);
     }
 }

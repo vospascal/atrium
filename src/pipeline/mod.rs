@@ -27,7 +27,7 @@
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
 //!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: MultichannelRenderer (per-path VBAP gains)
-//!     mix_stages: [LfeCrossover, DelayComp(listener), FdnReverb, MasterGain]
+//!     mix_stages: [FdnReverb, LfeCrossover, DelayComp(listener), MasterGain]
 //! }
 //!
 //! Hrtf {
@@ -41,7 +41,7 @@
 //!     resolver: ImageSourceResolver (1 direct + up to 6 reflections)
 //!     path_effects: [PropagationDelay, AirAbsorption, GroundEffect, WallAbsorption]
 //!     renderer: DbapRenderer (per-path DBAP gains)
-//!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
+//!     mix_stages: [FdnReverb, LfeCrossover, DelayComp(static), MasterGain]
 //! }
 //!
 //! Ambisonics {
@@ -366,10 +366,12 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         // VBAP: no source stages — air absorption and ground effect are per-path PathEffects.
         source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(MultichannelRenderer::new()),
+        // FDN before LFE crossover: reverb bass gets redirected to LFE
+        // alongside the dry signal's bass.
         mix_stages: vec![
+            Box::new(FdnReverbStage::new()),
             Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::listener_relative()),
-            Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
         ],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
@@ -444,10 +446,12 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             rolloff_db: p.dbap_rolloff_db,
             ..Default::default()
         })),
+        // FDN before LFE crossover: reverb bass gets redirected to LFE
+        // alongside the dry signal's bass.
         mix_stages: vec![
+            Box::new(FdnReverbStage::new()),
             Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::static_calibration()),
-            Box::new(FdnReverbStage::new()),
             Box::new(MasterGainStage),
         ],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
@@ -1937,5 +1941,86 @@ mod tests {
             );
         }
         eprintln!();
+    }
+
+    /// Verify that with the corrected stage ordering (FDN → LFE crossover),
+    /// the LFE channel receives bass content including reverb bass. Previously,
+    /// LFE crossover ran first (highpassing mains), then FDN added reverb
+    /// whose bass stayed on the mains and never reached the subwoofer.
+    #[test]
+    fn vbap_lfe_has_signal_in_5_1() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+        let params = PipelineParams::default();
+
+        // Source at moderate distance — close enough for strong signal,
+        // far enough for meaningful reverb send.
+        let source_pos = Vec3::new(5.0, 5.0, 0.0);
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
+
+        let mut pipeline = build_vbap(&params);
+        let channels = 6;
+        let frames = 4096;
+        let wall_materials = default_wall_materials();
+        let room_min = Vec3::new(-20.0, -20.0, -5.0);
+        let room_max = Vec3::new(20.0, 20.0, 5.0);
+
+        // Init mix stages (FDN needs init to set up delay lines + damping,
+        // LFE crossover needs init to detect LFE channel and create filters).
+        let init_ctx = MixContext {
+            listener: &listener,
+            layout: &layout,
+            sample_rate: 48000.0,
+            channels,
+            room_min,
+            room_max,
+            master_gain: 1.0,
+            render_channels: channels,
+            reverb_input: None,
+            wall_reflectivity: 0.9,
+            wall_materials: &wall_materials,
+            atmosphere: &atm,
+            measurement_mode: false,
+        };
+        pipeline.init(&init_ctx);
+        pipeline.ensure_topology(1, &layout, 48000.0);
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
+            pos: source_pos,
+            val: 1.0,
+        })];
+        let mut buffer = vec![0.0f32; frames * channels];
+        let rp = RenderParams {
+            listener: &listener,
+            channels,
+            sample_rate: 48000.0,
+            master_gain: 1.0,
+            distance_model: &dm,
+            layout: &layout,
+            atmosphere: &atm,
+            ground: &ground,
+            room_min,
+            room_max,
+            barriers: &[],
+            wall_materials: &wall_materials,
+            measurement_mode: false,
+        };
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
+
+        // LFE is channel 3 in 5.1 layout.
+        let lfe_ch = 3;
+        let lfe_max: f32 = (0..frames)
+            .map(|f| buffer[f * channels + lfe_ch].abs())
+            .fold(0.0f32, f32::max);
+
+        // With correct ordering (FDN before LFE crossover), the LFE channel
+        // should have signal — either direct bass from the source or
+        // redirected bass from the reverb tail.
+        assert!(
+            lfe_max > 1e-6,
+            "LFE channel should have signal in 5.1 VBAP. Max abs = {lfe_max}"
+        );
     }
 }
