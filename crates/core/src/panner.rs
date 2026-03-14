@@ -62,7 +62,20 @@ pub fn distance_gain_at(
     )
 }
 
+/// Minimum effective distance (meters) to prevent division by zero in near field.
+const MIN_DISTANCE: f32 = 0.01;
+
+/// Maximum near-field gain (+20 dB). Prevents runaway amplification when a
+/// source is extremely close to the listener. At 0.1m with ref_distance=1.0,
+/// the inverse model gives gain=10.0 naturally; this cap only triggers closer.
+const MAX_NEAR_FIELD_GAIN: f32 = 10.0;
+
 /// Compute distance-based gain using a specific distance model.
+///
+/// Unlike the W3C Web Audio spec (which clamps distance to ref_distance),
+/// this allows near-field gain > 1.0 for sources closer than ref_distance.
+/// A source at 0.3m with ref_distance=1.0 gets +10.5 dB of near-field boost,
+/// matching real-world inverse square law behavior.
 pub fn distance_gain_at_model(
     from: Vec3,
     to: Vec3,
@@ -72,7 +85,8 @@ pub fn distance_gain_at_model(
     model: DistanceModelType,
 ) -> f32 {
     let dist = from.distance_to(to);
-    let clamped = dist.clamp(ref_distance, max_distance);
+    // Floor at MIN_DISTANCE to prevent div-by-zero; cap at max_distance.
+    let effective = dist.max(MIN_DISTANCE).min(max_distance);
 
     let gain = match model {
         DistanceModelType::Linear => {
@@ -80,11 +94,11 @@ pub fn distance_gain_at_model(
             if range <= 0.0 {
                 1.0
             } else {
-                1.0 - rolloff * (clamped - ref_distance) / range
+                1.0 - rolloff * (effective - ref_distance) / range
             }
         }
         DistanceModelType::Inverse => {
-            let denom = ref_distance + rolloff * (clamped - ref_distance);
+            let denom = ref_distance + rolloff * (effective - ref_distance);
             if denom <= 0.0 {
                 1.0
             } else {
@@ -95,11 +109,11 @@ pub fn distance_gain_at_model(
             if ref_distance <= 0.0 {
                 1.0
             } else {
-                (clamped / ref_distance).powf(-rolloff)
+                (effective / ref_distance).powf(-rolloff)
             }
         }
     };
-    gain.clamp(0.0, 1.0)
+    gain.clamp(0.0, MAX_NEAR_FIELD_GAIN)
 }
 
 /// Compute distance-based gain from listener to source.
@@ -220,11 +234,27 @@ mod tests {
     }
 
     #[test]
-    fn distance_closer_than_ref_clamps() {
+    fn near_field_gain_boost() {
         let l = listener_at_origin();
-        // Source closer than ref_distance → still 1.0
+        // Source at 0.3m with ref_distance=1.0 → gain = 1.0/0.3 ≈ 3.33 (+10.5 dB)
         let g = distance_gain(&l, Vec3::new(0.3, 0.0, 0.0), 1.0, 10.0, 1.0);
-        assert!((g - 1.0).abs() < 0.001, "gain={g}");
+        let expected = 1.0 / 0.3; // inverse: ref / (ref + rolloff*(d - ref)) = 1/(1+1*(0.3-1)) = 1/0.3
+        assert!(
+            (g - expected).abs() < 0.01,
+            "near-field gain at 0.3m should be ~{expected:.2}, got {g:.4}"
+        );
+        assert!(g > 1.0, "near-field gain should exceed 1.0");
+    }
+
+    #[test]
+    fn near_field_gain_capped() {
+        let l = listener_at_origin();
+        // Source extremely close (0.01m) → gain would be 100 but capped at 10.0
+        let g = distance_gain(&l, Vec3::new(0.01, 0.0, 0.0), 1.0, 10.0, 1.0);
+        assert!(
+            (g - 10.0).abs() < 0.01,
+            "near-field gain should cap at 10.0, got {g}"
+        );
     }
 
     #[test]
@@ -233,6 +263,19 @@ mod tests {
         // Source at 10m with ref=1.0, rolloff=1.0 → gain = 1/(1+1*9) = 0.1
         let g = distance_gain(&l, Vec3::new(10.0, 0.0, 0.0), 1.0, 10.0, 1.0);
         assert!((g - 0.1).abs() < 0.001, "gain={g}");
+    }
+
+    #[test]
+    fn near_field_6db_per_halving() {
+        let l = listener_at_origin();
+        // Inverse square: halving distance → +6 dB (2x gain)
+        let g_1m = distance_gain(&l, Vec3::new(1.0, 0.0, 0.0), 1.0, 10.0, 1.0);
+        let g_half = distance_gain(&l, Vec3::new(0.5, 0.0, 0.0), 1.0, 10.0, 1.0);
+        let db_diff = 20.0 * (g_half / g_1m).log10();
+        assert!(
+            (db_diff - 6.0).abs() < 0.5,
+            "halving distance should add ~6 dB, got {db_diff:.1}"
+        );
     }
 
     #[test]

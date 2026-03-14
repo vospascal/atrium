@@ -1,8 +1,8 @@
 # Source: Campfire
-# Wood fire crackling — quiet ambient sound, radiates in all directions.
+# Wood fire crackling — moderate ambient sound, radiates in all directions.
 # Uses spread to simulate a spatially wide source (not a point).
 
 path: assets/campfire.mp3
-reference_spl: 35.0        # ~30-40 dB SPL at 1m (indoor fireplace crackle)
+reference_spl: 55.0        # ~50-65 dB SPL at 1m (wood fire crackling/popping)
 directivity: omni           # radiates equally in all directions
 spread: 0.3                 # MDAP spread (0.0 = point source, 1.0 = full surround)

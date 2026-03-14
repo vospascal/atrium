@@ -160,10 +160,6 @@ pub struct SpeakerPositions {
 pub struct NormalizationConfig {
     #[serde(default = "default_target_rms")]
     pub target_rms: f32,
-    /// SPL reference level — the SPL that maps to 0 dBFS (digital full scale).
-    /// Real-world standard: 94.0 dB (IEC 61672). Lower = quiet sources get more gain.
-    #[serde(default = "default_spl_reference")]
-    pub spl_reference: f32,
     /// SPL hearing threshold in dB — below this level a source is considered inaudible.
     /// Used to compute audible_radius via ISO 9613 free-field propagation:
     ///   d_audible = 10^((reference_spl - spl_threshold) / 20)
@@ -176,7 +172,6 @@ impl Default for NormalizationConfig {
     fn default() -> Self {
         Self {
             target_rms: 0.5,
-            spl_reference: 40.0,
             spl_threshold: 20.0,
         }
     }
@@ -184,9 +179,6 @@ impl Default for NormalizationConfig {
 
 fn default_target_rms() -> f32 {
     0.5
-}
-fn default_spl_reference() -> f32 {
-    40.0
 }
 fn default_spl_threshold() -> f32 {
     20.0
@@ -288,11 +280,15 @@ pub struct BuildResult {
     pub channel_labels: Vec<String>,
 }
 
-/// Result of building sources: (sound sources, metadata for JSON).
-type BuildSourcesResult = (
-    Vec<Box<dyn atrium_core::source::SoundSource>>,
-    Vec<SourceMeta>,
-);
+/// Result of building sources.
+struct BuildSourcesResult {
+    sources: Vec<Box<dyn atrium_core::source::SoundSource>>,
+    metas: Vec<SourceMeta>,
+    /// Per-source spectral profile bands (24 Bark bands, dB relative to RMS).
+    spectral_profiles: Vec<[f32; crate::audio::spectral_profile::BARK_BANDS]>,
+    /// Per-source base amplitude (sone-based gain, before spatial attenuation).
+    source_amplitudes: Vec<f32>,
+}
 
 /// Default color palette for sources when no color is specified in YAML.
 const SOURCE_COLORS: &[&str] = &[
@@ -346,7 +342,11 @@ impl SceneConfig {
         let render_mode = parse_render_mode(&self.speakers.render_mode);
 
         // Decode audio and build sources (also collects metadata for the browser)
-        let (sources, source_metas) = self.build_sources()?;
+        let build = self.build_sources()?;
+        let sources = build.sources;
+        let source_metas = build.metas;
+        let spectral_profiles = build.spectral_profiles;
+        let source_amplitudes = build.source_amplitudes;
 
         let distance_model = DistanceModel {
             ref_distance: self.distance_model.ref_distance,
@@ -414,6 +414,7 @@ impl SceneConfig {
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;
 
+        let source_count = sources.len();
         let scene = AudioScene {
             initial_listener_pos: listener_pos,
             initial_listener_yaw: self.listener.yaw_degrees.to_radians(),
@@ -440,6 +441,9 @@ impl SceneConfig {
             barriers: Vec::new(),
             wall_materials,
             measurement_mode: false,
+            perceptual_layer: crate::pipeline::perceptual::PerceptualLayer::new(source_count),
+            spectral_profiles,
+            source_amplitudes,
         };
 
         let source_names: Vec<String> = source_metas.iter().map(|m| m.name.clone()).collect();
@@ -449,7 +453,7 @@ impl SceneConfig {
 
         let channel_labels: Vec<String> = match self.speakers.layout.as_str() {
             "5.1" => ["FL", "FR", "C", "LFE", "RL", "RR"].iter(),
-            "quad" => ["FL", "FR", "RL", "RR"].iter(),
+            "quad" => ["FL", "FR", "—", "—", "RL", "RR"].iter(),
             _ => ["L", "R"].iter(),
         }
         .map(|s| s.to_string())
@@ -497,7 +501,7 @@ impl SceneConfig {
         // Speakers
         let channel_labels = match self.speakers.layout.as_str() {
             "5.1" => &["FL", "FR", "C", "LFE", "RL", "RR"][..],
-            "quad" => &["FL", "FR", "RL", "RR"][..],
+            "quad" => &["FL", "FR", "—", "—", "RL", "RR"][..],
             _ => &["L", "R"][..],
         };
         let mut speakers = Vec::new();
@@ -556,7 +560,6 @@ impl SceneConfig {
                 "rolloff": self.distance_model.rolloff,
             },
             "normalization": {
-                "spl_reference": self.normalization.spl_reference,
                 "spl_threshold": self.normalization.spl_threshold,
                 "target_rms": self.normalization.target_rms,
             },
@@ -601,15 +604,24 @@ impl SceneConfig {
         let norm = &self.normalization;
         let mut nodes: Vec<Box<dyn atrium_core::source::SoundSource>> = Vec::new();
         let mut metas: Vec<SourceMeta> = Vec::new();
+        let mut spectral_profiles = Vec::<[f32; crate::audio::spectral_profile::BARK_BANDS]>::new();
+        let mut source_amplitudes = Vec::<f32>::new();
 
         let global_ref_dist = self.distance_model.ref_distance;
+
+        // The loudest source in the scene maps to gain 1.0; all others scale down.
+        let max_source_spl = defs
+            .iter()
+            .map(|d| d.reference_spl)
+            .fold(f32::NEG_INFINITY, f32::max);
 
         for (i, (entry, def)) in self.sources.iter().zip(defs.iter()).enumerate() {
             let buffer = Arc::new(decode_file(Path::new(&def.path))?);
             let profile = resolve_spl(def.reference_spl);
-            let amplitude = profile.amplitude(buffer.rms, norm.target_rms, norm.spl_reference);
+            let amplitude = profile.amplitude(buffer.rms, norm.target_rms, max_source_spl);
             let ref_dist = profile.ref_distance(global_ref_dist);
             let pattern = parse_directivity(&def.directivity);
+            let bands = buffer.spectral_profile.bands;
 
             let mut node = TestNode::new(
                 buffer,
@@ -656,10 +668,17 @@ impl SceneConfig {
                 orbit_speed: entry.orbit_speed,
             });
 
+            spectral_profiles.push(bands);
+            source_amplitudes.push(amplitude);
             nodes.push(Box::new(node));
         }
 
-        Ok((nodes, metas))
+        Ok(BuildSourcesResult {
+            sources: nodes,
+            metas,
+            spectral_profiles,
+            source_amplitudes,
+        })
     }
 }
 

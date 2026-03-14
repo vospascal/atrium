@@ -8,12 +8,16 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::audio::spectral_profile::{self, SpectralProfile};
+
 /// Pre-decoded audio samples. Immutable after creation — safe to share via Arc.
 pub struct AudioBuffer {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     /// Root-mean-square level of the decoded samples.
     pub rms: f32,
+    /// Long-term spectral profile across 24 Bark bands (computed at decode time).
+    pub spectral_profile: SpectralProfile,
 }
 
 /// Decode an audio file (MP3, WAV, FLAC, etc.) into a mono f32 AudioBuffer.
@@ -101,6 +105,8 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
         (all_samples.iter().map(|s| s * s).sum::<f32>() / all_samples.len() as f32).sqrt()
     };
 
+    let spectral_profile = spectral_profile::compute_profile(&all_samples, sample_rate);
+
     println!(
         "Decoded {}: {} samples, {}Hz, {}ch → mono (RMS: {:.4})",
         path.display(),
@@ -114,5 +120,6 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
         samples: all_samples,
         sample_rate,
         rms,
+        spectral_profile,
     })
 }

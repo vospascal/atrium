@@ -177,15 +177,14 @@ export function updateSources(store: AtriumStore) {
       store.sourceMuted[i] ? 0.05 : (0.1 + gains.total * 0.7);
     gainLines[i].visible = true;
 
-    // Update distance label
+    // Update distance label — physical SPL (pure inverse square) and modeled SPL (engine-authoritative)
     const dl = distLabels[i];
-    const d = Math.max(1, gains.distance);
-    const splAtDist = s.spl - 20 * Math.log10(d);
-    const emitDb = gains.emit > 0 ? 20 * Math.log10(gains.emit) : -999;
-    const hearDb = gains.hear > 0 ? 20 * Math.log10(gains.hear) : -999;
-    const receivedSpl = splAtDist + emitDb + hearDb;
-    const splText = isFinite(receivedSpl) ? receivedSpl.toFixed(0) : '-\u221E';
-    const distText = `${gains.distance.toFixed(1)}m ${splText}dB`;
+    const d = Math.max(0.01, gains.distance);
+    const physicalSpl = s.spl - 20 * Math.log10(d);
+    const modeledSpl = s.spl + gains.db;
+    const physText = isFinite(physicalSpl) ? physicalSpl.toFixed(0) : '-\u221E';
+    const modText = isFinite(modeledSpl) && gains.db > -900 ? modeledSpl.toFixed(0) : '-\u221E';
+    const distText = `${gains.distance.toFixed(1)}m ${physText}\u2192${modText}dB`;
     const hexColor = '#' + s.color.toString(16).padStart(6, '0');
     updateDistLabel(dl, distText, hexColor);
     dl.sprite.position.set(
@@ -203,11 +202,10 @@ export function getSourceGainText(store: AtriumStore, index: number): string {
   if (store.sourceMuted[index]) return 'muted';
   const t = store.telemetry?.[index];
   if (!t) return 'dist:- emit:- hear:- = -';
-  const d = Math.max(1, t.distance);
-  const splAtDist = s.spl - 20 * Math.log10(d);
-  const emitDb = t.emit > 0 ? 20 * Math.log10(t.emit) : -999;
-  const hearDb = t.hear > 0 ? 20 * Math.log10(t.hear) : -999;
-  const receivedSpl = splAtDist + emitDb + hearDb;
-  const splText = isFinite(receivedSpl) ? receivedSpl.toFixed(0) : '-\u221E';
-  return `dist:${t.dist.toFixed(2)} emit:${t.emit.toFixed(2)} hear:${t.hear.toFixed(2)} = ${splText} dBSPL`;
+  const d = Math.max(0.01, t.distance);
+  const physicalSpl = s.spl - 20 * Math.log10(d);
+  const modeledSpl = s.spl + t.db;
+  const physText = isFinite(physicalSpl) ? physicalSpl.toFixed(0) : '-\u221E';
+  const modText = isFinite(modeledSpl) && t.db > -900 ? modeledSpl.toFixed(0) : '-\u221E';
+  return `dist:${t.dist.toFixed(2)} emit:${t.emit.toFixed(2)} hear:${t.hear.toFixed(2)} = ${physText}\u2192${modText} dBSPL`;
 }

@@ -39,6 +39,12 @@ pub trait StreamHandle {
 /// If the speaker layout requests a different channel count than the device
 /// default (and the layout count is non-zero), prefer the layout.
 /// This allows forcing multichannel output (e.g. 6ch for 5.1) on capable devices.
+///
+/// Channel ordering assumption: all layouts use ITU channel order
+/// (L, R, C, LFE, Ls, Rs for 5.1). This holds for all target output paths:
+/// - NUC / ALSA: `snd_pcm_set_chmap()` defaults to ITU for multichannel
+/// - AirPlay / Apple TV: RAOP negotiates channel layout metadata
+/// - HDMI / AVR: EDID carries channel map; receivers expect ITU order
 pub fn resolve_channels(layout_channels: u16, device_channels: u16) -> u16 {
     if layout_channels != device_channels && layout_channels > 0 {
         layout_channels
@@ -88,12 +94,26 @@ impl AudioOutput for CpalOutput {
         let device_channels = supported.channels();
 
         let layout_channels = scene.speaker_layout.total_channels() as u16;
-        let channels = resolve_channels(layout_channels, device_channels);
+        let mut channels = resolve_channels(layout_channels, device_channels);
+
+        // Validate that the device actually supports the requested channel count.
+        // Without this, cpal may error or silently downmix (platform-dependent).
         if channels != device_channels {
-            println!(
-                "Speaker layout requests {} channels (device default: {})",
-                channels, device_channels
-            );
+            let device_supports = device
+                .supported_output_configs()?
+                .any(|cfg| cfg.channels() >= channels);
+            if device_supports {
+                println!(
+                    "Speaker layout requests {} channels (device default: {})",
+                    channels, device_channels
+                );
+            } else {
+                eprintln!(
+                    "Device does not support {} channels — falling back to device default ({})",
+                    channels, device_channels
+                );
+                channels = device_channels;
+            }
         }
 
         println!(
@@ -256,16 +276,24 @@ mod tests {
     }
 
     #[test]
-    fn quad_layout_has_4_channels() {
+    fn quad_layout_is_masked_5_1() {
         let layout = SpeakerLayout::quad(
             Vec3::new(-1.0, 1.0, 0.0),
             Vec3::new(1.0, 1.0, 0.0),
             Vec3::new(-1.0, -1.0, 0.0),
             Vec3::new(1.0, -1.0, 0.0),
         );
-        assert_eq!(layout.total_channels(), 4);
+        // Quad is 5.1 with center + LFE masked
+        assert_eq!(layout.total_channels(), 6);
         assert_eq!(layout.speaker_count(), 4);
-        assert_eq!(layout.lfe_channel(), None);
+        assert_eq!(layout.lfe_channel(), Some(3));
+        // Active channels: FL(0), FR(1), RL(4), RR(5) — center(2) and LFE(3) masked
+        assert!(layout.is_channel_active(0));
+        assert!(layout.is_channel_active(1));
+        assert!(!layout.is_channel_active(2));
+        assert!(!layout.is_channel_active(3));
+        assert!(layout.is_channel_active(4));
+        assert!(layout.is_channel_active(5));
     }
 
     #[test]

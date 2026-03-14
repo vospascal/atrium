@@ -48,8 +48,8 @@ export interface AtmosphereDef {
 }
 
 export interface NormalizationDef {
-  spl_reference: number;
   spl_threshold: number;
+  target_rms: number;
 }
 
 export interface RenderModeDef {
@@ -94,6 +94,7 @@ export interface SourceTelemetry {
   total: number;
   db: number;
   muted: boolean;
+  perceptual: number;
 }
 
 export interface TelemetryMessage {

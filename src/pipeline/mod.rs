@@ -56,6 +56,7 @@ pub mod mix_stage;
 pub mod path;
 pub mod path_effects;
 pub mod path_resolvers;
+pub mod perceptual;
 pub mod renderer;
 pub mod renderers;
 pub mod room_acoustics;

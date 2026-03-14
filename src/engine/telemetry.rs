@@ -26,6 +26,8 @@ pub struct SourceTelemetry {
     pub gain_total: f32,
     pub gain_db: f32,
     pub is_muted: bool,
+    /// Perceptual score [0, 1] from masking/salience analysis.
+    pub perceptual_score: f32,
 }
 
 impl Default for SourceTelemetry {
@@ -41,6 +43,7 @@ impl Default for SourceTelemetry {
             gain_total: 0.0,
             gain_db: f32::NEG_INFINITY,
             is_muted: false,
+            perceptual_score: 1.0,
         }
     }
 }
@@ -144,6 +147,7 @@ pub fn compute_telemetry(
             gain_total,
             gain_db,
             is_muted: source.is_muted(),
+            perceptual_score: 1.0, // overwritten by AudioScene with actual scores
         };
     }
 
@@ -164,7 +168,7 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
         }
         let _ = write!(
             json,
-            r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{}}}"#,
+            r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{},"perceptual":{:.3}}}"#,
             s.x,
             s.y,
             s.z,
@@ -179,6 +183,7 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
                 -999.0
             },
             s.is_muted,
+            s.perceptual_score,
         );
     }
 
@@ -205,10 +210,12 @@ mod tests {
             .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin())
             .collect();
         let rms = (samples.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
+        let spectral_profile = crate::audio::spectral_profile::compute_profile(&samples, sr as u32);
         Arc::new(AudioBuffer {
             samples,
             sample_rate: sr as u32,
             rms,
+            spectral_profile,
         })
     }
 
@@ -216,10 +223,10 @@ mod tests {
         buf: &Arc<AudioBuffer>,
         spl: f32,
         pos: Vec3,
-        ceiling: f32,
+        max_source_spl: f32,
     ) -> Box<dyn SoundSource> {
         let profile = SoundProfile { reference_spl: spl };
-        let amplitude = profile.amplitude(buf.rms, 0.1, ceiling);
+        let amplitude = profile.amplitude(buf.rms, 0.1, max_source_spl);
         let ref_dist = profile.ref_distance(1.0);
         let mut node = TestNode::new(Arc::clone(buf), pos, 0.0, 0.0);
         node.amplitude = amplitude;

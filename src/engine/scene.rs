@@ -1,16 +1,20 @@
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
+use crate::audio::spectral_profile::BARK_BANDS;
 use crate::engine::commands::Command;
 #[cfg(feature = "memprof")]
 use crate::engine::memprof::{MemProfiler, MemStage};
 use crate::engine::telemetry::{compute_telemetry, TelemetryFrame};
 use crate::pipeline::mix_stage::MixContext;
+use crate::pipeline::perceptual::{PerceptualLayer, SourcePerceptualState};
 use crate::pipeline::{render_pipeline, RenderParams, RenderPipeline};
 use crate::profile_span;
 use crate::world::room::Room;
 use crate::world::types::Vec3;
+use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
+use atrium_core::panner::distance_gain_at_model;
 use atrium_core::source::SoundSource;
 use atrium_core::speaker::{RenderMode, SpeakerLayout};
 
@@ -63,6 +67,13 @@ pub struct AudioScene {
     pub wall_materials: [crate::pipeline::path::WallMaterial; 6],
     /// Bypass soft clipping and gain clamping for acoustic measurement.
     pub measurement_mode: bool,
+    // ── Perceptual masking layer ──
+    /// Per-source spectral profiles (24 Bark bands, dB relative to RMS).
+    pub spectral_profiles: Vec<[f32; BARK_BANDS]>,
+    /// Per-source base amplitudes (sone-based gain, before spatial attenuation).
+    pub source_amplitudes: Vec<f32>,
+    /// Perceptual scoring layer (masking + salience analysis).
+    pub perceptual_layer: PerceptualLayer,
 }
 
 impl AudioScene {
@@ -208,6 +219,51 @@ impl AudioScene {
         #[cfg(feature = "memprof")]
         self.memprof.record_stage(MemStage::SourceTick);
 
+        // Perceptual masking analysis (feed-forward, before rendering).
+        {
+            let _s = profile_span!("perceptual").entered();
+            let states: Vec<SourcePerceptualState> = self
+                .sources
+                .iter()
+                .enumerate()
+                .map(|(i, source)| {
+                    let pos = source.position();
+                    let active = source.is_active() && !source.is_muted();
+                    let amp = if active && i < self.source_amplitudes.len() {
+                        let dist_gain = distance_gain_at_model(
+                            self.listener.position,
+                            pos,
+                            source.ref_distance(),
+                            self.distance_model.max_distance,
+                            self.distance_model.rolloff,
+                            self.distance_model.model,
+                        );
+                        let emit_gain = directivity_gain(
+                            pos,
+                            source.orientation(),
+                            self.listener.position,
+                            &source.directivity(),
+                        );
+                        let hear_gain = self.listener.hearing_gain(pos);
+                        self.source_amplitudes[i] * dist_gain * emit_gain * hear_gain
+                    } else {
+                        0.0
+                    };
+                    let bands = if i < self.spectral_profiles.len() {
+                        self.spectral_profiles[i]
+                    } else {
+                        [0.0; BARK_BANDS]
+                    };
+                    SourcePerceptualState {
+                        received_amplitude: amp,
+                        spectral_bands: bands,
+                        active,
+                    }
+                })
+                .collect();
+            self.perceptual_layer.update(&states);
+        }
+
         // Render through the composable pipeline
         {
             let (room_min, room_max) = self.room.bounds();
@@ -246,6 +302,13 @@ impl AudioScene {
                     frame.channel_peaks =
                         crate::engine::telemetry::compute_channel_peaks(output, channels);
                     frame.channel_count = channels as u8;
+                    // Stamp perceptual scores from the latest analysis.
+                    let scores = self.perceptual_layer.scores();
+                    for i in 0..frame.source_count as usize {
+                        if i < scores.len() {
+                            frame.sources[i].perceptual_score = scores[i];
+                        }
+                    }
                     let _ = producer.push(frame); // silent drop if full
                 }
             }

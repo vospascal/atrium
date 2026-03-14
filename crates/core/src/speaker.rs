@@ -269,8 +269,12 @@ impl SpeakerLayout {
     }
 
     /// Quad 4.0 layout: front-left, front-right, rear-left, rear-right.
+    ///
+    /// Implemented as masked 5.1 (6 channels) with center and LFE silent.
+    /// This guarantees channel semantics match ITU 5.1 on the device —
+    /// channels 0/1/4/5 are FL/FR/Ls/Rs, channels 2/3 are zeroed.
     pub fn quad(fl: Vec3, fr: Vec3, rl: Vec3, rr: Vec3) -> Self {
-        Self::new(
+        let mut layout = Self::new(
             &[
                 Speaker {
                     position: fl,
@@ -282,16 +286,19 @@ impl SpeakerLayout {
                 },
                 Speaker {
                     position: rl,
-                    channel: 2,
+                    channel: 4,
                 },
                 Speaker {
                     position: rr,
-                    channel: 3,
+                    channel: 5,
                 },
             ],
-            None,
-            4,
-        )
+            Some(3),
+            6,
+        );
+        // Mask center (2) and LFE (3) — quad only uses FL/FR/RL/RR.
+        layout.set_active_channels(&[0, 1, 4, 5]);
+        layout
     }
 
     /// ITU 5.1 surround: L(0), R(1), C(2), LFE(3), Ls(4), Rs(5).
