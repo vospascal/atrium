@@ -4,7 +4,6 @@
 //!   - `environments/*.yaml` — virtual acoustic space (dimensions, wall materials)
 //!   - `rooms/*.yaml`        — atrium geometry (physical speaker room)
 //!   - `sources/*.yaml`      — sound identity (audio file, SPL, directivity)
-//!   - `processors/*.yaml`   — effect chain (early reflections, reverb)
 //!   - `atmospheres/*.yaml`  — atmospheric absorption conditions
 //!
 //! The scene itself only adds placement (positions, orbits) and mixing
@@ -52,9 +51,6 @@ pub struct SceneConfig {
     #[serde(default)]
     pub normalization: NormalizationConfig,
     pub sources: Vec<SourceEntry>,
-    /// Path to processors definition file (e.g. "processors/small_room.yaml").
-    /// Omit for no processors.
-    pub processors: Option<String>,
     /// Path to atmosphere definition file (e.g. "atmospheres/default.yaml").
     /// Omit for standard conditions.
     pub atmosphere: Option<String>,
@@ -324,19 +320,6 @@ fn resolve_spl(db: f32) -> SoundProfile {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type")]
-pub enum ProcessorConfig {
-    #[serde(rename = "early_reflections")]
-    EarlyReflections {
-        #[serde(default = "default_er_reflectivity")]
-        wall_reflectivity: f32,
-    },
-}
-
-fn default_er_reflectivity() -> f32 {
-    crate::pipeline::DEFAULT_WALL_REFLECTIVITY
-}
-#[derive(Deserialize)]
 pub struct AtmosphereConfig {
     #[serde(default = "default_temperature")]
     pub temperature_c: f32,
@@ -468,19 +451,6 @@ impl SceneConfig {
             model: parse_distance_model(&self.distance_model.model),
         };
 
-        // Load processor params from file (feeds pipeline construction)
-        let mut er_wall_reflectivity: Option<f32> = None;
-        if let Some(path) = &self.processors {
-            let defs: Vec<ProcessorConfig> = load_yaml(path)?;
-            for def in &defs {
-                match def {
-                    ProcessorConfig::EarlyReflections { wall_reflectivity } => {
-                        er_wall_reflectivity = Some(*wall_reflectivity);
-                    }
-                }
-            }
-        }
-
         // Load atmosphere from file (or defaults if omitted)
         let atmosphere = match &self.atmosphere {
             Some(path) => {
@@ -517,9 +487,8 @@ impl SceneConfig {
         let ground = GroundProperties::mixed(environment_cfg.ground_factor);
 
         let wall_materials = build_wall_materials(&environment_cfg);
-        // Environment's wall_reflectivity takes precedence; processor override is fallback
-        let effective_reflectivity =
-            er_wall_reflectivity.unwrap_or(environment_cfg.wall_reflectivity);
+        // Environment's wall_reflectivity is authoritative
+        let effective_reflectivity = environment_cfg.wall_reflectivity;
         let (environment_min, environment_max) = environment.bounds();
         let pipeline_params = PipelineParams {
             sample_rate: 48000.0, // will be recalibrated in init_pipelines

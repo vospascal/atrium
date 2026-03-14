@@ -79,6 +79,4 @@ sources:
     color: "#ce93d8"
     position: [5.0, 3.0, 0.0]   # front-right area
 
-processors: processors/small_room.yaml
-
 atmosphere: atmospheres/default.yaml
