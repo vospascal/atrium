@@ -21,8 +21,7 @@ use atrium_core::speaker::SpeakerLayout;
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput};
-use crate::pipeline::SourceStageBank;
+use crate::pipeline::SourceContext;
 
 /// Per-path FOA encode renderer.
 ///
@@ -111,9 +110,7 @@ impl Renderer for AmbisonicsRenderer {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
-        src_out: &SourceOutput,
         paths: &PathSet,
         path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
@@ -137,8 +134,7 @@ impl Renderer for AmbisonicsRenderer {
             for frame in 0..out.num_frames {
                 let t = frame as f32 * inv_frames;
                 let raw = source.next_sample(out.sample_rate);
-                let sample =
-                    source_stages.process_sample_all(source_idx, raw) * src_out.gain_modifier;
+                let sample = raw;
 
                 let base = frame * out.channels;
                 for (pi, path) in path_slice.iter().enumerate() {
@@ -154,7 +150,7 @@ impl Renderer for AmbisonicsRenderer {
                     // Z-rotation creates spatial decorrelation from the omni input.
                     if path.kind == PathKind::Direct {
                         if let Some(ref mut rev) = out.reverb_send {
-                            rev[base] += path_sample * src_out.reverb_send;
+                            rev[base] += path_sample * ctx.reverb_send;
                         }
                     }
                 }
@@ -182,8 +178,7 @@ impl Renderer for AmbisonicsRenderer {
             for frame in 0..out.num_frames {
                 let t = frame as f32 * inv_frames;
                 let raw = source.next_sample(out.sample_rate);
-                let sample =
-                    source_stages.process_sample_all(source_idx, raw) * src_out.gain_modifier;
+                let sample = raw;
 
                 let base = frame * out.channels;
                 for (pi, path) in path_slice.iter().enumerate() {

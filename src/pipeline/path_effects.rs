@@ -7,8 +7,8 @@
 use atrium_core::panner::DistanceModelType;
 
 use crate::audio::distance::DistanceModel;
+use crate::audio::filters::{AirAbsorptionFilter, Biquad};
 use crate::pipeline::path::{PathEffect, PathEffectContext};
-use crate::pipeline::stages::air_absorption::AirAbsorptionFilter;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AirAbsorptionEffect
@@ -17,7 +17,7 @@ use crate::pipeline::stages::air_absorption::AirAbsorptionFilter;
 /// Per-path air absorption using ISO 9613-1 lowpass filter.
 ///
 /// Reuses `AirAbsorptionFilter` — the same biquad + hysteresis logic used by
-/// the SourceStage and WorldLockedRenderer.
+/// the WorldLockedRenderer.
 pub struct AirAbsorptionEffect {
     inner: AirAbsorptionFilter,
 }
@@ -124,8 +124,7 @@ impl PathEffect for DistanceAttenuationEffect {
 
 /// Per-path frequency-dependent ground effect (ISO 9613-2, Table 3).
 ///
-/// Replaces the broadband `GroundEffectStage` with three biquad filters that
-/// model the spectral shape of ground interaction:
+/// Uses three biquad filters to model the spectral shape of ground interaction:
 ///
 /// 1. **Low shelf (~250 Hz):** ISO Table 3 low-freq behavior.
 ///    Hard ground (G=0): -1.5 dB (constructive interference).
@@ -140,18 +139,18 @@ impl PathEffect for DistanceAttenuationEffect {
 ///
 /// For short distances (< 0.5 m) or zero heights, filters pass through unchanged.
 pub struct GroundEffectFilter {
-    low_shelf: ShelvingBiquad,
-    high_shelf: ShelvingBiquad,
-    notch: ParametricBiquad,
+    low_shelf: Biquad,
+    high_shelf: Biquad,
+    notch: Biquad,
     sample_rate: f32,
 }
 
 impl GroundEffectFilter {
     pub fn new(sample_rate: f32) -> Self {
         Self {
-            low_shelf: ShelvingBiquad::new(),
-            high_shelf: ShelvingBiquad::new(),
-            notch: ParametricBiquad::new(),
+            low_shelf: Biquad::unity(),
+            high_shelf: Biquad::unity(),
+            notch: Biquad::unity(),
             sample_rate,
         }
     }
@@ -225,177 +224,6 @@ impl PathEffect for GroundEffectFilter {
 }
 
 /// 2nd-order biquad for shelving filters (Direct Form I).
-struct ShelvingBiquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    x1: f32,
-    x2: f32,
-    y1: f32,
-    y2: f32,
-}
-
-impl ShelvingBiquad {
-    fn new() -> Self {
-        Self {
-            b0: 1.0,
-            b1: 0.0,
-            b2: 0.0,
-            a1: 0.0,
-            a2: 0.0,
-            x1: 0.0,
-            x2: 0.0,
-            y1: 0.0,
-            y2: 0.0,
-        }
-    }
-
-    fn set_unity(&mut self) {
-        self.b0 = 1.0;
-        self.b1 = 0.0;
-        self.b2 = 0.0;
-        self.a1 = 0.0;
-        self.a2 = 0.0;
-    }
-
-    /// Low-shelf filter (RBJ Audio EQ Cookbook).
-    fn set_low_shelf(&mut self, freq_hz: f32, gain_db: f32, sample_rate: f32) {
-        let a = 10.0_f32.powf(gain_db / 40.0); // sqrt of linear gain
-        let omega = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
-        let cos_w = omega.cos();
-        let sin_w = omega.sin();
-        let alpha = sin_w / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
-        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
-
-        let a0 = (a + 1.0) + (a - 1.0) * cos_w + two_sqrt_a_alpha;
-        let a0_inv = 1.0 / a0;
-
-        self.b0 = (a * ((a + 1.0) - (a - 1.0) * cos_w + two_sqrt_a_alpha)) * a0_inv;
-        self.b1 = (2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w)) * a0_inv;
-        self.b2 = (a * ((a + 1.0) - (a - 1.0) * cos_w - two_sqrt_a_alpha)) * a0_inv;
-        self.a1 = (-2.0 * ((a - 1.0) + (a + 1.0) * cos_w)) * a0_inv;
-        self.a2 = ((a + 1.0) + (a - 1.0) * cos_w - two_sqrt_a_alpha) * a0_inv;
-    }
-
-    /// High-shelf filter (RBJ Audio EQ Cookbook).
-    fn set_high_shelf(&mut self, freq_hz: f32, gain_db: f32, sample_rate: f32) {
-        let a = 10.0_f32.powf(gain_db / 40.0);
-        let omega = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
-        let cos_w = omega.cos();
-        let sin_w = omega.sin();
-        let alpha = sin_w / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
-        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
-
-        let a0 = (a + 1.0) - (a - 1.0) * cos_w + two_sqrt_a_alpha;
-        let a0_inv = 1.0 / a0;
-
-        self.b0 = (a * ((a + 1.0) + (a - 1.0) * cos_w + two_sqrt_a_alpha)) * a0_inv;
-        self.b1 = (-2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w)) * a0_inv;
-        self.b2 = (a * ((a + 1.0) + (a - 1.0) * cos_w - two_sqrt_a_alpha)) * a0_inv;
-        self.a1 = (2.0 * ((a - 1.0) - (a + 1.0) * cos_w)) * a0_inv;
-        self.a2 = ((a + 1.0) - (a - 1.0) * cos_w - two_sqrt_a_alpha) * a0_inv;
-    }
-
-    #[inline]
-    fn process(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
-            - self.a1 * self.y1
-            - self.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-
-    fn reset(&mut self) {
-        self.x1 = 0.0;
-        self.x2 = 0.0;
-        self.y1 = 0.0;
-        self.y2 = 0.0;
-    }
-}
-
-/// 2nd-order parametric biquad for peak/notch (Direct Form I).
-struct ParametricBiquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    x1: f32,
-    x2: f32,
-    y1: f32,
-    y2: f32,
-}
-
-impl ParametricBiquad {
-    fn new() -> Self {
-        Self {
-            b0: 1.0,
-            b1: 0.0,
-            b2: 0.0,
-            a1: 0.0,
-            a2: 0.0,
-            x1: 0.0,
-            x2: 0.0,
-            y1: 0.0,
-            y2: 0.0,
-        }
-    }
-
-    fn set_unity(&mut self) {
-        self.b0 = 1.0;
-        self.b1 = 0.0;
-        self.b2 = 0.0;
-        self.a1 = 0.0;
-        self.a2 = 0.0;
-    }
-
-    /// Peaking/notch EQ (RBJ Audio EQ Cookbook).
-    fn set_peak(&mut self, freq_hz: f32, gain_db: f32, q: f32, sample_rate: f32) {
-        if gain_db.abs() < 0.01 {
-            self.set_unity();
-            return;
-        }
-
-        let a = 10.0_f32.powf(gain_db / 40.0);
-        let omega = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
-        let cos_w = omega.cos();
-        let sin_w = omega.sin();
-        let alpha = sin_w / (2.0 * q.max(0.1));
-
-        let a0 = 1.0 + alpha / a;
-        let a0_inv = 1.0 / a0;
-
-        self.b0 = (1.0 + alpha * a) * a0_inv;
-        self.b1 = (-2.0 * cos_w) * a0_inv;
-        self.b2 = (1.0 - alpha * a) * a0_inv;
-        self.a1 = (-2.0 * cos_w) * a0_inv;
-        self.a2 = (1.0 - alpha / a) * a0_inv;
-    }
-
-    #[inline]
-    fn process(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
-            - self.a1 * self.y1
-            - self.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-
-    fn reset(&mut self) {
-        self.x1 = 0.0;
-        self.x2 = 0.0;
-        self.y1 = 0.0;
-        self.y2 = 0.0;
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PropagationDelayEffect
@@ -491,16 +319,16 @@ impl PathEffect for PropagationDelayEffect {
 /// The broadband `path.gain` already accounts for overall wall reflectivity;
 /// these filters add the *frequency-dependent* coloring on top.
 pub struct WallAbsorptionEffect {
-    low_shelf: ShelvingBiquad,
-    high_shelf: ShelvingBiquad,
+    low_shelf: Biquad,
+    high_shelf: Biquad,
     sample_rate: f32,
 }
 
 impl WallAbsorptionEffect {
     pub fn new(sample_rate: f32) -> Self {
         Self {
-            low_shelf: ShelvingBiquad::new(),
-            high_shelf: ShelvingBiquad::new(),
+            low_shelf: Biquad::unity(),
+            high_shelf: Biquad::unity(),
             sample_rate,
         }
     }

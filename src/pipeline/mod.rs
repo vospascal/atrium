@@ -1,15 +1,14 @@
 //! Composable render pipeline.
 //!
 //! A render pipeline defines the complete audio processing chain for a given
-//! render mode. Each pipeline consists of two categories of stages:
+//! render mode. Each pipeline consists of:
 //!
-//! 1. **SourceStages** — per-source, before routing (envelopes, listener-relative
-//!    propagation for VBAP/HRTF)
-//! 2. **MixStages** — post-mix, whole-buffer (LFE crossover, delay comp,
+//! 1. **PathResolver** + **PathEffects** — resolve propagation paths per source,
+//!    then apply per-path DSP (delay, air absorption, ground effect, wall absorption)
+//! 2. **Renderer** — mode-specific spatialization (gain ramp, HRTF convolution,
+//!    per-speaker propagation)
+//! 3. **MixStages** — post-mix, whole-buffer (LFE crossover, delay comp,
 //!    reverb, master gain)
-//!
-//! Plus a **Renderer** that handles mode-specific spatialization:
-//! multichannel gain ramp, per-speaker propagation, or HRTF convolution.
 //!
 //! # Pipeline definitions
 //!
@@ -18,7 +17,6 @@
 //!
 //! ```text
 //! WorldLocked {
-//!     source_stages: []
 //!     renderer: WorldLockedRenderer (per-speaker air absorption, ground effect, reflections, distance+directivity)
 //!     mix_stages: [LfeCrossover, DelayComp(static), MasterGain]
 //! }
@@ -60,7 +58,6 @@ pub mod perceptual;
 pub mod renderer;
 pub mod renderers;
 pub mod room_acoustics;
-pub mod source_stage;
 pub mod stages;
 
 use atrium_core::speaker::SpeakerLayout;
@@ -75,10 +72,12 @@ use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 
+use atrium_core::directivity::DirectivityPattern;
+use atrium_core::listener::Listener;
+
 use self::mix_stage::{MixContext, MixStage};
 use self::path::{PathEffect, PathEffectChain, PathEffectFactory, PathResolver, MAX_PATHS};
 use self::renderer::Renderer;
-use self::source_stage::{SourceContext, SourceOutput, SourceStage};
 
 use self::path_resolvers::{DirectPathResolver, ImageSourceResolver};
 use self::renderers::ambisonics::AmbisonicsRenderer;
@@ -116,98 +115,27 @@ use self::stages::master_gain::MasterGainStage;
 // (multi-delay, rotation operate natively in B-format domain).
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SourceStageBank — factory-managed per-source instances
+// SourceContext — per-source geometry passed to renderers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Factory function that creates one SourceStage instance given the sample rate.
-type SourceStageFactory = Box<dyn Fn(f32) -> Box<dyn SourceStage> + Send>;
-
-/// A column of per-source stage instances, grown by a factory.
-struct StageColumn {
-    factory: SourceStageFactory,
-    instances: Vec<Box<dyn SourceStage>>,
-}
-
-/// Manages per-source SourceStage instances via factories.
-///
-/// Each "column" is one stage type (e.g., AirAbsorption). Each column has
-/// N instances, one per source. When sources are added, new instances are
-/// created via the factory function.
-pub struct SourceStageBank {
-    columns: Vec<StageColumn>,
-    sample_rate: f32,
-}
-
-impl SourceStageBank {
-    fn new(factories: Vec<SourceStageFactory>, sample_rate: f32) -> Self {
-        Self {
-            columns: factories
-                .into_iter()
-                .map(|f| StageColumn {
-                    factory: f,
-                    instances: Vec::new(),
-                })
-                .collect(),
-            sample_rate,
-        }
-    }
-
-    /// Ensure we have enough per-source instances.
-    pub fn ensure_sources(&mut self, count: usize) {
-        for col in &mut self.columns {
-            while col.instances.len() < count {
-                col.instances.push((col.factory)(self.sample_rate));
-            }
-        }
-    }
-
-    /// Run all stages' `process()` for a given source index.
-    pub fn process_all(
-        &mut self,
-        source_idx: usize,
-        ctx: &SourceContext,
-        output: &mut SourceOutput,
-    ) {
-        for col in &mut self.columns {
-            if let Some(stage) = col.instances.get_mut(source_idx) {
-                stage.process(ctx, output);
-            }
-        }
-    }
-
-    /// Collect mutable references to all stages for a given source,
-    /// for passing to the renderer's inner loop (`process_sample`).
-    pub fn for_source(&mut self, source_idx: usize) -> Vec<&mut dyn SourceStage> {
-        let mut refs = Vec::with_capacity(self.columns.len());
-        for col in &mut self.columns {
-            if let Some(stage) = col.instances.get_mut(source_idx) {
-                refs.push(&mut **stage as &mut dyn SourceStage);
-            }
-        }
-        refs
-    }
-
-    /// Process a single sample through all stages for the given source,
-    /// without allocating a temporary Vec of references.
-    #[inline]
-    pub fn process_sample_all(&mut self, source_idx: usize, sample: f32) -> f32 {
-        let mut value = sample;
-        for col in &mut self.columns {
-            if let Some(stage) = col.instances.get_mut(source_idx) {
-                value = stage.process_sample(value);
-            }
-        }
-        value
-    }
-
-    /// Reset all stage instances.
-    pub fn reset(&mut self) {
-        for col in &mut self.columns {
-            for instance in &mut col.instances {
-                instance.reset();
-            }
-        }
-    }
+/// Per-source context for rendering. Borrowed from AudioScene per render call.
+pub struct SourceContext<'a> {
+    pub listener: &'a Listener,
+    pub source_pos: Vec3,
+    pub source_orientation: Vec3,
+    pub source_directivity: &'a DirectivityPattern,
+    pub source_spread: f32,
+    pub source_ref_distance: f32,
+    pub dist_to_listener: f32,
+    pub atmosphere: &'a AtmosphericParams,
+    pub environment_min: Vec3,
+    pub environment_max: Vec3,
+    pub ground: &'a GroundProperties,
+    pub sample_rate: f32,
+    pub distance_model: &'a DistanceModel,
+    pub layout: &'a SpeakerLayout,
+    /// Reverb send level (0.0–1.0), computed from critical distance.
+    pub reverb_send: f32,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,7 +144,6 @@ impl SourceStageBank {
 
 /// A complete render pipeline for one mode.
 pub struct RenderPipeline {
-    pub source_stages: SourceStageBank,
     pub renderer: Box<dyn Renderer>,
     pub mix_stages: Vec<Box<dyn MixStage>>,
     pub resolver: Box<dyn PathResolver>,
@@ -248,7 +175,6 @@ impl RenderPipeline {
 
     /// Reset all state (called on mode switch).
     pub fn reset(&mut self) {
-        self.source_stages.reset();
         self.renderer.reset();
         for stage in &mut self.mix_stages {
             stage.reset();
@@ -267,7 +193,6 @@ impl RenderPipeline {
         layout: &SpeakerLayout,
         sample_rate: f32,
     ) {
-        self.source_stages.ensure_sources(source_count);
         self.renderer
             .ensure_topology(source_count, layout, sample_rate);
 
@@ -347,11 +272,7 @@ pub fn build_all_pipelines(params: &PipelineParams) -> [RenderPipeline; 5] {
 }
 
 fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
-    let sample_rate = p.sample_rate;
-
     RenderPipeline {
-        // WorldLocked: no source stages — propagation lives in the renderer
-        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(WorldLockedRenderer::new(
             self::renderers::world_locked::WorldLockedParams {
                 wall_reflectivity: p.er_wall_reflectivity,
@@ -373,12 +294,9 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
 }
 
 fn build_vbap(p: &PipelineParams) -> RenderPipeline {
-    let sample_rate = p.sample_rate;
     let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
-        // VBAP: no source stages — air absorption and ground effect are per-path PathEffects.
-        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(MultichannelRenderer::new()),
         // FDN before LFE crossover: reverb bass gets redirected to LFE
         // alongside the dry signal's bass.
@@ -419,8 +337,6 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
     let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
-        // HRTF: no source stages — air absorption and ground effect are per-path PathEffects.
-        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sample_rate)),
         mix_stages: vec![Box::new(FdnReverbStage::new()), Box::new(MasterGainStage)],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
@@ -450,12 +366,9 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 }
 
 fn build_dbap(p: &PipelineParams) -> RenderPipeline {
-    let sample_rate = p.sample_rate;
     let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
-        // DBAP: no source stages — air absorption and ground effect are per-path PathEffects.
-        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(DbapRenderer::new(atrium_core::dbap::DbapParams {
             rolloff_db: p.dbap_rolloff_db,
             ..Default::default()
@@ -495,12 +408,9 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
 }
 
 fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
-    let sample_rate = p.sample_rate;
     let delay_cap = propagation_delay_capacity(p);
 
     RenderPipeline {
-        // Ambisonics: no source stages — air absorption and ground effect are per-path PathEffects.
-        source_stages: SourceStageBank::new(vec![], sample_rate),
         renderer: Box::new(AmbisonicsRenderer::new()),
         mix_stages: vec![
             Box::new(AmbiMultiDelayStage::new()),
@@ -572,9 +482,8 @@ pub fn render_pipeline(
 
     let num_frames = output.len() / params.channels;
 
-    // Split borrow: source_stages, renderer, resolver, path_effects are independent fields
+    // Split borrow: renderer, resolver, path_effects are independent fields
     let RenderPipeline {
-        source_stages,
         renderer,
         mix_stages,
         resolver,
@@ -586,7 +495,6 @@ pub fn render_pipeline(
     } = pipeline;
 
     // Ensure topology
-    source_stages.ensure_sources(sources.len());
     renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
 
     // Grow per-source path effect chains if needed.
@@ -622,6 +530,11 @@ pub fn render_pipeline(
         let pos = source.position();
         let dist_to_listener = params.listener.position.distance_to(pos);
 
+        // Per-source reverb send: critical distance scales by √γ (directivity factor).
+        let gamma = atrium_core::directivity::directivity_factor(&source.directivity());
+        let critical_dist = room_acoustics::critical_distance(volume, rt60, gamma);
+        let reverb_send = room_acoustics::reverb_send(dist_to_listener, critical_dist);
+
         let ctx = SourceContext {
             listener: params.listener,
             source_pos: pos,
@@ -637,6 +550,7 @@ pub fn render_pipeline(
             sample_rate: params.sample_rate,
             distance_model: params.distance_model,
             layout: params.layout,
+            reverb_send,
         };
 
         // Resolve propagation paths for this source
@@ -652,19 +566,6 @@ pub fn render_pipeline(
             };
             resolver.resolve(&resolve_ctx, &mut paths);
         }
-
-        // Buffer-rate source stages
-        let mut src_out = SourceOutput::default_for(params.layout.total_channels());
-        {
-            let _s = profile_span!("source_stages", src = i).entered();
-            source_stages.process_all(i, &ctx, &mut src_out);
-        }
-
-        // Per-source reverb send: critical distance scales by √γ (directivity factor).
-        let gamma = atrium_core::directivity::directivity_factor(&source.directivity());
-        let critical_dist = room_acoustics::critical_distance(volume, rt60, gamma);
-        let send = room_acoustics::reverb_send(dist_to_listener, critical_dist);
-        src_out.reverb_send = send;
 
         // Update per-path effect chains at buffer rate
         if let Some(chains) = path_effects.get_mut(i) {
@@ -697,16 +598,7 @@ pub fn render_pipeline(
             } else {
                 &mut []
             };
-            renderer.render_source(
-                i,
-                source.as_mut(),
-                source_stages,
-                &ctx,
-                &src_out,
-                &paths,
-                effect_chains,
-                &mut out,
-            );
+            renderer.render_source(i, source.as_mut(), &ctx, &paths, effect_chains, &mut out);
         }
     }
 
@@ -754,7 +646,6 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
-    use crate::pipeline::stages::ground_effect::GroundEffectStage;
 
     fn default_wall_materials() -> [path::WallMaterial; 6] {
         std::array::from_fn(|_| path::WallMaterial::default())
@@ -1092,32 +983,6 @@ mod tests {
         for mode in RenderMode::ALL {
             assert_eq!(RenderMode::ALL[mode.index()], mode);
         }
-    }
-
-    // ── SourceStageBank: factory creates per-source instances ────────────
-
-    #[test]
-    fn source_stage_bank_grows_with_sources() {
-        let mut bank = SourceStageBank::new(
-            vec![
-                Box::new(|_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-                Box::new(|_sr| Box::new(GroundEffectStage) as Box<dyn SourceStage>),
-            ],
-            48000.0,
-        );
-
-        bank.ensure_sources(3);
-        assert_eq!(bank.columns.len(), 2);
-        assert_eq!(bank.columns[0].instances.len(), 3);
-        assert_eq!(bank.columns[1].instances.len(), 3);
-
-        // Growing doesn't shrink
-        bank.ensure_sources(5);
-        assert_eq!(bank.columns[0].instances.len(), 5);
-
-        // Smaller count is a no-op
-        bank.ensure_sources(2);
-        assert_eq!(bank.columns[0].instances.len(), 5);
     }
 
     // ── Pipeline reset clears gain ramps ─────────────────────────────────

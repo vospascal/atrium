@@ -22,8 +22,7 @@ use atrium_core::types::Vec3;
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput};
-use crate::pipeline::SourceStageBank;
+use crate::pipeline::SourceContext;
 
 const BLOCK_SIZE: usize = 128;
 const FILTER_UPDATE_INTERVAL: usize = 4;
@@ -224,9 +223,7 @@ impl Renderer for HrtfRenderer {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
-        src_out: &SourceOutput,
         paths: &PathSet,
         path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
@@ -325,8 +322,7 @@ impl Renderer for HrtfRenderer {
             // 1. Fill base samples (consumed once from source)
             for i in 0..block_len {
                 let raw = source.next_sample(out.sample_rate);
-                let sample = source_stages.process_sample_all(source_idx, raw);
-                self.base_buf[i] = sample * src_out.gain_modifier;
+                self.base_buf[i] = raw;
             }
 
             // 2. For each path: gain-ramp → render → accumulate
@@ -345,7 +341,7 @@ impl Renderer for HrtfRenderer {
                     if path.kind == PathKind::Direct {
                         if let Some(ref mut rev) = out.reverb_send {
                             let base = (frame + i) * out.channels;
-                            rev[base] += self.mono_buf[i] * src_out.reverb_send;
+                            rev[base] += self.mono_buf[i] * ctx.reverb_send;
                         }
                     }
                 }

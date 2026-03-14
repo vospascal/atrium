@@ -15,8 +15,7 @@
 use atrium_core::speaker::SpeakerLayout;
 
 use super::path::{PathEffectChain, PathSet};
-use super::source_stage::{SourceContext, SourceOutput};
-use super::SourceStageBank;
+use super::SourceContext;
 
 /// Interleaved output buffer with format metadata.
 pub struct OutputBuffer<'a> {
@@ -32,16 +31,14 @@ pub struct OutputBuffer<'a> {
 
 /// Renders one source's samples into the output buffer.
 ///
-/// Called after all SourceStages have run for this source.
-/// Receives resolved propagation paths for the source.
+/// Called for each active source per buffer.
+/// Receives resolved propagation paths and per-path effect chains.
 pub trait Renderer: Send {
     /// Render one source into the output buffer.
     ///
     /// - `source_idx`: index into per-source state owned by this renderer
     /// - `source`: the SoundSource to pull samples from
-    /// - `source_stages`: per-source stage bank for `process_sample_all()` in the inner loop
-    /// - `ctx`: full source geometry (position, orientation, directivity)
-    /// - `src_out`: gains/modifiers computed by SourceStages
+    /// - `ctx`: full source geometry (position, orientation, directivity, reverb send)
     /// - `paths`: resolved propagation paths (direct + reflections)
     /// - `path_effects`: per-path effect chains (air absorption, ground effect, etc.)
     /// - `out`: interleaved output buffer to accumulate into
@@ -50,9 +47,7 @@ pub trait Renderer: Send {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
-        src_out: &SourceOutput,
         paths: &PathSet,
         path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,

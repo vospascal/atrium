@@ -14,8 +14,7 @@ use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput};
-use crate::pipeline::SourceStageBank;
+use crate::pipeline::SourceContext;
 
 /// Multichannel per-path gain-ramp renderer for DBAP mode.
 pub struct DbapRenderer {
@@ -42,9 +41,7 @@ impl Renderer for DbapRenderer {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
-        src_out: &SourceOutput,
         paths: &PathSet,
         path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
@@ -82,13 +79,8 @@ impl Renderer for DbapRenderer {
             let t = frame as f32 * inv_frames;
             let raw = source.next_sample(out.sample_rate);
 
-            // Per-sample source stage DSP (ground effect, etc.)
-            let mut sample = source_stages.process_sample_all(source_idx, raw);
-
-            // Apply broadband modifiers (ground effect gain, etc.)
-            sample *= src_out.gain_modifier;
-
             // Accumulate all propagation paths, each with its own DBAP gains.
+            let sample = raw;
             let base = frame * out.channels;
             for (pi, path) in path_slice.iter().enumerate() {
                 let filtered = path_effects[pi].process_sample(sample);
@@ -102,7 +94,7 @@ impl Renderer for DbapRenderer {
                 // the early-reflection stage); feeding them again would overcount.
                 if path.kind == PathKind::Direct {
                     if let Some(ref mut rev) = out.reverb_send {
-                        rev[base] += path_sample * src_out.reverb_send;
+                        rev[base] += path_sample * ctx.reverb_send;
                     }
                 }
             }

@@ -1,7 +1,7 @@
 //! Concrete stage implementations.
 //!
-//! Each file contains one or more stage structs implementing
-//! `SourceStage` or `MixStage`.
+//! Each file contains stage structs implementing `MixStage`,
+//! shared filters, or per-speaker processing primitives.
 
 // MixStages (post-mix, whole-buffer)
 pub mod ambi_decode;
@@ -14,9 +14,7 @@ pub mod master_gain;
 // Pipeline analysis (test-only diagnostic tooling)
 mod pipeline_analysis;
 
-// SourceStages (per-source, before routing)
-pub mod air_absorption;
-pub mod ground_effect;
+// Per-speaker reflections (used by WorldLockedRenderer)
 pub mod reflections;
 
 /// Sanitize to finite values, clamped to ±100.0 stability ceiling.

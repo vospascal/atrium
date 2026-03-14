@@ -8,13 +8,12 @@ use atrium_core::directivity::directivity_gain;
 use atrium_core::panner::distance_gain_at_model;
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
+use crate::audio::filters::AirAbsorptionFilter;
 use crate::audio::propagation::ground_effect_gain;
 use crate::pipeline::path::{PathEffectChain, PathSet};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput};
-use crate::pipeline::stages::air_absorption::AirAbsorptionFilter;
 use crate::pipeline::stages::reflections::ReflectionCore;
-use crate::pipeline::SourceStageBank;
+use crate::pipeline::SourceContext;
 
 /// Per source × speaker propagation state.
 struct SpeakerPropagation {
@@ -73,9 +72,7 @@ impl Renderer for WorldLockedRenderer {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
-        _src_out: &SourceOutput,
         _paths: &PathSet,
         _path_effects: &mut [PathEffectChain],
         out: &mut OutputBuffer,
@@ -147,10 +144,8 @@ impl Renderer for WorldLockedRenderer {
             let t = frame as f32 * inv_frames;
             let raw = source.next_sample(out.sample_rate);
 
-            // Source-level DSP (envelopes, source EQ)
-            let sample = source_stages.process_sample_all(source_idx, raw);
-
             // Per-speaker: air absorption filter + reflections + broadband gain ramp
+            let sample = raw;
             for spk_idx in 0..layout.speaker_count() {
                 if let Some(speaker) = layout.speaker_by_index(spk_idx) {
                     let ch = speaker.channel;
