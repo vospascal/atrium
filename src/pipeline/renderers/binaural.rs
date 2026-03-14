@@ -22,7 +22,8 @@ use atrium_core::types::Vec3;
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
+use crate::pipeline::source_stage::{SourceContext, SourceOutput};
+use crate::pipeline::SourceStageBank;
 
 const BLOCK_SIZE: usize = 128;
 const FILTER_UPDATE_INTERVAL: usize = 4;
@@ -223,7 +224,7 @@ impl Renderer for HrtfRenderer {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut [&mut dyn SourceStage],
+        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
         src_out: &SourceOutput,
         paths: &PathSet,
@@ -324,10 +325,7 @@ impl Renderer for HrtfRenderer {
             // 1. Fill base samples (consumed once from source)
             for i in 0..block_len {
                 let raw = source.next_sample(out.sample_rate);
-                let mut sample = raw;
-                for stage in source_stages.iter_mut() {
-                    sample = stage.process_sample(sample);
-                }
+                let sample = source_stages.process_sample_all(source_idx, raw);
                 self.base_buf[i] = sample * src_out.gain_modifier;
             }
 

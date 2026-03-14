@@ -8,6 +8,7 @@
 //! attack/release dynamics (fast attack for newly-masked sources, slow release
 //! with hold for unmasking).
 
+use crate::audio::masking::{SpreadingFunction, MASKING_OFFSET};
 use crate::audio::spectral_profile::BARK_BANDS;
 
 /// Smoothing time constants (at 48kHz, 256-sample blocks = 187.5 blocks/sec).
@@ -21,9 +22,6 @@ const SALIENCE_RANGE: f32 = 0.3;
 
 /// Cap for uniqueness when no competitors exist in a band.
 const UNIQUENESS_CAP_DB: f32 = 20.0;
-
-/// Masking offset in dB (simultaneous masking is not perfect).
-const MASKING_OFFSET: f32 = 6.0;
 
 /// Minimum received amplitude for a source to be considered active in analysis.
 const AMPLITUDE_FLOOR: f32 = 0.001;
@@ -51,38 +49,32 @@ pub struct SourcePerceptualState {
 /// Perceptual scoring layer that computes per-source scores based on masking
 /// analysis and spectral salience.
 pub struct PerceptualLayer {
-    /// Pre-computed spreading function table (47 entries for dz in -23..+23).
-    spread_table: [f32; 47],
+    /// Pre-computed spreading function for inter-band masking.
+    spreading: SpreadingFunction,
     /// Per-source smoothed perceptual scores.
     scores: Vec<f32>,
     /// Hold counters for release smoothing.
     hold_counters: Vec<u32>,
     /// Whether gain shaping is enabled (default: false).
     pub gain_shaping_enabled: bool,
+    /// Scratch buffer: per-source received level in dB.
+    received_db: Vec<f32>,
+    /// Scratch buffer: per-source per-band levels in dB.
+    band_db: Vec<[f32; BARK_BANDS]>,
+    /// Scratch buffer: per-source active flag (above amplitude floor).
+    active_mask: Vec<bool>,
 }
 
 impl PerceptualLayer {
     pub fn new(source_count: usize) -> Self {
-        // Build spreading table (same formula as masking.rs).
-        let mut spread_table = [0.0f32; 47];
-        for (i, entry) in spread_table.iter_mut().enumerate() {
-            let dz = i as f32 - 23.0;
-            *entry = if dz < -1.0 {
-                27.0 * dz
-            } else if dz < 0.0 {
-                6.5 * dz
-            } else if dz > 0.0 {
-                -24.0 * dz
-            } else {
-                0.0
-            };
-        }
-
         Self {
-            spread_table,
+            spreading: SpreadingFunction::new(),
             scores: vec![1.0; source_count],
             hold_counters: vec![0; source_count],
             gain_shaping_enabled: false,
+            received_db: vec![f32::NEG_INFINITY; source_count],
+            band_db: vec![[f32::NEG_INFINITY; BARK_BANDS]; source_count],
+            active_mask: vec![false; source_count],
         }
     }
 
@@ -90,6 +82,10 @@ impl PerceptualLayer {
     pub fn resize(&mut self, source_count: usize) {
         self.scores.resize(source_count, 1.0);
         self.hold_counters.resize(source_count, 0);
+        self.received_db.resize(source_count, f32::NEG_INFINITY);
+        self.band_db
+            .resize(source_count, [f32::NEG_INFINITY; BARK_BANDS]);
+        self.active_mask.resize(source_count, false);
     }
 
     /// Get the current smoothed perceptual scores.
@@ -117,25 +113,31 @@ impl PerceptualLayer {
             return;
         }
 
-        // Step 1: Compute received dB and band levels for active sources above floor.
-        let mut received_db = vec![f32::NEG_INFINITY; source_count];
-        let mut band_db = vec![[f32::NEG_INFINITY; BARK_BANDS]; source_count];
-        let mut active_mask = vec![false; source_count];
+        // Step 1: Clear and fill scratch buffers for active sources above floor.
+        for value in self.received_db.iter_mut() {
+            *value = f32::NEG_INFINITY;
+        }
+        for bands in self.band_db.iter_mut() {
+            *bands = [f32::NEG_INFINITY; BARK_BANDS];
+        }
+        for flag in self.active_mask.iter_mut() {
+            *flag = false;
+        }
 
         for (s, src) in sources.iter().enumerate() {
             if !src.active || src.received_amplitude < AMPLITUDE_FLOOR {
                 continue;
             }
-            active_mask[s] = true;
-            received_db[s] = 20.0 * src.received_amplitude.log10();
-            for (band, spectral) in band_db[s].iter_mut().zip(&src.spectral_bands) {
-                *band = received_db[s] + spectral;
+            self.active_mask[s] = true;
+            self.received_db[s] = 20.0 * src.received_amplitude.log10();
+            for (band, spectral) in self.band_db[s].iter_mut().zip(&src.spectral_bands) {
+                *band = self.received_db[s] + spectral;
             }
         }
 
         // Step 2: For each active source, compute masking threshold, audibility, salience.
         for s in 0..source_count {
-            if !active_mask[s] {
+            if !self.active_mask[s] {
                 // Inactive source: smoothly decay score toward 0.
                 self.smooth_score(s, 0.0);
                 continue;
@@ -145,26 +147,26 @@ impl PerceptualLayer {
             let mut salience_sum = 0.0f32;
             let mut weight_sum = 0.0f32;
 
+            #[allow(clippy::needless_range_loop)]
             for b in 0..BARK_BANDS {
                 // Compute masked threshold from all other sources.
                 let mut mask_linear = 0.0f32;
                 let mut max_other_level = f32::NEG_INFINITY;
 
                 for t in 0..source_count {
-                    if t == s || !active_mask[t] {
+                    if t == s || !self.active_mask[t] {
                         continue;
                     }
                     // Spreading contribution from source t to band b.
-                    for (b2, &level) in band_db[t].iter().enumerate() {
+                    for (b2, &level) in self.band_db[t].iter().enumerate() {
                         let dz = b as i32 - b2 as i32;
-                        let spread_idx = (dz + 23).clamp(0, 46) as usize;
-                        let spread = self.spread_table[spread_idx];
+                        let spread = self.spreading.spread_db(dz);
                         let contribution_db = level + spread - MASKING_OFFSET;
                         mask_linear += 10.0_f32.powf(contribution_db / 10.0);
                     }
                     // Track max other level in this band for uniqueness.
-                    if band_db[t][b] > max_other_level {
-                        max_other_level = band_db[t][b];
+                    if self.band_db[t][b] > max_other_level {
+                        max_other_level = self.band_db[t][b];
                     }
                 }
 
@@ -174,7 +176,7 @@ impl PerceptualLayer {
                     f32::NEG_INFINITY
                 };
 
-                let source_level = band_db[s][b];
+                let source_level = self.band_db[s][b];
 
                 // Skip bands where this source has no energy.
                 if source_level <= f32::NEG_INFINITY {

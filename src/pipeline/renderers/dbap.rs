@@ -14,7 +14,8 @@ use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::source_stage::{SourceContext, SourceOutput, SourceStage};
+use crate::pipeline::source_stage::{SourceContext, SourceOutput};
+use crate::pipeline::SourceStageBank;
 
 /// Multichannel per-path gain-ramp renderer for DBAP mode.
 pub struct DbapRenderer {
@@ -41,7 +42,7 @@ impl Renderer for DbapRenderer {
         &mut self,
         source_idx: usize,
         source: &mut dyn atrium_core::source::SoundSource,
-        source_stages: &mut [&mut dyn SourceStage],
+        source_stages: &mut SourceStageBank,
         ctx: &SourceContext,
         src_out: &SourceOutput,
         paths: &PathSet,
@@ -82,10 +83,7 @@ impl Renderer for DbapRenderer {
             let raw = source.next_sample(out.sample_rate);
 
             // Per-sample source stage DSP (ground effect, etc.)
-            let mut sample = raw;
-            for stage in source_stages.iter_mut() {
-                sample = stage.process_sample(sample);
-            }
+            let mut sample = source_stages.process_sample_all(source_idx, raw);
 
             // Apply broadband modifiers (ground effect gain, etc.)
             sample *= src_out.gain_modifier;

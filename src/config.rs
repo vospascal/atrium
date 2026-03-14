@@ -444,6 +444,7 @@ impl SceneConfig {
             perceptual_layer: crate::pipeline::perceptual::PerceptualLayer::new(source_count),
             spectral_profiles,
             source_amplitudes,
+            perceptual_states: Vec::new(),
         };
 
         let source_names: Vec<String> = source_metas.iter().map(|m| m.name.clone()).collect();

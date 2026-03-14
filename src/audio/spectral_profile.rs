@@ -90,8 +90,25 @@ pub fn compute_profile(samples: &[f32], sample_rate: u32) -> SpectralProfile {
         offset += HOP_SIZE;
     }
 
+    // For clips shorter than FFT_SIZE, zero-pad to FFT_SIZE and analyze the single frame.
+    // This gives a valid (if lower-resolution) spectral profile for short percussive sounds.
     if frame_count == 0 {
-        return SpectralProfile::default();
+        // Zero-pad: copy available samples with window applied, rest stays zero
+        for i in 0..samples.len() {
+            time_buf[i] = samples[i] * window[i];
+        }
+        for sample in time_buf.iter_mut().take(FFT_SIZE).skip(samples.len()) {
+            *sample = 0.0;
+        }
+
+        r2c.process(&mut time_buf, &mut freq_buf).unwrap();
+
+        for (bin_index, bin) in freq_buf.iter().enumerate() {
+            let magnitude_squared = (bin.re * bin.re + bin.im * bin.im) as f64;
+            accumulated_spectrum[bin_index] += magnitude_squared;
+        }
+
+        frame_count = 1;
     }
 
     // Average the accumulated spectrum
@@ -223,5 +240,42 @@ mod tests {
             .map(|decibels| 10.0_f32.powf(decibels / 10.0))
             .sum();
         assert!(total_linear.is_finite() && total_linear > 0.0);
+    }
+
+    #[test]
+    fn short_clip_gets_valid_profile() {
+        // A short 1kHz sine (shorter than FFT_SIZE) should still produce a valid
+        // spectral profile with energy concentrated in the correct Bark band,
+        // not the flat default profile.
+        let sample_rate = 48000u32;
+        let short_samples = sine_wave(1000.0, sample_rate, 0.02); // 20ms = 960 samples < 4096
+        assert!(
+            short_samples.len() < 4096,
+            "test requires samples shorter than FFT_SIZE"
+        );
+
+        let profile = compute_profile(&short_samples, sample_rate);
+
+        // Should NOT be the flat default (all zeros)
+        let all_zero = profile.bands.iter().all(|&band| band == 0.0);
+        assert!(
+            !all_zero,
+            "short clip should not produce flat default profile"
+        );
+
+        // Peak energy should still be in band 8 (920-1080 Hz) for a 1kHz tone
+        let peak_band = profile
+            .bands
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(
+            peak_band,
+            8,
+            "short 1kHz clip should peak in band 9 (index 8), got band {}",
+            peak_band + 1
+        );
     }
 }

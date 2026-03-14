@@ -187,6 +187,19 @@ impl SourceStageBank {
         refs
     }
 
+    /// Process a single sample through all stages for the given source,
+    /// without allocating a temporary Vec of references.
+    #[inline]
+    pub fn process_sample_all(&mut self, source_idx: usize, sample: f32) -> f32 {
+        let mut value = sample;
+        for col in &mut self.columns {
+            if let Some(stage) = col.instances.get_mut(source_idx) {
+                value = stage.process_sample(value);
+            }
+        }
+        value
+    }
+
     /// Reset all stage instances.
     pub fn reset(&mut self) {
         for col in &mut self.columns {
@@ -652,9 +665,6 @@ pub fn render_pipeline(
         let send = room_acoustics::reverb_send(dist_to_listener, critical_dist);
         src_out.reverb_send = send;
 
-        // Collect source stage refs for the inner loop
-        let mut stage_refs = source_stages.for_source(i);
-
         // Update per-path effect chains at buffer rate
         if let Some(chains) = path_effects.get_mut(i) {
             for (pi, path) in paths.as_slice().iter().enumerate() {
@@ -689,7 +699,7 @@ pub fn render_pipeline(
             renderer.render_source(
                 i,
                 source.as_mut(),
-                &mut stage_refs,
+                source_stages,
                 &ctx,
                 &src_out,
                 &paths,

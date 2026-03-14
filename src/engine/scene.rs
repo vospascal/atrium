@@ -74,6 +74,8 @@ pub struct AudioScene {
     pub source_amplitudes: Vec<f32>,
     /// Perceptual scoring layer (masking + salience analysis).
     pub perceptual_layer: PerceptualLayer,
+    /// Reusable buffer for per-source perceptual states (avoids per-frame allocation).
+    pub perceptual_states: Vec<SourcePerceptualState>,
 }
 
 impl AudioScene {
@@ -222,46 +224,42 @@ impl AudioScene {
         // Perceptual masking analysis (feed-forward, before rendering).
         {
             let _s = profile_span!("perceptual").entered();
-            let states: Vec<SourcePerceptualState> = self
-                .sources
-                .iter()
-                .enumerate()
-                .map(|(i, source)| {
-                    let pos = source.position();
-                    let active = source.is_active() && !source.is_muted();
-                    let amp = if active && i < self.source_amplitudes.len() {
-                        let dist_gain = distance_gain_at_model(
-                            self.listener.position,
-                            pos,
-                            source.ref_distance(),
-                            self.distance_model.max_distance,
-                            self.distance_model.rolloff,
-                            self.distance_model.model,
-                        );
-                        let emit_gain = directivity_gain(
-                            pos,
-                            source.orientation(),
-                            self.listener.position,
-                            &source.directivity(),
-                        );
-                        let hear_gain = self.listener.hearing_gain(pos);
-                        self.source_amplitudes[i] * dist_gain * emit_gain * hear_gain
-                    } else {
-                        0.0
-                    };
-                    let bands = if i < self.spectral_profiles.len() {
-                        self.spectral_profiles[i]
-                    } else {
-                        [0.0; BARK_BANDS]
-                    };
-                    SourcePerceptualState {
-                        received_amplitude: amp,
-                        spectral_bands: bands,
-                        active,
-                    }
-                })
-                .collect();
-            self.perceptual_layer.update(&states);
+            self.perceptual_states.clear();
+            for (i, source) in self.sources.iter().enumerate() {
+                let pos = source.position();
+                let active = source.is_active() && !source.is_muted();
+                let amp = if active && i < self.source_amplitudes.len() {
+                    let dist_gain = distance_gain_at_model(
+                        self.listener.position,
+                        pos,
+                        source.ref_distance(),
+                        self.distance_model.max_distance,
+                        self.distance_model.rolloff,
+                        self.distance_model.model,
+                    );
+                    let emit_gain = directivity_gain(
+                        pos,
+                        source.orientation(),
+                        self.listener.position,
+                        &source.directivity(),
+                    );
+                    let hear_gain = self.listener.hearing_gain(pos);
+                    self.source_amplitudes[i] * dist_gain * emit_gain * hear_gain
+                } else {
+                    0.0
+                };
+                let bands = if i < self.spectral_profiles.len() {
+                    self.spectral_profiles[i]
+                } else {
+                    [0.0; BARK_BANDS]
+                };
+                self.perceptual_states.push(SourcePerceptualState {
+                    received_amplitude: amp,
+                    spectral_bands: bands,
+                    active,
+                });
+            }
+            self.perceptual_layer.update(&self.perceptual_states);
         }
 
         // Render through the composable pipeline
