@@ -19,28 +19,49 @@ export function buildSoundField(ctx: SceneContext, store: AtriumStore) {
   if (worker) worker.terminate();
   initialized = false;
 
-  const { width: w, depth: d, height: h } = store.room;
+  // Scatter points within each source's audible radius (not the room box).
+  // Points only exist where sound is actually present.
+  const activeSources = store.sources.filter((_, i) => !store.sourceMuted[i]);
+  const pointsPerSource = activeSources.length > 0
+    ? Math.floor(POINT_COUNT / activeSources.length)
+    : 0;
 
-  // Generate static point positions uniformly in the room volume
   const threePositions = new Float32Array(POINT_COUNT * 3);
   atriumPoints = new Float32Array(POINT_COUNT * 3);
   const energy = new Float32Array(POINT_COUNT); // starts at 0
 
-  for (let i = 0; i < POINT_COUNT; i++) {
-    // Random position in Atrium coords
-    const ax = Math.random() * w;
-    const ay = Math.random() * d;
-    const az = Math.random() * h;
+  let idx = 0;
+  for (const src of activeSources) {
+    const radius = src.audibleR;
+    const count = Math.min(pointsPerSource, POINT_COUNT - idx);
+    for (let j = 0; j < count; j++) {
+      // Uniform random point inside a sphere (rejection-free via cube root)
+      const u = Math.random();
+      const cosTheta = 2 * Math.random() - 1;
+      const sinTheta = Math.sqrt(1 - cosTheta * cosTheta);
+      const phi = 2 * Math.PI * Math.random();
+      const r = radius * Math.cbrt(u);
 
-    atriumPoints[i * 3] = ax;
-    atriumPoints[i * 3 + 1] = ay;
-    atriumPoints[i * 3 + 2] = az;
+      const ax = src.x + r * sinTheta * Math.cos(phi);
+      const ay = src.y + r * sinTheta * Math.sin(phi);
+      const az = Math.max(0, src.z + r * cosTheta); // clamp to floor
 
-    // Convert to Three.js coords for rendering
-    const tv = toThree(ax, ay, az);
-    threePositions[i * 3] = tv.x;
-    threePositions[i * 3 + 1] = tv.y;
-    threePositions[i * 3 + 2] = tv.z;
+      atriumPoints[idx * 3] = ax;
+      atriumPoints[idx * 3 + 1] = ay;
+      atriumPoints[idx * 3 + 2] = az;
+
+      const tv = toThree(ax, ay, az);
+      threePositions[idx * 3] = tv.x;
+      threePositions[idx * 3 + 1] = tv.y;
+      threePositions[idx * 3 + 2] = tv.z;
+      idx++;
+    }
+  }
+  // Zero-fill any remaining slots
+  for (let i = idx; i < POINT_COUNT; i++) {
+    threePositions[i * 3] = 0;
+    threePositions[i * 3 + 1] = -10; // offscreen
+    threePositions[i * 3 + 2] = 0;
   }
 
   // Create geometry
@@ -57,7 +78,8 @@ export function buildSoundField(ctx: SceneContext, store: AtriumStore) {
       void main() {
         vEnergy = energy;
         vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = 5.0;
+        // Hide sub-threshold particles; tiny point for visible ones
+        gl_PointSize = energy > 0.0 ? max(1.0, 8.0 / -mvPos.z) : 0.0;
         gl_Position = projectionMatrix * mvPos;
       }
     `,
@@ -132,6 +154,6 @@ export function updateSoundField(store: AtriumStore) {
   worker.postMessage({
     type: 'update',
     sources,
-    splReference: 60, // normalization reference
+    splThreshold: 20, // dB SPL hearing threshold — particles invisible below this
   });
 }

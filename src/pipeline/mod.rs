@@ -302,8 +302,8 @@ pub struct PipelineParams {
     /// Per-wall materials for per-wall reflection gains in ImageSourceResolver.
     pub wall_materials: [path::WallMaterial; 6],
     /// Room bounds for sizing delay buffers from max image-source distance.
-    pub room_min: Vec3,
-    pub room_max: Vec3,
+    pub environment_min: Vec3,
+    pub environment_max: Vec3,
 }
 
 impl Default for PipelineParams {
@@ -315,22 +315,22 @@ impl Default for PipelineParams {
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
             wall_materials: Default::default(),
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
         }
     }
 }
 
 /// Compute the propagation delay buffer capacity from room geometry.
 fn propagation_delay_capacity(p: &PipelineParams) -> usize {
-    let max_dist = room_acoustics::max_image_source_distance(p.room_min, p.room_max);
+    let max_dist = room_acoustics::max_image_source_distance(p.environment_min, p.environment_max);
     let speed_of_sound = AtmosphericParams::default().speed_of_sound();
     room_acoustics::delay_buffer_capacity(max_dist, speed_of_sound, p.sample_rate, 8192)
 }
 
 /// Compute the reflection core buffer capacity from room geometry.
 fn reflection_buffer_capacity(p: &PipelineParams) -> usize {
-    let max_dist = room_acoustics::max_image_source_distance(p.room_min, p.room_max);
+    let max_dist = room_acoustics::max_image_source_distance(p.environment_min, p.environment_max);
     let speed_of_sound = AtmosphericParams::default().speed_of_sound();
     room_acoustics::delay_buffer_capacity(max_dist, speed_of_sound, p.sample_rate, 4096)
 }
@@ -550,8 +550,8 @@ pub struct RenderParams<'a> {
     pub layout: &'a SpeakerLayout,
     pub atmosphere: &'a AtmosphericParams,
     pub ground: &'a GroundProperties,
-    pub room_min: atrium_core::types::Vec3,
-    pub room_max: atrium_core::types::Vec3,
+    pub environment_min: atrium_core::types::Vec3,
+    pub environment_max: atrium_core::types::Vec3,
     pub barriers: &'a [crate::audio::propagation::Barrier],
     pub wall_materials: &'a [path::WallMaterial; 6],
     /// Bypass soft clipping and gain clamping for acoustic measurement.
@@ -605,7 +605,8 @@ pub fn render_pipeline(
     output.fill(0.0);
 
     // Room geometry + RT60 for per-source reverb send (critical distance).
-    let (volume, surface_area) = room_acoustics::room_geometry(params.room_min, params.room_max);
+    let (volume, surface_area) =
+        room_acoustics::room_geometry(params.environment_min, params.environment_max);
     let rt60 = room_acoustics::sabine_rt60(volume, surface_area, *wall_reflectivity);
 
     // Prepare reverb send buffer (same size as output, zeroed).
@@ -630,8 +631,8 @@ pub fn render_pipeline(
             source_ref_distance: source.ref_distance(),
             dist_to_listener,
             atmosphere: params.atmosphere,
-            room_min: params.room_min,
-            room_max: params.room_max,
+            environment_min: params.environment_min,
+            environment_max: params.environment_max,
             ground: params.ground,
             sample_rate: params.sample_rate,
             distance_model: params.distance_model,
@@ -644,8 +645,8 @@ pub fn render_pipeline(
             let resolve_ctx = ResolveContext {
                 source_pos: pos,
                 target_pos: params.listener.position,
-                room_min: params.room_min,
-                room_max: params.room_max,
+                environment_min: params.environment_min,
+                environment_max: params.environment_max,
                 barriers: params.barriers,
                 atmosphere: params.atmosphere,
             };
@@ -720,8 +721,8 @@ pub fn render_pipeline(
         layout: params.layout,
         sample_rate: params.sample_rate,
         channels: params.channels,
-        room_min: params.room_min,
-        room_max: params.room_max,
+        environment_min: params.environment_min,
+        environment_max: params.environment_max,
         master_gain: params.master_gain,
         render_channels: effective_render_channels,
         reverb_input: Some(reverb_send_buffer),
@@ -830,8 +831,8 @@ mod tests {
         let mut buf_a = vec![0.0f32; frames * channels];
         let mut buf_b = vec![0.0f32; frames * channels];
 
-        let room_min = Vec3::new(0.0, 0.0, 0.0);
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let environment_min = Vec3::new(0.0, 0.0, 0.0);
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
 
         // Listener at center of room
         let listener_a = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
@@ -844,8 +845,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -866,8 +867,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -931,8 +932,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::ZERO,
-            room_max: Vec3::new(6.0, 4.0, 3.0),
+            environment_min: Vec3::ZERO,
+            environment_max: Vec3::new(6.0, 4.0, 3.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1002,8 +1003,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::ZERO,
-            room_max: Vec3::new(6.0, 4.0, 3.0),
+            environment_min: Vec3::ZERO,
+            environment_max: Vec3::new(6.0, 4.0, 3.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1065,8 +1066,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::ZERO,
-            room_max: Vec3::new(6.0, 4.0, 3.0),
+            environment_min: Vec3::ZERO,
+            environment_max: Vec3::new(6.0, 4.0, 3.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1190,8 +1191,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::new(-20.0, -20.0, -5.0),
-            room_max: Vec3::new(20.0, 20.0, 5.0),
+            environment_min: Vec3::new(-20.0, -20.0, -5.0),
+            environment_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1240,8 +1241,8 @@ mod tests {
                 layout: &layout,
                 atmosphere: &atm,
                 ground: &ground,
-                room_min: Vec3::new(-20.0, -20.0, -5.0),
-                room_max: Vec3::new(20.0, 20.0, 5.0),
+                environment_min: Vec3::new(-20.0, -20.0, -5.0),
+                environment_max: Vec3::new(20.0, 20.0, 5.0),
                 barriers: &[],
                 wall_materials: &default_wall_materials(),
                 measurement_mode: false,
@@ -1327,8 +1328,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::new(-20.0, -20.0, -5.0),
-            room_max: Vec3::new(20.0, 20.0, 5.0),
+            environment_min: Vec3::new(-20.0, -20.0, -5.0),
+            environment_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1393,8 +1394,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::new(-20.0, -20.0, -5.0),
-            room_max: Vec3::new(20.0, 20.0, 5.0),
+            environment_min: Vec3::new(-20.0, -20.0, -5.0),
+            environment_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1465,8 +1466,8 @@ mod tests {
                 layout: &layout,
                 atmosphere: &atm,
                 ground: &ground,
-                room_min: Vec3::new(-20.0, -20.0, -5.0),
-                room_max: Vec3::new(20.0, 20.0, 5.0),
+                environment_min: Vec3::new(-20.0, -20.0, -5.0),
+                environment_max: Vec3::new(20.0, 20.0, 5.0),
                 barriers: &[],
                 wall_materials: &default_wall_materials(),
                 measurement_mode: false,
@@ -1537,8 +1538,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::new(-20.0, -20.0, -5.0),
-            room_max: Vec3::new(20.0, 20.0, 5.0),
+            environment_min: Vec3::new(-20.0, -20.0, -5.0),
+            environment_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1597,8 +1598,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1663,8 +1664,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min: Vec3::new(-20.0, -20.0, -5.0),
-            room_max: Vec3::new(20.0, 20.0, 5.0),
+            environment_min: Vec3::new(-20.0, -20.0, -5.0),
+            environment_max: Vec3::new(20.0, 20.0, 5.0),
             barriers: &[],
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
@@ -1844,8 +1845,8 @@ mod tests {
         let frames = 4096;
 
         // Use the actual atrium room bounds
-        let room_min = Vec3::new(0.0, 0.0, 0.0);
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let environment_min = Vec3::new(0.0, 0.0, 0.0);
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
 
         let render_mode = |mode: RenderMode, reflectivity: f32| -> Vec<f32> {
             let params = PipelineParams {
@@ -1874,8 +1875,8 @@ mod tests {
                 layout: &layout,
                 atmosphere: &atm,
                 ground: &ground,
-                room_min,
-                room_max,
+                environment_min,
+                environment_max,
                 barriers: &[],
                 wall_materials: &wall_materials,
                 measurement_mode: false,
@@ -1975,8 +1976,8 @@ mod tests {
         let channels = 6;
         let frames = 4096;
         let wall_materials = default_wall_materials();
-        let room_min = Vec3::new(-20.0, -20.0, -5.0);
-        let room_max = Vec3::new(20.0, 20.0, 5.0);
+        let environment_min = Vec3::new(-20.0, -20.0, -5.0);
+        let environment_max = Vec3::new(20.0, 20.0, 5.0);
 
         // Init mix stages (FDN needs init to set up delay lines + damping,
         // LFE crossover needs init to detect LFE channel and create filters).
@@ -1985,8 +1986,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
@@ -2012,8 +2013,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &wall_materials,
             measurement_mode: false,

@@ -1,11 +1,16 @@
 # Scene: Default Atrium
-# Wires together room geometry, sound sources, processors, and atmosphere.
+# Wires together environment, atrium, sound sources, processors, and atmosphere.
 # Each section either defines inline config or references a separate file.
+#
+# Two-box architecture:
+#   environment — the virtual acoustic space (reflections, reverb, propagation)
+#   atrium      — the physical speaker room (dimensions only, moves with listener)
 #
 # Usage:  cargo run                         (loads this file)
 #         cargo run -- scenes/other.yaml    (loads a different scene)
 
-room: rooms/atrium_6x4.yaml
+environment: environments/riverside.yaml
+atrium: rooms/atrium_6x4.yaml
 
 listener:
   position: [3.0, 2.0, 0.0]  # center of room

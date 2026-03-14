@@ -1,4 +1,5 @@
-/** Sound field energy computation — runs off main thread at telemetry rate (~15 Hz) */
+/** Sound field energy computation — runs off main thread at telemetry rate (~15 Hz).
+ *  Outputs normalised dB values: 0 = at or below hearing threshold, 1 = source SPL at ref distance. */
 
 interface SourceData {
   x: number;
@@ -20,7 +21,7 @@ interface ComputeMessage {
 interface UpdateMessage {
   type: 'update';
   sources: SourceData[];
-  splReference: number;
+  splThreshold: number; // dB SPL below which particles are invisible (e.g. 20)
 }
 
 function patternGain(patternType: string, alpha: number, angle: number): number {
@@ -44,15 +45,16 @@ self.onmessage = (e: MessageEvent<ComputeMessage | UpdateMessage>) => {
   }
 
   if (msg.type === 'update' && cachedPoints) {
-    const { sources, splReference } = msg;
+    const { sources, splThreshold } = msg;
     const energy = new Float32Array(pointCount);
 
-    // For each sample point, sum energy contributions from all sources
     for (let i = 0; i < pointCount; i++) {
       const px = cachedPoints[i * 3];
       const py = cachedPoints[i * 3 + 1];
       const pz = cachedPoints[i * 3 + 2];
-      let totalEnergy = 0;
+
+      // Sum pressure squared from all sources (energy addition)
+      let pressureSqSum = 0;
 
       for (const src of sources) {
         if (src.muted) continue;
@@ -61,33 +63,37 @@ self.onmessage = (e: MessageEvent<ComputeMessage | UpdateMessage>) => {
         const dz = pz - src.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-        // Distance attenuation (inverse model)
+        // Distance attenuation (inverse distance law)
         const gainDist = dist <= src.refDist ? 1.0 : src.refDist / dist;
 
-        // Directivity: angle from source forward to point
+        // Directivity
         const angle = Math.atan2(Math.sqrt(dx * dx + dz * dz), dy);
         const gainEmit = patternGain(src.patternType, src.patternAlpha, Math.abs(angle - src.orientation));
 
-        // Energy contribution (proportional to amplitude squared)
-        const amplitude = src.spl / splReference;
-        totalEnergy += amplitude * amplitude * gainDist * gainDist * gainEmit;
+        // SPL at this point = source SPL + 20*log10(gainDist * gainEmit)
+        // Pressure proportional to 10^(spl/20), so p² ∝ 10^(spl/10)
+        const splAtPoint = src.spl + 20 * Math.log10(Math.max(1e-10, gainDist * gainEmit));
+        const pressureSq = Math.pow(10, splAtPoint / 10);
+        pressureSqSum += pressureSq;
       }
 
-      energy[i] = totalEnergy;
-    }
+      // Convert summed pressure² back to dB SPL
+      const splTotal = pressureSqSum > 0 ? 10 * Math.log10(pressureSqSum) : -Infinity;
 
-    // Normalize against fixed reference (energy at refDist from loudest source)
-    // This makes colors represent absolute energy, not relative
-    let refEnergy = 0;
-    for (const src of sources) {
-      if (src.muted) continue;
-      const a = src.spl / splReference;
-      refEnergy += a * a; // energy at refDist where gainDist = 1.0
-    }
-    if (refEnergy > 0) {
-      const inv = 1.0 / refEnergy;
-      for (let i = 0; i < pointCount; i++) {
-        energy[i] = Math.min(1.0, energy[i] * inv);
+      // Normalise: 0 at threshold, 1 at max source SPL
+      // Find the dB range from threshold to the loudest source
+      if (splTotal <= splThreshold) {
+        energy[i] = 0;
+      } else {
+        // Map threshold..maxSPL → 0..1
+        let maxSpl = 0;
+        for (const src of sources) {
+          if (!src.muted && src.spl > maxSpl) maxSpl = src.spl;
+        }
+        const range = maxSpl - splThreshold;
+        energy[i] = range > 0
+          ? Math.min(1.0, (splTotal - splThreshold) / range)
+          : 0;
       }
     }
 

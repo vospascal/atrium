@@ -18,8 +18,8 @@ pub struct MixContext<'a> {
     pub layout: &'a SpeakerLayout,
     pub sample_rate: f32,
     pub channels: usize,
-    pub room_min: Vec3,
-    pub room_max: Vec3,
+    pub environment_min: Vec3,
+    pub environment_max: Vec3,
     /// Runtime master gain from AudioScene. Flows through each render call.
     pub master_gain: f32,
     /// Number of channels the renderer actually writes to.

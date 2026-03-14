@@ -62,9 +62,16 @@ export interface ExperimentDef {
   values: string[];
 }
 
+export interface AtriumDef {
+  width: number;
+  depth: number;
+  height: number;
+}
+
 export interface SceneStateMessage {
   type: 'scene_state';
   room: RoomDef;
+  atrium?: AtriumDef;
   listener: ListenerDef;
   sources: SourceDef[];
   speakers: SpeakerDef[];

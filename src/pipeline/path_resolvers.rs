@@ -105,12 +105,12 @@ impl PathResolver for ImageSourceResolver {
         // 6 image sources: mirror source across each wall of the rectangular room
         let src = ctx.source_pos;
         let images = [
-            Vec3::new(2.0 * ctx.room_min.x - src.x, src.y, src.z), // -X wall
-            Vec3::new(2.0 * ctx.room_max.x - src.x, src.y, src.z), // +X wall
-            Vec3::new(src.x, 2.0 * ctx.room_min.y - src.y, src.z), // -Y wall
-            Vec3::new(src.x, 2.0 * ctx.room_max.y - src.y, src.z), // +Y wall
-            Vec3::new(src.x, src.y, 2.0 * ctx.room_min.z - src.z), // -Z wall (floor)
-            Vec3::new(src.x, src.y, 2.0 * ctx.room_max.z - src.z), // +Z wall (ceiling)
+            Vec3::new(2.0 * ctx.environment_min.x - src.x, src.y, src.z), // -X wall
+            Vec3::new(2.0 * ctx.environment_max.x - src.x, src.y, src.z), // +X wall
+            Vec3::new(src.x, 2.0 * ctx.environment_min.y - src.y, src.z), // -Y wall
+            Vec3::new(src.x, 2.0 * ctx.environment_max.y - src.y, src.z), // +Y wall
+            Vec3::new(src.x, src.y, 2.0 * ctx.environment_min.z - src.z), // -Z wall (floor)
+            Vec3::new(src.x, src.y, 2.0 * ctx.environment_max.z - src.z), // +Z wall (ceiling)
         ];
 
         for (wall_idx, image) in images.iter().enumerate() {
@@ -235,8 +235,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(3.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -257,8 +257,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 5.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::ZERO,
-            room_max: Vec3::ZERO,
+            environment_min: Vec3::ZERO,
+            environment_max: Vec3::ZERO,
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -278,8 +278,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(1.0, 2.0, 3.0),
             target_pos: Vec3::new(1.0, 2.0, 3.0),
-            room_min: Vec3::ZERO,
-            room_max: Vec3::ZERO,
+            environment_min: Vec3::ZERO,
+            environment_max: Vec3::ZERO,
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -298,8 +298,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(3.0, 4.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::ZERO,
-            room_max: Vec3::ZERO,
+            environment_min: Vec3::ZERO,
+            environment_max: Vec3::ZERO,
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -323,8 +323,8 @@ mod tests {
         ResolveContext {
             source_pos: source,
             target_pos: target,
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
             atmosphere: &TEST_ATMOSPHERE,
         }
@@ -486,8 +486,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(1.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -506,8 +506,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(4.9, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -549,8 +549,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -583,8 +583,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(3.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &[],
             atmosphere: &AtmosphericParams::default(),
         };
@@ -609,8 +609,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 0.0, 0.0),
             target_pos: Vec3::new(10.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
             atmosphere: &AtmosphericParams::default(),
         };
@@ -658,8 +658,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 0.0, 0.0),
             target_pos: Vec3::new(10.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
             atmosphere: &AtmosphericParams::default(),
         };
@@ -682,8 +682,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 0.0, 0.0),
             target_pos: Vec3::new(10.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
             atmosphere: &AtmosphericParams::default(),
         };
@@ -714,8 +714,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 0.0, 0.0),
             target_pos: Vec3::new(10.0, 0.0, 0.0),
-            room_min: Vec3::new(-10.0, -10.0, -10.0),
-            room_max: Vec3::new(10.0, 10.0, 10.0),
+            environment_min: Vec3::new(-10.0, -10.0, -10.0),
+            environment_max: Vec3::new(10.0, 10.0, 10.0),
             barriers: &barriers,
             atmosphere: &AtmosphericParams::default(),
         };
@@ -754,8 +754,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: source,
             target_pos: target,
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             barriers: &[],
             atmosphere: &TEST_ATMOSPHERE,
         };
@@ -903,8 +903,8 @@ mod tests {
         // Source at origin, listener at (10, 0, 0) in a 20m cube.
         let source = Vec3::new(0.0, 0.0, 0.0);
         let listener = Vec3::new(10.0, 0.0, 0.0);
-        let room_min = Vec3::new(-10.0, -10.0, -10.0);
-        let room_max = Vec3::new(10.0, 10.0, 10.0);
+        let environment_min = Vec3::new(-10.0, -10.0, -10.0);
+        let environment_max = Vec3::new(10.0, 10.0, 10.0);
         let sample_rate = 48000.0;
 
         // --- ImageSourceResolver delays ---
@@ -912,8 +912,8 @@ mod tests {
         let ctx = ResolveContext {
             source_pos: source,
             target_pos: listener,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             atmosphere: &atmosphere,
         };
@@ -930,12 +930,19 @@ mod tests {
 
         // --- ReflectionCore delays (in samples) ---
         let mut core = ReflectionCore::new(0.9, 4096);
-        core.update(room_min, room_max, source, listener, sample_rate, c);
+        core.update(
+            environment_min,
+            environment_max,
+            source,
+            listener,
+            sample_rate,
+            c,
+        );
 
         // ReflectionCore and ImageSourceResolver both compute:
         //   delay = (image_dist - direct_dist) / speed_of_sound
         // Verify a specific wall: -X wall image is at (-0, 0, 0) → (x=-20, 0, 0)
-        // Wait, image = (2*room_min.x - source.x, source.y, source.z) = (-20, 0, 0)
+        // Wait, image = (2*environment_min.x - source.x, source.y, source.z) = (-20, 0, 0)
         // image_dist = distance((-20,0,0), (10,0,0)) = 30
         // direct_dist = 10
         // delay = (30 - 10) / 343.42 = 20 / 343.42

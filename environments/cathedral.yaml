@@ -1,0 +1,15 @@
+# Environment: Cathedral
+# Large stone interior — very long reverb tail, highly reflective.
+# Based on DAGA 2020 cathedral room (RT60 ≈ 5.1s).
+
+width: 40.0   # meters (X axis)
+depth: 25.0   # meters (Y axis)
+height: 20.0  # meters (Z axis)
+
+ground_factor: 0.0         # stone floor
+wall_reflectivity: 0.95    # highly reflective stone
+
+walls:
+  default: stone
+  floor: stone
+  ceiling: stone

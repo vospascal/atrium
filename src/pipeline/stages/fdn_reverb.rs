@@ -412,8 +412,10 @@ impl MixStage for FdnReverbStage {
         // Derive per-band RT60 from room geometry + wall materials via Sabine's equation.
         // RT60 at 500 Hz (band 2) sets the overall decay; RT60 at 4 kHz (band 5)
         // controls how much faster highs decay — driven by actual material absorption.
-        let (volume, surface_area) = room_acoustics::room_geometry(ctx.room_min, ctx.room_max);
-        let wall_areas = room_acoustics::wall_surface_areas(ctx.room_min, ctx.room_max);
+        let (volume, surface_area) =
+            room_acoustics::room_geometry(ctx.environment_min, ctx.environment_max);
+        let wall_areas =
+            room_acoustics::wall_surface_areas(ctx.environment_min, ctx.environment_max);
         let rt60_low = room_acoustics::sabine_rt60_at_band(
             volume,
             &wall_areas,
@@ -591,8 +593,8 @@ mod tests {
             layout,
             sample_rate: 48000.0,
             channels,
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
             render_channels,
             reverb_input: None,
@@ -809,8 +811,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
             render_channels,
             reverb_input: Some(&reverb_input),
@@ -896,8 +898,8 @@ mod tests {
 
         // Actual atrium: 6×4×3m room, hard walls
         let ctx = MixContext {
-            room_min: Vec3::new(0.0, 0.0, 0.0),
-            room_max: Vec3::new(6.0, 4.0, 3.0),
+            environment_min: Vec3::new(0.0, 0.0, 0.0),
+            environment_max: Vec3::new(6.0, 4.0, 3.0),
             ..mix_ctx(&layout, &listener, channels, render_channels)
         };
 
@@ -933,9 +935,10 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
         let sample_rate = 48000.0;
 
-        let room_min = Vec3::new(0.0, 0.0, 0.0);
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
-        let (volume, surface_area) = room_acoustics::room_geometry(room_min, room_max);
+        let environment_min = Vec3::new(0.0, 0.0, 0.0);
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, surface_area) =
+            room_acoustics::room_geometry(environment_min, environment_max);
 
         let reflectivities = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95];
         let hf_ratios = [0.3, 0.4, 0.5, 0.6];
@@ -968,8 +971,8 @@ mod tests {
                 reverb_input[0] = 1.0; // single impulse on ch0
 
                 let ctx = MixContext {
-                    room_min,
-                    room_max,
+                    environment_min,
+                    environment_max,
                     wall_reflectivity: refl,
                     reverb_input: Some(&reverb_input),
                     ..mix_ctx(&layout, &listener, channels, render_channels)
@@ -1014,9 +1017,10 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
         let sample_rate = 48000.0;
 
-        let room_min = Vec3::new(0.0, 0.0, 0.0);
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
-        let (volume, surface_area) = room_acoustics::room_geometry(room_min, room_max);
+        let environment_min = Vec3::new(0.0, 0.0, 0.0);
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, surface_area) =
+            room_acoustics::room_geometry(environment_min, environment_max);
 
         let listener_pos = Vec3::new(3.0, 2.0, 0.0); // center of room
         let source_positions = [
@@ -1050,8 +1054,8 @@ mod tests {
                 let resolve_ctx = ResolveContext {
                     source_pos: *source_pos,
                     target_pos: listener_pos,
-                    room_min,
-                    room_max,
+                    environment_min,
+                    environment_max,
                     barriers: &[],
                     atmosphere: &AtmosphericParams::default(),
                 };
@@ -1067,7 +1071,8 @@ mod tests {
 
                 // ── FDN late tail: feed impulse × send, measure tail ──
                 // Use band-specific RT60 from wall materials (hard walls for this test).
-                let wall_areas = room_acoustics::wall_surface_areas(room_min, room_max);
+                let wall_areas =
+                    room_acoustics::wall_surface_areas(environment_min, environment_max);
                 let atmosphere = AtmosphericParams::default();
                 let rt60_high = room_acoustics::sabine_rt60_at_band(
                     volume,
@@ -1088,8 +1093,8 @@ mod tests {
                 reverb_input[0] = send; // impulse scaled by d/d_c send law
 
                 let ctx = MixContext {
-                    room_min,
-                    room_max,
+                    environment_min,
+                    environment_max,
                     wall_reflectivity: refl,
                     reverb_input: Some(&reverb_input),
                     ..mix_ctx(&layout, &listener, channels, render_channels)
@@ -1199,10 +1204,10 @@ mod tests {
     fn hard_walls_rt60_ratio_near_unity() {
         // Hard walls have nearly uniform absorption across bands (0.02–0.05),
         // so RT60 at 500 Hz and 4 kHz should be similar (ratio near 1.0).
-        let room_min = Vec3::ZERO;
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
-        let (volume, _) = room_acoustics::room_geometry(room_min, room_max);
-        let wall_areas = room_acoustics::wall_surface_areas(room_min, room_max);
+        let environment_min = Vec3::ZERO;
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, _) = room_acoustics::room_geometry(environment_min, environment_max);
+        let wall_areas = room_acoustics::wall_surface_areas(environment_min, environment_max);
         let atmosphere = AtmosphericParams::default();
 
         let rt60_low = room_acoustics::sabine_rt60_at_band(
@@ -1233,10 +1238,10 @@ mod tests {
     fn carpet_walls_have_lower_hf_ratio() {
         // Carpet has much higher absorption at 4 kHz (0.40) vs 500 Hz (0.08),
         // so RT60_high / RT60_low should be significantly lower than hard walls.
-        let room_min = Vec3::ZERO;
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
-        let (volume, _) = room_acoustics::room_geometry(room_min, room_max);
-        let wall_areas = room_acoustics::wall_surface_areas(room_min, room_max);
+        let environment_min = Vec3::ZERO;
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, _) = room_acoustics::room_geometry(environment_min, environment_max);
+        let wall_areas = room_acoustics::wall_surface_areas(environment_min, environment_max);
         let atmosphere = AtmosphericParams::default();
 
         let carpet_materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::carpet());
@@ -1266,8 +1271,8 @@ mod tests {
     #[test]
     fn fdn_init_uses_material_derived_damping() {
         // Verify that FDN init produces different damping for different materials.
-        let room_min = Vec3::ZERO;
-        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let environment_min = Vec3::ZERO;
+        let environment_max = Vec3::new(6.0, 4.0, 3.0);
 
         let hard_materials = [WallMaterial::HARD_WALL; 6];
         let carpet_materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::carpet());
@@ -1282,8 +1287,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels: 2,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
@@ -1300,8 +1305,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels: 2,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
@@ -1410,8 +1415,8 @@ mod tests {
             layout: &layout,
             sample_rate: 96000.0,
             channels: 2,
-            room_min: Vec3::new(-5.0, -5.0, -5.0),
-            room_max: Vec3::new(5.0, 5.0, 5.0),
+            environment_min: Vec3::new(-5.0, -5.0, -5.0),
+            environment_max: Vec3::new(5.0, 5.0, 5.0),
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,

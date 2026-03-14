@@ -362,8 +362,8 @@ mod tests {
             layout: render_params.layout,
             sample_rate,
             channels,
-            room_min: render_params.room_min,
-            room_max: render_params.room_max,
+            environment_min: render_params.environment_min,
+            environment_max: render_params.environment_max,
             master_gain: render_params.master_gain,
             render_channels: effective_render_channels,
             reverb_input: Some(&reverb_send_snapshot),
@@ -546,14 +546,14 @@ mod tests {
         let ground = default_ground();
         let distance_model = default_distance_model();
         let wall_materials = default_wall_materials();
-        let (room_min, room_max) = standard_room();
+        let (environment_min, environment_max) = standard_room();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
             wall_materials: wall_materials.clone(),
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             ..PipelineParams::default()
         };
         let mut pipeline = build_vbap(&params);
@@ -573,8 +573,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &wall_materials,
             measurement_mode: true, // linear signal for accurate analysis
@@ -585,8 +585,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
@@ -631,14 +631,14 @@ mod tests {
         let ground = default_ground();
         let distance_model = default_distance_model();
         let wall_materials = default_wall_materials();
-        let (room_min, room_max) = standard_room();
+        let (environment_min, environment_max) = standard_room();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
             wall_materials: wall_materials.clone(),
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             ..PipelineParams::default()
         };
         let mut pipeline = build_hrtf(&params);
@@ -658,8 +658,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &wall_materials,
             measurement_mode: true,
@@ -670,8 +670,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
@@ -697,14 +697,14 @@ mod tests {
         let ground = default_ground();
         let distance_model = default_distance_model();
         let wall_materials = default_wall_materials();
-        let (room_min, room_max) = standard_room();
+        let (environment_min, environment_max) = standard_room();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
             wall_materials: wall_materials.clone(),
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             ..PipelineParams::default()
         };
         let mut pipeline = build_dbap(&params);
@@ -724,8 +724,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &wall_materials,
             measurement_mode: true,
@@ -736,8 +736,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
@@ -763,14 +763,14 @@ mod tests {
         let ground = default_ground();
         let distance_model = default_distance_model();
         let wall_materials = default_wall_materials();
-        let (room_min, room_max) = standard_room();
+        let (environment_min, environment_max) = standard_room();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
             wall_materials: wall_materials.clone(),
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             ..PipelineParams::default()
         };
         let mut pipeline = build_ambisonics(&params);
@@ -790,8 +790,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &wall_materials,
             measurement_mode: true,
@@ -802,8 +802,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
@@ -834,14 +834,14 @@ mod tests {
         let ground = default_ground();
         let distance_model = default_distance_model();
         let wall_materials = default_wall_materials();
-        let (room_min, room_max) = standard_room();
+        let (environment_min, environment_max) = standard_room();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
             wall_materials: wall_materials.clone(),
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             ..PipelineParams::default()
         };
         let mut pipeline = build_vbap(&params);
@@ -853,8 +853,8 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
@@ -875,8 +875,8 @@ mod tests {
             layout: &layout,
             atmosphere: &atm,
             ground: &ground,
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
             barriers: &[],
             wall_materials: &wall_materials,
             measurement_mode: true,

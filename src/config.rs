@@ -1,7 +1,8 @@
 //! YAML-driven scene configuration.
 //!
 //! A scene file (`scenes/*.yaml`) wires together separate config files:
-//!   - `rooms/*.yaml`        — room geometry
+//!   - `environments/*.yaml` — virtual acoustic space (dimensions, wall materials)
+//!   - `rooms/*.yaml`        — atrium geometry (physical speaker room)
 //!   - `sources/*.yaml`      — sound identity (audio file, SPL, directivity)
 //!   - `processors/*.yaml`   — effect chain (early reflections, reverb)
 //!   - `atmospheres/*.yaml`  — atmospheric absorption conditions
@@ -31,12 +32,17 @@ use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 
 // ── Top-level scene config ──────────────────────────────────────────────────
 
-/// A scene: references room, source, processor, and atmosphere files,
-/// adds listener placement, speaker layout, and mixing parameters.
+/// A scene: references environment, atrium, source, processor, and atmosphere
+/// files, adds listener placement, speaker layout, and mixing parameters.
 #[derive(Deserialize)]
 pub struct SceneConfig {
-    /// Path to room definition file (e.g. "rooms/atrium_6x4.yaml").
-    pub room: String,
+    /// Path to environment definition file (e.g. "environments/riverside.yaml").
+    /// The virtual acoustic space where sources live.
+    #[serde(alias = "room")]
+    pub environment: String,
+    /// Path to atrium definition file (e.g. "rooms/atrium_6x4.yaml").
+    /// The physical speaker room dimensions. Optional — defaults to environment dims.
+    pub atrium: Option<String>,
     pub listener: ListenerConfig,
     #[serde(default = "default_master_gain")]
     pub master_gain: f32,
@@ -68,9 +74,11 @@ fn default_hrtf_path() -> String {
 
 // ── File-loaded configs (rooms/, processors/, atmospheres/) ─────────────────
 
-/// Room geometry definition (loaded from `rooms/*.yaml`).
+/// Environment geometry + acoustic properties (loaded from `environments/*.yaml`).
+/// Defines the virtual acoustic space where sources live — dimensions, wall
+/// materials, ground surface, and broadband reflectivity.
 #[derive(Deserialize)]
-pub struct RoomConfig {
+pub struct EnvironmentConfig {
     pub width: f32,
     pub depth: f32,
     pub height: f32,
@@ -78,6 +86,96 @@ pub struct RoomConfig {
     /// Default: 0.0 (hard reflective floor like concrete or tile).
     #[serde(default)]
     pub ground_factor: f32,
+    /// Broadband wall reflectivity (energy domain, 0.0–1.0).
+    /// Used for image source reflection gain and Sabine RT60.
+    /// Default: 0.9 (typical indoor room).
+    #[serde(default = "default_wall_reflectivity")]
+    pub wall_reflectivity: f32,
+    /// Per-wall material names for frequency-dependent absorption.
+    #[serde(default)]
+    pub walls: WallsConfig,
+}
+
+fn default_wall_reflectivity() -> f32 {
+    0.9
+}
+
+/// Per-wall material configuration. Each wall can specify a material name
+/// (e.g. "stone", "wood", "open"). Unspecified walls use `default`.
+#[derive(Deserialize)]
+pub struct WallsConfig {
+    /// Fallback material for walls not individually specified.
+    #[serde(default = "default_wall_name")]
+    pub default: String,
+    pub floor: Option<String>,   // -Z
+    pub ceiling: Option<String>, // +Z
+    pub north: Option<String>,   // +Y
+    pub south: Option<String>,   // -Y
+    pub east: Option<String>,    // +X
+    pub west: Option<String>,    // -X
+}
+
+impl Default for WallsConfig {
+    fn default() -> Self {
+        Self {
+            default: default_wall_name(),
+            floor: None,
+            ceiling: None,
+            north: None,
+            south: None,
+            east: None,
+            west: None,
+        }
+    }
+}
+
+fn default_wall_name() -> String {
+    "hard_wall".into()
+}
+
+/// Atrium geometry (loaded from `rooms/*.yaml` or inline).
+/// The physical speaker room — only dimensions, no acoustic properties.
+#[derive(Deserialize)]
+pub struct AtriumConfig {
+    pub width: f32,
+    pub depth: f32,
+    pub height: f32,
+}
+
+/// Map a material name string to a `WallMaterial` preset.
+fn parse_wall_material(name: &str) -> crate::pipeline::path::WallMaterial {
+    use crate::pipeline::path::WallMaterial;
+    match name {
+        "hard_wall" => WallMaterial::hard_wall(),
+        "stone" => WallMaterial::stone(),
+        "wood" => WallMaterial::wood(),
+        "glass" => WallMaterial::glass(),
+        "carpet" => WallMaterial::carpet(),
+        "ceiling_tile" => WallMaterial::ceiling_tile(),
+        "grass" => WallMaterial::grass(),
+        "open" => WallMaterial::open(),
+        other => {
+            eprintln!("warning: unknown wall material '{other}', using hard_wall");
+            WallMaterial::hard_wall()
+        }
+    }
+}
+
+/// Build the 6-wall material array from an `EnvironmentConfig`.
+/// Order: [-X (west), +X (east), -Y (south), +Y (north), -Z (floor), +Z (ceiling)].
+fn build_wall_materials(env: &EnvironmentConfig) -> [crate::pipeline::path::WallMaterial; 6] {
+    let default = &env.walls.default;
+    let get = |wall: &Option<String>| -> crate::pipeline::path::WallMaterial {
+        parse_wall_material(wall.as_deref().unwrap_or(default))
+    };
+    [
+        get(&env.walls.west),    // -X
+        get(&env.walls.east),    // +X
+        get(&env.walls.south),   // -Y
+        get(&env.walls.north),   // +Y
+        get(&env.walls.floor),   // -Z
+        get(&env.walls.ceiling), // +Z
+    ]
 }
 
 #[derive(Deserialize)]
@@ -330,9 +428,24 @@ impl SceneConfig {
     }
 
     pub fn build(self) -> Result<BuildResult, Box<dyn std::error::Error>> {
-        // Load room from file
-        let room_cfg: RoomConfig = load_yaml(&self.room)?;
-        let room = BoxRoom::new(room_cfg.width, room_cfg.depth, room_cfg.height);
+        // Load environment (virtual acoustic space) from file
+        let environment_cfg: EnvironmentConfig = load_yaml(&self.environment)?;
+        let environment = BoxRoom::new(
+            environment_cfg.width,
+            environment_cfg.depth,
+            environment_cfg.height,
+        );
+
+        // Load atrium (physical speaker room) dimensions — optional, defaults to environment
+        let atrium_cfg: AtriumConfig = if let Some(ref path) = self.atrium {
+            load_yaml(path)?
+        } else {
+            AtriumConfig {
+                width: environment_cfg.width,
+                depth: environment_cfg.depth,
+                height: environment_cfg.height,
+            }
+        };
 
         let listener_pos = arr_to_vec3(self.listener.position);
         let listener = Listener::new(listener_pos, self.listener.yaw_degrees.to_radians());
@@ -382,8 +495,13 @@ impl SceneConfig {
         };
 
         // Build comprehensive JSON for the browser (all computed values)
-        let scene_json =
-            self.build_scene_json(&room_cfg, &speaker_layout, &source_metas, &atmosphere);
+        let scene_json = self.build_scene_json(
+            &environment_cfg,
+            &atrium_cfg,
+            &speaker_layout,
+            &source_metas,
+            &atmosphere,
+        );
 
         let initial_source_states: Vec<InitialSourceState> = self
             .sources
@@ -396,20 +514,22 @@ impl SceneConfig {
             .collect();
 
         // Build composable pipelines
-        let ground = GroundProperties::mixed(room_cfg.ground_factor);
+        let ground = GroundProperties::mixed(environment_cfg.ground_factor);
 
-        let wall_materials: [crate::pipeline::path::WallMaterial; 6] =
-            std::array::from_fn(|_| crate::pipeline::path::WallMaterial::default());
-        let (room_min, room_max) = room.bounds();
+        let wall_materials = build_wall_materials(&environment_cfg);
+        // Environment's wall_reflectivity takes precedence; processor override is fallback
+        let effective_reflectivity =
+            er_wall_reflectivity.unwrap_or(environment_cfg.wall_reflectivity);
+        let (environment_min, environment_max) = environment.bounds();
         let pipeline_params = PipelineParams {
             sample_rate: 48000.0, // will be recalibrated in init_pipelines
             hrtf_path: self.hrtf,
-            er_wall_reflectivity: er_wall_reflectivity.unwrap_or(0.9),
+            er_wall_reflectivity: effective_reflectivity,
             distance_model,
             dbap_rolloff_db: self.speakers.dbap_rolloff_db,
             wall_materials: wall_materials.clone(),
-            room_min,
-            room_max,
+            environment_min,
+            environment_max,
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;
@@ -424,7 +544,7 @@ impl SceneConfig {
             initial_render_mode: render_mode,
             listener,
             sources,
-            room: Box::new(room),
+            environment: Box::new(environment),
             master_gain: self.master_gain,
             sample_rate: 0.0, // set by audio backend
             distance_model,
@@ -494,7 +614,8 @@ impl SceneConfig {
 
     fn build_scene_json(
         &self,
-        room_cfg: &RoomConfig,
+        environment_cfg: &EnvironmentConfig,
+        atrium_cfg: &AtriumConfig,
         layout: &SpeakerLayout,
         source_metas: &[SourceMeta],
         atmosphere: &AtmosphericParams,
@@ -543,9 +664,14 @@ impl SceneConfig {
         serde_json::json!({
             "type": "scene_state",
             "room": {
-                "width": room_cfg.width,
-                "depth": room_cfg.depth,
-                "height": room_cfg.height,
+                "width": environment_cfg.width,
+                "depth": environment_cfg.depth,
+                "height": environment_cfg.height,
+            },
+            "atrium": {
+                "width": atrium_cfg.width,
+                "depth": atrium_cfg.depth,
+                "height": atrium_cfg.height,
             },
             "listener": {
                 "x": self.listener.position[0],

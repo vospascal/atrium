@@ -113,8 +113,8 @@ impl PathSet {
 pub struct ResolveContext<'a> {
     pub source_pos: Vec3,
     pub target_pos: Vec3,
-    pub room_min: Vec3,
-    pub room_max: Vec3,
+    pub environment_min: Vec3,
+    pub environment_max: Vec3,
     pub barriers: &'a [Barrier],
     pub atmosphere: &'a AtmosphericParams,
 }
@@ -173,6 +173,46 @@ impl WallMaterial {
         Self {
             name: "ceiling_tile",
             alpha: [0.20, 0.40, 0.70, 0.80, 0.60, 0.40],
+        }
+    }
+
+    /// Stone surface (cathedral, castle). Very low absorption, high reflection.
+    pub fn stone() -> Self {
+        Self {
+            name: "stone",
+            alpha: [0.02, 0.02, 0.03, 0.03, 0.04, 0.05],
+        }
+    }
+
+    /// Wood paneling. Moderate absorption.
+    pub fn wood() -> Self {
+        Self {
+            name: "wood",
+            alpha: [0.15, 0.11, 0.10, 0.07, 0.06, 0.07],
+        }
+    }
+
+    /// Glass surface. Low mid-frequency absorption, moderate at high frequencies.
+    pub fn glass() -> Self {
+        Self {
+            name: "glass",
+            alpha: [0.35, 0.25, 0.18, 0.12, 0.07, 0.04],
+        }
+    }
+
+    /// Grass / soft outdoor ground. High absorption.
+    pub fn grass() -> Self {
+        Self {
+            name: "grass",
+            alpha: [0.10, 0.20, 0.40, 0.55, 0.60, 0.60],
+        }
+    }
+
+    /// Fully absorptive surface (outdoor / open air). No reflections.
+    pub fn open() -> Self {
+        Self {
+            name: "open",
+            alpha: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         }
     }
 

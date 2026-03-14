@@ -83,21 +83,24 @@ export function buildSources(ctx: SceneContext, store: AtriumStore) {
   // Falloff clouds — disabled for now (re-enable by uncommenting)
   falloffClouds = [];
 
-  // Audible radius rings — flat circle at the 20 dB threshold distance
+  // Audible radius rings — sized by actual dB propagation (uncapped)
+  const SPL_THRESHOLD = 20; // dB SPL hearing floor
   const RING_SEGMENTS = 64;
   audibleRings = store.sources.map(s => {
+    const dbAbove = s.spl - SPL_THRESHOLD;
+    const radius = dbAbove > 0 ? s.refDist * Math.pow(10, dbAbove / 20) : 0;
     const pts: THREE.Vector3[] = [];
     for (let j = 0; j <= RING_SEGMENTS; j++) {
       const angle = (j / RING_SEGMENTS) * Math.PI * 2;
       pts.push(new THREE.Vector3(
-        Math.cos(angle) * s.audibleR,
+        Math.cos(angle) * radius,
         0,
-        Math.sin(angle) * s.audibleR,
+        Math.sin(angle) * radius,
       ));
     }
     const geo = new THREE.BufferGeometry().setFromPoints(pts);
     const mat = new THREE.LineBasicMaterial({
-      color: s.color, transparent: true, opacity: 0.25,
+      color: s.color, transparent: true, opacity: 0.15,
     });
     const ring = new THREE.Line(geo, mat);
     ctx.scene.add(ring);

@@ -61,7 +61,7 @@ impl DelayCompStage {
         let layout = ctx.layout;
         let target_pos = match self.mode {
             // For static: use room center as reference point
-            Mode::Static => (ctx.room_min + ctx.room_max) * 0.5,
+            Mode::Static => (ctx.environment_min + ctx.environment_max) * 0.5,
             // For listener-relative: use actual listener position
             Mode::ListenerRelative => ctx.listener.position,
         };
@@ -88,7 +88,7 @@ impl DelayCompStage {
 
     /// Ensure buffers are large enough for the room geometry.
     fn ensure_capacity(&mut self, ctx: &MixContext) {
-        let room_diag = (ctx.room_max - ctx.room_min).length();
+        let room_diag = (ctx.environment_max - ctx.environment_min).length();
         let max_delay_samples =
             (room_diag / ctx.atmosphere.speed_of_sound() * ctx.sample_rate).ceil() as usize;
         let needed = max_delay_samples.next_power_of_two().max(1024);

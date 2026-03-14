@@ -7,6 +7,9 @@ import { getSourceMeshes } from './sources.js';
 let dragTarget: 'listener' | number | null = null;
 let spaceHeld = false;
 
+/** Keyboard state for WASD movement (read by animation loop). */
+export const keys: Record<string, boolean> = {};
+
 export function setupInteractions(ctx: SceneContext, store: AtriumStore) {
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
@@ -84,6 +87,7 @@ export function setupInteractions(ctx: SceneContext, store: AtriumStore) {
   ctx.renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
 
   window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
     if (e.code === 'Space') {
       spaceHeld = true;
       ctx.controls.enableZoom = false;
@@ -92,6 +96,7 @@ export function setupInteractions(ctx: SceneContext, store: AtriumStore) {
     }
   });
   window.addEventListener('keyup', (e) => {
+    keys[e.code] = false;
     if (e.code === 'Space') {
       spaceHeld = false;
       ctx.controls.enableZoom = true;

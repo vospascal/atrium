@@ -1,0 +1,14 @@
+# Environment: Riverside
+# Open outdoor space — no enclosing walls, grass ground.
+# Sources are in nature: birds, water, wind. No reflections.
+
+width: 100.0  # meters (X axis)
+depth: 100.0  # meters (Y axis)
+height: 50.0  # meters (Z axis)
+
+ground_factor: 1.0         # porous ground (grass/earth)
+wall_reflectivity: 0.0     # no reflections (open air)
+
+walls:
+  default: open
+  floor: grass              # grass ground surface

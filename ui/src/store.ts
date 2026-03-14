@@ -1,5 +1,5 @@
 import type {
-  RoomDef, ListenerDef, DistanceModelDef, AtmosphereDef,
+  RoomDef, AtriumDef, ListenerDef, DistanceModelDef, AtmosphereDef,
   Source, Speaker, SourceTelemetry, SceneStateMessage, SpeakerDef,
   DirectivityPattern, SourceDef, RenderModeDef, ExperimentDef,
 } from './types.js';
@@ -42,6 +42,7 @@ function parseSource(s: SourceDef): Source {
 
 export class AtriumStore extends EventTarget {
   room: RoomDef = { width: 6, depth: 4, height: 3 };
+  atrium: AtriumDef = { width: 6, depth: 4, height: 3 };
   listener: ListenerDef = { x: 3, y: 2, z: 0, yaw: Math.PI / 2 };
   distModel: DistanceModelDef = { ref_distance: 1.0, max_distance: 20.0, rolloff: 1.0 };
   atmosphere: AtmosphereDef = { temperature_c: 20, humidity_pct: 50 };
@@ -93,6 +94,9 @@ export class AtriumStore extends EventTarget {
   handleSceneState(msg: SceneStateMessage) {
     if (msg.room) {
       this.room = msg.room;
+    }
+    if (msg.atrium) {
+      this.atrium = msg.atrium;
     }
     if (msg.distance_model) {
       this.distModel = msg.distance_model;

@@ -110,8 +110,8 @@ impl Renderer for WorldLockedRenderer {
 
                 // Reflections tap update
                 prop.reflections.update(
-                    ctx.room_min,
-                    ctx.room_max,
+                    ctx.environment_min,
+                    ctx.environment_max,
                     ctx.source_pos,
                     speaker.position,
                     out.sample_rate,

@@ -136,7 +136,6 @@ impl AudioOutput for CpalOutput {
 
         scene.init_pipelines();
 
-
         let config = StreamConfig {
             channels,
             sample_rate: cpal::SampleRate(sample_rate),

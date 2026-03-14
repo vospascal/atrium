@@ -32,7 +32,7 @@ pub struct InitialSourceState {
 pub struct AudioScene {
     pub listener: Listener,
     pub sources: Vec<Box<dyn SoundSource>>,
-    pub room: Box<dyn Room>,
+    pub environment: Box<dyn Room>,
     pub master_gain: f32,
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
@@ -63,7 +63,7 @@ pub struct AudioScene {
     pub ground: GroundProperties,
     /// Barriers for occlusion/transmission in propagation.
     pub barriers: Vec<crate::audio::propagation::Barrier>,
-    /// Wall materials for the 6 room faces (order: -X, +X, -Y, +Y, -Z, +Z).
+    /// Wall materials for the 6 environment faces (order: -X, +X, -Y, +Y, -Z, +Z).
     pub wall_materials: [crate::pipeline::path::WallMaterial; 6],
     /// Bypass soft clipping and gain clamping for acoustic measurement.
     pub measurement_mode: bool,
@@ -168,10 +168,10 @@ impl AudioScene {
         }
     }
 
-    /// Initialize pipelines with room geometry and sample rate.
+    /// Initialize pipelines with environment geometry and sample rate.
     /// Must be called after sample_rate is set and before the audio callback starts.
     pub fn init_pipelines(&mut self) {
-        let (room_min, room_max) = self.room.bounds();
+        let (environment_min, environment_max) = self.environment.bounds();
         let total_channels = self.speaker_layout.total_channels();
         for pipeline in self.pipelines.iter_mut() {
             let render_channels = if pipeline.render_channels > 0 {
@@ -184,8 +184,8 @@ impl AudioScene {
                 layout: &self.speaker_layout,
                 sample_rate: self.sample_rate,
                 channels: total_channels,
-                room_min,
-                room_max,
+                environment_min,
+                environment_max,
                 master_gain: self.master_gain,
                 render_channels,
                 reverb_input: None,
@@ -264,7 +264,7 @@ impl AudioScene {
 
         // Render through the composable pipeline
         {
-            let (room_min, room_max) = self.room.bounds();
+            let (environment_min, environment_max) = self.environment.bounds();
             let pipeline = &mut self.pipelines[self.active_pipeline.index()];
             let _s = profile_span!("pipeline", mode = ?self.active_pipeline).entered();
             let params = RenderParams {
@@ -276,8 +276,8 @@ impl AudioScene {
                 layout: &self.speaker_layout,
                 atmosphere: &self.atmosphere,
                 ground: &self.ground,
-                room_min,
-                room_max,
+                environment_min,
+                environment_max,
                 barriers: &self.barriers,
                 wall_materials: &self.wall_materials,
                 measurement_mode: self.measurement_mode,
