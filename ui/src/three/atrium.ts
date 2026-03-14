@@ -12,7 +12,7 @@ export function getAtriumGroup(): THREE.Group | null {
   return atriumGroup;
 }
 
-function createSpeakerMesh(sp: Speaker, atrium: { width: number; depth: number }): THREE.Group {
+function createSpeakerMesh(sp: Speaker, spawn: { x: number; y: number }): THREE.Group {
   const group = new THREE.Group();
   const box = new THREE.Mesh(
     new THREE.BoxGeometry(0.2, 0.25, 0.15),
@@ -32,10 +32,10 @@ function createSpeakerMesh(sp: Speaker, atrium: { width: number; depth: number }
   sprite.position.y = 0.25;
   group.add(sprite);
 
-  // Position relative to atrium center (local coords)
-  // Atrium X → Three.js X, Atrium Y → Three.js -Z, Atrium Z → Three.js Y
-  const dx = sp.x - atrium.width / 2;
-  const dy = sp.y - atrium.depth / 2;
+  // Speaker world position → offset from spawn (atrium center)
+  // Engine X → Three.js X, Engine Y → Three.js -Z, Engine Z → Three.js Y
+  const dx = sp.x - spawn.x;
+  const dy = sp.y - spawn.y;
   group.position.set(dx, sp.z, -dy);
 
   return group;
@@ -60,7 +60,7 @@ export function buildAtrium(ctx: SceneContext, store: AtriumStore) {
 
   // Add speakers as children of atrium group
   speakerMeshes = store.speakers.map(sp => {
-    const mesh = createSpeakerMesh(sp, store.atrium);
+    const mesh = createSpeakerMesh(sp, store.spawn);
     atriumGroup!.add(mesh);
     return mesh;
   });

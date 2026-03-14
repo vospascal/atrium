@@ -6,6 +6,8 @@ width: 100.0  # meters (X axis)
 depth: 100.0  # meters (Y axis)
 height: 50.0  # meters (Z axis)
 
+spawn: [50.0, 50.0, 0.0]  # center of environment
+
 ground_factor: 1.0         # porous ground (grass/earth)
 wall_reflectivity: 0.0     # no reflections (open air)
 

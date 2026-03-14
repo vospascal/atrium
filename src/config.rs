@@ -78,6 +78,11 @@ pub struct EnvironmentConfig {
     pub width: f32,
     pub depth: f32,
     pub height: f32,
+    /// Spawn point — where the atrium center is placed within the environment.
+    /// Scene positions (listener, sources, speakers) are atrium-local and get
+    /// offset by this point to become world coordinates.
+    /// Defaults to the center of the environment: [width/2, depth/2, 0].
+    pub spawn: Option<[f32; 3]>,
     /// Ground surface factor for ISO 9613-2 ground effect (0.0 = hard, 1.0 = porous).
     /// Default: 0.0 (hard reflective floor like concrete or tile).
     #[serde(default)]
@@ -254,6 +259,11 @@ pub struct SpeakerPositions {
 pub struct NormalizationConfig {
     #[serde(default = "default_target_rms")]
     pub target_rms: f32,
+    /// SPL that maps to 0 dBFS (digital full scale).
+    /// gain = 10^((spl - spl_reference) / 20).
+    /// IEC 61672 standard: 94 dB (1 Pa RMS calibration tone).
+    #[serde(default = "default_spl_reference")]
+    pub spl_reference: f32,
     /// SPL hearing threshold in dB — below this level a source is considered inaudible.
     /// Used to compute audible_radius via ISO 9613 free-field propagation:
     ///   d_audible = 10^((reference_spl - spl_threshold) / 20)
@@ -266,6 +276,7 @@ impl Default for NormalizationConfig {
     fn default() -> Self {
         Self {
             target_rms: 0.5,
+            spl_reference: 94.0,
             spl_threshold: 20.0,
         }
     }
@@ -273,6 +284,9 @@ impl Default for NormalizationConfig {
 
 fn default_target_rms() -> f32 {
     0.5
+}
+fn default_spl_reference() -> f32 {
+    94.0
 }
 fn default_spl_threshold() -> f32 {
     20.0
@@ -419,6 +433,17 @@ impl SceneConfig {
             environment_cfg.height,
         );
 
+        // Spawn point: where the atrium center sits in the environment.
+        // Defaults to the center of the environment floor.
+        let spawn = match environment_cfg.spawn {
+            Some(arr) => Vec3::new(arr[0], arr[1], arr[2]),
+            None => Vec3::new(
+                environment_cfg.width / 2.0,
+                environment_cfg.depth / 2.0,
+                0.0,
+            ),
+        };
+
         // Load atrium (physical speaker room) dimensions — optional, defaults to environment
         let atrium_cfg: AtriumConfig = if let Some(ref path) = self.atrium {
             load_yaml(path)?
@@ -430,15 +455,16 @@ impl SceneConfig {
             }
         };
 
-        let listener_pos = arr_to_vec3(self.listener.position);
+        // Scene positions are atrium-local — offset by spawn to get world coordinates.
+        let listener_pos = arr_to_vec3(self.listener.position) + spawn;
         let listener = Listener::new(listener_pos, self.listener.yaw_degrees.to_radians());
 
-        // Build speaker layout
-        let speaker_layout = self.build_speakers();
+        // Build speaker layout (atrium-local positions offset by spawn)
+        let speaker_layout = self.build_speakers(spawn);
         let render_mode = parse_render_mode(&self.speakers.render_mode);
 
         // Decode audio and build sources (also collects metadata for the browser)
-        let build = self.build_sources()?;
+        let build = self.build_sources(spawn)?;
         let sources = build.sources;
         let source_metas = build.metas;
         let spectral_profiles = build.spectral_profiles;
@@ -468,6 +494,7 @@ impl SceneConfig {
         let scene_json = self.build_scene_json(
             &environment_cfg,
             &atrium_cfg,
+            spawn,
             &speaker_layout,
             &source_metas,
             &atmosphere,
@@ -477,7 +504,7 @@ impl SceneConfig {
             .sources
             .iter()
             .map(|entry| InitialSourceState {
-                position: arr_to_vec3(entry.position),
+                position: arr_to_vec3(entry.position) + spawn,
                 orbit_radius: entry.orbit_radius,
                 orbit_speed: entry.orbit_speed,
             })
@@ -558,25 +585,26 @@ impl SceneConfig {
         })
     }
 
-    fn build_speakers(&self) -> SpeakerLayout {
+    fn build_speakers(&self, spawn: Vec3) -> SpeakerLayout {
         let p = &self.speakers.positions;
+        let s = |arr: [f32; 3]| arr_to_vec3(arr) + spawn;
         match self.speakers.layout.as_str() {
             "5.1" => SpeakerLayout::surround_5_1(
-                arr_to_vec3(p.fl.unwrap_or([0.0, 4.0, 0.0])),
-                arr_to_vec3(p.fr.unwrap_or([6.0, 4.0, 0.0])),
-                arr_to_vec3(p.c.unwrap_or([3.0, 4.0, 0.0])),
-                arr_to_vec3(p.rl.unwrap_or([0.0, 0.0, 0.0])),
-                arr_to_vec3(p.rr.unwrap_or([6.0, 0.0, 0.0])),
+                s(p.fl.unwrap_or([-3.0, 2.0, 0.0])),
+                s(p.fr.unwrap_or([3.0, 2.0, 0.0])),
+                s(p.c.unwrap_or([0.0, 2.0, 0.0])),
+                s(p.rl.unwrap_or([-3.0, -2.0, 0.0])),
+                s(p.rr.unwrap_or([3.0, -2.0, 0.0])),
             ),
             "quad" => SpeakerLayout::quad(
-                arr_to_vec3(p.fl.unwrap_or([0.0, 4.0, 0.0])),
-                arr_to_vec3(p.fr.unwrap_or([6.0, 4.0, 0.0])),
-                arr_to_vec3(p.rl.unwrap_or([0.0, 0.0, 0.0])),
-                arr_to_vec3(p.rr.unwrap_or([6.0, 0.0, 0.0])),
+                s(p.fl.unwrap_or([-3.0, 2.0, 0.0])),
+                s(p.fr.unwrap_or([3.0, 2.0, 0.0])),
+                s(p.rl.unwrap_or([-3.0, -2.0, 0.0])),
+                s(p.rr.unwrap_or([3.0, -2.0, 0.0])),
             ),
             _ => SpeakerLayout::stereo(
-                arr_to_vec3(p.l.or(p.fl).unwrap_or([0.0, 4.0, 0.0])),
-                arr_to_vec3(p.r.or(p.fr).unwrap_or([6.0, 4.0, 0.0])),
+                s(p.l.or(p.fl).unwrap_or([-3.0, 2.0, 0.0])),
+                s(p.r.or(p.fr).unwrap_or([3.0, 2.0, 0.0])),
             ),
         }
     }
@@ -585,6 +613,7 @@ impl SceneConfig {
         &self,
         environment_cfg: &EnvironmentConfig,
         atrium_cfg: &AtriumConfig,
+        spawn: Vec3,
         layout: &SpeakerLayout,
         source_metas: &[SourceMeta],
         atmosphere: &AtmosphericParams,
@@ -609,10 +638,11 @@ impl SceneConfig {
             }
         }
 
-        // Sources (all computed values from the engine)
+        // Sources (all computed values from the engine, world coordinates)
         let sources: Vec<_> = source_metas
             .iter()
             .map(|s| {
+                let world_pos = arr_to_vec3(s.position) + spawn;
                 serde_json::json!({
                     "name": s.name,
                     "color": s.color,
@@ -623,13 +653,14 @@ impl SceneConfig {
                     "directivity": s.directivity,
                     "directivity_alpha": s.directivity_alpha,
                     "spread": s.spread,
-                    "position": s.position,
+                    "position": [world_pos.x, world_pos.y, world_pos.z],
                     "orbit_radius": s.orbit_radius,
                     "orbit_speed": s.orbit_speed,
                 })
             })
             .collect();
 
+        let listener_world = arr_to_vec3(self.listener.position) + spawn;
         serde_json::json!({
             "type": "scene_state",
             "room": {
@@ -642,10 +673,15 @@ impl SceneConfig {
                 "depth": atrium_cfg.depth,
                 "height": atrium_cfg.height,
             },
+            "spawn": {
+                "x": spawn.x,
+                "y": spawn.y,
+                "z": spawn.z,
+            },
             "listener": {
-                "x": self.listener.position[0],
-                "y": self.listener.position[1],
-                "z": self.listener.position[2],
+                "x": listener_world.x,
+                "y": listener_world.y,
+                "z": listener_world.z,
                 "yaw": self.listener.yaw_degrees.to_radians(),
             },
             "master_gain": self.master_gain,
@@ -684,7 +720,7 @@ impl SceneConfig {
         .to_string()
     }
 
-    fn build_sources(&self) -> Result<BuildSourcesResult, Box<dyn std::error::Error>> {
+    fn build_sources(&self, spawn: Vec3) -> Result<BuildSourcesResult, Box<dyn std::error::Error>> {
         // Load all source definitions first
         let defs: Vec<SourceDef> = self
             .sources
@@ -704,24 +740,19 @@ impl SceneConfig {
         let mut source_amplitudes = Vec::<f32>::new();
 
         let global_ref_dist = self.distance_model.ref_distance;
-
-        // The loudest source in the scene maps to gain 1.0; all others scale down.
-        let max_source_spl = defs
-            .iter()
-            .map(|d| d.reference_spl)
-            .fold(f32::NEG_INFINITY, f32::max);
+        let spl_reference = norm.spl_reference;
 
         for (i, (entry, def)) in self.sources.iter().zip(defs.iter()).enumerate() {
             let buffer = Arc::new(decode_file(Path::new(&def.path))?);
             let profile = resolve_spl(def.reference_spl);
-            let amplitude = profile.amplitude(buffer.rms, norm.target_rms, max_source_spl);
+            let amplitude = profile.amplitude(buffer.rms, norm.target_rms, spl_reference);
             let ref_dist = profile.ref_distance(global_ref_dist);
             let pattern = parse_directivity(&def.directivity);
             let bands = buffer.spectral_profile.bands;
 
             let mut node = TestNode::new(
                 buffer,
-                arr_to_vec3(entry.position),
+                arr_to_vec3(entry.position) + spawn,
                 entry.orbit_radius,
                 entry.orbit_speed,
             );

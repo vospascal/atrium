@@ -3,7 +3,7 @@
 /// MP3 files are mastered at arbitrary digital levels — a quiet recording of a
 /// loud djembe might have higher RMS than a hot recording of a soft cat purring.
 /// SoundProfile first RMS-normalizes the raw audio, then applies a gain based
-/// on the sound's real-world SPL normalized to the loudest source in the scene.
+/// on the sound's real-world SPL relative to the IEC 61672 calibration level.
 ///
 /// Distance attenuation uses a fixed reference distance (IEC 61672: 1m standard
 /// measurement distance). SPL only controls amplitude — louder sources are louder
@@ -16,11 +16,14 @@ pub struct SoundProfile {
 impl SoundProfile {
     /// Compute linear amplitude for a source.
     ///
-    /// Maps `reference_spl` to digital amplitude using `max_source_spl` (the
-    /// loudest source's SPL in the scene) as the 0 dBFS calibration point.
-    /// The loudest source gets gain 1.0; quieter sources scale down by
-    /// 10^((spl - max) / 20) per dB below the maximum.
-    pub fn amplitude(&self, buffer_rms: f32, target_rms: f32, max_source_spl: f32) -> f32 {
+    /// Maps `reference_spl` to digital amplitude using `spl_reference` as the
+    /// calibration point. A source at `spl_reference` gets gain 1.0. Louder
+    /// sources get gain > 1.0, quieter sources get gain < 1.0.
+    ///
+    /// No cap — the distance model's `MAX_NEAR_FIELD_GAIN` handles clipping
+    /// protection. With spl_reference = 94 dB (IEC 61672):
+    ///   djembe (75 dB) → 0.112,  campfire (55 dB) → 0.0112,  cat (25 dB) → 0.000355
+    pub fn amplitude(&self, buffer_rms: f32, target_rms: f32, spl_reference: f32) -> f32 {
         // Step 1: RMS normalization — correct for mastering differences
         let rms_correction = if buffer_rms > 1e-6 {
             target_rms / buffer_rms
@@ -28,9 +31,9 @@ impl SoundProfile {
             1.0
         };
 
-        // Step 2: SPL-to-amplitude mapping (gain = 10^((spl - max) / 20), capped at 1.0)
-        let db_below = self.reference_spl - max_source_spl;
-        let spl_gain = 10.0_f32.powf(db_below / 20.0).min(1.0);
+        // Step 2: SPL-to-amplitude mapping (absolute, no cap)
+        let db_diff = self.reference_spl - spl_reference;
+        let spl_gain = 10.0_f32.powf(db_diff / 20.0);
 
         rms_correction * spl_gain
     }
@@ -73,14 +76,30 @@ impl SoundProfile {
 mod tests {
     use super::*;
 
+    // IEC 61672 calibration level: 94 dB SPL = 0 dBFS
+    const SPL_REF: f32 = 94.0;
+
     #[test]
-    fn loudest_source_has_gain_one() {
+    fn source_at_reference_has_gain_one() {
+        let profile = SoundProfile {
+            reference_spl: 94.0,
+        };
+        let gain = profile.amplitude(0.1, 0.1, SPL_REF);
+        assert!((gain - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn djembe_gain_below_one() {
+        // 75 dB is 19 dB below spl_reference 94 → gain = 10^(-19/20) ≈ 0.112
         let profile = SoundProfile {
             reference_spl: 75.0,
         };
-        // When buffer_rms == target_rms, RMS correction is 1.0
-        let gain = profile.amplitude(0.1, 0.1, 75.0);
-        assert!((gain - 1.0).abs() < 1e-6);
+        let gain = profile.amplitude(0.1, 0.1, SPL_REF);
+        let expected = 10.0_f32.powf(-19.0 / 20.0); // ≈ 0.112
+        assert!(
+            (gain - expected).abs() < 0.001,
+            "75 dB source should get gain ~{expected}, got {gain}"
+        );
     }
 
     #[test]
@@ -94,30 +113,27 @@ mod tests {
         let purring = SoundProfile {
             reference_spl: 25.0,
         };
-        let max_spl = 75.0;
         let rms = 0.1;
         let target = 0.1;
-        let gain_djembe = djembe.amplitude(rms, target, max_spl);
-        let gain_campfire = campfire.amplitude(rms, target, max_spl);
-        let gain_purring = purring.amplitude(rms, target, max_spl);
+        let gain_djembe = djembe.amplitude(rms, target, SPL_REF);
+        let gain_campfire = campfire.amplitude(rms, target, SPL_REF);
+        let gain_purring = purring.amplitude(rms, target, SPL_REF);
         assert!(gain_djembe > gain_campfire);
         assert!(gain_campfire > gain_purring);
     }
 
     #[test]
     fn gain_ordering_survives_rms_normalization() {
-        // Even if the loud source has a quieter recording, SPL ordering is preserved
         let djembe = SoundProfile {
             reference_spl: 75.0,
         };
         let campfire = SoundProfile {
             reference_spl: 55.0,
         };
-        let max_spl = 75.0;
         let target = 0.1;
         // Djembe recording is quieter (lower RMS), campfire is hotter
-        let gain_djembe = djembe.amplitude(0.05, target, max_spl);
-        let gain_campfire = campfire.amplitude(0.2, target, max_spl);
+        let gain_djembe = djembe.amplitude(0.05, target, SPL_REF);
+        let gain_campfire = campfire.amplitude(0.2, target, SPL_REF);
         assert!(
             gain_djembe > gain_campfire,
             "djembe ({}) should beat campfire ({}) despite lower recording RMS",
@@ -127,28 +143,29 @@ mod tests {
     }
 
     #[test]
-    fn db_scaling_20db_is_factor_10() {
-        // 20 dB below max → gain = 10^(-20/20) = 0.1
+    fn db_scaling_20db_below_reference() {
+        // 74 dB is 20 dB below spl_reference 94 → gain = 10^(-20/20) = 0.1
         let profile = SoundProfile {
-            reference_spl: 55.0,
+            reference_spl: 74.0,
         };
-        let gain = profile.amplitude(0.1, 0.1, 75.0);
+        let gain = profile.amplitude(0.1, 0.1, SPL_REF);
         assert!(
             (gain - 0.1).abs() < 0.001,
-            "20 dB below max should give gain 0.1, got {gain}"
+            "20 dB below reference should give gain 0.1, got {gain}"
         );
     }
 
     #[test]
-    fn db_scaling_50db_below_max() {
-        // 50 dB below max → gain = 10^(-50/20) = 0.00316
+    fn cat_gain_with_iec_reference() {
+        // Cat at 25 dB with spl_reference 94: gain = 10^((25-94)/20) = 10^(-3.45) ≈ 0.000355
         let profile = SoundProfile {
             reference_spl: 25.0,
         };
-        let gain = profile.amplitude(0.1, 0.1, 75.0);
+        let gain = profile.amplitude(0.1, 0.1, SPL_REF);
+        let expected = 10.0_f32.powf(-69.0 / 20.0);
         assert!(
-            (gain - 0.00316).abs() < 0.001,
-            "50 dB below max should give gain ~0.00316, got {gain}"
+            (gain - expected).abs() < 0.0001,
+            "cat should get gain ~{expected}, got {gain}"
         );
     }
 
@@ -182,7 +199,10 @@ mod tests {
 
     #[test]
     fn scene_gain_distribution() {
-        // Verify the expected gain distribution with max_source_spl = 75 (djembe)
+        // With spl_reference = 94 (IEC 61672):
+        //   djembe   75 dB → 10^(-19/20) ≈ 0.112
+        //   campfire 55 dB → 10^(-39/20) ≈ 0.0112
+        //   purring  25 dB → 10^(-69/20) ≈ 0.000355
         let djembe = SoundProfile {
             reference_spl: 75.0,
         };
@@ -192,25 +212,28 @@ mod tests {
         let purring = SoundProfile {
             reference_spl: 25.0,
         };
-        let max_spl = 75.0;
         let rms = 0.1;
         let target = 0.1;
 
-        let gain_djembe = djembe.amplitude(rms, target, max_spl);
-        let gain_campfire = campfire.amplitude(rms, target, max_spl);
-        let gain_purring = purring.amplitude(rms, target, max_spl);
+        let gain_djembe = djembe.amplitude(rms, target, SPL_REF);
+        let gain_campfire = campfire.amplitude(rms, target, SPL_REF);
+        let gain_purring = purring.amplitude(rms, target, SPL_REF);
+
+        let expected_djembe = 10.0_f32.powf(-19.0 / 20.0);
+        let expected_campfire = 10.0_f32.powf(-39.0 / 20.0);
+        let expected_purring = 10.0_f32.powf(-69.0 / 20.0);
 
         assert!(
-            (gain_djembe - 1.0).abs() < 1e-6,
-            "djembe should be 1.0, got {gain_djembe}"
+            (gain_djembe - expected_djembe).abs() < 0.001,
+            "djembe should be ~{expected_djembe}, got {gain_djembe}"
         );
         assert!(
-            (gain_campfire - 0.1).abs() < 0.01,
-            "campfire should be ~0.1, got {gain_campfire}"
+            (gain_campfire - expected_campfire).abs() < 0.001,
+            "campfire should be ~{expected_campfire}, got {gain_campfire}"
         );
         assert!(
-            (gain_purring - 0.00316).abs() < 0.001,
-            "purring should be ~0.00316, got {gain_purring}"
+            (gain_purring - expected_purring).abs() < 0.0001,
+            "purring should be ~{expected_purring}, got {gain_purring}"
         );
     }
 }

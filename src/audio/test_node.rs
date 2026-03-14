@@ -135,6 +135,14 @@ impl SoundSource for TestNode {
         self.orbit_angle = angle;
     }
 
+    fn orbit_center(&self) -> Vec3 {
+        self.orbit_center
+    }
+
+    fn orbit_radius(&self) -> f32 {
+        self.orbit_radius
+    }
+
     fn ref_distance(&self) -> f32 {
         self.ref_dist
     }

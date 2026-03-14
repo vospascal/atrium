@@ -68,10 +68,17 @@ export interface AtriumDef {
   height: number;
 }
 
+export interface SpawnDef {
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface SceneStateMessage {
   type: 'scene_state';
   room: RoomDef;
   atrium?: AtriumDef;
+  spawn?: SpawnDef;
   listener: ListenerDef;
   sources: SourceDef[];
   speakers: SpeakerDef[];
@@ -102,6 +109,14 @@ export interface SourceTelemetry {
   db: number;
   muted: boolean;
   perceptual: number;
+  /** Source facing direction (unit vector, engine X/Y). */
+  ox: number;
+  oy: number;
+  /** Orbit center (engine X/Y). */
+  ocx: number;
+  ocy: number;
+  /** Orbit radius (meters). 0 = stationary. */
+  or: number;
 }
 
 export interface TelemetryMessage {

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { SceneContext } from './scene.js';
 import type { AtriumStore } from '../store.js';
 import { toThree } from './coords.js';
-import { createPatternMesh } from './directivity.js';
+import { createGroundPie } from './directivity.js';
 import type { DirectivityPattern } from '../types.js';
 
 const HEARING_PATTERN: DirectivityPattern = {
@@ -11,6 +11,7 @@ const HEARING_PATTERN: DirectivityPattern = {
 
 let listenerGroup: THREE.Group;
 let listenerSphere: THREE.Mesh;
+let hearingPie: THREE.Mesh;
 
 export function getListenerGroup(): THREE.Group {
   return listenerGroup;
@@ -22,6 +23,7 @@ export function getListenerSphere(): THREE.Mesh {
 
 export function buildListener(ctx: SceneContext) {
   if (listenerGroup) ctx.scene.remove(listenerGroup);
+  if (hearingPie) ctx.scene.remove(hearingPie);
 
   listenerGroup = new THREE.Group();
 
@@ -32,25 +34,21 @@ export function buildListener(ctx: SceneContext) {
   );
   listenerGroup.add(listenerSphere);
 
-  // Direction arrow
-  const arrowGeo = new THREE.ConeGeometry(0.08, 0.3, 8);
-  arrowGeo.rotateX(Math.PI / 2);
-  arrowGeo.translate(0, 0, 0.25);
-  const arrowMesh = new THREE.Mesh(
-    arrowGeo,
-    new THREE.MeshStandardMaterial({ color: 0x4fc3f7, emissive: 0x1a6080 }),
-  );
-  listenerGroup.add(arrowMesh);
-
-  // Hearing pattern wireframe
-  const hearingMesh = createPatternMesh(HEARING_PATTERN, 0x4fc3f7);
-  listenerGroup.add(hearingMesh);
-
   ctx.scene.add(listenerGroup);
+
+  // Hearing pattern — ground pie (same style as source directivity pies)
+  hearingPie = createGroundPie(HEARING_PATTERN, 0x4fc3f7, 0.8, 0.15);
+  ctx.scene.add(hearingPie);
 }
 
 export function updateListener(store: AtriumStore) {
   if (!listenerGroup) return;
-  listenerGroup.position.copy(toThree(store.listener.x, store.listener.y, store.listener.z));
-  listenerGroup.rotation.y = store.listener.yaw + Math.PI / 2;
+  const pos = toThree(store.listener.x, store.listener.y, store.listener.z);
+  listenerGroup.position.copy(pos);
+
+  // Hearing pie sits on the ground, rotated to match listener yaw
+  if (hearingPie) {
+    hearingPie.position.set(pos.x, 0.02, pos.z);
+    hearingPie.rotation.y = store.listener.yaw + Math.PI / 2;
+  }
 }

@@ -4,5 +4,5 @@
 # make this nearly inaudible from across the room.
 
 path: assets/purring.mp3
-reference_spl: 25.0        # ~25 dB SPL at 1m (barely audible)
+reference_spl: 30.0        # ~25 dB SPL at 1m (barely audible)
 directivity: omni           # radiates equally in all directions

@@ -2,12 +2,15 @@ import * as THREE from 'three';
 import type { SceneContext } from './scene.js';
 import type { AtriumStore } from '../store.js';
 import { toThree } from './coords.js';
+import { createGroundPie } from './directivity.js';
 
 let sourceMeshes: THREE.Sprite[] = [];
 let falloffClouds: THREE.Points[] = [];
 let audibleRings: THREE.Line[] = [];
 let gainLines: THREE.Line[] = [];
 let distLabels: DistLabel[] = [];
+let orbitRings: THREE.Line[] = [];
+let directivityPies: THREE.Mesh[] = [];
 
 interface DistLabel {
   canvas: HTMLCanvasElement;
@@ -45,6 +48,8 @@ export function buildSources(ctx: SceneContext, store: AtriumStore) {
   audibleRings.forEach(m => ctx.scene.remove(m));
   gainLines.forEach(m => ctx.scene.remove(m));
   distLabels.forEach(d => ctx.scene.remove(d.sprite));
+  orbitRings.forEach(m => ctx.scene.remove(m));
+  directivityPies.forEach(m => ctx.scene.remove(m));
 
   // Source meshes
   sourceMeshes = store.sources.map(s => {
@@ -130,6 +135,35 @@ export function buildSources(ctx: SceneContext, store: AtriumStore) {
     ctx.scene.add(sprite);
     return { canvas, ctx: cctx, tex, sprite, lastText: '' };
   });
+
+  // Orbit path rings — dashed circle on the ground plane
+  const ORBIT_SEGMENTS = 64;
+  orbitRings = store.sources.map(s => {
+    const pts: THREE.Vector3[] = [];
+    for (let j = 0; j <= ORBIT_SEGMENTS; j++) {
+      const angle = (j / ORBIT_SEGMENTS) * Math.PI * 2;
+      // Unit circle in XZ (Three.js ground plane), scaled by orbit radius at update time
+      pts.push(new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle)));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const mat = new THREE.LineDashedMaterial({
+      color: s.color, transparent: true, opacity: 0.3,
+      dashSize: 0.15, gapSize: 0.1,
+    });
+    const ring = new THREE.Line(geo, mat);
+    ring.computeLineDistances();
+    ring.visible = false;
+    ctx.scene.add(ring);
+    return ring;
+  });
+
+  // Directivity pie — filled polar pattern on the ground plane
+  directivityPies = store.sources.map(s => {
+    const mesh = createGroundPie(s.pattern, s.color);
+    mesh.visible = false;
+    ctx.scene.add(mesh);
+    return mesh;
+  });
 }
 
 export function updateSources(store: AtriumStore) {
@@ -164,6 +198,34 @@ export function updateSources(store: AtriumStore) {
       audibleRings[i].position.copy(sourceMeshes[i].position);
       audibleRings[i].position.y = 0.01; // sit on floor
       audibleRings[i].visible = !store.sourceMuted[i];
+    }
+
+    // Orbit ring — position at orbit center, scale by radius
+    if (orbitRings[i]) {
+      const orbitRadius = t?.or ?? s.r;
+      if (orbitRadius > 0.01) {
+        const ocx = t?.ocx ?? s.cx;
+        const ocy = t?.ocy ?? s.cy;
+        const center = toThree(ocx, ocy, 0);
+        orbitRings[i].position.set(center.x, 0.01, center.z);
+        orbitRings[i].scale.set(orbitRadius, 1, orbitRadius);
+        orbitRings[i].visible = !store.sourceMuted[i];
+      } else {
+        orbitRings[i].visible = false;
+      }
+    }
+
+    // Directivity pie — position at source, rotate to face emission direction
+    if (directivityPies[i]) {
+      const piePos = toThree(ax, ay, 0);
+      directivityPies[i].position.set(piePos.x, 0.02, piePos.z);
+      if (t && s.pattern.type !== 'omni') {
+        // Engine orientation (ox, oy) → Three.js rotation around Y axis
+        // Engine +X maps to Three.js +X, engine +Y maps to Three.js -Z
+        const yaw = Math.atan2(t.ox, -t.oy);
+        directivityPies[i].rotation.y = yaw;
+      }
+      directivityPies[i].visible = !store.sourceMuted[i];
     }
 
     // Gain data

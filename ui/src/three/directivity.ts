@@ -16,47 +16,37 @@ export function patternGain(pattern: DirectivityPattern, angle: number): number 
   return 1.0;
 }
 
-const POLAR_STEPS = 48;
-const RING_STEPS = 24;
-const PATTERN_SCALE = 0.8;
+const PIE_STEPS = 48;
 
-/** Generate a 3D directivity pattern as a wireframe surface of revolution */
-export function createPatternMesh(pattern: DirectivityPattern, color: number): THREE.LineSegments {
-  const vertices: number[] = [];
+/**
+ * Filled polar‐pattern "pizza pie" on the ground plane (Y = 0).
+ * Forward direction = local +Z.  Caller rotates around Y to orient.
+ */
+export function createGroundPie(
+  pattern: DirectivityPattern,
+  color: number,
+  radius: number = 0.6,
+  opacity: number = 0.2,
+): THREE.Mesh {
+  // Center vertex + perimeter vertices
+  const positions = new Float32Array((PIE_STEPS + 2) * 3);
+  for (let j = 0; j <= PIE_STEPS; j++) {
+    const theta = (j / PIE_STEPS) * Math.PI * 2 - Math.PI; // −π → π
+    const gain = patternGain(pattern, Math.abs(theta));
+    const r = gain * radius;
+    const idx = (j + 1) * 3;
+    positions[idx]     = r * Math.sin(theta); // X lateral
+    positions[idx + 1] = 0;                    // Y up
+    positions[idx + 2] = r * Math.cos(theta);  // Z forward
+  }
   const indices: number[] = [];
-
-  for (let p = 0; p <= POLAR_STEPS; p++) {
-    const theta = (p / POLAR_STEPS) * Math.PI;
-    const gain = patternGain(pattern, theta);
-    const r = gain * PATTERN_SCALE;
-    const rPerp = r * Math.sin(theta);
-    const zAlongFwd = r * Math.cos(theta);
-
-    for (let a = 0; a <= RING_STEPS; a++) {
-      const phi = (a / RING_STEPS) * Math.PI * 2;
-      vertices.push(
-        rPerp * Math.cos(phi),
-        rPerp * Math.sin(phi),
-        zAlongFwd,
-      );
-    }
+  for (let j = 0; j < PIE_STEPS; j++) {
+    indices.push(0, j + 1, j + 2);
   }
-
-  for (let p = 0; p < POLAR_STEPS; p++) {
-    for (let a = 0; a < RING_STEPS; a++) {
-      const curr = p * (RING_STEPS + 1) + a;
-      const next = curr + 1;
-      const below = curr + (RING_STEPS + 1);
-      indices.push(curr, next);
-      indices.push(curr, below);
-    }
-  }
-
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setIndex(indices);
-
-  return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-    color, transparent: true, opacity: 0.15,
+  return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false,
   }));
 }

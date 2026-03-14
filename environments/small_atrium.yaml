@@ -3,7 +3,7 @@
 # Mirrors the original rooms/atrium_6x4.yaml with acoustic properties added.
 #
 # Coordinate system: X = left/right, Y = front/back, Z = up/down
-# Origin (0,0,0) is at the rear-left floor corner.
+# Spawn defaults to center of room floor: [3, 2, 0].
 
 width: 6.0    # meters (X axis)
 depth: 4.0    # meters (Y axis)

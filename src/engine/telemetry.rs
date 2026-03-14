@@ -28,6 +28,14 @@ pub struct SourceTelemetry {
     pub is_muted: bool,
     /// Perceptual score [0, 1] from masking/salience analysis.
     pub perceptual_score: f32,
+    /// Source facing direction (unit vector).
+    pub orientation_x: f32,
+    pub orientation_y: f32,
+    /// Orbit center position.
+    pub orbit_center_x: f32,
+    pub orbit_center_y: f32,
+    /// Orbit radius (meters). 0 = stationary.
+    pub orbit_radius: f32,
 }
 
 impl Default for SourceTelemetry {
@@ -44,6 +52,11 @@ impl Default for SourceTelemetry {
             gain_db: f32::NEG_INFINITY,
             is_muted: false,
             perceptual_score: 1.0,
+            orientation_x: 1.0,
+            orientation_y: 0.0,
+            orbit_center_x: 0.0,
+            orbit_center_y: 0.0,
+            orbit_radius: 0.0,
         }
     }
 }
@@ -136,6 +149,9 @@ pub fn compute_telemetry(
             f32::NEG_INFINITY
         };
 
+        let orientation = source.orientation();
+        let orbit_center = source.orbit_center();
+
         frame.sources[i] = SourceTelemetry {
             x: pos.x,
             y: pos.y,
@@ -148,6 +164,11 @@ pub fn compute_telemetry(
             gain_db,
             is_muted: source.is_muted(),
             perceptual_score: 1.0, // overwritten by AudioScene with actual scores
+            orientation_x: orientation.x,
+            orientation_y: orientation.y,
+            orbit_center_x: orbit_center.x,
+            orbit_center_y: orbit_center.y,
+            orbit_radius: source.orbit_radius(),
         };
     }
 
@@ -168,7 +189,7 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
         }
         let _ = write!(
             json,
-            r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{},"perceptual":{:.3}}}"#,
+            r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{},"perceptual":{:.3},"ox":{:.3},"oy":{:.3},"ocx":{:.2},"ocy":{:.2},"or":{:.2}}}"#,
             s.x,
             s.y,
             s.z,
@@ -184,6 +205,11 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
             },
             s.is_muted,
             s.perceptual_score,
+            s.orientation_x,
+            s.orientation_y,
+            s.orbit_center_x,
+            s.orbit_center_y,
+            s.orbit_radius,
         );
     }
 

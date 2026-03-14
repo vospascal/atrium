@@ -13,7 +13,7 @@ environment: environments/riverside.yaml
 atrium: rooms/atrium_6x4.yaml
 
 listener:
-  position: [3.0, 2.0, 0.0]  # center of room
+  position: [0.0, 0.0, 0.0]  # center of atrium (atrium-local coords)
   yaw_degrees: 90.0           # facing +Y (toward front wall)
 
 master_gain: 1.0
@@ -45,11 +45,11 @@ speakers:
   layout: "5.1"              # 5.1, quad, or stereo
   render_mode: vbap           # world_locked, vbap, hrtf
   positions:
-    fl: [0.0, 4.0, 0.0]   # front-left
-    fr: [6.0, 4.0, 0.0]   # front-right
-    c:  [3.0, 4.0, 0.0]   # front-center
-    rl: [0.0, 0.0, 0.0]   # rear-left
-    rr: [6.0, 0.0, 0.0]   # rear-right
+    fl: [-3.0, 2.0, 0.0]  # front-left
+    fr: [3.0, 2.0, 0.0]   # front-right
+    c:  [0.0, 2.0, 0.0]   # front-center
+    rl: [-3.0, -2.0, 0.0] # rear-left
+    rr: [3.0, -2.0, 0.0]  # rear-right
 
 normalization:
   # RMS target for digital normalization of raw audio buffers.
@@ -57,6 +57,12 @@ normalization:
   # Real-world standard: 0.1 (-20 dBFS RMS, ~17 dB peak headroom).
   # Raise for louder output; lower for more headroom.
   target_rms: 0.1
+
+  # SPL that maps to 0 dBFS (digital full scale).
+  # IEC 61672 standard: 94 dB (1 Pa RMS calibration tone).
+  # gain = 10^((spl - spl_reference) / 20).
+  # At 94: djembe (75 dB) → 0.112, campfire (55 dB) → 0.011, cat (25 dB) → 0.00035.
+  spl_reference: 94.0
 
   # SPL hearing threshold in dB — below this a source is inaudible.
   # Used to compute audible_radius via ISO 9613 free-field propagation:
@@ -67,16 +73,16 @@ normalization:
 sources:
   - source: sources/djembe.yaml
     color: "#ff6b35"
-    position: [3.0, 2.0, 0.0]   # orbits around listener
+    position: [0.0, 0.0, 0.0]    # orbits around listener at center
     orbit_radius: 1.5
-    orbit_speed: 1.0             # rad/s (~6.3s per orbit)
+    orbit_speed: 1.0              # rad/s (~6.3s per orbit)
 
   - source: sources/campfire.yaml
     color: "#ffc107"
-    position: [1.0, 1.0, 0.0]   # near corner
+    position: [-1.5, 0.0, 0.0]   # 1.5m left of center
 
   - source: sources/purring.yaml
     color: "#ce93d8"
-    position: [5.0, 3.0, 0.0]   # front-right area
+    position: [1.5, 0.0, 0.0]    # 1.5m right of center
 
 atmosphere: atmospheres/default.yaml
