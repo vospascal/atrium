@@ -42,7 +42,7 @@ impl MixStage for AmbisonicsDecodeStage {
         // Only decode if the renderer wrote B-format (≥4 render channels).
         // For stereo layouts, the renderer does inline bilateral decode.
         // Use render_channels (layout-based), not channels (hardware output).
-        if ctx.render_channels < 4 {
+        if ctx.render_channels < 4 || ctx.channels < 4 {
             return;
         }
 

@@ -124,7 +124,18 @@ impl AudioOutput for CpalOutput {
         );
 
         scene.sample_rate = sample_rate as f32;
+
+        // When the device has fewer channels than the layout, mask the
+        // channels that don't fit. The spatial algorithms still compute
+        // gains for all speakers, but masked channels are zeroed out.
+        let layout_total = scene.speaker_layout.total_channels();
+        if (channels as usize) < layout_total {
+            let active: Vec<usize> = (0..channels as usize).collect();
+            scene.speaker_layout.set_active_channels(&active);
+        }
+
         scene.init_pipelines();
+
 
         let config = StreamConfig {
             channels,

@@ -144,7 +144,7 @@ impl MixStage for AmbiMultiDelayStage {
 
     #[allow(clippy::needless_range_loop)]
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
-        if ctx.render_channels < 4 || !self.initialized {
+        if ctx.render_channels < 4 || ctx.channels < 4 || !self.initialized {
             return;
         }
 

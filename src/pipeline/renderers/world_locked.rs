@@ -86,7 +86,7 @@ impl Renderer for WorldLockedRenderer {
         let mut path_gains = [0.0f32; MAX_CHANNELS];
         for spk_idx in 0..layout.speaker_count() {
             if let Some(speaker) = layout.speaker_by_index(spk_idx) {
-                if !layout.is_channel_active(speaker.channel) {
+                if speaker.channel >= out.channels || !layout.is_channel_active(speaker.channel) {
                     continue;
                 }
 
@@ -154,7 +154,7 @@ impl Renderer for WorldLockedRenderer {
             for spk_idx in 0..layout.speaker_count() {
                 if let Some(speaker) = layout.speaker_by_index(spk_idx) {
                     let ch = speaker.channel;
-                    if !layout.is_channel_active(ch) {
+                    if ch >= out.channels || !layout.is_channel_active(ch) {
                         continue;
                     }
 

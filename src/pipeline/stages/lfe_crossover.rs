@@ -175,8 +175,9 @@ impl LfeBassManagementStage {
 impl MixStage for LfeBassManagementStage {
     fn init(&mut self, ctx: &MixContext) {
         let lfe = match ctx.layout.lfe_channel() {
-            Some(ch) => ch,
-            None => {
+            // LFE channel must fit within the actual output buffer width.
+            Some(ch) if ch < ctx.channels => ch,
+            _ => {
                 self.lfe_lowpass = None;
                 self.lfe_channel = None;
                 self.main_highpass = std::array::from_fn(|_| None);
@@ -199,8 +200,8 @@ impl MixStage for LfeBassManagementStage {
 
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
         let lfe = match self.lfe_channel {
-            Some(ch) => ch,
-            None => return,
+            Some(ch) if ch < ctx.channels => ch,
+            _ => return,
         };
         let lfe_lp = match self.lfe_lowpass.as_mut() {
             Some(f) => f,
@@ -216,6 +217,9 @@ impl MixStage for LfeBassManagementStage {
             // Sum bass content redirected from main channels.
             let mut bass_sum = 0.0f32;
             for (ch, hp_filter) in self.main_highpass.iter_mut().enumerate() {
+                if ch >= channels {
+                    break;
+                }
                 if let Some(ref mut hp) = hp_filter {
                     let idx = base + ch;
                     let original = buffer[idx];

@@ -711,9 +711,9 @@ pub fn render_pipeline(
 
     // Post-mix chain
     let effective_render_channels = if *render_channels > 0 {
-        *render_channels
+        (*render_channels).min(params.channels)
     } else {
-        params.layout.total_channels()
+        params.layout.total_channels().min(params.channels)
     };
     let mix_ctx = MixContext {
         listener: params.listener,
