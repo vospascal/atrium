@@ -2,7 +2,6 @@ use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 use crate::audio::spectral_profile::BARK_BANDS;
-use crate::engine::commands::Command;
 #[cfg(feature = "memprof")]
 use crate::engine::memprof::{MemProfiler, MemStage};
 use crate::engine::telemetry::{compute_telemetry, TelemetryFrame};
@@ -12,11 +11,12 @@ use crate::pipeline::{render_pipeline, RenderParams, RenderPipeline};
 use crate::profile_span;
 use crate::world::room::Room;
 use crate::world::types::Vec3;
+use atrium_core::commands::Command;
 use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
 use atrium_core::source::SoundSource;
-use atrium_core::speaker::{RenderMode, SpeakerLayout};
+use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 
 /// Snapshot of per-source initial state for scene reset.
 #[derive(Clone, Copy)]
@@ -59,6 +59,8 @@ pub struct AudioScene {
     pub pipelines: [RenderPipeline; 5],
     /// Which pipeline is active.
     pub active_pipeline: RenderMode,
+    /// Current speaker configuration (tracked for telemetry).
+    pub active_channel_mode: ChannelMode,
     /// Ground properties for pipeline propagation stages.
     pub ground: GroundProperties,
     /// Barriers for occlusion/transmission in propagation.
@@ -137,6 +139,7 @@ impl AudioScene {
                     }
                 }
                 Command::SetChannelMode { mode } => {
+                    self.active_channel_mode = mode;
                     self.speaker_layout
                         .set_active_channels(mode.active_channels());
                 }
@@ -153,6 +156,15 @@ impl AudioScene {
                     self.master_gain = self.initial_master_gain;
                     self.atmosphere = self.initial_atmosphere;
                     self.active_pipeline = self.initial_render_mode;
+                    // Reset speaker config to full layout
+                    let initial_channel_mode = match self.speaker_layout.total_channels() {
+                        2 => ChannelMode::Stereo,
+                        4 => ChannelMode::Quad,
+                        _ => ChannelMode::Surround51,
+                    };
+                    self.active_channel_mode = initial_channel_mode;
+                    self.speaker_layout
+                        .set_active_channels(initial_channel_mode.active_channels());
                     for p in self.pipelines.iter_mut() {
                         p.reset();
                     }
@@ -297,6 +309,9 @@ impl AudioScene {
                     let mut frame =
                         compute_telemetry(&self.sources, &self.listener, &self.distance_model);
                     frame.render_mode = self.active_pipeline;
+                    frame.channel_mode = self.active_channel_mode;
+                    frame.temperature_c = self.atmosphere.temperature_c;
+                    frame.humidity_pct = self.atmosphere.humidity_pct;
                     frame.channel_peaks =
                         crate::engine::telemetry::compute_channel_peaks(output, channels);
                     frame.channel_count = channels as u8;

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use crate::engine::commands::Command;
 use crate::world::types::Vec3;
+use atrium_core::commands::Command;
 use atrium_core::speaker::{ChannelMode, RenderMode};
 
 /// JSON messages received from the browser via WebSocket.

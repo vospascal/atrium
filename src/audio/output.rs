@@ -11,9 +11,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
-use crate::engine::commands::Command;
 use crate::engine::scene::AudioScene;
 use crate::profile_span;
+use atrium_core::commands::Command;
 
 /// Abstraction over audio output backends.
 /// Future: implement for cubeb-rs or other backends.

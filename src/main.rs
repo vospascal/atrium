@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::config::SceneConfig;
-use atrium::engine::commands::Command;
 use atrium::engine::telemetry::{telemetry_to_json, TelemetryFrame};
 use atrium::server::websocket::{run_server, TelemetryBroadcast};
+use atrium_core::commands::Command;
 
 #[cfg(feature = "memprof")]
 #[global_allocator]
@@ -15,6 +15,7 @@ static ALLOC: atrium::engine::memprof::TrackingAllocator =
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let ui_enabled = cfg!(feature = "tui") && args.iter().any(|a| a == "--ui");
+    let bevy_enabled = cfg!(feature = "bevy") && args.iter().any(|a| a == "--bevy");
     let scene_path = args
         .iter()
         .skip(1)
@@ -38,9 +39,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = SceneConfig::load(&scene_path)?;
     let mut result = config.build()?;
 
-    // Telemetry channel: audio thread → broadcaster thread (small ring, latest-wins)
-    let (telem_producer, mut telem_consumer) = rtrb::RingBuffer::<TelemetryFrame>::new(4);
+    // Telemetry channel: audio thread → broadcaster/Bevy (small ring, latest-wins)
+    let (telem_producer, telem_consumer) = rtrb::RingBuffer::<TelemetryFrame>::new(4);
     result.scene.telemetry_out = Some(telem_producer);
+
+    // Extract Bevy scene data from scene_json before anything consumes it
+    #[cfg(feature = "bevy")]
+    let bevy_scene_data = if bevy_enabled {
+        Some(build_bevy_scene_data(&result.scene_json)?)
+    } else {
+        None
+    };
 
     #[cfg(feature = "tui")]
     let source_names = result.source_names.clone();
@@ -61,7 +70,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if ui_enabled {
         println!("Terminal dashboard: active");
     }
+    if bevy_enabled {
+        println!("Bevy 3D visualization: active");
+    }
     println!();
+
+    // ── Bevy mode: Bevy owns the main thread, WS server on background thread ──
+    #[cfg(feature = "bevy")]
+    if bevy_enabled {
+        let bevy_scene_data = bevy_scene_data.unwrap();
+        let telemetry_receiver = atrium_bevy::TelemetryReceiver::new(telem_consumer);
+        let command_sender = atrium_bevy::CommandSender::new(producer);
+
+        // Keep audio handle alive
+        let _handle = handle;
+
+        // Bevy takes over the main thread (blocks until window closes)
+        atrium_bevy::run(bevy_scene_data, telemetry_receiver, command_sender);
+        return Ok(());
+    }
+
+    // ── Default mode: telemetry broadcaster + WS server on main thread ─────────
+    let mut telem_consumer = telem_consumer;
 
     // Telemetry broadcaster: drains ring buffer at ~15 Hz, publishes latest JSON
     let broadcast = Arc::new(TelemetryBroadcast::new());
@@ -138,6 +168,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_server("0.0.0.0:3333", producer, result.scene_json, broadcast)?;
 
     Ok(())
+}
+
+/// Build Bevy SceneData from the scene JSON string.
+#[cfg(feature = "bevy")]
+fn build_bevy_scene_data(
+    scene_json: &str,
+) -> Result<atrium_bevy::SceneData, Box<dyn std::error::Error>> {
+    let json: serde_json::Value = serde_json::from_str(scene_json)?;
+
+    let room = &json["room"];
+    let atrium = &json["atrium"];
+    let spawn = &json["spawn"];
+    let listener = &json["listener"];
+
+    let speakers: Vec<atrium_bevy::SpeakerData> = json["speakers"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|speaker| atrium_bevy::SpeakerData {
+            label: speaker["label"].as_str().unwrap_or("?").to_string(),
+            position: [
+                speaker["x"].as_f64().unwrap_or(0.0) as f32,
+                speaker["y"].as_f64().unwrap_or(0.0) as f32,
+                speaker["z"].as_f64().unwrap_or(0.0) as f32,
+            ],
+        })
+        .collect();
+
+    let sources: Vec<atrium_bevy::SourceData> = json["sources"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|source| {
+            let color = parse_hex_color(source["color"].as_str().unwrap_or("#ffffff"));
+            let pos = source["position"].as_array();
+            atrium_bevy::SourceData {
+                name: source["name"].as_str().unwrap_or("?").to_string(),
+                color,
+                position: [
+                    pos.and_then(|a| a[0].as_f64()).unwrap_or(0.0) as f32,
+                    pos.and_then(|a| a[1].as_f64()).unwrap_or(0.0) as f32,
+                    pos.and_then(|a| a[2].as_f64()).unwrap_or(0.0) as f32,
+                ],
+                orbit_radius: source["orbit_radius"].as_f64().unwrap_or(0.0) as f32,
+                spl: source["spl"].as_f64().unwrap_or(80.0) as f32,
+                ref_distance: source["ref_dist"].as_f64().unwrap_or(1.0) as f32,
+                directivity: source["directivity"].as_str().unwrap_or("omni").to_string(),
+                directivity_alpha: source["directivity_alpha"].as_f64().unwrap_or(1.0) as f32,
+                spread: source["spread"].as_f64().unwrap_or(0.0) as f32,
+            }
+        })
+        .collect();
+
+    Ok(atrium_bevy::SceneData {
+        environment_width: room["width"].as_f64().unwrap_or(20.0) as f32,
+        environment_depth: room["depth"].as_f64().unwrap_or(20.0) as f32,
+        environment_height: room["height"].as_f64().unwrap_or(10.0) as f32,
+        atrium_width: atrium["width"].as_f64().unwrap_or(6.0) as f32,
+        atrium_depth: atrium["depth"].as_f64().unwrap_or(4.0) as f32,
+        atrium_height: atrium["height"].as_f64().unwrap_or(3.0) as f32,
+        spawn: [
+            spawn["x"].as_f64().unwrap_or(0.0) as f32,
+            spawn["y"].as_f64().unwrap_or(0.0) as f32,
+            spawn["z"].as_f64().unwrap_or(0.0) as f32,
+        ],
+        speakers,
+        sources,
+        listener_position: [
+            listener["x"].as_f64().unwrap_or(0.0) as f32,
+            listener["y"].as_f64().unwrap_or(0.0) as f32,
+            listener["z"].as_f64().unwrap_or(0.0) as f32,
+        ],
+        listener_yaw: listener["yaw"].as_f64().unwrap_or(0.0) as f32,
+    })
+}
+
+/// Parse a hex color string like "#ff6b35" into [r, g, b] floats in 0..1.
+#[cfg(feature = "bevy")]
+fn parse_hex_color(hex: &str) -> [f32; 3] {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() < 6 {
+        return [1.0, 1.0, 1.0];
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255) as f32 / 255.0;
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255) as f32 / 255.0;
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255) as f32 / 255.0;
+    [r, g, b]
 }
 
 /// Initialize the tracing subscriber based on the --profile mode.

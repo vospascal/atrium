@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tungstenite::protocol::Message;
 
-use crate::engine::commands::Command;
+use atrium_core::commands::Command;
 
 use super::messages::ClientMessage;
 

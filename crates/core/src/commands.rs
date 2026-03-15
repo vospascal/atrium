@@ -1,5 +1,5 @@
-use crate::world::types::Vec3;
-use atrium_core::speaker::{ChannelMode, RenderMode};
+use crate::speaker::{ChannelMode, RenderMode};
+use crate::types::Vec3;
 
 /// Commands sent from the control thread to the audio thread via rtrb ring buffer.
 /// All variants must be small and Copy — no heap allocations.
@@ -49,8 +49,4 @@ pub enum Command {
 
     /// Reset the scene to its initial state (positions, orbits, gains, etc.).
     ResetScene,
-    // Future:
-    // AddSource { id: u32, source_type: SourceType, position: Vec3 },
-    // RemoveSource { id: u32 },
-    // SetRoomGeometry { ... },
 }

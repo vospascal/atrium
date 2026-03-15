@@ -1,0 +1,10 @@
+[package]
+name = "atrium-bevy"
+version = "0.1.0"
+edition = "2021"
+description = "Bevy 3D visualization for the Atrium spatial audio engine"
+
+[dependencies]
+atrium-core = { path = "../core" }
+bevy = { version = "0.18", features = ["bevy_dev_tools"] }
+rtrb = "0.3"

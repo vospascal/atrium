@@ -2,92 +2,21 @@
 //!
 //! The audio thread computes a `TelemetryFrame` every ~15 Hz and pushes it
 //! through an rtrb ring buffer to the main thread, which broadcasts it to
-//! WebSocket clients as JSON.
+//! WebSocket clients or the Bevy visualization.
 //!
-//! All types are fixed-size and Copy — no heap allocations, real-time safe.
+//! Type definitions live in `atrium_core::telemetry` (shared with atrium-bevy).
+//! This module re-exports them and provides the compute/serialization functions.
 
 use crate::audio::distance::DistanceModel;
 use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
 use atrium_core::source::SoundSource;
-use atrium_core::speaker::RenderMode;
 
-/// Per-source telemetry snapshot.
-#[derive(Clone, Copy, Debug)]
-pub struct SourceTelemetry {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub distance: f32,
-    pub gain_dist: f32,
-    pub gain_emit: f32,
-    pub gain_hear: f32,
-    pub gain_total: f32,
-    pub gain_db: f32,
-    pub is_muted: bool,
-    /// Perceptual score [0, 1] from masking/salience analysis.
-    pub perceptual_score: f32,
-    /// Source facing direction (unit vector).
-    pub orientation_x: f32,
-    pub orientation_y: f32,
-    /// Orbit center position.
-    pub orbit_center_x: f32,
-    pub orbit_center_y: f32,
-    /// Orbit radius (meters). 0 = stationary.
-    pub orbit_radius: f32,
-}
-
-impl Default for SourceTelemetry {
-    fn default() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            distance: 0.0,
-            gain_dist: 0.0,
-            gain_emit: 0.0,
-            gain_hear: 0.0,
-            gain_total: 0.0,
-            gain_db: f32::NEG_INFINITY,
-            is_muted: false,
-            perceptual_score: 1.0,
-            orientation_x: 1.0,
-            orientation_y: 0.0,
-            orbit_center_x: 0.0,
-            orbit_center_y: 0.0,
-            orbit_radius: 0.0,
-        }
-    }
-}
-
-pub const MAX_SOURCES: usize = 16;
-pub const MAX_TELEM_CHANNELS: usize = 8;
-
-/// Complete telemetry frame: all sources for one update tick.
-#[derive(Clone, Copy, Debug)]
-pub struct TelemetryFrame {
-    pub sources: [SourceTelemetry; MAX_SOURCES],
-    pub source_count: u8,
-    /// Current pipeline mode (may change at runtime via SetRenderMode command).
-    pub render_mode: RenderMode,
-    /// Per-channel peak amplitude (linear) from the most recent render buffer.
-    pub channel_peaks: [f32; MAX_TELEM_CHANNELS],
-    /// Number of output channels.
-    pub channel_count: u8,
-}
-
-impl Default for TelemetryFrame {
-    fn default() -> Self {
-        Self {
-            sources: [SourceTelemetry::default(); MAX_SOURCES],
-            source_count: 0,
-            render_mode: RenderMode::WorldLocked,
-            channel_peaks: [0.0; MAX_TELEM_CHANNELS],
-            channel_count: 0,
-        }
-    }
-}
+// Re-export telemetry types from core so existing callers keep working.
+pub use atrium_core::telemetry::{
+    SourceTelemetry, TelemetryFrame, MAX_CHANNELS as MAX_TELEM_CHANNELS, MAX_SOURCES,
+};
 
 /// Compute per-channel peak amplitudes from an interleaved output buffer.
 pub fn compute_channel_peaks(output: &[f32], channels: usize) -> [f32; MAX_TELEM_CHANNELS] {
@@ -389,6 +318,112 @@ mod tests {
         assert!(
             (drop - 6.0).abs() < 0.1,
             "Doubling distance should drop 6 dB, got {drop:.1}"
+        );
+    }
+
+    /// Find the distance at which campfire (55 dB) and purring (30 dB) each
+    /// produce exactly 45 dB SPL received, using the real engine telemetry path.
+    ///
+    /// Inverse distance model (ref_dist=1, rolloff=1, omni source, omni listener):
+    ///   received = reference_spl + gain_db
+    ///   gain_db  = 20·log₁₀(1/d) = -20·log₁₀(d)   (for d ≥ 1)
+    ///
+    /// Solving: d = 10^((reference_spl - target) / 20)
+    ///   Campfire: 10^((55 - 45)/20) = 10^0.5  ≈ 3.162 m  (move away)
+    ///   Purring:  10^((30 - 45)/20) = 10^-0.75 ≈ 0.178 m  (move closer, near-field boost)
+    #[test]
+    fn distance_for_45db_received_campfire_and_purring() {
+        let buf = sine_buffer();
+        let dist_model = default_distance();
+        let target_received = 45.0_f32;
+
+        for (name, spl, expected_distance) in [
+            ("campfire", 55.0_f32, 10.0_f32.powf(0.5)),  // ≈ 3.162 m
+            ("purring", 30.0_f32, 10.0_f32.powf(-0.75)), // ≈ 0.178 m
+        ] {
+            // Place source at the analytically derived distance along +X
+            let source_pos = Vec3::new(expected_distance, 0.0, 0.0);
+            let listener = omni_listener(Vec3::ZERO);
+            let sources: Vec<Box<dyn SoundSource>> =
+                vec![make_source(&buf, spl, source_pos, 100.0)];
+
+            let frame = compute_telemetry(&sources, &listener, &dist_model);
+            let telemetry = &frame.sources[0];
+
+            // Verify distance
+            assert!(
+                (telemetry.distance - expected_distance).abs() < 0.01,
+                "{name}: distance should be {expected_distance:.3}, got {:.3}",
+                telemetry.distance,
+            );
+
+            // Verify received SPL = reference_spl + gain_db ≈ 45 dB
+            let received = spl + telemetry.gain_db;
+            assert!(
+                (received - target_received).abs() < 0.5,
+                "{name}: received should be ~{target_received} dB SPL, got {received:.1} \
+                 (spl={spl}, gain_db={:.1}, dist={:.3}, gain_dist={:.4})",
+                telemetry.gain_db,
+                telemetry.distance,
+                telemetry.gain_dist,
+            );
+
+            println!(
+                "  {name}: {spl:.0} dB SPL @ {:.3}m → received {received:.1} dB SPL \
+                 (gain_db={:.1}, dist_gain={:.4})",
+                telemetry.distance, telemetry.gain_db, telemetry.gain_dist,
+            );
+        }
+    }
+
+    /// Verify that at their respective 45 dB distances, campfire and purring
+    /// produce the SAME actual digital audio amplitude.
+    ///
+    /// The audio thread multiplies: output = sample × source_amplitude × gain_total
+    /// If the received SPL is the same, the digital amplitude must be the same.
+    #[test]
+    fn actual_audio_amplitude_matches_at_equal_received_spl() {
+        let buf = sine_buffer();
+        let dist_model = default_distance();
+        let spl_reference = 94.0_f32; // IEC 61672
+        let target_rms = 0.1;
+
+        // Distances that give exactly 45 dB received (from the test above)
+        let campfire_distance = 10.0_f32.powf(0.5);  // 3.162 m
+        let purring_distance = 10.0_f32.powf(-0.75); // 0.178 m
+
+        let campfire_profile = SoundProfile { reference_spl: 55.0 };
+        let purring_profile = SoundProfile { reference_spl: 30.0 };
+
+        let campfire_amp = campfire_profile.amplitude(buf.rms, target_rms, spl_reference);
+        let purring_amp = purring_profile.amplitude(buf.rms, target_rms, spl_reference);
+
+        let listener = omni_listener(Vec3::ZERO);
+
+        let campfire_sources: Vec<Box<dyn SoundSource>> = vec![make_source(
+            &buf, 55.0, Vec3::new(campfire_distance, 0.0, 0.0), spl_reference,
+        )];
+        let purring_sources: Vec<Box<dyn SoundSource>> = vec![make_source(
+            &buf, 30.0, Vec3::new(purring_distance, 0.0, 0.0), spl_reference,
+        )];
+
+        let campfire_frame = compute_telemetry(&campfire_sources, &listener, &dist_model);
+        let purring_frame = compute_telemetry(&purring_sources, &listener, &dist_model);
+
+        let campfire_output = campfire_amp * campfire_frame.sources[0].gain_total;
+        let purring_output = purring_amp * purring_frame.sources[0].gain_total;
+
+        println!("  campfire: amp={campfire_amp:.6} × gain={:.4} = output {campfire_output:.8}",
+            campfire_frame.sources[0].gain_total);
+        println!("  purring:  amp={purring_amp:.6} × gain={:.4} = output {purring_output:.8}",
+            purring_frame.sources[0].gain_total);
+        println!("  ratio: {:.4} (should be 1.0)", campfire_output / purring_output);
+
+        // If both receive 45 dB SPL, their digital output must be equal
+        assert!(
+            (campfire_output - purring_output).abs() / campfire_output.max(1e-10) < 0.01,
+            "At equal received SPL, digital amplitudes should match: \
+             campfire={campfire_output:.8}, purring={purring_output:.8}"
         );
     }
 

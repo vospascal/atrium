@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/tui"]
+members = [".", "crates/core", "crates/tui", "crates/bevy-ui"]
 
 [package]
 name = "atrium"
@@ -22,6 +22,7 @@ symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac"] }
 sofar = "0.2.1"
 realfft = "3.5"
 atrium-tui = { path = "crates/tui", optional = true }
+atrium-bevy = { path = "crates/bevy-ui", optional = true }
 
 # Profiling (optional, zero-cost when disabled)
 tracing = { version = "0.1", optional = true }
@@ -32,8 +33,13 @@ tracing-flame = { version = "0.2", optional = true }
 [features]
 default = ["tui"]
 tui = ["dep:atrium-tui"]
+bevy = ["dep:atrium-bevy"]
 profiler = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-perfetto", "dep:tracing-flame"]
 memprof = []
+
+# Optimize deps in debug mode (essential for Bevy — unplayable without this)
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.profiling]
 inherits = "release"

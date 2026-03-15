@@ -1,6 +1,5 @@
 //! Audio engine internals: scene graph, command queue, telemetry, and profiling.
 
-pub mod commands;
 /// Audio-thread allocation tracking. Only available with `--features memprof`.
 #[cfg(feature = "memprof")]
 pub mod memprof;

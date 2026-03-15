@@ -529,6 +529,11 @@ impl SceneConfig {
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;
+        let active_channel_mode = match speaker_layout.total_channels() {
+            2 => ChannelMode::Stereo,
+            4 => ChannelMode::Quad,
+            _ => ChannelMode::Surround51,
+        };
 
         let source_count = sources.len();
         let scene = AudioScene {
@@ -553,6 +558,7 @@ impl SceneConfig {
             memprof: crate::engine::memprof::MemProfiler::new(),
             pipelines,
             active_pipeline,
+            active_channel_mode,
             ground,
             barriers: Vec::new(),
             wall_materials,
