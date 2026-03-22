@@ -389,11 +389,15 @@ mod tests {
         let target_rms = 0.1;
 
         // Distances that give exactly 45 dB received (from the test above)
-        let campfire_distance = 10.0_f32.powf(0.5);  // 3.162 m
+        let campfire_distance = 10.0_f32.powf(0.5); // 3.162 m
         let purring_distance = 10.0_f32.powf(-0.75); // 0.178 m
 
-        let campfire_profile = SoundProfile { reference_spl: 55.0 };
-        let purring_profile = SoundProfile { reference_spl: 30.0 };
+        let campfire_profile = SoundProfile {
+            reference_spl: 55.0,
+        };
+        let purring_profile = SoundProfile {
+            reference_spl: 30.0,
+        };
 
         let campfire_amp = campfire_profile.amplitude(buf.rms, target_rms, spl_reference);
         let purring_amp = purring_profile.amplitude(buf.rms, target_rms, spl_reference);
@@ -401,10 +405,16 @@ mod tests {
         let listener = omni_listener(Vec3::ZERO);
 
         let campfire_sources: Vec<Box<dyn SoundSource>> = vec![make_source(
-            &buf, 55.0, Vec3::new(campfire_distance, 0.0, 0.0), spl_reference,
+            &buf,
+            55.0,
+            Vec3::new(campfire_distance, 0.0, 0.0),
+            spl_reference,
         )];
         let purring_sources: Vec<Box<dyn SoundSource>> = vec![make_source(
-            &buf, 30.0, Vec3::new(purring_distance, 0.0, 0.0), spl_reference,
+            &buf,
+            30.0,
+            Vec3::new(purring_distance, 0.0, 0.0),
+            spl_reference,
         )];
 
         let campfire_frame = compute_telemetry(&campfire_sources, &listener, &dist_model);
@@ -413,11 +423,18 @@ mod tests {
         let campfire_output = campfire_amp * campfire_frame.sources[0].gain_total;
         let purring_output = purring_amp * purring_frame.sources[0].gain_total;
 
-        println!("  campfire: amp={campfire_amp:.6} × gain={:.4} = output {campfire_output:.8}",
-            campfire_frame.sources[0].gain_total);
-        println!("  purring:  amp={purring_amp:.6} × gain={:.4} = output {purring_output:.8}",
-            purring_frame.sources[0].gain_total);
-        println!("  ratio: {:.4} (should be 1.0)", campfire_output / purring_output);
+        println!(
+            "  campfire: amp={campfire_amp:.6} × gain={:.4} = output {campfire_output:.8}",
+            campfire_frame.sources[0].gain_total
+        );
+        println!(
+            "  purring:  amp={purring_amp:.6} × gain={:.4} = output {purring_output:.8}",
+            purring_frame.sources[0].gain_total
+        );
+        println!(
+            "  ratio: {:.4} (should be 1.0)",
+            campfire_output / purring_output
+        );
 
         // If both receive 45 dB SPL, their digital output must be equal
         assert!(

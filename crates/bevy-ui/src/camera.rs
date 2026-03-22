@@ -14,7 +14,9 @@ use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use bevy::prelude::*;
 
-use crate::scene::{atrium_to_bevy, SceneData};
+use bevy::ui::IsDefaultUiCamera;
+
+use crate::scene::{atrium_to_bevy, SceneDescription};
 use crate::telemetry::CommandSender;
 
 /// Minimum camera height above the ground plane.
@@ -61,14 +63,15 @@ impl Default for CameraSettings {
     }
 }
 
-pub fn setup_camera(mut commands: Commands, scene_data: Res<SceneData>) {
-    let spawn = atrium_to_bevy(scene_data.spawn);
+pub fn setup_camera(mut commands: Commands, description: Res<SceneDescription>) {
+    let spawn = atrium_to_bevy(description.environment.spawn);
 
     let settings = CameraSettings {
-        orbit_distance: scene_data.atrium_width.max(scene_data.atrium_depth) * 2.0,
-        max_distance: scene_data
-            .environment_width
-            .max(scene_data.environment_depth),
+        orbit_distance: description.atrium.width.max(description.atrium.depth) * 2.0,
+        max_distance: description
+            .environment
+            .width
+            .max(description.environment.depth),
         ..default()
     };
 
@@ -77,10 +80,10 @@ pub fn setup_camera(mut commands: Commands, scene_data: Res<SceneData>) {
 
     commands.spawn((
         OrbitCamera,
+        IsDefaultUiCamera,
         Camera3d::default(),
         Tonemapping::TonyMcMapface,
         Transform::from_xyz(spawn.x + 8.0, 10.0, spawn.z + 8.0).looking_at(spawn, Vec3::Y),
-        // Exponential squared fog — soft atmospheric falloff at environment edges
         DistanceFog {
             color: Color::srgb(0.08, 0.08, 0.10),
             falloff: FogFalloff::ExponentialSquared {
@@ -88,7 +91,6 @@ pub fn setup_camera(mut commands: Commands, scene_data: Res<SceneData>) {
             },
             ..default()
         },
-        // Depth of field — keeps listener area sharp, blurs distant objects
         DepthOfField {
             mode: DepthOfFieldMode::Gaussian,
             focal_distance: settings.orbit_distance,
@@ -100,8 +102,8 @@ pub fn setup_camera(mut commands: Commands, scene_data: Res<SceneData>) {
 
     commands.insert_resource(settings);
     commands.insert_resource(ListenerState {
-        position: scene_data.listener_position,
-        yaw: scene_data.listener_yaw.to_radians(),
+        position: description.listener.position,
+        yaw: description.listener.yaw_degrees.to_radians(),
     });
 }
 
@@ -137,10 +139,6 @@ pub fn orbit_camera(
     let bevy_forward = Vec3::new(-camera_yaw.sin(), 0.0, -camera_yaw.cos());
     let bevy_right = Vec3::new(camera_yaw.cos(), 0.0, -camera_yaw.sin());
 
-    // Sync listener yaw with camera facing direction — the hearing cone
-    // rotates as you orbit the view (same behavior as the web UI).
-    // Bevy camera yaw → Atrium yaw: Bevy forward is -Z, Atrium forward is +Y.
-    // camera_yaw=0 in Bevy means looking toward -Z, which is Atrium +Y (yaw=π/2).
     let atrium_yaw = FRAC_PI_2 + camera_yaw;
     let yaw_changed = (atrium_yaw - listener.yaw).abs() > 0.001;
     listener.yaw = atrium_yaw;
@@ -163,14 +161,11 @@ pub fn orbit_camera(
     if moved {
         let bevy_delta = move_dir.normalize() * settings.move_speed * time.delta_secs();
 
-        // Convert Bevy delta back to Atrium coordinates:
-        // Atrium.X = Bevy.X, Atrium.Y = -Bevy.Z, Atrium.Z = Bevy.Y
         listener.position[0] += bevy_delta.x;
         listener.position[1] -= bevy_delta.z;
         listener.position[2] += bevy_delta.y;
     }
 
-    // Send pose update whenever position or yaw changed
     if moved || yaw_changed {
         command_sender.send(Command::SetListenerPose {
             position: AtriumVec3::new(
@@ -192,10 +187,8 @@ pub fn orbit_camera(
             (settings.orbit_distance - scroll).clamp(settings.min_distance, settings.max_distance);
     }
 
-    // Update depth of field focal distance to track orbit distance
     dof.focal_distance = settings.orbit_distance;
 
-    // Camera orbits around listener position, clamped above ground
     let orbit_target = atrium_to_bevy(listener.position);
     transform.translation = orbit_target - transform.forward() * settings.orbit_distance;
     transform.translation.y = transform.translation.y.max(MIN_CAMERA_HEIGHT);

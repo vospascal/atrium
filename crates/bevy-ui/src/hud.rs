@@ -5,8 +5,8 @@
 
 use bevy::prelude::*;
 
+use crate::ecs::{SoundSource, SoundSourceIndex};
 use crate::input;
-use crate::scene::SceneData;
 use crate::telemetry::TelemetryMessage;
 
 // ── Colors ──────────────────────────────────────────────────────────────────
@@ -94,7 +94,10 @@ pub(crate) struct PipelineReceivedSplText {
 
 // ── Setup ───────────────────────────────────────────────────────────────────
 
-pub(crate) fn setup_hud(mut commands: Commands, scene_data: Res<SceneData>) {
+pub(crate) fn setup_hud(mut commands: Commands, sources: Query<(&SoundSourceIndex, &SoundSource)>) {
+    // Collect and sort sources by index for deterministic HUD ordering.
+    let mut sorted_sources: Vec<_> = sources.iter().collect();
+    sorted_sources.sort_by_key(|(idx, _)| idx.0);
     // Root panel — top-left, semi-transparent
     commands
         .spawn((
@@ -113,25 +116,19 @@ pub(crate) fn setup_hud(mut commands: Commands, scene_data: Res<SceneData>) {
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|panel| {
-            // Title
             spawn_title(panel);
-
-            // Separator
             spawn_separator(panel);
 
-            // Render mode buttons
             spawn_section_label(panel, "RENDER MODE");
             input::spawn_render_mode_buttons(panel);
 
             spawn_separator(panel);
 
-            // Channel mode buttons
             spawn_section_label(panel, "SPEAKERS");
             input::spawn_channel_mode_buttons(panel);
 
             spawn_separator(panel);
 
-            // Listener
             spawn_section_label(panel, "LISTENER");
             panel.spawn((
                 ListenerPositionText,
@@ -145,28 +142,24 @@ pub(crate) fn setup_hud(mut commands: Commands, scene_data: Res<SceneData>) {
 
             spawn_separator(panel);
 
-            // Sources
             spawn_section_label(panel, "SOURCES");
-            for (index, source) in scene_data.sources.iter().enumerate() {
-                spawn_source_row(panel, index, source);
-                input::spawn_source_buttons(panel, index, source.orbit_radius > 0.0);
+            for (index, source) in &sorted_sources {
+                spawn_source_row(panel, index.0, source);
+                input::spawn_source_buttons(panel, index.0, source.orbit_radius > 0.0);
             }
 
             spawn_separator(panel);
 
-            // Atmosphere
             spawn_section_label(panel, "ATMOSPHERE");
             input::spawn_atmosphere_controls(panel);
 
             spawn_separator(panel);
 
-            // Channel meters
             spawn_section_label(panel, "OUTPUT LEVELS");
             spawn_channel_meters(panel);
 
             spawn_separator(panel);
 
-            // Reset
             input::spawn_reset_button(panel);
         });
 
@@ -187,7 +180,6 @@ pub(crate) fn setup_hud(mut commands: Commands, scene_data: Res<SceneData>) {
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|panel| {
-            // Title
             panel.spawn((
                 Text::new("Volume Pipeline"),
                 TextFont {
@@ -199,8 +191,8 @@ pub(crate) fn setup_hud(mut commands: Commands, scene_data: Res<SceneData>) {
 
             spawn_separator(panel);
 
-            for (index, source) in scene_data.sources.iter().enumerate() {
-                spawn_pipeline_source(panel, index, source);
+            for (index, source) in &sorted_sources {
+                spawn_pipeline_source(panel, index.0, source);
             }
         });
 }
@@ -238,11 +230,7 @@ fn spawn_separator(parent: &mut ChildSpawnerCommands) {
     ));
 }
 
-fn spawn_source_row(
-    parent: &mut ChildSpawnerCommands,
-    index: usize,
-    source: &crate::scene::SourceData,
-) {
+fn spawn_source_row(parent: &mut ChildSpawnerCommands, index: usize, source: &SoundSource) {
     let source_color = Color::srgb(source.color[0], source.color[1], source.color[2]);
 
     parent
@@ -253,7 +241,6 @@ fn spawn_source_row(
             ..default()
         })
         .with_children(|row| {
-            // Source name with colored indicator
             row.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(6.0),
@@ -261,7 +248,6 @@ fn spawn_source_row(
                 ..default()
             })
             .with_children(|name_row| {
-                // Color dot
                 name_row.spawn((
                     Node {
                         width: Val::Px(8.0),
@@ -270,7 +256,6 @@ fn spawn_source_row(
                     },
                     BackgroundColor(source_color),
                 ));
-                // Name
                 name_row.spawn((
                     Text::new(&source.name),
                     TextFont {
@@ -281,7 +266,6 @@ fn spawn_source_row(
                 ));
             });
 
-            // Value text (updated each frame)
             row.spawn((
                 SourceValueText { index },
                 Text::new("dist: —  gain: —"),
@@ -298,12 +282,12 @@ fn spawn_source_row(
         });
 }
 
-// ── Pipeline stage colors (matching the screenshot style) ────────────────
+// ── Pipeline stage colors ────────────────────────────────────────────────
 
-const STAGE_COLOR_DIST: Color = Color::srgb(0.96, 0.26, 0.21); // red
-const STAGE_COLOR_EMIT: Color = Color::srgb(0.61, 0.15, 0.69); // purple
-const STAGE_COLOR_HEAR: Color = Color::srgb(0.31, 0.76, 0.97); // blue
-const STAGE_COLOR_TOTAL: Color = Color::srgb(0.30, 0.69, 0.31); // green
+const STAGE_COLOR_DIST: Color = Color::srgb(0.96, 0.26, 0.21);
+const STAGE_COLOR_EMIT: Color = Color::srgb(0.61, 0.15, 0.69);
+const STAGE_COLOR_HEAR: Color = Color::srgb(0.31, 0.76, 0.97);
+const STAGE_COLOR_TOTAL: Color = Color::srgb(0.30, 0.69, 0.31);
 
 fn stage_color(stage: PipelineStage) -> Color {
     match stage {
@@ -321,11 +305,7 @@ fn stage_label(stage: PipelineStage) -> &'static str {
     }
 }
 
-fn spawn_pipeline_source(
-    parent: &mut ChildSpawnerCommands,
-    index: usize,
-    source: &crate::scene::SourceData,
-) {
+fn spawn_pipeline_source(parent: &mut ChildSpawnerCommands, index: usize, source: &SoundSource) {
     let source_color = Color::srgb(source.color[0], source.color[1], source.color[2]);
 
     parent
@@ -336,7 +316,6 @@ fn spawn_pipeline_source(
             ..default()
         })
         .with_children(|col| {
-            // Source name header
             col.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(6.0),
@@ -362,7 +341,6 @@ fn spawn_pipeline_source(
                 ));
             });
 
-            // Pipeline stages
             for stage in [
                 PipelineStage::Distance,
                 PipelineStage::Emission,
@@ -371,10 +349,8 @@ fn spawn_pipeline_source(
                 spawn_pipeline_bar(col, index, stage);
             }
 
-            // Total / final gain
             spawn_pipeline_total(col, index);
 
-            // Received SPL
             col.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::SpaceBetween,
@@ -403,7 +379,6 @@ fn spawn_pipeline_source(
                 ));
             });
 
-            // Thin separator between sources
             col.spawn((
                 Node {
                     width: Val::Percent(100.0),
@@ -431,7 +406,6 @@ fn spawn_pipeline_bar(
             ..default()
         })
         .with_children(|col| {
-            // Label + percentage row
             col.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::SpaceBetween,
@@ -460,7 +434,6 @@ fn spawn_pipeline_bar(
                 ));
             });
 
-            // Bar background + fill
             col.spawn((
                 Node {
                     width: Val::Px(bar_width),
@@ -563,7 +536,6 @@ fn spawn_channel_meters(parent: &mut ChildSpawnerCommands) {
                         ..default()
                     })
                     .with_children(|row| {
-                        // Channel label
                         row.spawn((
                             Text::new(*label),
                             TextFont {
@@ -577,7 +549,6 @@ fn spawn_channel_meters(parent: &mut ChildSpawnerCommands) {
                             },
                         ));
 
-                        // Meter background
                         row.spawn((
                             Node {
                                 width: Val::Px(160.0),
@@ -587,7 +558,6 @@ fn spawn_channel_meters(parent: &mut ChildSpawnerCommands) {
                             BackgroundColor(METER_BG),
                         ))
                         .with_children(|meter_bg| {
-                            // Meter fill bar
                             meter_bg.spawn((
                                 ChannelMeterBar { channel },
                                 Node {
@@ -599,7 +569,6 @@ fn spawn_channel_meters(parent: &mut ChildSpawnerCommands) {
                             ));
                         });
 
-                        // Peak dB text
                         row.spawn((
                             ChannelPeakText { channel },
                             Text::new("-∞"),
@@ -677,7 +646,6 @@ pub(crate) fn update_hud_meters(
             let peak = frame.channel_peaks[marker.channel].clamp(0.0, 1.0);
             node.width = Val::Px(peak * meter_width);
 
-            // Color: green < -12dB, yellow < -3dB, red above
             bg.0 = if peak > 0.707 {
                 METER_RED
             } else if peak > 0.25 {
@@ -702,14 +670,11 @@ pub(crate) fn update_hud_meters(
 }
 
 /// Map a linear gain to a 0..1 bar fraction using a dB scale.
-/// Range: -40 dB (gain ~0.01) → 0.0,  +20 dB (gain 10.0) → 1.0.
-/// gain=1.0 (0 dB) maps to 2/3 of the bar width.
 fn gain_to_bar_fraction(gain: f32) -> f32 {
     if gain <= 0.0 {
         return 0.0;
     }
     let db = 20.0 * gain.log10();
-    // Map -40..+20 dB → 0..1
     ((db + 40.0) / 60.0).clamp(0.0, 1.0)
 }
 
@@ -734,7 +699,7 @@ pub(crate) fn update_hud_pipeline(
         (&PipelineReceivedSplText, &mut Text),
         (Without<PipelineStageText>, Without<PipelineTotalText>),
     >,
-    scene_data: Res<SceneData>,
+    audio_sources: Query<(&SoundSourceIndex, &SoundSource)>,
     mut messages: MessageReader<TelemetryMessage>,
 ) {
     let Some(msg) = messages.read().last() else {
@@ -782,13 +747,15 @@ pub(crate) fn update_hud_pipeline(
     }
 
     for (marker, mut text) in &mut spl_texts {
-        if marker.source_index < frame.source_count as usize
-            && marker.source_index < scene_data.sources.len()
-        {
+        if marker.source_index < frame.source_count as usize {
             let telemetry = &frame.sources[marker.source_index];
-            let reference_spl = scene_data.sources[marker.source_index].spl;
-            // received_spl = reference_spl + gain_db
-            // gain_db already encodes: -20·log₁₀(dist/ref_dist) + 20·log₁₀(emit) + 20·log₁₀(hear)
+            // Look up the reference SPL from the SoundSource component
+            let reference_spl = audio_sources
+                .iter()
+                .find(|(idx, _)| idx.0 == marker.source_index)
+                .map(|(_, s)| s.spl)
+                .unwrap_or(80.0);
+
             if telemetry.gain_db.is_finite() {
                 let received = reference_spl + telemetry.gain_db;
                 **text = format!("{:.0} dB SPL", received);

@@ -43,10 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (telem_producer, telem_consumer) = rtrb::RingBuffer::<TelemetryFrame>::new(4);
     result.scene.telemetry_out = Some(telem_producer);
 
-    // Extract Bevy scene data from scene_json before anything consumes it
+    // Extract Bevy scene description from scene_json before anything consumes it
     #[cfg(feature = "bevy")]
-    let bevy_scene_data = if bevy_enabled {
-        Some(build_bevy_scene_data(&result.scene_json)?)
+    let bevy_description = if bevy_enabled {
+        Some(build_scene_description(&result.scene_json)?)
     } else {
         None
     };
@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Bevy mode: Bevy owns the main thread, WS server on background thread ──
     #[cfg(feature = "bevy")]
     if bevy_enabled {
-        let bevy_scene_data = bevy_scene_data.unwrap();
+        let description = bevy_description.unwrap();
         let telemetry_receiver = atrium_bevy::TelemetryReceiver::new(telem_consumer);
         let command_sender = atrium_bevy::CommandSender::new(producer);
 
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _handle = handle;
 
         // Bevy takes over the main thread (blocks until window closes)
-        atrium_bevy::run(bevy_scene_data, telemetry_receiver, command_sender);
+        atrium_bevy::run(description, telemetry_receiver, command_sender);
         return Ok(());
     }
 
@@ -170,91 +170,131 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Build Bevy SceneData from the scene JSON string.
+/// Build a SceneDescription from the engine's scene JSON string.
+/// This bridges the YAML config → audio engine → Bevy ECS path.
+/// In the future, config.rs could produce SceneDescription directly.
 #[cfg(feature = "bevy")]
-fn build_bevy_scene_data(
+fn build_scene_description(
     scene_json: &str,
-) -> Result<atrium_bevy::SceneData, Box<dyn std::error::Error>> {
+) -> Result<atrium_bevy::SceneDescription, Box<dyn std::error::Error>> {
+    use atrium_bevy::scene::schema::*;
+
     let json: serde_json::Value = serde_json::from_str(scene_json)?;
 
     let room = &json["room"];
-    let atrium = &json["atrium"];
+    let atrium_json = &json["atrium"];
     let spawn = &json["spawn"];
-    let listener = &json["listener"];
+    let listener_json = &json["listener"];
+    let dm = &json["distance_model"];
 
-    let speakers: Vec<atrium_bevy::SpeakerData> = json["speakers"]
+    let speakers: Vec<SpeakerDescription> = json["speakers"]
         .as_array()
         .unwrap_or(&vec![])
         .iter()
-        .map(|speaker| atrium_bevy::SpeakerData {
-            label: speaker["label"].as_str().unwrap_or("?").to_string(),
-            position: [
-                speaker["x"].as_f64().unwrap_or(0.0) as f32,
-                speaker["y"].as_f64().unwrap_or(0.0) as f32,
-                speaker["z"].as_f64().unwrap_or(0.0) as f32,
-            ],
+        .enumerate()
+        .map(|(i, speaker)| {
+            let label = speaker["label"].as_str().unwrap_or("?").to_string();
+            SpeakerDescription {
+                id: label.to_lowercase(),
+                label,
+                position: [
+                    speaker["x"].as_f64().unwrap_or(0.0) as f32,
+                    speaker["y"].as_f64().unwrap_or(0.0) as f32,
+                    speaker["z"].as_f64().unwrap_or(0.0) as f32,
+                ],
+                channel: speaker["channel"].as_u64().unwrap_or(i as u64) as usize,
+            }
         })
         .collect();
 
-    let sources: Vec<atrium_bevy::SourceData> = json["sources"]
+    let sources: Vec<SourceDescription> = json["sources"]
         .as_array()
         .unwrap_or(&vec![])
         .iter()
-        .map(|source| {
-            let color = parse_hex_color(source["color"].as_str().unwrap_or("#ffffff"));
+        .enumerate()
+        .map(|(i, source)| {
+            let name = source["name"].as_str().unwrap_or("?").to_string();
             let pos = source["position"].as_array();
-            atrium_bevy::SourceData {
-                name: source["name"].as_str().unwrap_or("?").to_string(),
-                color,
+            SourceDescription {
+                id: format!("source_{}", i),
+                name,
+                color: source["color"].as_str().unwrap_or("#ffffff").to_string(),
                 position: [
                     pos.and_then(|a| a[0].as_f64()).unwrap_or(0.0) as f32,
                     pos.and_then(|a| a[1].as_f64()).unwrap_or(0.0) as f32,
                     pos.and_then(|a| a[2].as_f64()).unwrap_or(0.0) as f32,
                 ],
-                orbit_radius: source["orbit_radius"].as_f64().unwrap_or(0.0) as f32,
                 spl: source["spl"].as_f64().unwrap_or(80.0) as f32,
                 ref_distance: source["ref_dist"].as_f64().unwrap_or(1.0) as f32,
                 directivity: source["directivity"].as_str().unwrap_or("omni").to_string(),
                 directivity_alpha: source["directivity_alpha"].as_f64().unwrap_or(1.0) as f32,
                 spread: source["spread"].as_f64().unwrap_or(0.0) as f32,
+                orbit_radius: source["orbit_radius"].as_f64().unwrap_or(0.0) as f32,
+                orbit_speed: source["orbit_speed"].as_f64().unwrap_or(0.0) as f32,
             }
         })
         .collect();
 
-    Ok(atrium_bevy::SceneData {
-        environment_width: room["width"].as_f64().unwrap_or(20.0) as f32,
-        environment_depth: room["depth"].as_f64().unwrap_or(20.0) as f32,
-        environment_height: room["height"].as_f64().unwrap_or(10.0) as f32,
-        atrium_width: atrium["width"].as_f64().unwrap_or(6.0) as f32,
-        atrium_depth: atrium["depth"].as_f64().unwrap_or(4.0) as f32,
-        atrium_height: atrium["height"].as_f64().unwrap_or(3.0) as f32,
-        spawn: [
-            spawn["x"].as_f64().unwrap_or(0.0) as f32,
-            spawn["y"].as_f64().unwrap_or(0.0) as f32,
-            spawn["z"].as_f64().unwrap_or(0.0) as f32,
-        ],
-        speakers,
-        sources,
-        listener_position: [
-            listener["x"].as_f64().unwrap_or(0.0) as f32,
-            listener["y"].as_f64().unwrap_or(0.0) as f32,
-            listener["z"].as_f64().unwrap_or(0.0) as f32,
-        ],
-        listener_yaw: listener["yaw"].as_f64().unwrap_or(0.0) as f32,
-    })
-}
+    let layout_str = json["channel_mode"]
+        .as_str()
+        .or_else(|| {
+            // Fall back to speaker count heuristic
+            None
+        })
+        .unwrap_or(match speakers.len() {
+            2 => "stereo",
+            4 => "quad",
+            _ => "5.1",
+        })
+        .to_string();
 
-/// Parse a hex color string like "#ff6b35" into [r, g, b] floats in 0..1.
-#[cfg(feature = "bevy")]
-fn parse_hex_color(hex: &str) -> [f32; 3] {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 {
-        return [1.0, 1.0, 1.0];
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255) as f32 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255) as f32 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255) as f32 / 255.0;
-    [r, g, b]
+    Ok(SceneDescription {
+        version: 1,
+        environment: EnvironmentDescription {
+            width: room["width"].as_f64().unwrap_or(20.0) as f32,
+            depth: room["depth"].as_f64().unwrap_or(20.0) as f32,
+            height: room["height"].as_f64().unwrap_or(10.0) as f32,
+            spawn: [
+                spawn["x"].as_f64().unwrap_or(0.0) as f32,
+                spawn["y"].as_f64().unwrap_or(0.0) as f32,
+                spawn["z"].as_f64().unwrap_or(0.0) as f32,
+            ],
+        },
+        atrium: AtriumDescription {
+            width: atrium_json["width"].as_f64().unwrap_or(6.0) as f32,
+            depth: atrium_json["depth"].as_f64().unwrap_or(4.0) as f32,
+            height: atrium_json["height"].as_f64().unwrap_or(3.0) as f32,
+        },
+        listener: ListenerDescription {
+            position: [
+                listener_json["x"].as_f64().unwrap_or(0.0) as f32,
+                listener_json["y"].as_f64().unwrap_or(0.0) as f32,
+                listener_json["z"].as_f64().unwrap_or(0.0) as f32,
+            ],
+            yaw_degrees: (listener_json["yaw"].as_f64().unwrap_or(0.0) as f32).to_degrees(),
+        },
+        sources,
+        speakers: SpeakerLayoutDescription {
+            layout: layout_str,
+            speakers,
+            dbap_rolloff_db: json["dbap_rolloff_db"].as_f64().unwrap_or(6.0) as f32,
+        },
+        render_mode: json["render_mode"].as_str().unwrap_or("vbap").to_string(),
+        master_gain: json["master_gain"].as_f64().unwrap_or(1.0) as f32,
+        distance_model: DistanceModelDescription {
+            model: dm["model"].as_str().unwrap_or("inverse").to_string(),
+            ref_distance: dm["ref_distance"].as_f64().unwrap_or(1.0) as f32,
+            max_distance: dm["max_distance"].as_f64().unwrap_or(20.0) as f32,
+            rolloff: dm["rolloff"].as_f64().unwrap_or(1.0) as f32,
+        },
+        atmosphere: AtmosphereDescription {
+            temperature_c: json["atmosphere"]["temperature_c"].as_f64().unwrap_or(20.0) as f32,
+            humidity_pct: json["atmosphere"]["humidity_pct"].as_f64().unwrap_or(50.0) as f32,
+            pressure_kpa: json["atmosphere"]["pressure_kpa"]
+                .as_f64()
+                .unwrap_or(101.325) as f32,
+        },
+    })
 }
 
 /// Initialize the tracing subscriber based on the --profile mode.
