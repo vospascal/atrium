@@ -1,14 +1,19 @@
-//! Bevy 3D visualization for the Atrium spatial audio engine.
+//! Bevy visualization for the Atrium spatial audio engine.
 //!
-//! Renders the environment, atrium, speakers, and sound sources in real time,
-//! driven by telemetry from the audio thread via an rtrb ring buffer.
+//! Renders a top-down garden environment with orthographic projection,
+//! showing speakers, sound sources, and listener in real time.
+//! Driven by telemetry from the audio thread via an rtrb ring buffer.
+//! Weather system provides Clear/Rain/Wind/Storm states (keys 1-4).
 
 mod camera;
 pub mod ecs;
+pub mod grass_material;
 mod hud;
 mod input;
+mod scatter;
 pub mod scene;
 mod telemetry;
+pub mod weather;
 
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin};
 
@@ -54,22 +59,39 @@ impl Plugin for AtriumPlugin {
                 ..default()
             },
         })
+        .add_plugins(MaterialPlugin::<grass_material::GrassMaterial>::default())
+        .init_resource::<weather::WeatherState>()
         .init_resource::<telemetry::LatestTelemetry>()
         .init_resource::<scene::SourceDragState>()
         .init_resource::<scene::save::SceneFilePath>()
         .add_message::<telemetry::TelemetryMessage>()
-        // Phase 1: spawn scene entities
-        .add_systems(Startup, scene::setup_scene)
+        // Phase 1: spawn scene entities + scatter props
+        .add_systems(Startup, (scene::setup_scene, scatter::scatter_props))
         // Phase 2: systems that query spawned entities (run after flush)
         .add_systems(
             PostStartup,
             (camera::setup_camera, hud::setup_hud, init_orbit_speeds),
         )
-        .add_systems(Update, telemetry::poll_telemetry)
+        .add_systems(
+            Update,
+            (
+                telemetry::poll_telemetry,
+                grass_material::update_grass_time,
+                weather::transition_weather,
+                weather::apply_weather_to_grass,
+                weather::apply_weather_to_atmosphere,
+                weather::weather_keyboard_controls,
+            ),
+        )
+        .add_systems(
+            Update,
+            (weather::spawn_rain_drops, weather::update_rain_drops),
+        )
         .add_systems(
             Update,
             (
                 scene::update_listener,
+                scene::update_listener_direction_cone,
                 scene::update_sources,
                 scene::update_source_lights,
                 scene::update_gain_lines,
@@ -78,10 +100,9 @@ impl Plugin for AtriumPlugin {
                 scene::update_ear_labels,
                 scene::draw_directivity_patterns,
                 scene::draw_audible_rings,
-                scene::draw_atrium_wireframe,
                 scene::draw_listener_direction,
                 scene::drag_sources,
-                camera::orbit_camera,
+                camera::update_isometric_camera,
             ),
         )
         .add_systems(

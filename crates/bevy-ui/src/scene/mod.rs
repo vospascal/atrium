@@ -18,7 +18,7 @@ use bevy::window::PrimaryWindow;
 use atrium_core::commands::Command;
 use atrium_core::types::Vec3 as AtriumVec3;
 
-use crate::camera::OrbitCamera;
+use crate::camera::IsometricCamera;
 use crate::ecs::*;
 use crate::telemetry::{CommandSender, TelemetryMessage};
 
@@ -55,6 +55,10 @@ pub(crate) struct EarLabel {
     pub is_right: bool,
 }
 
+/// Marker for the listener's direction indicator cone.
+#[derive(Component)]
+pub(crate) struct ListenerDirectionCone;
+
 // ── Coordinate mapping ───────────────────────────────────────────────────────
 //
 // Atrium: X = left/right, Y = front/back, Z = up/down
@@ -73,8 +77,17 @@ pub fn setup_scene(
     description: Res<SceneDescription>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut grass_materials: ResMut<Assets<crate::grass_material::GrassMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
-    import::spawn_scene(&mut commands, &mut meshes, &mut materials, &description);
+    import::spawn_scene(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut grass_materials,
+        &asset_server,
+        &description,
+    );
 }
 
 // ── Per-frame updates ────────────────────────────────────────────────────────
@@ -89,6 +102,24 @@ pub fn update_listener(
     };
     let target = atrium_to_bevy(state.position);
     transform.translation = transform.translation.lerp(target, 0.3);
+}
+
+/// Rotate the listener's direction cone to match the camera yaw.
+pub(crate) fn update_listener_direction_cone(
+    mut cones: Query<&mut Transform, With<ListenerDirectionCone>>,
+    camera_query: Query<&Transform, (With<IsometricCamera>, Without<ListenerDirectionCone>)>,
+) {
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+    let (camera_yaw, _, _) = camera_transform.rotation.to_euler(EulerRot::YXZ);
+
+    for mut cone_transform in &mut cones {
+        // Cone base rotation is -90° on X (points forward along -Z).
+        // Apply camera yaw rotation on Y axis so it faces the listener's direction.
+        cone_transform.rotation =
+            Quat::from_rotation_y(camera_yaw) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    }
 }
 
 /// Update source positions from telemetry (skips sources being dragged).
@@ -170,7 +201,7 @@ pub fn update_gain_lines(
 
 /// Position screen-space labels above their corresponding 3D source positions.
 pub(crate) fn billboard_labels(
-    camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<IsometricCamera>>,
     sources: Query<(&SoundSourceIndex, &GlobalTransform)>,
     mut labels: Query<(&SourceLabel, &mut Node)>,
 ) {
@@ -196,7 +227,7 @@ pub(crate) fn billboard_labels(
 
 /// Position screen-space labels above speakers.
 pub(crate) fn billboard_speaker_labels(
-    camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<IsometricCamera>>,
     speakers: Query<(&SoundSpeaker, &GlobalTransform)>,
     mut labels: Query<(&SpeakerLabel, &mut Node)>,
 ) {
@@ -223,8 +254,8 @@ pub(crate) fn billboard_speaker_labels(
 
 /// Position "L" and "R" labels at the listener's ear positions (screen-space).
 pub(crate) fn update_ear_labels(
-    camera_query: Query<(&Camera, &GlobalTransform, &Transform), With<OrbitCamera>>,
-    listener_query: Query<&Transform, (With<SoundListener>, Without<OrbitCamera>)>,
+    camera_query: Query<(&Camera, &GlobalTransform, &Transform), With<IsometricCamera>>,
+    listener_query: Query<&Transform, (With<SoundListener>, Without<IsometricCamera>)>,
     mut labels: Query<(&EarLabel, &mut Node)>,
 ) {
     let Ok((camera, camera_global, camera_transform)) = camera_query.single() else {
@@ -259,7 +290,7 @@ pub(crate) fn update_ear_labels(
 pub(crate) fn draw_listener_direction(
     mut gizmos: Gizmos,
     listener_query: Query<&Transform, With<SoundListener>>,
-    camera_query: Query<&Transform, (With<OrbitCamera>, Without<SoundListener>)>,
+    camera_query: Query<&Transform, (With<IsometricCamera>, Without<SoundListener>)>,
 ) {
     let Ok(listener_transform) = listener_query.single() else {
         return;
@@ -416,43 +447,6 @@ pub(crate) fn draw_audible_rings(mut gizmos: Gizmos, sources: Query<(&SoundSourc
     }
 }
 
-/// Draw atrium wireframe using gizmos (reads SceneDescription resource).
-pub(crate) fn draw_atrium_wireframe(mut gizmos: Gizmos, description: Res<SceneDescription>) {
-    let center = atrium_to_bevy(description.environment.spawn);
-    let half_w = description.atrium.width / 2.0;
-    let half_d = description.atrium.depth / 2.0;
-    let height = description.atrium.height;
-
-    let wireframe_color = Color::srgba(0.4, 0.5, 0.6, 0.3);
-
-    let corners_floor = [
-        center + Vec3::new(-half_w, 0.0, -half_d),
-        center + Vec3::new(half_w, 0.0, -half_d),
-        center + Vec3::new(half_w, 0.0, half_d),
-        center + Vec3::new(-half_w, 0.0, half_d),
-    ];
-    for i in 0..4 {
-        gizmos.line(
-            corners_floor[i],
-            corners_floor[(i + 1) % 4],
-            wireframe_color,
-        );
-    }
-
-    let corners_ceiling = corners_floor.map(|c| c + Vec3::Y * height);
-    for i in 0..4 {
-        gizmos.line(
-            corners_ceiling[i],
-            corners_ceiling[(i + 1) % 4],
-            wireframe_color,
-        );
-    }
-
-    for i in 0..4 {
-        gizmos.line(corners_floor[i], corners_ceiling[i], wireframe_color);
-    }
-}
-
 // ── Source dragging ─────────────────────────────────────────────────────────
 
 /// Tracks which source is being dragged (if any).
@@ -466,7 +460,7 @@ const PICK_RADIUS: f32 = 40.0;
 /// Left-click to pick a source, drag to move it on the ground plane.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drag_sources(
-    camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<IsometricCamera>>,
     mut sources: Query<(&SoundSourceIndex, &mut Transform)>,
     mut drag: ResMut<SourceDragState>,
     mut command_sender: ResMut<CommandSender>,

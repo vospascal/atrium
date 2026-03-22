@@ -47,7 +47,7 @@ pub struct SoundSourceIndex(pub usize);
 // ── Listener ────────────────────────────────────────────────────────────────
 
 /// Authoring data for the listener. Position is on Transform.
-/// At runtime, yaw is driven by the camera orbit system.
+/// At runtime, yaw is driven by the camera system.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug)]
 #[reflect(Component, Serialize, Deserialize)]
 pub struct SoundListener {

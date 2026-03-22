@@ -1,32 +1,34 @@
-//! Orbit camera with WASD listener movement, mouse orbit, fog, and depth of field.
+//! Isometric camera with orthographic projection and yaw rotation.
 //!
-//! WASD moves the **listener** in Atrium coordinates, sending SetListenerPose
-//! commands to the audio engine. The camera orbits around the listener.
-//! Camera is clamped above the ground plane.
-
-use std::f32::consts::FRAC_PI_2;
-use std::ops::Range;
+//! The camera looks down at a fixed pitch (~35°) and can be rotated
+//! horizontally via right-click drag. WASD moves the listener,
+//! scroll wheel zooms, and the camera tracks the listener position.
 
 use atrium_core::commands::Command;
 use atrium_core::types::Vec3 as AtriumVec3;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
-use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use bevy::prelude::*;
-
 use bevy::ui::IsDefaultUiCamera;
 
 use crate::scene::{atrium_to_bevy, SceneDescription};
 use crate::telemetry::CommandSender;
+use crate::weather::WeatherState;
 
-/// Minimum camera height above the ground plane.
-const MIN_CAMERA_HEIGHT: f32 = 0.5;
+/// Fixed camera pitch angle from horizontal (radians). ~35° gives a nice ¾ view.
+const CAMERA_PITCH: f32 = 0.61;
+
+/// Distance from the look-at point to the camera along the view direction.
+/// Kept small to avoid fog darkening (ortho doesn't need large distance).
+const CAMERA_DISTANCE: f32 = 15.0;
+
+/// Mouse sensitivity for yaw rotation (radians per pixel of drag).
+const YAW_SENSITIVITY: f32 = 0.005;
 
 #[derive(Component)]
-pub struct OrbitCamera;
+pub struct IsometricCamera;
 
 /// Tracks the listener's position in Atrium coordinate space.
-/// Bevy.X = Atrium.X, Bevy.Y = Atrium.Z, Bevy.Z = -Atrium.Y
 #[derive(Resource)]
 pub struct ListenerState {
     /// Listener position in Atrium coordinates [x, y, z].
@@ -37,79 +39,97 @@ pub struct ListenerState {
 
 #[derive(Resource)]
 pub struct CameraSettings {
-    pub orbit_distance: f32,
-    pub pitch_speed: f32,
-    pub yaw_speed: f32,
+    pub ortho_scale: f32,
+    pub min_scale: f32,
+    pub max_scale: f32,
     pub zoom_speed: f32,
     pub move_speed: f32,
-    pub pitch_range: Range<f32>,
-    pub min_distance: f32,
-    pub max_distance: f32,
+    /// Visible world height when ortho_scale = 1.0.
+    pub viewport_height: f32,
+    /// Camera yaw in radians (0 = north-facing, rotated by right-click drag).
+    pub camera_yaw: f32,
 }
 
 impl Default for CameraSettings {
     fn default() -> Self {
-        let pitch_limit = FRAC_PI_2 - 0.01;
         Self {
-            orbit_distance: 15.0,
-            pitch_speed: 0.003,
-            yaw_speed: 0.004,
-            zoom_speed: 1.0,
+            ortho_scale: 1.0,
+            min_scale: 0.3,
+            max_scale: 5.0,
+            zoom_speed: 0.15,
             move_speed: 3.0,
-            pitch_range: -pitch_limit..pitch_limit,
-            min_distance: 2.0,
-            max_distance: 80.0,
+            viewport_height: 10.0,
+            camera_yaw: 0.0,
         }
     }
 }
 
-pub fn setup_camera(mut commands: Commands, description: Res<SceneDescription>) {
-    let spawn = atrium_to_bevy(description.environment.spawn);
+/// Compute camera offset from the look-at target for a given yaw.
+fn camera_offset(yaw: f32) -> Vec3 {
+    let rotation = Quat::from_euler(EulerRot::YXZ, yaw, -CAMERA_PITCH, 0.0);
+    rotation * Vec3::new(0.0, 0.0, CAMERA_DISTANCE)
+}
 
+/// Movement directions on the ground plane for a given camera yaw.
+fn movement_directions(yaw: f32) -> (Vec3, Vec3) {
+    let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+    (forward, right)
+}
+
+pub fn setup_camera(
+    mut commands: Commands,
+    description: Res<SceneDescription>,
+    mut weather: ResMut<WeatherState>,
+) {
+    let viewport_height = description.atrium.width.max(description.atrium.depth) * 1.5;
     let settings = CameraSettings {
-        orbit_distance: description.atrium.width.max(description.atrium.depth) * 2.0,
-        max_distance: description
-            .environment
-            .width
-            .max(description.environment.depth),
+        ortho_scale: 1.0,
+        min_scale: 0.3,
+        max_scale: 5.0,
+        viewport_height,
         ..default()
     };
 
-    // Fog density tuned so visibility drops to ~5% at max_distance
-    let fog_density = 3.0 / settings.max_distance;
+    weather.base_fog_density = 0.002;
+
+    let look_at = atrium_to_bevy(description.listener.position);
+    let camera_pos = look_at + camera_offset(settings.camera_yaw);
 
     commands.spawn((
-        OrbitCamera,
+        IsometricCamera,
         IsDefaultUiCamera,
         Camera3d::default(),
-        Tonemapping::TonyMcMapface,
-        Transform::from_xyz(spawn.x + 8.0, 10.0, spawn.z + 8.0).looking_at(spawn, Vec3::Y),
-        DistanceFog {
-            color: Color::srgb(0.08, 0.08, 0.10),
-            falloff: FogFalloff::ExponentialSquared {
-                density: fog_density,
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: bevy::camera::ScalingMode::FixedVertical {
+                viewport_height: settings.viewport_height,
             },
-            ..default()
-        },
-        DepthOfField {
-            mode: DepthOfFieldMode::Gaussian,
-            focal_distance: settings.orbit_distance,
-            aperture_f_stops: 1.0 / 4.0,
-            max_depth: settings.max_distance,
+            scale: settings.ortho_scale,
+            near: -200.0,
+            far: 200.0,
+            ..OrthographicProjection::default_3d()
+        }),
+        Tonemapping::TonyMcMapface,
+        Transform::from_translation(camera_pos).looking_at(look_at, Vec3::Y),
+        AmbientLight {
+            color: Color::srgb(0.8, 0.85, 0.95),
+            brightness: 1000.0,
             ..default()
         },
     ));
 
     commands.insert_resource(settings);
+
+    let listener_yaw = description.listener.yaw_degrees.to_radians();
     commands.insert_resource(ListenerState {
         position: description.listener.position,
-        yaw: description.listener.yaw_degrees.to_radians(),
+        yaw: listener_yaw,
     });
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn orbit_camera(
-    mut camera: Single<(&mut Transform, &mut DepthOfField), With<OrbitCamera>>,
+pub fn update_isometric_camera(
+    mut camera: Single<(&mut Transform, &mut Projection), With<IsometricCamera>>,
     mut settings: ResMut<CameraSettings>,
     mut listener: ResMut<ListenerState>,
     mut command_sender: ResMut<CommandSender>,
@@ -119,29 +139,21 @@ pub fn orbit_camera(
     time: Res<Time>,
     mut scroll_messages: MessageReader<MouseWheel>,
 ) {
-    let (ref mut transform, ref mut dof) = *camera;
+    let (ref mut transform, ref mut projection) = *camera;
 
-    // Right-click drag to orbit
+    // Right-click drag to rotate camera yaw
     if mouse_buttons.pressed(MouseButton::Right) {
         let delta = mouse_motion.delta;
-        let delta_pitch = delta.y * settings.pitch_speed;
-        let delta_yaw = delta.x * settings.yaw_speed;
-
-        let (yaw, pitch, _roll) = transform.rotation.to_euler(EulerRot::YXZ);
-        let pitch =
-            (pitch + delta_pitch).clamp(settings.pitch_range.start, settings.pitch_range.end);
-        let yaw = yaw + delta_yaw;
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+        settings.camera_yaw += delta.x * YAW_SENSITIVITY;
     }
 
-    // WASD — move listener relative to camera yaw (on the ground plane)
-    let (camera_yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    let bevy_forward = Vec3::new(-camera_yaw.sin(), 0.0, -camera_yaw.cos());
-    let bevy_right = Vec3::new(camera_yaw.cos(), 0.0, -camera_yaw.sin());
-
-    let atrium_yaw = FRAC_PI_2 + camera_yaw;
+    // Sync listener yaw to camera yaw (Atrium coordinates)
+    let atrium_yaw = std::f32::consts::FRAC_PI_2 + settings.camera_yaw;
     let yaw_changed = (atrium_yaw - listener.yaw).abs() > 0.001;
     listener.yaw = atrium_yaw;
+
+    // WASD — move listener relative to current camera orientation
+    let (bevy_forward, bevy_right) = movement_directions(settings.camera_yaw);
 
     let mut move_dir = Vec3::ZERO;
     if keyboard.pressed(KeyCode::KeyW) {
@@ -160,7 +172,6 @@ pub fn orbit_camera(
     let moved = move_dir != Vec3::ZERO;
     if moved {
         let bevy_delta = move_dir.normalize() * settings.move_speed * time.delta_secs();
-
         listener.position[0] += bevy_delta.x;
         listener.position[1] -= bevy_delta.z;
         listener.position[2] += bevy_delta.y;
@@ -183,13 +194,17 @@ pub fn orbit_camera(
             MouseScrollUnit::Line => event.y * settings.zoom_speed,
             MouseScrollUnit::Pixel => event.y * settings.zoom_speed * 0.01,
         };
-        settings.orbit_distance =
-            (settings.orbit_distance - scroll).clamp(settings.min_distance, settings.max_distance);
+        settings.ortho_scale =
+            (settings.ortho_scale - scroll).clamp(settings.min_scale, settings.max_scale);
     }
 
-    dof.focal_distance = settings.orbit_distance;
+    // Apply zoom
+    if let Projection::Orthographic(ref mut ortho) = **projection {
+        ortho.scale = settings.ortho_scale;
+    }
 
-    let orbit_target = atrium_to_bevy(listener.position);
-    transform.translation = orbit_target - transform.forward() * settings.orbit_distance;
-    transform.translation.y = transform.translation.y.max(MIN_CAMERA_HEIGHT);
+    // Camera tracks listener position with current yaw
+    let look_at = atrium_to_bevy(listener.position);
+    let camera_pos = look_at + camera_offset(settings.camera_yaw);
+    **transform = Transform::from_translation(camera_pos).looking_at(look_at, Vec3::Y);
 }
