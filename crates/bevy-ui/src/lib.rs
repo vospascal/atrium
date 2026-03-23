@@ -8,6 +8,7 @@
 mod camera;
 pub mod ecs;
 pub mod grass_material;
+mod grass_wind;
 mod hud;
 mod input;
 mod scatter;
@@ -60,6 +61,7 @@ impl Plugin for AtriumPlugin {
             },
         })
         .add_plugins(MaterialPlugin::<grass_material::GrassMaterial>::default())
+        .add_plugins(MaterialPlugin::<grass_wind::GrassWindMaterial>::default())
         .init_resource::<weather::WeatherState>()
         .init_resource::<telemetry::LatestTelemetry>()
         .init_resource::<scene::SourceDragState>()
@@ -85,7 +87,12 @@ impl Plugin for AtriumPlugin {
         )
         .add_systems(
             Update,
-            (weather::spawn_rain_drops, weather::update_rain_drops),
+            (
+                weather::spawn_rain_drops,
+                weather::update_rain_drops,
+                grass_wind::update_grass_wind,
+                scatter::spawn_pending_grass,
+            ),
         )
         .add_systems(
             Update,

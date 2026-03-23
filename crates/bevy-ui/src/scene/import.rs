@@ -110,11 +110,11 @@ pub fn spawn_scene(
         let to_center = -pos;
         let base_yaw = to_center.x.atan2(to_center.z);
         let correction = match speaker.label.to_lowercase().as_str() {
-            "fl" => std::f32::consts::FRAC_PI_2,        // 90° CCW
-            "c" => std::f32::consts::FRAC_PI_4,         // 45° CCW
-            "rl" => std::f32::consts::PI,                // 180°
-            "rr" => -std::f32::consts::FRAC_PI_2,       // 90° CW
-            _ => 0.0,                                     // FR and others: no correction
+            "fl" => std::f32::consts::FRAC_PI_2,  // 90° CCW
+            "c" => std::f32::consts::FRAC_PI_4,   // 45° CCW
+            "rl" => std::f32::consts::PI,         // 180°
+            "rr" => -std::f32::consts::FRAC_PI_2, // 90° CW
+            _ => 0.0,                             // FR and others: no correction
         };
         let yaw = base_yaw + correction;
         commands.spawn((
