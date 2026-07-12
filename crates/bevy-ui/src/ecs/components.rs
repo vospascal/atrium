@@ -44,6 +44,14 @@ pub struct SoundSource {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SoundSourceIndex(pub usize);
 
+/// Atrium height (Z, meters) of a spatial entity. The 2D top-down view only
+/// edits the ground plane, so height is carried here — Transform.z is the
+/// draw-layer index, not a spatial coordinate. Every path back to the audio
+/// engine or scene file reconstructs [x, y, height] from Transform + this.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug)]
+#[reflect(Component, Serialize, Deserialize)]
+pub struct AtriumHeight(pub f32);
+
 // ── Listener ────────────────────────────────────────────────────────────────
 
 /// Authoring data for the listener. Position is on Transform.

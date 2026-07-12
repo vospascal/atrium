@@ -50,6 +50,18 @@ pub trait SoundSource: Send {
     /// Set the source spread for MDAP.
     fn set_spread(&mut self, _spread: f32) {}
 
+    /// Set the source's reference SPL (dB at 1 m), recomputing its base
+    /// amplitude in place, and return the new base amplitude. Lets loudness
+    /// change live without a scene rebuild (the amplitude is `k · 10^(spl/20)`
+    /// for a per-source constant `k`, so no audio re-decode is needed).
+    /// Returns 0.0 for sources that don't model SPL.
+    fn set_reference_spl(&mut self, _spl: f32) -> f32 {
+        0.0
+    }
+
+    /// Set the source's directivity emission pattern.
+    fn set_directivity(&mut self, _pattern: DirectivityPattern) {}
+
     /// Set orbit speed (radians/sec). 0 = paused.
     fn set_orbit_speed(&mut self, _speed: f32) {}
 

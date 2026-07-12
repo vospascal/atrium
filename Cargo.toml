@@ -18,11 +18,13 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Symphonia: only enable the codecs/formats we need
-symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac"] }
+symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac", "ogg", "vorbis"] }
 sofar = "0.2.1"
 realfft = "3.5"
 atrium-tui = { path = "crates/tui", optional = true }
 atrium-bevy = { path = "crates/bevy-ui", optional = true }
+# Native file dialog for the "Browse…" add-source button (bevy UI only).
+rfd = { version = "0.15", optional = true }
 
 # Profiling (optional, zero-cost when disabled)
 tracing = { version = "0.1", optional = true }
@@ -33,7 +35,7 @@ tracing-flame = { version = "0.2", optional = true }
 [features]
 default = ["tui"]
 tui = ["dep:atrium-tui"]
-bevy = ["dep:atrium-bevy"]
+bevy = ["dep:atrium-bevy", "dep:rfd"]
 profiler = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-perfetto", "dep:tracing-flame"]
 memprof = []
 

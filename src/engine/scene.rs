@@ -2,6 +2,7 @@ use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 use crate::audio::spectral_profile::BARK_BANDS;
+use crate::engine::edit::{Retired, SceneEdit};
 #[cfg(feature = "memprof")]
 use crate::engine::memprof::{MemProfiler, MemStage};
 use crate::engine::telemetry::{compute_telemetry, TelemetryFrame};
@@ -40,6 +41,11 @@ pub struct AudioScene {
     pub atmosphere: AtmosphericParams,
     /// Ring buffer producer for sending telemetry to the main thread.
     pub telemetry_out: Option<rtrb::Producer<TelemetryFrame>>,
+    /// Consumer for live source-pool edits (add/remove) from the control thread.
+    pub scene_edits: Option<rtrb::Consumer<SceneEdit>>,
+    /// Producer that ships displaced source boxes back to the control thread to
+    /// be dropped there (deallocation is not real-time safe).
+    pub retired_out: Option<rtrb::Producer<Retired>>,
     /// Callback counter for throttling telemetry (~15 Hz).
     pub telemetry_counter: u32,
     /// Push telemetry every N callbacks.
@@ -123,6 +129,20 @@ impl AudioScene {
                         source.set_spread(spread);
                     }
                 }
+                Command::SetSourceSpl { index, spl } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        let amplitude = source.set_reference_spl(spl);
+                        // Keep the perceptual layer's base amplitude in sync.
+                        if let Some(slot) = self.source_amplitudes.get_mut(index as usize) {
+                            *slot = amplitude;
+                        }
+                    }
+                }
+                Command::SetSourceDirectivity { index, pattern } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_directivity(pattern);
+                    }
+                }
                 Command::SetSourceOrbitSpeed { index, speed } => {
                     if let Some(source) = self.sources.get_mut(index as usize) {
                         source.set_orbit_speed(speed);
@@ -180,6 +200,65 @@ impl AudioScene {
         }
     }
 
+    /// Drain live source-pool edits (add/remove) from the control thread.
+    /// Called at the top of each audio callback. Swaps `Box`es in and out of the
+    /// fixed slot pool — never allocates or deallocates on the audio thread: the
+    /// incoming box is pre-built on the control thread, and the displaced box is
+    /// shipped to the retire channel to be dropped there.
+    pub fn process_scene_edits(&mut self) {
+        // Take the consumer out so the slot accesses below don't alias its
+        // borrow of `self`; restore it afterwards.
+        let Some(mut consumer) = self.scene_edits.take() else {
+            return;
+        };
+        while let Ok(edit) = consumer.pop() {
+            match edit {
+                SceneEdit::AddSource {
+                    slot,
+                    source,
+                    bands,
+                    amplitude,
+                } => {
+                    let slot = slot as usize;
+                    if slot < self.sources.len() {
+                        let displaced = std::mem::replace(&mut self.sources[slot], source);
+                        if let Some(profile) = self.spectral_profiles.get_mut(slot) {
+                            *profile = bands;
+                        }
+                        if let Some(amp) = self.source_amplitudes.get_mut(slot) {
+                            *amp = amplitude;
+                        }
+                        self.retire(displaced);
+                    } else {
+                        self.retire(source);
+                    }
+                }
+                SceneEdit::RemoveSource { slot, filler } => {
+                    let slot = slot as usize;
+                    if slot < self.sources.len() {
+                        let displaced = std::mem::replace(&mut self.sources[slot], filler);
+                        if let Some(amp) = self.source_amplitudes.get_mut(slot) {
+                            *amp = 0.0;
+                        }
+                        self.retire(displaced);
+                    } else {
+                        self.retire(filler);
+                    }
+                }
+            }
+        }
+        self.scene_edits = Some(consumer);
+    }
+
+    /// Ship a displaced source box back to the control thread to be dropped
+    /// there. If the retire channel is full or absent, the box is dropped here
+    /// as a last resort (rare; the control thread drains every frame).
+    fn retire(&mut self, source: Box<dyn SoundSource>) {
+        if let Some(out) = self.retired_out.as_mut() {
+            let _ = out.push(Retired(source));
+        }
+    }
+
     /// Initialize pipelines with environment geometry and sample rate.
     /// Must be called after sample_rate is set and before the audio callback starts.
     pub fn init_pipelines(&mut self) {
@@ -219,6 +298,9 @@ impl AudioScene {
 
         #[cfg(feature = "memprof")]
         self.memprof.begin_callback();
+
+        // Apply any live source-pool edits before rendering this buffer.
+        self.process_scene_edits();
 
         let num_frames = output.len() / channels;
         let dt = num_frames as f32 / self.sample_rate;

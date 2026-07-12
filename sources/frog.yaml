@@ -1,0 +1,6 @@
+# Source: Frog
+# Pond frogs croaking — mid-level, rhythmic calls near the water's edge.
+
+path: assets/frog.mp3
+reference_spl: 65.0        # ~60-70 dB SPL at 1m (chorus of croaks)
+directivity: omni           # croaks radiate in all directions

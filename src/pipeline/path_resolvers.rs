@@ -937,6 +937,7 @@ mod tests {
             listener,
             sample_rate,
             c,
+            1.0,
         );
 
         // ReflectionCore and ImageSourceResolver both compute:

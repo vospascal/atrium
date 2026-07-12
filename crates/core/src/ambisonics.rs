@@ -706,9 +706,9 @@ pub fn foa_rotate_z(b: &BFormat, angle: f32) -> BFormat {
 /// on each ear's side.
 ///
 /// Without HRTFs, we use forward-facing cardioid weights after rotation:
-///   left  = W/√2 × 0.5 + X' × 0.5
-///   right = W/√2 × 0.5 + X' × 0.5
-/// where X' is the rotated forward axis (was Y before ±90° rotation).
+///   ear = W × √2 × 0.5 + X' × 0.5
+/// (the √2 undoes the SN3D 1/√2 on W), where X' is the rotated forward axis
+/// (was Y before the ±90° rotation).
 ///
 /// Reference: Ben-Hur et al. 2020, "Binaural Reproduction Based on
 /// Bilateral Ambisonics and Ear-Aligned HRTFs."

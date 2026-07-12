@@ -10,6 +10,10 @@ pub struct TestNode {
     buffer: Arc<AudioBuffer>,
     playback_pos: f64, // f64 for sub-sample precision over long durations
     pub amplitude: f32,
+    /// Base amplitude at 0 dB SPL: `amplitude = unit_amplitude · 10^(spl/20)`.
+    /// Set by the scene builder so a live SPL edit can rescale amplitude without
+    /// re-decoding. 0.0 = unset (SPL edits then have no effect).
+    pub unit_amplitude: f32,
     pub orbit_radius: f32,
     pub orbit_speed: f32, // radians per second
     pub orbit_center: Vec3,
@@ -31,6 +35,7 @@ impl TestNode {
             buffer,
             playback_pos: 0.0,
             amplitude: 0.5,
+            unit_amplitude: 0.0,
             orbit_radius,
             orbit_speed,
             orbit_center,
@@ -121,6 +126,17 @@ impl SoundSource for TestNode {
 
     fn set_spread(&mut self, spread: f32) {
         self.spread = spread;
+    }
+
+    fn set_reference_spl(&mut self, spl: f32) -> f32 {
+        if self.unit_amplitude > 0.0 {
+            self.amplitude = self.unit_amplitude * 10.0_f32.powf(spl / 20.0);
+        }
+        self.amplitude
+    }
+
+    fn set_directivity(&mut self, pattern: DirectivityPattern) {
+        self.pattern = pattern;
     }
 
     fn set_orbit_speed(&mut self, speed: f32) {

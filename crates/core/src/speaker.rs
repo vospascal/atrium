@@ -1018,23 +1018,6 @@ impl SpeakerLayout {
         acc
     }
 
-    /// Compute per-channel gains for the given render mode.
-    pub fn compute_gains(
-        &self,
-        mode: RenderMode,
-        listener: &Listener,
-        source: &SourceSpatial,
-        distance: &DistanceParams,
-    ) -> ChannelGains {
-        match mode {
-            RenderMode::WorldLocked
-            | RenderMode::Hrtf
-            | RenderMode::Dbap
-            | RenderMode::Ambisonics => self.compute_gains_stereo(listener, source, distance),
-            RenderMode::Vbap => self.compute_gains_vbap(listener, source, distance),
-        }
-    }
-
     /// Compute VBAP gains with MDAP (Multiple Direction Amplitude Panning) support.
     /// When spread > 0, pans to multiple directions for a wider image;
     /// when spread == 0, falls through to standard VBAP.
@@ -1760,40 +1743,6 @@ mod tests {
             "source LEFT → left channels (FL+RL={}) should be louder than right (FR+RR={})",
             left_sum,
             right_sum
-        );
-    }
-
-    // ── Mode dispatch test ─────────────────────────────────────────────
-
-    #[test]
-    fn compute_gains_dispatches_on_mode() {
-        // Use 5.1 layout so WorldLocked (stereo, channels 0+1 only) and
-        // VBAP (distributes across all speaker pairs) clearly diverge.
-        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
-        let dist = default_distance();
-        let src = omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
-
-        let layout = SpeakerLayout::surround_5_1(
-            Vec3::new(0.0, 4.0, 0.0),
-            Vec3::new(6.0, 4.0, 0.0),
-            Vec3::new(3.0, 4.0, 0.0),
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(6.0, 0.0, 0.0),
-        );
-
-        let mic_gains = layout.compute_gains(RenderMode::WorldLocked, &listener, &src, &dist);
-        let vbap_gains = layout.compute_gains(RenderMode::Vbap, &listener, &src, &dist);
-
-        // WorldLocked only fills channels 0-1 (stereo), VBAP uses 5.1 speaker pairs.
-        // Compare across all channels — they must differ.
-        let diff: f32 = (0..layout.total_channels())
-            .map(|i| (mic_gains.gains[i] - vbap_gains.gains[i]).abs())
-            .sum();
-        assert!(
-            diff > 0.01,
-            "modes should produce different gains: mic={:?} vbap={:?}",
-            &mic_gains.gains[..6],
-            &vbap_gains.gains[..6]
         );
     }
 

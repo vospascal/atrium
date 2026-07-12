@@ -30,9 +30,9 @@ pub fn save_scene_on_keypress(
     keyboard: Res<ButtonInput<KeyCode>>,
     description: Res<SceneDescription>,
     file_path: Res<SceneFilePath>,
-    sources: Query<(&SoundSourceIndex, &SoundSource, &Transform)>,
-    speakers: Query<(&SoundSpeaker, &Transform)>,
-    listener: Query<(&SoundListener, &Transform)>,
+    sources: Query<(&SoundSourceIndex, &SoundSource, &Transform, &AtriumHeight)>,
+    speakers: Query<(&SoundSpeaker, &Transform, &AtriumHeight)>,
+    listener: Query<(&SoundListener, &Transform, &AtriumHeight)>,
     environment: Query<&SoundEnvironment>,
     atrium: Query<&SoundAtrium>,
 ) {
@@ -43,15 +43,20 @@ pub fn save_scene_on_keypress(
 
     let source_data: Vec<_> = sources
         .iter()
-        .map(|(idx, source, transform)| (*idx, source.clone(), transform.translation))
+        .map(|(idx, source, transform, height)| {
+            (*idx, source.clone(), transform.translation, *height)
+        })
         .collect();
 
     let speaker_data: Vec<_> = speakers
         .iter()
-        .map(|(speaker, transform)| (speaker.clone(), transform.translation))
+        .map(|(speaker, transform, height)| (speaker.clone(), transform.translation, *height))
         .collect();
 
-    let listener_data = listener.iter().next().map(|(l, t)| (l, t.translation));
+    let listener_data = listener
+        .iter()
+        .next()
+        .map(|(l, t, height)| (l, t.translation, *height));
 
     let env = environment.iter().next();
     let atr = atrium.iter().next();

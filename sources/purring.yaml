@@ -1,8 +1,10 @@
 # Source: Cat Purring
-# Very quiet, close-range sound. In reality you'd need to be
-# right next to the cat to hear it — distance attenuation will
-# make this nearly inaudible from across the room.
+# Stylized "close-mic'd" purr. A real purr is ~25-30 dB SPL at 1 m, which is
+# below the audible floor of a 94 dB-calibrated chain (received ~-64 dBFS even
+# with the +20 dB near-field cap) — physically honest but never hearable.
+# 55 dB plays as: clearly present when you approach the cat, faint warmth at
+# the listener center, gone across the room.
 
 path: assets/purring.mp3
-reference_spl: 30.0        # ~25 dB SPL at 1m (barely audible)
+reference_spl: 55.0        # stylized; matches campfire at 1m, +20 dB near-field when close
 directivity: omni           # radiates equally in all directions

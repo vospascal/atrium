@@ -1,39 +1,47 @@
-//! Isometric camera with orthographic projection and yaw rotation.
+//! Top-down 2D camera and listener control.
 //!
-//! The camera looks down at a fixed pitch (~35°) and can be rotated
-//! horizontally via right-click drag. WASD moves the listener,
-//! scroll wheel zooms, and the camera tracks the listener position.
+//! An orthographic `Camera2d` looks straight down at the ground plane
+//! (a schematic "radar" view of the atrium). WASD moves the listener on the
+//! plane, Q/E rotate the listener's facing, and the scroll wheel zooms.
+//! The camera tracks the listener position; north is always up (no rotation).
 
 use atrium_core::commands::Command;
 use atrium_core::types::Vec3 as AtriumVec3;
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::input::mouse::{AccumulatedMouseMotion, MouseScrollUnit, MouseWheel};
+use bevy::camera::ScalingMode;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
-use bevy::ui::IsDefaultUiCamera;
 
-use crate::scene::{atrium_to_bevy, SceneDescription};
+use crate::ecs::SoundListener;
+use crate::scene::{atrium_to_world, SceneDescription};
 use crate::telemetry::CommandSender;
-use crate::weather::WeatherState;
 
-/// Fixed camera pitch angle from horizontal (radians). ~35° gives a nice ¾ view.
-const CAMERA_PITCH: f32 = 0.61;
-
-/// Distance from the look-at point to the camera along the view direction.
-/// Kept small to avoid fog darkening (ortho doesn't need large distance).
-const CAMERA_DISTANCE: f32 = 15.0;
-
-/// Mouse sensitivity for yaw rotation (radians per pixel of drag).
-const YAW_SENSITIVITY: f32 = 0.005;
-
+/// How the listener is drawn in the plane; its facing lives in `ListenerState`.
 #[derive(Component)]
-pub struct IsometricCamera;
+pub struct TopDownCamera;
 
-/// Tracks the listener's position in Atrium coordinate space.
+/// Analog-stick / trigger deadzone — PS4 sticks rest slightly off-center and
+/// triggers report tiny non-zero values at rest.
+const STICK_DEADZONE: f32 = 0.15;
+
+/// Apply a radial deadzone and rescale so travel starts at 0 just past the
+/// deadzone (avoids a jump from 0 → deadzone when the stick first engages).
+fn deadzone(value: f32) -> f32 {
+    if value.abs() < STICK_DEADZONE {
+        0.0
+    } else {
+        let sign = value.signum();
+        sign * (value.abs() - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)
+    }
+}
+
+/// Tracks the listener's position and facing in Atrium coordinate space.
+/// This is the single source of truth for the listener (unlike sources, which
+/// are driven by telemetry). The HUD reads position/yaw from here.
 #[derive(Resource)]
 pub struct ListenerState {
     /// Listener position in Atrium coordinates [x, y, z].
     pub position: [f32; 3],
-    /// Listener yaw in radians.
+    /// Listener facing (yaw) in radians. 0 = +X, π/2 = +Y (front).
     pub yaw: f32,
 }
 
@@ -43,11 +51,10 @@ pub struct CameraSettings {
     pub min_scale: f32,
     pub max_scale: f32,
     pub zoom_speed: f32,
+    /// Listener move speed (metres/second).
     pub move_speed: f32,
-    /// Visible world height when ortho_scale = 1.0.
-    pub viewport_height: f32,
-    /// Camera yaw in radians (0 = north-facing, rotated by right-click drag).
-    pub camera_yaw: f32,
+    /// Listener turn speed (radians/second).
+    pub turn_speed: f32,
 }
 
 impl Default for CameraSettings {
@@ -58,153 +65,163 @@ impl Default for CameraSettings {
             max_scale: 5.0,
             zoom_speed: 0.15,
             move_speed: 3.0,
-            viewport_height: 10.0,
-            camera_yaw: 0.0,
+            turn_speed: 2.0,
         }
     }
 }
 
-/// Compute camera offset from the look-at target for a given yaw.
-fn camera_offset(yaw: f32) -> Vec3 {
-    let rotation = Quat::from_euler(EulerRot::YXZ, yaw, -CAMERA_PITCH, 0.0);
-    rotation * Vec3::new(0.0, 0.0, CAMERA_DISTANCE)
-}
+/// PostStartup: spawn the 2D camera and insert control resources.
+pub fn setup_camera(mut commands: Commands, description: Res<SceneDescription>) {
+    // Show the whole environment plus a margin.
+    let env = &description.environment;
+    let viewport_height = env.width.max(env.depth) * 1.4;
+    let settings = CameraSettings::default();
 
-/// Movement directions on the ground plane for a given camera yaw.
-fn movement_directions(yaw: f32) -> (Vec3, Vec3) {
-    let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
-    let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
-    (forward, right)
-}
-
-pub fn setup_camera(
-    mut commands: Commands,
-    description: Res<SceneDescription>,
-    mut weather: ResMut<WeatherState>,
-) {
-    let viewport_height = description.atrium.width.max(description.atrium.depth) * 1.5;
-    let settings = CameraSettings {
-        ortho_scale: 1.0,
-        min_scale: 0.3,
-        max_scale: 5.0,
-        viewport_height,
-        ..default()
-    };
-
-    weather.base_fog_density = 0.002;
-
-    let look_at = atrium_to_bevy(description.listener.position);
-    let camera_pos = look_at + camera_offset(settings.camera_yaw);
+    let look_at = atrium_to_world(description.listener.position);
 
     commands.spawn((
-        IsometricCamera,
-        IsDefaultUiCamera,
-        Camera3d::default(),
+        TopDownCamera,
+        Camera2d,
         Projection::Orthographic(OrthographicProjection {
-            scaling_mode: bevy::camera::ScalingMode::FixedVertical {
-                viewport_height: settings.viewport_height,
-            },
+            scaling_mode: ScalingMode::FixedVertical { viewport_height },
             scale: settings.ortho_scale,
-            near: -200.0,
-            far: 200.0,
-            ..OrthographicProjection::default_3d()
+            ..OrthographicProjection::default_2d()
         }),
-        Tonemapping::TonyMcMapface,
-        Transform::from_translation(camera_pos).looking_at(look_at, Vec3::Y),
-        AmbientLight {
-            color: Color::srgb(0.8, 0.85, 0.95),
-            brightness: 1000.0,
-            ..default()
-        },
+        // Keep camera z small: the default ortho far plane is 1000, so a large
+        // camera z clips negative-z layers (the landscape decor at z -9..-6).
+        Transform::from_xyz(look_at.x, look_at.y, 50.0),
     ));
 
-    commands.insert_resource(settings);
-
-    let listener_yaw = description.listener.yaw_degrees.to_radians();
     commands.insert_resource(ListenerState {
         position: description.listener.position,
-        yaw: listener_yaw,
+        yaw: description.listener.yaw_degrees.to_radians(),
     });
+    commands.insert_resource(settings);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn update_isometric_camera(
-    mut camera: Single<(&mut Transform, &mut Projection), With<IsometricCamera>>,
-    mut settings: ResMut<CameraSettings>,
-    mut listener: ResMut<ListenerState>,
-    mut command_sender: ResMut<CommandSender>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mouse_motion: Res<AccumulatedMouseMotion>,
+/// Update: WASD / left stick moves the listener; Q/E / right stick rotate its
+/// facing. Writes the listener entity transform + `ListenerState` and notifies
+/// audio. Gamepad sticks are analog (partial deflection = slower), keyboard is
+/// full-speed.
+pub fn move_listener(
+    mut listener: Single<&mut Transform, With<SoundListener>>,
+    mut state: ResMut<ListenerState>,
+    settings: Res<CameraSettings>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     time: Res<Time>,
-    mut scroll_messages: MessageReader<MouseWheel>,
+    mut command_sender: ResMut<CommandSender>,
+) {
+    let dt = time.delta_secs();
+
+    // Movement in world axes: W = +Y (front), S = -Y, A = -X, D = +X.
+    let mut move_dir = Vec2::ZERO;
+    if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
+        move_dir.y += 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
+        move_dir.y -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
+        move_dir.x += 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
+        move_dir.x -= 1.0;
+    }
+
+    // Turning: Q = counter-clockwise, E = clockwise.
+    let mut turn = 0.0;
+    if keyboard.pressed(KeyCode::KeyQ) {
+        turn += 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyE) {
+        turn -= 1.0;
+    }
+
+    // Gamepad: left stick moves, right stick X turns. Additive with keyboard.
+    for gamepad in &gamepads {
+        move_dir.x += deadzone(gamepad.get(GamepadAxis::LeftStickX).unwrap_or(0.0));
+        move_dir.y += deadzone(gamepad.get(GamepadAxis::LeftStickY).unwrap_or(0.0));
+        turn -= deadzone(gamepad.get(GamepadAxis::RightStickX).unwrap_or(0.0));
+    }
+
+    let mut changed = false;
+
+    if move_dir != Vec2::ZERO {
+        // Clamp to unit length so diagonals/keyboard aren't faster, but keep
+        // sub-unit analog magnitude from a partly-deflected stick.
+        let len = move_dir.length();
+        if len > 1.0 {
+            move_dir /= len;
+        }
+        // No clamp on position — the listener roams freely (camera follows).
+        let delta = move_dir * settings.move_speed * dt;
+        state.position[0] += delta.x;
+        state.position[1] += delta.y;
+        changed = true;
+    }
+    let turn = turn.clamp(-1.0, 1.0);
+    if turn != 0.0 {
+        state.yaw += turn * settings.turn_speed * dt;
+        changed = true;
+    }
+
+    if changed {
+        let world = atrium_to_world(state.position);
+        listener.translation.x = world.x;
+        listener.translation.y = world.y;
+
+        command_sender.send(Command::SetListenerPose {
+            position: AtriumVec3::new(state.position[0], state.position[1], state.position[2]),
+            yaw: state.yaw,
+        });
+    }
+}
+
+/// Update: scroll / gamepad triggers zoom, camera tracks the listener (north
+/// stays up).
+pub fn follow_and_zoom_camera(
+    mut camera: Single<(&mut Transform, &mut Projection), With<TopDownCamera>>,
+    mut settings: ResMut<CameraSettings>,
+    state: Res<ListenerState>,
+    mut scroll: MessageReader<MouseWheel>,
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    over_hud: Res<crate::hud::PointerOverHud>,
 ) {
     let (ref mut transform, ref mut projection) = *camera;
 
-    // Right-click drag to rotate camera yaw
-    if mouse_buttons.pressed(MouseButton::Right) {
-        let delta = mouse_motion.delta;
-        settings.camera_yaw += delta.x * YAW_SENSITIVITY;
-    }
-
-    // Sync listener yaw to camera yaw (Atrium coordinates)
-    let atrium_yaw = std::f32::consts::FRAC_PI_2 + settings.camera_yaw;
-    let yaw_changed = (atrium_yaw - listener.yaw).abs() > 0.001;
-    listener.yaw = atrium_yaw;
-
-    // WASD — move listener relative to current camera orientation
-    let (bevy_forward, bevy_right) = movement_directions(settings.camera_yaw);
-
-    let mut move_dir = Vec3::ZERO;
-    if keyboard.pressed(KeyCode::KeyW) {
-        move_dir += bevy_forward;
-    }
-    if keyboard.pressed(KeyCode::KeyS) {
-        move_dir -= bevy_forward;
-    }
-    if keyboard.pressed(KeyCode::KeyD) {
-        move_dir += bevy_right;
-    }
-    if keyboard.pressed(KeyCode::KeyA) {
-        move_dir -= bevy_right;
-    }
-
-    let moved = move_dir != Vec3::ZERO;
-    if moved {
-        let bevy_delta = move_dir.normalize() * settings.move_speed * time.delta_secs();
-        listener.position[0] += bevy_delta.x;
-        listener.position[1] -= bevy_delta.z;
-        listener.position[2] += bevy_delta.y;
-    }
-
-    if moved || yaw_changed {
-        command_sender.send(Command::SetListenerPose {
-            position: AtriumVec3::new(
-                listener.position[0],
-                listener.position[1],
-                listener.position[2],
-            ),
-            yaw: listener.yaw,
-        });
-    }
-
-    // Scroll to zoom
-    for event in scroll_messages.read() {
-        let scroll = match event.unit {
+    // Always drain the wheel events; only apply zoom when the cursor isn't over
+    // a HUD panel (there the wheel scrolls the panel instead).
+    let mut step = 0.0;
+    for event in scroll.read() {
+        step += match event.unit {
             MouseScrollUnit::Line => event.y * settings.zoom_speed,
             MouseScrollUnit::Pixel => event.y * settings.zoom_speed * 0.01,
         };
+    }
+    if !over_hud.0 {
         settings.ortho_scale =
-            (settings.ortho_scale - scroll).clamp(settings.min_scale, settings.max_scale);
+            (settings.ortho_scale - step).clamp(settings.min_scale, settings.max_scale);
     }
 
-    // Apply zoom
+    // Gamepad triggers: R2 zooms in (smaller scale), L2 zooms out.
+    let dt = time.delta_secs();
+    for gamepad in &gamepads {
+        let zoom_in = gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
+        let zoom_out = gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
+        let zoom_delta = (zoom_out - zoom_in) * settings.zoom_speed * 12.0 * dt;
+        if zoom_delta != 0.0 {
+            settings.ortho_scale =
+                (settings.ortho_scale + zoom_delta).clamp(settings.min_scale, settings.max_scale);
+        }
+    }
+
     if let Projection::Orthographic(ref mut ortho) = **projection {
         ortho.scale = settings.ortho_scale;
     }
 
-    // Camera tracks listener position with current yaw
-    let look_at = atrium_to_bevy(listener.position);
-    let camera_pos = look_at + camera_offset(settings.camera_yaw);
-    **transform = Transform::from_translation(camera_pos).looking_at(look_at, Vec3::Y);
+    let look_at = atrium_to_world(state.position);
+    transform.translation.x = look_at.x;
+    transform.translation.y = look_at.y;
 }

@@ -14,27 +14,36 @@ struct GrassWindUniforms {
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> wind: GrassWindUniforms;
 
+// Simple hash for per-blade variation (deterministic from position)
+fn hash12(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     var out: VertexOutput;
 
-    // Standard local-to-world transform
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     var world_pos = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
 
-    // Wind displacement — only blade tips move, roots stay planted.
-    // vertex.position.y is in local space (0 to ~28 for Grass.glb),
-    // so normalize to 0-1 range using a reasonable max height.
-    let normalized_height = clamp(vertex.position.y / 30.0, 0.0, 1.0);
-    let bend = normalized_height * normalized_height;
+    // UV.y = 0 at base, 1 at tip
+    let height_percent = vertex.uv.y;
 
-    let phase = world_pos.x * 0.7 + world_pos.z * 0.5;
-    let sway = (sin(wind.time * 1.5 + phase) * 0.6 + sin(wind.time * 3.7 + phase * 2.3) * 0.25)
-               * wind.wind_strength * bend * 0.03;
+    // Per-blade random lean from world position hash
+    let blade_root = world_pos.xz - vertex.position.xz * 0.01;
+    let random_lean = (hash12(floor(blade_root * 100.0)) - 0.5) * 0.015;
 
-    world_pos.x += wind.wind_direction_x * sway;
-    world_pos.z += wind.wind_direction_z * sway;
-    world_pos.y -= abs(sway) * 0.15;
+    // Wind sway: sinusoidal wave
+    let wave = sin(wind.time * 1.8 + (world_pos.x + world_pos.z) * 0.5);
+    let sway = wave * wind.wind_strength * height_percent * 0.02;
+
+    // Curve: random lean + wind, applied to tips only
+    let curve = (random_lean * height_percent * height_percent) + sway;
+
+    world_pos.x += wind.wind_direction_x * curve;
+    world_pos.z += wind.wind_direction_z * curve;
 
     out.world_position = world_pos;
     out.position = position_world_to_clip(world_pos.xyz);

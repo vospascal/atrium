@@ -1,0 +1,8 @@
+# Source: Cicadas
+# A wall of cicadas up in the trees — dense, enveloping drone rather than a
+# point. Wide spread so it wraps the listener like real canopy insects.
+
+path: assets/cicadas.ogg
+reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective drone)
+directivity: omni           # diffuse, from all around the canopy
+spread: 0.6                 # broad MDAP spread — not a point source

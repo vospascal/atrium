@@ -1,0 +1,72 @@
+# Scene: Nature — Sound Emission Map
+# Recreates the top-down "sound emission map" reference: a central listener in
+# an open ~60×60 m clearing, ringed by nature sound sources at the reference
+# bearings and distances. Run the 2D map with:
+#   cargo run --features bevy --no-default-features -- --bevy scenes/nature.yaml
+#
+# Positions are [x, y, z] in metres, listener-relative (offset by the meadow
+# spawn). Bearings are measured from +Y (north / "up" on the map), clockwise —
+# matching the angle read-out on each source card.
+
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]   # centre of the clearing, ears at 1.2 m
+  yaw_degrees: 90.0           # facing +Y (north / up on the map)
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0          # keep sources audible out to ~40 m
+  rolloff: 1.0
+
+speakers:
+  layout: "5.1"
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c:  [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0
+
+sources:
+  - source: sources/seagull.yaml    # Birds — NW, high overhead
+    name: Birds
+    color: "#e0544a"
+    position: [-13.2, 13.2, 6.0]    # 18.6 m @ 315 deg
+
+  - source: sources/frog.yaml       # Frogs — NE, near the water
+    name: Frogs
+    color: "#6db33f"
+    position: [10.1, 10.1, 0.0]     # 14.3 m @ 45 deg
+
+  - source: sources/stream.yaml     # Stream — due east
+    name: Stream
+    color: "#26c6da"
+    position: [10.7, 0.0, 0.0]      # 10.7 m @ 90 deg
+
+  - source: sources/cicadas.yaml    # Cicadas in the trees — SE, up in the canopy
+    name: Cicadas
+    color: "#e0a020"
+    position: [11.5, -11.5, 4.0]    # 16.2 m @ 135 deg
+
+  - source: sources/campfire.yaml   # Campfire — due south
+    name: Campfire
+    color: "#ff7a2e"
+    position: [0.0, -9.8, 0.0]      # 9.8 m @ 180 deg
+
+  - source: sources/cricket.yaml    # Insects — SW, in the grass
+    name: Insects
+    color: "#9b6dc8"
+    position: [-9.1, -9.1, 0.0]     # 12.9 m @ 225 deg
+
+atmosphere: atmospheres/default.yaml

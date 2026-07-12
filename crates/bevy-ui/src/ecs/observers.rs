@@ -45,16 +45,13 @@ pub fn sync_source_properties(
 /// Unlike sources, speaker positions are NOT updated from telemetry,
 /// so Changed<Transform> is safe to watch here.
 pub fn sync_speaker_positions(
-    speakers: Query<(&SoundSpeaker, &Transform), Changed<Transform>>,
+    speakers: Query<(&SoundSpeaker, &Transform, &AtriumHeight), Changed<Transform>>,
     mut command_sender: ResMut<CommandSender>,
 ) {
-    for (speaker, transform) in &speakers {
-        // Convert Bevy Y-up back to Atrium Z-up
-        let position = AtriumVec3::new(
-            transform.translation.x,
-            -transform.translation.z,
-            transform.translation.y,
-        );
+    for (speaker, transform, height) in &speakers {
+        // World (Bevy 2D) ground plane → Atrium coords; the 2D view only moves
+        // entities on the ground plane, so height comes from AtriumHeight.
+        let position = AtriumVec3::new(transform.translation.x, transform.translation.y, height.0);
         command_sender.send(Command::SetSpeakerPosition {
             channel: speaker.channel as u8,
             position,

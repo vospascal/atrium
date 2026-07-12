@@ -62,6 +62,10 @@ impl Default for SourceTelemetry {
 pub struct TelemetryFrame {
     pub sources: [SourceTelemetry; MAX_SOURCES],
     pub source_count: u8,
+    /// Bit `i` set = slot `i` holds a live source. With the 16-slot pool, slots
+    /// can be sparse (a removed source leaves a gap), so consumers must gate on
+    /// this mask rather than assuming `0..source_count` are all present.
+    pub active_mask: u16,
     /// Current pipeline mode (may change at runtime via SetRenderMode command).
     pub render_mode: RenderMode,
     /// Current speaker configuration.
@@ -81,6 +85,7 @@ impl Default for TelemetryFrame {
         Self {
             sources: [SourceTelemetry::default(); MAX_SOURCES],
             source_count: 0,
+            active_mask: 0,
             render_mode: RenderMode::WorldLocked,
             channel_mode: ChannelMode::Surround51,
             temperature_c: 20.0,

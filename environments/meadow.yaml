@@ -1,0 +1,17 @@
+# Environment: Meadow
+# Open ~60×60 m outdoor clearing — grass ground, no enclosing walls. Sized to
+# match the "Top-Down Sound Emission Map" reference (Area Size ~60 m × 60 m).
+# Nature sources ring a central listener; no reflections (open air).
+
+width: 60.0   # meters (X axis)
+depth: 60.0   # meters (Y axis)
+height: 30.0  # meters (Z axis) — open sky
+
+spawn: [30.0, 30.0, 0.0]   # center of the clearing
+
+ground_factor: 1.0         # porous grass/earth
+wall_reflectivity: 0.0     # open air, no reflections
+
+walls:
+  default: open
+  floor: grass             # grass ground surface

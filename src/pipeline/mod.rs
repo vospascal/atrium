@@ -88,7 +88,7 @@ use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::ambi_decode::AmbisonicsDecodeStage;
 use self::stages::ambi_multi_delay::AmbiMultiDelayStage;
 use self::stages::delay_comp::DelayCompStage;
-use self::stages::fdn_reverb::FdnReverbStage;
+use self::stages::fdn_reverb::{FdnConfig, FdnReverbStage};
 use self::stages::lfe_crossover::LfeBassManagementStage;
 use self::stages::master_gain::MasterGainStage;
 
@@ -229,6 +229,10 @@ pub struct PipelineParams {
     /// Room bounds for sizing delay buffers from max image-source distance.
     pub environment_min: Vec3,
     pub environment_max: Vec3,
+    /// Explicit late-reverb mid-band RT60 (seconds). `None` = geometry-derived.
+    pub reverb_rt60_seconds: Option<f32>,
+    /// Explicit late-reverb pre-delay (milliseconds). `None` = mean-free-path.
+    pub reverb_pre_delay_ms: Option<f32>,
 }
 
 impl Default for PipelineParams {
@@ -242,6 +246,8 @@ impl Default for PipelineParams {
             wall_materials: Default::default(),
             environment_min: Vec3::new(-5.0, -5.0, -5.0),
             environment_max: Vec3::new(5.0, 5.0, 5.0),
+            reverb_rt60_seconds: None,
+            reverb_pre_delay_ms: None,
         }
     }
 }
@@ -279,6 +285,9 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
                 reflection_capacity: reflection_buffer_capacity(p),
             },
         )),
+        // No FDN: WorldLocked reverberates through its own per-speaker reflection
+        // taps. Adding a shared FDN on top over-summed the tail and pushed
+        // sustained tones into overload in reflective rooms.
         mix_stages: vec![
             Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::static_calibration()),
@@ -301,7 +310,10 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
         // FDN before LFE crossover: reverb bass gets redirected to LFE
         // alongside the dry signal's bass.
         mix_stages: vec![
-            Box::new(FdnReverbStage::new()),
+            Box::new(FdnReverbStage::with_config(FdnConfig::speaker(
+                p.reverb_rt60_seconds,
+                p.reverb_pre_delay_ms,
+            ))),
             Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::listener_relative()),
             Box::new(MasterGainStage),
@@ -338,7 +350,13 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 
     RenderPipeline {
         renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sample_rate)),
-        mix_stages: vec![Box::new(FdnReverbStage::new()), Box::new(MasterGainStage)],
+        mix_stages: vec![
+            Box::new(FdnReverbStage::with_config(FdnConfig::headphone(
+                p.reverb_rt60_seconds,
+                p.reverb_pre_delay_ms,
+            ))),
+            Box::new(MasterGainStage),
+        ],
         resolver: Box::new(ImageSourceResolver::from_materials(&p.wall_materials)),
         path_effect_factories: vec![
             Box::new(move |sample_rate| {
@@ -376,7 +394,10 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
         // FDN before LFE crossover: reverb bass gets redirected to LFE
         // alongside the dry signal's bass.
         mix_stages: vec![
-            Box::new(FdnReverbStage::new()),
+            Box::new(FdnReverbStage::with_config(FdnConfig::speaker(
+                p.reverb_rt60_seconds,
+                p.reverb_pre_delay_ms,
+            ))),
             Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::static_calibration()),
             Box::new(MasterGainStage),
@@ -415,7 +436,10 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
         mix_stages: vec![
             Box::new(AmbiMultiDelayStage::new()),
             Box::new(AmbisonicsDecodeStage::new()),
-            Box::new(FdnReverbStage::new()),
+            Box::new(FdnReverbStage::with_config(FdnConfig::speaker(
+                p.reverb_rt60_seconds,
+                p.reverb_pre_delay_ms,
+            ))),
             Box::new(LfeBassManagementStage::new()),
             Box::new(DelayCompStage::listener_relative()),
             Box::new(MasterGainStage),
@@ -787,6 +811,209 @@ mod tests {
                 rms_b,
             );
         }
+    }
+
+    // ── End-to-end: a reflective room produces a reverb tail ─────────────
+
+    /// A 1 kHz source that plays for `remaining` samples then goes silent, so we
+    /// can measure what rings out after it stops. 1 kHz survives the reverb-send
+    /// HPF (a DC burst would not).
+    struct BurstSource {
+        pos: Vec3,
+        n: usize,
+        remaining: usize,
+    }
+    impl SoundSource for BurstSource {
+        fn next_sample(&mut self, sr: f32) -> f32 {
+            if self.remaining == 0 {
+                return 0.0;
+            }
+            self.remaining -= 1;
+            let s = (std::f32::consts::TAU * 1000.0 * self.n as f32 / sr).sin() * 0.5;
+            self.n += 1;
+            s
+        }
+        fn position(&self) -> Vec3 {
+            self.pos
+        }
+        fn tick(&mut self, _dt: f32) {}
+        fn is_active(&self) -> bool {
+            true
+        }
+    }
+
+    /// The headline fix, end-to-end: rendered through the default (VBAP) pipeline,
+    /// a reflective room rings out after the source stops, while an open field
+    /// (the old `riverside` default) goes essentially silent — proving the tail
+    /// comes from the environment, not from panning.
+    #[test]
+    fn reflective_room_produces_reverb_tail_open_field_does_not() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+        let channels = 6;
+        let frames = 512;
+        let environment_min = Vec3::new(0.0, 0.0, 0.0);
+        let environment_max = Vec3::new(8.0, 6.0, 4.0);
+        let listener = Listener::new(Vec3::new(4.0, 3.0, 0.0), std::f32::consts::FRAC_PI_2);
+
+        let late_energy = |wall: path::WallMaterial, reflectivity: f32, rt60: Option<f32>| -> f32 {
+            let wall_materials: [path::WallMaterial; 6] = std::array::from_fn(|_| wall.clone());
+            let params = PipelineParams {
+                sample_rate: 48000.0,
+                er_wall_reflectivity: reflectivity,
+                wall_materials: wall_materials.clone(),
+                environment_min,
+                environment_max,
+                reverb_rt60_seconds: rt60,
+                ..PipelineParams::default()
+            };
+            let mut pipeline = build_vbap(&params);
+
+            // render_pipeline does not init mix stages; the FDN needs it to
+            // compute damping/pre-delay before it will produce a tail.
+            let init_ctx = MixContext {
+                listener: &listener,
+                layout: &layout,
+                sample_rate: 48000.0,
+                channels,
+                environment_min,
+                environment_max,
+                master_gain: 1.0,
+                render_channels: channels,
+                reverb_input: None,
+                wall_reflectivity: reflectivity,
+                wall_materials: &wall_materials,
+                atmosphere: &atm,
+                measurement_mode: false,
+            };
+            pipeline.init(&init_ctx);
+
+            let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(BurstSource {
+                pos: Vec3::new(4.0, 4.5, 0.0), // ~1.5 m in front of the listener
+                n: 0,
+                remaining: frames, // one buffer of tone, then silence
+            })];
+
+            // Buffer 0 = tone; buffers 1..7 = silence while the tail rings out.
+            let mut late = 0.0f32;
+            for b in 0..7 {
+                let mut buf = vec![0.0f32; frames * channels];
+                let rp = RenderParams {
+                    listener: &listener,
+                    channels,
+                    sample_rate: 48000.0,
+                    master_gain: 1.0,
+                    distance_model: &dm,
+                    layout: &layout,
+                    atmosphere: &atm,
+                    ground: &ground,
+                    environment_min,
+                    environment_max,
+                    barriers: &[],
+                    wall_materials: &wall_materials,
+                    measurement_mode: false,
+                };
+                render_pipeline(&mut pipeline, &mut sources, &rp, &mut buf);
+                if b >= 3 {
+                    // Well after the source stopped: only the tail remains.
+                    late += buf.iter().map(|s| s * s).sum::<f32>();
+                }
+            }
+            late
+        };
+
+        let reflective = late_energy(path::WallMaterial::hard_wall(), 0.9, Some(2.0));
+        let open = late_energy(path::WallMaterial::open(), 0.0, None);
+
+        assert!(
+            reflective > 1e-6 && reflective > open * 10.0,
+            "reflective room should ring out after the source stops; open field should not: \
+             reflective={reflective}, open={open}"
+        );
+    }
+
+    /// Stereo (bilateral) Ambisonics must feed the late-reverb send like every
+    /// other mode. Regression: the 2-channel render branch skipped the reverb
+    /// send entirely, so the FDN read a zeroed bus and headphone Ambisonics
+    /// had no tail at all.
+    #[test]
+    fn stereo_ambisonics_produces_reverb_tail() {
+        let layout = SpeakerLayout::stereo(Vec3::new(3.0, 4.5, 0.0), Vec3::new(5.0, 4.5, 0.0));
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+        let channels = 2;
+        let frames = 512;
+        let environment_min = Vec3::new(0.0, 0.0, 0.0);
+        let environment_max = Vec3::new(8.0, 6.0, 4.0);
+        let listener = Listener::new(Vec3::new(4.0, 3.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let wall_materials: [path::WallMaterial; 6] =
+            std::array::from_fn(|_| path::WallMaterial::hard_wall());
+
+        let params = PipelineParams {
+            sample_rate: 48000.0,
+            er_wall_reflectivity: 0.9,
+            wall_materials: wall_materials.clone(),
+            environment_min,
+            environment_max,
+            reverb_rt60_seconds: Some(2.0),
+            ..PipelineParams::default()
+        };
+        let mut pipeline = build_ambisonics(&params);
+
+        let init_ctx = MixContext {
+            listener: &listener,
+            layout: &layout,
+            sample_rate: 48000.0,
+            channels,
+            environment_min,
+            environment_max,
+            master_gain: 1.0,
+            render_channels: channels,
+            reverb_input: None,
+            wall_reflectivity: 0.9,
+            wall_materials: &wall_materials,
+            atmosphere: &atm,
+            measurement_mode: false,
+        };
+        pipeline.init(&init_ctx);
+
+        let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(BurstSource {
+            pos: Vec3::new(4.0, 4.5, 0.0),
+            n: 0,
+            remaining: frames,
+        })];
+
+        let mut late = 0.0f32;
+        for b in 0..7 {
+            let mut buf = vec![0.0f32; frames * channels];
+            let rp = RenderParams {
+                listener: &listener,
+                channels,
+                sample_rate: 48000.0,
+                master_gain: 1.0,
+                distance_model: &dm,
+                layout: &layout,
+                atmosphere: &atm,
+                ground: &ground,
+                environment_min,
+                environment_max,
+                barriers: &[],
+                wall_materials: &wall_materials,
+                measurement_mode: false,
+            };
+            render_pipeline(&mut pipeline, &mut sources, &rp, &mut buf);
+            if b >= 3 {
+                late += buf.iter().map(|s| s * s).sum::<f32>();
+            }
+        }
+
+        assert!(
+            late > 1e-8,
+            "stereo bilateral Ambisonics should ring out through the FDN, got late energy {late}"
+        );
     }
 
     // ── WorldLocked: nearest speaker gets highest gain ───────────────────

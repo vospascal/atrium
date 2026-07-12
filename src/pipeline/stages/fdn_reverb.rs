@@ -6,30 +6,48 @@
 //!
 //! Chain order: Direct (0–3ms) → EarlyReflections (3–50ms) → FdnReverb (50ms+)
 
+use crate::audio::filters::Biquad;
 use crate::pipeline::mix_stage::{MixContext, MixStage};
 use crate::pipeline::room_acoustics;
 use crate::pipeline::stages::sanitize_finite;
 
-const NUM_LINES: usize = 8;
+/// 16 delay lines (was 8). Modal density is `fs / Σdelays`; doubling the line
+/// count roughly halves the mode spacing (to ~1.3 Hz here), which crosses
+/// Schroeder's overlap threshold for a ~1.6 s tail so the reverb reads as a
+/// smooth wash rather than a ringing/metallic one. Must stay a power of two
+/// (the Hadamard mixing matrix is built by the fast Walsh–Hadamard transform).
+const NUM_LINES: usize = 16;
 const MAX_OUT: usize = 8;
-/// Minimum delay buffer size (sufficient for all BASE_DELAYS at 48 kHz).
+/// Initial delay buffer size (floor). Grown at init to fit `BASE_DELAYS` for the
+/// actual sample rate (see `required_buffer_size` / `compute_delays`).
 const MIN_BUF_SIZE: usize = 512;
 const PRE_DELAY_BUF_SIZE: usize = 2048;
 const PRE_DELAY_BUF_MASK: usize = PRE_DELAY_BUF_SIZE - 1;
 /// Fallback pre-delay when room geometry is degenerate (volume ≈ 0 or surface area ≈ 0).
 const PRE_DELAY_FALLBACK_SECONDS: f32 = 0.020;
-const BASE_DELAYS: [usize; NUM_LINES] = [241, 307, 353, 389, 421, 433, 461, 499];
+/// Delay-line lengths (samples @ 48 kHz): 16 mutually-prime values spread over
+/// ~26–70 ms. HALL-scale, not box-scale: modal density is `fs / Σdelays`, so the
+/// ~36.8k-sample total gives ~1.3 Hz mode spacing (vs ~15.5 Hz for the old box
+/// delays, which rang metallically). Coprime lengths keep modes from coinciding;
+/// longer delays raise density without changing RT60 (the damping formula is
+/// per-sample normalized). Longest (3347) fits the 4096 buffer.
+const BASE_DELAYS: [usize; NUM_LINES] = [
+    1249, 1399, 1531, 1669, 1811, 1949, 2089, 2237, 2371, 2503, 2657, 2791, 2939, 3067, 3209, 3347,
+];
 const BASE_SAMPLE_RATE: f32 = 48000.0;
 
 /// Per-line delay modulation parameters.
 /// Irrational rate ratios prevent modulation patterns from repeating.
 /// Rates chosen from golden-ratio-spaced values between 0.5–1.7 Hz
 /// (slow enough to be inaudible, fast enough to smear modes within 1–2s).
-const MOD_RATES_HZ: [f32; NUM_LINES] = [0.51, 0.73, 0.97, 1.13, 1.31, 1.53, 0.67, 1.07];
-/// Modulation depth in samples at 48 kHz. Scaled by sample_rate/48000
-/// at init. ±3 samples at 48 kHz ≈ ±63 µs — enough to smear modes but
-/// not enough to produce audible pitch warble.
-const MOD_DEPTH_SAMPLES_48K: f32 = 3.0;
+const MOD_RATES_HZ: [f32; NUM_LINES] = [
+    0.51, 0.73, 0.97, 1.13, 1.31, 1.53, 0.67, 1.07, 0.59, 0.83, 1.03, 1.21, 1.43, 1.61, 0.79, 1.19,
+];
+/// Modulation depth in samples at 48 kHz. Scaled by sample_rate/48000 at init.
+/// ±10 samples ≈ ±208 µs smears residual modes across the ~2.8 Hz spacing so the
+/// tail stays smooth rather than metallic. On the hall-scale delay lines this is
+/// only ±0.3–0.8 %, and the slow rates keep pitch deviation at ~2 cents (inaudible).
+const MOD_DEPTH_SAMPLES_48K: f32 = 10.0;
 
 /// Per-line LFO state for delay modulation.
 #[derive(Clone, Copy)]
@@ -115,6 +133,83 @@ fn feedback_soft_clamp(x: f32) -> f32 {
     }
 }
 
+/// When RT60 is overridden explicitly, the 4 kHz decay is set to this fraction
+/// of the mid-band (500 Hz) RT60 — highs ring out somewhat faster than lows for
+/// a naturally bright-but-controlled "glass atrium" tail without going sizzly.
+const HF_DECAY_RATIO: f32 = 0.6;
+
+/// Voicing/tuning for the FDN reverb, resolved once at pipeline-build time from
+/// the environment config. Separates *what the room does* (RT60, pre-delay from
+/// geometry) from *how the designer wants the tail to sit* (per-channel balance,
+/// low-end control).
+#[derive(Clone)]
+pub struct FdnConfig {
+    /// Explicit mid-band (500 Hz) RT60 in seconds. `Some` bypasses the
+    /// geometry+material Sabine RT60; the 4 kHz decay is derived via
+    /// `HF_DECAY_RATIO`. `None` keeps the physically-derived decay.
+    pub rt60_seconds: Option<f32>,
+    /// Explicit pre-delay in milliseconds. `Some` bypasses the mean-free-path
+    /// pre-delay (clamped to the pre-delay buffer capacity). `None` keeps it.
+    pub pre_delay_ms: Option<f32>,
+    /// Per-output-channel wet trim, indexed by the canonical 5.1 hardware layout
+    /// (0=L, 1=R, 2=C, 3=LFE, 4=Ls, 5=Rs, 6/7=back surrounds). Lets surrounds run
+    /// wetter than fronts and keeps the centre near-dry for dialogue clarity.
+    pub channel_gains: [f32; MAX_OUT],
+    /// High-pass cutoff (Hz) applied to the reverb send. Keeps low-mid mud out of
+    /// the tail — and, since the tail then has little sub-bass, keeps reverb bass
+    /// out of the LFE too. `0.0` disables it.
+    pub hpf_cutoff_hz: f32,
+    /// Overall wet level multiplier applied to the tail. Lets the reverb sit under
+    /// the dry signal (the send law + normalization set the D/R balance; this trims
+    /// the absolute prominence). `1.0` = full.
+    pub wet: f32,
+}
+
+impl Default for FdnConfig {
+    /// Neutral FDN: physically-derived decay/pre-delay, uniform channel level,
+    /// full wet, no send high-pass. Matches the reverb's historical behaviour.
+    fn default() -> Self {
+        Self {
+            rt60_seconds: None,
+            pre_delay_ms: None,
+            channel_gains: [1.0; MAX_OUT],
+            hpf_cutoff_hz: 0.0,
+            wet: 1.0,
+        }
+    }
+}
+
+impl FdnConfig {
+    /// Voicing for the physical speaker array: surrounds wettest, centre near-dry,
+    /// fronts moderate, LFE unused; reverb send high-passed to control the low end.
+    /// This is the idea.md atrium recipe (surrounds > fronts > centre, LFE dry).
+    pub fn speaker(rt60_seconds: Option<f32>, pre_delay_ms: Option<f32>) -> Self {
+        Self {
+            rt60_seconds,
+            pre_delay_ms,
+            //             L    R    C    LFE  Ls   Rs   (7.1 back ×2)
+            channel_gains: [0.6, 0.6, 0.15, 0.0, 1.0, 1.0, 1.0, 1.0],
+            hpf_cutoff_hz: 160.0,
+            // Sit the tail clearly under the dry signal — a living-room atrium,
+            // not a wash. Keeps the wet from dominating in energy-concentrating
+            // modes (VBAP/WorldLocked/Ambisonics).
+            wet: 0.5,
+        }
+    }
+
+    /// Voicing for headphone (HRTF) output: full, uniform stereo reverb with only
+    /// a gentle rumble filter — no speaker-array channel balancing.
+    pub fn headphone(rt60_seconds: Option<f32>, pre_delay_ms: Option<f32>) -> Self {
+        Self {
+            rt60_seconds,
+            pre_delay_ms,
+            channel_gains: [1.0; MAX_OUT],
+            hpf_cutoff_hz: 100.0,
+            wet: 0.7,
+        }
+    }
+}
+
 /// Post-mix FDN late reverb stage.
 ///
 /// Fully physics-based gain staging:
@@ -152,6 +247,19 @@ pub struct FdnReverbStage {
     modulators: [DelayModulator; NUM_LINES],
     initialized: bool,
     measurement_mode: bool,
+    // ── Configuration (resolved from the environment at build time) ──
+    /// Explicit mid-band RT60 override (seconds); `None` = geometry-derived.
+    rt60_override: Option<f32>,
+    /// Explicit pre-delay override (milliseconds); `None` = mean-free-path.
+    pre_delay_override_ms: Option<f32>,
+    /// Per-channel wet trim (canonical 5.1 role order).
+    channel_gains: [f32; MAX_OUT],
+    /// Reverb-send high-pass cutoff (Hz); `0.0` disables it.
+    hpf_cutoff_hz: f32,
+    /// Reverb-send high-pass filter, built at init once the sample rate is known.
+    send_hpf: Option<Biquad>,
+    /// Overall wet-level multiplier for the tail.
+    wet: f32,
 }
 
 /// Sabine RT60 band indices for FDN damping.
@@ -166,7 +274,15 @@ impl Default for FdnReverbStage {
 }
 
 impl FdnReverbStage {
+    /// Neutral reverb: physically-derived decay/pre-delay, uniform channel level,
+    /// no send high-pass. Equivalent to `with_config(FdnConfig::default())`.
     pub fn new() -> Self {
+        Self::with_config(FdnConfig::default())
+    }
+
+    /// Reverb configured from the environment (RT60/pre-delay overrides,
+    /// per-channel voicing, reverb-send high-pass).
+    pub fn with_config(config: FdnConfig) -> Self {
         Self {
             delay_buffers: vec![vec![0.0; MIN_BUF_SIZE]; NUM_LINES],
             buffer_size: MIN_BUF_SIZE,
@@ -181,6 +297,12 @@ impl FdnReverbStage {
             modulators: [DelayModulator::new(); NUM_LINES],
             initialized: false,
             measurement_mode: false,
+            rt60_override: config.rt60_seconds,
+            pre_delay_override_ms: config.pre_delay_ms,
+            channel_gains: config.channel_gains,
+            hpf_cutoff_hz: config.hpf_cutoff_hz,
+            send_hpf: None,
+            wet: config.wet,
         }
     }
 
@@ -302,32 +424,25 @@ impl FdnReverbStage {
         };
     }
 
+    /// In-place fast Walsh–Hadamard transform, normalized to be orthonormal.
+    /// This is the FDN's lossless mixing matrix; it works for any power-of-two
+    /// `NUM_LINES` (the old code hardcoded the 8-point butterfly).
     #[inline(always)]
-    fn hadamard_8(v: &mut [f32; NUM_LINES]) {
-        for i in (0..8).step_by(2) {
-            let a = v[i];
-            let b = v[i + 1];
-            v[i] = a + b;
-            v[i + 1] = a - b;
+    fn hadamard(v: &mut [f32; NUM_LINES]) {
+        let mut h = 1;
+        while h < NUM_LINES {
+            let mut i = 0;
+            while i < NUM_LINES {
+                for j in i..i + h {
+                    let a = v[j];
+                    let b = v[j + h];
+                    v[j] = a + b;
+                    v[j + h] = a - b;
+                }
+                i += h * 2;
+            }
+            h *= 2;
         }
-        for i in (0..8).step_by(4) {
-            let (a0, a1) = (v[i], v[i + 1]);
-            let (b0, b1) = (v[i + 2], v[i + 3]);
-            v[i] = a0 + b0;
-            v[i + 1] = a1 + b1;
-            v[i + 2] = a0 - b0;
-            v[i + 3] = a1 - b1;
-        }
-        let (a0, a1, a2, a3) = (v[0], v[1], v[2], v[3]);
-        let (b0, b1, b2, b3) = (v[4], v[5], v[6], v[7]);
-        v[0] = a0 + b0;
-        v[1] = a1 + b1;
-        v[2] = a2 + b2;
-        v[3] = a3 + b3;
-        v[4] = a0 - b0;
-        v[5] = a1 - b1;
-        v[6] = a2 - b2;
-        v[7] = a3 - b3;
         let scale = 1.0 / (NUM_LINES as f32).sqrt();
         for x in v.iter_mut() {
             *x *= scale;
@@ -383,7 +498,7 @@ impl FdnReverbStage {
             output[ch] /= (taps_in_ch * ch_count as f32).sqrt();
         }
 
-        Self::hadamard_8(&mut taps);
+        Self::hadamard(&mut taps);
 
         let input_scale = 1.0 / (NUM_LINES as f32).sqrt();
         let scaled_input = mono_in * input_scale;
@@ -431,9 +546,29 @@ impl MixStage for FdnReverbStage {
             RT60_HIGH_BAND,
         );
 
+        // Explicit RT60 override (e.g. "atrium tuned to 3.5 s") bypasses the
+        // geometry/material Sabine decay. HF decays a bit faster for a bright
+        // but non-sizzly tail. Guard against non-positive values.
+        let (rt60_low, rt60_high) = match self.rt60_override {
+            Some(rt60) if rt60 > 0.0 => (rt60, rt60 * HF_DECAY_RATIO),
+            _ => (rt60_low, rt60_high),
+        };
+
         // Pre-delay from mean free path: average time between wall bounces.
         let speed_of_sound = ctx.atmosphere.speed_of_sound();
         self.compute_pre_delay(ctx.sample_rate, volume, surface_area, speed_of_sound);
+
+        // Explicit pre-delay override (e.g. 20 ms) replaces the mean-free-path
+        // value, clamped to the pre-delay buffer capacity.
+        if let Some(ms) = self.pre_delay_override_ms {
+            let max_seconds = (PRE_DELAY_BUF_SIZE - 1) as f32 / ctx.sample_rate;
+            let seconds = (ms / 1000.0).clamp(0.0, max_seconds);
+            self.pre_delay_samples = (seconds * ctx.sample_rate) as usize;
+        }
+
+        // Build the reverb-send high-pass now that the sample rate is known.
+        self.send_hpf = (self.hpf_cutoff_hz > 0.0)
+            .then(|| Biquad::highpass(self.hpf_cutoff_hz, ctx.sample_rate));
 
         self.compute_damping(ctx.sample_rate, rt60_low, rt60_high);
         self.initialized = true;
@@ -471,6 +606,13 @@ impl MixStage for FdnReverbStage {
                 mono_sum / active_count as f32
             };
 
+            // High-pass the reverb send so the tail stays clear of low-mid mud
+            // (and, with little sub-bass left, keeps reverb out of the LFE).
+            let mono_in = match self.send_hpf.as_mut() {
+                Some(hpf) => hpf.process(mono_in),
+                None => mono_in,
+            };
+
             // Pre-delay
             self.pre_delay_buf[self.pre_delay_write_pos] = mono_in;
             let read_pos = (self.pre_delay_write_pos + PRE_DELAY_BUF_SIZE - self.pre_delay_samples)
@@ -483,7 +625,12 @@ impl MixStage for FdnReverbStage {
 
             for ch in 0..render_channels {
                 if ctx.layout.is_channel_active(ch) {
-                    let mixed = buffer[base + ch] + wet[ch] * self.output_normalization;
+                    // Per-channel voicing: surrounds run wetter than fronts, the
+                    // centre stays near-dry (canonical 5.1 role order); `wet` sets
+                    // the overall tail prominence.
+                    let wet_ch =
+                        wet[ch] * self.output_normalization * self.channel_gains[ch] * self.wet;
+                    let mixed = buffer[base + ch] + wet_ch;
                     // Linear output — MasterGainStage is the single point of
                     // output limiting. sanitize_finite prevents NaN/Inf propagation
                     // and enforces a ±100.0 stability ceiling for runaway FDN.
@@ -502,6 +649,9 @@ impl MixStage for FdnReverbStage {
         self.pre_delay_write_pos = 0;
         for d in &mut self.damping {
             d.state = 0.0;
+        }
+        if let Some(hpf) = self.send_hpf.as_mut() {
+            hpf.reset();
         }
     }
 
@@ -799,7 +949,10 @@ mod tests {
         // Quad mask: FL(0), FR(1), RL(4), RR(5) active; C(2), LFE(3) masked.
         layout.set_active_channels(&[0, 1, 4, 5]);
 
-        let frames = 2048;
+        // Long enough to span the late-reverb onset: the hall-scale delay lines
+        // start emitting only after pre-delay (~0.9k samples in the test room) plus
+        // the shortest delay (~1.3k), so a short window would see no wet yet.
+        let frames = 8192;
         let mut reverb_input = vec![0.0f32; frames * channels];
         // Write mono signal to ch0 only (mimics renderer mono bus).
         for frame in 0..frames {
@@ -1439,11 +1592,11 @@ mod tests {
             fdn.delays
         );
 
-        // Longest delay should be approximately 499 * 2 = 998
+        // Longest delay should be approximately 3001 * 2 = 6002 at 96 kHz.
         let max_delay = *fdn.delays.iter().max().unwrap();
         assert!(
-            max_delay > 900,
-            "longest delay at 96 kHz should be ~998, got {max_delay}"
+            max_delay > 5000,
+            "longest delay at 96 kHz should be ~6002, got {max_delay}"
         );
 
         // Buffer should have grown beyond the 48 kHz minimum of 512
@@ -1457,11 +1610,44 @@ mod tests {
     /// required_buffer_size scales correctly with sample rate.
     #[test]
     fn buffer_size_scales_with_sample_rate() {
-        assert_eq!(FdnReverbStage::required_buffer_size(48000.0), 512);
-        assert!(FdnReverbStage::required_buffer_size(96000.0) >= 1024);
-        assert!(FdnReverbStage::required_buffer_size(44100.0) >= 512);
+        // Longest delay 3001 @ 48 kHz → next_pow2(3002) = 4096.
+        assert_eq!(FdnReverbStage::required_buffer_size(48000.0), 4096);
+        assert!(FdnReverbStage::required_buffer_size(96000.0) >= 8192);
+        assert!(FdnReverbStage::required_buffer_size(44100.0) >= 4096);
         // Very high sample rate
-        assert!(FdnReverbStage::required_buffer_size(192000.0) >= 2048);
+        assert!(FdnReverbStage::required_buffer_size(192000.0) >= 16384);
+    }
+
+    /// Modal-density guard — the fix for tinny/metallic reverb. Mode spacing is
+    /// Δf = fs / Σ(delays); sparse modes (large Δf) ring metallically on a long
+    /// tail. The old box-scale delays gave ~15.5 Hz; hall-scale delays must give
+    /// well under 4 Hz so modes pack densely enough for a smooth wash.
+    #[test]
+    fn delay_lines_dense_enough_for_smooth_tail() {
+        let fs = 48_000.0;
+        let mut fdn = FdnReverbStage::new();
+        fdn.compute_delays(fs);
+
+        let sum: usize = fdn.delays.iter().sum();
+        let mode_spacing = fs / sum as f32;
+        // 16 hall-scale lines target ~1.3 Hz — below Schroeder's overlap threshold
+        // (~1.4 Hz for a 1.6 s tail), so modes overlap and the tail is smooth.
+        assert!(
+            mode_spacing < 2.0,
+            "FDN mode spacing should be < 2 Hz for a smooth (non-metallic) tail, \
+             got {mode_spacing:.1} Hz (Σdelays={sum})"
+        );
+
+        // Delays must stay mutually distinct (coprime spread preserved).
+        let mut uniq = fdn.delays.to_vec();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(
+            uniq.len(),
+            NUM_LINES,
+            "all delay lengths should be distinct: {:?}",
+            fdn.delays
+        );
     }
 
     /// Benchmark: measure FDN processing cost per second of audio.
@@ -1520,10 +1706,148 @@ mod tests {
         );
         eprintln!();
 
-        // Sanity: FDN should use less than 10% of a core for 6ch at 48kHz
+        // Sanity: FDN should use a small fraction of a core for 6ch at 48kHz.
+        // 16 delay lines roughly double the 8-line cost (~10% of a core, measured
+        // in isolation); the bound is loose to stay reliable under parallel test
+        // load while still catching gross regressions.
         assert!(
-            cpu_percent < 10.0,
-            "FDN should use < 10% CPU, got {cpu_percent:.1}%"
+            cpu_percent < 20.0,
+            "FDN should use < 20% CPU, got {cpu_percent:.1}%"
+        );
+    }
+
+    // ── Configurable reverb: RT60 / pre-delay overrides, voicing, HPF ─────────
+
+    /// Total wet energy the FDN adds to a buffer (output − input), isolating the
+    /// tail from any dry passthrough already in the buffer.
+    fn added_wet_energy(fdn: &mut FdnReverbStage, ctx: &MixContext, buffer: &mut [f32]) -> f32 {
+        let input = buffer.to_vec();
+        fdn.process(buffer, ctx);
+        buffer
+            .iter()
+            .zip(&input)
+            .map(|(out, dry)| {
+                let wet = out - dry;
+                wet * wet
+            })
+            .sum()
+    }
+
+    /// An explicit RT60 override must lengthen the decay: a 3.5 s tail retains far
+    /// more late energy than a 1.0 s tail, independent of room geometry.
+    #[test]
+    fn rt60_override_slows_decay() {
+        let channels = 6;
+        let (layout, listener) = make_ctx(channels, channels);
+        let ctx = mix_ctx(&layout, &listener, channels, channels);
+
+        let tail_energy = |rt60: f32| -> f32 {
+            let mut fdn = FdnReverbStage::with_config(FdnConfig {
+                rt60_seconds: Some(rt60),
+                ..FdnConfig::default()
+            });
+            fdn.init(&ctx);
+            let frames = 48_000; // 1 s
+            let mut buffer = vec![0.0f32; frames * channels];
+            buffer[0] = 1.0; // impulse into channel 0 (mono-summed as FDN input)
+            fdn.process(&mut buffer, &ctx);
+            // Energy in the last 0.5 s — pure tail, dry impulse long gone.
+            let start = (frames / 2) * channels;
+            buffer[start..].iter().map(|s| s * s).sum()
+        };
+
+        let long = tail_energy(3.5);
+        let short = tail_energy(1.0);
+        assert!(
+            long > short * 2.0,
+            "RT60=3.5s tail should retain much more energy than RT60=1.0s: {long} vs {short}"
+        );
+    }
+
+    /// A pre-delay override sets the delay directly (20 ms @ 48 kHz = 960 samples),
+    /// bypassing the mean-free-path value the test room would otherwise produce.
+    #[test]
+    fn pre_delay_override_sets_samples() {
+        let channels = 6;
+        let (layout, listener) = make_ctx(channels, channels);
+        let ctx = mix_ctx(&layout, &listener, channels, channels);
+
+        let mut fdn = FdnReverbStage::with_config(FdnConfig {
+            pre_delay_ms: Some(20.0),
+            ..FdnConfig::default()
+        });
+        fdn.init(&ctx);
+        assert_eq!(
+            fdn.diagnostics().pre_delay_samples,
+            960,
+            "20 ms @ 48 kHz should be exactly 960 samples of pre-delay"
+        );
+    }
+
+    /// Speaker voicing must run the surrounds much wetter than the centre
+    /// (idea.md: surrounds > fronts > centre), so an impulse leaves far more
+    /// late energy in Ls/Rs (ch 4/5, gain 1.0) than in C (ch 2, gain 0.15).
+    #[test]
+    fn speaker_voicing_surrounds_wetter_than_center() {
+        let channels = 6;
+        let (layout, listener) = make_ctx(channels, channels);
+        let ctx = mix_ctx(&layout, &listener, channels, channels);
+
+        let mut fdn = FdnReverbStage::with_config(FdnConfig::speaker(Some(2.0), None));
+        fdn.init(&ctx);
+
+        let frames = 24_000;
+        let mut buffer = vec![0.0f32; frames * channels];
+        buffer[0] = 1.0; // impulse into channel 0
+        fdn.process(&mut buffer, &ctx);
+
+        let ch_energy = |ch: usize| -> f32 {
+            (0..frames)
+                .map(|f| {
+                    let v = buffer[f * channels + ch];
+                    v * v
+                })
+                .sum::<f32>()
+        };
+        let center = ch_energy(2); // gain 0.15
+        let ls = ch_energy(4); // gain 1.0
+        let rs = ch_energy(5); // gain 1.0
+        assert!(
+            ls > center * 3.0 && rs > center * 3.0,
+            "surrounds should be much wetter than centre: Ls={ls}, Rs={rs}, C={center}"
+        );
+    }
+
+    /// The reverb-send HPF must strip sub-bass out of the tail: a 40 Hz send with
+    /// a 160 Hz high-pass produces far less wet energy than with the HPF disabled.
+    #[test]
+    fn reverb_hpf_attenuates_low_frequency_send() {
+        let channels = 6;
+        let (layout, listener) = make_ctx(channels, channels);
+        let ctx = mix_ctx(&layout, &listener, channels, channels);
+
+        let wet_energy = |hpf: f32| -> f32 {
+            let mut fdn = FdnReverbStage::with_config(FdnConfig {
+                hpf_cutoff_hz: hpf,
+                ..FdnConfig::default()
+            });
+            fdn.init(&ctx);
+            let frames = 48_000;
+            let mut buffer = vec![0.0f32; frames * channels];
+            for frame in 0..frames {
+                let s = (std::f32::consts::TAU * 40.0 * frame as f32 / 48_000.0).sin() * 0.5;
+                for ch in 0..channels {
+                    buffer[frame * channels + ch] = s;
+                }
+            }
+            added_wet_energy(&mut fdn, &ctx, &mut buffer)
+        };
+
+        let with_hpf = wet_energy(160.0);
+        let without_hpf = wet_energy(0.0);
+        assert!(
+            with_hpf < without_hpf * 0.3,
+            "160 Hz send HPF should strongly attenuate a 40 Hz tail: with={with_hpf}, without={without_hpf}"
         );
     }
 }

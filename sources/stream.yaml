@@ -1,0 +1,8 @@
+# Source: Stream
+# A running brook — steady, broadband water noise. Slightly spread so it reads
+# as a length of moving water rather than a point.
+
+path: assets/running_water.ogg
+reference_spl: 62.0        # ~60-65 dB SPL at 1m (babbling brook, close)
+directivity: omni           # water noise scatters in all directions
+spread: 0.3                 # a little width — a stretch of stream, not a point

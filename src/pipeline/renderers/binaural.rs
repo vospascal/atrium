@@ -98,6 +98,12 @@ struct HrtfPath {
 
 struct HrtfSource {
     paths: Vec<HrtfPath>,
+    /// Per-source buffer counter gating HRTF filter updates. Must be
+    /// per-source: a single renderer-wide counter incremented once per
+    /// `render_source` call only ever hits `% FILTER_UPDATE_INTERVAL == 0`
+    /// for some sources when the source count shares a factor with the
+    /// interval — with 2 sources, source 1 would never update its direction.
+    update_counter: usize,
 }
 
 pub struct HrtfRenderer {
@@ -113,7 +119,6 @@ pub struct HrtfRenderer {
     xfade_right_buf: Vec<f32>,
     /// Shared input spectrum buffer — one forward FFT per block shared by L/R convolvers.
     input_spectrum: Vec<Complex<f32>>,
-    update_counter: usize,
     sample_rate: f32,
 }
 
@@ -134,7 +139,6 @@ impl HrtfRenderer {
                     xfade_left_buf: vec![0.0; BLOCK_SIZE],
                     xfade_right_buf: vec![0.0; BLOCK_SIZE],
                     input_spectrum: Vec::new(),
-                    update_counter: 0,
                     sample_rate,
                 }
             }
@@ -164,12 +168,11 @@ impl HrtfRenderer {
             xfade_left_buf: vec![0.0; BLOCK_SIZE],
             xfade_right_buf: vec![0.0; BLOCK_SIZE],
             input_spectrum: vec![Complex::new(0.0, 0.0); freq_len],
-            update_counter: 0,
             sample_rate,
         })
     }
 
-    fn new_source(sofa: &Sofar) -> HrtfSource {
+    fn new_source(sofa: &Sofar, source_idx: usize) -> HrtfSource {
         let filt_len = sofa.filter_len();
         let mut init_filter = Filter::new(filt_len);
         sofa.filter(0.0, 1.0, 0.0, &mut init_filter);
@@ -202,8 +205,23 @@ impl HrtfRenderer {
             });
         }
 
-        HrtfSource { paths }
+        HrtfSource {
+            paths,
+            // Stagger initial phases so at most one source recomputes its
+            // HRTF filter per buffer (for source counts ≤ the interval).
+            update_counter: source_idx % FILTER_UPDATE_INTERVAL,
+        }
     }
+}
+
+/// Equal-power stereo gains from a lateral pan position.
+/// `pan` ∈ [0, 1]: 0 = full left, 0.5 = center, 1 = full right.
+/// Invariant: gain_left² + gain_right² = 1 for all pan values.
+#[inline]
+fn equal_power_pan(pan: f32) -> (f32, f32) {
+    let gain_left = (std::f32::consts::FRAC_PI_2 * pan).cos();
+    let gain_right = (std::f32::consts::FRAC_PI_2 * (1.0 - pan)).cos();
+    (gain_left, gain_right)
 }
 
 /// Convert source position to SOFA listener-relative coordinates.
@@ -277,7 +295,9 @@ impl Renderer for HrtfRenderer {
 
         // Update HRTF filter for the direct path only — reflections use cheap
         // stereo panning and don't need convolution.
-        let should_update = self.update_counter.is_multiple_of(FILTER_UPDATE_INTERVAL);
+        let should_update = self.sources[source_idx]
+            .update_counter
+            .is_multiple_of(FILTER_UPDATE_INTERVAL);
         if should_update {
             if let Some(ref mut filter) = self.filter {
                 // Find the direct path index (always first, but be safe)
@@ -295,9 +315,13 @@ impl Renderer for HrtfRenderer {
                     hpath.active = new_active;
                     hpath.xfade_remaining = BLOCK_SIZE;
 
+                    // Clamp to buffer capacity: SOFA delays × high sample rates
+                    // (e.g. 0.7 ms × 96 kHz = 67 samples) can exceed the 64-sample
+                    // ring; unclamped they would wrap and read future samples.
                     let sr = self.sample_rate;
-                    hpath.itd_left.target_delay_samples = filter.ldelay * sr;
-                    hpath.itd_right.target_delay_samples = filter.rdelay * sr;
+                    let max_delay = (DELAY_BUF_SIZE - 2) as f32;
+                    hpath.itd_left.target_delay_samples = (filter.ldelay * sr).min(max_delay);
+                    hpath.itd_right.target_delay_samples = (filter.rdelay * sr).min(max_delay);
                 }
             }
         }
@@ -421,8 +445,7 @@ impl Renderer for HrtfRenderer {
                     let dist = (sx * sx + _sy * _sy + _sz * _sz).sqrt().max(0.001);
                     // Equal-power pan: angle → [0, 1] where 0.5 = center
                     let pan = 0.5 + 0.5 * (right_component / dist).clamp(-1.0, 1.0);
-                    let gain_left = (std::f32::consts::FRAC_PI_2 * (1.0 - pan)).cos();
-                    let gain_right = (std::f32::consts::FRAC_PI_2 * pan).cos();
+                    let (gain_left, gain_right) = equal_power_pan(pan);
 
                     // Accumulate directly into stereo output (no convolution)
                     for i in 0..block_len {
@@ -443,7 +466,7 @@ impl Renderer for HrtfRenderer {
             self.sources[source_idx].paths[pi].prev_gain = target_gains[pi];
         }
 
-        self.update_counter += 1;
+        self.sources[source_idx].update_counter += 1;
     }
 
     fn name(&self) -> &str {
@@ -454,13 +477,15 @@ impl Renderer for HrtfRenderer {
         self.sample_rate = sample_rate;
         if let Some(ref sofa) = self.sofa {
             while self.sources.len() < source_count {
-                self.sources.push(Self::new_source(sofa));
+                let source_idx = self.sources.len();
+                self.sources.push(Self::new_source(sofa, source_idx));
             }
         }
     }
 
     fn reset(&mut self) {
-        for src in &mut self.sources {
+        for (source_idx, src) in self.sources.iter_mut().enumerate() {
+            src.update_counter = source_idx % FILTER_UPDATE_INTERVAL;
             for path in &mut src.paths {
                 path.prev_gain = 0.0;
                 path.xfade_remaining = 0;
@@ -472,6 +497,90 @@ impl Renderer for HrtfRenderer {
                 }
             }
         }
-        self.update_counter = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reflection arriving from the listener's right must be louder in the
+    /// right channel. This guards against the channel-swap bug where
+    /// `gain_left` used `(1 - pan)` and `gain_right` used `pan` — mirroring
+    /// every reflection to the wrong side.
+    #[test]
+    fn pan_right_is_louder_in_right_channel() {
+        let (l, r) = equal_power_pan(1.0); // fully right
+        assert!(
+            l.abs() < 1e-6,
+            "full-right pan should silence left, got {l}"
+        );
+        assert!(
+            (r - 1.0).abs() < 1e-6,
+            "full-right pan should be unity right, got {r}"
+        );
+
+        let (l, r) = equal_power_pan(0.75);
+        assert!(r > l, "right-of-center pan must favor the right channel");
+    }
+
+    #[test]
+    fn pan_left_is_louder_in_left_channel() {
+        let (l, r) = equal_power_pan(0.0); // fully left
+        assert!((l - 1.0).abs() < 1e-6);
+        assert!(r.abs() < 1e-6);
+    }
+
+    #[test]
+    fn pan_center_is_equal_power() {
+        let (l, r) = equal_power_pan(0.5);
+        assert!((l - r).abs() < 1e-6, "center pan should be symmetric");
+        assert!(
+            (l - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+            "center pan should be -3 dB per channel"
+        );
+    }
+
+    /// Energy preservation: L² + R² = 1 across the whole pan range.
+    #[test]
+    fn pan_preserves_power_everywhere() {
+        for i in 0..=20 {
+            let pan = i as f32 / 20.0;
+            let (l, r) = equal_power_pan(pan);
+            let power = l * l + r * r;
+            assert!(
+                (power - 1.0).abs() < 1e-5,
+                "pan={pan}: power={power} should be 1.0"
+            );
+        }
+    }
+
+    /// ITD delay targets must be clamped to the ring buffer capacity —
+    /// at 96 kHz a 0.7 ms SOFA delay (67 samples) exceeds the 64-sample ring
+    /// and would otherwise wrap around and read future samples.
+    #[test]
+    fn itd_delay_stays_within_buffer() {
+        let mut itd = ItdDelay::new();
+        // Simulate the clamped assignment path used in render_source.
+        let sr: f32 = 96000.0;
+        let sofa_delay_seconds: f32 = 0.0007;
+        let max_delay = (DELAY_BUF_SIZE - 2) as f32;
+        itd.target_delay_samples = (sofa_delay_seconds * sr).min(max_delay);
+        assert!(itd.target_delay_samples <= max_delay);
+
+        // Feed an impulse and run long enough for smoothing to settle; the
+        // delayed output must appear (buffer indexing stays valid throughout).
+        let mut saw_signal = false;
+        for n in 0..1024 {
+            let input = if n == 0 { 1.0 } else { 0.0 };
+            let out = itd.process(input);
+            if out.abs() > 1e-9 {
+                saw_signal = true;
+            }
+        }
+        assert!(
+            saw_signal,
+            "delayed impulse should emerge from the ITD line"
+        );
     }
 }

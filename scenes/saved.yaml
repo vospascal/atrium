@@ -1,0 +1,120 @@
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+listener:
+  position:
+  - 0.0
+  - 0.0
+  - 1.2
+  yaw_degrees: 90.0
+master_gain: 1.0
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+speakers:
+  layout: '5.1'
+  render_mode: vbap
+  positions:
+    fl:
+    - -3.0
+    - 2.0
+    - 0.0
+    fr:
+    - 3.0
+    - 2.0
+    - 0.0
+    c:
+    - 0.0
+    - 2.0
+    - 0.0
+    rl:
+    - -3.0
+    - -2.0
+    - 0.0
+    rr:
+    - 3.0
+    - -2.0
+    - 0.0
+    l: null
+    r: null
+  dbap_rolloff_db: 6.0
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+sources:
+- source: sources/seagull.yaml
+  reference_spl: 70.0
+  directivity: omni
+  spread: 0.0
+  name: Birds
+  color: '#e0544a'
+  position:
+  - -13.929241
+  - 16.27208
+  - 6.0
+  orbit_radius: 0.0
+  orbit_speed: 0.0
+- source: sources/frog.yaml
+  reference_spl: 79.0
+  directivity: omni
+  spread: 0.0
+  name: Frogs
+  color: '#6db33f'
+  position:
+  - 11.646683
+  - 11.5044365
+  - 0.0
+  orbit_radius: 0.0
+  orbit_speed: 0.0
+- source: sources/stream.yaml
+  reference_spl: 84.0
+  directivity: omni
+  spread: 0.5
+  name: Stream
+  color: '#26c6da'
+  position:
+  - 11.686821
+  - 8.519722
+  - 0.0
+  orbit_radius: 0.0
+  orbit_speed: 0.0
+- source: sources/cicadas.yaml
+  reference_spl: 96.0
+  directivity: omni
+  spread: 0.8000001
+  name: Cicadas
+  color: '#e0a020'
+  position:
+  - 7.897064
+  - -6.6506767
+  - 4.0
+  orbit_radius: 0.0
+  orbit_speed: 0.0
+- source: sources/campfire.yaml
+  reference_spl: 80.0
+  directivity: omni
+  spread: 0.6
+  name: Campfire
+  color: '#ff7a2e'
+  position:
+  - 0.024295807
+  - 3.1155815
+  - 0.0
+  orbit_radius: 0.0
+  orbit_speed: 0.0
+- source: sources/cricket.yaml
+  reference_spl: 82.0
+  directivity: omni
+  spread: 0.6
+  name: Insects
+  color: '#9b6dc8'
+  position:
+  - -7.770197
+  - -5.3407803
+  - 0.0
+  orbit_radius: 0.0
+  orbit_speed: 0.0
+atmosphere: atmospheres/default.yaml
+hrtf: assets/hrtf/default.sofa

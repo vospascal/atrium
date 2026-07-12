@@ -9,7 +9,10 @@
 # Usage:  cargo run                         (loads this file)
 #         cargo run -- scenes/other.yaml    (loads a different scene)
 
-environment: environments/riverside.yaml
+# Glass atrium: reflective enclosure so the campsite sources (djembe, campfire,
+# purring cat) are wrapped in early reflections + a bright tail — not dry panning
+# in an open field. Swap to environments/riverside.yaml for the anechoic outdoor scene.
+environment: environments/atrium.yaml
 atrium: rooms/atrium_6x4.yaml
 
 listener:

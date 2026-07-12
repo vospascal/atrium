@@ -188,6 +188,14 @@ impl Renderer for AmbisonicsRenderer {
                         let gain = prev[pi][ear] + (target_stereo[pi][ear] - prev[pi][ear]) * t;
                         out.buffer[base + ear] += path_sample * gain;
                     }
+                    // Only the direct path feeds the late reverb send — same
+                    // as the ≥4ch branch; without this, stereo bilateral mode
+                    // starves the FDN and produces no tail at all.
+                    if path.kind == PathKind::Direct {
+                        if let Some(ref mut rev) = out.reverb_send {
+                            rev[base] += path_sample * ctx.reverb_send;
+                        }
+                    }
                 }
             }
 

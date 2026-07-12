@@ -5,9 +5,11 @@
 //! - All non-LFE channels receive LR4 highpass (two cascaded Butterworth HP sections)
 //! - Bass content removed from mains is redirected (summed) into the LFE channel
 //!
-//! LR4 guarantees flat magnitude reconstruction: LP(f) + HP(f) = 1.0 at all
-//! frequencies, with zero phase shift at the 120 Hz crossover point. Each filter
-//! is -6 dB at crossover, so their sum is 0 dB (unity).
+//! LR4's reconstruction property: LP(f) + HP(f) is an *allpass* — flat
+//! magnitude at all frequencies, with LP and HP mutually in phase. Each branch
+//! is -6 dB at crossover, so their sum is 0 dB. Note LP + HP ≠ 1 as a transfer
+//! function (the sum carries the allpass phase), which is why the bass redirect
+//! uses an explicit parallel lowpass rather than `original - highpassed`.
 //!
 //! No-op for layouts without LFE (e.g. stereo, quad).
 
@@ -65,6 +67,14 @@ pub struct LfeBassManagementStage {
     lfe_lowpass: Option<Lr4Filter>,
     /// LR4 highpass per non-LFE channel. Only populated for active channels.
     main_highpass: [Option<Lr4Filter>; MAX_CHANNELS],
+    /// Parallel LR4 lowpass per non-LFE channel, for the bass redirect.
+    ///
+    /// The redirected bass must be a *true* LR4 lowpass of each main channel.
+    /// `original - highpassed` is NOT that: LP4 + HP4 sums to an allpass, not
+    /// to unity, so `1 - HP4` equals `LP4 + (1 - allpass)` — a term that peaks
+    /// at 1.5× at the crossover (vs the correct 0.5×) and leaks midrange into
+    /// the LFE at only −9 dB @ 1 kHz.
+    main_lowpass: [Option<Lr4Filter>; MAX_CHANNELS],
     /// Cached LFE channel index.
     lfe_channel: Option<usize>,
 }
@@ -74,6 +84,7 @@ impl Default for LfeBassManagementStage {
         Self {
             lfe_lowpass: None,
             main_highpass: std::array::from_fn(|_| None),
+            main_lowpass: std::array::from_fn(|_| None),
             lfe_channel: None,
         }
     }
@@ -94,6 +105,7 @@ impl MixStage for LfeBassManagementStage {
                 self.lfe_lowpass = None;
                 self.lfe_channel = None;
                 self.main_highpass = std::array::from_fn(|_| None);
+                self.main_lowpass = std::array::from_fn(|_| None);
                 return;
             }
         };
@@ -101,10 +113,17 @@ impl MixStage for LfeBassManagementStage {
         self.lfe_channel = Some(lfe);
         self.lfe_lowpass = Some(Lr4Filter::lowpass(LFE_CUTOFF_HZ, ctx.sample_rate));
 
-        // Create HP filters for all non-LFE channels up to the render channel count.
+        // Create HP + parallel LP filters for all non-LFE channels.
         self.main_highpass = std::array::from_fn(|ch| {
             if ch < ctx.channels && ch != lfe {
                 Some(Lr4Filter::highpass(LFE_CUTOFF_HZ, ctx.sample_rate))
+            } else {
+                None
+            }
+        });
+        self.main_lowpass = std::array::from_fn(|ch| {
+            if ch < ctx.channels && ch != lfe {
+                Some(Lr4Filter::lowpass(LFE_CUTOFF_HZ, ctx.sample_rate))
             } else {
                 None
             }
@@ -127,27 +146,26 @@ impl MixStage for LfeBassManagementStage {
         for frame in 0..num_frames {
             let base = frame * channels;
 
-            // Sum bass content redirected from main channels.
+            // Sum bass content redirected from main channels: a true parallel
+            // LR4 lowpass per channel. All LR4 branches share the same phase
+            // response, so the redirected bass from multiple mains (and the
+            // lowpassed LFE input) sums coherently.
             let mut bass_sum = 0.0f32;
-            for (ch, hp_filter) in self.main_highpass.iter_mut().enumerate() {
-                if ch >= channels {
-                    break;
-                }
-                if let Some(ref mut hp) = hp_filter {
-                    let idx = base + ch;
-                    let original = buffer[idx];
-                    let highpassed = hp.process(original);
-                    buffer[idx] = highpassed;
-                    // Bass = what the HP removed. LR4 guarantees: original = hp + lp,
-                    // so lp = original - hp.
-                    bass_sum += original - highpassed;
-                }
+            for ch in 0..channels.min(MAX_CHANNELS) {
+                let (Some(hp), Some(lp)) =
+                    (&mut self.main_highpass[ch], &mut self.main_lowpass[ch])
+                else {
+                    continue;
+                };
+                let idx = base + ch;
+                let original = buffer[idx];
+                buffer[idx] = hp.process(original);
+                bass_sum += lp.process(original);
             }
 
-            // LFE channel: lowpass existing LFE content, then add redirected bass.
-            // The redirected bass is already implicitly lowpassed (original - HP = LP
-            // by LR4's perfect reconstruction property), so it bypasses the LFE LP
-            // to avoid double-filtering.
+            // LFE channel: lowpass existing LFE content, then add redirected bass
+            // (already LR4-lowpassed above — it bypasses the LFE LP to avoid
+            // double-filtering).
             let lfe_idx = base + lfe;
             buffer[lfe_idx] = lfe_lp.process(buffer[lfe_idx]) + bass_sum;
         }
@@ -158,6 +176,9 @@ impl MixStage for LfeBassManagementStage {
             f.reset();
         }
         for f in self.main_highpass.iter_mut().flatten() {
+            f.reset();
+        }
+        for f in self.main_lowpass.iter_mut().flatten() {
             f.reset();
         }
     }
@@ -412,10 +433,24 @@ mod tests {
         );
     }
 
-    /// LR4 reconstruction: HP(main) + LP(redirected bass) ≈ original signal.
-    /// Tests that no energy is lost or gained through the crossover.
-    #[test]
-    fn lr4_reconstruction_flat() {
+    /// Steady-state amplitude of a sine on the given channel over the last
+    /// half of the buffer (RMS × √2).
+    fn steady_state_amplitude(buffer: &[f32], channels: usize, ch: usize) -> f32 {
+        let num_frames = buffer.len() / channels;
+        let start = num_frames / 2;
+        let mean_square: f32 = (start..num_frames)
+            .map(|f| {
+                let s = buffer[f * channels + ch];
+                s * s
+            })
+            .sum::<f32>()
+            / (num_frames - start) as f32;
+        (2.0 * mean_square).sqrt()
+    }
+
+    /// Run a single-frequency sine (amplitude 1.0) on channel 0 through the
+    /// stage and return (main_ch0_amplitude, lfe_amplitude) at steady state.
+    fn run_sine_through_crossover(freq: f32) -> (f32, f32) {
         let layout = surround_51_layout();
         let listener = Listener::new(Vec3::ZERO, 0.0);
         let ctx = test_mix_context(&layout, &listener);
@@ -423,40 +458,66 @@ mod tests {
         stage.init(&ctx);
 
         let channels = 6;
-        let num_frames = 8192;
-
-        // Test with broadband signal (sum of several frequencies).
-        let test_freqs = [40.0, 80.0, 120.0, 500.0, 2000.0, 8000.0];
+        let num_frames = 16384;
         let mut buffer = vec![0.0f32; channels * num_frames];
-
         for frame in 0..num_frames {
             let t = frame as f32 / SAMPLE_RATE;
-            let sample: f32 = test_freqs
-                .iter()
-                .map(|&f| (2.0 * std::f32::consts::PI * f * t).sin())
-                .sum();
-            // Put signal on channel 0 only.
-            buffer[frame * channels + 0] = sample;
+            buffer[frame * channels] = (2.0 * std::f32::consts::PI * freq * t).sin();
         }
-
-        let original: Vec<f32> = (0..num_frames).map(|f| buffer[f * channels + 0]).collect();
-
         stage.process(&mut buffer, &ctx);
 
-        // Reconstruction = main channel (HP) + LFE channel (LP of redirected bass).
-        // Use last 4096 frames to avoid transients.
-        let mut max_error = 0.0f32;
-        for frame in num_frames / 2..num_frames {
-            let reconstructed = buffer[frame * channels + 0] + buffer[frame * channels + 3];
-            let error = (reconstructed - original[frame]).abs();
-            max_error = max_error.max(error);
-        }
+        (
+            steady_state_amplitude(&buffer, channels, 0),
+            steady_state_amplitude(&buffer, channels, 3),
+        )
+    }
 
-        // LR4 perfect reconstruction: error should be negligible.
-        // Allow small floating-point tolerance.
+    /// LR4 reconstruction: |HP(f)| + |LP(f)| contributions must sum to flat
+    /// magnitude at every frequency. LR4's property is an *allpass* sum —
+    /// flat magnitude with phase rotation — so this is asserted per frequency
+    /// on steady-state sine amplitude, NOT as time-domain waveform identity.
+    /// (The old formulation `redirect = original − HP` made the time-domain
+    /// identity hold tautologically while injecting +9.5 dB excess bass at
+    /// the crossover.)
+    #[test]
+    fn crossover_sum_is_magnitude_flat_per_frequency() {
+        for freq in [40.0, 80.0, 120.0, 240.0, 1000.0, 4000.0] {
+            let (main, lfe) = run_sine_through_crossover(freq);
+            // LP and HP branches are phase-coherent (that's the point of LR4),
+            // so amplitudes of ch0 (HP) + ch3 (LP redirect) add in phase.
+            let total = main + lfe;
+            assert!(
+                (total - 1.0).abs() < 0.06,
+                "{freq} Hz: |HP| + |LP| = {total:.3}, expected ~1.0 (main={main:.3}, lfe={lfe:.3})"
+            );
+        }
+    }
+
+    /// At the 120 Hz crossover each LR4 branch is exactly −6 dB (0.5×).
+    /// The redirected bass must arrive at 0.5×, not the 1.5× produced by the
+    /// old `original − highpassed` formulation.
+    #[test]
+    fn redirected_bass_at_crossover_is_minus_6_db() {
+        let (main, lfe) = run_sine_through_crossover(120.0);
         assert!(
-            max_error < 0.01,
-            "LR4 reconstruction error too large: {max_error}"
+            (lfe - 0.5).abs() < 0.03,
+            "120 Hz redirected bass should be ~0.5× (−6 dB), got {lfe:.3}"
+        );
+        assert!(
+            (main - 0.5).abs() < 0.03,
+            "120 Hz highpassed main should be ~0.5× (−6 dB), got {main:.3}"
+        );
+    }
+
+    /// Midrange must not leak into the subwoofer. A true LR4 lowpass is
+    /// ~−73 dB at 1 kHz; the old formulation leaked 1 kHz into the LFE at
+    /// only −9.4 dB (0.34×).
+    #[test]
+    fn midrange_does_not_leak_into_lfe() {
+        let (_, lfe) = run_sine_through_crossover(1000.0);
+        assert!(
+            lfe < 0.01,
+            "1 kHz content on a main channel should stay out of the LFE, got {lfe:.4}"
         );
     }
 }

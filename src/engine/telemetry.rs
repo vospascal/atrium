@@ -46,6 +46,11 @@ pub fn compute_telemetry(
     frame.source_count = count as u8;
 
     for (i, source) in sources.iter().enumerate().take(count) {
+        // Mark this slot present in the active mask. Empty pool slots hold a
+        // `SilenceNode` (`is_active() == false`) and stay clear.
+        if source.is_active() {
+            frame.active_mask |= 1 << i;
+        }
         let pos = source.position();
         let dist = listener.position.distance_to(pos);
         let src_ref_dist = source.ref_distance();
@@ -111,11 +116,17 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
     let mut json = String::with_capacity(256);
     json.push_str(r#"{"type":"telemetry","sources":["#);
 
+    let mut written = 0;
     for i in 0..frame.source_count as usize {
+        // Skip empty pool slots (sparse after live remove).
+        if frame.active_mask & (1 << i) == 0 {
+            continue;
+        }
         let s = &frame.sources[i];
-        if i > 0 {
+        if written > 0 {
             json.push(',');
         }
+        written += 1;
         let _ = write!(
             json,
             r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{},"perceptual":{:.3},"ox":{:.3},"oy":{:.3},"ocx":{:.2},"ocy":{:.2},"or":{:.2}}}"#,

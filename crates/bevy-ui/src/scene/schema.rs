@@ -68,6 +68,11 @@ pub struct SourceDescription {
     /// Stable identifier. Generated if omitted.
     #[serde(default)]
     pub id: String,
+    /// Audio-thread pool slot (0..16). Stable across a session; sources can be
+    /// sparse after a live remove, so this is the key for telemetry/commands,
+    /// not the position in the `sources` list. Defaults to the list index.
+    #[serde(default)]
+    pub slot: usize,
     pub name: String,
     /// Hex color string (e.g. "#ff6b35").
     #[serde(default = "default_color")]

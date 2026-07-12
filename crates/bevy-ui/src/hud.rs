@@ -3,10 +3,15 @@
 //! Mirrors the web UI's left panel: source list with gain/distance,
 //! listener position, render mode, and channel peak meters.
 
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::ui::UiGlobalTransform;
+use bevy::window::PrimaryWindow;
 
 use crate::ecs::{SoundSource, SoundSourceIndex};
 use crate::input;
+use crate::scene::schema::parse_hex_color;
+use crate::scene::SceneDescription;
 use crate::telemetry::TelemetryMessage;
 
 // ── Colors ──────────────────────────────────────────────────────────────────
@@ -28,8 +33,22 @@ const FONT_SIZE_SMALL: f32 = 11.0;
 
 // ── Marker components ───────────────────────────────────────────────────────
 
+/// True when the cursor is over any HUD panel — so the mouse wheel scrolls the
+/// panel instead of zooming the camera.
+#[derive(Resource, Default)]
+pub(crate) struct PointerOverHud(pub bool);
+
 #[derive(Component)]
 pub(crate) struct HudPanel;
+
+/// Marker for the right-hand Volume Pipeline panel root (so it can be despawned
+/// on scene reload — it was previously untagged and would leak).
+#[derive(Component)]
+pub(crate) struct PipelinePanel;
+
+/// Marker for any HUD panel that scrolls its overflow with the mouse wheel.
+#[derive(Component)]
+pub(crate) struct HudScrollable;
 
 /// Marker for a source row's dynamic text (gain/distance values).
 #[derive(Component)]
@@ -94,29 +113,43 @@ pub(crate) struct PipelineReceivedSplText {
 
 // ── Setup ───────────────────────────────────────────────────────────────────
 
-pub(crate) fn setup_hud(mut commands: Commands, sources: Query<(&SoundSourceIndex, &SoundSource)>) {
-    // Collect and sort sources by index for deterministic HUD ordering.
-    let mut sorted_sources: Vec<_> = sources.iter().collect();
-    sorted_sources.sort_by_key(|(idx, _)| idx.0);
+pub(crate) fn setup_hud(mut commands: Commands, description: Res<SceneDescription>) {
+    build_hud_panels(&mut commands, &description);
+}
+
+/// Build both HUD panels from a `SceneDescription`. Reads the description (not
+/// ECS) so it can run at startup and on scene reload (where freshly-spawned
+/// entities aren't yet queryable). Sources are already in index order.
+pub(crate) fn build_hud_panels(commands: &mut Commands, description: &SceneDescription) {
     // Root panel — top-left, semi-transparent
     commands
         .spawn((
             HudPanel,
+            HudScrollable,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(12.0),
                 top: Val::Px(12.0),
+                bottom: Val::Px(12.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(12.0)),
                 row_gap: Val::Px(8.0),
                 min_width: Val::Px(260.0),
                 max_width: Val::Px(320.0),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
+            ScrollPosition::default(),
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|panel| {
             spawn_title(panel);
+            spawn_separator(panel);
+
+            spawn_section_label(panel, "SCENE");
+            input::spawn_scene_picker(panel);
+            input::spawn_save_button(panel);
+
             spawn_separator(panel);
 
             spawn_section_label(panel, "RENDER MODE");
@@ -143,15 +176,26 @@ pub(crate) fn setup_hud(mut commands: Commands, sources: Query<(&SoundSourceInde
             spawn_separator(panel);
 
             spawn_section_label(panel, "SOURCES");
-            for (index, source) in &sorted_sources {
-                spawn_source_row(panel, index.0, source);
-                input::spawn_source_buttons(panel, index.0, source.orbit_radius > 0.0);
+            for source in &description.sources {
+                let color = parse_hex_color(&source.color);
+                spawn_source_row(panel, source.slot, &source.name, color);
+                input::spawn_source_buttons(panel, source.slot, source.orbit_radius > 0.0);
             }
+
+            spawn_separator(panel);
+
+            spawn_section_label(panel, "ADD SOURCE");
+            input::spawn_add_source_controls(panel);
 
             spawn_separator(panel);
 
             spawn_section_label(panel, "ATMOSPHERE");
             input::spawn_atmosphere_controls(panel);
+
+            spawn_separator(panel);
+
+            spawn_section_label(panel, "LANDSCAPE");
+            input::spawn_biome_controls(panel);
 
             spawn_separator(panel);
 
@@ -166,17 +210,22 @@ pub(crate) fn setup_hud(mut commands: Commands, sources: Query<(&SoundSourceInde
     // ── Right panel: Volume Pipeline ────────────────────────────────────
     commands
         .spawn((
+            PipelinePanel,
+            HudScrollable,
             Node {
                 position_type: PositionType::Absolute,
                 right: Val::Px(12.0),
                 top: Val::Px(12.0),
+                bottom: Val::Px(12.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(12.0)),
                 row_gap: Val::Px(6.0),
                 min_width: Val::Px(240.0),
                 max_width: Val::Px(280.0),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
+            ScrollPosition::default(),
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|panel| {
@@ -191,8 +240,9 @@ pub(crate) fn setup_hud(mut commands: Commands, sources: Query<(&SoundSourceInde
 
             spawn_separator(panel);
 
-            for (index, source) in &sorted_sources {
-                spawn_pipeline_source(panel, index.0, source);
+            for source in &description.sources {
+                let color = parse_hex_color(&source.color);
+                spawn_pipeline_source(panel, source.slot, &source.name, color, source.spl);
             }
         });
 }
@@ -230,8 +280,8 @@ fn spawn_separator(parent: &mut ChildSpawnerCommands) {
     ));
 }
 
-fn spawn_source_row(parent: &mut ChildSpawnerCommands, index: usize, source: &SoundSource) {
-    let source_color = Color::srgb(source.color[0], source.color[1], source.color[2]);
+fn spawn_source_row(parent: &mut ChildSpawnerCommands, index: usize, name: &str, color: [f32; 3]) {
+    let source_color = Color::srgb(color[0], color[1], color[2]);
 
     parent
         .spawn(Node {
@@ -257,7 +307,7 @@ fn spawn_source_row(parent: &mut ChildSpawnerCommands, index: usize, source: &So
                     BackgroundColor(source_color),
                 ));
                 name_row.spawn((
-                    Text::new(&source.name),
+                    Text::new(name),
                     TextFont {
                         font_size: FONT_SIZE,
                         ..default()
@@ -305,8 +355,14 @@ fn stage_label(stage: PipelineStage) -> &'static str {
     }
 }
 
-fn spawn_pipeline_source(parent: &mut ChildSpawnerCommands, index: usize, source: &SoundSource) {
-    let source_color = Color::srgb(source.color[0], source.color[1], source.color[2]);
+fn spawn_pipeline_source(
+    parent: &mut ChildSpawnerCommands,
+    index: usize,
+    name: &str,
+    color: [f32; 3],
+    spl: f32,
+) {
+    let source_color = Color::srgb(color[0], color[1], color[2]);
 
     parent
         .spawn(Node {
@@ -332,7 +388,7 @@ fn spawn_pipeline_source(parent: &mut ChildSpawnerCommands, index: usize, source
                     BackgroundColor(source_color),
                 ));
                 row.spawn((
-                    Text::new(format!("{} ({:.0} dB SPL)", source.name, source.spl)),
+                    Text::new(format!("{} ({:.0} dB SPL)", name, spl)),
                     TextFont {
                         font_size: FONT_SIZE,
                         ..default()
@@ -620,7 +676,7 @@ pub(crate) fn update_hud_listener(
     let [x, y, z] = listener.position;
     for mut t in &mut text {
         **t = format!(
-            "pos: ({:.1}, {:.1}, {:.1})  yaw: {:.0}°",
+            "pos: ({:.1}, {:.1}, {:.1})  yaw: {:.0} deg",
             x,
             y,
             z,
@@ -762,6 +818,45 @@ pub(crate) fn update_hud_pipeline(
             } else {
                 **text = "-∞ dB SPL".to_string();
             }
+        }
+    }
+}
+
+/// Scroll HUD panels with the mouse wheel when the cursor is over them, and
+/// publish whether the cursor is over a panel so the camera zoom can stand down.
+pub(crate) fn scroll_hud_panels(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut scroll: MessageReader<MouseWheel>,
+    mut panels: Query<
+        (&ComputedNode, &UiGlobalTransform, &mut ScrollPosition),
+        With<HudScrollable>,
+    >,
+    mut over_hud: ResMut<PointerOverHud>,
+) {
+    let Some(cursor) = windows.single().ok().and_then(|w| w.cursor_position()) else {
+        over_hud.0 = false;
+        return;
+    };
+
+    over_hud.0 = panels
+        .iter()
+        .any(|(node, transform, _)| node.contains_point(*transform, cursor));
+
+    let mut delta = 0.0;
+    for event in scroll.read() {
+        delta += match event.unit {
+            MouseScrollUnit::Line => event.y * 20.0,
+            MouseScrollUnit::Pixel => event.y,
+        };
+    }
+    if delta == 0.0 {
+        return;
+    }
+
+    for (node, transform, mut position) in &mut panels {
+        if node.contains_point(*transform, cursor) {
+            // Scroll up (positive wheel) moves content down → decrease offset.
+            position.0.y = (position.0.y - delta).max(0.0);
         }
     }
 }

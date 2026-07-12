@@ -5,6 +5,7 @@
 //! color conversion (hex → float → hex) paths.
 
 use atrium_bevy::ecs::*;
+use atrium_bevy::scene::atrium_to_world;
 use atrium_bevy::scene::export::export_scene;
 use atrium_bevy::scene::schema::*;
 use bevy::math::Vec3;
@@ -30,6 +31,7 @@ fn sample_description() -> SceneDescription {
         sources: vec![
             SourceDescription {
                 id: "source_0".into(),
+                slot: 0,
                 name: "Djembe".into(),
                 color: "#ff6b35".into(),
                 position: [3.0, 2.0, 0.0],
@@ -43,6 +45,7 @@ fn sample_description() -> SceneDescription {
             },
             SourceDescription {
                 id: "source_1".into(),
+                slot: 1,
                 name: "Campfire".into(),
                 color: "#4ecdc4".into(),
                 position: [-1.0, 4.0, 0.0],
@@ -89,20 +92,24 @@ fn sample_description() -> SceneDescription {
     }
 }
 
-/// Simulate what atrium_to_bevy does: Bevy.X = Atrium.X, Bevy.Y = Atrium.Z, Bevy.Z = -Atrium.Y
-fn atrium_to_bevy(pos: [f32; 3]) -> Vec3 {
-    Vec3::new(pos[0], pos[2], -pos[1])
+/// Simulate what import::spawn_scene does in the 2D top-down view: the
+/// Transform holds the ground plane (Bevy.X = Atrium.X, Bevy.Y = Atrium.Y,
+/// Bevy.Z = draw layer), and the atrium height rides along in `AtriumHeight`.
+fn atrium_to_bevy(pos: [f32; 3]) -> (Vec3, AtriumHeight) {
+    let world = atrium_to_world(pos);
+    (Vec3::new(world.x, world.y, 0.0), AtriumHeight(pos[2]))
 }
 
 /// Build the intermediate data that would exist in ECS, then export it.
 fn round_trip(input: &SceneDescription) -> SceneDescription {
     // Simulate what import::spawn_scene does: convert positions to Bevy coords
-    let source_data: Vec<(SoundSourceIndex, SoundSource, Vec3)> = input
+    let source_data: Vec<(SoundSourceIndex, SoundSource, Vec3, AtriumHeight)> = input
         .sources
         .iter()
         .enumerate()
         .map(|(i, s)| {
             let rgb = parse_hex_color(&s.color);
+            let (translation, height) = atrium_to_bevy(s.position);
             (
                 SoundSourceIndex(i),
                 SoundSource {
@@ -117,23 +124,26 @@ fn round_trip(input: &SceneDescription) -> SceneDescription {
                     orbit_radius: s.orbit_radius,
                     orbit_speed: s.orbit_speed,
                 },
-                atrium_to_bevy(s.position),
+                translation,
+                height,
             )
         })
         .collect();
 
-    let speaker_data: Vec<(SoundSpeaker, Vec3)> = input
+    let speaker_data: Vec<(SoundSpeaker, Vec3, AtriumHeight)> = input
         .speakers
         .speakers
         .iter()
         .map(|s| {
+            let (translation, height) = atrium_to_bevy(s.position);
             (
                 SoundSpeaker {
                     id: s.id.clone(),
                     label: s.label.clone(),
                     channel: s.channel,
                 },
-                atrium_to_bevy(s.position),
+                translation,
+                height,
             )
         })
         .collect();
@@ -142,7 +152,7 @@ fn round_trip(input: &SceneDescription) -> SceneDescription {
         id: "listener".into(),
         yaw_degrees: input.listener.yaw_degrees,
     };
-    let listener_pos = atrium_to_bevy(input.listener.position);
+    let (listener_pos, listener_height) = atrium_to_bevy(input.listener.position);
 
     let env = SoundEnvironment {
         id: "environment".into(),
@@ -163,7 +173,7 @@ fn round_trip(input: &SceneDescription) -> SceneDescription {
         input,
         &source_data,
         &speaker_data,
-        Some((&listener_component, listener_pos)),
+        Some((&listener_component, listener_pos, listener_height)),
         Some(&env),
         Some(&atr),
     )

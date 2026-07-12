@@ -113,6 +113,7 @@ impl Renderer for WorldLockedRenderer {
                     speaker.position,
                     out.sample_rate,
                     ctx.atmosphere.speed_of_sound(),
+                    ctx.source_ref_distance,
                 );
 
                 // Distance + directivity (per-source distance model)

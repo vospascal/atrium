@@ -1,0 +1,31 @@
+# Environment: Glass Atrium
+# The "big airy atrium" from idea.md — a tall glass-walled hall with a stone
+# floor. Bright, enveloping tail that stays clear of mud:
+#   - glass walls: absorb bass (glass panels resonate) but reflect highs → airy,
+#     not boomy. Strong early reflections give width + "space".
+#   - stone floor: hard and reflective, preserves energy.
+#   - explicit RT60 + pre-delay knobs dial the atrium tail directly, since a room
+#     this size wouldn't otherwise land at the target decay.
+#
+# Coordinate system: X = left/right, Y = front/back, Z = up/down.
+# Spawn defaults to the centre of the floor: [7, 5, 0].
+# The physical 6x4 speaker atrium sits centred inside this virtual hall.
+
+width: 14.0   # meters (X axis)
+depth: 10.0   # meters (Y axis)
+height: 9.0   # meters (Z axis) — tall, airy
+
+ground_factor: 0.0         # hard stone floor
+wall_reflectivity: 0.75    # reflective but not a boomy echo chamber
+
+walls:
+  default: glass            # glass curtain walls: bass-absorbing, bright
+  floor: stone              # hard stone clearing
+  ceiling: glass            # glass atrium roof
+
+# Atrium tail: a living-room-sized hall, not a cathedral. ~1.6 s decay with a
+# short pre-delay keeps it spacious but clear — a longer tail (idea.md's 3.5 s)
+# lingered and muddied. These override the geometry-derived Sabine/mean-free-path.
+# Raise rt60_seconds for a bigger, more washy space; lower it for a tighter room.
+rt60_seconds: 1.6
+pre_delay_ms: 12.0

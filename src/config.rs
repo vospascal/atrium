@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
@@ -33,7 +33,7 @@ use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 
 /// A scene: references environment, atrium, source, processor, and atmosphere
 /// files, adds listener placement, speaker layout, and mixing parameters.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct SceneConfig {
     /// Path to environment definition file (e.g. "environments/riverside.yaml").
     /// The virtual acoustic space where sources live.
@@ -95,6 +95,15 @@ pub struct EnvironmentConfig {
     /// Per-wall material names for frequency-dependent absorption.
     #[serde(default)]
     pub walls: WallsConfig,
+    /// Explicit late-reverb decay (mid-band RT60, seconds). When set, overrides
+    /// the geometry/material-derived Sabine decay in the FDN — lets you dial a
+    /// target "atrium tail" (e.g. 3.5 s) that room dimensions alone can't hit.
+    #[serde(default)]
+    pub rt60_seconds: Option<f32>,
+    /// Explicit late-reverb pre-delay (milliseconds). When set, overrides the
+    /// mean-free-path pre-delay (e.g. 20 ms for clarity before the wash).
+    #[serde(default)]
+    pub pre_delay_ms: Option<f32>,
 }
 
 fn default_wall_reflectivity() -> f32 {
@@ -179,14 +188,14 @@ fn build_wall_materials(env: &EnvironmentConfig) -> [crate::pipeline::path::Wall
     ]
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ListenerConfig {
     pub position: [f32; 3],
     #[serde(default)]
     pub yaw_degrees: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct DistanceModelConfig {
     #[serde(default = "default_model_type")]
     pub model: String,
@@ -222,7 +231,7 @@ fn default_rolloff() -> f32 {
     1.0
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct SpeakerConfig {
     pub layout: String,
     #[serde(default = "default_render_mode")]
@@ -243,7 +252,7 @@ fn default_dbap_rolloff() -> f32 {
     6.0
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct SpeakerPositions {
     pub fl: Option<[f32; 3]>,
     pub fr: Option<[f32; 3]>,
@@ -255,7 +264,7 @@ pub struct SpeakerPositions {
     pub r: Option<[f32; 3]>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct NormalizationConfig {
     #[serde(default = "default_target_rms")]
     pub target_rms: f32,
@@ -294,11 +303,31 @@ fn default_spl_threshold() -> f32 {
 
 // ── Source configs (scene entry + file definition) ──────────────────────────
 
-/// Scene entry: references a source file and places it in the scene.
-#[derive(Deserialize)]
+/// Scene entry: places a source in the scene. The sound definition comes either
+/// from a referenced `sources/*.yaml` file (`source`) or from inline fields
+/// (`audio` + `reference_spl` + …). Inline fields also act as overrides on top
+/// of a referenced file — so a live SPL/spread/directivity edit is captured on
+/// Save without needing to rewrite the source yaml, and a browsed audio file
+/// with no preset yaml round-trips as a fully self-contained entry.
+#[derive(Deserialize, Serialize, Clone)]
 pub struct SourceEntry {
-    /// Path to the source definition YAML file (e.g. "sources/djembe.yaml").
-    pub source: String,
+    /// Path to a source definition YAML file (e.g. "sources/djembe.yaml").
+    /// Optional when the entry is defined inline via `audio`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Path to the audio file (e.g. "assets/frog.mp3"). Overrides the referenced
+    /// def's path; required when `source` is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
+    /// Reference SPL in dB at 1 m. Overrides the referenced def.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_spl: Option<f32>,
+    /// Directivity pattern ("omni", "cardioid", …). Overrides the referenced def.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directivity: Option<String>,
+    /// MDAP spread (0.0 = point, 1.0 = full surround). Overrides the referenced def.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<f32>,
     /// Display name (defaults to filename stem if omitted).
     pub name: Option<String>,
     /// UI color as hex string (e.g. "#ff6b35"). Defaults to palette by index.
@@ -308,6 +337,75 @@ pub struct SourceEntry {
     pub orbit_radius: f32,
     #[serde(default)]
     pub orbit_speed: f32,
+}
+
+/// Resolved intrinsic sound properties for one entry, merging a referenced
+/// `SourceDef` (if any) with the entry's inline overrides.
+struct ResolvedSource {
+    audio_path: String,
+    reference_spl: f32,
+    directivity: String,
+    spread: f32,
+}
+
+impl SourceEntry {
+    /// Resolve this entry's sound definition: load the referenced yaml (if any)
+    /// and apply inline overrides on top.
+    fn resolve(&self) -> Result<ResolvedSource, Box<dyn std::error::Error>> {
+        let def: Option<SourceDef> = match &self.source {
+            Some(path) => {
+                let contents =
+                    std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+                Some(serde_yaml::from_str(&contents).map_err(|e| format!("{}: {}", path, e))?)
+            }
+            None => None,
+        };
+
+        let audio_path = self
+            .audio
+            .clone()
+            .or_else(|| def.as_ref().map(|d| d.path.clone()))
+            .ok_or("source entry needs either `source` or `audio`")?;
+        let reference_spl = self
+            .reference_spl
+            .or_else(|| def.as_ref().map(|d| d.reference_spl))
+            .unwrap_or(70.0);
+        let directivity = self
+            .directivity
+            .clone()
+            .or_else(|| def.as_ref().map(|d| d.directivity.clone()))
+            .unwrap_or_else(|| "omni".into());
+        let spread = self
+            .spread
+            .or_else(|| def.as_ref().map(|d| d.spread))
+            .unwrap_or(0.0);
+
+        Ok(ResolvedSource {
+            audio_path,
+            reference_spl,
+            directivity,
+            spread,
+        })
+    }
+
+    /// A display name: explicit `name`, else the stem of the referenced yaml or
+    /// the audio file.
+    fn display_name(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        let stem_of = |p: &str| {
+            Path::new(p)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        };
+        self.source
+            .as_deref()
+            .and_then(stem_of)
+            .or_else(|| self.audio.as_deref().and_then(stem_of))
+            .unwrap_or_else(|| "?".to_string())
+    }
 }
 
 /// Source definition (loaded from `sources/*.yaml`): intrinsic sound properties.
@@ -465,10 +563,30 @@ impl SceneConfig {
 
         // Decode audio and build sources (also collects metadata for the browser)
         let build = self.build_sources(spawn)?;
-        let sources = build.sources;
+        let mut sources = build.sources;
         let source_metas = build.metas;
-        let spectral_profiles = build.spectral_profiles;
-        let source_amplitudes = build.source_amplitudes;
+        let mut spectral_profiles = build.spectral_profiles;
+        let mut source_amplitudes = build.source_amplitudes;
+
+        // Pre-warm the source pool to a fixed 16 slots with silent placeholders.
+        // Live add/remove only swaps a Box into/out of an existing slot, so the
+        // parallel vectors and pipeline topology never grow on the audio thread
+        // (which would allocate). Scenes with >16 sources are truncated.
+        const MAX_SOURCES: usize = atrium_core::telemetry::MAX_SOURCES;
+        if sources.len() > MAX_SOURCES {
+            eprintln!(
+                "warning: scene has {} sources; truncating to the {MAX_SOURCES}-slot pool",
+                sources.len()
+            );
+            sources.truncate(MAX_SOURCES);
+            spectral_profiles.truncate(MAX_SOURCES);
+            source_amplitudes.truncate(MAX_SOURCES);
+        }
+        while sources.len() < MAX_SOURCES {
+            sources.push(Box::new(crate::audio::silence_node::SilenceNode));
+            spectral_profiles.push([0.0; crate::audio::spectral_profile::BARK_BANDS]);
+            source_amplitudes.push(0.0);
+        }
 
         let distance_model = DistanceModel {
             ref_distance: self.distance_model.ref_distance,
@@ -526,6 +644,8 @@ impl SceneConfig {
             wall_materials: wall_materials.clone(),
             environment_min,
             environment_max,
+            reverb_rt60_seconds: environment_cfg.rt60_seconds,
+            reverb_pre_delay_ms: environment_cfg.pre_delay_ms,
         };
         let pipelines = build_all_pipelines(&pipeline_params);
         let active_pipeline = render_mode;
@@ -552,6 +672,8 @@ impl SceneConfig {
             speaker_layout,
             atmosphere,
             telemetry_out: None,
+            scene_edits: None,
+            retired_out: None,
             telemetry_counter: 0,
             telemetry_interval: 6, // ~15 Hz at 512-sample buffers; calibrated later
             #[cfg(feature = "memprof")]
@@ -727,18 +849,6 @@ impl SceneConfig {
     }
 
     fn build_sources(&self, spawn: Vec3) -> Result<BuildSourcesResult, Box<dyn std::error::Error>> {
-        // Load all source definitions first
-        let defs: Vec<SourceDef> = self
-            .sources
-            .iter()
-            .map(|entry| {
-                let contents = std::fs::read_to_string(&entry.source)
-                    .map_err(|e| format!("{}: {}", entry.source, e))?;
-                serde_yaml::from_str(&contents)
-                    .map_err(|e| format!("{}: {}", entry.source, e).into())
-            })
-            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-
         let norm = &self.normalization;
         let mut nodes: Vec<Box<dyn atrium_core::source::SoundSource>> = Vec::new();
         let mut metas: Vec<SourceMeta> = Vec::new();
@@ -746,64 +856,54 @@ impl SceneConfig {
         let mut source_amplitudes = Vec::<f32>::new();
 
         let global_ref_dist = self.distance_model.ref_distance;
-        let spl_reference = norm.spl_reference;
+        let max_dist = self.distance_model.max_distance;
 
-        for (i, (entry, def)) in self.sources.iter().zip(defs.iter()).enumerate() {
-            let buffer = Arc::new(decode_file(Path::new(&def.path))?);
-            let profile = resolve_spl(def.reference_spl);
-            let amplitude = profile.amplitude(buffer.rms, norm.target_rms, spl_reference);
-            let ref_dist = profile.ref_distance(global_ref_dist);
-            let pattern = parse_directivity(&def.directivity);
-            let bands = buffer.spectral_profile.bands;
-
-            let mut node = TestNode::new(
-                buffer,
-                arr_to_vec3(entry.position) + spawn,
+        for (i, entry) in self.sources.iter().enumerate() {
+            // Merge referenced def (if any) with inline overrides.
+            let resolved = entry.resolve()?;
+            let position = arr_to_vec3(entry.position) + spawn;
+            let built = build_one_source(
+                &resolved.audio_path,
+                resolved.reference_spl,
+                &resolved.directivity,
+                resolved.spread,
+                position,
                 entry.orbit_radius,
                 entry.orbit_speed,
-            );
-            node.amplitude = amplitude;
-            node.ref_dist = ref_dist;
-            node.pattern = pattern;
-            node.spread = def.spread;
+                norm,
+                global_ref_dist,
+                max_dist,
+            )?;
 
-            let name = entry.name.as_deref().unwrap_or_else(|| {
-                Path::new(&entry.source)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-            });
+            let name = entry.display_name();
             let color = entry
                 .color
                 .clone()
                 .unwrap_or_else(|| SOURCE_COLORS[i % SOURCE_COLORS.len()].to_string());
 
-            let max_dist = self.distance_model.max_distance;
-            let audible_radius = profile.audible_radius(norm.spl_threshold, max_dist);
-
             println!(
                 "  {} → SPL={:.0} dB, amplitude={:.4}, ref_dist={:.2}m, audible={:.2}m",
-                name, profile.reference_spl, amplitude, ref_dist, audible_radius,
+                name, resolved.reference_spl, built.amplitude, built.ref_dist, built.audible_radius,
             );
 
             metas.push(SourceMeta {
-                name: name.to_string(),
+                name,
                 color,
-                spl: profile.reference_spl,
-                ref_dist,
-                amplitude,
-                audible_radius,
-                directivity: def.directivity.clone(),
-                directivity_alpha: pattern.alpha(),
-                spread: def.spread,
+                spl: resolved.reference_spl,
+                ref_dist: built.ref_dist,
+                amplitude: built.amplitude,
+                audible_radius: built.audible_radius,
+                directivity: resolved.directivity.clone(),
+                directivity_alpha: built.directivity_alpha,
+                spread: resolved.spread,
                 position: entry.position,
                 orbit_radius: entry.orbit_radius,
                 orbit_speed: entry.orbit_speed,
             });
 
-            spectral_profiles.push(bands);
-            source_amplitudes.push(amplitude);
-            nodes.push(Box::new(node));
+            spectral_profiles.push(built.bands);
+            source_amplitudes.push(built.amplitude);
+            nodes.push(built.source);
         }
 
         Ok(BuildSourcesResult {
@@ -813,6 +913,81 @@ impl SceneConfig {
             source_amplitudes,
         })
     }
+}
+
+// ── Single-source builder (shared by scene build + live add) ────────────────
+
+/// A fully-built source plus the derived values the UI and perceptual layer
+/// need. Produced on the control thread and, for live adds, shipped into a pool
+/// slot via [`crate::engine::edit::SceneEdit`].
+pub struct BuiltSource {
+    pub source: Box<dyn atrium_core::source::SoundSource>,
+    /// 24 Bark-band spectral profile (dB relative to RMS).
+    pub bands: [f32; crate::audio::spectral_profile::BARK_BANDS],
+    /// Base playback amplitude (sone-based gain, before spatial attenuation).
+    pub amplitude: f32,
+    /// Per-source reference distance (m) derived from SPL.
+    pub ref_dist: f32,
+    /// Free-field audible radius (m) at the hearing threshold.
+    pub audible_radius: f32,
+    /// Directivity polar coefficient (1.0 omni, 0.5 cardioid, …).
+    pub directivity_alpha: f32,
+}
+
+/// Decode a source audio file and build one `SoundSource` with its amplitude,
+/// spectral profile, and reference distance. Used both when building a scene
+/// and when adding a source live (the same lossless path, so a live-added
+/// source matches a reloaded one exactly). `position` is world coordinates
+/// (already offset by the environment spawn point).
+#[allow(clippy::too_many_arguments)]
+pub fn build_one_source(
+    audio_path: &str,
+    reference_spl: f32,
+    directivity: &str,
+    spread: f32,
+    position: Vec3,
+    orbit_radius: f32,
+    orbit_speed: f32,
+    normalization: &NormalizationConfig,
+    global_ref_dist: f32,
+    max_distance: f32,
+) -> Result<BuiltSource, Box<dyn std::error::Error>> {
+    let buffer = Arc::new(decode_file(Path::new(audio_path))?);
+    let profile = resolve_spl(reference_spl);
+    let amplitude = profile.amplitude(
+        buffer.rms,
+        normalization.target_rms,
+        normalization.spl_reference,
+    );
+    let ref_dist = profile.ref_distance(global_ref_dist);
+    let pattern = parse_directivity(directivity);
+    let bands = buffer.spectral_profile.bands;
+    let audible_radius = profile.audible_radius(normalization.spl_threshold, max_distance);
+
+    // Base amplitude at 0 dB SPL, so a live SPL edit can rescale without
+    // re-decoding: amplitude = unit_amplitude · 10^(spl/20).
+    let rms_correction = if buffer.rms > 1e-6 {
+        normalization.target_rms / buffer.rms
+    } else {
+        1.0
+    };
+    let unit_amplitude = rms_correction * 10.0_f32.powf(-normalization.spl_reference / 20.0);
+
+    let mut node = TestNode::new(buffer, position, orbit_radius, orbit_speed);
+    node.amplitude = amplitude;
+    node.unit_amplitude = unit_amplitude;
+    node.ref_dist = ref_dist;
+    node.pattern = pattern;
+    node.spread = spread;
+
+    Ok(BuiltSource {
+        source: Box::new(node),
+        bands,
+        amplitude,
+        ref_dist,
+        audible_radius,
+        directivity_alpha: pattern.alpha(),
+    })
 }
 
 // ── String → enum helpers ───────────────────────────────────────────────────
@@ -851,4 +1026,52 @@ fn parse_render_mode(s: &str) -> RenderMode {
 
 fn arr_to_vec3(a: [f32; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default scene must load a *reflective* environment. This guards the
+    /// root-cause fix: the old default (`riverside`) was an open field whose
+    /// walls reflect nothing, so the engine produced dry panning with no tail.
+    #[test]
+    fn atrium_environment_is_reflective_unlike_open_field() {
+        let atrium: EnvironmentConfig =
+            load_yaml("environments/atrium.yaml").expect("atrium.yaml should load");
+        let riverside: EnvironmentConfig =
+            load_yaml("environments/riverside.yaml").expect("riverside.yaml should load");
+
+        // Every atrium wall reflects a meaningful fraction of energy.
+        let atrium_walls = build_wall_materials(&atrium);
+        for (i, wall) in atrium_walls.iter().enumerate() {
+            assert!(
+                wall.broadband_reflection_gain() > 0.5,
+                "atrium wall {i} should be reflective, got gain {}",
+                wall.broadband_reflection_gain()
+            );
+        }
+
+        // The open field's default walls reflect essentially nothing.
+        let riverside_walls = build_wall_materials(&riverside);
+        assert!(
+            riverside_walls[0].broadband_reflection_gain() < 0.01,
+            "riverside default walls should be non-reflecting (open air), got {}",
+            riverside_walls[0].broadband_reflection_gain()
+        );
+
+        // The atrium exposes explicit tail knobs; the open field leaves them unset.
+        assert_eq!(atrium.rt60_seconds, Some(1.6));
+        assert_eq!(atrium.pre_delay_ms, Some(12.0));
+        assert_eq!(riverside.rt60_seconds, None);
+    }
+
+    /// The default scene file itself must point at the reflective atrium — the
+    /// one-line change that unlocks reflections + tail for the shipped config.
+    #[test]
+    fn default_scene_uses_the_atrium_environment() {
+        let scene: SceneConfig =
+            load_yaml("scenes/default.yaml").expect("default.yaml should load");
+        assert_eq!(scene.environment, "environments/atrium.yaml");
+    }
 }

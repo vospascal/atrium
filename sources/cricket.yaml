@@ -1,0 +1,8 @@
+# Source: Cricket
+# A field of crickets — a loud, enveloping chorus like the cicadas rather than
+# a single chirp. Wide spread so it wraps the listener.
+
+path: assets/cricket.ogg
+reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective chorus, like cicadas)
+directivity: omni           # stridulation scatters in all directions
+spread: 0.6                 # broad MDAP spread — a chorus, not a point

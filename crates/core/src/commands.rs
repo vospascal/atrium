@@ -1,3 +1,4 @@
+use crate::directivity::DirectivityPattern;
 use crate::speaker::{ChannelMode, RenderMode};
 use crate::types::Vec3;
 
@@ -28,6 +29,17 @@ pub enum Command {
 
     /// Set MDAP spread for a source (0.0 = point, 1.0 = full hemisphere).
     SetSourceSpread { index: u16, spread: f32 },
+
+    /// Set a source's reference SPL (dB at 1 m). The audio thread recomputes the
+    /// source's base amplitude in place, so loudness changes live without a
+    /// scene rebuild.
+    SetSourceSpl { index: u16, spl: f32 },
+
+    /// Set a source's directivity emission pattern.
+    SetSourceDirectivity {
+        index: u16,
+        pattern: DirectivityPattern,
+    },
 
     /// Set orbit speed for a source (0 = paused).
     SetSourceOrbitSpeed { index: u16, speed: f32 },

@@ -1,0 +1,7 @@
+# Source: Seagull
+# Coastal gull calls — bright, piercing cries that carry a long way.
+# Placed high and distant, so it reads as birds passing overhead.
+
+path: assets/seagull.ogg
+reference_spl: 70.0        # ~70 dB SPL at 1m (loud, carrying call)
+directivity: omni           # calls scatter in all directions
