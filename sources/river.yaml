@@ -1,0 +1,33 @@
+# A located segment of flowing water. Unlike wind and ambient rain, this is a
+# Object emitter: normal distance falloff, direction, reflections, and room
+# reverb all apply.
+synth: river
+
+# Plausible calm-to-brisk stream velocity. This preserves the useful dynamic
+# range of the listening preset while expressing it as water speed.
+min_flow_speed: 0.3
+max_flow_speed: 1.2
+change_time_min: 15.0
+change_time_max: 110.0
+
+# Multi-scale eddies drive correlated level and spectral motion without
+# resampling or slowing the broadband carriers.
+eddy_time_min: 0.35
+eddy_time_max: 1.25
+eddy_depth: 0.65
+
+# River layers: continuous turbulence, bubble population, obstacle splashes,
+# and a restrained fine-spray tail.
+body_gain: 0.40
+current_gain: 0.65
+bubble_activity: 0.75
+splash_rate: 0.45
+splash_gain: 0.30
+spray_gain: 0.050
+master_gain: 1.0
+
+# A deliberately gentle artistic default. The recording has no calibrated SPL
+# metadata, so unlike the spectral and temporal values this is not a measurement.
+reference_spl: 55.0
+directivity: omni
+spread: 0.90

@@ -25,7 +25,7 @@ use atrium_core::commands::Command;
 use atrium_core::speaker::RenderMode;
 use atrium_core::types::Vec3 as AtriumVec3;
 
-use crate::camera::TopDownCamera;
+use crate::camera::{CameraSettings, TopDownCamera};
 use crate::ecs::*;
 use crate::telemetry::{LatestTelemetry, TelemetryMessage};
 use atrium_behavior::CommandSender;
@@ -49,9 +49,15 @@ pub(crate) struct SourceCard {
     pub index: usize,
 }
 
-/// The live "distance  bearing  level" text inside a source card.
+/// The live distance and bearing text inside a source card.
 #[derive(Component)]
 pub(crate) struct SourceCardMetrics {
+    pub index: usize,
+}
+
+/// The live relative level text inside a source card.
+#[derive(Component)]
+pub(crate) struct SourceCardLevel {
     pub index: usize,
 }
 
@@ -63,13 +69,6 @@ pub(crate) struct ListenerTag;
 #[derive(Component)]
 pub(crate) struct SpeakerLabel {
     pub channel: usize,
-}
-
-/// Marker for the listener ear labels ("L" / "R").
-#[derive(Component)]
-pub(crate) struct EarLabel {
-    /// true = right ear, false = left ear
-    pub is_right: bool,
 }
 
 // ── Coordinate mapping ───────────────────────────────────────────────────────
@@ -226,7 +225,6 @@ fn draw_dashed_line_2d(
 /// Dashes march toward the listener (sound traveling); alpha tracks gain.
 pub(crate) fn draw_source_links(
     mut gizmos: Gizmos,
-    time: Res<Time>,
     theme: Res<LandscapeTheme>,
     sources: Query<(&SoundSourceIndex, &Transform), With<SoundSource>>,
     listener: Query<&Transform, With<SoundListener>>,
@@ -237,7 +235,6 @@ pub(crate) fn draw_source_links(
     };
     let listener_position = listener_transform.translation.truncate();
     let link_color = theme.palette().link_line;
-    let march = time.elapsed_secs() * 0.9;
 
     for (index, source_transform) in &sources {
         let gain = telemetry_gain(&telemetry, index.0);
@@ -246,8 +243,8 @@ pub(crate) fn draw_source_links(
         let delta = listener_position - source_position;
         let distance = delta.length();
         // Trim so the line starts at the badge halo and stops at the listener rings.
-        let start_trim = BADGE_RADIUS + 0.18;
-        let end_trim = BADGE_RADIUS + 0.45;
+        let start_trim = (BADGE_RADIUS + 0.18) * source_transform.scale.x;
+        let end_trim = (BADGE_RADIUS + 0.45) * listener_transform.scale.x;
         if distance <= start_trim + end_trim {
             continue;
         }
@@ -256,10 +253,10 @@ pub(crate) fn draw_source_links(
             &mut gizmos,
             source_position + direction * start_trim,
             listener_position - direction * end_trim,
-            0.26,
-            0.20,
-            march,
-            link_color.with_alpha(0.15 + gain * 0.55),
+            0.10,
+            0.12,
+            0.0,
+            link_color.with_alpha(0.40 + gain * 0.48),
         );
     }
 }
@@ -278,12 +275,13 @@ pub(crate) fn draw_source_ripples(
     for (index, source, transform) in &sources {
         let gain = telemetry_gain(&telemetry, index.0);
         let center = transform.translation.truncate();
+        let badge_scale = transform.scale.x;
         let speed = 0.35 + gain * 0.45;
-        let reach = 0.7 + gain * 1.3;
+        let reach = (0.7 + gain * 1.3) * badge_scale;
 
         for ripple in 0..RIPPLES {
             let progress = (elapsed * speed + ripple as f32 / RIPPLES as f32).fract();
-            let radius = BADGE_RADIUS + 0.15 + progress * reach;
+            let radius = (BADGE_RADIUS + 0.15) * badge_scale + progress * reach;
             let alpha = (1.0 - progress).powi(2) * (0.08 + gain * 0.45);
             let color = Color::srgba(source.color[0], source.color[1], source.color[2], alpha);
             gizmos.circle_2d(center, radius, color);
@@ -303,7 +301,7 @@ pub(crate) fn draw_source_icons(
             &mut gizmos,
             icon.0,
             transform.translation.truncate(),
-            BADGE_RADIUS * 0.8,
+            BADGE_RADIUS * 0.8 * transform.scale.x,
             icon_color,
         );
     }
@@ -442,8 +440,8 @@ fn pattern_gain(directivity: &str, alpha: f32, angle: f32) -> f32 {
     }
 }
 
-/// Concentric halo rings around the listener (gently pulsing) and the
-/// "person" glyph on the listener badge.
+/// Concentric halo rings around the listener (gently pulsing). The filled
+/// person glyph is a real mesh child of the listener badge.
 pub(crate) fn draw_listener_rings(
     mut gizmos: Gizmos,
     time: Res<Time>,
@@ -456,85 +454,16 @@ pub(crate) fn draw_listener_rings(
     let center = listener_transform.translation.truncate();
     let palette = theme.palette();
     let elapsed = time.elapsed_secs();
+    let badge_scale = listener_transform.scale.x;
 
     for (ring, radius) in [0.65_f32, 1.05, 1.5, 2.0].into_iter().enumerate() {
         let pulse = 1.0 + 0.02 * (elapsed * 1.3 + ring as f32 * 0.7).sin();
         let alpha = 0.26 - ring as f32 * 0.06;
         gizmos.circle_2d(
             center,
-            radius * pulse,
+            radius * badge_scale * pulse,
             palette.listener_ring.with_alpha(alpha),
         );
-    }
-
-    // Person glyph: head + shoulder arc.
-    let icon_color = palette.icon;
-    let head_center = center + Vec2::new(0.0, 0.10);
-    gizmos.circle_2d(head_center, 0.085, icon_color);
-    gizmos.circle_2d(head_center, 0.045, icon_color);
-
-    const ARC_STEPS: usize = 12;
-    let shoulder_center = center + Vec2::new(0.0, -0.26);
-    let shoulder_radius = 0.24;
-    let (start_angle, end_angle) = (30.0_f32.to_radians(), 150.0_f32.to_radians());
-    let mut points = Vec::with_capacity(ARC_STEPS + 2);
-    for step in 0..=ARC_STEPS {
-        let t = step as f32 / ARC_STEPS as f32;
-        let angle = start_angle + t * (end_angle - start_angle);
-        points.push(shoulder_center + Vec2::new(angle.cos(), angle.sin()) * shoulder_radius);
-    }
-    // Close the base of the shoulders.
-    points.push(points[0]);
-    gizmos.linestrip_2d(points, icon_color);
-}
-
-/// Draw the listener's facing cone (inner + outer wedges) on the ground plane.
-pub(crate) fn draw_listener_direction(
-    mut gizmos: Gizmos,
-    listener: Query<&Transform, With<SoundListener>>,
-    state: Res<crate::camera::ListenerState>,
-    theme: Res<LandscapeTheme>,
-) {
-    let Ok(listener_transform) = listener.single() else {
-        return;
-    };
-    let center = listener_transform.translation.truncate();
-    let yaw = state.yaw;
-    let ring_color = theme.palette().listener_ring;
-
-    let cone_length = 1.5;
-    let inner = 15.0_f32.to_radians();
-    let outer = 45.0_f32.to_radians();
-    let inner_color = ring_color.with_alpha(0.55);
-    let outer_color = ring_color.with_alpha(0.22);
-
-    let dir = |angle: f32| Vec2::new(angle.cos(), angle.sin());
-
-    gizmos.line_2d(center, center + dir(yaw) * cone_length, inner_color);
-    for sign in [-1.0_f32, 1.0] {
-        gizmos.line_2d(
-            center,
-            center + dir(yaw + sign * inner) * cone_length,
-            inner_color,
-        );
-        gizmos.line_2d(
-            center,
-            center + dir(yaw + sign * outer) * cone_length,
-            outer_color,
-        );
-    }
-
-    // Inner arc cap.
-    const ARC: usize = 12;
-    let mut prev = None;
-    for step in 0..=ARC {
-        let t = step as f32 / ARC as f32;
-        let angle = yaw - inner + t * 2.0 * inner;
-        let point = center + dir(angle) * cone_length;
-        if let Some(p) = prev {
-            gizmos.line_2d(p, point, inner_color);
-        }
-        prev = Some(point);
     }
 }
 
@@ -544,21 +473,27 @@ pub(crate) fn draw_listener_direction(
 /// "distance  bearing  level" line from telemetry.
 pub(crate) fn update_source_cards(
     camera: Query<(&Camera, &GlobalTransform), With<TopDownCamera>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
     sources: Query<(&SoundSourceIndex, &GlobalTransform)>,
+    camera_settings: Res<CameraSettings>,
     listener_state: Res<crate::camera::ListenerState>,
     telemetry: Res<LatestTelemetry>,
-    mut cards: Query<(&SourceCard, &mut Node)>,
-    mut metrics: Query<(&SourceCardMetrics, &mut Text)>,
+    mut cards: Query<(&SourceCard, &mut Node, &mut UiTransform)>,
+    mut metrics: Query<(&SourceCardMetrics, &mut Text), Without<SourceCardLevel>>,
+    mut levels: Query<(&SourceCardLevel, &mut Text), Without<SourceCardMetrics>>,
 ) {
     let Ok((camera, camera_global)) = camera.single() else {
         return;
     };
-    let window_width = windows.single().map(|window| window.width()).unwrap_or(0.0);
     let listener_position = Vec2::new(listener_state.position[0], listener_state.position[1]);
     let frame = &telemetry.frame;
 
-    for (card, mut node) in &mut cards {
+    let card_scale = (camera_settings.home_scale / camera_settings.ortho_scale).clamp(0.08, 12.5);
+    let card_width = 132.0;
+    let card_height = 62.0;
+    let transform_shift_x = card_width * (1.0 - card_scale) * 0.5;
+    let transform_shift_y = card_height * (1.0 - card_scale) * 0.5;
+
+    for (card, mut node, mut ui_transform) in &mut cards {
         let Some((_, source_global)) = sources.iter().find(|(idx, _)| idx.0 == card.index) else {
             continue;
         };
@@ -568,22 +503,12 @@ pub(crate) fn update_source_cards(
             continue;
         };
         node.display = Display::Flex;
-        // Card sits on the side of the badge facing away from the listener so
-        // clustered sources don't stack their cards; screen edges override.
-        let mut place_right = source_global.translation().x >= listener_position.x;
-        if window_width > 0.0 {
-            if viewport.x > window_width - 300.0 {
-                place_right = false;
-            } else if viewport.x < 260.0 {
-                place_right = true;
-            }
-        }
-        node.left = Val::Px(if place_right {
-            viewport.x + 30.0
-        } else {
-            viewport.x - 230.0
-        });
-        node.top = Val::Px(viewport.y - 26.0);
+        ui_transform.scale = Vec2::splat(card_scale);
+        // Callouts keep a stable right-side relationship to their marker,
+        // including when that places part of the card outside the viewport.
+        let desired_left = viewport.x + 34.0 * card_scale;
+        node.left = Val::Px(desired_left - transform_shift_x);
+        node.top = Val::Px(viewport.y - 38.0 * card_scale - transform_shift_y);
     }
 
     for (metric, mut text) in &mut metrics {
@@ -599,22 +524,30 @@ pub(crate) fn update_source_cards(
             bearing += 360.0;
         }
 
-        let (distance, level) = if metric.index < frame.source_count as usize {
+        let distance = if metric.index < frame.source_count as usize {
             let source = &frame.sources[metric.index];
-            let level = if source.is_muted {
-                "muted".to_string()
-            } else if source.gain_total <= 1e-4 {
-                "silent".to_string()
-            } else {
-                format!("{:+.1} dB", source.gain_db.clamp(-99.9, 20.0))
-            };
-            (source.distance, level)
+            source.distance
         } else {
-            (delta.length(), "—".to_string())
+            delta.length()
         };
 
-        // "deg" instead of "°": Bevy's default font subset renders ° as tofu.
-        **text = format!("{distance:.1} m   {bearing:.0} deg   {level}");
+        **text = format!("{distance:.1} m  /  {bearing:.0} deg");
+    }
+
+    for (level, mut text) in &mut levels {
+        let value = if level.index < frame.source_count as usize {
+            let source = &frame.sources[level.index];
+            if source.is_muted {
+                "Muted".to_string()
+            } else if source.gain_total <= 1e-4 {
+                "Silent".to_string()
+            } else {
+                format!("{:+.1} dB", source.gain_db.clamp(-99.9, 20.0))
+            }
+        } else {
+            "-- dB".to_string()
+        };
+        **text = value;
     }
 }
 
@@ -622,7 +555,8 @@ pub(crate) fn update_source_cards(
 pub(crate) fn update_listener_tag(
     camera: Query<(&Camera, &GlobalTransform), With<TopDownCamera>>,
     listener: Query<&GlobalTransform, With<SoundListener>>,
-    mut tags: Query<&mut Node, With<ListenerTag>>,
+    camera_settings: Res<CameraSettings>,
+    mut tags: Query<(&mut Node, &mut UiTransform), With<ListenerTag>>,
 ) {
     let Ok((camera, camera_global)) = camera.single() else {
         return;
@@ -630,25 +564,26 @@ pub(crate) fn update_listener_tag(
     let Ok(listener_global) = listener.single() else {
         return;
     };
-    for mut node in &mut tags {
+    let scale = (camera_settings.home_scale / camera_settings.ortho_scale).clamp(0.08, 12.5);
+    for (mut node, mut ui_transform) in &mut tags {
+        ui_transform.scale = Vec2::splat(scale);
         place_label(
             camera,
             camera_global,
             listener_global.translation(),
             &mut node,
-            36.0,
-            -30.0,
+            38.0,
+            -38.0 * scale,
         );
     }
 }
 
-/// Keep speaker/ear label colors readable when the theme changes: they sit on
+/// Keep speaker label colors readable when the theme changes: they sit on
 /// the landscape (unlike cards, which have their own dark background), so they
 /// take the palette's line color — light at night, dark by day.
 pub(crate) fn retint_labels_on_theme_change(
     theme: Res<LandscapeTheme>,
     mut speaker_labels: Query<&mut TextColor, With<SpeakerLabel>>,
-    mut ear_labels: Query<&mut TextColor, (With<EarLabel>, Without<SpeakerLabel>)>,
 ) {
     if !theme.is_changed() {
         return;
@@ -656,9 +591,6 @@ pub(crate) fn retint_labels_on_theme_change(
     let color = theme.palette().link_line;
     for mut text_color in &mut speaker_labels {
         text_color.0 = color.with_alpha(0.85);
-    }
-    for mut text_color in &mut ear_labels {
-        text_color.0 = color.with_alpha(0.9);
     }
 }
 
@@ -690,39 +622,6 @@ pub(crate) fn billboard_speaker_labels(
             &mut node,
             10.0,
             20.0,
-        );
-    }
-}
-
-/// Position "L"/"R" labels at the listener's ears (rotated with facing).
-pub(crate) fn update_ear_labels(
-    camera: Query<(&Camera, &GlobalTransform), With<TopDownCamera>>,
-    listener: Query<&Transform, With<SoundListener>>,
-    state: Res<crate::camera::ListenerState>,
-    mut labels: Query<(&EarLabel, &mut Node)>,
-) {
-    let Ok((camera, camera_global)) = camera.single() else {
-        return;
-    };
-    let Ok(listener_transform) = listener.single() else {
-        return;
-    };
-    let center = listener_transform.translation.truncate();
-    let facing = Vec2::new(state.yaw.cos(), state.yaw.sin());
-    // Right of facing (clockwise 90°): (x, y) → (y, -x).
-    let right = Vec2::new(facing.y, -facing.x);
-    let ear_offset = 0.55;
-
-    for (ear, mut node) in &mut labels {
-        let sign = if ear.is_right { 1.0 } else { -1.0 };
-        let world = center + right * sign * ear_offset;
-        place_label(
-            camera,
-            camera_global,
-            world.extend(LAYER_LISTENER),
-            &mut node,
-            6.0,
-            8.0,
         );
     }
 }
@@ -765,6 +664,7 @@ pub(crate) fn drag_sources(
     mut command_sender: ResMut<CommandSender>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    over_hud: Res<crate::hud::PointerOverHud>,
 ) {
     let Ok((camera, camera_global)) = camera.single() else {
         return;
@@ -782,6 +682,10 @@ pub(crate) fn drag_sources(
     };
 
     if mouse_buttons.just_pressed(MouseButton::Left) {
+        // App-bar/drawer clicks belong to the UI, never to a marker behind it.
+        if over_hud.0 {
+            return;
+        }
         let mut best = PICK_RADIUS;
         let mut picked = None;
         for (index, transform, _) in &sources {

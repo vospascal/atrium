@@ -13,7 +13,7 @@ use super::icons::{IconKind, SourceIcon};
 use super::landscape::{FloorSprite, LandscapeTheme};
 use super::schema::{parse_hex_color, SceneDescription, SourceDescription};
 use super::{
-    EarLabel, ListenerTag, SourceCard, SourceCardMetrics, SpeakerLabel, BADGE_RADIUS,
+    ListenerTag, SourceCard, SourceCardLevel, SourceCardMetrics, SpeakerLabel, BADGE_RADIUS,
     LAYER_LISTENER, LAYER_SOURCE, LAYER_SPEAKER,
 };
 use crate::ecs::*;
@@ -22,9 +22,10 @@ use crate::ecs::*;
 const BADGE_FILL: Color = Color::srgba(0.03, 0.055, 0.10, 0.92);
 
 /// Info card background (matches the HUD panels, slightly deeper).
-pub(crate) const CARD_BG: Color = Color::srgba(0.02, 0.04, 0.08, 0.86);
+pub(crate) const CARD_BG: Color = Color::srgba(0.02, 0.04, 0.08, 0.78);
 const CARD_TEXT: Color = Color::srgb(0.92, 0.95, 1.00);
 const CARD_METRICS_TEXT: Color = Color::srgb(0.65, 0.73, 0.86);
+const CARD_BORDER: Color = Color::srgba(0.48, 0.64, 0.78, 0.38);
 
 /// Spawn all scene entities from a `SceneDescription`.
 ///
@@ -93,14 +94,24 @@ pub fn spawn_scene(
         );
     }
 
+    // Keep markers approximately the same screen size across compact indoor
+    // rooms and wide outdoor maps; camera zoom still scales them naturally.
+    let visual_scale = map_visual_scale(description);
+
     // ── Source badges: dark disc + colored ring + soft halo ──
     for source in &description.sources {
-        spawn_one_source(commands, meshes, materials, source);
+        spawn_one_source(commands, meshes, materials, source, visual_scale);
     }
 
-    // ── Listener badge: dark disc + light ring (glyph drawn by gizmos) ──
-    let listener_fill_mesh = meshes.add(Circle::new(BADGE_RADIUS + 0.04));
-    let listener_ring_mesh = meshes.add(Annulus::new(BADGE_RADIUS - 0.02, BADGE_RADIUS + 0.04));
+    // ── Listener badge: larger dark disc, luminous rings, filled person glyph ──
+    let listener_radius = BADGE_RADIUS + 0.12;
+    let listener_fill_mesh = meshes.add(Circle::new(listener_radius));
+    let listener_ring_mesh = meshes.add(Annulus::new(listener_radius - 0.05, listener_radius));
+    let listener_glow_mesh =
+        meshes.add(Annulus::new(listener_radius + 0.06, listener_radius + 0.09));
+    let listener_head_mesh = meshes.add(Circle::new(0.09));
+    let listener_body_mesh = meshes.add(Ellipse::new(0.17, 0.14));
+    let listener_white = materials.add(ColorMaterial::from_color(Color::srgb(0.94, 0.97, 1.0)));
     let listener_world = atrium_to_world(description.listener.position);
     commands
         .spawn((
@@ -111,15 +122,31 @@ pub fn spawn_scene(
             AtriumHeight(description.listener.position[2]),
             Mesh2d(listener_fill_mesh),
             MeshMaterial2d(materials.add(ColorMaterial::from_color(BADGE_FILL))),
-            Transform::from_xyz(listener_world.x, listener_world.y, LAYER_LISTENER),
+            Transform::from_xyz(listener_world.x, listener_world.y, LAYER_LISTENER)
+                .with_scale(Vec3::splat(visual_scale)),
         ))
         .with_children(|badge| {
             badge.spawn((
                 Mesh2d(listener_ring_mesh),
-                MeshMaterial2d(
-                    materials.add(ColorMaterial::from_color(Color::srgb(0.92, 0.95, 1.0))),
-                ),
+                MeshMaterial2d(listener_white.clone()),
                 Transform::from_xyz(0.0, 0.0, 0.1),
+            ));
+            badge.spawn((
+                Mesh2d(listener_glow_mesh),
+                MeshMaterial2d(materials.add(ColorMaterial::from_color(Color::srgba(
+                    0.27, 0.78, 0.98, 0.58,
+                )))),
+                Transform::from_xyz(0.0, 0.0, 0.05),
+            ));
+            badge.spawn((
+                Mesh2d(listener_head_mesh),
+                MeshMaterial2d(listener_white.clone()),
+                Transform::from_xyz(0.0, 0.15, 0.2),
+            ));
+            badge.spawn((
+                Mesh2d(listener_body_mesh),
+                MeshMaterial2d(listener_white),
+                Transform::from_xyz(0.0, -0.14, 0.2),
             ));
         });
 
@@ -127,15 +154,18 @@ pub fn spawn_scene(
     commands
         .spawn((
             ListenerTag,
+            UiTransform::IDENTITY,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(-1000.0),
                 top: Val::Px(-1000.0),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(3.0)),
+                border: UiRect::all(Val::Px(1.0)),
                 border_radius: BorderRadius::all(Val::Px(999.0)),
                 ..default()
             },
             BackgroundColor(CARD_BG),
+            BorderColor::all(CARD_BORDER),
         ))
         .with_children(|pill| {
             pill.spawn((
@@ -144,14 +174,9 @@ pub fn spawn_scene(
                     font_size: 13.0,
                     ..default()
                 },
-                TextColor(CARD_TEXT),
+                TextColor(Color::srgb(0.27, 0.78, 0.98)),
             ));
         });
-
-    let ear_color = Color::srgba(0.92, 0.95, 1.0, 0.9);
-    for (is_right, text) in [(false, "L"), (true, "R")] {
-        spawn_label(commands, text, 12.0, ear_color, EarLabel { is_right });
-    }
 
     // Themed background behind the map.
     commands.insert_resource(ClearColor(palette.background));
@@ -165,6 +190,7 @@ pub(crate) fn spawn_one_source(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
     source: &SourceDescription,
+    visual_scale: f32,
 ) {
     let slot = source.slot;
     let rgb = parse_hex_color(&source.color);
@@ -205,7 +231,8 @@ pub(crate) fn spawn_one_source(
             AtriumHeight(source.position[2]),
             Mesh2d(badge_fill_mesh),
             MeshMaterial2d(badge_fill_material),
-            Transform::from_xyz(world.x, world.y, LAYER_SOURCE),
+            Transform::from_xyz(world.x, world.y, LAYER_SOURCE)
+                .with_scale(Vec3::splat(visual_scale)),
         ))
         .with_children(|badge| {
             badge.spawn((
@@ -223,58 +250,144 @@ pub(crate) fn spawn_one_source(
     spawn_source_card(commands, slot, &source.name, color);
 }
 
-/// Info card for one source: "N Name" row + live "12.9 m  225°  -7.0 dB" row.
+pub(crate) fn map_visual_scale(description: &SceneDescription) -> f32 {
+    (description
+        .environment
+        .width
+        .max(description.environment.depth)
+        / 60.0)
+        .clamp(0.25, 1.0)
+}
+
+/// Compact map callout for one source: colored title, position row, and level row.
 /// Positioned next to the badge each frame by `update_source_cards`.
 fn spawn_source_card(commands: &mut Commands, index: usize, name: &str, color: Color) {
     commands
         .spawn((
             SourceCard { index },
+            GlobalZIndex(3),
+            UiTransform::IDENTITY,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(-1000.0),
                 top: Val::Px(-1000.0),
+                width: Val::Px(132.0),
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
-                row_gap: Val::Px(2.0),
-                border_radius: BorderRadius::all(Val::Px(8.0)),
+                padding: UiRect::axes(Val::Px(9.0), Val::Px(7.0)),
+                row_gap: Val::Px(4.0),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(12.0)),
                 ..default()
             },
             BackgroundColor(CARD_BG),
+            BorderColor::all(CARD_BORDER),
         ))
         .with_children(|card| {
-            card.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(7.0),
-                align_items: AlignItems::Center,
-                ..default()
-            })
-            .with_children(|title_row| {
-                title_row.spawn((
-                    Text::new(format!("{}", index + 1)),
-                    TextFont {
-                        font_size: 12.0,
-                        ..default()
-                    },
-                    TextColor(CARD_METRICS_TEXT),
-                ));
-                title_row.spawn((
-                    Text::new(name),
-                    TextFont {
-                        font_size: 13.0,
-                        ..default()
-                    },
-                    TextColor(color),
-                ));
-            });
             card.spawn((
-                SourceCardMetrics { index },
-                Text::new("..."),
+                Text::new(name),
                 TextFont {
                     font_size: 12.0,
                     ..default()
                 },
-                TextColor(CARD_TEXT),
+                TextColor(color),
             ));
+            card.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(7.0),
+                ..default()
+            })
+            .with_children(|row| {
+                spawn_pin_icon(row);
+                row.spawn((
+                    SourceCardMetrics { index },
+                    Text::new("-- m  /  -- deg"),
+                    TextFont {
+                        font_size: 9.0,
+                        ..default()
+                    },
+                    TextColor(CARD_METRICS_TEXT),
+                ));
+            });
+            card.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(7.0),
+                ..default()
+            })
+            .with_children(|row| {
+                spawn_level_icon(row);
+                row.spawn((
+                    SourceCardLevel { index },
+                    Text::new("-- dB"),
+                    TextFont {
+                        font_size: 9.0,
+                        ..default()
+                    },
+                    TextColor(CARD_TEXT),
+                ));
+            });
+        });
+}
+
+fn spawn_pin_icon(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            position_type: PositionType::Relative,
+            width: Val::Px(14.0),
+            height: Val::Px(14.0),
+            ..default()
+        })
+        .with_children(|icon| {
+            icon.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(3.0),
+                    top: Val::Px(1.0),
+                    width: Val::Px(8.0),
+                    height: Val::Px(8.0),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(999.0)),
+                    ..default()
+                },
+                BorderColor::all(CARD_METRICS_TEXT),
+            ));
+            icon.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(6.5),
+                    top: Val::Px(8.0),
+                    width: Val::Px(1.0),
+                    height: Val::Px(5.0),
+                    ..default()
+                },
+                BackgroundColor(CARD_METRICS_TEXT),
+            ));
+        });
+}
+
+fn spawn_level_icon(parent: &mut ChildSpawnerCommands) {
+    parent
+        .spawn(Node {
+            width: Val::Px(14.0),
+            height: Val::Px(14.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::FlexEnd,
+            column_gap: Val::Px(2.0),
+            ..default()
+        })
+        .with_children(|icon| {
+            for height in [5.0, 9.0, 13.0] {
+                icon.spawn((
+                    Node {
+                        width: Val::Px(2.0),
+                        height: Val::Px(height),
+                        border_radius: BorderRadius::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(CARD_METRICS_TEXT),
+                ));
+            }
         });
 }
 

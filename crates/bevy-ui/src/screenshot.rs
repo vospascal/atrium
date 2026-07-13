@@ -13,6 +13,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use atrium_core::commands::Command;
 use atrium_core::speaker::RenderMode;
 
+use crate::hud::{HudDrawer, HudState};
 use crate::scene::landscape::{
     self, Biome, FloorSprite, LandscapeDecor, LandscapeTheme, TimeOfDay,
 };
@@ -25,6 +26,7 @@ use atrium_behavior::CommandSender;
 enum Step {
     Theme(LandscapeTheme),
     Mode(RenderMode),
+    Drawer(Option<HudDrawer>),
     Scene(std::path::PathBuf),
     Save(std::path::PathBuf),
 }
@@ -34,6 +36,8 @@ impl Step {
         match self {
             Step::Theme(theme) => format!("{:?}_{:?}", theme.biome, theme.time_of_day),
             Step::Mode(mode) => format!("mode_{}", mode.as_str()),
+            Step::Drawer(None) => "ui_map".to_string(),
+            Step::Drawer(Some(drawer)) => format!("ui_{drawer:?}"),
             Step::Scene(path) => format!(
                 "scene_{}",
                 path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
@@ -68,6 +72,19 @@ impl ScreenshotTour {
     pub fn new(directory: String) -> Self {
         let steps = match std::env::var("ATRIUM_SCREENSHOT_TOUR").as_deref() {
             Ok("modes") => RenderMode::ALL.iter().copied().map(Step::Mode).collect(),
+            Ok("ui") => [
+                None,
+                Some(HudDrawer::Scenes),
+                Some(HudDrawer::Sources),
+                Some(HudDrawer::AddSource),
+                Some(HudDrawer::Mix),
+                Some(HudDrawer::Environment),
+                Some(HudDrawer::Signal),
+            ]
+            .iter()
+            .copied()
+            .map(Step::Drawer)
+            .collect(),
             Ok("scenes") => [
                 "scenes/default.yaml",
                 "scenes/nature.yaml",
@@ -124,6 +141,7 @@ pub(crate) fn run_screenshot_tour(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut command_sender: ResMut<CommandSender>,
+    mut hud_state: ResMut<HudState>,
     mut pending: ResMut<PendingReload>,
     mut pending_save: ResMut<PendingSave>,
     mut exit: MessageWriter<AppExit>,
@@ -153,6 +171,9 @@ pub(crate) fn run_screenshot_tour(
                     // Engine echoes the new mode back via telemetry; the next
                     // tick (1 s later) is plenty for it to settle before capture.
                     command_sender.send(Command::SetRenderMode { mode: *mode });
+                }
+                Step::Drawer(drawer) => {
+                    hud_state.active_drawer = *drawer;
                 }
                 Step::Scene(path) => {
                     // Reload driver rebuilds audio + UI; captured next tick.

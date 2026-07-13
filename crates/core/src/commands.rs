@@ -75,6 +75,9 @@ pub enum Command {
 /// the controls it models and ignores the rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SynthParam {
+    FlowSpeedMin,
+    FlowSpeedMax,
+    RiverSplashRate,
     MinSpeed,
     MaxSpeed,
     ChangeTimeMin,

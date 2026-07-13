@@ -27,6 +27,7 @@ use crate::synth::canopy_wind::CanopyWindSource;
 use crate::synth::field_wind::FieldWindSource;
 use crate::synth::rain::RainSource;
 use crate::synth::rain_v2::RainSourceV2;
+use crate::synth::river::RiverSource;
 use crate::synth::soft_wind::SoftWindSource;
 use crate::synth::storm_wind::StormWindSource;
 use crate::synth::wave::WaveSource;
@@ -484,6 +485,7 @@ pub enum SynthSpec {
     StormWind(StormWindSynthParams),
     Rain(RainSynthParams),
     RainV2(RainV2SynthParams),
+    River(RiverSynthParams),
     Waves(WaveSynthParams),
 }
 
@@ -611,6 +613,25 @@ pub struct RainV2SynthParams {
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
+pub struct RiverSynthParams {
+    pub min_flow_speed: Option<f32>,
+    pub max_flow_speed: Option<f32>,
+    pub change_time_min: Option<f32>,
+    pub change_time_max: Option<f32>,
+    pub eddy_time_min: Option<f32>,
+    pub eddy_time_max: Option<f32>,
+    pub eddy_depth: Option<f32>,
+    pub body_gain: Option<f32>,
+    pub current_gain: Option<f32>,
+    pub bubble_activity: Option<f32>,
+    pub splash_rate: Option<f32>,
+    pub splash_gain: Option<f32>,
+    pub spray_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
 pub struct WaveSynthParams {
     pub period: Option<f32>,
     pub crash_prob: Option<f32>,
@@ -630,6 +651,7 @@ impl SynthSpec {
             SynthSpec::StormWind(_) => "storm_wind",
             SynthSpec::Rain(_) => "rain",
             SynthSpec::RainV2(_) => "rain_v2",
+            SynthSpec::River(_) => "river",
             SynthSpec::Waves(_) => "waves",
         }
     }
@@ -929,6 +951,49 @@ impl SynthSpec {
                 }
                 if let Some(value) = params.master_gain {
                     generator.master_gain = value;
+                }
+                Box::new(generator)
+            }
+            SynthSpec::River(params) => {
+                let mut generator = RiverSource::new(
+                    position,
+                    params.min_flow_speed.unwrap_or(0.3),
+                    params.max_flow_speed.unwrap_or(1.2),
+                    params.seed.unwrap_or(default_seed),
+                );
+                let (default_min, default_max) = generator.change_time_range();
+                generator.set_change_time_range(
+                    params.change_time_min.unwrap_or(default_min),
+                    params.change_time_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.eddy_time_range();
+                generator.set_eddy_time_range(
+                    params.eddy_time_min.unwrap_or(default_min),
+                    params.eddy_time_max.unwrap_or(default_max),
+                );
+                if let Some(value) = params.eddy_depth {
+                    generator.eddy_depth = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.body_gain {
+                    generator.body_gain = value.max(0.0);
+                }
+                if let Some(value) = params.current_gain {
+                    generator.current_gain = value.max(0.0);
+                }
+                if let Some(value) = params.bubble_activity {
+                    generator.bubble_activity = value.max(0.0);
+                }
+                if let Some(value) = params.splash_rate {
+                    generator.splash_rate = value.max(0.0);
+                }
+                if let Some(value) = params.splash_gain {
+                    generator.splash_gain = value.max(0.0);
+                }
+                if let Some(value) = params.spray_gain {
+                    generator.spray_gain = value.max(0.0);
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value.clamp(0.0, 2.0);
                 }
                 Box::new(generator)
             }
@@ -1763,6 +1828,10 @@ mod tests {
                 "rain_v2",
             ),
             (
+                "synth: river\nmin_flow_speed: 0.3\nmax_flow_speed: 1.2\nreference_spl: 45\n",
+                "river",
+            ),
+            (
                 "synth: waves\nperiod: 6\ncrash_prob: 0.25\nreference_spl: 60\n",
                 "waves",
             ),
@@ -1779,6 +1848,7 @@ mod tests {
                             "waves" => 60,
                             "canopy_wind" => 48,
                             "soft_wind" => 42,
+                            "river" => 45,
                             "storm_wind" => 60,
                             _ => 55,
                         }
@@ -1967,6 +2037,51 @@ mod tests {
     }
 
     #[test]
+    fn river_controls_parse_and_build_as_an_object() {
+        let source: SynthSourceDef = serde_yaml::from_str(
+            "synth: river\n\
+             min_flow_speed: 0.3\n\
+             max_flow_speed: 1.2\n\
+             change_time_min: 15\n\
+             change_time_max: 110\n\
+             eddy_time_min: 0.35\n\
+             eddy_time_max: 1.25\n\
+             eddy_depth: 0.65\n\
+             bubble_activity: 0.75\n\
+             splash_rate: 0.45\n\
+             reference_spl: 45\n",
+        )
+        .unwrap();
+        let SynthSpec::River(params) = &source.spec else {
+            panic!("expected river");
+        };
+        assert_eq!(params.min_flow_speed, Some(0.3));
+        assert_eq!(params.max_flow_speed, Some(1.2));
+        assert_eq!(params.eddy_time_min, Some(0.35));
+        assert_eq!(params.eddy_time_max, Some(1.25));
+        assert_eq!(params.eddy_depth, Some(0.65));
+        assert_eq!(params.bubble_activity, Some(0.75));
+        assert_eq!(params.splash_rate, Some(0.45));
+
+        let built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            "omni",
+            1.0,
+            Vec3::ZERO,
+            47,
+            &NormalizationConfig::default(),
+            1.0,
+            40.0,
+        )
+        .expect("river should build");
+        assert_eq!(
+            built.source.emitter_kind(),
+            atrium_core::source::EmitterKind::Object
+        );
+    }
+
+    #[test]
     fn field_wind_builds_as_a_field_emitter() {
         let source: SynthSourceDef = serde_yaml::from_str(
             "synth: field_wind\nmin_speed: 1\nmax_speed: 8\nchange_time_min: 20\nchange_time_max: 50\nreference_spl: 55\n",
@@ -2105,6 +2220,21 @@ mod tests {
         assert_eq!(
             result.scene.sources[0].emitter_kind(),
             atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    #[test]
+    fn river_scene_builds_end_to_end() {
+        let scene = SceneConfig::load("scenes/river-only.yaml").expect("scene should load");
+        let result = scene.build().expect("river scene should build");
+        assert_eq!(
+            result.source_names.first().map(String::as_str),
+            Some("River")
+        );
+        assert!(result.scene.source_amplitudes[0] > 0.0);
+        assert_eq!(
+            result.scene.sources[0].emitter_kind(),
+            atrium_core::source::EmitterKind::Object
         );
     }
 }

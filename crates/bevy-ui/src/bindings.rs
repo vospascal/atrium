@@ -18,8 +18,6 @@ const TITLE: Color = Color::srgb(0.31, 0.76, 0.97);
 const HEADER: Color = Color::srgb(0.95, 0.76, 0.30);
 const KEY_COLOR: Color = Color::srgb(0.85, 0.85, 0.88);
 const ACTION_COLOR: Color = Color::srgb(0.62, 0.62, 0.66);
-const HINT_COLOR: Color = Color::srgba(0.75, 0.75, 0.80, 0.75);
-const HINT_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.45);
 
 // ── Marker + state ────────────────────────────────────────────────────────────
 
@@ -60,25 +58,6 @@ const GAMEPAD_BINDINGS: &[Binding] = &[
 
 /// Spawn the (hidden) modal overlay and the persistent open-hint.
 pub(crate) fn setup_bindings_ui(mut commands: Commands) {
-    // Persistent hint, bottom-center.
-    commands.spawn((
-        Text::new("F1  /  \u{25EF} / Start  \u{2014}  Controls"),
-        TextFont {
-            font_size: 12.0,
-            ..default()
-        },
-        TextColor(HINT_COLOR),
-        BackgroundColor(HINT_BG),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(10.0),
-            left: Val::Percent(50.0),
-            margin: UiRect::left(Val::Px(-90.0)),
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
-            ..default()
-        },
-    ));
-
     // Modal overlay root (full-screen dimmer), hidden until toggled.
     commands
         .spawn((

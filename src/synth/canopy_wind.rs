@@ -327,6 +327,7 @@ impl SoundSource for CanopyWindSource {
 
     fn set_synth_param(&mut self, param: SynthParam, value: f32) {
         match param {
+            SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => self.min_speed = value.clamp(0.0, self.max_speed),
             SynthParam::MaxSpeed => self.max_speed = value.clamp(self.min_speed, 25.0),
             SynthParam::ChangeTimeMin => {

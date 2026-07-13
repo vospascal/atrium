@@ -1,7 +1,7 @@
 //! Live synth-parameter panel (egui). Click a source, drag the sliders, hear
 //! the change immediately — each slider sends a `SetSynthParam` command to the
-//! audio thread. Only wind-family controls are exposed here; other source
-//! types ignore commands they don't model.
+//! audio thread. Wind-family and river controls are exposed here; other
+//! source types ignore commands they don't model.
 
 use atrium_behavior::CommandSender;
 use atrium_core::commands::{Command, SynthParam};
@@ -43,6 +43,7 @@ pub struct SynthPanelState {
     branch_level: f32,
     debris_level: f32,
     structure_level: f32,
+    splash_rate: f32,
     master_gain: f32,
 }
 
@@ -74,6 +75,7 @@ impl Default for SynthPanelState {
             branch_level: 0.12,
             debris_level: 0.06,
             structure_level: 0.05,
+            splash_rate: 0.45,
             master_gain: 1.0,
         }
     }
@@ -90,20 +92,21 @@ pub fn synth_param_panel(
     let Some(index) = selected.0 else {
         return;
     };
-    // Only wind synth sources get this panel.
+    // Only synths with a live parameter surface get this panel.
     let Some((_, source)) = sources.iter().find(|(i, _)| i.0 == index) else {
         return;
     };
     let synth_kind = source.synth_kind.as_deref();
     if !matches!(
         synth_kind,
-        Some("field_wind" | "soft_wind" | "canopy_wind" | "storm_wind")
+        Some("field_wind" | "soft_wind" | "canopy_wind" | "storm_wind" | "river")
     ) {
         return;
     }
     let is_canopy = synth_kind == Some("canopy_wind");
     let is_soft = synth_kind == Some("soft_wind");
     let is_storm = synth_kind == Some("storm_wind");
+    let is_river = synth_kind == Some("river");
     let name = source.name.clone();
 
     // Reset sliders to baseline when the selection changes.
@@ -112,7 +115,23 @@ pub fn synth_param_panel(
             for_index: Some(index),
             ..Default::default()
         };
-        if is_storm {
+        if is_river {
+            // Reuse generic filterbank fields: low=body, body=current,
+            // mid=bubbles, presence=splash level, air=spray.
+            initial.min_speed = 0.3;
+            initial.max_speed = 1.2;
+            initial.change_time_min = 15.0;
+            initial.change_time_max = 110.0;
+            initial.turbulence_time_min = 0.35;
+            initial.turbulence_time_max = 1.25;
+            initial.turbulence_depth = 0.65;
+            initial.low_gain = 0.40;
+            initial.body_gain = 0.65;
+            initial.mid_gain = 0.75;
+            initial.splash_rate = 0.45;
+            initial.presence_gain = 0.30;
+            initial.air_gain = 0.050;
+        } else if is_storm {
             initial.min_speed = 8.0;
             initial.max_speed = 18.0;
             initial.change_time_min = 12.0;
@@ -168,6 +187,140 @@ pub fn synth_param_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+
+    if is_river {
+        let mut open = true;
+        egui::Window::new(format!("River — {name}"))
+            .default_width(280.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let i = index as u16;
+                let mut row = |ui: &mut egui::Ui,
+                               label: &str,
+                               value: &mut f32,
+                               range: std::ops::RangeInclusive<f32>,
+                               param: SynthParam| {
+                    if ui
+                        .add(egui::Slider::new(value, range).text(label))
+                        .changed()
+                    {
+                        command_sender.send(Command::SetSynthParam {
+                            index: i,
+                            param,
+                            value: *value,
+                        });
+                    }
+                };
+
+                ui.label("Flow driver");
+                row(
+                    ui,
+                    "minimum flow speed (m/s)",
+                    &mut state.min_speed,
+                    0.0..=5.0,
+                    SynthParam::FlowSpeedMin,
+                );
+                row(
+                    ui,
+                    "maximum flow speed (m/s)",
+                    &mut state.max_speed,
+                    0.0..=5.0,
+                    SynthParam::FlowSpeedMax,
+                );
+                row(
+                    ui,
+                    "evolution minimum (s)",
+                    &mut state.change_time_min,
+                    1.0..=120.0,
+                    SynthParam::ChangeTimeMin,
+                );
+                row(
+                    ui,
+                    "evolution maximum (s)",
+                    &mut state.change_time_max,
+                    1.0..=180.0,
+                    SynthParam::ChangeTimeMax,
+                );
+                row(
+                    ui,
+                    "eddy minimum (s)",
+                    &mut state.turbulence_time_min,
+                    0.02..=2.0,
+                    SynthParam::TurbulenceTimeMin,
+                );
+                row(
+                    ui,
+                    "eddy maximum (s)",
+                    &mut state.turbulence_time_max,
+                    0.02..=4.0,
+                    SynthParam::TurbulenceTimeMax,
+                );
+                row(
+                    ui,
+                    "eddy depth",
+                    &mut state.turbulence_depth,
+                    0.0..=1.0,
+                    SynthParam::TurbulenceDepth,
+                );
+
+                ui.separator();
+                ui.label("River mix");
+                row(
+                    ui,
+                    "turbulent body",
+                    &mut state.low_gain,
+                    0.0..=2.0,
+                    SynthParam::LowGain,
+                );
+                row(
+                    ui,
+                    "surface current",
+                    &mut state.body_gain,
+                    0.0..=2.0,
+                    SynthParam::BodyGain,
+                );
+                row(
+                    ui,
+                    "bubble activity",
+                    &mut state.mid_gain,
+                    0.0..=2.0,
+                    SynthParam::MidGain,
+                );
+                row(
+                    ui,
+                    "splashes / second",
+                    &mut state.splash_rate,
+                    0.0..=8.0,
+                    SynthParam::RiverSplashRate,
+                );
+                row(
+                    ui,
+                    "splash level",
+                    &mut state.presence_gain,
+                    0.0..=3.0,
+                    SynthParam::PresenceGain,
+                );
+                row(
+                    ui,
+                    "fine spray",
+                    &mut state.air_gain,
+                    0.0..=1.0,
+                    SynthParam::AirGain,
+                );
+                row(
+                    ui,
+                    "master_gain",
+                    &mut state.master_gain,
+                    0.0..=2.0,
+                    SynthParam::MasterGain,
+                );
+            });
+
+        if !open {
+            selected.0 = None;
+        }
+        return;
+    }
 
     let mut open = true;
     let title = match synth_kind {

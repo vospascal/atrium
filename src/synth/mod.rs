@@ -13,6 +13,7 @@ pub mod field_wind;
 pub mod noise;
 pub mod rain;
 pub mod rain_v2;
+pub mod river;
 pub mod soft_wind;
 pub mod storm_wind;
 pub mod wave;

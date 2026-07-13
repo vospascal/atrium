@@ -1,23 +1,27 @@
-// Render spectrogram images (time × log-frequency) of the real wind recording
-// and the wind synths, so their spectral *motion* can be compared by eye.
+// Render spectrogram images (time × log-frequency) of a reference recording
+// and the corresponding synth family, so their spectral motion can be
+// compared by eye.
 //
 // Writes PPM files (no image-crate dep); convert to PNG with `sips`.
-//   cargo run --bin spectrogram -- "<recording>" <out_dir>
+//   cargo run --bin spectrogram -- "<recording>" <out_dir> [wind|rain]
 
 use std::path::Path;
 
 use atrium::audio::decode::decode_file;
 use atrium::synth::canopy_wind::CanopyWindSource;
 use atrium::synth::field_wind::FieldWindSource;
+use atrium::synth::rain::RainSource;
+use atrium::synth::rain_v2::RainSourceV2;
+use atrium::synth::river::RiverSource;
 use atrium::synth::soft_wind::SoftWindSource;
 use atrium::synth::storm_wind::StormWindSource;
 use atrium::world::types::Vec3;
 use atrium_core::source::SoundSource;
 use realfft::RealFftPlanner;
 
-const FFT_SIZE: usize = 2048;
-const HOP: usize = 512;
-const HEIGHT: usize = 480;
+const FFT_SIZE: usize = 8192;
+const HOP: usize = 1024;
+const HEIGHT: usize = 720;
 const F_MIN: f32 = 40.0;
 const F_MAX: f32 = 16_000.0;
 
@@ -100,6 +104,7 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "assets/wind_field.mp3".into());
     let out_dir = args.get(2).cloned().unwrap_or_else(|| ".".into());
+    let family = args.get(3).map(String::as_str).unwrap_or("wind");
 
     let buffer = decode_file(Path::new(&path)).expect("decode failed");
     let sr = buffer.sample_rate as f32;
@@ -113,39 +118,63 @@ fn main() {
         &format!("{out_dir}/spec_recording.ppm"),
     );
 
-    let mut field = FieldWindSource::new(Vec3::ZERO, 1.0, 8.0, 42);
-    let samples: Vec<f32> = (0..n).map(|_| field.next_sample(sr)).collect();
-    write_spectrogram(
-        "field_wind",
-        &samples,
-        sr,
-        &format!("{out_dir}/spec_field_wind.ppm"),
-    );
+    if family == "rain" {
+        let mut v1 = RainSource::new(Vec3::ZERO, 0.5, 42);
+        let samples: Vec<f32> = (0..n).map(|_| v1.next_sample(sr)).collect();
+        write_spectrogram(
+            "rain_v1",
+            &samples,
+            sr,
+            &format!("{out_dir}/spec_rain_v1.ppm"),
+        );
 
-    let mut soft = SoftWindSource::new(Vec3::ZERO, 1.0, 5.0, 46);
-    let samples: Vec<f32> = (0..n).map(|_| soft.next_sample(sr)).collect();
-    write_spectrogram(
-        "soft_wind",
-        &samples,
-        sr,
-        &format!("{out_dir}/spec_soft_wind.ppm"),
-    );
+        let mut v2 = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
+        let samples: Vec<f32> = (0..n).map(|_| v2.next_sample(sr)).collect();
+        write_spectrogram(
+            "rain_v2",
+            &samples,
+            sr,
+            &format!("{out_dir}/spec_rain_v2.ppm"),
+        );
 
-    let mut canopy = CanopyWindSource::new(Vec3::ZERO, 1.5, 8.0, 43);
-    let samples: Vec<f32> = (0..n).map(|_| canopy.next_sample(sr)).collect();
-    write_spectrogram(
-        "canopy_wind",
-        &samples,
-        sr,
-        &format!("{out_dir}/spec_canopy_wind.ppm"),
-    );
+        let mut river = RiverSource::new(Vec3::ZERO, 0.3, 1.2, 42);
+        let samples: Vec<f32> = (0..n).map(|_| river.next_sample(sr)).collect();
+        write_spectrogram("river", &samples, sr, &format!("{out_dir}/spec_river.ppm"));
+    } else {
+        let mut field = FieldWindSource::new(Vec3::ZERO, 1.0, 8.0, 42);
+        let samples: Vec<f32> = (0..n).map(|_| field.next_sample(sr)).collect();
+        write_spectrogram(
+            "field_wind",
+            &samples,
+            sr,
+            &format!("{out_dir}/spec_field_wind.ppm"),
+        );
 
-    let mut storm = StormWindSource::new(Vec3::ZERO, 8.0, 18.0, 44);
-    let samples: Vec<f32> = (0..n).map(|_| storm.next_sample(sr)).collect();
-    write_spectrogram(
-        "storm_wind",
-        &samples,
-        sr,
-        &format!("{out_dir}/spec_storm_wind.ppm"),
-    );
+        let mut soft = SoftWindSource::new(Vec3::ZERO, 1.0, 5.0, 46);
+        let samples: Vec<f32> = (0..n).map(|_| soft.next_sample(sr)).collect();
+        write_spectrogram(
+            "soft_wind",
+            &samples,
+            sr,
+            &format!("{out_dir}/spec_soft_wind.ppm"),
+        );
+
+        let mut canopy = CanopyWindSource::new(Vec3::ZERO, 1.5, 8.0, 43);
+        let samples: Vec<f32> = (0..n).map(|_| canopy.next_sample(sr)).collect();
+        write_spectrogram(
+            "canopy_wind",
+            &samples,
+            sr,
+            &format!("{out_dir}/spec_canopy_wind.ppm"),
+        );
+
+        let mut storm = StormWindSource::new(Vec3::ZERO, 8.0, 18.0, 44);
+        let samples: Vec<f32> = (0..n).map(|_| storm.next_sample(sr)).collect();
+        write_spectrogram(
+            "storm_wind",
+            &samples,
+            sr,
+            &format!("{out_dir}/spec_storm_wind.ppm"),
+        );
+    }
 }

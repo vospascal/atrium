@@ -422,6 +422,7 @@ impl SoundSource for FieldWindSource {
 
     fn set_synth_param(&mut self, param: SynthParam, value: f32) {
         match param {
+            SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => {
                 self.min_speed = value.clamp(0.0, self.max_speed);
             }

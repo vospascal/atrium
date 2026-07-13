@@ -268,7 +268,7 @@ pub(crate) fn spawn_source_buttons(
                     BackgroundColor(BTN_INACTIVE),
                 ))
                 .with_children(|button| {
-                    button.spawn(small_button_text("\u{25B6}"));
+                    button.spawn(small_button_text("II"));
                 });
             }
 
@@ -394,7 +394,7 @@ pub(crate) fn spawn_atmosphere_controls(parent: &mut ChildSpawnerCommands) {
                         BackgroundColor(BTN_INACTIVE),
                     ))
                     .with_children(|b| {
-                        b.spawn(small_button_text("\u{2212}"));
+                        b.spawn(small_button_text("-"));
                     });
                     row.spawn((
                         TempUpButton,
@@ -435,7 +435,7 @@ pub(crate) fn spawn_atmosphere_controls(parent: &mut ChildSpawnerCommands) {
                         BackgroundColor(BTN_INACTIVE),
                     ))
                     .with_children(|b| {
-                        b.spawn(small_button_text("\u{2212}"));
+                        b.spawn(small_button_text("-"));
                     });
                     row.spawn((
                         HumidityUpButton,
@@ -794,9 +794,9 @@ pub(crate) fn sync_pause_buttons(
             if let Ok((mut text, mut color)) = texts.get_mut(child) {
                 // ⏸ when playing (can pause), ▶ when paused (can resume)
                 **text = if is_orbiting {
-                    "\u{23F8}".to_string()
+                    "II".to_string()
                 } else {
-                    "\u{25B6}".to_string()
+                    ">".to_string()
                 };
                 color.0 = if is_orbiting {
                     BTN_TEXT_ACTIVE
@@ -955,9 +955,20 @@ pub(crate) fn spawn_scene_picker(parent: &mut ChildSpawnerCommands) {
 pub(crate) fn handle_scene_pick_buttons(
     buttons: Query<(&ScenePickButton, &Interaction), Changed<Interaction>>,
     mut pending: ResMut<PendingReload>,
+    mut hud_state: ResMut<crate::hud::HudState>,
 ) {
     for (button, interaction) in &buttons {
         if *interaction == Interaction::Pressed {
+            if let Some(label) = std::path::Path::new(&button.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+            {
+                let mut words = label.replace('-', " ");
+                if let Some(first) = words.get_mut(0..1) {
+                    first.make_ascii_uppercase();
+                }
+                hud_state.scene_name = words;
+            }
             pending.0 = Some(ReloadTarget::ScenePath(button.path.clone().into()));
         }
     }
@@ -974,7 +985,7 @@ pub(crate) fn spawn_save_button(parent: &mut ChildSpawnerCommands) {
             BackgroundColor(BTN_INACTIVE),
         ))
         .with_children(|button| {
-            button.spawn(small_button_text("Save \u{2192} saved.yaml"));
+            button.spawn(small_button_text("Save as saved.yaml"));
         });
 }
 
@@ -1037,7 +1048,7 @@ pub(crate) fn spawn_add_source_controls(parent: &mut ChildSpawnerCommands) {
                 BackgroundColor(BTN_ACTIVE),
             ))
             .with_children(|button| {
-                let (text, font, _) = small_button_text("Browse\u{2026}");
+                let (text, font, _) = small_button_text("Browse...");
                 button.spawn((text, font, TextColor(BTN_TEXT_ACTIVE)));
             });
         });

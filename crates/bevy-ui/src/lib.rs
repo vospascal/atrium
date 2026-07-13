@@ -61,7 +61,8 @@ impl Plugin for AtriumPlugin {
                     ..default()
                 },
                 text_color: Color::srgba(0.8, 0.8, 0.8, 0.6),
-                enabled: true,
+                // Diagnostics should not occupy the primary canvas by default.
+                enabled: false,
                 // The graph draws a solid red bar over the HUD — keep it off.
                 frame_time_graph_config: FrameTimeGraphConfig {
                     enabled: false,
@@ -75,6 +76,7 @@ impl Plugin for AtriumPlugin {
         .init_resource::<scene::save::SceneFilePath>()
         .init_resource::<scene::landscape::LandscapeTheme>()
         .init_resource::<hud::PointerOverHud>()
+        .init_resource::<hud::HudState>()
         .init_resource::<synth_panel::SelectedSource>()
         .init_resource::<synth_panel::SynthPanelState>()
         .init_resource::<scene::reload::PendingReload>()
@@ -101,7 +103,7 @@ impl Plugin for AtriumPlugin {
                 telemetry::poll_telemetry,
                 hud::scroll_hud_panels,
                 camera::move_listener,
-                camera::follow_and_zoom_camera,
+                (camera::pan_camera, camera::follow_and_zoom_camera).chain(),
                 scene::update_sources,
                 scene::drag_sources,
             ),
@@ -119,7 +121,6 @@ impl Plugin for AtriumPlugin {
                 scene::draw_audible_rings,
                 scene::draw_directivity_patterns,
                 scene::draw_listener_rings,
-                scene::draw_listener_direction,
                 scene::update_speaker_visuals,
             ),
         )
@@ -158,7 +159,20 @@ impl Plugin for AtriumPlugin {
                 .chain(),
         )
         // Per-source live property edits (SPL / spread / directivity).
-        .add_systems(Update, input::handle_source_edit_buttons);
+        .add_systems(Update, input::handle_source_edit_buttons)
+        // Floating concept controls: master volume and map zoom pills.
+        .add_systems(
+            Update,
+            (
+                hud::handle_master_gain_buttons,
+                hud::sync_master_gain_ui,
+                hud::handle_zoom_buttons,
+                hud::sync_zoom_text,
+                hud::handle_fit_level_buttons,
+                hud::sync_scene_name,
+                hud::handle_help_button,
+            ),
+        );
 
         // Automated screenshot tour (visual verification, opt-in via env var).
         if let Ok(directory) = std::env::var("ATRIUM_SCREENSHOT_DIR") {
@@ -174,7 +188,6 @@ impl Plugin for AtriumPlugin {
                     scene::update_source_cards,
                     scene::update_listener_tag,
                     scene::billboard_speaker_labels,
-                    scene::update_ear_labels,
                     scene::retint_labels_on_theme_change,
                 ),
             )
@@ -186,6 +199,8 @@ impl Plugin for AtriumPlugin {
                     hud::update_hud_listener,
                     hud::update_hud_meters,
                     hud::update_hud_pipeline,
+                    hud::handle_hud_menu_buttons,
+                    hud::sync_hud_drawers,
                     input::handle_render_mode_buttons,
                     input::handle_channel_mode_buttons,
                     input::handle_mute_buttons,

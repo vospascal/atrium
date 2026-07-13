@@ -161,7 +161,6 @@ type SceneEntities = Or<(
     With<landscape::LandscapeDecor>,
     With<super::SourceCard>,
     With<super::SpeakerLabel>,
-    With<super::EarLabel>,
     With<super::ListenerTag>,
     With<hud::HudPanel>,
     With<hud::PipelinePanel>,
@@ -343,6 +342,7 @@ pub(crate) fn drive_scene_edits(
                     &mut meshes,
                     &mut materials,
                     &added.description,
+                    import::map_visual_scale(&description),
                 );
                 if (added.slot as usize) < orbit.speeds.len() {
                     orbit.speeds[added.slot as usize] = if added.description.orbit_radius > 0.0 {

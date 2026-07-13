@@ -12,6 +12,7 @@ use atrium::synth::canopy_wind::CanopyWindSource;
 use atrium::synth::field_wind::FieldWindSource;
 use atrium::synth::rain::RainSource;
 use atrium::synth::rain_v2::RainSourceV2;
+use atrium::synth::river::RiverSource;
 use atrium::synth::soft_wind::SoftWindSource;
 use atrium::synth::storm_wind::StormWindSource;
 use atrium::synth::wave::WaveSource;
@@ -165,5 +166,9 @@ fn main() {
     analyze(
         "Rain v2 (intensity 0.5)",
         Box::new(RainSourceV2::new(Vec3::ZERO, 0.5, 42)),
+    );
+    analyze(
+        "River (0.3-1.2 m/s)",
+        Box::new(RiverSource::new(Vec3::ZERO, 0.3, 1.2, 42)),
     );
 }

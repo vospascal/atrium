@@ -10,8 +10,9 @@ use atrium_core::types::Vec3 as AtriumVec3;
 use bevy::camera::ScalingMode;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
-use crate::ecs::SoundListener;
+use crate::ecs::{SoundListener, SoundSource};
 use crate::scene::{atrium_to_world, SceneDescription};
 use atrium_behavior::CommandSender;
 
@@ -48,25 +49,57 @@ pub struct ListenerState {
 #[derive(Resource)]
 pub struct CameraSettings {
     pub ortho_scale: f32,
-    pub min_scale: f32,
-    pub max_scale: f32,
-    pub zoom_speed: f32,
+    pub home_scale: f32,
+    /// Minimum received relative level included by the fit-to-audible action.
+    pub fit_audibility_db: f32,
     /// Listener move speed (metres/second).
     pub move_speed: f32,
     /// Listener turn speed (radians/second).
     pub turn_speed: f32,
 }
 
+/// User-controlled map offset. Dragging empty map space updates this while the
+/// camera continues to track listener movement underneath it.
+#[derive(Resource, Default)]
+pub struct CameraPan {
+    pub offset: Vec2,
+    last_cursor: Option<Vec2>,
+}
+
 impl Default for CameraSettings {
     fn default() -> Self {
         Self {
-            ortho_scale: 1.0,
-            min_scale: 0.3,
-            max_scale: 5.0,
-            zoom_speed: 0.15,
+            ortho_scale: 0.25,
+            home_scale: 0.25,
+            fit_audibility_db: -60.0,
             move_speed: 3.0,
             turn_speed: 2.0,
         }
+    }
+}
+
+impl CameraSettings {
+    pub const MIN_ZOOM_PERCENT: f32 = 50.0;
+    pub const MAX_ZOOM_PERCENT: f32 = 250.0;
+    pub const ZOOM_STEP_PERCENT: f32 = 10.0;
+
+    pub fn zoom_percent(&self) -> f32 {
+        100.0 * self.home_scale / self.ortho_scale
+    }
+
+    pub fn set_zoom_percent(&mut self, percentage: f32) {
+        let snapped = (percentage / Self::ZOOM_STEP_PERCENT).round() * Self::ZOOM_STEP_PERCENT;
+        let snapped = snapped.clamp(Self::MIN_ZOOM_PERCENT, Self::MAX_ZOOM_PERCENT);
+        self.ortho_scale = self.home_scale * 100.0 / snapped;
+    }
+
+    pub fn step_zoom(&mut self, delta_percent: f32) {
+        self.set_zoom_percent(self.zoom_percent() + delta_percent);
+    }
+
+    pub fn set_scale_snapped(&mut self, scale: f32) {
+        let percentage = 100.0 * self.home_scale / scale.max(f32::EPSILON);
+        self.set_zoom_percent(percentage);
     }
 }
 
@@ -82,6 +115,7 @@ pub fn setup_camera(mut commands: Commands, description: Res<SceneDescription>) 
     commands.spawn((
         TopDownCamera,
         Camera2d,
+        BoxShadowSamples(6),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical { viewport_height },
             scale: settings.ortho_scale,
@@ -97,6 +131,60 @@ pub fn setup_camera(mut commands: Commands, description: Res<SceneDescription>) 
         yaw: description.listener.yaw_degrees.to_radians(),
     });
     commands.insert_resource(settings);
+    commands.insert_resource(CameraPan::default());
+}
+
+/// Grab empty map space with the primary mouse button to pan. Source markers
+/// keep their existing drag behavior because a press that starts on a marker
+/// is deliberately ignored here.
+pub fn pan_camera(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera: Query<(&Camera, &GlobalTransform), With<TopDownCamera>>,
+    sources: Query<&GlobalTransform, With<SoundSource>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    over_hud: Res<crate::hud::PointerOverHud>,
+    mut pan: ResMut<CameraPan>,
+) {
+    if mouse.just_released(MouseButton::Left) || !mouse.pressed(MouseButton::Left) {
+        pan.last_cursor = None;
+        return;
+    }
+
+    let Some(cursor) = windows.single().ok().and_then(Window::cursor_position) else {
+        pan.last_cursor = None;
+        return;
+    };
+    let Ok((camera, camera_global)) = camera.single() else {
+        return;
+    };
+
+    if mouse.just_pressed(MouseButton::Left) {
+        if over_hud.0 {
+            return;
+        }
+        let over_source = sources.iter().any(|source| {
+            camera
+                .world_to_viewport(camera_global, source.translation())
+                .is_ok_and(|viewport| viewport.distance(cursor) <= 40.0)
+        });
+        if !over_source {
+            pan.last_cursor = Some(cursor);
+        }
+        return;
+    }
+
+    let Some(previous_cursor) = pan.last_cursor else {
+        return;
+    };
+    let (Ok(previous_world), Ok(current_world)) = (
+        camera.viewport_to_world_2d(camera_global, previous_cursor),
+        camera.viewport_to_world_2d(camera_global, cursor),
+    ) else {
+        pan.last_cursor = Some(cursor);
+        return;
+    };
+    pan.offset -= current_world - previous_world;
+    pan.last_cursor = Some(cursor);
 }
 
 /// Update: WASD / left stick moves the listener; Q/E / right stick rotate its
@@ -185,35 +273,37 @@ pub fn follow_and_zoom_camera(
     mut settings: ResMut<CameraSettings>,
     state: Res<ListenerState>,
     mut scroll: MessageReader<MouseWheel>,
+    mut scroll_accumulator: Local<f32>,
     gamepads: Query<&Gamepad>,
-    time: Res<Time>,
     over_hud: Res<crate::hud::PointerOverHud>,
+    pan: Res<CameraPan>,
 ) {
     let (ref mut transform, ref mut projection) = *camera;
 
     // Always drain the wheel events; only apply zoom when the cursor isn't over
     // a HUD panel (there the wheel scrolls the panel instead).
-    let mut step = 0.0;
     for event in scroll.read() {
-        step += match event.unit {
-            MouseScrollUnit::Line => event.y * settings.zoom_speed,
-            MouseScrollUnit::Pixel => event.y * settings.zoom_speed * 0.01,
+        *scroll_accumulator += match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y / 100.0,
         };
     }
-    if !over_hud.0 {
-        settings.ortho_scale =
-            (settings.ortho_scale - step).clamp(settings.min_scale, settings.max_scale);
+    if over_hud.0 {
+        *scroll_accumulator = 0.0;
+    } else if scroll_accumulator.abs() >= 1.0 {
+        settings.step_zoom(scroll_accumulator.signum() * CameraSettings::ZOOM_STEP_PERCENT);
+        // One deliberate gesture produces one zoom step; discard momentum so
+        // a trackpad flick cannot race through several levels.
+        *scroll_accumulator = 0.0;
     }
 
-    // Gamepad triggers: R2 zooms in (smaller scale), L2 zooms out.
-    let dt = time.delta_secs();
+    // Gamepad triggers use the same discrete 10% steps.
     for gamepad in &gamepads {
-        let zoom_in = gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
-        let zoom_out = gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
-        let zoom_delta = (zoom_out - zoom_in) * settings.zoom_speed * 12.0 * dt;
-        if zoom_delta != 0.0 {
-            settings.ortho_scale =
-                (settings.ortho_scale + zoom_delta).clamp(settings.min_scale, settings.max_scale);
+        if gamepad.just_pressed(GamepadButton::RightTrigger2) {
+            settings.step_zoom(CameraSettings::ZOOM_STEP_PERCENT);
+        }
+        if gamepad.just_pressed(GamepadButton::LeftTrigger2) {
+            settings.step_zoom(-CameraSettings::ZOOM_STEP_PERCENT);
         }
     }
 
@@ -222,6 +312,36 @@ pub fn follow_and_zoom_camera(
     }
 
     let look_at = atrium_to_world(state.position);
-    transform.translation.x = look_at.x;
-    transform.translation.y = look_at.y;
+    transform.translation.x = look_at.x + pan.offset.x;
+    transform.translation.y = look_at.y + pan.offset.y;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CameraSettings;
+
+    #[test]
+    fn zoom_uses_ten_percent_steps() {
+        let mut settings = CameraSettings::default();
+        settings.step_zoom(CameraSettings::ZOOM_STEP_PERCENT);
+        assert_eq!(settings.zoom_percent(), 110.0);
+        settings.step_zoom(-CameraSettings::ZOOM_STEP_PERCENT);
+        assert_eq!(settings.zoom_percent(), 100.0);
+    }
+
+    #[test]
+    fn zoom_is_clamped_to_fifty_and_two_hundred_fifty_percent() {
+        let mut settings = CameraSettings::default();
+        settings.set_zoom_percent(1_000.0);
+        assert_eq!(settings.zoom_percent(), 250.0);
+        settings.set_zoom_percent(-100.0);
+        assert_eq!(settings.zoom_percent(), 50.0);
+    }
+
+    #[test]
+    fn computed_fit_scale_snaps_to_a_valid_zoom_step() {
+        let mut settings = CameraSettings::default();
+        settings.set_scale_snapped(0.30);
+        assert_eq!(settings.zoom_percent(), 80.0);
+    }
 }
