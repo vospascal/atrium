@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/tui", "crates/bevy-ui"]
+members = [".", "crates/core", "crates/tui", "crates/bevy-ui", "crates/behavior"]
 
 [package]
 name = "atrium"
@@ -23,6 +23,7 @@ sofar = "0.2.1"
 realfft = "3.5"
 atrium-tui = { path = "crates/tui", optional = true }
 atrium-bevy = { path = "crates/bevy-ui", optional = true }
+atrium-behavior = { path = "crates/behavior", optional = true }
 # Native file dialog for the "Browse…" add-source button (bevy UI only).
 rfd = { version = "0.15", optional = true }
 
@@ -35,7 +36,7 @@ tracing-flame = { version = "0.2", optional = true }
 [features]
 default = ["tui"]
 tui = ["dep:atrium-tui"]
-bevy = ["dep:atrium-bevy", "dep:rfd"]
+bevy = ["dep:atrium-bevy", "dep:atrium-behavior", "dep:rfd"]
 profiler = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-perfetto", "dep:tracing-flame"]
 memprof = []
 

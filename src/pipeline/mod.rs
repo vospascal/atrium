@@ -83,6 +83,7 @@ use self::path_resolvers::{DirectPathResolver, ImageSourceResolver};
 use self::renderers::ambisonics::AmbisonicsRenderer;
 use self::renderers::binaural::HrtfRenderer;
 use self::renderers::dbap::DbapRenderer;
+use self::renderers::field::{FieldEncoding, FieldRenderer};
 use self::renderers::multichannel::MultichannelRenderer;
 use self::renderers::world_locked::WorldLockedRenderer;
 use self::stages::ambi_decode::AmbisonicsDecodeStage;
@@ -145,6 +146,9 @@ pub struct SourceContext<'a> {
 /// A complete render pipeline for one mode.
 pub struct RenderPipeline {
     pub renderer: Box<dyn Renderer>,
+    /// Dedicated path for environmental fields. Fields do not enter the
+    /// point-source resolver/renderer at all.
+    field_renderer: FieldRenderer,
     pub mix_stages: Vec<Box<dyn MixStage>>,
     pub resolver: Box<dyn PathResolver>,
     /// Factories for creating per-path effects (air absorption, ground effect, etc.).
@@ -176,6 +180,7 @@ impl RenderPipeline {
     /// Reset all state (called on mode switch).
     pub fn reset(&mut self) {
         self.renderer.reset();
+        self.field_renderer.reset();
         for stage in &mut self.mix_stages {
             stage.reset();
         }
@@ -195,6 +200,8 @@ impl RenderPipeline {
     ) {
         self.renderer
             .ensure_topology(source_count, layout, sample_rate);
+        self.field_renderer
+            .ensure_topology(source_count, sample_rate);
 
         // Grow per-source path effect chains.
         while self.path_effects.len() < source_count {
@@ -285,6 +292,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
                 reflection_capacity: reflection_buffer_capacity(p),
             },
         )),
+        field_renderer: FieldRenderer::default(),
         // No FDN: WorldLocked reverberates through its own per-speaker reflection
         // taps. Adding a shared FDN on top over-summed the tail and pushed
         // sustained tones into overload in reflective rooms.
@@ -307,6 +315,7 @@ fn build_vbap(p: &PipelineParams) -> RenderPipeline {
 
     RenderPipeline {
         renderer: Box::new(MultichannelRenderer::new()),
+        field_renderer: FieldRenderer::default(),
         // FDN before LFE crossover: reverb bass gets redirected to LFE
         // alongside the dry signal's bass.
         mix_stages: vec![
@@ -350,6 +359,7 @@ fn build_hrtf(p: &PipelineParams) -> RenderPipeline {
 
     RenderPipeline {
         renderer: Box::new(HrtfRenderer::new(&p.hrtf_path, sample_rate)),
+        field_renderer: FieldRenderer::default(),
         mix_stages: vec![
             Box::new(FdnReverbStage::with_config(FdnConfig::headphone(
                 p.reverb_rt60_seconds,
@@ -391,6 +401,7 @@ fn build_dbap(p: &PipelineParams) -> RenderPipeline {
             rolloff_db: p.dbap_rolloff_db,
             ..Default::default()
         })),
+        field_renderer: FieldRenderer::default(),
         // FDN before LFE crossover: reverb bass gets redirected to LFE
         // alongside the dry signal's bass.
         mix_stages: vec![
@@ -433,6 +444,7 @@ fn build_ambisonics(p: &PipelineParams) -> RenderPipeline {
 
     RenderPipeline {
         renderer: Box::new(AmbisonicsRenderer::new()),
+        field_renderer: FieldRenderer::default(),
         mix_stages: vec![
             Box::new(AmbiMultiDelayStage::new()),
             Box::new(AmbisonicsDecodeStage::new()),
@@ -509,6 +521,7 @@ pub fn render_pipeline(
     // Split borrow: renderer, resolver, path_effects are independent fields
     let RenderPipeline {
         renderer,
+        field_renderer,
         mix_stages,
         resolver,
         path_effect_factories,
@@ -520,6 +533,7 @@ pub fn render_pipeline(
 
     // Ensure topology
     renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
+    field_renderer.ensure_topology(sources.len(), params.sample_rate);
 
     // Grow per-source path effect chains if needed.
     while path_effects.len() < sources.len() {
@@ -551,13 +565,39 @@ pub fn render_pipeline(
             continue;
         }
 
+        // Environmental fields are already the surrounding acoustic energy.
+        // Render them directly as decorrelated channels: no point position,
+        // distance law, image-source paths, propagation filters, or room send.
+        if source.emitter_kind() == atrium_core::source::EmitterKind::Field {
+            let encoding = if renderer.name() == "ambisonics" {
+                FieldEncoding::Ambisonics
+            } else {
+                FieldEncoding::Speaker
+            };
+            field_renderer.render_source(
+                i,
+                source.as_mut(),
+                encoding,
+                params.layout,
+                params.sample_rate,
+                params.channels,
+                num_frames,
+                output,
+            );
+            continue;
+        }
+
         let pos = source.position();
         let dist_to_listener = params.listener.position.distance_to(pos);
 
         // Per-source reverb send: critical distance scales by √γ (directivity factor).
+        // Diffuse sources (high MDAP spread — wind, rain, waves) are the ambient
+        // field itself, not a point that echoes off walls, so their send is
+        // scaled down; a localized bird keeps its full reverb.
         let gamma = atrium_core::directivity::directivity_factor(&source.directivity());
         let critical_dist = room_acoustics::critical_distance(volume, rt60, gamma);
-        let reverb_send = room_acoustics::reverb_send(dist_to_listener, critical_dist);
+        let reverb_send = room_acoustics::reverb_send(dist_to_listener, critical_dist)
+            * room_acoustics::diffuse_reverb_scale(source.spread());
 
         let ctx = SourceContext {
             listener: params.listener,
@@ -693,6 +733,25 @@ mod tests {
         }
     }
 
+    /// Deterministic stochastic texture used to verify that Field rendering is
+    /// invariant to object-space geometry and room acoustics.
+    struct FieldTextureSource {
+        pos: Vec3,
+        rng: crate::synth::noise::Rng,
+    }
+    impl SoundSource for FieldTextureSource {
+        fn next_sample(&mut self, _sr: f32) -> f32 {
+            self.rng.next_bipolar() * 0.25
+        }
+        fn position(&self) -> Vec3 {
+            self.pos
+        }
+        fn emitter_kind(&self) -> atrium_core::source::EmitterKind {
+            atrium_core::source::EmitterKind::Field
+        }
+        fn tick(&mut self, _dt: f32) {}
+    }
+
     fn default_atmosphere() -> AtmosphericParams {
         AtmosphericParams {
             temperature_c: 20.0,
@@ -717,6 +776,73 @@ mod tests {
             Vec3::new(0.0, 0.0, 0.0), // RL
             Vec3::new(6.0, 0.0, 0.0), // RR
         )
+    }
+
+    #[test]
+    fn field_emitter_bypasses_position_and_room_acoustics() {
+        let layout = layout_5_1();
+        let dm = default_distance_model();
+        let atm = default_atmosphere();
+        let ground = default_ground();
+        let listener = Listener::new(Vec3::new(3.0, 2.0, 1.2), 0.0);
+        let environment_min = Vec3::ZERO;
+        let environment_max = Vec3::new(20.0, 15.0, 8.0);
+        let channels = 6;
+        let frames = 4096;
+
+        let render = |position: Vec3, reflectivity: f32, wall: path::WallMaterial| {
+            let walls: [path::WallMaterial; 6] = std::array::from_fn(|_| wall.clone());
+            let pipeline_params = PipelineParams {
+                sample_rate: 48_000.0,
+                er_wall_reflectivity: reflectivity,
+                wall_materials: walls.clone(),
+                environment_min,
+                environment_max,
+                reverb_rt60_seconds: Some(3.0),
+                ..PipelineParams::default()
+            };
+            let mut pipeline = build_vbap(&pipeline_params);
+            let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(FieldTextureSource {
+                pos: position,
+                rng: crate::synth::noise::Rng::new(42),
+            })];
+            let mut output = vec![0.0; frames * channels];
+            let render_params = RenderParams {
+                listener: &listener,
+                channels,
+                sample_rate: 48_000.0,
+                master_gain: 1.0,
+                distance_model: &dm,
+                layout: &layout,
+                atmosphere: &atm,
+                ground: &ground,
+                environment_min,
+                environment_max,
+                barriers: &[],
+                wall_materials: &walls,
+                measurement_mode: true,
+            };
+            render_pipeline(&mut pipeline, &mut sources, &render_params, &mut output);
+            output
+        };
+
+        let near_reflective = render(
+            Vec3::new(3.1, 2.0, 1.2),
+            0.95,
+            path::WallMaterial::hard_wall(),
+        );
+        let far_open = render(Vec3::new(19.0, 14.0, 7.0), 0.0, path::WallMaterial::open());
+        assert_eq!(near_reflective, far_open);
+
+        // The field occupies every active spatial channel while LFE remains the
+        // responsibility of the downstream crossover.
+        for channel in [0, 1, 2, 4, 5] {
+            let energy: f32 = near_reflective
+                .chunks_exact(channels)
+                .map(|frame| frame[channel] * frame[channel])
+                .sum();
+            assert!(energy > 0.0, "field channel {channel} is silent");
+        }
     }
 
     // ── WorldLocked: gains independent of listener position ──────────────

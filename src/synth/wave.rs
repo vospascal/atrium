@@ -12,7 +12,7 @@ use std::f32::consts::TAU;
 use crate::world::types::Vec3;
 use atrium_core::source::SoundSource;
 
-use super::noise::{BrownNoise, PinkNoise, Rng};
+use super::noise::{BrownNoise, OnePoleLP, PinkNoise, Rng};
 
 /// Procedural ocean wave sound source.
 ///
@@ -29,6 +29,9 @@ pub struct WaveSource {
     // Crash burst (computed inline — no allocation)
     crash_pos: usize,
     crash_len: usize,
+    // Lowpass on the crash white-noise: raw white read as harsh "sissing"
+    // (strong 8-16 kHz air band). ~1.4 kHz makes it a soft breaker wash.
+    crash_lp: OnePoleLP,
 
     // Tuning knobs
     /// Seconds between swell peaks (3–10 typical for ocean).
@@ -64,11 +67,14 @@ impl WaveSource {
             t: 0,
             crash_pos: 0,
             crash_len: 0,
+            crash_lp: OnePoleLP::new(1400.0, 48_000.0),
             period: period.max(1.0),
             crash_prob: crash_prob.clamp(0.0, 1.0),
             roar_level: 0.8,
-            hiss_level: 0.3,
-            crash_gain: 0.6,
+            // Lower hiss + softer crashes: the pink-noise "sissing" the user
+            // heard sat on top of the swell. Roar (brown) still carries the body.
+            hiss_level: 0.15,
+            crash_gain: 0.45,
             master_gain: 1.0,
             position,
             rng: Rng::new(seed),
@@ -104,7 +110,7 @@ impl SoundSource for WaveSource {
         let mut crash = 0.0;
         if self.crash_len > 0 {
             let env = self.crash_envelope();
-            crash = self.rng.next_bipolar() * env;
+            crash = self.crash_lp.process(self.rng.next_bipolar()) * env;
             self.crash_pos += 1;
             if self.crash_pos >= self.crash_len {
                 self.crash_len = 0;

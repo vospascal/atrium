@@ -16,7 +16,7 @@ use atrium_core::commands::Command;
 use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
-use atrium_core::source::SoundSource;
+use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 
 /// Snapshot of per-source initial state for scene reset.
@@ -169,6 +169,15 @@ impl AudioScene {
                 } => {
                     self.atmosphere.temperature_c = temperature_c;
                     self.atmosphere.humidity_pct = humidity_pct;
+                }
+                Command::SetSynthParam {
+                    index,
+                    param,
+                    value,
+                } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_synth_param(param, value);
+                    }
                 }
                 Command::ResetScene => {
                     self.listener.position = self.initial_listener_pos;
@@ -323,22 +332,26 @@ impl AudioScene {
                 let pos = source.position();
                 let active = source.is_active() && !source.is_muted();
                 let amp = if active && i < self.source_amplitudes.len() {
-                    let dist_gain = distance_gain_at_model(
-                        self.listener.position,
-                        pos,
-                        source.ref_distance(),
-                        self.distance_model.max_distance,
-                        self.distance_model.rolloff,
-                        self.distance_model.model,
-                    );
-                    let emit_gain = directivity_gain(
-                        pos,
-                        source.orientation(),
-                        self.listener.position,
-                        &source.directivity(),
-                    );
-                    let hear_gain = self.listener.hearing_gain(pos);
-                    self.source_amplitudes[i] * dist_gain * emit_gain * hear_gain
+                    if source.emitter_kind() == EmitterKind::Field {
+                        self.source_amplitudes[i]
+                    } else {
+                        let dist_gain = distance_gain_at_model(
+                            self.listener.position,
+                            pos,
+                            source.ref_distance(),
+                            self.distance_model.max_distance,
+                            self.distance_model.rolloff,
+                            self.distance_model.model,
+                        );
+                        let emit_gain = directivity_gain(
+                            pos,
+                            source.orientation(),
+                            self.listener.position,
+                            &source.directivity(),
+                        );
+                        let hear_gain = self.listener.hearing_gain(pos);
+                        self.source_amplitudes[i] * dist_gain * emit_gain * hear_gain
+                    }
                 } else {
                     0.0
                 };

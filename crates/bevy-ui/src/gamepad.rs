@@ -12,7 +12,8 @@ use atrium_core::commands::Command;
 use atrium_core::speaker::RenderMode;
 use bevy::prelude::*;
 
-use crate::telemetry::{CommandSender, LatestTelemetry};
+use crate::telemetry::LatestTelemetry;
+use atrium_behavior::CommandSender;
 
 /// Cycle the render mode with L1/R1 and reset the scene with South (Cross).
 pub(crate) fn handle_gamepad_actions(

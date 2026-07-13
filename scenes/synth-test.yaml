@@ -1,0 +1,66 @@
+# Scene: Synth Test — procedural weather sources, as-is
+#
+# Evaluation scene for the ported synth generators (see
+# docs/rain-synthesis-audit findings). The generators play from distinct
+# directions so each can be judged by turning toward it:
+#
+#   field wind — west (left)
+#   waves    — south  (behind)
+#   rain v2  — north  (ahead, overhead)
+#   rain v1  — east   (right, overhead)   ← A/B against v2
+#
+# Open meadow environment: no wall reflections, so what you hear is the raw
+# generator + distance/air model, not the room. Run with:
+#   cargo run -- scenes/synth-test.yaml
+#   cargo run --features bevy --no-default-features -- --bevy scenes/synth-test.yaml
+
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]   # center of the clearing, ears at 1.2 m
+  yaw_degrees: 90.0           # facing +Y (north)
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: "5.1"
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c:  [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0
+
+sources:
+  - source: sources/field-wind.yaml       # Field wind — ambient field emitter
+    name: Field Wind
+    color: "#8ca9ad"
+    position: [-8.0, 0.0, 3.0]
+
+  - source: sources/synth-waves.yaml    # Waves — due south, at ground level
+    name: Waves
+    color: "#26c6da"
+    position: [0.0, -10.0, 0.5]
+
+  - source: sources/synth-rain-v2.yaml  # Rain v2 — due north, overhead
+    name: Rain v2
+    color: "#6aa49e"
+    position: [0.0, 8.0, 5.0]
+
+  - source: sources/synth-rain-v1.yaml  # Rain v1 — due east, overhead
+    name: Rain v1
+    color: "#cfcb7f"
+    position: [8.0, 0.0, 5.0]

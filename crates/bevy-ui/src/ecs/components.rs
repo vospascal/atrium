@@ -23,6 +23,9 @@ pub struct SoundSource {
     pub name: String,
     /// RGB color in 0.0..1.0 range.
     pub color: [f32; 3],
+    /// Acoustic occupancy: "object" or "field".
+    #[serde(default = "default_emitter_kind")]
+    pub emitter_kind: String,
     /// Reference SPL at 1 meter (dB).
     pub spl: f32,
     /// Reference distance for distance attenuation (meters).
@@ -37,6 +40,15 @@ pub struct SoundSource {
     pub orbit_radius: f32,
     /// Orbit angular speed (rad/s).
     pub orbit_speed: f32,
+    /// Procedural-synth kind ("field_wind", "soft_wind", "canopy_wind", "storm_wind", …)
+    /// if this is a synth source, else None.
+    /// Drives the live parameter panel (which is synth-type-specific).
+    #[serde(default)]
+    pub synth_kind: Option<String>,
+}
+
+fn default_emitter_kind() -> String {
+    "object".into()
 }
 
 /// Runtime-only mapping from this Bevy entity to the audio engine's source index.

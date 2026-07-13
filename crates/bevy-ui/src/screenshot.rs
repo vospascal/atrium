@@ -18,7 +18,7 @@ use crate::scene::landscape::{
 };
 use crate::scene::reload::{PendingReload, PendingSave, ReloadTarget};
 use crate::scene::SceneDescription;
-use crate::telemetry::CommandSender;
+use atrium_behavior::CommandSender;
 
 /// One step in the tour: apply a state (theme / render mode / scene) then screenshot.
 #[derive(Clone)]

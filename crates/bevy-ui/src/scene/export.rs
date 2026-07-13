@@ -39,6 +39,7 @@ pub fn export_scene(
                 name: source.name.clone(),
                 color: color_to_hex(source.color),
                 position: bevy_to_atrium(*position, *height),
+                emitter_kind: source.emitter_kind.clone(),
                 spl: source.spl,
                 ref_distance: source.ref_distance,
                 directivity: source.directivity.clone(),
@@ -46,6 +47,7 @@ pub fn export_scene(
                 spread: source.spread,
                 orbit_radius: source.orbit_radius,
                 orbit_speed: source.orbit_speed,
+                synth_kind: source.synth_kind.clone(),
             })
             .collect()
     };

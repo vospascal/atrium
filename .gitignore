@@ -1,6 +1,7 @@
 /target
 /research papers
 *.log
+.DS_Store
 ui/node_modules
 ui/dist
 .idea

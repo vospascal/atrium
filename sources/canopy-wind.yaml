@@ -1,0 +1,36 @@
+# Generative wind moving through a leafy tree canopy.
+#
+# A diffuse Field emitter: placement is an editor anchor, not a point source.
+# The synth models the vegetation itself as the radiator—broad foliage body,
+# continuous leaf wash, statistical leaf contacts, and sparse branch motion.
+synth: canopy_wind
+
+# Bounded weather driver. This preset spans light air through moderate breeze.
+min_speed: 1.5             # m/s: hard instantaneous lower bound
+max_speed: 8.0             # m/s: hard instantaneous upper bound
+change_time_min: 15.0      # seconds between slow weather destinations
+change_time_max: 45.0
+gust_duration_min: 2.0     # shorter positive surges within the weather
+gust_duration_max: 8.0
+turbulence_time_min: 0.12  # fastest canopy-eddy trajectory
+turbulence_time_max: 0.80
+gust_strength: 0.40        # fraction of speed range reserved for gusts
+rise_bias: 0.30            # >0 tends toward quicker rises, slower releases
+turbulence_depth: 0.30     # sub-second canopy eddies
+gust_brightness: 0.0       # optional extra leaf-wash opening at gust peaks
+turbulence_brightness: 0.0 # optional fast leaf-wash spectral flutter
+
+# Vegetation character
+foliage_density: 0.75      # 0 bare/sparse, 1 dense foliage
+leaf_dryness: 0.25         # 0 soft green, 1 stiff/dry and much brighter
+branch_level: 0.12         # rare low branch movement; keep subtle
+
+# Layer balance
+body_gain: 0.80            # stable 100-1000 Hz foliage body
+rustle_gain: 0.90          # continuous leaf wash
+contact_gain: 0.75         # discrete leaf-on-leaf grains
+master_gain: 1.0
+
+reference_spl: 48.0        # nominal environmental bed, not a 1 m point event
+directivity: omni          # ignored by Field rendering
+spread: 1.0                # descriptive only; Field uses diffuse rendering

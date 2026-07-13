@@ -13,7 +13,7 @@ use bevy::prelude::*;
 
 use crate::ecs::SoundListener;
 use crate::scene::{atrium_to_world, SceneDescription};
-use crate::telemetry::CommandSender;
+use atrium_behavior::CommandSender;
 
 /// How the listener is drawn in the plane; its facing lives in `ListenerState`.
 #[derive(Component)]

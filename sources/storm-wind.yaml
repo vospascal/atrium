@@ -1,0 +1,37 @@
+# Generative gale/storm wind without baked-in rain or thunder.
+#
+# A diffuse Field emitter: it bypasses point distance, direction, reflections,
+# and room reverb. Compose rain, thunder, waves, or canopy wind separately.
+synth: storm_wind
+
+# Bounded storm-front driver. This tuned default spans moderate breeze through
+# gale. The synth still accepts up to the project's 25 m/s ceiling when a scene
+# needs the lower edge of Beaufort storm force.
+min_speed: 8.0              # m/s: hard instantaneous lower bound
+max_speed: 18.0             # m/s: hard instantaneous upper bound
+change_time_min: 12.0       # slower storm-front pressure evolution
+change_time_max: 40.0
+gust_duration_min: 1.5      # brief irregular gusts; kept below 20 seconds
+gust_duration_max: 14.0
+turbulence_time_min: 0.12   # fastest buffeting trajectory
+turbulence_time_max: 0.80
+gust_strength: 0.55         # reserve more of the range for violent surges
+rise_bias: 0.45             # fast attack, slower pressure release
+turbulence_depth: 0.65      # smooth sub-second buffeting depth
+gust_brightness: 0.0        # optional extra shear/tearing at gust peaks
+turbulence_brightness: 0.0  # optional fast shear/tearing spectral motion
+
+# Optional environment interactions. Both remain sparse at these defaults.
+debris_level: 0.06          # short snaps and tumbling airborne fragments
+structure_level: 0.05       # low structural strain/groan events
+
+# Storm filterbank
+pressure_gain: 1.03         # 18-180 Hz pressure and rumble
+roar_gain: 1.50             # 55 Hz-1.25 kHz main broadband roar
+shear_gain: 0.70            # 280 Hz-4.8 kHz turbulent shear
+tear_gain: 0.35             # 1.8-9.5 kHz high-speed tearing
+master_gain: 0.85
+
+reference_spl: 60.0         # forceful environmental bed, still below point events
+directivity: omni           # ignored by Field rendering
+spread: 1.0                 # descriptive only; Field rendering is diffuse

@@ -59,6 +59,44 @@ pub enum Command {
         humidity_pct: f32,
     },
 
+    /// Set a procedural-synth parameter on a source live (no rebuild). Sources
+    /// that don't model the parameter ignore it.
+    SetSynthParam {
+        index: u16,
+        param: SynthParam,
+        value: f32,
+    },
+
     /// Reset the scene to its initial state (positions, orbits, gains, etc.).
     ResetScene,
+}
+
+/// A live-tunable procedural-synth parameter. A `SoundSource` interprets only
+/// the controls it models and ignores the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SynthParam {
+    MinSpeed,
+    MaxSpeed,
+    ChangeTimeMin,
+    ChangeTimeMax,
+    GustDurationMin,
+    GustDurationMax,
+    TurbulenceTimeMin,
+    TurbulenceTimeMax,
+    GustStrength,
+    RiseBias,
+    GustBrightness,
+    TurbulenceBrightness,
+    LowGain,
+    BodyGain,
+    MidGain,
+    PresenceGain,
+    AirGain,
+    TurbulenceDepth,
+    FoliageDensity,
+    LeafDryness,
+    BranchLevel,
+    DebrisLevel,
+    StructureLevel,
+    MasterGain,
 }

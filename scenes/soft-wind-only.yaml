@@ -1,0 +1,38 @@
+# Focused scene for the spectrum-derived soft-wind field.
+#   cargo run --features bevy --no-default-features -- --bevy scenes/soft-wind-only.yaml
+
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: "5.1"
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c:  [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0
+
+sources:
+  - source: sources/soft-wind.yaml
+    name: Soft Wind
+    color: "#a8c4c8"
+    position: [0.0, 0.0, 1.2]

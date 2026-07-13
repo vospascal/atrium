@@ -1,0 +1,7 @@
+# Synth source: procedural ocean waves (swell LFO + stochastic breakers).
+synth: waves
+period: 6.0         # seconds between swell peaks (3-10 typical)
+crash_prob: 0.25    # breaker events per second
+reference_spl: 60.0 # dB at 1 m — surf carries
+directivity: omni
+spread: 0.9

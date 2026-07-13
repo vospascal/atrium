@@ -16,7 +16,8 @@ use crate::scene::reload::{
     PendingReload, PendingSave, PendingSceneEdit, ReloadTarget, SceneEditRequest,
 };
 use crate::scene::SceneDescription;
-use crate::telemetry::{CommandSender, LatestTelemetry, TelemetryMessage};
+use crate::telemetry::{LatestTelemetry, TelemetryMessage};
+use atrium_behavior::CommandSender;
 
 // ── Colors ──────────────────────────────────────────────────────────────────
 

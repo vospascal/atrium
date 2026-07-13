@@ -78,6 +78,10 @@ pub struct SourceDescription {
     #[serde(default = "default_color")]
     pub color: String,
     pub position: [f32; 3],
+    /// Acoustic occupancy: "object" or "field". This is independent of the
+    /// sample/synth signal identity.
+    #[serde(default = "default_emitter_kind")]
+    pub emitter_kind: String,
     /// Reference SPL at 1 meter (dB).
     #[serde(default = "default_spl")]
     pub spl: f32,
@@ -99,6 +103,11 @@ pub struct SourceDescription {
     /// Orbit speed (rad/s).
     #[serde(default)]
     pub orbit_speed: f32,
+    /// Procedural-synth kind ("field_wind", "soft_wind", "canopy_wind", "storm_wind",
+    /// "rain", "waves", "rain_v2") if this is a synth source, else absent.
+    /// Drives the live parameter panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synth_kind: Option<String>,
 }
 
 fn default_color() -> String {
@@ -106,6 +115,9 @@ fn default_color() -> String {
 }
 fn default_spl() -> f32 {
     80.0
+}
+fn default_emitter_kind() -> String {
+    "object".into()
 }
 fn default_ref_distance() -> f32 {
     1.0

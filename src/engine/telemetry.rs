@@ -11,7 +11,7 @@ use crate::audio::distance::DistanceModel;
 use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
-use atrium_core::source::SoundSource;
+use atrium_core::source::{EmitterKind, SoundSource};
 
 // Re-export telemetry types from core so existing callers keep working.
 pub use atrium_core::telemetry::{
@@ -55,26 +55,28 @@ pub fn compute_telemetry(
         let dist = listener.position.distance_to(pos);
         let src_ref_dist = source.ref_distance();
 
-        // Distance attenuation
-        let gain_dist = distance_gain_at_model(
-            listener.position,
-            pos,
-            src_ref_dist,
-            distance_model.max_distance,
-            distance_model.rolloff,
-            distance_model.model,
-        );
-
-        // Source emission directivity
-        let gain_emit = directivity_gain(
-            pos,
-            source.orientation(),
-            listener.position,
-            &source.directivity(),
-        );
-
-        // Listener hearing cone
-        let gain_hear = listener.hearing_gain(pos);
+        let (gain_dist, gain_emit, gain_hear) = if source.emitter_kind() == EmitterKind::Field {
+            // Position remains useful as an editor anchor, but it has no
+            // acoustic attenuation or directivity semantics for a field.
+            (1.0, 1.0, 1.0)
+        } else {
+            let gain_dist = distance_gain_at_model(
+                listener.position,
+                pos,
+                src_ref_dist,
+                distance_model.max_distance,
+                distance_model.rolloff,
+                distance_model.model,
+            );
+            let gain_emit = directivity_gain(
+                pos,
+                source.orientation(),
+                listener.position,
+                &source.directivity(),
+            );
+            let gain_hear = listener.hearing_gain(pos);
+            (gain_dist, gain_emit, gain_hear)
+        };
 
         let gain_total = gain_dist * gain_emit * gain_hear;
         let gain_db = if gain_total.is_finite() && gain_total > 0.0 {
@@ -215,6 +217,24 @@ mod tests {
         }
     }
 
+    struct FieldAnchor(Vec3);
+
+    impl SoundSource for FieldAnchor {
+        fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+            0.0
+        }
+
+        fn position(&self) -> Vec3 {
+            self.0
+        }
+
+        fn emitter_kind(&self) -> EmitterKind {
+            EmitterKind::Field
+        }
+
+        fn tick(&mut self, _dt: f32) {}
+    }
+
     // ── Telemetry gain component tests ──────────────────────────────────
 
     #[test]
@@ -226,6 +246,20 @@ mod tests {
             vec![make_source(&buf, 80.0, Vec3::new(5.0, 0.0, 0.0), 100.0)];
         let frame = compute_telemetry(&sources, &listener, &dist);
         assert!((frame.sources[0].distance - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn field_telemetry_uses_anchor_position_without_point_attenuation() {
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let sources: Vec<Box<dyn SoundSource>> =
+            vec![Box::new(FieldAnchor(Vec3::new(90.0, -40.0, 12.0)))];
+        let frame = compute_telemetry(&sources, &listener, &default_distance());
+        let source = &frame.sources[0];
+        assert!(source.distance > 90.0, "anchor distance remains observable");
+        assert_eq!(source.gain_dist, 1.0);
+        assert_eq!(source.gain_emit, 1.0);
+        assert_eq!(source.gain_hear, 1.0);
+        assert_eq!(source.gain_total, 1.0);
     }
 
     #[test]

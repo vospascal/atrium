@@ -9,5 +9,6 @@
 pub mod ambisonics;
 pub mod binaural;
 pub mod dbap;
+pub mod field;
 pub mod multichannel;
 pub mod world_locked;

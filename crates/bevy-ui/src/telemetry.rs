@@ -6,10 +6,9 @@
 //! The `TelemetryFrame` type comes from `atrium_core::telemetry` — the same
 //! concrete type the audio engine pushes into the ring buffer.
 
-use atrium_core::commands::Command;
 use atrium_core::telemetry::TelemetryFrame;
 use bevy::prelude::*;
-use rtrb::{Consumer, Producer};
+use rtrb::Consumer;
 
 /// Bevy message written each frame with the latest telemetry.
 #[derive(Message, Clone, Debug)]
@@ -41,34 +40,6 @@ impl TelemetryReceiver {
         Self {
             consumer: SendConsumer(consumer),
         }
-    }
-}
-
-// ── Command sender (Bevy → audio thread) ────────────────────────────────────
-
-struct SendProducer(Producer<Command>);
-
-// SAFETY: same reasoning as SendConsumer — rtrb uses atomics, single-producer access.
-unsafe impl Send for SendProducer {}
-unsafe impl Sync for SendProducer {}
-
-/// Resource wrapping the rtrb producer for sending commands to the audio thread.
-#[derive(Resource)]
-pub struct CommandSender {
-    producer: SendProducer,
-}
-
-impl CommandSender {
-    pub fn new(producer: Producer<Command>) -> Self {
-        Self {
-            producer: SendProducer(producer),
-        }
-    }
-
-    /// Try to push a command into the ring buffer.
-    /// Silently drops if the buffer is full (non-blocking).
-    pub fn send(&mut self, command: Command) {
-        let _ = self.producer.0.push(command);
     }
 }
 

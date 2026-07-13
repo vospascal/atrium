@@ -409,10 +409,13 @@ mod tests {
 
     #[test]
     fn v2_bed_is_quieter_than_drops() {
-        // Continuous layers alone should be significantly quieter than full mix
+        // Continuous layers alone should be significantly quieter than full mix.
+        // Note: drops are silenced via impact_gain/bubble_gain (real fields),
+        // NOT drop_rate — that field is currently dead code (the internal rate
+        // curve ignores it; see docs/rain-synthesis-audit.md).
         let mut bed_only = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
-        bed_only.drop_rate = 0.0;
-        bed_only.drip_rate = 0.0;
+        bed_only.impact_gain = 0.0;
+        bed_only.bubble_gain = 0.0;
         bed_only.texture_gain = 0.0;
 
         let mut full = RainSourceV2::new(Vec3::ZERO, 0.5, 42);

@@ -17,7 +17,8 @@ use super::{import, SceneDescription};
 use crate::camera::ListenerState;
 use crate::hud;
 use crate::input::SourceOrbitSpeeds;
-use crate::telemetry::{CommandSender, LatestTelemetry, TelemetryReceiver};
+use crate::telemetry::{LatestTelemetry, TelemetryReceiver};
+use atrium_behavior::CommandSender;
 
 // ── Injected audio host (implemented in `atrium`) ────────────────────────────
 

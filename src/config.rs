@@ -19,9 +19,17 @@ use crate::audio::decode::decode_file;
 use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 use crate::audio::sound_profile::SoundProfile;
+use crate::audio::synth_node::SynthNode;
 use crate::audio::test_node::TestNode;
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::{build_all_pipelines, PipelineParams};
+use crate::synth::canopy_wind::CanopyWindSource;
+use crate::synth::field_wind::FieldWindSource;
+use crate::synth::rain::RainSource;
+use crate::synth::rain_v2::RainSourceV2;
+use crate::synth::soft_wind::SoftWindSource;
+use crate::synth::storm_wind::StormWindSource;
+use crate::synth::wave::WaveSource;
 use crate::world::room::{BoxRoom, Room};
 use crate::world::types::Vec3;
 use atrium_core::directivity::DirectivityPattern;
@@ -339,10 +347,16 @@ pub struct SourceEntry {
     pub orbit_speed: f32,
 }
 
+/// The sound identity an entry resolved to: a sample file or a synth spec.
+enum ResolvedSound {
+    Sample { audio_path: String },
+    Synth { spec: SynthSpec },
+}
+
 /// Resolved intrinsic sound properties for one entry, merging a referenced
 /// `SourceDef` (if any) with the entry's inline overrides.
 struct ResolvedSource {
-    audio_path: String,
+    sound: ResolvedSound,
     reference_spl: f32,
     directivity: String,
     spread: f32,
@@ -361,30 +375,45 @@ impl SourceEntry {
             None => None,
         };
 
-        let audio_path = self
-            .audio
-            .clone()
-            .or_else(|| def.as_ref().map(|d| d.path.clone()))
-            .ok_or("source entry needs either `source` or `audio`")?;
-        let reference_spl = self
-            .reference_spl
-            .or_else(|| def.as_ref().map(|d| d.reference_spl))
-            .unwrap_or(70.0);
-        let directivity = self
-            .directivity
-            .clone()
-            .or_else(|| def.as_ref().map(|d| d.directivity.clone()))
-            .unwrap_or_else(|| "omni".into());
-        let spread = self
-            .spread
-            .or_else(|| def.as_ref().map(|d| d.spread))
-            .unwrap_or(0.0);
+        // Split the def into its sound identity + intrinsic defaults.
+        let (def_sound, def_spl, def_directivity, def_spread) = match def {
+            Some(SourceDef::Sample(sample)) => (
+                Some(ResolvedSound::Sample {
+                    audio_path: sample.path,
+                }),
+                Some(sample.reference_spl),
+                Some(sample.directivity),
+                Some(sample.spread),
+            ),
+            Some(SourceDef::Synth(synth)) => (
+                Some(ResolvedSound::Synth { spec: synth.spec }),
+                Some(synth.reference_spl),
+                Some(synth.directivity),
+                Some(synth.spread),
+            ),
+            None => (None, None, None, None),
+        };
+
+        // The entry-level `audio:` override replaces a sample def's file.
+        // Combining it with a synth def is contradictory — reject it.
+        let sound = match (self.audio.clone(), def_sound) {
+            (Some(_), Some(ResolvedSound::Synth { .. })) => {
+                return Err("`audio:` override cannot apply to a synth source definition".into())
+            }
+            (Some(audio_path), _) => ResolvedSound::Sample { audio_path },
+            (None, Some(sound)) => sound,
+            (None, None) => return Err("source entry needs either `source` or `audio`".into()),
+        };
 
         Ok(ResolvedSource {
-            audio_path,
-            reference_spl,
-            directivity,
-            spread,
+            sound,
+            reference_spl: self.reference_spl.or(def_spl).unwrap_or(70.0),
+            directivity: self
+                .directivity
+                .clone()
+                .or(def_directivity)
+                .unwrap_or_else(|| "omni".into()),
+            spread: self.spread.or(def_spread).unwrap_or(0.0),
         })
     }
 
@@ -408,15 +437,524 @@ impl SourceEntry {
     }
 }
 
-/// Source definition (loaded from `sources/*.yaml`): intrinsic sound properties.
+/// Source definition (loaded from `sources/*.yaml`): intrinsic sound identity.
+/// Either a sample player (`path:` to an audio file) or a procedural synth
+/// generator (`synth:` kind plus generator parameters).
 #[derive(Deserialize)]
-pub struct SourceDef {
+#[serde(untagged)]
+pub enum SourceDef {
+    Sample(SampleSourceDef),
+    Synth(SynthSourceDef),
+}
+
+/// Sample-file source definition.
+#[derive(Deserialize)]
+pub struct SampleSourceDef {
     pub path: String,
     pub reference_spl: SplValue,
     #[serde(default = "default_directivity")]
     pub directivity: String,
     #[serde(default)]
     pub spread: f32,
+}
+
+/// Procedural synth source definition. Generator parameters sit at the same
+/// YAML level as the calibration fields (`synth: field_wind` +
+/// `min_speed: 1.0` + …).
+#[derive(Deserialize)]
+pub struct SynthSourceDef {
+    #[serde(flatten)]
+    pub spec: SynthSpec,
+    pub reference_spl: SplValue,
+    #[serde(default = "default_directivity")]
+    pub directivity: String,
+    #[serde(default)]
+    pub spread: f32,
+}
+
+/// Which procedural generator to run, with its parameters. Tagged by the
+/// `synth:` field. Every parameter is optional — unset fields keep the
+/// generator's own defaults, so YAML only states what it wants to change.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(tag = "synth", rename_all = "snake_case")]
+pub enum SynthSpec {
+    CanopyWind(CanopyWindSynthParams),
+    FieldWind(FieldWindSynthParams),
+    SoftWind(SoftWindSynthParams),
+    StormWind(StormWindSynthParams),
+    Rain(RainSynthParams),
+    RainV2(RainV2SynthParams),
+    Waves(WaveSynthParams),
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct StormWindSynthParams {
+    pub min_speed: Option<f32>,
+    pub max_speed: Option<f32>,
+    pub change_time_min: Option<f32>,
+    pub change_time_max: Option<f32>,
+    pub gust_duration_min: Option<f32>,
+    pub gust_duration_max: Option<f32>,
+    pub turbulence_time_min: Option<f32>,
+    pub turbulence_time_max: Option<f32>,
+    pub gust_strength: Option<f32>,
+    pub rise_bias: Option<f32>,
+    pub turbulence_depth: Option<f32>,
+    pub gust_brightness: Option<f32>,
+    pub turbulence_brightness: Option<f32>,
+    pub debris_level: Option<f32>,
+    pub structure_level: Option<f32>,
+    pub pressure_gain: Option<f32>,
+    pub roar_gain: Option<f32>,
+    pub shear_gain: Option<f32>,
+    pub tear_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct CanopyWindSynthParams {
+    pub min_speed: Option<f32>,
+    pub max_speed: Option<f32>,
+    pub change_time_min: Option<f32>,
+    pub change_time_max: Option<f32>,
+    pub gust_duration_min: Option<f32>,
+    pub gust_duration_max: Option<f32>,
+    pub turbulence_time_min: Option<f32>,
+    pub turbulence_time_max: Option<f32>,
+    pub gust_strength: Option<f32>,
+    pub rise_bias: Option<f32>,
+    pub turbulence_depth: Option<f32>,
+    pub gust_brightness: Option<f32>,
+    pub turbulence_brightness: Option<f32>,
+    pub foliage_density: Option<f32>,
+    pub leaf_dryness: Option<f32>,
+    pub branch_level: Option<f32>,
+    pub body_gain: Option<f32>,
+    pub rustle_gain: Option<f32>,
+    pub contact_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct FieldWindSynthParams {
+    pub min_speed: Option<f32>,
+    pub max_speed: Option<f32>,
+    pub change_time_min: Option<f32>,
+    pub change_time_max: Option<f32>,
+    pub gust_duration_min: Option<f32>,
+    pub gust_duration_max: Option<f32>,
+    pub turbulence_time_min: Option<f32>,
+    pub turbulence_time_max: Option<f32>,
+    pub gust_strength: Option<f32>,
+    pub rise_bias: Option<f32>,
+    pub gust_brightness: Option<f32>,
+    pub turbulence_brightness: Option<f32>,
+    pub low_gain: Option<f32>,
+    pub body_gain: Option<f32>,
+    pub mid_gain: Option<f32>,
+    pub presence_gain: Option<f32>,
+    pub air_gain: Option<f32>,
+    pub turbulence_depth: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct SoftWindSynthParams {
+    pub min_speed: Option<f32>,
+    pub max_speed: Option<f32>,
+    pub change_time_min: Option<f32>,
+    pub change_time_max: Option<f32>,
+    pub gust_duration_min: Option<f32>,
+    pub gust_duration_max: Option<f32>,
+    pub turbulence_time_min: Option<f32>,
+    pub turbulence_time_max: Option<f32>,
+    pub gust_strength: Option<f32>,
+    pub rise_bias: Option<f32>,
+    pub turbulence_depth: Option<f32>,
+    pub gust_brightness: Option<f32>,
+    pub turbulence_brightness: Option<f32>,
+    pub low_gain: Option<f32>,
+    pub body_gain: Option<f32>,
+    pub mid_gain: Option<f32>,
+    pub presence_gain: Option<f32>,
+    pub air_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct RainSynthParams {
+    pub intensity: Option<f32>,
+    pub drop_rate: Option<f32>,
+    pub drip_rate: Option<f32>,
+    pub hiss_gain: Option<f32>,
+    pub brown_gain: Option<f32>,
+    pub impact_gain: Option<f32>,
+    pub bubble_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct RainV2SynthParams {
+    pub intensity: Option<f32>,
+    pub drip_rate: Option<f32>,
+    pub impact_gain: Option<f32>,
+    pub bubble_gain: Option<f32>,
+    pub bed_gain: Option<f32>,
+    pub texture_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct WaveSynthParams {
+    pub period: Option<f32>,
+    pub crash_prob: Option<f32>,
+    pub roar_level: Option<f32>,
+    pub hiss_level: Option<f32>,
+    pub crash_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+impl SynthSpec {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            SynthSpec::CanopyWind(_) => "canopy_wind",
+            SynthSpec::FieldWind(_) => "field_wind",
+            SynthSpec::SoftWind(_) => "soft_wind",
+            SynthSpec::StormWind(_) => "storm_wind",
+            SynthSpec::Rain(_) => "rain",
+            SynthSpec::RainV2(_) => "rain_v2",
+            SynthSpec::Waves(_) => "waves",
+        }
+    }
+
+    /// Construct the generator at `position`. `default_seed` applies when the
+    /// params don't pin one — the scene builder passes a slot-stable seed so
+    /// reloading a scene sounds statistically identical.
+    pub fn build_generator(
+        &self,
+        position: Vec3,
+        default_seed: u64,
+    ) -> Box<dyn atrium_core::source::SoundSource> {
+        match self {
+            SynthSpec::CanopyWind(params) => {
+                let mut generator = CanopyWindSource::new(
+                    position,
+                    params.min_speed.unwrap_or(1.5),
+                    params.max_speed.unwrap_or(8.0),
+                    params.seed.unwrap_or(default_seed),
+                );
+                let (default_min, default_max) = generator.change_time_range();
+                generator.set_change_time_range(
+                    params.change_time_min.unwrap_or(default_min),
+                    params.change_time_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.gust_duration_range();
+                generator.set_gust_duration_range(
+                    params.gust_duration_min.unwrap_or(default_min),
+                    params.gust_duration_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.turbulence_time_range();
+                generator.set_turbulence_time_range(
+                    params.turbulence_time_min.unwrap_or(default_min),
+                    params.turbulence_time_max.unwrap_or(default_max),
+                );
+                if let Some(value) = params.gust_strength {
+                    generator.gust_strength = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.rise_bias {
+                    generator.rise_bias = value.clamp(-1.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_depth {
+                    generator.turbulence_depth = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.gust_brightness {
+                    generator.gust_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_brightness {
+                    generator.turbulence_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.foliage_density {
+                    generator.foliage_density = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.leaf_dryness {
+                    generator.leaf_dryness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.branch_level {
+                    generator.branch_level = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.body_gain {
+                    generator.body_gain = value.max(0.0);
+                }
+                if let Some(value) = params.rustle_gain {
+                    generator.rustle_gain = value.max(0.0);
+                }
+                if let Some(value) = params.contact_gain {
+                    generator.contact_gain = value.max(0.0);
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value.clamp(0.0, 2.0);
+                }
+                Box::new(generator)
+            }
+            SynthSpec::FieldWind(params) => {
+                let mut generator = FieldWindSource::new(
+                    position,
+                    params.min_speed.unwrap_or(1.0),
+                    params.max_speed.unwrap_or(8.0),
+                    params.seed.unwrap_or(default_seed),
+                );
+                let (default_min, default_max) = generator.change_time_range();
+                generator.set_change_time_range(
+                    params.change_time_min.unwrap_or(default_min),
+                    params.change_time_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.gust_duration_range();
+                generator.set_gust_duration_range(
+                    params.gust_duration_min.unwrap_or(default_min),
+                    params.gust_duration_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.turbulence_time_range();
+                generator.set_turbulence_time_range(
+                    params.turbulence_time_min.unwrap_or(default_min),
+                    params.turbulence_time_max.unwrap_or(default_max),
+                );
+                if let Some(value) = params.gust_strength {
+                    generator.gust_strength = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.rise_bias {
+                    generator.rise_bias = value.clamp(-1.0, 1.0);
+                }
+                if let Some(value) = params.gust_brightness {
+                    generator.gust_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_brightness {
+                    generator.turbulence_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.low_gain {
+                    generator.low_gain = value;
+                }
+                if let Some(value) = params.body_gain {
+                    generator.body_gain = value;
+                }
+                if let Some(value) = params.mid_gain {
+                    generator.mid_gain = value;
+                }
+                if let Some(value) = params.presence_gain {
+                    generator.presence_gain = value;
+                }
+                if let Some(value) = params.air_gain {
+                    generator.air_gain = value;
+                }
+                if let Some(value) = params.turbulence_depth {
+                    generator.turbulence_depth = value;
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value;
+                }
+                Box::new(generator)
+            }
+            SynthSpec::SoftWind(params) => {
+                let mut generator = SoftWindSource::new(
+                    position,
+                    params.min_speed.unwrap_or(1.0),
+                    params.max_speed.unwrap_or(5.0),
+                    params.seed.unwrap_or(default_seed),
+                );
+                let (default_min, default_max) = generator.change_time_range();
+                generator.set_change_time_range(
+                    params.change_time_min.unwrap_or(default_min),
+                    params.change_time_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.gust_duration_range();
+                generator.set_gust_duration_range(
+                    params.gust_duration_min.unwrap_or(default_min),
+                    params.gust_duration_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.turbulence_time_range();
+                generator.set_turbulence_time_range(
+                    params.turbulence_time_min.unwrap_or(default_min),
+                    params.turbulence_time_max.unwrap_or(default_max),
+                );
+                if let Some(value) = params.gust_strength {
+                    generator.gust_strength = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.rise_bias {
+                    generator.rise_bias = value.clamp(-1.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_depth {
+                    generator.turbulence_depth = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.gust_brightness {
+                    generator.gust_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_brightness {
+                    generator.turbulence_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.low_gain {
+                    generator.low_gain = value.max(0.0);
+                }
+                if let Some(value) = params.body_gain {
+                    generator.body_gain = value.max(0.0);
+                }
+                if let Some(value) = params.mid_gain {
+                    generator.mid_gain = value.max(0.0);
+                }
+                if let Some(value) = params.presence_gain {
+                    generator.presence_gain = value.max(0.0);
+                }
+                if let Some(value) = params.air_gain {
+                    generator.air_gain = value.max(0.0);
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value.clamp(0.0, 2.0);
+                }
+                Box::new(generator)
+            }
+            SynthSpec::StormWind(params) => {
+                let mut generator = StormWindSource::new(
+                    position,
+                    params.min_speed.unwrap_or(8.0),
+                    params.max_speed.unwrap_or(18.0),
+                    params.seed.unwrap_or(default_seed),
+                );
+                let (default_min, default_max) = generator.change_time_range();
+                generator.set_change_time_range(
+                    params.change_time_min.unwrap_or(default_min),
+                    params.change_time_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.gust_duration_range();
+                generator.set_gust_duration_range(
+                    params.gust_duration_min.unwrap_or(default_min),
+                    params.gust_duration_max.unwrap_or(default_max),
+                );
+                let (default_min, default_max) = generator.turbulence_time_range();
+                generator.set_turbulence_time_range(
+                    params.turbulence_time_min.unwrap_or(default_min),
+                    params.turbulence_time_max.unwrap_or(default_max),
+                );
+                if let Some(value) = params.gust_strength {
+                    generator.gust_strength = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.rise_bias {
+                    generator.rise_bias = value.clamp(-1.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_depth {
+                    generator.turbulence_depth = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.gust_brightness {
+                    generator.gust_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.turbulence_brightness {
+                    generator.turbulence_brightness = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.debris_level {
+                    generator.debris_level = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.structure_level {
+                    generator.structure_level = value.clamp(0.0, 1.0);
+                }
+                if let Some(value) = params.pressure_gain {
+                    generator.pressure_gain = value.max(0.0);
+                }
+                if let Some(value) = params.roar_gain {
+                    generator.roar_gain = value.max(0.0);
+                }
+                if let Some(value) = params.shear_gain {
+                    generator.shear_gain = value.max(0.0);
+                }
+                if let Some(value) = params.tear_gain {
+                    generator.tear_gain = value.max(0.0);
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value.clamp(0.0, 2.0);
+                }
+                Box::new(generator)
+            }
+            SynthSpec::Rain(params) => {
+                let mut generator = RainSource::new(
+                    position,
+                    params.intensity.unwrap_or(0.5),
+                    params.seed.unwrap_or(default_seed),
+                );
+                if let Some(value) = params.drop_rate {
+                    generator.drop_rate = value;
+                }
+                if let Some(value) = params.drip_rate {
+                    generator.drip_rate = value;
+                }
+                if let Some(value) = params.hiss_gain {
+                    generator.hiss_gain = value;
+                }
+                if let Some(value) = params.brown_gain {
+                    generator.brown_gain = value;
+                }
+                if let Some(value) = params.impact_gain {
+                    generator.impact_gain = value;
+                }
+                if let Some(value) = params.bubble_gain {
+                    generator.bubble_gain = value;
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value;
+                }
+                Box::new(generator)
+            }
+            SynthSpec::RainV2(params) => {
+                let mut generator = RainSourceV2::new(
+                    position,
+                    params.intensity.unwrap_or(0.5),
+                    params.seed.unwrap_or(default_seed),
+                );
+                if let Some(value) = params.drip_rate {
+                    generator.drip_rate = value;
+                }
+                if let Some(value) = params.impact_gain {
+                    generator.impact_gain = value;
+                }
+                if let Some(value) = params.bubble_gain {
+                    generator.bubble_gain = value;
+                }
+                if let Some(value) = params.bed_gain {
+                    generator.bed_gain = value;
+                }
+                if let Some(value) = params.texture_gain {
+                    generator.texture_gain = value;
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value;
+                }
+                Box::new(generator)
+            }
+            SynthSpec::Waves(params) => {
+                let mut generator = WaveSource::new(
+                    position,
+                    params.period.unwrap_or(6.0),
+                    params.crash_prob.unwrap_or(0.25),
+                    params.seed.unwrap_or(default_seed),
+                );
+                if let Some(value) = params.roar_level {
+                    generator.roar_level = value;
+                }
+                if let Some(value) = params.hiss_level {
+                    generator.hiss_level = value;
+                }
+                if let Some(value) = params.crash_gain {
+                    generator.crash_gain = value;
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value;
+                }
+                Box::new(generator)
+            }
+        }
+    }
 }
 
 fn default_directivity() -> String {
@@ -503,6 +1041,8 @@ struct SourceMeta {
     position: [f32; 3],
     orbit_radius: f32,
     orbit_speed: f32,
+    synth_kind: Option<String>,
+    emitter_kind: String,
 }
 
 // ── Loading & building ──────────────────────────────────────────────────────
@@ -784,6 +1324,8 @@ impl SceneConfig {
                     "position": [world_pos.x, world_pos.y, world_pos.z],
                     "orbit_radius": s.orbit_radius,
                     "orbit_speed": s.orbit_speed,
+                    "synth_kind": s.synth_kind,
+                    "emitter_kind": s.emitter_kind,
                 })
             })
             .collect();
@@ -862,18 +1404,42 @@ impl SceneConfig {
             // Merge referenced def (if any) with inline overrides.
             let resolved = entry.resolve()?;
             let position = arr_to_vec3(entry.position) + spawn;
-            let built = build_one_source(
-                &resolved.audio_path,
-                resolved.reference_spl,
-                &resolved.directivity,
-                resolved.spread,
-                position,
-                entry.orbit_radius,
-                entry.orbit_speed,
-                norm,
-                global_ref_dist,
-                max_dist,
-            )?;
+            let built = match &resolved.sound {
+                ResolvedSound::Sample { audio_path } => build_one_source(
+                    audio_path,
+                    resolved.reference_spl,
+                    &resolved.directivity,
+                    resolved.spread,
+                    position,
+                    entry.orbit_radius,
+                    entry.orbit_speed,
+                    norm,
+                    global_ref_dist,
+                    max_dist,
+                )?,
+                ResolvedSound::Synth { spec } => {
+                    if entry.orbit_radius != 0.0 || entry.orbit_speed != 0.0 {
+                        return Err(format!(
+                            "source `{}`: synth sources don't support orbit (motion belongs to the behavior layer)",
+                            entry.display_name()
+                        )
+                        .into());
+                    }
+                    build_one_synth_source(
+                        spec,
+                        resolved.reference_spl,
+                        &resolved.directivity,
+                        resolved.spread,
+                        position,
+                        // Slot-stable default seed: reloading the scene sounds
+                        // statistically identical, multiple synths decorrelate.
+                        1000 + i as u64,
+                        norm,
+                        global_ref_dist,
+                        max_dist,
+                    )?
+                }
+            };
 
             let name = entry.display_name();
             let color = entry
@@ -886,6 +1452,11 @@ impl SceneConfig {
                 name, resolved.reference_spl, built.amplitude, built.ref_dist, built.audible_radius,
             );
 
+            let synth_kind = match &resolved.sound {
+                ResolvedSound::Synth { spec } => Some(spec.kind_name().to_string()),
+                ResolvedSound::Sample { .. } => None,
+            };
+            let emitter_kind = built.source.emitter_kind().as_str().to_string();
             metas.push(SourceMeta {
                 name,
                 color,
@@ -899,6 +1470,8 @@ impl SceneConfig {
                 position: entry.position,
                 orbit_radius: entry.orbit_radius,
                 orbit_speed: entry.orbit_speed,
+                synth_kind,
+                emitter_kind,
             });
 
             spectral_profiles.push(built.bands);
@@ -974,6 +1547,79 @@ pub fn build_one_source(
     let unit_amplitude = rms_correction * 10.0_f32.powf(-normalization.spl_reference / 20.0);
 
     let mut node = TestNode::new(buffer, position, orbit_radius, orbit_speed);
+    node.amplitude = amplitude;
+    node.unit_amplitude = unit_amplitude;
+    node.ref_dist = ref_dist;
+    node.pattern = pattern;
+    node.spread = spread;
+
+    Ok(BuiltSource {
+        source: Box::new(node),
+        bands,
+        amplitude,
+        ref_dist,
+        audible_radius,
+        directivity_alpha: pattern.alpha(),
+    })
+}
+
+/// Seconds of preview audio rendered control-side to measure a synth source's
+/// RMS and Bark-band spectral profile — the same calibration measurements
+/// `build_one_source` reads from a decoded file. Long enough to average over
+/// gust cycles and drop statistics.
+pub const SYNTH_PREVIEW_SECONDS: f32 = 20.0;
+/// Sample rate for the preview render. The profile is Bark-band coarse, so a
+/// device actually running at 44.1 kHz changes nothing meaningful.
+pub const SYNTH_PREVIEW_SAMPLE_RATE: u32 = 48_000;
+
+/// Build one procedural synth `SoundSource` with its amplitude, spectral
+/// profile, and reference distance. Mirrors `build_one_source` exactly, except
+/// the calibration measurements come from a preview render instead of a
+/// decoded file, so synth and sample sources obey the same loudness model.
+#[allow(clippy::too_many_arguments)]
+pub fn build_one_synth_source(
+    spec: &SynthSpec,
+    reference_spl: f32,
+    directivity: &str,
+    spread: f32,
+    position: Vec3,
+    default_seed: u64,
+    normalization: &NormalizationConfig,
+    global_ref_dist: f32,
+    max_distance: f32,
+) -> Result<BuiltSource, Box<dyn std::error::Error>> {
+    // Preview render: measure RMS + spectral profile exactly like a decoded file.
+    let sample_rate = SYNTH_PREVIEW_SAMPLE_RATE as f32;
+    let mut preview_generator = spec.build_generator(position, default_seed);
+    let total_samples = (SYNTH_PREVIEW_SECONDS * sample_rate) as usize;
+    let mut samples = vec![0.0_f32; total_samples];
+    for sample in samples.iter_mut() {
+        *sample = preview_generator.next_sample(sample_rate);
+    }
+    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / total_samples as f32).sqrt();
+    if rms < 1e-6 {
+        return Err(format!(
+            "synth source `{}` rendered silence — check its parameters",
+            spec.kind_name()
+        )
+        .into());
+    }
+    let bands =
+        crate::audio::spectral_profile::compute_profile(&samples, SYNTH_PREVIEW_SAMPLE_RATE).bands;
+
+    let profile = resolve_spl(reference_spl);
+    let amplitude = profile.amplitude(rms, normalization.target_rms, normalization.spl_reference);
+    let ref_dist = profile.ref_distance(global_ref_dist);
+    let pattern = parse_directivity(directivity);
+    let audible_radius = profile.audible_radius(normalization.spl_threshold, max_distance);
+
+    // Base amplitude at 0 dB SPL, mirroring build_one_source.
+    let rms_correction = normalization.target_rms / rms;
+    let unit_amplitude = rms_correction * 10.0_f32.powf(-normalization.spl_reference / 20.0);
+
+    // Fresh generator so the audible source starts from a clean state rather
+    // than wherever the preview render left its envelopes.
+    let mut node = SynthNode::new(spec.build_generator(position, default_seed), position);
     node.amplitude = amplitude;
     node.unit_amplitude = unit_amplitude;
     node.ref_dist = ref_dist;
@@ -1073,5 +1719,392 @@ mod tests {
         let scene: SceneConfig =
             load_yaml("scenes/default.yaml").expect("default.yaml should load");
         assert_eq!(scene.environment, "environments/atrium.yaml");
+    }
+
+    // ── Synth source definitions ────────────────────────────────────────────
+
+    /// A sample def must still parse into the Sample variant.
+    #[test]
+    fn sample_source_def_parses() {
+        let yaml = "path: assets/campfire.mp3\nreference_spl: 68.0\nspread: 0.6\n";
+        match serde_yaml::from_str::<SourceDef>(yaml).expect("sample def should parse") {
+            SourceDef::Sample(sample) => {
+                assert_eq!(sample.path, "assets/campfire.mp3");
+                assert_eq!(sample.reference_spl, 68.0);
+            }
+            SourceDef::Synth(_) => panic!("parsed as synth"),
+        }
+    }
+
+    /// Every synth kind must parse — with bare-integer YAML values, which
+    /// exercise serde's flatten/Content numeric path (a known footgun).
+    #[test]
+    fn synth_source_defs_parse_with_integer_values() {
+        let cases = [
+            (
+                "synth: canopy_wind\nmin_speed: 2\nmax_speed: 8\nfoliage_density: 1\nreference_spl: 48\n",
+                "canopy_wind",
+            ),
+            (
+                "synth: field_wind\nmin_speed: 1\nmax_speed: 8\nchange_time_min: 20\nchange_time_max: 50\nreference_spl: 55\n",
+                "field_wind",
+            ),
+            (
+                "synth: soft_wind\nmin_speed: 1\nmax_speed: 5\ngust_brightness: 1\nreference_spl: 42\n",
+                "soft_wind",
+            ),
+            (
+                "synth: storm_wind\nmin_speed: 8\nmax_speed: 18\nturbulence_depth: 1\nreference_spl: 60\n",
+                "storm_wind",
+            ),
+            ("synth: rain\nintensity: 0.5\nreference_spl: 55\n", "rain"),
+            (
+                "synth: rain_v2\nintensity: 0.5\nreference_spl: 55\n",
+                "rain_v2",
+            ),
+            (
+                "synth: waves\nperiod: 6\ncrash_prob: 0.25\nreference_spl: 60\n",
+                "waves",
+            ),
+        ];
+        for (yaml, expected_kind) in cases {
+            match serde_yaml::from_str::<SourceDef>(yaml)
+                .unwrap_or_else(|e| panic!("{expected_kind} def should parse: {e}"))
+            {
+                SourceDef::Synth(synth) => {
+                    assert_eq!(synth.spec.kind_name(), expected_kind);
+                    assert_eq!(
+                        synth.reference_spl as i32,
+                        match expected_kind {
+                            "waves" => 60,
+                            "canopy_wind" => 48,
+                            "soft_wind" => 42,
+                            "storm_wind" => 60,
+                            _ => 55,
+                        }
+                    );
+                }
+                SourceDef::Sample(_) => panic!("{expected_kind} parsed as sample"),
+            }
+        }
+    }
+
+    #[test]
+    fn storm_wind_controls_parse_and_build_as_a_field() {
+        let source: SynthSourceDef = serde_yaml::from_str(
+            "synth: storm_wind\n\
+             min_speed: 8\n\
+             max_speed: 18\n\
+             change_time_min: 12\n\
+             change_time_max: 40\n\
+             gust_duration_min: 1.5\n\
+             gust_duration_max: 14\n\
+             gust_strength: 0.55\n\
+             turbulence_depth: 0.65\n\
+             debris_level: 0.06\n\
+             structure_level: 0.05\n\
+             pressure_gain: 1.03\n\
+             roar_gain: 1.50\n\
+             shear_gain: 0.70\n\
+             tear_gain: 0.35\n\
+             reference_spl: 60\n",
+        )
+        .unwrap();
+        let SynthSpec::StormWind(params) = &source.spec else {
+            panic!("expected storm_wind");
+        };
+        assert_eq!(params.min_speed, Some(8.0));
+        assert_eq!(params.max_speed, Some(18.0));
+        assert_eq!(params.gust_strength, Some(0.55));
+        assert_eq!(params.turbulence_depth, Some(0.65));
+        assert_eq!(params.debris_level, Some(0.06));
+        assert_eq!(params.structure_level, Some(0.05));
+        assert_eq!(params.pressure_gain, Some(1.03));
+        assert_eq!(params.roar_gain, Some(1.50));
+        assert_eq!(params.shear_gain, Some(0.70));
+        assert_eq!(params.tear_gain, Some(0.35));
+
+        let built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            "omni",
+            1.0,
+            Vec3::ZERO,
+            45,
+            &NormalizationConfig::default(),
+            1.0,
+            40.0,
+        )
+        .expect("storm wind should build");
+        assert_eq!(
+            built.source.emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    #[test]
+    fn canopy_wind_controls_parse_and_build_as_a_field() {
+        let source: SynthSourceDef = serde_yaml::from_str(
+            "synth: canopy_wind\n\
+             min_speed: 2\n\
+             max_speed: 8\n\
+             change_time_min: 15\n\
+             change_time_max: 45\n\
+             gust_duration_min: 2\n\
+             gust_duration_max: 8\n\
+             foliage_density: 0.75\n\
+             leaf_dryness: 0.25\n\
+             branch_level: 0.12\n\
+             reference_spl: 48\n",
+        )
+        .unwrap();
+        let SynthSpec::CanopyWind(params) = &source.spec else {
+            panic!("expected canopy_wind");
+        };
+        assert_eq!(params.min_speed, Some(2.0));
+        assert_eq!(params.max_speed, Some(8.0));
+        assert_eq!(params.foliage_density, Some(0.75));
+        assert_eq!(params.leaf_dryness, Some(0.25));
+        assert_eq!(params.branch_level, Some(0.12));
+
+        let built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            "omni",
+            1.0,
+            Vec3::ZERO,
+            42,
+            &NormalizationConfig::default(),
+            1.0,
+            40.0,
+        )
+        .expect("canopy wind should build");
+        assert_eq!(
+            built.source.emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    #[test]
+    fn field_wind_bounded_driver_controls_parse() {
+        let source: SynthSourceDef = serde_yaml::from_str(
+            "synth: field_wind\n\
+             min_speed: 2\n\
+             max_speed: 5\n\
+             change_time_min: 20\n\
+             change_time_max: 50\n\
+             gust_duration_min: 3\n\
+             gust_duration_max: 10\n\
+             turbulence_time_min: 0.12\n\
+             turbulence_time_max: 0.80\n\
+             gust_strength: 0.35\n\
+             rise_bias: 0.25\n\
+             gust_brightness: 0.20\n\
+             turbulence_brightness: 0.10\n\
+             reference_spl: 55\n",
+        )
+        .unwrap();
+        let SynthSpec::FieldWind(params) = source.spec else {
+            panic!("expected field_wind");
+        };
+        assert_eq!(params.min_speed, Some(2.0));
+        assert_eq!(params.max_speed, Some(5.0));
+        assert_eq!(params.change_time_min, Some(20.0));
+        assert_eq!(params.change_time_max, Some(50.0));
+        assert_eq!(params.gust_duration_min, Some(3.0));
+        assert_eq!(params.gust_duration_max, Some(10.0));
+        assert_eq!(params.turbulence_time_min, Some(0.12));
+        assert_eq!(params.turbulence_time_max, Some(0.80));
+        assert_eq!(params.gust_strength, Some(0.35));
+        assert_eq!(params.rise_bias, Some(0.25));
+        assert_eq!(params.gust_brightness, Some(0.20));
+        assert_eq!(params.turbulence_brightness, Some(0.10));
+    }
+
+    #[test]
+    fn soft_wind_controls_parse_and_build_as_a_field() {
+        let source: SynthSourceDef = serde_yaml::from_str(
+            "synth: soft_wind\n\
+             min_speed: 1\n\
+             max_speed: 5\n\
+             change_time_min: 10\n\
+             change_time_max: 24\n\
+             gust_duration_min: 0.8\n\
+             gust_duration_max: 4\n\
+             turbulence_time_min: 0.12\n\
+             turbulence_time_max: 0.8\n\
+             gust_brightness: 0.18\n\
+             turbulence_brightness: 0.10\n\
+             reference_spl: 42\n",
+        )
+        .unwrap();
+        let SynthSpec::SoftWind(params) = &source.spec else {
+            panic!("expected soft_wind");
+        };
+        assert_eq!(params.min_speed, Some(1.0));
+        assert_eq!(params.max_speed, Some(5.0));
+        assert_eq!(params.turbulence_time_min, Some(0.12));
+        assert_eq!(params.turbulence_time_max, Some(0.8));
+        assert_eq!(params.gust_brightness, Some(0.18));
+        assert_eq!(params.turbulence_brightness, Some(0.10));
+
+        let built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            "omni",
+            1.0,
+            Vec3::ZERO,
+            46,
+            &NormalizationConfig::default(),
+            1.0,
+            40.0,
+        )
+        .expect("soft wind should build");
+        assert_eq!(
+            built.source.emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    #[test]
+    fn field_wind_builds_as_a_field_emitter() {
+        let source: SynthSourceDef = serde_yaml::from_str(
+            "synth: field_wind\nmin_speed: 1\nmax_speed: 8\nchange_time_min: 20\nchange_time_max: 50\nreference_spl: 55\n",
+        )
+        .unwrap();
+        let built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            "omni",
+            1.0,
+            Vec3::ZERO,
+            42,
+            &NormalizationConfig::default(),
+            1.0,
+            40.0,
+        )
+        .expect("field wind should build");
+        assert_eq!(
+            built.source.emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    /// Storm speed bounds must reach the DSP, including its high-speed tearing.
+    #[test]
+    fn storm_wind_speed_range_reaches_the_dsp() {
+        let calm_spec: SynthSourceDef = serde_yaml::from_str(
+            "synth: storm_wind\nmin_speed: 10\nmax_speed: 10\nreference_spl: 60\n",
+        )
+        .unwrap();
+        let fast_spec: SynthSourceDef = serde_yaml::from_str(
+            "synth: storm_wind\nmin_speed: 25\nmax_speed: 25\nreference_spl: 60\n",
+        )
+        .unwrap();
+
+        let bright_fraction = |spec: &SynthSpec| {
+            let mut generator = spec.build_generator(Vec3::ZERO, 7);
+            for _ in 0..48_000 {
+                generator.next_sample(48_000.0); // warm up filters
+            }
+            let mut hp = crate::synth::noise::OnePoleHP::new(1_800.0, 48_000.0);
+            let (mut full, mut high) = (0.0_f64, 0.0_f64);
+            for _ in 0..192_000 {
+                let s = generator.next_sample(48_000.0);
+                full += (s * s) as f64;
+                let h = hp.process(s);
+                high += (h * h) as f64;
+            }
+            (high / full.max(1e-12)) as f32
+        };
+
+        let calm = bright_fraction(&calm_spec.spec);
+        let fast = bright_fraction(&fast_spec.spec);
+        assert!(
+            fast > calm * 1.5,
+            "storm force should have more tearing energy (calm {calm}, fast {fast})"
+        );
+    }
+
+    /// A synth def whose parameters produce silence must fail loudly at build
+    /// time, not play an inaudible source.
+    #[test]
+    fn silent_synth_source_is_a_build_error() {
+        let spec = SynthSpec::Rain(RainSynthParams {
+            intensity: Some(0.0),
+            ..Default::default()
+        });
+        let result = build_one_synth_source(
+            &spec,
+            55.0,
+            "omni",
+            0.9,
+            Vec3::ZERO,
+            1,
+            &NormalizationConfig::default(),
+            1.0,
+            40.0,
+        );
+        assert!(result.is_err(), "zero-intensity rain should fail the build");
+    }
+
+    /// The synth test scene must build end-to-end with calibrated sources.
+    #[test]
+    fn synth_test_scene_builds_with_calibrated_sources() {
+        let scene = SceneConfig::load("scenes/synth-test.yaml").expect("scene should load");
+        let result = scene.build().expect("scene should build");
+        let expected = ["Field Wind", "Waves", "Rain v2", "Rain v1"];
+        assert_eq!(&result.source_names[..expected.len()], &expected);
+        for (index, name) in expected.iter().enumerate() {
+            assert!(
+                result.scene.source_amplitudes[index] > 0.0,
+                "source {name} should have positive amplitude"
+            );
+        }
+    }
+
+    #[test]
+    fn canopy_wind_scene_builds_end_to_end() {
+        let scene = SceneConfig::load("scenes/canopy-wind-only.yaml").expect("scene should load");
+        let result = scene.build().expect("canopy scene should build");
+        assert_eq!(
+            result.source_names.first().map(String::as_str),
+            Some("Canopy Wind")
+        );
+        assert!(result.scene.source_amplitudes[0] > 0.0);
+        assert_eq!(
+            result.scene.sources[0].emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    #[test]
+    fn storm_wind_scene_builds_end_to_end() {
+        let scene = SceneConfig::load("scenes/storm-wind-only.yaml").expect("scene should load");
+        let result = scene.build().expect("storm scene should build");
+        assert_eq!(
+            result.source_names.first().map(String::as_str),
+            Some("Storm Wind")
+        );
+        assert!(result.scene.source_amplitudes[0] > 0.0);
+        assert_eq!(
+            result.scene.sources[0].emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
+    }
+
+    #[test]
+    fn soft_wind_scene_builds_end_to_end() {
+        let scene = SceneConfig::load("scenes/soft-wind-only.yaml").expect("scene should load");
+        let result = scene.build().expect("soft-wind scene should build");
+        assert_eq!(
+            result.source_names.first().map(String::as_str),
+            Some("Soft Wind")
+        );
+        assert!(result.scene.source_amplitudes[0] > 0.0);
+        assert_eq!(
+            result.scene.sources[0].emitter_kind(),
+            atrium_core::source::EmitterKind::Field
+        );
     }
 }

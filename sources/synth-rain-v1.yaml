@@ -1,0 +1,7 @@
+# Synth source: procedural rain v1 (pink/brown bed + burst impacts).
+# Kept alongside v2 so both can be A/B'd in the same scene during the audit.
+synth: rain
+intensity: 0.5      # 0-1 — moderate rainfall
+reference_spl: 55.0 # dB at 1 m
+directivity: omni
+spread: 0.9

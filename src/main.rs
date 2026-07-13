@@ -4,7 +4,9 @@ use std::time::Duration;
 use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::config::SceneConfig;
 #[cfg(feature = "bevy")]
-use atrium::config::{build_one_source, NormalizationConfig, SourceDef, SourceEntry};
+use atrium::config::{
+    build_one_source, build_one_synth_source, NormalizationConfig, SourceDef, SourceEntry,
+};
 #[cfg(feature = "bevy")]
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::telemetry::{telemetry_to_json, TelemetryFrame};
@@ -275,7 +277,7 @@ impl atrium_bevy::SceneHost for AtriumSceneHost {
 
         Ok(atrium_bevy::ReloadOutput {
             audio: Box::new(StreamHost(handle)),
-            command_sender: atrium_bevy::CommandSender::new(producer),
+            command_sender: atrium_behavior::CommandSender::new(producer),
             telemetry_receiver: atrium_bevy::TelemetryReceiver::new(telem_consumer),
             description,
         })
@@ -332,47 +334,94 @@ impl atrium_bevy::SceneHost for AtriumSceneHost {
             .position(|entry| entry.is_none())
             .ok_or(format!("source pool is full ({MAX_SOURCES} max)"))?;
 
-        // Resolve the origin into audio + intrinsic sound properties.
-        let (audio_path, spl, directivity, spread, source_yaml, name) = match spec.origin {
+        // Resolve the origin into a sound identity + intrinsic properties.
+        enum AddSound {
+            Sample(String),
+            Synth(atrium::config::SynthSpec),
+        }
+        let (sound, spl, directivity, spread, source_yaml, name) = match spec.origin {
             atrium_bevy::AddOrigin::Preset(yaml) => {
                 let contents =
                     std::fs::read_to_string(&yaml).map_err(|e| format!("{yaml}: {e}"))?;
                 let def: SourceDef =
                     serde_yaml::from_str(&contents).map_err(|e| format!("{yaml}: {e}"))?;
                 let name = file_stem_or(&yaml, "source");
-                (
-                    def.path,
-                    def.reference_spl,
-                    def.directivity,
-                    def.spread,
-                    Some(yaml),
-                    name,
-                )
+                match def {
+                    SourceDef::Sample(sample) => (
+                        AddSound::Sample(sample.path),
+                        sample.reference_spl,
+                        sample.directivity,
+                        sample.spread,
+                        Some(yaml),
+                        name,
+                    ),
+                    SourceDef::Synth(synth) => (
+                        AddSound::Synth(synth.spec),
+                        synth.reference_spl,
+                        synth.directivity,
+                        synth.spread,
+                        Some(yaml),
+                        name,
+                    ),
+                }
             }
             atrium_bevy::AddOrigin::AudioFile(path) => {
                 let name = file_stem_or(&path, "source");
-                (path, 70.0, "omni".to_string(), 0.3, None, name)
+                (
+                    AddSound::Sample(path),
+                    70.0,
+                    "omni".to_string(),
+                    0.3,
+                    None,
+                    name,
+                )
             }
         };
 
-        // Build the source on this thread (decode + amplitude + spectral bands).
+        // Build the source on this thread (decode/render + amplitude + bands).
         let world =
             atrium_core::types::Vec3::new(spec.position[0], spec.position[1], spec.position[2]);
-        let built = build_one_source(
-            &audio_path,
-            spl,
-            &directivity,
-            spread,
-            world,
-            0.0,
-            0.0,
-            &self.normalization,
-            self.global_ref_dist,
-            self.max_distance,
-        )
-        .map_err(|e| e.to_string())?;
+        let (built, audio_override, synth_kind) = match sound {
+            AddSound::Sample(audio_path) => (
+                build_one_source(
+                    &audio_path,
+                    spl,
+                    &directivity,
+                    spread,
+                    world,
+                    0.0,
+                    0.0,
+                    &self.normalization,
+                    self.global_ref_dist,
+                    self.max_distance,
+                )
+                .map_err(|e| e.to_string())?,
+                Some(audio_path),
+                None,
+            ),
+            AddSound::Synth(synth_spec) => {
+                let kind = Some(synth_spec.kind_name().to_string());
+                (
+                    build_one_synth_source(
+                        &synth_spec,
+                        spl,
+                        &directivity,
+                        spread,
+                        world,
+                        1000 + slot as u64,
+                        &self.normalization,
+                        self.global_ref_dist,
+                        self.max_distance,
+                    )
+                    .map_err(|e| e.to_string())?,
+                    None,
+                    kind,
+                )
+            }
+        };
         let ref_dist = built.ref_dist;
         let directivity_alpha = built.directivity_alpha;
+        let emitter_kind = built.source.emitter_kind().as_str().to_string();
 
         // Splice into the audio thread's free slot (no gap).
         {
@@ -397,7 +446,8 @@ impl atrium_bevy::SceneHost for AtriumSceneHost {
         ];
         self.slot_entries[slot] = Some(SourceEntry {
             source: source_yaml,
-            audio: Some(audio_path),
+            // Synth presets carry no audio file — identity lives in the def yaml.
+            audio: audio_override,
             reference_spl: Some(spl),
             directivity: Some(directivity.clone()),
             spread: Some(spread),
@@ -416,6 +466,7 @@ impl atrium_bevy::SceneHost for AtriumSceneHost {
                 name,
                 color,
                 position: spec.position,
+                emitter_kind,
                 spl,
                 ref_distance: ref_dist,
                 directivity,
@@ -423,6 +474,7 @@ impl atrium_bevy::SceneHost for AtriumSceneHost {
                 spread,
                 orbit_radius: 0.0,
                 orbit_speed: 0.0,
+                synth_kind,
             },
         })
     }
@@ -533,6 +585,10 @@ fn build_scene_description(
                     pos.and_then(|a| a[1].as_f64()).unwrap_or(0.0) as f32,
                     pos.and_then(|a| a[2].as_f64()).unwrap_or(0.0) as f32,
                 ],
+                emitter_kind: source["emitter_kind"]
+                    .as_str()
+                    .unwrap_or("object")
+                    .to_string(),
                 spl: source["spl"].as_f64().unwrap_or(80.0) as f32,
                 ref_distance: source["ref_dist"].as_f64().unwrap_or(1.0) as f32,
                 directivity: source["directivity"].as_str().unwrap_or("omni").to_string(),
@@ -540,6 +596,7 @@ fn build_scene_description(
                 spread: source["spread"].as_f64().unwrap_or(0.0) as f32,
                 orbit_radius: source["orbit_radius"].as_f64().unwrap_or(0.0) as f32,
                 orbit_speed: source["orbit_speed"].as_f64().unwrap_or(0.0) as f32,
+                synth_kind: source["synth_kind"].as_str().map(|s| s.to_string()),
             }
         })
         .collect();

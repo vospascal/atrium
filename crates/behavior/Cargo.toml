@@ -1,0 +1,13 @@
+[package]
+name = "atrium-behavior"
+version = "0.1.0"
+edition = "2021"
+description = "Control-rate behavior layer for Atrium on Bevy ECS — runs headless (MinimalPlugins) or inside the Bevy editor"
+
+[dependencies]
+atrium-core = { path = "../core" }
+# No default features: ECS, app, and time only — no window, renderer, or winit.
+# The same plugin runs in the full editor App (which enables the render stack)
+# and in a headless App built with MinimalPlugins.
+bevy = { version = "0.18", default-features = false, features = ["std"] }
+rtrb = "0.3"

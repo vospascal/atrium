@@ -100,9 +100,11 @@ impl RainSource {
         let mid = len as f32 / 2.0;
         let sigma = len as f32 / 4.0; // wide envelope for smooth bursts
 
-        // Fresh filters per burst (stack-allocated, cheap)
+        // Fresh filters per burst (stack-allocated, cheap).
+        // LP lowered 3500→1800 Hz: the drop "ticks" read as "too high in tone"
+        // (audit + user). Warmer taps; the pipeline darkens further downstream.
         let mut hp = OnePoleHP::new(200.0_f32.max(cut_hz * 0.6), sample_rate);
-        let mut lp = OnePoleLP::new(3500.0, sample_rate);
+        let mut lp = OnePoleLP::new(1800.0, sample_rate);
 
         for i in 0..len {
             let window = (-0.5 * ((i as f32 - mid) / sigma).powi(2)).exp();
@@ -113,9 +115,11 @@ impl RainSource {
         len
     }
 
-    /// Generate a decaying sine "bubble" resonance (~3.3 kHz, ~15 ms).
+    /// Generate a decaying sine "bubble" resonance (~1.6 kHz, ~15 ms).
+    /// Lowered from 3300 Hz: a fixed high ping is the textbook "metallic"
+    /// artifact (Farnell) and the main "too high in tone" culprit in v1.
     fn generate_bubble(&mut self, sample_rate: f32) -> usize {
-        let freq = 3300.0_f32;
+        let freq = 1600.0_f32;
         let len = ((0.015 * sample_rate) as usize).min(MAX_BURST);
         let tau = 0.003 * sample_rate; // decay time constant
 

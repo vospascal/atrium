@@ -1,6 +1,32 @@
 use crate::directivity::DirectivityPattern;
 use crate::types::Vec3;
 
+/// How a source occupies acoustic space.
+///
+/// This is deliberately separate from the signal generator. A bird sample and
+/// a procedural aeolian whistle are both [`Object`](EmitterKind::Object)
+/// emitters, while wind and steady rain beds are [`Field`](EmitterKind::Field)
+/// emitters regardless of how their samples are produced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EmitterKind {
+    /// Localized radiator: distance, direction, propagation paths, reflections,
+    /// and room reverb all apply.
+    #[default]
+    Object,
+    /// Environmental sound field: level is independent of a single source
+    /// position and the signal bypasses point-source propagation and room send.
+    Field,
+}
+
+impl EmitterKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Object => "object",
+            Self::Field => "field",
+        }
+    }
+}
+
 /// Trait for anything that generates audio samples and has a position.
 /// Implementations must be Send (moved to audio thread) and must not allocate.
 pub trait SoundSource: Send {
@@ -9,6 +35,12 @@ pub trait SoundSource: Send {
 
     /// Current world-space position.
     fn position(&self) -> Vec3;
+
+    /// Spatial interpretation of this source. Existing sources remain point-like
+    /// objects unless they explicitly opt into field rendering.
+    fn emitter_kind(&self) -> EmitterKind {
+        EmitterKind::Object
+    }
 
     /// Whether this source is still producing audio.
     fn is_active(&self) -> bool {
@@ -61,6 +93,10 @@ pub trait SoundSource: Send {
 
     /// Set the source's directivity emission pattern.
     fn set_directivity(&mut self, _pattern: DirectivityPattern) {}
+
+    /// Set a procedural-synth parameter live. Sources that don't model the
+    /// given parameter ignore it. Default: no-op (sample players etc.).
+    fn set_synth_param(&mut self, _param: crate::commands::SynthParam, _value: f32) {}
 
     /// Set orbit speed (radians/sec). 0 = paused.
     fn set_orbit_speed(&mut self, _speed: f32) {}

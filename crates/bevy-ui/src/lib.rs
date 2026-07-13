@@ -13,11 +13,14 @@ mod hud;
 mod input;
 pub mod scene;
 mod screenshot;
+mod synth_panel;
 mod telemetry;
 
+use atrium_behavior::CommandSender;
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
+use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
 pub use ecs::{
     SoundAtrium, SoundEnvironment, SoundListener, SoundSource, SoundSourceIndex, SoundSpeaker,
@@ -26,7 +29,7 @@ pub use scene::reload::{
     AddOrigin, AddSpec, AddedSource, AudioHandle, AudioHost, ReloadOutput, ReloadTarget, SceneHost,
 };
 pub use scene::SceneDescription;
-pub use telemetry::{CommandSender, TelemetryReceiver};
+pub use telemetry::TelemetryReceiver;
 
 /// Main Atrium visualization plugin.
 /// Requires `SceneDescription`, `TelemetryReceiver`, and `CommandSender` as
@@ -50,6 +53,7 @@ impl Plugin for AtriumPlugin {
             }),
             ..default()
         }))
+        .add_plugins(EguiPlugin::default())
         .add_plugins(FpsOverlayPlugin {
             config: FpsOverlayConfig {
                 text_config: TextFont {
@@ -71,6 +75,8 @@ impl Plugin for AtriumPlugin {
         .init_resource::<scene::save::SceneFilePath>()
         .init_resource::<scene::landscape::LandscapeTheme>()
         .init_resource::<hud::PointerOverHud>()
+        .init_resource::<synth_panel::SelectedSource>()
+        .init_resource::<synth_panel::SynthPanelState>()
         .init_resource::<scene::reload::PendingReload>()
         .init_resource::<scene::reload::PendingSave>()
         .init_resource::<scene::reload::PendingSceneEdit>()
@@ -100,6 +106,8 @@ impl Plugin for AtriumPlugin {
                 scene::drag_sources,
             ),
         )
+        // egui synth-parameter panel (runs in the egui pass).
+        .add_systems(EguiPrimaryContextPass, synth_panel::synth_param_panel)
         // 2D gizmo overlays.
         .add_systems(
             Update,

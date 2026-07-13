@@ -10,7 +10,7 @@
 use bevy::prelude::*;
 
 use super::components::*;
-use crate::telemetry::CommandSender;
+use atrium_behavior::CommandSender;
 use atrium_core::commands::Command;
 use atrium_core::types::Vec3 as AtriumVec3;
 

@@ -259,6 +259,19 @@ pub fn reverb_send(distance: f32, critical_distance: f32) -> f32 {
     x2 / (1.0 + x2)
 }
 
+/// Reverb-send scale for a source of the given MDAP `spread`.
+///
+/// A point source (spread 0) excites the room fully — you hear it reflect and
+/// reverberate. A distributed/diffuse source *is* the ambient field itself
+/// (wind, rain, waves are all around you, not a point that echoes off a wall),
+/// so it should get NO reverb tail — the scale reaches 0 by spread 0.75. This
+/// keeps a localized bird reverberant while the diffuse weather beds are fully
+/// dry (their field recordings also already carry their own ambience, so engine
+/// reverb would double it and read as echo).
+pub fn diffuse_reverb_scale(spread: f32) -> f32 {
+    (1.0 - spread / 0.75).clamp(0.0, 1.0)
+}
+
 /// Compute per-delay-line feedback gains for the Ambisonics FDN
 /// from room geometry and wall reflectivity.
 ///
@@ -891,6 +904,19 @@ mod tests {
             );
             prev = send;
         }
+    }
+
+    #[test]
+    fn diffuse_reverb_scale_keeps_points_wet_and_beds_dry() {
+        // Point source (bird): nearly full reverb.
+        assert!(diffuse_reverb_scale(0.0) > 0.99);
+        assert!(diffuse_reverb_scale(0.2) > 0.6);
+        // Diffuse beds (wind/waves/rain, spread 0.85–0.9): fully dry, no echo.
+        assert_eq!(diffuse_reverb_scale(0.85), 0.0);
+        assert_eq!(diffuse_reverb_scale(0.9), 0.0);
+        assert_eq!(diffuse_reverb_scale(1.0), 0.0);
+        // Monotonic: more spread ⇒ less send.
+        assert!(diffuse_reverb_scale(0.3) > diffuse_reverb_scale(0.6));
     }
 
     // ── Max image-source distance & buffer sizing (Phase 5A) ─────────

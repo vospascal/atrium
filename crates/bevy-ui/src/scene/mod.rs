@@ -27,7 +27,8 @@ use atrium_core::types::Vec3 as AtriumVec3;
 
 use crate::camera::TopDownCamera;
 use crate::ecs::*;
-use crate::telemetry::{CommandSender, LatestTelemetry, TelemetryMessage};
+use crate::telemetry::{LatestTelemetry, TelemetryMessage};
+use atrium_behavior::CommandSender;
 use icons::SourceIcon;
 use landscape::LandscapeTheme;
 
@@ -760,6 +761,7 @@ pub(crate) fn drag_sources(
     camera: Query<(&Camera, &GlobalTransform), With<TopDownCamera>>,
     mut sources: Query<(&SoundSourceIndex, &mut Transform, &AtriumHeight)>,
     mut drag: ResMut<SourceDragState>,
+    mut selected: ResMut<crate::synth_panel::SelectedSource>,
     mut command_sender: ResMut<CommandSender>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -792,6 +794,10 @@ pub(crate) fn drag_sources(
             }
         }
         drag.dragging = picked;
+        // Clicking a source selects it for the live synth panel (sticky).
+        if picked.is_some() {
+            selected.0 = picked;
+        }
     }
 
     let Some(dragging) = drag.dragging else {

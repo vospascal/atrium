@@ -1,0 +1,36 @@
+# Generative open-field wind.
+#
+# This is an environmental Field emitter by construction: its placement is an
+# authoring/UI anchor only. Playback bypasses point distance, directional
+# panning, propagation paths, early reflections, and late-reverb send.
+synth: field_wind
+
+# Bounded wind-speed driver. Approximate Beaufort bands: light air 1-2 m/s,
+# light breeze 2-3, gentle breeze 4-5, moderate breeze 6-8. This preset ranges
+# from light air to moderate breeze; 2-5 is a useful gentler alternative.
+# Speed affects pressure, brightness, density, and turbulence together.
+min_speed: 1.0             # m/s: hard lower bound
+max_speed: 8.0             # m/s: hard upper bound
+change_time_min: 20.0      # seconds between slow weather destinations
+change_time_max: 50.0
+gust_duration_min: 3.0     # shorter positive surges layered over the weather
+gust_duration_max: 10.0
+turbulence_time_min: 0.12  # fastest eddy/ruffle trajectory
+turbulence_time_max: 0.80
+gust_strength: 0.35        # fraction of the speed range reserved for gusts
+rise_bias: 0.25            # >0 tends toward quicker rises and slower releases
+turbulence_depth: 0.20     # sub-second eddy modulation depth
+gust_brightness: 0.0       # optional extra spectral opening at gust peaks
+turbulence_brightness: 0.0 # optional spectral flutter from fast eddies
+
+# Time-varying noise-filterbank balance
+low_gain: 0.12             # 110-250 Hz pressure/body support
+body_gain: 1.0             # 140-950 Hz main wind body
+mid_gain: 0.40             # 450 Hz-1.6 kHz moving texture
+presence_gain: 1.10        # 1.7-6.5 kHz gust presence
+air_gain: 0.08             # 3.8-10 kHz air
+master_gain: 1.0
+
+reference_spl: 48.0        # nominal field level; gust dynamics rise within this bed
+directivity: omni          # ignored by Field rendering; retained for schema compatibility
+spread: 1.0                # UI description only; Field does not use MDAP spread
