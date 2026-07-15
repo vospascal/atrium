@@ -1,0 +1,11 @@
+[package]
+name = "voxel-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "Procedural voxel diorama sandbox — prototype for the Atrium visual layer"
+
+[dependencies]
+bevy = "0.18"
+dot_vox = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
