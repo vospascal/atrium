@@ -6,7 +6,7 @@
 //!
 //! Run:    `cargo run -p voxel-sandbox`
 //! Keys:   `Tab` switch orbit ↔ first-person view · `R` new plateau
-//!         hold `N` to fast-forward the day/night cycle
+//!         hold `N` to fast-forward the day/night cycle · `V` view-tuning panel
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
 //! Walk:   left-drag look around · WASD walk · Shift run
 //!
@@ -22,6 +22,7 @@ mod flame;
 mod mesh;
 mod noise;
 mod terrain_import;
+mod tweak_panel;
 mod vox_import;
 mod world;
 
@@ -35,6 +36,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use std::path::Path;
 
 use crate::flame::{FlameLight, FlameMaterial};
+use crate::tweak_panel::ViewTweaks;
 use crate::world::{
     Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
 };
@@ -90,7 +92,14 @@ fn main() {
         .init_resource::<OrbitCameraState>()
         .init_resource::<FirstPersonState>()
         .init_resource::<day_night::DayNightCycle>()
+        .init_resource::<ViewTweaks>()
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
+        .add_plugins(bevy_egui::EguiPlugin::default())
+        .add_systems(
+            bevy_egui::EguiPrimaryContextPass,
+            tweak_panel::view_tweak_panel,
+        )
+        .add_systems(Update, tweak_panel::toggle_panel)
         .add_systems(Startup, (setup_scene, initial_world_system))
         .add_systems(
             Update,
@@ -400,7 +409,6 @@ impl GroundHeights {
 }
 
 const PLATEAU_FLOOR_RENDER: f32 = world::PLATEAU_FLOOR as f32 * VOXEL_SIZE;
-const EYE_HEIGHT: f32 = 1.7;
 
 /// Press `R` for a fresh plateau.
 #[allow(clippy::too_many_arguments)]
@@ -509,19 +517,33 @@ fn toggle_view_mode(
 #[allow(clippy::too_many_arguments)]
 fn camera_system(
     view_mode: Res<ViewMode>,
+    tweaks: Res<ViewTweaks>,
     mut orbit_state: ResMut<OrbitCameraState>,
     mut walk_state: ResMut<FirstPersonState>,
     ground_heights: Option<Res<GroundHeights>>,
-    mut camera_query: Query<(&mut Transform, &mut DepthOfField, &mut DistanceFog), With<Camera3d>>,
+    mut camera_query: Query<
+        (
+            &mut Transform,
+            &mut Projection,
+            &mut DepthOfField,
+            &mut DistanceFog,
+        ),
+        With<Camera3d>,
+    >,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
 ) {
-    let Ok((mut camera_transform, mut depth_of_field, mut fog)) = camera_query.single_mut() else {
+    let Ok((mut camera_transform, mut projection, mut depth_of_field, mut fog)) =
+        camera_query.single_mut()
+    else {
         return;
     };
+
+    // The tweak panel owns the mouse while the cursor is over it.
+    let mouse_free = !tweaks.pointer_over_panel;
 
     match *view_mode {
         ViewMode::Orbit => {
@@ -532,10 +554,12 @@ fn camera_system(
                 &mouse_motion,
                 &mouse_scroll,
                 &time,
+                mouse_free,
             );
             *camera_transform = orbit_state.transform();
             depth_of_field.focal_distance = orbit_state.distance;
-            depth_of_field.aperture_f_stops = 0.06;
+            depth_of_field.aperture_f_stops = tweaks.orbit_aperture_f_stops;
+            set_fov(&mut projection, tweaks.orbit_fov_degrees);
             // Haze must stay behind the diorama from up here, or the whole
             // scene washes out; only the far rim picks up a little depth.
             fog.falloff = FogFalloff::Linear {
@@ -551,18 +575,26 @@ fn camera_system(
                 &keyboard,
                 &mouse_motion,
                 &time,
+                tweaks.eye_height,
+                mouse_free,
             );
             *camera_transform = Transform::from_translation(walk_state.position).with_rotation(
                 Quat::from_euler(EulerRot::YXZ, walk_state.yaw, walk_state.pitch, 0.0),
             );
-            // Deep focus while walking; the haze carries the mood instead.
-            depth_of_field.focal_distance = 12.0;
-            depth_of_field.aperture_f_stops = 1.5;
+            depth_of_field.focal_distance = tweaks.walk_focal_distance;
+            depth_of_field.aperture_f_stops = tweaks.walk_aperture_f_stops;
+            set_fov(&mut projection, tweaks.first_person_fov_degrees);
             fog.falloff = FogFalloff::Linear {
                 start: 35.0,
                 end: 170.0,
             };
         }
+    }
+}
+
+fn set_fov(projection: &mut Projection, fov_degrees: f32) {
+    if let Projection::Perspective(perspective) = projection {
+        perspective.fov = fov_degrees.to_radians();
     }
 }
 
@@ -573,17 +605,26 @@ fn orbit_update(
     mouse_motion: &AccumulatedMouseMotion,
     mouse_scroll: &AccumulatedMouseScroll,
     time: &Time,
+    mouse_free: bool,
 ) {
-    let motion_delta = mouse_motion.delta;
+    let motion_delta = if mouse_free {
+        mouse_motion.delta
+    } else {
+        Vec2::ZERO
+    };
 
     if mouse_buttons.pressed(MouseButton::Left) && motion_delta != Vec2::ZERO {
         camera_state.yaw -= motion_delta.x * 0.005;
         camera_state.pitch = (camera_state.pitch + motion_delta.y * 0.005).clamp(0.05, 1.5);
     }
 
-    let scroll_amount = match mouse_scroll.unit {
-        MouseScrollUnit::Line => mouse_scroll.delta.y,
-        MouseScrollUnit::Pixel => mouse_scroll.delta.y / 50.0,
+    let scroll_amount = if !mouse_free {
+        0.0
+    } else {
+        match mouse_scroll.unit {
+            MouseScrollUnit::Line => mouse_scroll.delta.y,
+            MouseScrollUnit::Pixel => mouse_scroll.delta.y / 50.0,
+        }
     };
     if scroll_amount != 0.0 {
         camera_state.distance =
@@ -617,6 +658,7 @@ fn orbit_update(
     camera_state.focus += pan;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn first_person_update(
     walk_state: &mut FirstPersonState,
     ground_heights: Option<&GroundHeights>,
@@ -624,8 +666,14 @@ fn first_person_update(
     keyboard: &ButtonInput<KeyCode>,
     mouse_motion: &AccumulatedMouseMotion,
     time: &Time,
+    eye_height: f32,
+    mouse_free: bool,
 ) {
-    let motion_delta = mouse_motion.delta;
+    let motion_delta = if mouse_free {
+        mouse_motion.delta
+    } else {
+        Vec2::ZERO
+    };
     if mouse_buttons.pressed(MouseButton::Left) && motion_delta != Vec2::ZERO {
         walk_state.yaw -= motion_delta.x * 0.003;
         walk_state.pitch = (walk_state.pitch - motion_delta.y * 0.003).clamp(-1.4, 1.4);
@@ -658,7 +706,7 @@ fn first_person_update(
     // Follow the terrain, smoothed so voxel steps don't jolt the camera.
     if let Some(heights) = ground_heights {
         let target_eye =
-            heights.ground_at(walk_state.position.x, walk_state.position.z) + EYE_HEIGHT;
+            heights.ground_at(walk_state.position.x, walk_state.position.z) + eye_height;
         let blend = (time.delta_secs() * 10.0).min(1.0);
         walk_state.position.y += (target_eye - walk_state.position.y) * blend;
     }

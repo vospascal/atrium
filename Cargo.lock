@@ -6283,6 +6283,7 @@ name = "voxel-sandbox"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_egui",
  "dot_vox",
  "serde",
  "serde_json",
