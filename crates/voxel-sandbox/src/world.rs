@@ -47,9 +47,11 @@ const NO_LAND: i32 = -1;
 // and tree belts — regardless of whether the heightmap came from the
 // built-in generator or a Blender export.
 
-/// Columns this close to water (and low enough) become sandy beach.
-const BEACH_DISTANCE_METERS: f32 = 2.5;
-const BEACH_MAX_ALTITUDE_METERS: f32 = 1.0;
+/// Beach width scales with biome dryness: the lush side keeps grass to
+/// the water's edge (a sliver of wet sand), the dry side gets real beaches.
+const BEACH_LUSH_METERS: f32 = 0.4;
+const BEACH_DRY_METERS: f32 = 2.6;
+const BEACH_MAX_ALTITUDE_METERS: f32 = 0.8;
 /// Steeper than this (rise/run, 1.0 = 45°) the soil gives way to bare rock.
 const ROCK_SLOPE_RATIO: f32 = 0.95;
 /// Above this altitude everything is bare rock (alpine zone)…
@@ -68,22 +70,58 @@ pub enum Voxel {
     TallGrass,
     Dirt,
     Sand,
+    /// Dark lake-bottom muck where the water is too deep for sand.
+    Sediment,
     Stone,
     Water,
     Trunk,
+    /// White bark with dark flecks (birches).
+    TrunkBirch,
     Leaves,
+    /// Second canopy tone: slab-built tree crowns alternate light/dark chunks.
+    LeavesDark,
+    /// Light yellow-green birch foliage — turns gold early in autumn.
+    LeavesBirch,
+    /// Dark blue-green conifer needles — barely turn with the seasons.
+    LeavesPine,
     FlowerPink,
     FlowerWhite,
     FlowerYellow,
-    /// Second canopy tone: slab-built tree crowns alternate light/dark chunks.
-    LeavesDark,
+    FlowerBlue,
+    /// Underwater grass tufts swaying on the river/lake bed.
+    WaterWeed,
+    /// Flat pad floating on the water surface.
+    LilyPad,
+    /// A pad carrying a white blossom.
+    LilyBloom,
+    /// Tall waterline grass, stacked a few voxels high.
+    Reed,
+    /// The brown seed head topping a cattail (Typha) stalk.
+    CattailHead,
     Snow,
 }
 
 impl Voxel {
-    /// Solid voxels occlude faces and cast ambient occlusion; air and water do not.
+    /// Solid voxels occlude faces and cast ambient occlusion. Air, water,
+    /// and thin ground cover (tufts, flowers, pads, reeds) do not — cover
+    /// renders below full voxel height, so treating it as solid would bake
+    /// shadows against gaps that are visibly open.
     pub fn is_solid(self) -> bool {
-        !matches!(self, Voxel::Air | Voxel::Water)
+        !matches!(
+            self,
+            Voxel::Air
+                | Voxel::Water
+                | Voxel::TallGrass
+                | Voxel::FlowerPink
+                | Voxel::FlowerWhite
+                | Voxel::FlowerYellow
+                | Voxel::FlowerBlue
+                | Voxel::WaterWeed
+                | Voxel::LilyPad
+                | Voxel::LilyBloom
+                | Voxel::Reed
+                | Voxel::CattailHead
+        )
     }
 }
 
@@ -108,6 +146,10 @@ pub struct VoxelWorld {
     slope: Vec<f32>,
     /// Per-column distance to the nearest water surface, meters.
     water_distance: Vec<f32>,
+    /// Per-tree color identity (0..1), stamped in a disc around each tree
+    /// and bush when it grows. The mesher derives hue variation and the
+    /// autumn turning order from it, so every tree has its own shade.
+    tree_tone: Vec<f32>,
 }
 
 impl VoxelWorld {
@@ -161,14 +203,22 @@ impl VoxelWorld {
         self.ground_cover[(z as usize) * WORLD_SIZE_X + x as usize]
     }
 
-    /// Fully procedural plateau (fBm heightmap + noise rim).
-    pub fn generate(seed: u32) -> Self {
-        Self::build(compute_heightmap(seed), seed, None)
+    /// Fully procedural plateau (fBm heightmap + noise rim). `season` runs
+    /// 0.0 (high summer) to 1.0 (deep autumn) and thins the flower meadows;
+    /// the mesher applies the matching foliage colors.
+    pub fn generate(seed: u32, season: f32) -> Self {
+        let mut heights = compute_heightmap(seed);
+        smooth_shorelines(&mut heights);
+        Self::build(heights, seed, season, None)
     }
 
     /// Plateau from a Blender-exported heightmap (meters relative to the
     /// water plane, NaN = open sky), with optional authored tree positions.
-    pub fn from_imported(terrain: &crate::terrain_import::ImportedTerrain, seed: u32) -> Self {
+    pub fn from_imported(
+        terrain: &crate::terrain_import::ImportedTerrain,
+        seed: u32,
+        season: f32,
+    ) -> Self {
         let mut heights = vec![NO_LAND; WORLD_SIZE_X * WORLD_SIZE_Z];
         for z in 0..WORLD_SIZE_Z {
             for x in 0..WORLD_SIZE_X {
@@ -199,19 +249,26 @@ impl VoxelWorld {
                     .collect()
             });
 
-        Self::build(heights, seed, tree_positions.as_deref())
+        Self::build(heights, seed, season, tree_positions.as_deref())
     }
 
     /// Shared tail of every construction path: fill columns from the
-    /// heightmap, then decorate and plant trees. (The fog ring hiding the
-    /// world edge is a shader effect, not voxels — see `fog_ring.rs`.)
-    fn build(heights: Vec<i32>, seed: u32, tree_positions: Option<&[(i32, i32)]>) -> Self {
+    /// heightmap, then decorate, plant trees, and scatter bushes and
+    /// boulders. (The fog ring hiding the world edge is a shader effect,
+    /// not voxels — see `fog_ring.rs`.)
+    fn build(
+        heights: Vec<i32>,
+        seed: u32,
+        season: f32,
+        tree_positions: Option<&[(i32, i32)]>,
+    ) -> Self {
         let mut world = Self {
             voxels: vec![Voxel::Air; WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z],
             dryness: compute_dryness_map(seed),
             ground_cover: compute_cover_map(seed),
             slope: compute_slope_map(&heights),
             water_distance: compute_water_distance_map(&heights),
+            tree_tone: vec![0.5; WORLD_SIZE_X * WORLD_SIZE_Z],
         };
 
         let underside = compute_underside_map(&heights, seed);
@@ -220,31 +277,56 @@ impl VoxelWorld {
                 let column_index = (z as usize) * WORLD_SIZE_X + x as usize;
                 let column_height = heights[column_index];
                 if column_height != NO_LAND {
-                    world.fill_column(x, z, column_height, underside[column_index]);
+                    world.fill_column(x, z, column_height, underside[column_index], seed);
                 }
             }
         }
 
-        world.decorate(&heights, seed);
+        world.decorate(&heights, seed, season);
         match tree_positions {
             Some(positions) => world.plant_trees_at(positions, &heights, seed),
             None => world.plant_trees(&heights, seed),
         }
+        world.scatter_bushes(&heights, seed);
+        world.scatter_boulders(&heights, seed);
         world
     }
 
     /// One terrain column: sculpted underside bottom, stone core, subsoil,
     /// biome-classified cap, water fill up to the water line.
-    fn fill_column(&mut self, x: i32, z: i32, column_height: i32, underside_y: i32) {
+    fn fill_column(&mut self, x: i32, z: i32, column_height: i32, underside_y: i32, seed: u32) {
         let altitude_meters = (column_height - WATER_LEVEL) as f32 * VOXEL_SIZE;
         let slope = self.slope_at(x, z);
         let water_distance = self.water_distance_at(x, z);
 
-        let cap = if altitude_meters > SNOW_LINE_METERS && slope <= SNOW_MAX_SLOPE_RATIO {
+        let cap = if column_height < WATER_LEVEL {
+            // Underwater bed: sandy shallows fading into dark sediment,
+            // with a noise-wavy boundary so the transition meanders.
+            let depth_meters = (WATER_LEVEL - column_height) as f32 * VOXEL_SIZE;
+            let sand_limit = 0.20
+                + 0.40
+                    * fractal_noise_2d(
+                        x as f32 * 0.03 + 7100.0,
+                        z as f32 * 0.03,
+                        2,
+                        seed.wrapping_add(67),
+                    );
+            if depth_meters <= sand_limit {
+                Voxel::Sand
+            } else {
+                Voxel::Sediment
+            }
+        } else if altitude_meters > SNOW_LINE_METERS && slope <= SNOW_MAX_SLOPE_RATIO {
             Voxel::Snow
-        } else if slope > ROCK_SLOPE_RATIO || altitude_meters > ALPINE_LINE_METERS {
+        } else if (slope > ROCK_SLOPE_RATIO && altitude_meters > 1.2)
+            || altitude_meters > ALPINE_LINE_METERS
+        {
+            // Slope-rock needs some altitude: lake and river banks are
+            // just steep enough to trip the rule, but they're soil, not
+            // cliffs — gray rings around every pond look wrong.
             Voxel::Stone
-        } else if water_distance <= BEACH_DISTANCE_METERS
+        } else if water_distance
+            <= BEACH_LUSH_METERS + (BEACH_DRY_METERS - BEACH_LUSH_METERS) * self.dryness_at(x, z)
             && altitude_meters <= BEACH_MAX_ALTITUDE_METERS
         {
             Voxel::Sand
@@ -253,6 +335,7 @@ impl VoxelWorld {
         };
         let subsoil = match cap {
             Voxel::Sand => Voxel::Sand,
+            Voxel::Sediment => Voxel::Sediment,
             Voxel::Grass => Voxel::Dirt,
             _ => Voxel::Stone,
         };
@@ -363,6 +446,36 @@ impl VoxelWorld {
         self.water_distance[(z as usize) * WORLD_SIZE_X + x as usize]
     }
 
+    /// Per-tree color identity at a column (0..1, 0.5 where no tree grew).
+    pub fn tree_tone_at(&self, x: i32, z: i32) -> f32 {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return 0.5;
+        }
+        self.tree_tone[(z as usize) * WORLD_SIZE_X + x as usize]
+    }
+
+    /// Stamp a tree's color identity in a disc around its base, so the
+    /// mesher can recover "which tree does this leaf belong to" from x/z.
+    fn stamp_tree_tone(&mut self, x: i32, z: i32, radius: i32, tone: f32) {
+        for offset_z in -radius..=radius {
+            for offset_x in -radius..=radius {
+                if offset_x * offset_x + offset_z * offset_z > radius * radius {
+                    continue;
+                }
+                let column_x = x + offset_x;
+                let column_z = z + offset_z;
+                if column_x < 0
+                    || column_z < 0
+                    || column_x >= WORLD_SIZE_X as i32
+                    || column_z >= WORLD_SIZE_Z as i32
+                {
+                    continue;
+                }
+                self.tree_tone[(column_z as usize) * WORLD_SIZE_X + column_x as usize] = tone;
+            }
+        }
+    }
+
     /// Trees at authored positions (e.g. a Blender scatter), still subject
     /// to the "dry grassland only" rule.
     fn plant_trees_at(&mut self, positions: &[(i32, i32)], heights: &[i32], seed: u32) {
@@ -372,12 +485,21 @@ impl VoxelWorld {
             }
             let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
             if column_height <= WATER_LEVEL + 1
-                || self.get(x, column_height, z) != Voxel::Grass
+                || !self.plantable_cap(x, column_height, z)
                 || !self.tree_can_grow(x, z, column_height)
             {
                 continue;
             }
             self.grow_tree(x, column_height, z, seed);
+        }
+    }
+
+    /// Trees root in grass anywhere, and in shoreline sand (willow country).
+    fn plantable_cap(&self, x: i32, column_height: i32, z: i32) -> bool {
+        match self.get(x, column_height, z) {
+            Voxel::Grass => true,
+            Voxel::Sand => self.water_distance_at(x, z) <= 4.0,
+            _ => false,
         }
     }
 
@@ -388,15 +510,123 @@ impl VoxelWorld {
         altitude_meters < TREE_LINE_METERS && self.slope_at(x, z) <= TREE_MAX_SLOPE_RATIO
     }
 
-    /// Tall grass tufts and flowers on dry grassland.
-    fn decorate(&mut self, heights: &[i32], seed: u32) {
+    /// Ground cover, above and below the waterline: tall grass and flower
+    /// meadows on land, reed belts at the shore, waterweed and lily pads
+    /// in the shallows.
+    fn decorate(&mut self, heights: &[i32], seed: u32, season: f32) {
         for z in 0..WORLD_SIZE_Z as i32 {
             for x in 0..WORLD_SIZE_X as i32 {
                 let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
-                if column_height <= WATER_LEVEL + 1 {
+                if column_height == NO_LAND {
                     continue;
                 }
-                if self.get(x, column_height, z) != Voxel::Grass {
+
+                // Underwater: reeds wade out into the shallowest water, weed
+                // tufts cover the bed, lily pads cluster on the surface.
+                if column_height < WATER_LEVEL {
+                    let depth = WATER_LEVEL - column_height;
+                    let roll = hash_to_unit(hash_3d(x, 902, z, seed.wrapping_add(53)));
+                    if depth <= 2 {
+                        // Same patch field as the shore reeds, so the belts
+                        // run continuously across the waterline. A thin
+                        // fringe grows everywhere along the edge; the patch
+                        // noise thickens it into full beds.
+                        let reed_patch = fractal_noise_2d(
+                            x as f32 * 0.06 + 9700.0,
+                            z as f32 * 0.06,
+                            3,
+                            seed.wrapping_add(77),
+                        );
+                        if roll < 0.12 + 0.30 * smoothstep(0.48, 0.70, reed_patch) {
+                            let stalk_hash = hash_3d(x, 904, z, seed.wrapping_add(55));
+                            if stalk_hash.is_multiple_of(3) {
+                                // Cattail: the stalk clears the surface and
+                                // carries a brown seed head.
+                                for y in (column_height + 1)..=(WATER_LEVEL + 2) {
+                                    self.set(x, y, z, Voxel::Reed);
+                                }
+                                self.set(x, WATER_LEVEL + 3, z, Voxel::CattailHead);
+                            } else {
+                                for y in (column_height + 1)..=(WATER_LEVEL + 1) {
+                                    self.set(x, y, z, Voxel::Reed);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    let weed_patch = fractal_noise_2d(
+                        x as f32 * 0.05 + 8300.0,
+                        z as f32 * 0.05,
+                        3,
+                        seed.wrapping_add(71),
+                    );
+                    let weed_chance = if depth >= 2 { 0.62 } else { 0.30 };
+                    if roll < weed_chance * smoothstep(0.42, 0.72, weed_patch) {
+                        self.set(x, column_height + 1, z, Voxel::WaterWeed);
+                    } else if (1..=6).contains(&depth) {
+                        let pad_patch = fractal_noise_2d(
+                            x as f32 * 0.045 + 9100.0,
+                            z as f32 * 0.045,
+                            3,
+                            seed.wrapping_add(73),
+                        );
+                        // Tight patches, dense inside: pads raft together in
+                        // clusters instead of sprinkling across the water.
+                        if pad_patch > 0.66
+                            && roll > 0.55
+                            && self.get(x, WATER_LEVEL + 1, z) == Voxel::Air
+                        {
+                            let pad = if hash_3d(x, 908, z, seed.wrapping_add(65)).is_multiple_of(6)
+                            {
+                                Voxel::LilyBloom
+                            } else {
+                                Voxel::LilyPad
+                            };
+                            self.set(x, WATER_LEVEL + 1, z, pad);
+                        }
+                    }
+                    continue;
+                }
+
+                let cap = self.get(x, column_height, z);
+                let altitude_meters = (column_height - WATER_LEVEL) as f32 * VOXEL_SIZE;
+                let water_distance = self.water_distance_at(x, z);
+
+                // Reed belt right at the waterline, on sand or grass.
+                if matches!(cap, Voxel::Sand | Voxel::Grass)
+                    && altitude_meters <= 0.6
+                    && water_distance <= 1.1
+                {
+                    let reed_patch = fractal_noise_2d(
+                        x as f32 * 0.06 + 9700.0,
+                        z as f32 * 0.06,
+                        3,
+                        seed.wrapping_add(77),
+                    );
+                    let roll = hash_to_unit(hash_3d(x, 903, z, seed.wrapping_add(54)));
+                    if roll < 0.18 + 0.35 * smoothstep(0.48, 0.70, reed_patch) {
+                        let stalk_hash = hash_3d(x, 904, z, seed.wrapping_add(55));
+                        let is_cattail = stalk_hash.is_multiple_of(3);
+                        let reed_height = if is_cattail {
+                            3 + ((stalk_hash >> 4) % 2) as i32
+                        } else {
+                            2 + (stalk_hash % 3) as i32
+                        };
+                        for step in 1..=reed_height {
+                            if self.get(x, column_height + step, z) == Voxel::Air {
+                                self.set(x, column_height + step, z, Voxel::Reed);
+                            }
+                        }
+                        if is_cattail
+                            && self.get(x, column_height + reed_height + 1, z) == Voxel::Air
+                        {
+                            self.set(x, column_height + reed_height + 1, z, Voxel::CattailHead);
+                        }
+                        continue;
+                    }
+                }
+
+                if cap != Voxel::Grass || column_height <= WATER_LEVEL {
                     continue;
                 }
                 // Grass grows in clumpy patches with bare dirt between them
@@ -404,8 +634,81 @@ impl VoxelWorld {
                 let lushness = 1.0 - self.dryness_at(x, z);
                 let clump = smoothstep(0.40, 0.70, self.cover_at(x, z)) * lushness;
                 let roll = hash_to_unit(hash_3d(x, 900, z, seed.wrapping_add(51)));
-                if roll < 0.60 * clump {
-                    self.set(x, column_height + 1, z, Voxel::TallGrass);
+
+                // Flower meadows: noise blobs where flowers bloom in dense
+                // two-tone drifts. Each ~9 m patch keeps one palette so the
+                // drifts read as intentional plantings, not confetti; autumn
+                // thins them out.
+                let meadow = fractal_noise_2d(
+                    x as f32 * 0.02 + 4700.0,
+                    z as f32 * 0.02,
+                    3,
+                    seed.wrapping_add(61),
+                );
+                let meadow_amount =
+                    smoothstep(0.60, 0.72, meadow) * lushness * (1.0 - season * 0.75);
+                if meadow_amount > 0.0 && roll < 0.14 * meadow_amount {
+                    let palette = hash_3d(
+                        x.div_euclid(72),
+                        905,
+                        z.div_euclid(72),
+                        seed.wrapping_add(62),
+                    ) % 4;
+                    let pick = hash_3d(x, 906, z, seed.wrapping_add(63));
+                    let flower = match palette {
+                        0 => {
+                            if pick.is_multiple_of(3) {
+                                Voxel::FlowerYellow
+                            } else {
+                                Voxel::FlowerWhite
+                            }
+                        }
+                        1 => {
+                            if pick.is_multiple_of(3) {
+                                Voxel::FlowerWhite
+                            } else {
+                                Voxel::FlowerPink
+                            }
+                        }
+                        2 => {
+                            if pick.is_multiple_of(3) {
+                                Voxel::FlowerWhite
+                            } else {
+                                Voxel::FlowerBlue
+                            }
+                        }
+                        _ => {
+                            if pick.is_multiple_of(2) {
+                                Voxel::FlowerYellow
+                            } else {
+                                Voxel::FlowerBlue
+                            }
+                        }
+                    };
+                    // Half the meadow flowers stand on a grass stalk, so
+                    // blossoms bob above the carpet instead of hiding in it.
+                    if pick % 5 < 2 {
+                        self.set(x, column_height + 1, z, Voxel::TallGrass);
+                        self.set(x, column_height + 2, z, flower);
+                    } else {
+                        self.set(x, column_height + 1, z, flower);
+                    }
+                } else if roll < 0.70 * clump {
+                    // Lush clumps grow knee-high: stalks stack 2-3 voxels
+                    // where the meadow is densest, single tufts elsewhere.
+                    let stalk_roll = hash_to_unit(hash_3d(x, 907, z, seed.wrapping_add(64)));
+                    let stalk_height = if stalk_roll < clump * 0.5 {
+                        3
+                    } else if stalk_roll < clump * 1.4 {
+                        2
+                    } else {
+                        1
+                    };
+                    for step in 1..=stalk_height {
+                        if self.get(x, column_height + step, z) == Voxel::Air {
+                            self.set(x, column_height + step, z, Voxel::TallGrass);
+                        }
+                    }
                 } else if clump > 0.3 && roll > 0.9975 {
                     let flower = match hash_3d(x, 901, z, seed.wrapping_add(52)) % 3 {
                         0 => Voxel::FlowerPink,
@@ -426,16 +729,19 @@ impl VoxelWorld {
         for z in 16..(WORLD_SIZE_Z as i32 - 16) {
             for x in 16..(WORLD_SIZE_X as i32 - 16) {
                 let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
-                if column_height <= WATER_LEVEL + 3 {
+                if column_height <= WATER_LEVEL + 1 {
                     continue;
                 }
-                if self.get(x, column_height, z) != Voxel::Grass
+                if !self.plantable_cap(x, column_height, z)
                     || !self.tree_can_grow(x, z, column_height)
                 {
                     continue;
                 }
-                // Dense stands on the lush side, lone trees near the desert.
-                let tree_probability = 0.0035 * (0.15 + 0.85 * (1.0 - self.dryness_at(x, z)));
+                // Dense stands on the lush side, lone trees near the desert,
+                // and a bonus along the waterline so shores get willows.
+                let shore_bonus = 1.0 + 1.5 * smoothstep(6.0, 2.0, self.water_distance_at(x, z));
+                let tree_probability =
+                    0.0035 * (0.15 + 0.85 * (1.0 - self.dryness_at(x, z))) * shore_bonus;
                 if hash_to_unit(hash_3d(x, 700, z, seed.wrapping_add(31))) >= tree_probability {
                     continue;
                 }
@@ -453,12 +759,40 @@ impl VoxelWorld {
         }
     }
 
+    /// Pick a species from the terrain and a per-tree hash, stamp the
+    /// tree's color identity, and grow it. Willows crowd the waterline,
+    /// pines take the heights and the dry side, birches mix into the rest.
     fn grow_tree(&mut self, x: i32, ground_height: i32, z: i32, seed: u32) {
         let tree_hash = hash_3d(x, 800, z, seed.wrapping_add(41));
-        // Chunky reference-style tree: thick 3×3 trunk and a crown built
-        // from overlapping rectangular slabs in two leaf tones, instead of
-        // a smooth ellipsoid blob. Tall — real trees tower over the 1.7 m
-        // first-person eye, they don't sit at shoulder height.
+        let tone = hash_to_unit(tree_hash.wrapping_mul(0x85EB_CA6B).wrapping_add(0x9E37));
+        let species_roll = hash_to_unit(tree_hash.wrapping_mul(0x27D4_EB2F));
+        let altitude_meters = (ground_height - WATER_LEVEL) as f32 * VOXEL_SIZE;
+        let water_distance = self.water_distance_at(x, z);
+        let dryness = self.dryness_at(x, z);
+
+        if water_distance <= 4.0 && species_roll < 0.70 {
+            self.stamp_tree_tone(x, z, 18, tone);
+            self.grow_willow(x, ground_height, z, tree_hash);
+        } else if altitude_meters > 6.5
+            || (dryness > 0.55 && species_roll < 0.45)
+            || species_roll > 0.90
+        {
+            self.stamp_tree_tone(x, z, 13, tone);
+            self.grow_pine(x, ground_height, z, tree_hash);
+        } else if species_roll < 0.30 {
+            self.stamp_tree_tone(x, z, 10, tone);
+            self.grow_birch(x, ground_height, z, tree_hash);
+        } else {
+            self.stamp_tree_tone(x, z, 22, tone);
+            self.grow_oak(x, ground_height, z, tree_hash);
+        }
+    }
+
+    /// Chunky reference-style tree: thick 3×3 trunk and a crown built
+    /// from overlapping rectangular slabs in two leaf tones, instead of
+    /// a smooth ellipsoid blob. Tall — real trees tower over the 1.7 m
+    /// first-person eye, they don't sit at shoulder height.
+    fn grow_oak(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
         let trunk_height = 34 + (tree_hash % 18) as i32;
 
         for y in 1..=trunk_height {
@@ -470,13 +804,15 @@ impl VoxelWorld {
         }
 
         let crown_center_y = ground_height + trunk_height + 5;
-        let slab_count = 7 + (tree_hash >> 8) % 4;
+        // Many small overlapping slabs beat a few huge ones: the crown
+        // silhouette turns puffy and irregular instead of flat-topped.
+        let slab_count = 12 + (tree_hash >> 8) % 5;
         for slab_index in 0..slab_count as i32 {
             let slab_hash = hash_3d(
                 x + slab_index * 37,
                 810 + slab_index,
                 z + slab_index * 53,
-                seed.wrapping_add(43),
+                tree_hash.wrapping_add(43),
             );
             let unit_a = hash_to_unit(slab_hash);
             let unit_b = hash_to_unit(slab_hash.wrapping_mul(0x9E37_79B9));
@@ -488,14 +824,14 @@ impl VoxelWorld {
                 (x, crown_center_y, z)
             } else {
                 (
-                    x + ((unit_a - 0.5) * 22.0) as i32,
-                    crown_center_y + ((unit_b - 0.5) * 14.0) as i32,
-                    z + ((unit_c - 0.5) * 22.0) as i32,
+                    x + ((unit_a - 0.5) * 20.0) as i32,
+                    crown_center_y + ((unit_b - 0.5) * 13.0) as i32,
+                    z + ((unit_c - 0.5) * 20.0) as i32,
                 )
             };
-            let half_extent_x = 6 + (unit_d * 6.0) as i32;
-            let half_extent_y = 3 + (unit_a * 3.0) as i32;
-            let half_extent_z = 6 + (unit_b * 6.0) as i32;
+            let half_extent_x = 3 + (unit_d * 5.0) as i32;
+            let half_extent_y = 2 + (unit_a * 2.0) as i32;
+            let half_extent_z = 3 + (unit_b * 5.0) as i32;
             let leaf_tone = if slab_hash & 1 == 0 {
                 Voxel::Leaves
             } else {
@@ -511,6 +847,313 @@ impl VoxelWorld {
                         if self.get(cell_x, cell_y, cell_z) == Voxel::Air {
                             self.set(cell_x, cell_y, cell_z, leaf_tone);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Slender white-barked tree: thin 2×2 trunk, a narrow stack of small
+    /// leaf blobs high up. Reads as a lighter accent between the oaks.
+    fn grow_birch(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
+        let trunk_height = 42 + (tree_hash % 16) as i32;
+        for y in 1..=trunk_height {
+            for offset_x in 0..=1 {
+                for offset_z in 0..=1 {
+                    self.set(
+                        x + offset_x,
+                        ground_height + y,
+                        z + offset_z,
+                        Voxel::TrunkBirch,
+                    );
+                }
+            }
+        }
+
+        let crown_base = ground_height + trunk_height - 12;
+        let blob_count = 5 + (tree_hash >> 7) % 3;
+        for blob_index in 0..blob_count as i32 {
+            let blob_hash = hash_3d(
+                x + blob_index * 41,
+                830 + blob_index,
+                z + blob_index * 59,
+                tree_hash.wrapping_add(47),
+            );
+            let unit_a = hash_to_unit(blob_hash);
+            let unit_b = hash_to_unit(blob_hash.wrapping_mul(0x9E37_79B9));
+            let unit_c = hash_to_unit(blob_hash.wrapping_mul(0x85EB_CA6B));
+
+            let center_x = x + ((unit_a - 0.5) * 9.0) as i32;
+            let center_y = crown_base + blob_index * 4 + ((unit_b - 0.5) * 4.0) as i32;
+            let center_z = z + ((unit_c - 0.5) * 9.0) as i32;
+            let half_extent = 3 + (unit_a * 3.0) as i32;
+            let half_extent_y = 2 + (unit_b * 2.0) as i32;
+
+            for offset_y in -half_extent_y..=half_extent_y {
+                for offset_z in -half_extent..=half_extent {
+                    for offset_x in -half_extent..=half_extent {
+                        let cell_x = center_x + offset_x;
+                        let cell_y = center_y + offset_y;
+                        let cell_z = center_z + offset_z;
+                        if self.get(cell_x, cell_y, cell_z) == Voxel::Air {
+                            self.set(cell_x, cell_y, cell_z, Voxel::LeavesBirch);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Conifer: stacked shrinking discs with one-voxel gaps between them —
+    /// the pagoda silhouette MagicaVoxel pines are known for.
+    fn grow_pine(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
+        let total_height = 46 + (tree_hash % 22) as i32;
+        for y in 1..=total_height {
+            for offset_x in 0..=1 {
+                for offset_z in 0..=1 {
+                    self.set(x + offset_x, ground_height + y, z + offset_z, Voxel::Trunk);
+                }
+            }
+        }
+
+        let canopy_bottom = 8 + ((tree_hash >> 5) % 6) as i32;
+        let base_extent = 8.0 + hash_to_unit(tree_hash.wrapping_mul(0xC2B2_AE35)) * 4.0;
+        let layer_count = (total_height - canopy_bottom) / 4;
+        for layer_index in 0..=layer_count {
+            let progress = layer_index as f32 / layer_count.max(1) as f32;
+            let extent = ((1.0 - progress) * base_extent) as i32 + 1;
+            let layer_y = ground_height + canopy_bottom + layer_index * 4;
+            for offset_y in 0..3 {
+                for offset_z in -extent..=extent {
+                    for offset_x in -extent..=extent {
+                        if offset_x * offset_x + offset_z * offset_z > extent * extent {
+                            continue;
+                        }
+                        let cell_x = x + offset_x;
+                        let cell_y = layer_y + offset_y;
+                        let cell_z = z + offset_z;
+                        if self.get(cell_x, cell_y, cell_z) == Voxel::Air {
+                            self.set(cell_x, cell_y, cell_z, Voxel::LeavesPine);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Waterline tree: short thick trunk, a wide dome, and leaf strands
+    /// hanging from the dome's rim — they drape until they meet ground or
+    /// water, like a willow trailing in a pond.
+    fn grow_willow(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
+        let trunk_height = 18 + (tree_hash % 8) as i32;
+        for y in 1..=trunk_height {
+            for offset_x in -1..=1 {
+                for offset_z in -1..=1 {
+                    self.set(x + offset_x, ground_height + y, z + offset_z, Voxel::Trunk);
+                }
+            }
+        }
+
+        let dome_center_y = ground_height + trunk_height + 3;
+        let dome_radius = 10 + (hash_to_unit(tree_hash.wrapping_mul(0x9E37_79B9)) * 4.0) as i32;
+        let dome_height = 4 + ((tree_hash >> 9) % 3) as i32;
+        for offset_y in -1..=dome_height {
+            for offset_z in -dome_radius..=dome_radius {
+                for offset_x in -dome_radius..=dome_radius {
+                    let planar = (offset_x * offset_x + offset_z * offset_z) as f32
+                        / (dome_radius * dome_radius) as f32;
+                    let vertical = if offset_y < 0 {
+                        0.0
+                    } else {
+                        (offset_y * offset_y) as f32 / (dome_height * dome_height) as f32
+                    };
+                    if planar + vertical > 1.05 {
+                        continue;
+                    }
+                    let cell_x = x + offset_x;
+                    let cell_y = dome_center_y + offset_y;
+                    let cell_z = z + offset_z;
+                    if self.get(cell_x, cell_y, cell_z) == Voxel::Air {
+                        let mottle = hash_3d(cell_x, cell_y, cell_z, tree_hash);
+                        self.set(
+                            cell_x,
+                            cell_y,
+                            cell_z,
+                            if mottle.is_multiple_of(3) {
+                                Voxel::LeavesDark
+                            } else {
+                                Voxel::Leaves
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Hanging strands around the dome rim.
+        let strand_count = 26;
+        for strand_index in 0..strand_count {
+            let strand_hash = hash_3d(x + strand_index, 850, z - strand_index, tree_hash);
+            if hash_to_unit(strand_hash) > 0.80 {
+                continue;
+            }
+            let angle = TAU * strand_index as f32 / strand_count as f32;
+            let strand_x = x + (angle.cos() * (dome_radius as f32 - 0.5)).round() as i32;
+            let strand_z = z + (angle.sin() * (dome_radius as f32 - 0.5)).round() as i32;
+            let length = 8 + (strand_hash % 14) as i32;
+            let strand_leaf = if strand_hash.is_multiple_of(3) {
+                Voxel::LeavesDark
+            } else {
+                Voxel::Leaves
+            };
+            for drop in 0..length {
+                let cell_y = dome_center_y - 1 - drop;
+                if self.get(strand_x, cell_y, strand_z) != Voxel::Air {
+                    break;
+                }
+                self.set(strand_x, cell_y, strand_z, strand_leaf);
+            }
+        }
+    }
+
+    /// Low leaf blobs scattered on grassland — undergrowth between trees,
+    /// denser near the water.
+    fn scatter_bushes(&mut self, heights: &[i32], seed: u32) {
+        for z in 8..(WORLD_SIZE_Z as i32 - 8) {
+            for x in 8..(WORLD_SIZE_X as i32 - 8) {
+                let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
+                if column_height <= WATER_LEVEL + 1 {
+                    continue;
+                }
+                if self.get(x, column_height, z) != Voxel::Grass || self.slope_at(x, z) > 0.85 {
+                    continue;
+                }
+                let lushness = 1.0 - self.dryness_at(x, z);
+                let shore_bonus = 1.0 + smoothstep(8.0, 2.0, self.water_distance_at(x, z));
+                let probability = 0.0009 * (0.2 + 0.8 * lushness) * shore_bonus;
+                if hash_to_unit(hash_3d(x, 710, z, seed.wrapping_add(33))) >= probability {
+                    continue;
+                }
+                self.grow_bush(x, column_height, z, seed);
+            }
+        }
+    }
+
+    fn grow_bush(&mut self, x: i32, ground_height: i32, z: i32, seed: u32) {
+        let bush_hash = hash_3d(x, 860, z, seed.wrapping_add(35));
+        let tone = hash_to_unit(bush_hash.wrapping_mul(0x85EB_CA6B));
+        let half_extent_x = 2 + (bush_hash % 3) as i32;
+        let half_extent_z = 2 + ((bush_hash >> 3) % 3) as i32;
+        let half_extent_y = 1 + ((bush_hash >> 6) % 2) as i32;
+        self.stamp_tree_tone(x, z, half_extent_x.max(half_extent_z) + 1, tone);
+
+        let center_y = ground_height + half_extent_y;
+        for offset_y in -half_extent_y..=half_extent_y {
+            for offset_z in -half_extent_z..=half_extent_z {
+                for offset_x in -half_extent_x..=half_extent_x {
+                    let roundness = (offset_x * offset_x) as f32
+                        / (half_extent_x * half_extent_x) as f32
+                        + (offset_y * offset_y) as f32 / (half_extent_y * half_extent_y) as f32
+                        + (offset_z * offset_z) as f32 / (half_extent_z * half_extent_z) as f32;
+                    let bumpy = hash_to_unit(hash_3d(
+                        x + offset_x,
+                        ground_height + offset_y,
+                        z + offset_z,
+                        bush_hash,
+                    ));
+                    if roundness > 0.85 + bumpy * 0.45 {
+                        continue;
+                    }
+                    let cell_x = x + offset_x;
+                    let cell_y = center_y + offset_y;
+                    let cell_z = z + offset_z;
+                    if self.get(cell_x, cell_y, cell_z) == Voxel::Air {
+                        self.set(
+                            cell_x,
+                            cell_y,
+                            cell_z,
+                            if bumpy > 0.6 {
+                                Voxel::LeavesDark
+                            } else {
+                                Voxel::Leaves
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Half-buried boulder clusters: lone field stones on the meadow,
+    /// rock gardens where the rocky-patch noise runs high, and shore
+    /// stones poking out of the shallows.
+    fn scatter_boulders(&mut self, heights: &[i32], seed: u32) {
+        for z in 8..(WORLD_SIZE_Z as i32 - 8) {
+            for x in 8..(WORLD_SIZE_X as i32 - 8) {
+                let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
+                if column_height == NO_LAND || column_height < WATER_LEVEL - 4 {
+                    continue;
+                }
+                let cap = self.get(x, column_height, z);
+                if !matches!(cap, Voxel::Grass | Voxel::Sand) {
+                    continue;
+                }
+                let rocky_patch = fractal_noise_2d(
+                    x as f32 * 0.012 + 6100.0,
+                    z as f32 * 0.012,
+                    3,
+                    seed.wrapping_add(37),
+                );
+                let patch_boost = 1.0 + 5.0 * smoothstep(0.58, 0.72, rocky_patch);
+                let probability = 0.00022 * patch_boost;
+                if hash_to_unit(hash_3d(x, 720, z, seed.wrapping_add(39))) >= probability {
+                    continue;
+                }
+                self.grow_boulder(x, column_height, z, seed);
+            }
+        }
+    }
+
+    fn grow_boulder(&mut self, x: i32, ground_height: i32, z: i32, seed: u32) {
+        let boulder_hash = hash_3d(x, 870, z, seed.wrapping_add(45));
+        let lobe_count = 1 + (boulder_hash % 3) as i32;
+        for lobe_index in 0..lobe_count {
+            let lobe_hash = hash_3d(x + lobe_index * 13, 871, z - lobe_index * 7, boulder_hash);
+            let radius = 2 + (lobe_hash % 3) as i32;
+            let lobe_x = x + ((hash_to_unit(lobe_hash) - 0.5) * 5.0) as i32;
+            let lobe_z =
+                z + ((hash_to_unit(lobe_hash.wrapping_mul(0x9E37_79B9)) - 0.5) * 5.0) as i32;
+            // Sunk about halfway, so it reads as bedded in the ground.
+            let lobe_y = ground_height + radius / 2;
+            for offset_y in -radius..=radius {
+                for offset_z in -radius..=radius {
+                    for offset_x in -radius..=radius {
+                        if offset_x * offset_x + offset_y * offset_y + offset_z * offset_z
+                            > radius * radius
+                        {
+                            continue;
+                        }
+                        self.set(
+                            lobe_x + offset_x,
+                            lobe_y + offset_y,
+                            lobe_z + offset_z,
+                            Voxel::Stone,
+                        );
+                    }
+                }
+            }
+            // A shore boulder may have displaced the water under a lily
+            // pad — clear any pad it stranded.
+            for offset_z in -radius..=radius {
+                for offset_x in -radius..=radius {
+                    let column_x = lobe_x + offset_x;
+                    let column_z = lobe_z + offset_z;
+                    if matches!(
+                        self.get(column_x, WATER_LEVEL + 1, column_z),
+                        Voxel::LilyPad | Voxel::LilyBloom
+                    ) && self.get(column_x, WATER_LEVEL, column_z) != Voxel::Water
+                    {
+                        self.set(column_x, WATER_LEVEL + 1, column_z, Voxel::Air);
                     }
                 }
             }
@@ -558,23 +1201,17 @@ fn compute_slope_map(heights: &[i32]) -> Vec<f32> {
     slope_map
 }
 
-/// Distance to the nearest water column, meters, via a two-pass chamfer
-/// transform (exact enough for beach bands at a fraction of a BFS's cost).
-fn compute_water_distance_map(heights: &[i32]) -> Vec<f32> {
+/// Two-pass chamfer distance transform: distance in meters from every
+/// column to the nearest seed column (exact enough for shore bands at a
+/// fraction of a BFS's cost).
+fn chamfer_distance_map(is_seed: impl Fn(usize) -> bool) -> Vec<f32> {
     const DIAGONAL: f32 = 1.414;
     let far = (WORLD_SIZE_X + WORLD_SIZE_Z) as f32;
-    let mut distances: Vec<f32> = heights
-        .iter()
-        .map(|&height| {
-            if height != NO_LAND && height < WATER_LEVEL {
-                0.0
-            } else {
-                far
-            }
-        })
+    let index_of = |x: usize, z: usize| z * WORLD_SIZE_X + x;
+    let mut distances: Vec<f32> = (0..WORLD_SIZE_X * WORLD_SIZE_Z)
+        .map(|index| if is_seed(index) { 0.0 } else { far })
         .collect();
 
-    let index_of = |x: usize, z: usize| z * WORLD_SIZE_X + x;
     for z in 0..WORLD_SIZE_Z {
         for x in 0..WORLD_SIZE_X {
             let mut best = distances[index_of(x, z)];
@@ -616,6 +1253,53 @@ fn compute_water_distance_map(heights: &[i32]) -> Vec<f32> {
         *distance *= VOXEL_SIZE;
     }
     distances
+}
+
+/// Distance to the nearest water column, meters.
+fn compute_water_distance_map(heights: &[i32]) -> Vec<f32> {
+    chamfer_distance_map(|index| heights[index] != NO_LAND && heights[index] < WATER_LEVEL)
+}
+
+/// Ease every shoreline (procedural terrain only — imported heightmaps
+/// keep their authored cliffs). Above the water line, land within the
+/// ramp may only rise gently, so banks meet the water as floodplain
+/// aprons instead of trench walls. Below it, the bed near the shore is
+/// held up to a shallow sunlit shelf — the grass visibly slides under
+/// the water before the bottom drops away, like a natural beach entry.
+fn smooth_shorelines(heights: &mut [i32]) {
+    /// Land flattens toward the water inside this ramp…
+    const LAND_RAMP_METERS: f32 = 7.0;
+    /// …down to roughly one voxel right at the waterline…
+    const SHORE_STEP_METERS: f32 = 0.10;
+    /// …and may rise back to this by the ramp's outer edge.
+    const LAND_RAMP_TOP_METERS: f32 = 3.5;
+    /// The underwater shelf reaches this far out from the shore…
+    const SHELF_RAMP_METERS: f32 = 4.0;
+    /// …starting at ankle depth right against the bank.
+    const SHELF_EDGE_DEPTH_METERS: f32 = 0.15;
+
+    let water_distance = compute_water_distance_map(heights);
+    let land_distance =
+        chamfer_distance_map(|index| heights[index] != NO_LAND && heights[index] >= WATER_LEVEL);
+
+    for index in 0..heights.len() {
+        let height = heights[index];
+        if height == NO_LAND {
+            continue;
+        }
+        if height >= WATER_LEVEL {
+            let ramp = (water_distance[index] / LAND_RAMP_METERS).min(1.0);
+            let allowed_altitude =
+                SHORE_STEP_METERS + (LAND_RAMP_TOP_METERS - SHORE_STEP_METERS) * ramp * ramp;
+            let allowed_height = WATER_LEVEL + (allowed_altitude / VOXEL_SIZE).round() as i32;
+            heights[index] = height.min(allowed_height);
+        } else {
+            let ramp = (land_distance[index] / SHELF_RAMP_METERS).min(1.0);
+            let allowed_depth = SHELF_EDGE_DEPTH_METERS + ramp * ramp * 1.6;
+            let shallowest_bed = WATER_LEVEL - (allowed_depth / VOXEL_SIZE).round() as i32;
+            heights[index] = height.max(shallowest_bed);
+        }
+    }
 }
 
 /// Bottom voxel of the island per column: at the rim the underside meets
@@ -658,65 +1342,17 @@ fn compute_underside_map(heights: &[i32], seed: u32) -> Vec<i32> {
 }
 
 /// Distance to the island's rim (the nearest `NO_LAND` column or the
-/// world border), meters — same two-pass chamfer as the water map.
+/// world border), meters.
 fn compute_edge_distance_map(heights: &[i32]) -> Vec<f32> {
-    const DIAGONAL: f32 = 1.414;
-    let far = (WORLD_SIZE_X + WORLD_SIZE_Z) as f32;
-    let index_of = |x: usize, z: usize| z * WORLD_SIZE_X + x;
-    let mut distances: Vec<f32> = heights
-        .iter()
-        .map(|&height| if height == NO_LAND { 0.0 } else { far })
-        .collect();
-    for z in 0..WORLD_SIZE_Z {
-        distances[index_of(0, z)] = 0.0;
-        distances[index_of(WORLD_SIZE_X - 1, z)] = 0.0;
-    }
-    for x in 0..WORLD_SIZE_X {
-        distances[index_of(x, 0)] = 0.0;
-        distances[index_of(x, WORLD_SIZE_Z - 1)] = 0.0;
-    }
-
-    for z in 0..WORLD_SIZE_Z {
-        for x in 0..WORLD_SIZE_X {
-            let mut best = distances[index_of(x, z)];
-            if x > 0 {
-                best = best.min(distances[index_of(x - 1, z)] + 1.0);
-            }
-            if z > 0 {
-                best = best.min(distances[index_of(x, z - 1)] + 1.0);
-                if x > 0 {
-                    best = best.min(distances[index_of(x - 1, z - 1)] + DIAGONAL);
-                }
-                if x + 1 < WORLD_SIZE_X {
-                    best = best.min(distances[index_of(x + 1, z - 1)] + DIAGONAL);
-                }
-            }
-            distances[index_of(x, z)] = best;
-        }
-    }
-    for z in (0..WORLD_SIZE_Z).rev() {
-        for x in (0..WORLD_SIZE_X).rev() {
-            let mut best = distances[index_of(x, z)];
-            if x + 1 < WORLD_SIZE_X {
-                best = best.min(distances[index_of(x + 1, z)] + 1.0);
-            }
-            if z + 1 < WORLD_SIZE_Z {
-                best = best.min(distances[index_of(x, z + 1)] + 1.0);
-                if x + 1 < WORLD_SIZE_X {
-                    best = best.min(distances[index_of(x + 1, z + 1)] + DIAGONAL);
-                }
-                if x > 0 {
-                    best = best.min(distances[index_of(x - 1, z + 1)] + DIAGONAL);
-                }
-            }
-            distances[index_of(x, z)] = best;
-        }
-    }
-
-    for distance in &mut distances {
-        *distance *= VOXEL_SIZE;
-    }
-    distances
+    chamfer_distance_map(|index| {
+        let x = index % WORLD_SIZE_X;
+        let z = index / WORLD_SIZE_X;
+        heights[index] == NO_LAND
+            || x == 0
+            || z == 0
+            || x == WORLD_SIZE_X - 1
+            || z == WORLD_SIZE_Z - 1
+    })
 }
 
 /// Grass-patch coverage: mid-frequency noise sharpened into clumps, so
@@ -794,7 +1430,8 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
             }
 
             // Gentle rolling hills: long slopes that terrace into single-voxel
-            // contour steps, not steep blocky terrain.
+            // contour steps, not steep blocky terrain. The base sits barely
+            // above the water line so shores flood wide and shallow.
             let rolling = fractal_noise_2d(world_x * 0.007, world_z * 0.007, 5, seed);
             let detail = fractal_noise_2d(world_x * 0.03, world_z * 0.03, 4, seed.wrapping_add(7));
             let hill_shape = rolling * 0.85 + detail * 0.15;
@@ -810,11 +1447,26 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
             let channel_distance = (river_noise - 0.5).abs();
             // Wide gentle banks (out to channel_width) around a full-depth
             // channel core, so the river reads as a river, not a slot canyon.
-            let channel_width = 0.085;
+            let channel_width = 0.105;
             if channel_distance < channel_width {
                 let carve = smoothstep(channel_width, 0.02, channel_distance);
-                let river_bed = (WATER_LEVEL - 3) as f32 - carve * 2.0;
+                let river_bed = (WATER_LEVEL - 4) as f32 - carve * 2.5;
                 height += (river_bed - height) * carve;
+            }
+
+            // Lake basins: broad noise blobs sink softly below the water
+            // line — ponds where they sit alone, widenings where the river
+            // crosses them. The smooth mask doubles as the gentle shore.
+            let lake_noise = fractal_noise_2d(
+                world_x * 0.004 + 2300.0,
+                world_z * 0.004,
+                3,
+                seed.wrapping_add(19),
+            );
+            let lake_amount = smoothstep(0.66, 0.80, lake_noise);
+            if lake_amount > 0.0 {
+                let lake_bed = (WATER_LEVEL - 2) as f32 - lake_amount * 3.0;
+                height += (lake_bed - height) * lake_amount;
             }
 
             heights[z * WORLD_SIZE_X + x] =
@@ -830,7 +1482,7 @@ mod tests {
 
     #[test]
     fn beyond_the_rim_is_open_sky() {
-        let world = VoxelWorld::generate(1);
+        let world = VoxelWorld::generate(1, 0.0);
         for &(x, z) in &[
             (1, 1),
             (WORLD_SIZE_X as i32 - 2, 1),
@@ -849,7 +1501,7 @@ mod tests {
 
     #[test]
     fn plateau_has_grass_and_river() {
-        let world = VoxelWorld::generate(1);
+        let world = VoxelWorld::generate(1, 0.0);
         let mut grass_count = 0;
         let mut water_count = 0;
         let mut underside_count = 0;
@@ -890,6 +1542,106 @@ mod tests {
     }
 
     #[test]
+    fn water_bodies_have_life() {
+        let world = VoxelWorld::generate(1, 0.0);
+        let mut weed_count = 0;
+        let mut pad_count = 0;
+        let mut reed_count = 0;
+        for z in 0..WORLD_SIZE_Z as i32 {
+            for x in 0..WORLD_SIZE_X as i32 {
+                for y in 0..WORLD_SIZE_Y as i32 {
+                    match world.get(x, y, z) {
+                        Voxel::WaterWeed => {
+                            weed_count += 1;
+                            assert!(
+                                world.get(x, y - 1, z).is_solid(),
+                                "waterweed floating at ({x},{y},{z})"
+                            );
+                        }
+                        Voxel::LilyPad | Voxel::LilyBloom => {
+                            pad_count += 1;
+                            assert_eq!(
+                                world.get(x, y - 1, z),
+                                Voxel::Water,
+                                "lily pad not on the water surface at ({x},{y},{z})"
+                            );
+                            assert_eq!(y, WATER_LEVEL + 1, "lily pad off the surface layer");
+                        }
+                        Voxel::Reed => reed_count += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(weed_count > 100, "expected waterweed, got {weed_count}");
+        assert!(pad_count > 5, "expected lily pads, got {pad_count}");
+        assert!(reed_count > 50, "expected shore reeds, got {reed_count}");
+    }
+
+    #[test]
+    fn shorelines_are_gentle() {
+        // The easing pass must leave no trench walls: ground right at the
+        // water's edge stays within a few voxels of the surface.
+        let world = VoxelWorld::generate(1, 0.0);
+        for z in 1..WORLD_SIZE_Z as i32 - 1 {
+            for x in 1..WORLD_SIZE_X as i32 - 1 {
+                if world.get(x, WATER_LEVEL, z) != Voxel::Water {
+                    continue;
+                }
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let neighbor_x = x + dx;
+                    let neighbor_z = z + dz;
+                    if world.get(neighbor_x, WATER_LEVEL, neighbor_z) == Voxel::Water {
+                        continue;
+                    }
+                    // Top of the neighbor's GROUND (ignoring trees,
+                    // boulders, and ground cover).
+                    let ground_top = (WATER_LEVEL - 8..WATER_LEVEL + 40).rev().find(|&y| {
+                        matches!(
+                            world.get(neighbor_x, y, neighbor_z),
+                            Voxel::Grass | Voxel::Sand | Voxel::Dirt | Voxel::Sediment
+                        )
+                    });
+                    if let Some(top) = ground_top {
+                        assert!(
+                            top - WATER_LEVEL <= 3,
+                            "trench wall at ({neighbor_x},{neighbor_z}): shore rises {} voxels \
+                             above the water surface",
+                            top - WATER_LEVEL
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forests_have_species_variety() {
+        let world = VoxelWorld::generate(1, 0.0);
+        let mut oak_leaves = 0;
+        let mut birch_leaves = 0;
+        let mut pine_leaves = 0;
+        for z in 0..WORLD_SIZE_Z as i32 {
+            for x in 0..WORLD_SIZE_X as i32 {
+                for y in WATER_LEVEL..WORLD_SIZE_Y as i32 {
+                    match world.get(x, y, z) {
+                        Voxel::Leaves | Voxel::LeavesDark => oak_leaves += 1,
+                        Voxel::LeavesBirch => birch_leaves += 1,
+                        Voxel::LeavesPine => pine_leaves += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(
+            oak_leaves > 500,
+            "expected oak/willow canopy, got {oak_leaves}"
+        );
+        assert!(birch_leaves > 200, "expected birches, got {birch_leaves}");
+        assert!(pine_leaves > 200, "expected pines, got {pine_leaves}");
+    }
+
+    #[test]
     fn biomes_derive_from_terrain_shape() {
         // Synthetic cone mountain: 24 m peak in the middle, shore at the
         // edges dipping underwater. Biomes must fall out of the shape alone.
@@ -905,7 +1657,7 @@ mod tests {
         }
         let terrain =
             crate::terrain_import::ImportedTerrain::from_grid(grid_side, grid_side, grid, None);
-        let world = VoxelWorld::from_imported(&terrain, 3);
+        let world = VoxelWorld::from_imported(&terrain, 3, 0.0);
 
         let mut snow_count = 0;
         let mut sand_count = 0;
@@ -918,11 +1670,11 @@ mod tests {
                         Voxel::Snow => snow_count += 1,
                         Voxel::Sand => sand_count += 1,
                         Voxel::Grass => grass_count += 1,
-                        Voxel::Trunk => {
+                        Voxel::Trunk | Voxel::TrunkBirch => {
                             // Only trunk BASES count — a legal tree's trunk
                             // may extend above the line, its roots may not.
-                            let is_base =
-                                self::VoxelWorld::get(&world, x, y - 1, z) != Voxel::Trunk;
+                            let below = self::VoxelWorld::get(&world, x, y - 1, z);
+                            let is_base = !matches!(below, Voxel::Trunk | Voxel::TrunkBirch);
                             let base_altitude_meters = (y - 1 - WATER_LEVEL) as f32 * VOXEL_SIZE;
                             if is_base && base_altitude_meters > TREE_LINE_METERS + 0.5 {
                                 trunk_above_tree_line += 1;
@@ -944,8 +1696,8 @@ mod tests {
 
     #[test]
     fn generation_is_deterministic() {
-        let world_a = VoxelWorld::generate(7);
-        let world_b = VoxelWorld::generate(7);
+        let world_a = VoxelWorld::generate(7, 0.0);
+        let world_b = VoxelWorld::generate(7, 0.0);
         assert_eq!(world_a.voxels, world_b.voxels);
     }
 }

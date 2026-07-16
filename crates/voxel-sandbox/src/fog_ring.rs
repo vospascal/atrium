@@ -144,7 +144,14 @@ pub fn update_fog_ring(
     weather: Res<WeatherState>,
     mut materials: ResMut<Assets<FogSeaMaterial>>,
     mut dome_query: Query<(&mut Transform, &MeshMaterial3d<FogSeaMaterial>), With<FogSea>>,
-    camera_query: Query<&Transform, (With<Camera3d>, Without<FogSea>)>,
+    camera_query: Query<
+        &Transform,
+        (
+            With<Camera3d>,
+            Without<FogSea>,
+            Without<crate::water::ReflectionCamera>,
+        ),
+    >,
 ) {
     let Ok((mut dome_transform, material_handle)) = dome_query.single_mut() else {
         return;

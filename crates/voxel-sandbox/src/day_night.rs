@@ -57,7 +57,9 @@ impl Default for DayNightCycle {
             .unwrap_or(0.85);
         Self {
             time_fraction: time_fraction.rem_euclid(1.0),
-            run_clock: true,
+            // Off by default: the light stays where you set it; the panel
+            // checkbox (or holding N) runs the cycle when wanted.
+            run_clock: false,
             moon_phase: moon_phase.clamp(0.0, 1.0),
         }
     }

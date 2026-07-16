@@ -59,6 +59,7 @@ pub fn spawn_waterfalls(
             })),
             Transform::default(),
             bevy::light::NotShadowCaster,
+            crate::water::reflective_layers(),
             crate::WorldMesh,
         ));
     }

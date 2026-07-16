@@ -44,9 +44,16 @@ fn group_of(voxel: Voxel) -> Option<MeshGroup> {
     match voxel {
         Voxel::Air => None,
         Voxel::Water => Some(MeshGroup::Water),
-        Voxel::TallGrass | Voxel::FlowerPink | Voxel::FlowerWhite | Voxel::FlowerYellow => {
-            Some(MeshGroup::Cover)
-        }
+        Voxel::TallGrass
+        | Voxel::FlowerPink
+        | Voxel::FlowerWhite
+        | Voxel::FlowerYellow
+        | Voxel::FlowerBlue
+        | Voxel::WaterWeed
+        | Voxel::LilyPad
+        | Voxel::LilyBloom
+        | Voxel::Reed
+        | Voxel::CattailHead => Some(MeshGroup::Cover),
         _ => Some(MeshGroup::Terrain),
     }
 }
@@ -101,13 +108,23 @@ impl MeshBuffers {
 }
 
 pub struct WorldMeshes {
-    pub terrain: Mesh,
+    /// Terrain faces above the water plane — the part a planar-reflection
+    /// camera may see (rendered on the reflection layer too).
+    pub terrain_above_water: Mesh,
+    /// Terrain faces at or below the water plane (river/lake beds, bank
+    /// walls under the surface). Excluded from reflections: the mirrored
+    /// camera sits under the plane, and underwater geometry would occlude
+    /// the very reflection it is trying to render.
+    pub terrain_below_water: Mesh,
     pub water: Mesh,
 }
 
-pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
-    let mut terrain_buffers = MeshBuffers::default();
+pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
+    let mut above_water_buffers = MeshBuffers::default();
+    let mut below_water_buffers = MeshBuffers::default();
     let mut water_buffers = MeshBuffers::default();
+    // Faces above this (voxel units) belong to the reflection-visible mesh.
+    let water_plane_y = (crate::world::WATER_LEVEL + 1) as f32 + 0.01;
 
     let half_x = WORLD_SIZE_X as f32 / 2.0;
     let half_z = WORLD_SIZE_Z as f32 / 2.0;
@@ -120,8 +137,8 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
                     continue;
                 };
                 let voxel_position = IVec3::new(x, y, z);
-                let base_color = voxel_color(world, voxel, x, y, z, seed);
-                let vertical_scale = visual_vertical_scale(voxel, x, y, z, seed);
+                let base_color = voxel_color(world, voxel, x, y, z, seed, season);
+                let vertical_scale = visual_vertical_scale(world, voxel, x, y, z, seed);
 
                 for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
                     let neighbor_position = voxel_position + normal;
@@ -133,9 +150,20 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
                     if group_of(neighbor) == Some(voxel_group) {
                         continue;
                     }
-                    // Water renders only its boundary against air; its faces
-                    // against terrain are invisible from any angle.
-                    if voxel_group == MeshGroup::Water && neighbor != Voxel::Air {
+                    // A blooming lily is a green pad with a white blossom
+                    // dot: only its top face takes the flower color.
+                    let face_base_color = if voxel == Voxel::LilyBloom && normal != IVec3::Y {
+                        voxel_color(world, Voxel::LilyPad, x, y, z, seed, season)
+                    } else {
+                        base_color
+                    };
+                    // Water renders only its boundary against air (or thin
+                    // ground cover — lily pads sit right on the surface and
+                    // must not punch holes in it); its faces against terrain
+                    // are invisible from any angle.
+                    if voxel_group == MeshGroup::Water
+                        && !(neighbor == Voxel::Air || group_of(neighbor) == Some(MeshGroup::Cover))
+                    {
                         continue;
                     }
 
@@ -181,10 +209,10 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
 
                         let brightness = 0.55 + 0.15 * occlusion_level as f32;
                         corner_colors[corner_index] = [
-                            base_color[0] * brightness,
-                            base_color[1] * brightness,
-                            base_color[2] * brightness,
-                            base_color[3],
+                            face_base_color[0] * brightness,
+                            face_base_color[1] * brightness,
+                            face_base_color[2] * brightness,
+                            face_base_color[3],
                         ];
                     }
 
@@ -193,7 +221,13 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
                         < occlusion_levels[1] + occlusion_levels[3];
 
                     let buffers = match voxel_group {
-                        MeshGroup::Terrain | MeshGroup::Cover => &mut terrain_buffers,
+                        MeshGroup::Terrain | MeshGroup::Cover => {
+                            if face_center.y > water_plane_y {
+                                &mut above_water_buffers
+                            } else {
+                                &mut below_water_buffers
+                            }
+                        }
                         MeshGroup::Water => &mut water_buffers,
                     };
                     buffers.add_quad(corners, normal.as_vec3(), corner_colors, flip_diagonal);
@@ -203,19 +237,46 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
     }
 
     WorldMeshes {
-        terrain: terrain_buffers.into_mesh(),
+        terrain_above_water: above_water_buffers.into_mesh(),
+        terrain_below_water: below_water_buffers.into_mesh(),
         water: water_buffers.into_mesh(),
     }
 }
 
 /// Visual height of a voxel as a fraction of a full cube. Ground cover is
 /// squashed — tufts vary per-cell so the meadow reads as an uneven carpet.
-fn visual_vertical_scale(voxel: Voxel, x: i32, y: i32, z: i32, seed: u32) -> f32 {
+fn visual_vertical_scale(
+    world: &VoxelWorld,
+    voxel: Voxel,
+    x: i32,
+    y: i32,
+    z: i32,
+    seed: u32,
+) -> f32 {
     match voxel {
         Voxel::TallGrass => {
-            0.30 + 0.40 * hash_to_unit(hash_3d(x, y ^ 0x51, z, seed.wrapping_add(9)))
+            // Stalks may stack (or carry a flower on top): those cells stay
+            // full height so the stalk is continuous; only the tip tapers.
+            if matches!(
+                world.get(x, y + 1, z),
+                Voxel::TallGrass
+                    | Voxel::FlowerPink
+                    | Voxel::FlowerWhite
+                    | Voxel::FlowerYellow
+                    | Voxel::FlowerBlue
+            ) {
+                1.0
+            } else {
+                0.30 + 0.40 * hash_to_unit(hash_3d(x, y ^ 0x51, z, seed.wrapping_add(9)))
+            }
         }
-        Voxel::FlowerPink | Voxel::FlowerWhite | Voxel::FlowerYellow => 0.55,
+        Voxel::FlowerPink | Voxel::FlowerWhite | Voxel::FlowerYellow | Voxel::FlowerBlue => 0.55,
+        Voxel::WaterWeed => {
+            0.35 + 0.55 * hash_to_unit(hash_3d(x, y ^ 0x67, z, seed.wrapping_add(11)))
+        }
+        Voxel::LilyPad => 0.10,
+        Voxel::LilyBloom => 0.22,
+        Voxel::CattailHead => 0.75,
         _ => 1.0,
     }
 }
@@ -241,48 +302,130 @@ fn lerp_rgb(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 /// Base color of one voxel: palette entry, biome-dryness gradient for
-/// vegetation, water depth tint, and per-voxel brightness jitter.
-fn voxel_color(world: &VoxelWorld, voxel: Voxel, x: i32, y: i32, z: i32, seed: u32) -> [f32; 4] {
+/// vegetation, waterside-lushness and altitude gradients, seasonal foliage
+/// (0 = summer, 1 = autumn, per-tree turning order from the tone map),
+/// water depth tint, and per-voxel brightness jitter.
+fn voxel_color(
+    world: &VoxelWorld,
+    voxel: Voxel,
+    x: i32,
+    y: i32,
+    z: i32,
+    seed: u32,
+    season: f32,
+) -> [f32; 4] {
     let jitter_roll = hash_to_unit(hash_3d(x, y, z, seed.wrapping_add(3)));
     let dryness = world.dryness_at(x, z);
+    let altitude_meters = (y - crate::world::WATER_LEVEL) as f32 * VOXEL_SIZE;
+    // Lush right at the water, paling as the land climbs.
+    let lushness = crate::noise::smoothstep(9.0, 1.5, world.water_distance_at(x, z));
+    let paling = crate::noise::smoothstep(3.5, 11.0, altitude_meters);
 
     let (srgb, alpha, jitter) = match voxel {
         Voxel::Grass => {
             // Ground reads as dirt between the grass clumps and olive-green
             // under them, before the biome dryness sweep.
             let patchiness = crate::noise::smoothstep(0.35, 0.70, world.cover_at(x, z));
-            let ground = lerp_rgb([0.50, 0.42, 0.30], [0.41, 0.52, 0.29], patchiness);
+            let mut ground = lerp_rgb([0.50, 0.42, 0.30], [0.41, 0.52, 0.29], patchiness);
+            ground = lerp_rgb(ground, [0.33, 0.50, 0.25], lushness * 0.55);
+            ground = lerp_rgb(ground, [0.57, 0.55, 0.33], paling * 0.55);
+            ground = lerp_rgb(ground, [0.63, 0.52, 0.28], season * 0.55);
             (
                 lerp_rgb(ground, [0.72, 0.64, 0.38], dryness),
                 1.0,
                 0.92 + 0.16 * jitter_roll,
             )
         }
-        Voxel::TallGrass => (
-            lerp_rgb([0.28, 0.45, 0.23], [0.66, 0.60, 0.35], dryness),
-            1.0,
-            0.85 + 0.30 * jitter_roll,
-        ),
-        Voxel::Leaves => (
-            lerp_rgb([0.36, 0.50, 0.27], [0.55, 0.55, 0.28], dryness),
-            1.0,
-            0.86 + 0.26 * jitter_roll,
-        ),
-        Voxel::LeavesDark => (
-            lerp_rgb([0.25, 0.39, 0.21], [0.46, 0.47, 0.24], dryness),
-            1.0,
-            0.86 + 0.26 * jitter_roll,
-        ),
+        Voxel::TallGrass => {
+            let mut blade = [0.28, 0.45, 0.23];
+            blade = lerp_rgb(blade, [0.23, 0.46, 0.20], lushness * 0.45);
+            blade = lerp_rgb(blade, [0.62, 0.50, 0.26], season * 0.60);
+            (
+                lerp_rgb(blade, [0.66, 0.60, 0.35], dryness),
+                1.0,
+                0.85 + 0.30 * jitter_roll,
+            )
+        }
+        Voxel::Leaves | Voxel::LeavesDark => {
+            // Oak / willow / bush canopy. Per-tree tone picks the summer
+            // hue, the autumn target color, and how early the tree turns.
+            let tone = world.tree_tone_at(x, z);
+            let summer = lerp_rgb([0.30, 0.47, 0.22], [0.46, 0.54, 0.25], tone);
+            let autumn = if tone < 0.33 {
+                [0.72, 0.30, 0.10]
+            } else if tone < 0.66 {
+                [0.80, 0.47, 0.12]
+            } else {
+                [0.82, 0.62, 0.16]
+            };
+            let turn_start = 0.15 + tone * 0.45;
+            let turn = crate::noise::smoothstep(turn_start, (turn_start + 0.30).min(1.0), season);
+            let mut leaf = lerp_rgb(summer, autumn, turn);
+            leaf = lerp_rgb(leaf, [0.55, 0.55, 0.28], dryness * 0.5);
+            if voxel == Voxel::LeavesDark {
+                leaf = [leaf[0] * 0.74, leaf[1] * 0.74, leaf[2] * 0.74];
+            }
+            (leaf, 1.0, 0.86 + 0.26 * jitter_roll)
+        }
+        Voxel::LeavesBirch => {
+            let tone = world.tree_tone_at(x, z);
+            let summer = lerp_rgb([0.47, 0.56, 0.26], [0.55, 0.60, 0.30], tone);
+            // Birches turn early and go pure gold.
+            let turn = crate::noise::smoothstep(tone * 0.35, tone * 0.35 + 0.25, season);
+            (
+                lerp_rgb(summer, [0.88, 0.66, 0.14], turn),
+                1.0,
+                0.86 + 0.26 * jitter_roll,
+            )
+        }
+        Voxel::LeavesPine => {
+            let tone = world.tree_tone_at(x, z);
+            let needles = lerp_rgb([0.18, 0.32, 0.23], [0.24, 0.37, 0.25], tone);
+            // Evergreens just dull a little as the year fades.
+            (
+                lerp_rgb(needles, [0.24, 0.33, 0.22], season * 0.35),
+                1.0,
+                0.88 + 0.22 * jitter_roll,
+            )
+        }
         Voxel::Dirt => ([0.44, 0.32, 0.22], 1.0, 0.92 + 0.16 * jitter_roll),
-        Voxel::Sand => ([0.86, 0.77, 0.55], 1.0, 0.94 + 0.12 * jitter_roll),
+        Voxel::Sand => {
+            // Wet sand below the waterline is darker, so the shallows stay
+            // believable through the transparent water.
+            if y <= crate::world::WATER_LEVEL {
+                ([0.38, 0.33, 0.23], 1.0, 0.94 + 0.12 * jitter_roll)
+            } else {
+                ([0.86, 0.77, 0.55], 1.0, 0.94 + 0.12 * jitter_roll)
+            }
+        }
+        Voxel::Sediment => ([0.17, 0.16, 0.11], 1.0, 0.90 + 0.20 * jitter_roll),
         Voxel::Stone => ([0.52, 0.52, 0.55], 1.0, 0.90 + 0.20 * jitter_roll),
         Voxel::Trunk => ([0.45, 0.31, 0.19], 1.0, 0.88 + 0.24 * jitter_roll),
+        Voxel::TrunkBirch => {
+            // White paper bark broken by dark horizontal flecks.
+            if jitter_roll < 0.16 {
+                ([0.20, 0.18, 0.16], 1.0, 0.90 + 0.20 * jitter_roll)
+            } else {
+                ([0.80, 0.78, 0.72], 1.0, 0.92 + 0.14 * jitter_roll)
+            }
+        }
         Voxel::FlowerPink => ([0.93, 0.55, 0.75], 1.0, 1.0),
         Voxel::FlowerWhite => ([0.96, 0.95, 0.90], 1.0, 1.0),
         Voxel::FlowerYellow => ([0.95, 0.83, 0.35], 1.0, 1.0),
+        Voxel::FlowerBlue => ([0.45, 0.52, 0.92], 1.0, 1.0),
+        Voxel::WaterWeed => ([0.15, 0.30, 0.19], 1.0, 0.80 + 0.40 * jitter_roll),
+        Voxel::LilyPad => ([0.26, 0.50, 0.24], 1.0, 0.90 + 0.20 * jitter_roll),
+        Voxel::LilyBloom => ([0.95, 0.92, 0.85], 1.0, 0.95 + 0.10 * jitter_roll),
+        Voxel::CattailHead => ([0.32, 0.18, 0.08], 1.0, 0.88 + 0.24 * jitter_roll),
+        Voxel::Reed => {
+            let stalk = lerp_rgb([0.55, 0.56, 0.31], [0.63, 0.52, 0.26], season * 0.5);
+            (stalk, 1.0, 0.85 + 0.30 * jitter_roll)
+        }
         Voxel::Snow => ([0.92, 0.93, 0.96], 1.0, 0.96 + 0.07 * jitter_roll),
         Voxel::Water => {
-            // Deeper water → darker blue and more opaque.
+            // Deeper water → darker blue and more opaque. (The water shader
+            // recomputes absorption from real optical depth; this vertex
+            // tint is its per-column fallback hint.)
             let mut depth = 0;
             while depth < 8 && world.get(x, y - 1 - depth, z) == Voxel::Water {
                 depth += 1;
@@ -323,10 +466,11 @@ mod tests {
 
     #[test]
     fn meshes_are_consistent_and_nonempty() {
-        let world = VoxelWorld::generate(1);
-        let world_meshes = build_meshes(&world, 1);
+        let world = VoxelWorld::generate(1, 0.0);
+        let world_meshes = build_meshes(&world, 1, 0.0);
         for (label, mesh) in [
-            ("terrain", &world_meshes.terrain),
+            ("terrain above water", &world_meshes.terrain_above_water),
+            ("terrain below water", &world_meshes.terrain_below_water),
             ("water", &world_meshes.water),
         ] {
             let vertex_count = mesh.count_vertices();

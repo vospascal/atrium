@@ -53,12 +53,15 @@ pub fn toggle_panel(keyboard: Res<ButtonInput<KeyCode>>, mut tweaks: ResMut<View
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn view_tweak_panel(
     mut contexts: EguiContexts,
     mut tweaks: ResMut<ViewTweaks>,
     mut cycle: ResMut<DayNightCycle>,
     mut weather: ResMut<WeatherState>,
     mut fireflies: ResMut<FireflySettings>,
+    mut season: ResMut<crate::Season>,
+    mut regenerate: ResMut<crate::RegenerateRequest>,
     view_mode: Res<ViewMode>,
 ) {
     if !tweaks.panel_visible {
@@ -189,6 +192,31 @@ pub fn view_tweak_panel(
                     .text("intensity"),
             );
             ui.small("weather eases in over a few seconds");
+
+            ui.separator();
+            ui.label("Season");
+            let season_response = ui.add(
+                egui::Slider::new(&mut season.0, 0.0..=1.0)
+                    .custom_formatter(|value, _| {
+                        let name = if value < 0.20 {
+                            "summer"
+                        } else if value < 0.55 {
+                            "late summer"
+                        } else if value < 0.85 {
+                            "autumn"
+                        } else {
+                            "deep autumn"
+                        };
+                        format!("{value:.2} {name}")
+                    })
+                    .text("foliage"),
+            );
+            if season_response.drag_stopped()
+                || (season_response.changed() && !season_response.dragged())
+            {
+                regenerate.requested = true;
+            }
+            ui.small("release to regrow the island (takes a few seconds)");
         });
 
     egui::Window::new("Fireflies")

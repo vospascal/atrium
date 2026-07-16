@@ -180,6 +180,7 @@ fn spawn_swarm_at(commands: &mut Commands, assets: &FireflyAssets, position: Vec
             shadows_enabled: false,
             ..default()
         },
+        crate::water::reflective_layers(),
         FireflySwarm,
     ));
 }
@@ -193,7 +194,7 @@ pub fn firefly_controls(
     view_mode: Res<ViewMode>,
     orbit_state: Res<crate::OrbitCameraState>,
     ground_heights: Option<Res<crate::GroundHeights>>,
-    camera_query: Query<&Transform, With<Camera3d>>,
+    camera_query: Query<&Transform, (With<Camera3d>, Without<crate::water::ReflectionCamera>)>,
     swarms: Query<Entity, With<FireflySwarm>>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyF) {

@@ -266,7 +266,14 @@ pub fn update_precipitation(
         ),
         With<PrecipitationVolume>,
     >,
-    camera_query: Query<&Transform, (With<Camera3d>, Without<PrecipitationVolume>)>,
+    camera_query: Query<
+        &Transform,
+        (
+            With<Camera3d>,
+            Without<PrecipitationVolume>,
+            Without<crate::water::ReflectionCamera>,
+        ),
+    >,
 ) {
     let Ok((mut transform, mut visibility, material_handle)) = volume_query.single_mut() else {
         return;

@@ -18,7 +18,8 @@
 //! moon phase (0.5 = full). Weather is scriptable too: `VOXEL_CLOUDS`,
 //! `VOXEL_CLOUD_TYPE` (0 stratus · 1 cumulus · 2 cirrus), `VOXEL_WIND`,
 //! `VOXEL_WIND_DIRECTION`, `VOXEL_FOG`, `VOXEL_PRECIP=rain|snow`,
-//! `VOXEL_PRECIP_INTENSITY`.
+//! `VOXEL_PRECIP_INTENSITY`. `VOXEL_SEASON=0.0..1.0` picks the foliage
+//! season (0 = high summer, 1 = deep autumn; also a panel slider).
 //!
 //! Set `VOXEL_SCREENSHOT_PATH=/some/dir/shot.png` to capture one frame and
 //! exit (automated visual verification); add `VOXEL_START_FIRST_PERSON=1`
@@ -35,6 +36,7 @@ mod sky;
 mod terrain_import;
 mod tweak_panel;
 mod vox_import;
+mod water;
 mod waterfall;
 mod weather;
 mod world;
@@ -96,6 +98,14 @@ fn main() {
             ..default()
         })
         .insert_resource(WorldSeed(1))
+        .insert_resource(Season(
+            std::env::var("VOXEL_SEASON")
+                .ok()
+                .and_then(|value| value.parse::<f32>().ok())
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0),
+        ))
+        .init_resource::<RegenerateRequest>()
         .insert_resource(world_source)
         .insert_resource(if start_first_person {
             ViewMode::FirstPerson
@@ -108,14 +118,24 @@ fn main() {
         .init_resource::<day_night::CelestialState>()
         .init_resource::<weather::WeatherState>()
         .init_resource::<fireflies::FireflySettings>()
+        .init_resource::<water::ReflectionTarget>()
         .init_resource::<ViewTweaks>()
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
         .add_plugins(MaterialPlugin::<sky::SkyMaterial>::default())
         .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
         .add_plugins(MaterialPlugin::<fog_ring::FogSeaMaterial>::default())
+        .add_plugins(MaterialPlugin::<water::WaterMaterial>::default())
         .add_plugins(MaterialPlugin::<waterfall::WaterfallMaterial>::default())
         .add_plugins(MaterialPlugin::<fireflies::FireflyMaterial>::default())
         .add_plugins(MaterialPlugin::<campfire::FireMaterial>::default())
+        // With two cameras (main + water reflection), bevy_egui must not
+        // guess which one hosts the UI — it picked the reflection camera
+        // and drew the panels INTO the water. The main camera carries
+        // `PrimaryEguiContext` explicitly instead.
+        .insert_resource(bevy_egui::EguiGlobalSettings {
+            auto_create_primary_context: false,
+            ..default()
+        })
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
@@ -130,6 +150,7 @@ fn main() {
                 sky::spawn_sky,
                 weather::spawn_precipitation,
                 fog_ring::spawn_fog_ring,
+                water::spawn_reflection_camera,
                 fireflies::setup_fireflies,
                 campfire::setup_campfires,
             ),
@@ -144,6 +165,8 @@ fn main() {
                 sky::update_sky,
                 fog_ring::update_fog_ring,
                 weather::update_precipitation,
+                water::update_reflection_camera,
+                water::update_water,
                 waterfall::update_waterfalls,
                 fireflies::firefly_controls,
                 fireflies::spawn_env_fireflies,
@@ -162,6 +185,20 @@ fn main() {
 #[derive(Resource)]
 struct WorldSeed(u32);
 
+/// Foliage season, 0.0 (high summer) to 1.0 (deep autumn). Baked into the
+/// vertex colors, so changing it rebuilds the island.
+#[derive(Resource)]
+struct Season(f32);
+
+/// Set by the panel (season slider) or the `R` key to rebuild the world on
+/// the next frame.
+#[derive(Resource, Default)]
+struct RegenerateRequest {
+    requested: bool,
+    /// `R` rolls a fresh island; the season slider keeps the current one.
+    bump_seed: bool,
+}
+
 /// Marker for everything despawned and rebuilt on regeneration.
 #[derive(Component)]
 struct WorldMesh;
@@ -178,6 +215,8 @@ fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
     commands.spawn((
         Camera3d::default(),
         bevy::render::view::Hdr,
+        // The UI belongs to this camera (see EguiGlobalSettings above).
+        bevy_egui::PrimaryEguiContext,
         // The volumetric fog sea reads scene depth to march up to terrain.
         bevy::core_pipeline::prepass::DepthPrepass,
         // Long lens + far camera: compressed perspective like tilt-shift
@@ -227,17 +266,23 @@ fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
             ..default()
         }
         .build(),
+        // The sun must also light the reflection camera's view.
+        water::reflective_layers(),
         day_night::SunLight,
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn initial_world_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
+    mut water_materials: ResMut<Assets<water::WaterMaterial>>,
     mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
+    reflection_target: Res<water::ReflectionTarget>,
     seed: Res<WorldSeed>,
+    season: Res<Season>,
     source: Res<WorldSource>,
 ) {
     spawn_world(
@@ -245,9 +290,12 @@ fn initial_world_system(
         &mut meshes,
         &mut materials,
         &mut flame_materials,
+        &mut water_materials,
         &mut waterfall_materials,
+        &reflection_target,
         &source,
         seed.0,
+        season.0,
     );
 }
 
@@ -257,28 +305,71 @@ fn spawn_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     flame_materials: &mut Assets<FlameMaterial>,
+    water_materials: &mut Assets<water::WaterMaterial>,
     waterfall_materials: &mut Assets<waterfall::WaterfallMaterial>,
+    reflection_target: &water::ReflectionTarget,
     source: &WorldSource,
     seed: u32,
+    season: f32,
 ) {
     let generation_start = std::time::Instant::now();
     let voxel_world = match source {
-        WorldSource::Procedural => VoxelWorld::generate(seed),
-        WorldSource::Imported(terrain) => VoxelWorld::from_imported(terrain, seed),
+        WorldSource::Procedural => VoxelWorld::generate(seed, season),
+        WorldSource::Imported(terrain) => VoxelWorld::from_imported(terrain, seed, season),
     };
     let generation_elapsed = generation_start.elapsed();
 
     let meshing_start = std::time::Instant::now();
-    let world_meshes = mesh::build_meshes(&voxel_world, seed);
+    let world_meshes = mesh::build_meshes(&voxel_world, seed, season);
     info!(
         "world generated in {generation_elapsed:.2?}, meshed in {:.2?} \
-         (terrain {} verts, water {} verts)",
+         (terrain {} + {} verts, water {} verts)",
         meshing_start.elapsed(),
-        world_meshes.terrain.count_vertices(),
+        world_meshes.terrain_above_water.count_vertices(),
+        world_meshes.terrain_below_water.count_vertices(),
         world_meshes.water.count_vertices(),
     );
 
     let ground_heights = GroundHeights::from_world(&voxel_world);
+
+    // Log the shoreline nearest the island center and the widest open
+    // water, so screenshot runs can aim at them (`VOXEL_POSITION`/`VOXEL_LOOK`).
+    const BUCKET_VOXELS: usize = 50;
+    let buckets_x = WORLD_SIZE_X / BUCKET_VOXELS;
+    let buckets_z = WORLD_SIZE_Z / BUCKET_VOXELS;
+    let mut bucket_water_counts = vec![0_u32; buckets_x * buckets_z];
+    let mut nearest_water: Option<(f32, f32, f32)> = None;
+    for z in 0..WORLD_SIZE_Z as i32 {
+        for x in 0..WORLD_SIZE_X as i32 {
+            if voxel_world.get(x, WATER_LEVEL, z) != Voxel::Water {
+                continue;
+            }
+            bucket_water_counts
+                [(z as usize / BUCKET_VOXELS) * buckets_x + (x as usize / BUCKET_VOXELS)] += 1;
+            let render_x = (x as f32 - WORLD_SIZE_X as f32 / 2.0) * VOXEL_SIZE;
+            let render_z = (z as f32 - WORLD_SIZE_Z as f32 / 2.0) * VOXEL_SIZE;
+            let distance_squared = render_x * render_x + render_z * render_z;
+            if nearest_water.is_none_or(|(_, _, best)| distance_squared < best) {
+                nearest_water = Some((render_x, render_z, distance_squared));
+            }
+        }
+    }
+    if let Some((render_x, render_z, _)) = nearest_water {
+        info!("nearest water to center: ({render_x:.1}, {render_z:.1})");
+    }
+    if let Some(densest_bucket) =
+        (0..bucket_water_counts.len()).max_by_key(|&bucket_index| bucket_water_counts[bucket_index])
+    {
+        let bucket_center_x =
+            ((densest_bucket % buckets_x) * BUCKET_VOXELS + BUCKET_VOXELS / 2) as f32;
+        let bucket_center_z =
+            ((densest_bucket / buckets_x) * BUCKET_VOXELS + BUCKET_VOXELS / 2) as f32;
+        info!(
+            "widest open water around: ({:.1}, {:.1})",
+            (bucket_center_x - WORLD_SIZE_X as f32 / 2.0) * VOXEL_SIZE,
+            (bucket_center_z - WORLD_SIZE_Z as f32 / 2.0) * VOXEL_SIZE,
+        );
+    }
 
     // Waterfalls wherever the river spills over the rim.
     let river_exits = voxel_world.river_rim_exits();
@@ -330,6 +421,7 @@ fn spawn_world(
                             Mesh3d(meshes.add(solid_mesh)),
                             MeshMaterial3d(terrain_material.clone()),
                             Transform::from_xyz(x, ground + lift, z),
+                            water::reflective_layers(),
                             WorldMesh,
                         ));
                     }
@@ -342,6 +434,7 @@ fn spawn_world(
                             })),
                             Transform::from_xyz(x, ground + lift, z),
                             NotShadowCaster,
+                            water::reflective_layers(),
                             WorldMesh,
                         ));
                         commands.spawn((
@@ -356,6 +449,7 @@ fn spawn_world(
                                 base_intensity: 60_000.0,
                             },
                             Transform::from_xyz(x, ground + lift + 0.6, z),
+                            water::reflective_layers(),
                             WorldMesh,
                         ));
                     }
@@ -366,15 +460,22 @@ fn spawn_world(
     }
 
     commands.insert_resource(ground_heights);
-    let water_material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.15,
-        alpha_mode: AlphaMode::Blend,
-        ..default()
+    let water_material = water_materials.add(water::WaterMaterial {
+        water: water::WaterUniform::default(),
+        reflection: reflection_target.image.clone(),
+        reflection_clip_from_world: Mat4::IDENTITY,
     });
 
+    // Above-water terrain is also on the reflection layer, so the mirrored
+    // camera sees it; underwater terrain stays main-view only.
     commands.spawn((
-        Mesh3d(meshes.add(world_meshes.terrain)),
+        Mesh3d(meshes.add(world_meshes.terrain_above_water)),
+        MeshMaterial3d(terrain_material.clone()),
+        water::reflective_layers(),
+        WorldMesh,
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(world_meshes.terrain_below_water)),
         MeshMaterial3d(terrain_material),
         WorldMesh,
     ));
@@ -420,7 +521,7 @@ impl GroundHeights {
                 for y in (0..WORLD_SIZE_Y as i32).rev() {
                     if matches!(
                         voxel_world.get(x, y, z),
-                        Voxel::Grass | Voxel::Dirt | Voxel::Sand | Voxel::Stone
+                        Voxel::Grass | Voxel::Dirt | Voxel::Sand | Voxel::Sediment | Voxel::Stone
                     ) {
                         // Wade on the river surface rather than its bed.
                         let ground = (y + 1).max(WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
@@ -450,23 +551,36 @@ impl GroundHeights {
 
 const PLATEAU_FLOOR_RENDER: f32 = world::PLATEAU_FLOOR as f32 * VOXEL_SIZE;
 
-/// Press `R` for a fresh plateau.
+/// Press `R` for a fresh plateau; the panel's season slider requests a
+/// rebuild of the current one.
 #[allow(clippy::too_many_arguments)]
 fn regenerate_system(
     keyboard: Res<ButtonInput<KeyCode>>,
+    mut request: ResMut<RegenerateRequest>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
+    mut water_materials: ResMut<Assets<water::WaterMaterial>>,
     mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
+    reflection_target: Res<water::ReflectionTarget>,
     mut seed: ResMut<WorldSeed>,
+    season: Res<Season>,
     source: Res<WorldSource>,
     existing_meshes: Query<Entity, With<WorldMesh>>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyR) {
+    if keyboard.just_pressed(KeyCode::KeyR) {
+        request.requested = true;
+        request.bump_seed = true;
+    }
+    if !request.requested {
         return;
     }
-    seed.0 = seed.0.wrapping_add(1);
+    if request.bump_seed {
+        seed.0 = seed.0.wrapping_add(1);
+    }
+    *request = RegenerateRequest::default();
+
     for entity in &existing_meshes {
         commands.entity(entity).despawn();
     }
@@ -477,9 +591,12 @@ fn regenerate_system(
         &mut meshes,
         &mut materials,
         &mut flame_materials,
+        &mut water_materials,
         &mut waterfall_materials,
+        &reflection_target,
         &source,
         seed.0,
+        season.0,
     );
 }
 
@@ -540,8 +657,17 @@ impl Default for FirstPersonState {
                 ))
             })
             .unwrap_or((0.7, -0.05));
+        // `VOXEL_POSITION=x,z` (render-space meters) places the walker —
+        // pair with the "nearest water" log to shoot shoreline close-ups.
+        let (start_x, start_z) = std::env::var("VOXEL_POSITION")
+            .ok()
+            .and_then(|value| {
+                let (x_text, z_text) = value.split_once(',')?;
+                Some((x_text.trim().parse().ok()?, z_text.trim().parse().ok()?))
+            })
+            .unwrap_or((0.0, 0.0));
         Self {
-            position: Vec3::new(0.0, 13.0, 0.0),
+            position: Vec3::new(start_x, 13.0, start_z),
             yaw,
             pitch,
         }

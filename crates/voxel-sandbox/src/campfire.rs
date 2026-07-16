@@ -220,6 +220,7 @@ fn spawn_campfire_at(commands: &mut Commands, assets: &CampfireAssets, position:
         Mesh3d(assets.stones_mesh.clone()),
         MeshMaterial3d(assets.stone_material.clone()),
         Transform::from_translation(position),
+        crate::water::reflective_layers(),
         Campfire,
     ));
     commands.spawn((
@@ -227,6 +228,7 @@ fn spawn_campfire_at(commands: &mut Commands, assets: &CampfireAssets, position:
         MeshMaterial3d(assets.fire_material.clone()),
         Transform::from_translation(position),
         bevy::light::NotShadowCaster,
+        crate::water::reflective_layers(),
         Campfire,
     ));
     commands.spawn((
@@ -241,6 +243,7 @@ fn spawn_campfire_at(commands: &mut Commands, assets: &CampfireAssets, position:
             base_intensity: 60_000.0,
         },
         Transform::from_translation(position + Vec3::Y * 0.6),
+        crate::water::reflective_layers(),
         Campfire,
     ));
 }
@@ -254,7 +257,7 @@ pub fn campfire_controls(
     view_mode: Res<ViewMode>,
     orbit_state: Res<crate::OrbitCameraState>,
     ground_heights: Option<Res<crate::GroundHeights>>,
-    camera_query: Query<&Transform, With<Camera3d>>,
+    camera_query: Query<&Transform, (With<Camera3d>, Without<crate::water::ReflectionCamera>)>,
     campfires: Query<Entity, With<Campfire>>,
 ) {
     if !keyboard.just_pressed(KeyCode::KeyC) {

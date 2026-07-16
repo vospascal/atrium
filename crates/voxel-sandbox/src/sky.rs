@@ -71,6 +71,8 @@ pub fn spawn_sky(
         })),
         Transform::default(),
         bevy::light::NotShadowCaster,
+        // The sky must exist in water reflections too.
+        crate::water::reflective_layers(),
         SkyDome,
     ));
 }
@@ -130,7 +132,14 @@ pub fn update_sky(
     mut materials: ResMut<Assets<SkyMaterial>>,
     cycle: Res<crate::day_night::DayNightCycle>,
     mut dome_query: Query<(&mut Transform, &MeshMaterial3d<SkyMaterial>), With<SkyDome>>,
-    camera_query: Query<&Transform, (With<Camera3d>, Without<SkyDome>)>,
+    camera_query: Query<
+        &Transform,
+        (
+            With<Camera3d>,
+            Without<SkyDome>,
+            Without<crate::water::ReflectionCamera>,
+        ),
+    >,
 ) {
     let Ok((mut dome_transform, material_handle)) = dome_query.single_mut() else {
         return;
