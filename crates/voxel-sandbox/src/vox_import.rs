@@ -22,6 +22,18 @@ pub struct VoxModel {
 }
 
 impl VoxModel {
+    /// Build a model procedurally (code-generated props like the campfire
+    /// stone ring) — engine axes, y up, `cells` indexed `(y * z + z) * x`.
+    pub fn from_cells(size_x: i32, size_y: i32, size_z: i32, cells: Vec<Option<[f32; 4]>>) -> Self {
+        assert_eq!(cells.len(), (size_x * size_y * size_z) as usize);
+        Self {
+            size_x,
+            size_y,
+            size_z,
+            cells,
+        }
+    }
+
     fn index(&self, x: i32, y: i32, z: i32) -> usize {
         ((y * self.size_z + z) * self.size_x + x) as usize
     }

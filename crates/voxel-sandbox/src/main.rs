@@ -7,6 +7,7 @@
 //! Run:    `cargo run -p voxel-sandbox`
 //! Keys:   `Tab` switch orbit ↔ first-person view · `R` new island
 //!         `F` release a firefly swarm · `Shift+F` clear swarms
+//!         `C` place a campfire · `Shift+C` clear campfires
 //!         hold `N` to fast-forward the day/night cycle
 //!         `V` tuning panels (view + time & weather)
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
@@ -23,6 +24,7 @@
 //! exit (automated visual verification); add `VOXEL_START_FIRST_PERSON=1`
 //! to capture from the walking view.
 
+mod campfire;
 mod day_night;
 mod fireflies;
 mod flame;
@@ -113,6 +115,7 @@ fn main() {
         .add_plugins(MaterialPlugin::<fog_ring::FogSeaMaterial>::default())
         .add_plugins(MaterialPlugin::<waterfall::WaterfallMaterial>::default())
         .add_plugins(MaterialPlugin::<fireflies::FireflyMaterial>::default())
+        .add_plugins(MaterialPlugin::<campfire::FireMaterial>::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
@@ -128,6 +131,7 @@ fn main() {
                 weather::spawn_precipitation,
                 fog_ring::spawn_fog_ring,
                 fireflies::setup_fireflies,
+                campfire::setup_campfires,
             ),
         )
         .add_systems(
@@ -144,6 +148,8 @@ fn main() {
                 fireflies::firefly_controls,
                 fireflies::spawn_env_fireflies,
                 fireflies::update_fireflies,
+                campfire::campfire_controls,
+                campfire::spawn_env_campfires,
                 regenerate_system,
                 flame::flicker_flame_lights,
                 screenshot_system,
