@@ -1,17 +1,19 @@
 //! Culled-face voxel meshing with baked ambient occlusion.
 //!
-//! Produces three meshes per world: opaque terrain, clouds (separate
-//! material so they can glow slightly and skip shadow casting), and
-//! translucent water. Colors are per-vertex: material palette × biome
-//! dryness gradient × per-voxel hash jitter × corner ambient occlusion —
-//! the combination that gives the MagicaVoxel-render look.
+//! Produces two meshes per world: opaque terrain and translucent water.
+//! Colors are per-vertex: material palette × biome dryness gradient ×
+//! per-voxel hash jitter × corner ambient occlusion (plus a baked bounce
+//! that keeps the island's underside readable) — the combination that
+//! gives the MagicaVoxel-render look.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::noise::{hash_3d, hash_to_unit};
-use crate::world::{Voxel, VoxelWorld, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
+use crate::world::{
+    Voxel, VoxelWorld, PLATEAU_FLOOR, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
+};
 
 /// (face normal, tangent_1, tangent_2) with `tangent_1 × tangent_2 = normal`,
 /// so corners emitted counter-clockwise face outward.
@@ -35,7 +37,6 @@ enum MeshGroup {
     /// touch can never be culled as hidden — neither theirs nor a
     /// full-height neighbor's, or see-through holes open up.
     Cover,
-    Cloud,
     Water,
 }
 
@@ -43,7 +44,6 @@ fn group_of(voxel: Voxel) -> Option<MeshGroup> {
     match voxel {
         Voxel::Air => None,
         Voxel::Water => Some(MeshGroup::Water),
-        Voxel::Cloud => Some(MeshGroup::Cloud),
         Voxel::TallGrass | Voxel::FlowerPink | Voxel::FlowerWhite | Voxel::FlowerYellow => {
             Some(MeshGroup::Cover)
         }
@@ -102,13 +102,11 @@ impl MeshBuffers {
 
 pub struct WorldMeshes {
     pub terrain: Mesh,
-    pub clouds: Mesh,
     pub water: Mesh,
 }
 
 pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
     let mut terrain_buffers = MeshBuffers::default();
-    let mut cloud_buffers = MeshBuffers::default();
     let mut water_buffers = MeshBuffers::default();
 
     let half_x = WORLD_SIZE_X as f32 / 2.0;
@@ -196,7 +194,6 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
 
                     let buffers = match voxel_group {
                         MeshGroup::Terrain | MeshGroup::Cover => &mut terrain_buffers,
-                        MeshGroup::Cloud => &mut cloud_buffers,
                         MeshGroup::Water => &mut water_buffers,
                     };
                     buffers.add_quad(corners, normal.as_vec3(), corner_colors, flip_diagonal);
@@ -207,7 +204,6 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32) -> WorldMeshes {
 
     WorldMeshes {
         terrain: terrain_buffers.into_mesh(),
-        clouds: cloud_buffers.into_mesh(),
         water: water_buffers.into_mesh(),
     }
 }
@@ -284,7 +280,6 @@ fn voxel_color(world: &VoxelWorld, voxel: Voxel, x: i32, y: i32, z: i32, seed: u
         Voxel::FlowerPink => ([0.93, 0.55, 0.75], 1.0, 1.0),
         Voxel::FlowerWhite => ([0.96, 0.95, 0.90], 1.0, 1.0),
         Voxel::FlowerYellow => ([0.95, 0.83, 0.35], 1.0, 1.0),
-        Voxel::Cloud => ([0.97, 0.97, 1.0], 1.0, 0.985 + 0.03 * jitter_roll),
         Voxel::Snow => ([0.92, 0.93, 0.96], 1.0, 0.96 + 0.07 * jitter_roll),
         Voxel::Water => {
             // Deeper water → darker blue and more opaque.
@@ -302,10 +297,21 @@ fn voxel_color(world: &VoxelWorld, voxel: Voxel, x: i32, y: i32, z: i32, seed: u
         Voxel::Air => unreachable!("air voxels are never meshed"),
     };
 
+    // Baked bounce light: the island's sculpted underside faces away from
+    // the sun and would render near-black on ambient alone. The cloud sea
+    // below is a bright diffuse reflector, so brighten those voxels in the
+    // vertex colors — same philosophy as the baked AO. Slightly warm, so
+    // the belly reads as sunlit earth.
+    let underside_bounce = if y < PLATEAU_FLOOR {
+        [1.9, 1.75, 1.6]
+    } else {
+        [1.0, 1.0, 1.0]
+    };
+
     let linear = Color::srgb(
-        (srgb[0] * jitter).min(1.0),
-        (srgb[1] * jitter).min(1.0),
-        (srgb[2] * jitter).min(1.0),
+        (srgb[0] * jitter * underside_bounce[0]).min(1.0),
+        (srgb[1] * jitter * underside_bounce[1]).min(1.0),
+        (srgb[2] * jitter * underside_bounce[2]).min(1.0),
     )
     .to_linear();
     [linear.red, linear.green, linear.blue, alpha]
@@ -321,7 +327,6 @@ mod tests {
         let world_meshes = build_meshes(&world, 1);
         for (label, mesh) in [
             ("terrain", &world_meshes.terrain),
-            ("clouds", &world_meshes.clouds),
             ("water", &world_meshes.water),
         ] {
             let vertex_count = mesh.count_vertices();

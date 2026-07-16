@@ -1,10 +1,11 @@
 //! Procedural voxel plateau generation.
 //!
-//! One seed → one sky-plateau diorama ("a nice sized scene and nothing
-//! more"): a floating slab of land with an organic noise-jittered rim,
-//! rolling fBm hills on top, a carved river with sandy banks, layered
-//! dirt/stone cliff sides, decoration passes (tall grass, flowers,
-//! blob-canopy trees), and a ring of puffy voxel clouds hugging the edge.
+//! One seed → one floating-island diorama ("a nice sized scene and
+//! nothing more"): an organic noise-jittered rim, rolling fBm hills on
+//! top, a carved river with sandy banks, layered dirt/stone cliff sides,
+//! a sculpted underside tapering toward the island's center, and
+//! decoration passes (tall grass, flowers, blob-canopy trees). The fog
+//! sea the island floats in is a shader effect (`fog_ring.rs`).
 
 use std::f32::consts::TAU;
 
@@ -13,14 +14,21 @@ use bevy::math::IVec3;
 use crate::noise::{fractal_noise_2d, hash_3d, hash_to_unit, smoothstep};
 
 pub const WORLD_SIZE_X: usize = 1000;
-pub const WORLD_SIZE_Y: usize = 192;
+pub const WORLD_SIZE_Y: usize = 256;
 pub const WORLD_SIZE_Z: usize = 1000;
 
 /// River surface sits at the top of this voxel layer.
-pub const WATER_LEVEL: i32 = 20;
+pub const WATER_LEVEL: i32 = 84;
 
-/// The plateau slab starts here; below is open sky (hidden by the clouds).
-pub const PLATEAU_FLOOR: i32 = 8;
+/// The island's flat rim underside starts here; toward the center the
+/// sculpted underside tapers well below (floating-island bottom).
+pub const PLATEAU_FLOOR: i32 = 72;
+
+/// The underside reaches at most this far below the rim lip (meters),
+/// deepest toward the island's center.
+const UNDERSIDE_MAX_DEPTH_METERS: f32 = 8.0;
+/// How fast the underside deepens per meter of distance from the rim.
+const UNDERSIDE_TAPER_RATIO: f32 = 0.55;
 
 /// Land occupies roughly this fraction of the half-extent, modulated by noise.
 const LAND_RADIUS_FRACTION: f32 = 0.72;
@@ -67,7 +75,6 @@ pub enum Voxel {
     FlowerPink,
     FlowerWhite,
     FlowerYellow,
-    Cloud,
     /// Second canopy tone: slab-built tree crowns alternate light/dark chunks.
     LeavesDark,
     Snow,
@@ -187,7 +194,8 @@ impl VoxelWorld {
     }
 
     /// Shared tail of every construction path: fill columns from the
-    /// heightmap, then decorate, plant trees, and ring with clouds.
+    /// heightmap, then decorate and plant trees. (The fog ring hiding the
+    /// world edge is a shader effect, not voxels — see `fog_ring.rs`.)
     fn build(heights: Vec<i32>, seed: u32, tree_positions: Option<&[(i32, i32)]>) -> Self {
         let mut world = Self {
             voxels: vec![Voxel::Air; WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z],
@@ -197,11 +205,13 @@ impl VoxelWorld {
             water_distance: compute_water_distance_map(&heights),
         };
 
+        let underside = compute_underside_map(&heights, seed);
         for z in 0..WORLD_SIZE_Z as i32 {
             for x in 0..WORLD_SIZE_X as i32 {
-                let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
+                let column_index = (z as usize) * WORLD_SIZE_X + x as usize;
+                let column_height = heights[column_index];
                 if column_height != NO_LAND {
-                    world.fill_column(x, z, column_height);
+                    world.fill_column(x, z, column_height, underside[column_index]);
                 }
             }
         }
@@ -211,13 +221,12 @@ impl VoxelWorld {
             Some(positions) => world.plant_trees_at(positions, &heights, seed),
             None => world.plant_trees(&heights, seed),
         }
-        world.add_clouds(seed);
         world
     }
 
-    /// One terrain column: stone core, subsoil, biome-classified cap, water
-    /// fill up to the water line.
-    fn fill_column(&mut self, x: i32, z: i32, column_height: i32) {
+    /// One terrain column: sculpted underside bottom, stone core, subsoil,
+    /// biome-classified cap, water fill up to the water line.
+    fn fill_column(&mut self, x: i32, z: i32, column_height: i32, underside_y: i32) {
         let altitude_meters = (column_height - WATER_LEVEL) as f32 * VOXEL_SIZE;
         let slope = self.slope_at(x, z);
         let water_distance = self.water_distance_at(x, z);
@@ -239,11 +248,15 @@ impl VoxelWorld {
             _ => Voxel::Stone,
         };
 
-        for y in PLATEAU_FLOOR..=column_height {
+        for y in underside_y..=column_height {
             let voxel = if y == column_height {
                 cap
             } else if y >= column_height - 3 {
                 subsoil
+            } else if y < underside_y + 10 {
+                // Earthy skin on the island's sculpted bottom, so the
+                // underside reads as hanging soil rather than gray slab.
+                Voxel::Dirt
             } else {
                 Voxel::Stone
             };
@@ -423,77 +436,6 @@ impl VoxelWorld {
             }
         }
     }
-
-    /// Ring of puffy clouds hugging the plateau rim, hiding where the land ends.
-    fn add_clouds(&mut self, seed: u32) {
-        let cloud_count = 340;
-        let half_x = WORLD_SIZE_X as f32 / 2.0;
-        let half_z = WORLD_SIZE_Z as f32 / 2.0;
-
-        for cloud_index in 0..cloud_count {
-            let cloud_hash = hash_3d(cloud_index, 500, 0, seed.wrapping_add(61));
-            let angle_jitter = (hash_to_unit(cloud_hash) - 0.5) * TAU / cloud_count as f32 * 1.5;
-            let angle = cloud_index as f32 / cloud_count as f32 * TAU + angle_jitter;
-
-            let radius_fraction =
-                0.74 + hash_to_unit(hash_3d(cloud_index, 501, 0, seed.wrapping_add(62))) * 0.18;
-            let center_x = (half_x + angle.cos() * radius_fraction * half_x) as i32;
-            let center_z = (half_z + angle.sin() * radius_fraction * half_z) as i32;
-            let center_y = 14
-                + (hash_to_unit(hash_3d(cloud_index, 502, 0, seed.wrapping_add(63))) * 10.0) as i32;
-            let cloud_radius =
-                9.0 + hash_to_unit(hash_3d(cloud_index, 503, 0, seed.wrapping_add(64))) * 8.0;
-
-            self.grow_blob(
-                center_x,
-                center_y,
-                center_z,
-                cloud_radius,
-                0.55,
-                0.45,
-                Voxel::Cloud,
-                seed.wrapping_add(65),
-            );
-        }
-    }
-
-    /// Fill an ellipsoid blob with hash-jittered edges into air cells.
-    #[allow(clippy::too_many_arguments)]
-    fn grow_blob(
-        &mut self,
-        center_x: i32,
-        center_y: i32,
-        center_z: i32,
-        radius: f32,
-        vertical_scale: f32,
-        edge_jitter_strength: f32,
-        voxel: Voxel,
-        jitter_seed: u32,
-    ) {
-        let extent = radius.ceil() as i32;
-        for offset_y in -extent..=extent {
-            for offset_z in -extent..=extent {
-                for offset_x in -extent..=extent {
-                    let cell_x = center_x + offset_x;
-                    let cell_y = center_y + offset_y;
-                    let cell_z = center_z + offset_z;
-                    let normalized_distance = ((offset_x as f32).powi(2)
-                        + (offset_y as f32 / vertical_scale).powi(2)
-                        + (offset_z as f32).powi(2))
-                    .sqrt()
-                        / radius;
-                    let edge_jitter = (hash_to_unit(hash_3d(cell_x, cell_y, cell_z, jitter_seed))
-                        - 0.5)
-                        * edge_jitter_strength;
-                    if normalized_distance + edge_jitter < 1.0
-                        && self.get(cell_x, cell_y, cell_z) == Voxel::Air
-                    {
-                        self.set(cell_x, cell_y, cell_z, voxel);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Steepness per column: height span over a 5×5 window, as rise over run
@@ -553,6 +495,107 @@ fn compute_water_distance_map(heights: &[i32]) -> Vec<f32> {
         .collect();
 
     let index_of = |x: usize, z: usize| z * WORLD_SIZE_X + x;
+    for z in 0..WORLD_SIZE_Z {
+        for x in 0..WORLD_SIZE_X {
+            let mut best = distances[index_of(x, z)];
+            if x > 0 {
+                best = best.min(distances[index_of(x - 1, z)] + 1.0);
+            }
+            if z > 0 {
+                best = best.min(distances[index_of(x, z - 1)] + 1.0);
+                if x > 0 {
+                    best = best.min(distances[index_of(x - 1, z - 1)] + DIAGONAL);
+                }
+                if x + 1 < WORLD_SIZE_X {
+                    best = best.min(distances[index_of(x + 1, z - 1)] + DIAGONAL);
+                }
+            }
+            distances[index_of(x, z)] = best;
+        }
+    }
+    for z in (0..WORLD_SIZE_Z).rev() {
+        for x in (0..WORLD_SIZE_X).rev() {
+            let mut best = distances[index_of(x, z)];
+            if x + 1 < WORLD_SIZE_X {
+                best = best.min(distances[index_of(x + 1, z)] + 1.0);
+            }
+            if z + 1 < WORLD_SIZE_Z {
+                best = best.min(distances[index_of(x, z + 1)] + 1.0);
+                if x + 1 < WORLD_SIZE_X {
+                    best = best.min(distances[index_of(x + 1, z + 1)] + DIAGONAL);
+                }
+                if x > 0 {
+                    best = best.min(distances[index_of(x - 1, z + 1)] + DIAGONAL);
+                }
+            }
+            distances[index_of(x, z)] = best;
+        }
+    }
+
+    for distance in &mut distances {
+        *distance *= VOXEL_SIZE;
+    }
+    distances
+}
+
+/// Bottom voxel of the island per column: at the rim the underside meets
+/// the lip (`PLATEAU_FLOOR`); toward the center it tapers down like a
+/// floating island's belly, roughened by noise and the occasional hanging
+/// spike of rock.
+fn compute_underside_map(heights: &[i32], seed: u32) -> Vec<i32> {
+    let edge_distance = compute_edge_distance_map(heights);
+    let mut underside = vec![PLATEAU_FLOOR; WORLD_SIZE_X * WORLD_SIZE_Z];
+    for z in 0..WORLD_SIZE_Z {
+        for x in 0..WORLD_SIZE_X {
+            let column_index = z * WORLD_SIZE_X + x;
+            if heights[column_index] == NO_LAND {
+                continue;
+            }
+            let taper = (edge_distance[column_index] * UNDERSIDE_TAPER_RATIO)
+                .min(UNDERSIDE_MAX_DEPTH_METERS);
+            let roughness = fractal_noise_2d(
+                x as f32 * 0.02 + 5200.0,
+                z as f32 * 0.02,
+                3,
+                seed.wrapping_add(41),
+            );
+            let mut depth_meters = taper * (0.6 + 0.8 * roughness);
+            // Occasional hanging spikes, like roots of rock.
+            let spike = fractal_noise_2d(
+                x as f32 * 0.085 + 6400.0,
+                z as f32 * 0.085,
+                2,
+                seed.wrapping_add(43),
+            );
+            if spike > 0.78 && taper > 1.0 {
+                depth_meters += (spike - 0.78) * 22.0;
+            }
+            let depth_voxels = (depth_meters / VOXEL_SIZE).round() as i32;
+            underside[column_index] = (PLATEAU_FLOOR - depth_voxels).max(6);
+        }
+    }
+    underside
+}
+
+/// Distance to the island's rim (the nearest `NO_LAND` column or the
+/// world border), meters — same two-pass chamfer as the water map.
+fn compute_edge_distance_map(heights: &[i32]) -> Vec<f32> {
+    const DIAGONAL: f32 = 1.414;
+    let far = (WORLD_SIZE_X + WORLD_SIZE_Z) as f32;
+    let index_of = |x: usize, z: usize| z * WORLD_SIZE_X + x;
+    let mut distances: Vec<f32> = heights
+        .iter()
+        .map(|&height| if height == NO_LAND { 0.0 } else { far })
+        .collect();
+    for z in 0..WORLD_SIZE_Z {
+        distances[index_of(0, z)] = 0.0;
+        distances[index_of(WORLD_SIZE_X - 1, z)] = 0.0;
+    }
+    for x in 0..WORLD_SIZE_X {
+        distances[index_of(x, 0)] = 0.0;
+        distances[index_of(x, WORLD_SIZE_Z - 1)] = 0.0;
+    }
+
     for z in 0..WORLD_SIZE_Z {
         for x in 0..WORLD_SIZE_X {
             let mut best = distances[index_of(x, z)];
@@ -675,7 +718,7 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
             let rolling = fractal_noise_2d(world_x * 0.007, world_z * 0.007, 5, seed);
             let detail = fractal_noise_2d(world_x * 0.03, world_z * 0.03, 4, seed.wrapping_add(7));
             let hill_shape = rolling * 0.85 + detail * 0.15;
-            let mut height = 24.0 + hill_shape * 12.0;
+            let mut height = (WATER_LEVEL + 4) as f32 + hill_shape * 12.0;
 
             // River: carve wherever the channel noise crosses its midline.
             let river_noise = fractal_noise_2d(
@@ -717,19 +760,19 @@ mod tests {
             for y in 0..WORLD_SIZE_Y as i32 {
                 let voxel = world.get(x, y, z);
                 assert!(
-                    matches!(voxel, Voxel::Air | Voxel::Cloud),
-                    "expected sky/cloud at corner ({x},{y},{z}), got {voxel:?}"
+                    matches!(voxel, Voxel::Air),
+                    "expected open sky at corner ({x},{y},{z}), got {voxel:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn plateau_has_grass_river_and_clouds() {
+    fn plateau_has_grass_and_river() {
         let world = VoxelWorld::generate(1);
         let mut grass_count = 0;
         let mut water_count = 0;
-        let mut cloud_count = 0;
+        let mut underside_count = 0;
         for z in 0..WORLD_SIZE_Z as i32 {
             for x in 0..WORLD_SIZE_X as i32 {
                 for y in 0..WORLD_SIZE_Y as i32 {
@@ -742,8 +785,11 @@ mod tests {
                             );
                         }
                         Voxel::Water => water_count += 1,
-                        Voxel::Cloud => cloud_count += 1,
-                        _ => {}
+                        voxel => {
+                            if voxel.is_solid() && y < PLATEAU_FLOOR {
+                                underside_count += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -757,8 +803,9 @@ mod tests {
             "expected a river, got {water_count} water voxels"
         );
         assert!(
-            cloud_count > 2000,
-            "expected a cloud ring, got {cloud_count} cloud voxels"
+            underside_count > 100_000,
+            "expected a sculpted floating-island underside below the rim lip, \
+             got {underside_count} voxels"
         );
     }
 

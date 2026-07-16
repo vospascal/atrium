@@ -1,17 +1,22 @@
 //! Voxel plateau sandbox — prototype for the Atrium visual layer.
 //!
-//! A procedural sky-plateau diorama: rolling voxel terrain with a
+//! A procedural floating-island diorama: rolling voxel terrain with a
 //! lush→desert biome gradient, a carved river, slab-canopy trees, and a
-//! ring of clouds hiding the world edge.
+//! sculpted rock underside, hovering above a volumetric fog sea.
 //!
 //! Run:    `cargo run -p voxel-sandbox`
 //! Keys:   `Tab` switch orbit ↔ first-person view · `R` new plateau
-//!         hold `N` to fast-forward the day/night cycle · `V` view-tuning panel
+//!         hold `N` to fast-forward the day/night cycle
+//!         `V` tuning panels (view + time & weather)
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
 //! Walk:   left-drag look around · WASD walk · Shift run
 //!
 //! `VOXEL_TIME=0.0..1.0` sets the starting time of day (0 = midnight,
-//! 0.25 = sunrise, 0.5 = noon, 0.75 = sunset).
+//! 0.25 = sunrise, 0.5 = noon, 0.75 = sunset); `VOXEL_MOON=0.0..1.0` the
+//! moon phase (0.5 = full). Weather is scriptable too: `VOXEL_CLOUDS`,
+//! `VOXEL_CLOUD_TYPE` (0 stratus · 1 cumulus · 2 cirrus), `VOXEL_WIND`,
+//! `VOXEL_WIND_DIRECTION`, `VOXEL_FOG`, `VOXEL_PRECIP=rain|snow`,
+//! `VOXEL_PRECIP_INTENSITY`.
 //!
 //! Set `VOXEL_SCREENSHOT_PATH=/some/dir/shot.png` to capture one frame and
 //! exit (automated visual verification); add `VOXEL_START_FIRST_PERSON=1`
@@ -19,11 +24,14 @@
 
 mod day_night;
 mod flame;
+mod fog_ring;
 mod mesh;
 mod noise;
+mod sky;
 mod terrain_import;
 mod tweak_panel;
 mod vox_import;
+mod weather;
 mod world;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
@@ -92,21 +100,39 @@ fn main() {
         .init_resource::<OrbitCameraState>()
         .init_resource::<FirstPersonState>()
         .init_resource::<day_night::DayNightCycle>()
+        .init_resource::<day_night::CelestialState>()
+        .init_resource::<weather::WeatherState>()
         .init_resource::<ViewTweaks>()
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
+        .add_plugins(MaterialPlugin::<sky::SkyMaterial>::default())
+        .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
+        .add_plugins(MaterialPlugin::<fog_ring::FogSeaMaterial>::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
             tweak_panel::view_tweak_panel,
         )
         .add_systems(Update, tweak_panel::toggle_panel)
-        .add_systems(Startup, (setup_scene, initial_world_system))
+        .add_systems(
+            Startup,
+            (
+                setup_scene,
+                initial_world_system,
+                sky::spawn_sky,
+                weather::spawn_precipitation,
+                fog_ring::spawn_fog_ring,
+            ),
+        )
         .add_systems(
             Update,
             (
                 toggle_view_mode,
                 camera_system,
+                weather::ease_weather,
                 day_night::advance_day_night,
+                sky::update_sky,
+                fog_ring::update_fog_ring,
+                weather::update_precipitation,
                 regenerate_system,
                 flame::flicker_flame_lights,
                 screenshot_system,
@@ -135,6 +161,8 @@ fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
     commands.spawn((
         Camera3d::default(),
         bevy::render::view::Hdr,
+        // The volumetric fog sea reads scene depth to march up to terrain.
+        bevy::core_pipeline::prepass::DepthPrepass,
         // Long lens + far camera: compressed perspective like tilt-shift
         // miniature photography (the wide-angle default kept everything
         // in focus and made the diorama look like a fisheye game map).
@@ -224,10 +252,9 @@ fn spawn_world(
     let world_meshes = mesh::build_meshes(&voxel_world, seed);
     info!(
         "world generated in {generation_elapsed:.2?}, meshed in {:.2?} \
-         (terrain {} verts, clouds {} verts, water {} verts)",
+         (terrain {} verts, water {} verts)",
         meshing_start.elapsed(),
         world_meshes.terrain.count_vertices(),
-        world_meshes.clouds.count_vertices(),
         world_meshes.water.count_vertices(),
     );
 
@@ -313,13 +340,6 @@ fn spawn_world(
     }
 
     commands.insert_resource(ground_heights);
-    let cloud_material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 1.0,
-        // Slight self-glow keeps cloud undersides from going muddy.
-        emissive: LinearRgba::rgb(0.25, 0.26, 0.30),
-        ..default()
-    });
     let water_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.15,
@@ -330,12 +350,6 @@ fn spawn_world(
     commands.spawn((
         Mesh3d(meshes.add(world_meshes.terrain)),
         MeshMaterial3d(terrain_material),
-        WorldMesh,
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(world_meshes.clouds)),
-        MeshMaterial3d(cloud_material),
-        NotShadowCaster,
         WorldMesh,
     ));
     commands.spawn((
@@ -453,9 +467,16 @@ struct OrbitCameraState {
 impl Default for OrbitCameraState {
     fn default() -> Self {
         Self {
-            focus: Vec3::new(0.0, 3.8, 0.0),
+            // The island's surface sits around y = 12 since the world was
+            // raised to make room for the sculpted underside.
+            focus: Vec3::new(0.0, 12.5, 0.0),
             yaw: 0.7,
-            pitch: 0.55,
+            // `VOXEL_ORBIT_PITCH` (radians) frames screenshots — low values
+            // show the island silhouette side-on.
+            pitch: std::env::var("VOXEL_ORBIT_PITCH")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.55),
             distance: 130.0,
         }
     }
@@ -479,10 +500,22 @@ struct FirstPersonState {
 
 impl Default for FirstPersonState {
     fn default() -> Self {
+        // `VOXEL_LOOK=yaw,pitch` (radians) aims the starting first-person
+        // view — used by screenshot runs to frame the moon or clouds.
+        let (yaw, pitch) = std::env::var("VOXEL_LOOK")
+            .ok()
+            .and_then(|value| {
+                let (yaw_text, pitch_text) = value.split_once(',')?;
+                Some((
+                    yaw_text.trim().parse().ok()?,
+                    pitch_text.trim().parse().ok()?,
+                ))
+            })
+            .unwrap_or((0.7, -0.05));
         Self {
-            position: Vec3::new(0.0, 4.0, 0.0),
-            yaw: 0.7,
-            pitch: -0.05,
+            position: Vec3::new(0.0, 13.0, 0.0),
+            yaw,
+            pitch,
         }
     }
 }
@@ -518,6 +551,7 @@ fn toggle_view_mode(
 fn camera_system(
     view_mode: Res<ViewMode>,
     tweaks: Res<ViewTweaks>,
+    weather: Res<weather::WeatherState>,
     mut orbit_state: ResMut<OrbitCameraState>,
     mut walk_state: ResMut<FirstPersonState>,
     ground_heights: Option<Res<GroundHeights>>,
@@ -545,6 +579,11 @@ fn camera_system(
     // The tweak panel owns the mouse while the cursor is over it.
     let mouse_free = !tweaks.pointer_over_panel;
 
+    // Weather fog pulls the falloff band in toward the camera; the curve
+    // makes the slider's mid-range already feel misty.
+    let fog_amount = weather.current.fog.clamp(0.0, 1.0).powf(0.75);
+    let fog_range = |clear: f32, thick: f32| clear + (thick - clear) * fog_amount;
+
     match *view_mode {
         ViewMode::Orbit => {
             orbit_update(
@@ -561,10 +600,11 @@ fn camera_system(
             depth_of_field.aperture_f_stops = tweaks.orbit_aperture_f_stops;
             set_fov(&mut projection, tweaks.orbit_fov_degrees);
             // Haze must stay behind the diorama from up here, or the whole
-            // scene washes out; only the far rim picks up a little depth.
+            // scene washes out; only the far rim picks up a little depth —
+            // until weather fog rolls in and swallows the far half.
             fog.falloff = FogFalloff::Linear {
-                start: orbit_state.distance * 1.1,
-                end: orbit_state.distance * 3.0,
+                start: fog_range(orbit_state.distance * 1.1, orbit_state.distance * 0.30),
+                end: fog_range(orbit_state.distance * 3.0, orbit_state.distance * 1.15),
             };
         }
         ViewMode::FirstPerson => {
@@ -585,8 +625,8 @@ fn camera_system(
             depth_of_field.aperture_f_stops = tweaks.walk_aperture_f_stops;
             set_fov(&mut projection, tweaks.first_person_fov_degrees);
             fog.falloff = FogFalloff::Linear {
-                start: 35.0,
-                end: 170.0,
+                start: fog_range(35.0, 2.5),
+                end: fog_range(170.0, 26.0),
             };
         }
     }
