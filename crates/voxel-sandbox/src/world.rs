@@ -87,6 +87,15 @@ impl Voxel {
     }
 }
 
+/// A spot where the river spills over the rim (render-space meters).
+pub struct RiverExit {
+    pub center_x: f32,
+    pub center_z: f32,
+    pub width: f32,
+    pub outward_x: f32,
+    pub outward_z: f32,
+}
+
 pub struct VoxelWorld {
     pub voxels: Vec<Voxel>,
     /// Per-column biome dryness: 0 = lush green, 1 = desert. Drives the
@@ -265,6 +274,77 @@ impl VoxelWorld {
         for y in (column_height + 1)..=WATER_LEVEL {
             self.set(x, y, z, Voxel::Water);
         }
+    }
+
+    /// Places where the river spills over the island's rim: clusters of
+    /// water-surface columns whose outward neighbor is open sky. Returned
+    /// in render-space meters (world-centered), ready for waterfalls.
+    pub fn river_rim_exits(&self) -> Vec<RiverExit> {
+        let mut edge_columns: Vec<(i32, i32)> = Vec::new();
+        for z in 1..WORLD_SIZE_Z as i32 - 1 {
+            for x in 1..WORLD_SIZE_X as i32 - 1 {
+                if self.get(x, WATER_LEVEL, z) != Voxel::Water {
+                    continue;
+                }
+                let beyond_rim = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                    self.get(x + dx, WATER_LEVEL, z + dz) == Voxel::Air
+                        && self.get(x + dx, PLATEAU_FLOOR + 4, z + dz) == Voxel::Air
+                });
+                if beyond_rim {
+                    edge_columns.push((x, z));
+                }
+            }
+        }
+
+        // Greedy clustering: rim exits are far apart, columns within one
+        // exit are contiguous.
+        let mut exits: Vec<Vec<(i32, i32)>> = Vec::new();
+        for column in edge_columns {
+            match exits.iter_mut().find(|cluster| {
+                cluster
+                    .iter()
+                    .any(|&(x, z)| (x - column.0).abs() <= 16 && (z - column.1).abs() <= 16)
+            }) {
+                Some(cluster) => cluster.push(column),
+                None => exits.push(vec![column]),
+            }
+        }
+
+        let half_x = WORLD_SIZE_X as f32 / 2.0;
+        let half_z = WORLD_SIZE_Z as f32 / 2.0;
+        exits
+            .into_iter()
+            .map(|cluster| {
+                let count = cluster.len() as f32;
+                let mean_x = cluster.iter().map(|&(x, _)| x as f32).sum::<f32>() / count;
+                let mean_z = cluster.iter().map(|&(_, z)| z as f32).sum::<f32>() / count;
+                let center_x = (mean_x - half_x) * VOXEL_SIZE;
+                let center_z = (mean_z - half_z) * VOXEL_SIZE;
+                // Outward = radial from the island center; width = cluster
+                // spread perpendicular to it.
+                let length = (center_x * center_x + center_z * center_z)
+                    .sqrt()
+                    .max(0.001);
+                let outward = (center_x / length, center_z / length);
+                let tangent = (-outward.1, outward.0);
+                let mut min_span = f32::MAX;
+                let mut max_span = f32::MIN;
+                for &(x, z) in &cluster {
+                    let dx = (x as f32 - half_x) * VOXEL_SIZE - center_x;
+                    let dz = (z as f32 - half_z) * VOXEL_SIZE - center_z;
+                    let span = dx * tangent.0 + dz * tangent.1;
+                    min_span = min_span.min(span);
+                    max_span = max_span.max(span);
+                }
+                RiverExit {
+                    center_x,
+                    center_z,
+                    width: (max_span - min_span + 2.0 * VOXEL_SIZE).max(0.75),
+                    outward_x: outward.0,
+                    outward_z: outward.1,
+                }
+            })
+            .collect()
     }
 
     /// Terrain steepness at a column (rise over run, 1.0 = 45°).

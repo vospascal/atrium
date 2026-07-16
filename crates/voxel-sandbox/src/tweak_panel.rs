@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::day_night::DayNightCycle;
+use crate::fireflies::FireflySettings;
 use crate::weather::{Precipitation, WeatherState};
 use crate::ViewMode;
 
@@ -57,6 +58,7 @@ pub fn view_tweak_panel(
     mut tweaks: ResMut<ViewTweaks>,
     mut cycle: ResMut<DayNightCycle>,
     mut weather: ResMut<WeatherState>,
+    mut fireflies: ResMut<FireflySettings>,
     view_mode: Res<ViewMode>,
 ) {
     if !tweaks.panel_visible {
@@ -187,6 +189,35 @@ pub fn view_tweak_panel(
                     .text("intensity"),
             );
             ui.small("weather eases in over a few seconds");
+        });
+
+    egui::Window::new("Fireflies")
+        .default_pos((12.0, 640.0))
+        .default_width(280.0)
+        .show(ctx, |ui| {
+            ui.add(egui::Slider::new(&mut fireflies.amount, 0..=150).text("amount per swarm"));
+            ui.add(egui::Slider::new(&mut fireflies.width, 0.5..=8.0).text("width m"));
+            ui.add(egui::Slider::new(&mut fireflies.height, 0.2..=8.0).text("height m"));
+            ui.add(
+                egui::Slider::new(&mut fireflies.size, 0.01..=0.15)
+                    .logarithmic(true)
+                    .text("size m"),
+            );
+            ui.add(
+                egui::Slider::new(&mut fireflies.glow, 1.0..=60.0)
+                    .logarithmic(true)
+                    .text("emit power"),
+            );
+            ui.add(egui::Slider::new(&mut fireflies.blink_speed, 0.1..=3.0).text("blink speed"));
+            ui.add(
+                egui::Slider::new(&mut fireflies.light_intensity, 0.0..=8_000.0)
+                    .text("ground light lm"),
+            );
+            ui.horizontal(|ui| {
+                ui.label("color");
+                ui.color_edit_button_rgb(&mut fireflies.color);
+            });
+            ui.small("F spawns a swarm · Shift+F clears · night only");
         });
 
     tweaks.pointer_over_panel = ctx.wants_pointer_input();

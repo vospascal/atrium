@@ -5,7 +5,8 @@
 //! sculpted rock underside, hovering above a volumetric fog sea.
 //!
 //! Run:    `cargo run -p voxel-sandbox`
-//! Keys:   `Tab` switch orbit ↔ first-person view · `R` new plateau
+//! Keys:   `Tab` switch orbit ↔ first-person view · `R` new island
+//!         `F` release a firefly swarm · `Shift+F` clear swarms
 //!         hold `N` to fast-forward the day/night cycle
 //!         `V` tuning panels (view + time & weather)
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
@@ -23,6 +24,7 @@
 //! to capture from the walking view.
 
 mod day_night;
+mod fireflies;
 mod flame;
 mod fog_ring;
 mod mesh;
@@ -31,6 +33,7 @@ mod sky;
 mod terrain_import;
 mod tweak_panel;
 mod vox_import;
+mod waterfall;
 mod weather;
 mod world;
 
@@ -102,11 +105,14 @@ fn main() {
         .init_resource::<day_night::DayNightCycle>()
         .init_resource::<day_night::CelestialState>()
         .init_resource::<weather::WeatherState>()
+        .init_resource::<fireflies::FireflySettings>()
         .init_resource::<ViewTweaks>()
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
         .add_plugins(MaterialPlugin::<sky::SkyMaterial>::default())
         .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
         .add_plugins(MaterialPlugin::<fog_ring::FogSeaMaterial>::default())
+        .add_plugins(MaterialPlugin::<waterfall::WaterfallMaterial>::default())
+        .add_plugins(MaterialPlugin::<fireflies::FireflyMaterial>::default())
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
@@ -121,6 +127,7 @@ fn main() {
                 sky::spawn_sky,
                 weather::spawn_precipitation,
                 fog_ring::spawn_fog_ring,
+                fireflies::setup_fireflies,
             ),
         )
         .add_systems(
@@ -133,6 +140,10 @@ fn main() {
                 sky::update_sky,
                 fog_ring::update_fog_ring,
                 weather::update_precipitation,
+                waterfall::update_waterfalls,
+                fireflies::firefly_controls,
+                fireflies::spawn_env_fireflies,
+                fireflies::update_fireflies,
                 regenerate_system,
                 flame::flicker_flame_lights,
                 screenshot_system,
@@ -219,6 +230,7 @@ fn initial_world_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
+    mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
     seed: Res<WorldSeed>,
     source: Res<WorldSource>,
 ) {
@@ -227,6 +239,7 @@ fn initial_world_system(
         &mut meshes,
         &mut materials,
         &mut flame_materials,
+        &mut waterfall_materials,
         &source,
         seed.0,
     );
@@ -238,6 +251,7 @@ fn spawn_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     flame_materials: &mut Assets<FlameMaterial>,
+    waterfall_materials: &mut Assets<waterfall::WaterfallMaterial>,
     source: &WorldSource,
     seed: u32,
 ) {
@@ -259,6 +273,12 @@ fn spawn_world(
     );
 
     let ground_heights = GroundHeights::from_world(&voxel_world);
+
+    // Waterfalls wherever the river spills over the rim.
+    let river_exits = voxel_world.river_rim_exits();
+    let waterfall_count =
+        waterfall::spawn_waterfalls(commands, meshes, waterfall_materials, &river_exits);
+    info!("{waterfall_count} waterfall(s) at the rim");
 
     let terrain_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -432,6 +452,7 @@ fn regenerate_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
+    mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
     mut seed: ResMut<WorldSeed>,
     source: Res<WorldSource>,
     existing_meshes: Query<Entity, With<WorldMesh>>,
@@ -444,12 +465,13 @@ fn regenerate_system(
         commands.entity(entity).despawn();
     }
     // Imported terrain keeps its heights; a new seed reshuffles the
-    // decoration (grass, flowers, procedural trees) and clouds.
+    // decoration (grass, flowers, procedural trees) and waterfalls.
     spawn_world(
         &mut commands,
         &mut meshes,
         &mut materials,
         &mut flame_materials,
+        &mut waterfall_materials,
         &source,
         seed.0,
     );
