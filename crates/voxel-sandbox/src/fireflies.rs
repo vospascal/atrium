@@ -181,6 +181,13 @@ fn spawn_swarm_at(commands: &mut Commands, assets: &FireflyAssets, position: Vec
             ..default()
         },
         crate::water::reflective_layers(),
+        // Draw distance: motes are sub-pixel from afar — fade the swarm
+        // out between 55 and 70 m instead of paying for its quads.
+        bevy::camera::visibility::VisibilityRange {
+            start_margin: 0.0..0.0,
+            end_margin: 55.0..70.0,
+            use_aabb: false,
+        },
         FireflySwarm,
     ));
 }

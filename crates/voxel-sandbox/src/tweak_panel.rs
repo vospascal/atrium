@@ -47,10 +47,107 @@ impl Default for ViewTweaks {
     }
 }
 
-pub fn toggle_panel(keyboard: Res<ButtonInput<KeyCode>>, mut tweaks: ResMut<ViewTweaks>) {
+/// Live performance readout, toggled with `P` (or `VOXEL_PERF=1`).
+#[derive(Resource, Default)]
+pub struct PerfOverlay {
+    pub visible: bool,
+}
+
+pub fn toggle_panel(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut tweaks: ResMut<ViewTweaks>,
+    mut perf: ResMut<PerfOverlay>,
+) {
     if keyboard.just_pressed(KeyCode::KeyV) {
         tweaks.panel_visible = !tweaks.panel_visible;
     }
+    if keyboard.just_pressed(KeyCode::KeyP) {
+        perf.visible = !perf.visible;
+    }
+}
+
+/// The numbers currently shown in the overlay — refreshed a few times per
+/// second, not every frame, so they hold still long enough to read.
+#[derive(Default)]
+pub struct PerfReadout {
+    last_refresh_seconds: f32,
+    fps: Option<f64>,
+    frame_ms: Option<f64>,
+    entities: Option<f64>,
+}
+
+/// FPS / frame-time / world-build stats in the top-right corner. Runs
+/// after `view_tweak_panel`, so it ORs its pointer capture into
+/// `pointer_over_panel` (dragging the overlay must not spin the camera).
+pub fn perf_overlay(
+    mut contexts: EguiContexts,
+    perf: Res<PerfOverlay>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    world_stats: Option<Res<crate::WorldStats>>,
+    time: Res<Time>,
+    mut readout: Local<PerfReadout>,
+    mut tweaks: ResMut<ViewTweaks>,
+) {
+    if !perf.visible {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let now = time.elapsed_secs();
+    if readout.fps.is_none() || now - readout.last_refresh_seconds >= 0.33 {
+        readout.last_refresh_seconds = now;
+        readout.fps = diagnostics
+            .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(|diagnostic| diagnostic.smoothed());
+        readout.frame_ms = diagnostics
+            .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+            .and_then(|diagnostic| diagnostic.smoothed());
+        readout.entities = diagnostics
+            .get(&bevy::diagnostic::EntityCountDiagnosticsPlugin::ENTITY_COUNT)
+            .and_then(|diagnostic| diagnostic.value());
+    }
+
+    egui::Window::new("Performance")
+        .anchor(egui::Align2::RIGHT_TOP, (-12.0, 12.0))
+        .default_width(220.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            match (readout.fps, readout.frame_ms) {
+                (Some(fps), Some(frame_ms)) => {
+                    ui.strong(format!("{fps:.0} fps   {frame_ms:.1} ms"));
+                }
+                _ => {
+                    ui.strong("warming up…");
+                }
+            }
+            if let Some(entities) = readout.entities {
+                ui.label(format!("entities: {entities:.0}"));
+            }
+
+            if let Some(stats) = world_stats {
+                ui.separator();
+                ui.label(format!(
+                    "world: {} chunks · {:.1} M verts",
+                    stats.chunk_count,
+                    stats.total_vertices as f32 / 1e6
+                ));
+                ui.label(format!(
+                    "RLE: {:.1} M runs · {:.1} MB",
+                    stats.rle_runs as f32 / 1e6,
+                    stats.rle_bytes as f32 / 1e6
+                ));
+                ui.label(format!(
+                    "gen {:.0} ms · mesh {:.0} ms",
+                    stats.generation.as_secs_f32() * 1000.0,
+                    stats.meshing.as_secs_f32() * 1000.0
+                ));
+            }
+            ui.small("P hides this overlay");
+        });
+
+    tweaks.pointer_over_panel |= ctx.wants_pointer_input();
 }
 
 #[allow(clippy::too_many_arguments)]

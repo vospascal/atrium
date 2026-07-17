@@ -10,6 +10,7 @@
 //!         `C` place a campfire · `Shift+C` clear campfires
 //!         hold `N` to fast-forward the day/night cycle
 //!         `V` tuning panels (view + time & weather)
+//!         `P` performance overlay (or start with `VOXEL_PERF=1`)
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
 //! Walk:   left-drag look around · WASD walk · Shift run
 //!
@@ -52,9 +53,7 @@ use std::path::Path;
 
 use crate::flame::{FlameLight, FlameMaterial};
 use crate::tweak_panel::ViewTweaks;
-use crate::world::{
-    Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
-};
+use crate::world::{Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
 
 /// Pale haze that washes out the distance, like the reference shots.
 const HAZE_COLOR: Color = Color::srgb(0.80, 0.82, 0.79);
@@ -120,6 +119,11 @@ fn main() {
         .init_resource::<fireflies::FireflySettings>()
         .init_resource::<water::ReflectionTarget>()
         .init_resource::<ViewTweaks>()
+        .insert_resource(tweak_panel::PerfOverlay {
+            visible: std::env::var("VOXEL_PERF").is_ok(),
+        })
+        .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
+        .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
         .add_plugins(MaterialPlugin::<sky::SkyMaterial>::default())
         .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
@@ -139,7 +143,7 @@ fn main() {
         .add_plugins(bevy_egui::EguiPlugin::default())
         .add_systems(
             bevy_egui::EguiPrimaryContextPass,
-            tweak_panel::view_tweak_panel,
+            (tweak_panel::view_tweak_panel, tweak_panel::perf_overlay).chain(),
         )
         .add_systems(Update, tweak_panel::toggle_panel)
         .add_systems(
@@ -184,6 +188,17 @@ fn main() {
 
 #[derive(Resource)]
 struct WorldSeed(u32);
+
+/// Stats from the last world build, shown in the `P` performance overlay.
+#[derive(Resource)]
+struct WorldStats {
+    generation: std::time::Duration,
+    meshing: std::time::Duration,
+    chunk_count: usize,
+    total_vertices: usize,
+    rle_runs: usize,
+    rle_bytes: usize,
+}
 
 /// Foliage season, 0.0 (high summer) to 1.0 (deep autumn). Baked into the
 /// vertex colors, so changing it rebuilds the island.
@@ -318,17 +333,42 @@ fn spawn_world(
         WorldSource::Imported(terrain) => VoxelWorld::from_imported(terrain, seed, season),
     };
     let generation_elapsed = generation_start.elapsed();
+    let (run_count, rle_bytes) = voxel_world.memory_stats();
+    info!(
+        "world RLE: {run_count} runs, {:.1} MB resident (dense grid was 256 MB)",
+        rle_bytes as f32 / 1e6
+    );
 
     let meshing_start = std::time::Instant::now();
-    let world_meshes = mesh::build_meshes(&voxel_world, seed, season);
+    let chunk_meshes = mesh::build_all_chunk_meshes(&voxel_world, seed, season);
+    let count_bucket = |select: fn(&mesh::ChunkMeshes) -> &Option<Mesh>| {
+        chunk_meshes
+            .iter()
+            .map(|chunk| select(chunk).as_ref().map_or(0, Mesh::count_vertices))
+            .sum::<usize>()
+    };
+    let meshing_elapsed = meshing_start.elapsed();
+    let total_vertices = count_bucket(|chunk| &chunk.terrain_above_water)
+        + count_bucket(|chunk| &chunk.meadow_cover)
+        + count_bucket(|chunk| &chunk.terrain_below_water)
+        + count_bucket(|chunk| &chunk.water);
     info!(
-        "world generated in {generation_elapsed:.2?}, meshed in {:.2?} \
-         (terrain {} + {} verts, water {} verts)",
-        meshing_start.elapsed(),
-        world_meshes.terrain_above_water.count_vertices(),
-        world_meshes.terrain_below_water.count_vertices(),
-        world_meshes.water.count_vertices(),
+        "world generated in {generation_elapsed:.2?}, meshed in {meshing_elapsed:.2?} \
+         ({} chunks: terrain {} + meadow {} + underwater {} verts, water {} verts)",
+        chunk_meshes.len(),
+        count_bucket(|chunk| &chunk.terrain_above_water),
+        count_bucket(|chunk| &chunk.meadow_cover),
+        count_bucket(|chunk| &chunk.terrain_below_water),
+        count_bucket(|chunk| &chunk.water),
     );
+    commands.insert_resource(WorldStats {
+        generation: generation_elapsed,
+        meshing: meshing_elapsed,
+        chunk_count: chunk_meshes.len(),
+        total_vertices,
+        rle_runs: run_count,
+        rle_bytes,
+    });
 
     let ground_heights = GroundHeights::from_world(&voxel_world);
 
@@ -466,25 +506,50 @@ fn spawn_world(
         reflection_clip_from_world: Mat4::IDENTITY,
     });
 
-    // Above-water terrain is also on the reflection layer, so the mirrored
-    // camera sees it; underwater terrain stays main-view only.
-    commands.spawn((
-        Mesh3d(meshes.add(world_meshes.terrain_above_water)),
-        MeshMaterial3d(terrain_material.clone()),
-        water::reflective_layers(),
-        WorldMesh,
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(world_meshes.terrain_below_water)),
-        MeshMaterial3d(terrain_material),
-        WorldMesh,
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(world_meshes.water)),
-        MeshMaterial3d(water_material),
-        NotShadowCaster,
-        WorldMesh,
-    ));
+    // One entity per chunk bucket, so bevy's per-entity frustum culling
+    // trims every pass (main, reflection, shadow cascades) to what each
+    // view actually sees. Vertices are in world space; transforms stay
+    // identity and the culling AABBs derive from the vertices.
+    for chunk in chunk_meshes {
+        // Above-water terrain is also on the reflection layer, so the
+        // mirrored camera sees it; the meadow carpet and underwater
+        // terrain stay main-view only.
+        if let Some(chunk_mesh) = chunk.terrain_above_water {
+            commands.spawn((
+                Mesh3d(meshes.add(chunk_mesh)),
+                MeshMaterial3d(terrain_material.clone()),
+                water::reflective_layers(),
+                WorldMesh,
+            ));
+        }
+        // Neither the grass carpet nor anything below the waterline casts
+        // a shadow worth seeing — keeping them out of the cascade shadow
+        // passes (which render per camera view) is a large win.
+        if let Some(chunk_mesh) = chunk.meadow_cover {
+            commands.spawn((
+                Mesh3d(meshes.add(chunk_mesh)),
+                MeshMaterial3d(terrain_material.clone()),
+                NotShadowCaster,
+                WorldMesh,
+            ));
+        }
+        if let Some(chunk_mesh) = chunk.terrain_below_water {
+            commands.spawn((
+                Mesh3d(meshes.add(chunk_mesh)),
+                MeshMaterial3d(terrain_material.clone()),
+                NotShadowCaster,
+                WorldMesh,
+            ));
+        }
+        if let Some(chunk_mesh) = chunk.water {
+            commands.spawn((
+                Mesh3d(meshes.add(chunk_mesh)),
+                MeshMaterial3d(water_material.clone()),
+                NotShadowCaster,
+                WorldMesh,
+            ));
+        }
+    }
 }
 
 /// Parse `"index@x,z"` or `"index@x,z,lift"` prop placements (meters,
@@ -518,16 +583,21 @@ impl GroundHeights {
         let mut heights = vec![PLATEAU_FLOOR_RENDER; WORLD_SIZE_X * WORLD_SIZE_Z];
         for z in 0..WORLD_SIZE_Z as i32 {
             for x in 0..WORLD_SIZE_X as i32 {
-                for y in (0..WORLD_SIZE_Y as i32).rev() {
+                // Topmost walkable ground, straight off the column's RLE
+                // runs (a handful per column) instead of 256 cell reads.
+                let mut ground_top: Option<i32> = None;
+                for (voxel, y_start, length) in voxel_world.column_runs(x, z) {
                     if matches!(
-                        voxel_world.get(x, y, z),
+                        voxel,
                         Voxel::Grass | Voxel::Dirt | Voxel::Sand | Voxel::Sediment | Voxel::Stone
                     ) {
-                        // Wade on the river surface rather than its bed.
-                        let ground = (y + 1).max(WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
-                        heights[(z as usize) * WORLD_SIZE_X + x as usize] = ground;
-                        break;
+                        ground_top = Some(y_start + length - 1);
                     }
+                }
+                if let Some(y) = ground_top {
+                    // Wade on the river surface rather than its bed.
+                    let ground = (y + 1).max(WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
+                    heights[(z as usize) * WORLD_SIZE_X + x as usize] = ground;
                 }
             }
         }

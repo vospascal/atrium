@@ -229,6 +229,13 @@ fn spawn_campfire_at(commands: &mut Commands, assets: &CampfireAssets, position:
         Transform::from_translation(position),
         bevy::light::NotShadowCaster,
         crate::water::reflective_layers(),
+        // The animated flame is sub-pixel from afar (the point light still
+        // glows) — fade the quads out past ~80 m.
+        bevy::camera::visibility::VisibilityRange {
+            start_margin: 0.0..0.0,
+            end_margin: 80.0..100.0,
+            use_aabb: false,
+        },
         Campfire,
     ));
     commands.spawn((

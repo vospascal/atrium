@@ -107,20 +107,73 @@ impl MeshBuffers {
     }
 }
 
-pub struct WorldMeshes {
-    /// Terrain faces above the water plane — the part a planar-reflection
-    /// camera may see (rendered on the reflection layer too).
-    pub terrain_above_water: Mesh,
+/// Render chunks are full-height columns (like the RLE-thread layout):
+/// 64×256×64 voxels = an 8 m footprint. Column chunks match the terrain's
+/// heightmap structure, keep the entity count low (~hundreds), and their
+/// AABBs (from actual vertices) stay tight, so bevy's per-entity frustum
+/// culling works for the main view, the reflection view, and every shadow
+/// cascade.
+pub const CHUNK_SIZE: i32 = 64;
+
+/// The meshes of one render chunk, split by material treatment (see the
+/// field docs). `None` where the chunk has no such faces.
+pub struct ChunkMeshes {
+    /// Terrain faces above the water plane, plus the waterline plants
+    /// (reeds, cattails) — the part the planar-reflection camera renders.
+    pub terrain_above_water: Option<Mesh>,
+    /// Meadow carpet above the plane (grass tufts, flowers, lily pads).
+    /// Main view only: their reflections are invisible in the wavy
+    /// half-res mirror, and skipping millions of cover quads makes the
+    /// reflection pass cheap.
+    pub meadow_cover: Option<Mesh>,
     /// Terrain faces at or below the water plane (river/lake beds, bank
     /// walls under the surface). Excluded from reflections: the mirrored
     /// camera sits under the plane, and underwater geometry would occlude
     /// the very reflection it is trying to render.
-    pub terrain_below_water: Mesh,
-    pub water: Mesh,
+    pub terrain_below_water: Option<Mesh>,
+    pub water: Option<Mesh>,
 }
 
-pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
+impl ChunkMeshes {
+    fn is_empty(&self) -> bool {
+        self.terrain_above_water.is_none()
+            && self.meadow_cover.is_none()
+            && self.terrain_below_water.is_none()
+            && self.water.is_none()
+    }
+}
+
+/// Mesh every render chunk in parallel; empty chunks (open sky beyond the
+/// rim) are dropped.
+pub fn build_all_chunk_meshes(world: &VoxelWorld, seed: u32, season: f32) -> Vec<ChunkMeshes> {
+    use rayon::prelude::*;
+
+    let chunks_x = (WORLD_SIZE_X as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let chunks_z = (WORLD_SIZE_Z as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let coordinates: Vec<(i32, i32)> = (0..chunks_z)
+        .flat_map(|chunk_z| (0..chunks_x).map(move |chunk_x| (chunk_x, chunk_z)))
+        .collect();
+
+    coordinates
+        .par_iter()
+        .map(|&(chunk_x, chunk_z)| build_chunk_meshes(world, seed, season, chunk_x, chunk_z))
+        .filter(|chunk| !chunk.is_empty())
+        .collect()
+}
+
+/// Mesh one 64×256×64 column chunk. Neighbor lookups go through the whole
+/// world, so face culling and ambient occlusion are seamless across chunk
+/// borders. Vertices stay in world space (identity transforms) — bevy
+/// derives each mesh's culling AABB from them.
+fn build_chunk_meshes(
+    world: &VoxelWorld,
+    seed: u32,
+    season: f32,
+    chunk_x: i32,
+    chunk_z: i32,
+) -> ChunkMeshes {
     let mut above_water_buffers = MeshBuffers::default();
+    let mut meadow_cover_buffers = MeshBuffers::default();
     let mut below_water_buffers = MeshBuffers::default();
     let mut water_buffers = MeshBuffers::default();
     // Faces above this (voxel units) belong to the reflection-visible mesh.
@@ -129,20 +182,28 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
     let half_x = WORLD_SIZE_X as f32 / 2.0;
     let half_z = WORLD_SIZE_Z as f32 / 2.0;
 
+    let x_range = (chunk_x * CHUNK_SIZE)..((chunk_x + 1) * CHUNK_SIZE).min(WORLD_SIZE_X as i32);
+    let z_range = (chunk_z * CHUNK_SIZE)..((chunk_z + 1) * CHUNK_SIZE).min(WORLD_SIZE_Z as i32);
+
+    // The RLE world is unpacked once per chunk (plus a 1-cell apron for
+    // neighbor culling and corner AO) into a dense window — voxel reads
+    // below are plain array lookups, never run walks.
+    let scratch = world.unpack_chunk(x_range.start, x_range.end, z_range.start, z_range.end);
+
     for y in 0..WORLD_SIZE_Y as i32 {
-        for z in 0..WORLD_SIZE_Z as i32 {
-            for x in 0..WORLD_SIZE_X as i32 {
-                let voxel = world.get(x, y, z);
+        for z in z_range.clone() {
+            for x in x_range.clone() {
+                let voxel = scratch.get(x, y, z);
                 let Some(voxel_group) = group_of(voxel) else {
                     continue;
                 };
                 let voxel_position = IVec3::new(x, y, z);
-                let base_color = voxel_color(world, voxel, x, y, z, seed, season);
-                let vertical_scale = visual_vertical_scale(world, voxel, x, y, z, seed);
+                let base_color = voxel_color(world, &scratch, voxel, x, y, z, seed, season);
+                let vertical_scale = visual_vertical_scale(&scratch, voxel, x, y, z, seed);
 
                 for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
                     let neighbor_position = voxel_position + normal;
-                    let neighbor = world.get(
+                    let neighbor = scratch.get(
                         neighbor_position.x,
                         neighbor_position.y,
                         neighbor_position.z,
@@ -153,7 +214,7 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
                     // A blooming lily is a green pad with a white blossom
                     // dot: only its top face takes the flower color.
                     let face_base_color = if voxel == Voxel::LilyBloom && normal != IVec3::Y {
-                        voxel_color(world, Voxel::LilyPad, x, y, z, seed, season)
+                        voxel_color(world, &scratch, Voxel::LilyPad, x, y, z, seed, season)
                     } else {
                         base_color
                     };
@@ -194,13 +255,13 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
                         );
 
                         let occlusion_base = voxel_position + normal;
-                        let side_1_solid = world
+                        let side_1_solid = scratch
                             .get_offset(occlusion_base + tangent_1 * along_1)
                             .is_solid();
-                        let side_2_solid = world
+                        let side_2_solid = scratch
                             .get_offset(occlusion_base + tangent_2 * along_2)
                             .is_solid();
-                        let corner_solid = world
+                        let corner_solid = scratch
                             .get_offset(occlusion_base + tangent_1 * along_1 + tangent_2 * along_2)
                             .is_solid();
                         let occlusion_level =
@@ -222,10 +283,14 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
 
                     let buffers = match voxel_group {
                         MeshGroup::Terrain | MeshGroup::Cover => {
-                            if face_center.y > water_plane_y {
+                            if face_center.y <= water_plane_y {
+                                &mut below_water_buffers
+                            } else if voxel_group == MeshGroup::Terrain
+                                || matches!(voxel, Voxel::Reed | Voxel::CattailHead)
+                            {
                                 &mut above_water_buffers
                             } else {
-                                &mut below_water_buffers
+                                &mut meadow_cover_buffers
                             }
                         }
                         MeshGroup::Water => &mut water_buffers,
@@ -236,17 +301,25 @@ pub fn build_meshes(world: &VoxelWorld, seed: u32, season: f32) -> WorldMeshes {
         }
     }
 
-    WorldMeshes {
-        terrain_above_water: above_water_buffers.into_mesh(),
-        terrain_below_water: below_water_buffers.into_mesh(),
-        water: water_buffers.into_mesh(),
+    let into_optional_mesh = |buffers: MeshBuffers| {
+        if buffers.is_empty() {
+            None
+        } else {
+            Some(buffers.into_mesh())
+        }
+    };
+    ChunkMeshes {
+        terrain_above_water: into_optional_mesh(above_water_buffers),
+        meadow_cover: into_optional_mesh(meadow_cover_buffers),
+        terrain_below_water: into_optional_mesh(below_water_buffers),
+        water: into_optional_mesh(water_buffers),
     }
 }
 
 /// Visual height of a voxel as a fraction of a full cube. Ground cover is
 /// squashed — tufts vary per-cell so the meadow reads as an uneven carpet.
 fn visual_vertical_scale(
-    world: &VoxelWorld,
+    scratch: &crate::world::ChunkScratch,
     voxel: Voxel,
     x: i32,
     y: i32,
@@ -258,7 +331,7 @@ fn visual_vertical_scale(
             // Stalks may stack (or carry a flower on top): those cells stay
             // full height so the stalk is continuous; only the tip tapers.
             if matches!(
-                world.get(x, y + 1, z),
+                scratch.get(x, y + 1, z),
                 Voxel::TallGrass
                     | Voxel::FlowerPink
                     | Voxel::FlowerWhite
@@ -307,6 +380,7 @@ fn lerp_rgb(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
 /// water depth tint, and per-voxel brightness jitter.
 fn voxel_color(
     world: &VoxelWorld,
+    scratch: &crate::world::ChunkScratch,
     voxel: Voxel,
     x: i32,
     y: i32,
@@ -427,7 +501,7 @@ fn voxel_color(
             // recomputes absorption from real optical depth; this vertex
             // tint is its per-column fallback hint.)
             let mut depth = 0;
-            while depth < 8 && world.get(x, y - 1 - depth, z) == Voxel::Water {
+            while depth < 8 && scratch.get(x, y - 1 - depth, z) == Voxel::Water {
                 depth += 1;
             }
             let depth_amount = depth as f32 / 8.0;
@@ -465,19 +539,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn meshes_are_consistent_and_nonempty() {
+    fn chunk_meshes_are_consistent_and_nonempty() {
         let world = VoxelWorld::generate(1, 0.0);
-        let world_meshes = build_meshes(&world, 1, 0.0);
-        for (label, mesh) in [
-            ("terrain above water", &world_meshes.terrain_above_water),
-            ("terrain below water", &world_meshes.terrain_below_water),
-            ("water", &world_meshes.water),
-        ] {
-            let vertex_count = mesh.count_vertices();
-            assert!(vertex_count > 0, "{label} mesh is empty");
-            assert_eq!(vertex_count % 4, 0, "{label} mesh has partial quads");
-            let index_count = mesh.indices().expect("indices").len();
-            assert_eq!(index_count % 6, 0, "{label} mesh has partial quad indices");
+        let chunks = build_all_chunk_meshes(&world, 1, 0.0);
+        assert!(
+            chunks.len() > 30,
+            "expected the island to span many chunks, got {}",
+            chunks.len()
+        );
+
+        let mut above_total = 0;
+        let mut meadow_total = 0;
+        let mut below_total = 0;
+        let mut water_total = 0;
+        for chunk in &chunks {
+            for (label, mesh) in [
+                ("terrain above water", &chunk.terrain_above_water),
+                ("meadow cover", &chunk.meadow_cover),
+                ("terrain below water", &chunk.terrain_below_water),
+                ("water", &chunk.water),
+            ] {
+                let Some(mesh) = mesh else {
+                    continue;
+                };
+                let vertex_count = mesh.count_vertices();
+                assert!(vertex_count > 0, "{label} mesh present but empty");
+                assert_eq!(vertex_count % 4, 0, "{label} mesh has partial quads");
+                let index_count = mesh.indices().expect("indices").len();
+                assert_eq!(index_count % 6, 0, "{label} mesh has partial quad indices");
+            }
+            above_total += chunk
+                .terrain_above_water
+                .as_ref()
+                .map_or(0, Mesh::count_vertices);
+            meadow_total += chunk.meadow_cover.as_ref().map_or(0, Mesh::count_vertices);
+            below_total += chunk
+                .terrain_below_water
+                .as_ref()
+                .map_or(0, Mesh::count_vertices);
+            water_total += chunk.water.as_ref().map_or(0, Mesh::count_vertices);
         }
+        assert!(above_total > 100_000, "above-water terrain too small");
+        assert!(meadow_total > 10_000, "meadow cover too small");
+        assert!(below_total > 100_000, "underwater terrain too small");
+        assert!(water_total > 10_000, "water too small");
     }
 }

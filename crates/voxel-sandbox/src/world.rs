@@ -134,16 +134,34 @@ pub struct RiverExit {
     pub outward_z: f32,
 }
 
+/// One vertical run of identical voxels inside a column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Run {
+    pub voxel: Voxel,
+    pub length: u16,
+}
+
+/// The finished world, stored as per-column RLE: every (x, z) column is a
+/// short list of vertical runs (air above, a few material bands, stone
+/// core — typically well under a dozen). ~15 MB instead of the 256 MB
+/// dense grid, and a column's runs fit in a cache line or two.
+///
+/// Generation happens in a dense [`WorldBuilder`] (fast random writes for
+/// trees and boulders) and compresses into this on completion. Readers
+/// that sweep volumes never random-access the RLE: the mesher unpacks one
+/// chunk at a time into a dense [`ChunkScratch`], and column sweeps use
+/// [`VoxelWorld::column_runs`].
 pub struct VoxelWorld {
-    pub voxels: Vec<Voxel>,
+    /// All columns' runs, concatenated in column order (`z * X + x`).
+    runs: Vec<Run>,
+    /// Per-column offsets into `runs`; `column_starts[c]..column_starts[c+1]`.
+    column_starts: Vec<u32>,
     /// Per-column biome dryness: 0 = lush green, 1 = desert. Drives the
     /// ground-color gradient and vegetation density.
     dryness: Vec<f32>,
     /// Per-column grass-patch coverage: 1 = dense clump, 0 = bare dirt
     /// between the patches. Drives tuft clustering and ground tint.
     ground_cover: Vec<f32>,
-    /// Per-column steepness (rise over run, 1.0 = 45°), from the heightmap.
-    slope: Vec<f32>,
     /// Per-column distance to the nearest water surface, meters.
     water_distance: Vec<f32>,
     /// Per-tree color identity (0..1), stamped in a disc around each tree
@@ -152,11 +170,40 @@ pub struct VoxelWorld {
     tree_tone: Vec<f32>,
 }
 
-impl VoxelWorld {
-    fn index(x: usize, y: usize, z: usize) -> usize {
-        (y * WORLD_SIZE_Z + z) * WORLD_SIZE_X + x
+/// A dense one-chunk (+1 apron) window unpacked from the RLE world, so the
+/// mesher's neighbor and ambient-occlusion lookups are plain array reads.
+/// Cells are y-contiguous per column (fast unpack, fast vertical scans).
+pub struct ChunkScratch {
+    origin_x: i32,
+    origin_z: i32,
+    span_x: i32,
+    span_z: i32,
+    cells: Vec<Voxel>,
+}
+
+impl ChunkScratch {
+    /// Voxel at WORLD coordinates; air outside the window or the world.
+    pub fn get(&self, x: i32, y: i32, z: i32) -> Voxel {
+        let local_x = x - self.origin_x;
+        let local_z = z - self.origin_z;
+        if y < 0
+            || y >= WORLD_SIZE_Y as i32
+            || local_x < 0
+            || local_z < 0
+            || local_x >= self.span_x
+            || local_z >= self.span_z
+        {
+            return Voxel::Air;
+        }
+        self.cells[((local_z * self.span_x + local_x) * WORLD_SIZE_Y as i32 + y) as usize]
     }
 
+    pub fn get_offset(&self, position: IVec3) -> Voxel {
+        self.get(position.x, position.y, position.z)
+    }
+}
+
+impl VoxelWorld {
     pub fn get(&self, x: i32, y: i32, z: i32) -> Voxel {
         if x < 0
             || y < 0
@@ -167,24 +214,75 @@ impl VoxelWorld {
         {
             return Voxel::Air;
         }
-        self.voxels[Self::index(x as usize, y as usize, z as usize)]
-    }
-
-    pub fn get_offset(&self, position: IVec3) -> Voxel {
-        self.get(position.x, position.y, position.z)
-    }
-
-    fn set(&mut self, x: i32, y: i32, z: i32, voxel: Voxel) {
-        if x < 0
-            || y < 0
-            || z < 0
-            || x >= WORLD_SIZE_X as i32
-            || y >= WORLD_SIZE_Y as i32
-            || z >= WORLD_SIZE_Z as i32
-        {
-            return;
+        let column = (z as usize) * WORLD_SIZE_X + x as usize;
+        let start = self.column_starts[column] as usize;
+        let end = self.column_starts[column + 1] as usize;
+        let mut top = 0;
+        for run in &self.runs[start..end] {
+            top += run.length as i32;
+            if y < top {
+                return run.voxel;
+            }
         }
-        self.voxels[Self::index(x as usize, y as usize, z as usize)] = voxel;
+        Voxel::Air
+    }
+
+    /// The runs of one column, bottom to top, as `(voxel, y_start, length)`.
+    /// The cheap way to sweep columns (ground heights, save/load) without
+    /// per-cell run walks.
+    pub fn column_runs(&self, x: i32, z: i32) -> impl Iterator<Item = (Voxel, i32, i32)> + '_ {
+        let (start, end) = if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32
+        {
+            (0, 0)
+        } else {
+            let column = (z as usize) * WORLD_SIZE_X + x as usize;
+            (
+                self.column_starts[column] as usize,
+                self.column_starts[column + 1] as usize,
+            )
+        };
+        self.runs[start..end].iter().scan(0_i32, |y_cursor, run| {
+            let y_start = *y_cursor;
+            *y_cursor += run.length as i32;
+            Some((run.voxel, y_start, run.length as i32))
+        })
+    }
+
+    /// Unpack the columns `x_range`/`z_range` (the mesher passes its chunk
+    /// plus a 1-cell apron) into a dense scratch window.
+    pub fn unpack_chunk(&self, x_start: i32, x_end: i32, z_start: i32, z_end: i32) -> ChunkScratch {
+        let origin_x = (x_start - 1).max(0);
+        let origin_z = (z_start - 1).max(0);
+        let span_x = (x_end + 1).min(WORLD_SIZE_X as i32) - origin_x;
+        let span_z = (z_end + 1).min(WORLD_SIZE_Z as i32) - origin_z;
+        let mut cells = vec![Voxel::Air; (span_x * span_z * WORLD_SIZE_Y as i32) as usize];
+        for local_z in 0..span_z {
+            for local_x in 0..span_x {
+                let column_base = ((local_z * span_x + local_x) * WORLD_SIZE_Y as i32) as usize;
+                let mut y_cursor = 0_usize;
+                for (voxel, _, length) in self.column_runs(origin_x + local_x, origin_z + local_z) {
+                    if voxel != Voxel::Air {
+                        cells[column_base + y_cursor..column_base + y_cursor + length as usize]
+                            .fill(voxel);
+                    }
+                    y_cursor += length as usize;
+                }
+            }
+        }
+        ChunkScratch {
+            origin_x,
+            origin_z,
+            span_x,
+            span_z,
+            cells,
+        }
+    }
+
+    /// (run count, resident bytes of the RLE + column index).
+    pub fn memory_stats(&self) -> (usize, usize) {
+        let bytes = self.runs.len() * std::mem::size_of::<Run>()
+            + self.column_starts.len() * std::mem::size_of::<u32>();
+        (self.runs.len(), bytes)
     }
 
     /// Biome dryness at a column, `0.0` (lush) to `1.0` (desert).
@@ -209,7 +307,7 @@ impl VoxelWorld {
     pub fn generate(seed: u32, season: f32) -> Self {
         let mut heights = compute_heightmap(seed);
         smooth_shorelines(&mut heights);
-        Self::build(heights, seed, season, None)
+        WorldBuilder::build(heights, seed, season, None)
     }
 
     /// Plateau from a Blender-exported heightmap (meters relative to the
@@ -249,114 +347,7 @@ impl VoxelWorld {
                     .collect()
             });
 
-        Self::build(heights, seed, season, tree_positions.as_deref())
-    }
-
-    /// Shared tail of every construction path: fill columns from the
-    /// heightmap, then decorate, plant trees, and scatter bushes and
-    /// boulders. (The fog ring hiding the world edge is a shader effect,
-    /// not voxels — see `fog_ring.rs`.)
-    fn build(
-        heights: Vec<i32>,
-        seed: u32,
-        season: f32,
-        tree_positions: Option<&[(i32, i32)]>,
-    ) -> Self {
-        let mut world = Self {
-            voxels: vec![Voxel::Air; WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z],
-            dryness: compute_dryness_map(seed),
-            ground_cover: compute_cover_map(seed),
-            slope: compute_slope_map(&heights),
-            water_distance: compute_water_distance_map(&heights),
-            tree_tone: vec![0.5; WORLD_SIZE_X * WORLD_SIZE_Z],
-        };
-
-        let underside = compute_underside_map(&heights, seed);
-        for z in 0..WORLD_SIZE_Z as i32 {
-            for x in 0..WORLD_SIZE_X as i32 {
-                let column_index = (z as usize) * WORLD_SIZE_X + x as usize;
-                let column_height = heights[column_index];
-                if column_height != NO_LAND {
-                    world.fill_column(x, z, column_height, underside[column_index], seed);
-                }
-            }
-        }
-
-        world.decorate(&heights, seed, season);
-        match tree_positions {
-            Some(positions) => world.plant_trees_at(positions, &heights, seed),
-            None => world.plant_trees(&heights, seed),
-        }
-        world.scatter_bushes(&heights, seed);
-        world.scatter_boulders(&heights, seed);
-        world
-    }
-
-    /// One terrain column: sculpted underside bottom, stone core, subsoil,
-    /// biome-classified cap, water fill up to the water line.
-    fn fill_column(&mut self, x: i32, z: i32, column_height: i32, underside_y: i32, seed: u32) {
-        let altitude_meters = (column_height - WATER_LEVEL) as f32 * VOXEL_SIZE;
-        let slope = self.slope_at(x, z);
-        let water_distance = self.water_distance_at(x, z);
-
-        let cap = if column_height < WATER_LEVEL {
-            // Underwater bed: sandy shallows fading into dark sediment,
-            // with a noise-wavy boundary so the transition meanders.
-            let depth_meters = (WATER_LEVEL - column_height) as f32 * VOXEL_SIZE;
-            let sand_limit = 0.20
-                + 0.40
-                    * fractal_noise_2d(
-                        x as f32 * 0.03 + 7100.0,
-                        z as f32 * 0.03,
-                        2,
-                        seed.wrapping_add(67),
-                    );
-            if depth_meters <= sand_limit {
-                Voxel::Sand
-            } else {
-                Voxel::Sediment
-            }
-        } else if altitude_meters > SNOW_LINE_METERS && slope <= SNOW_MAX_SLOPE_RATIO {
-            Voxel::Snow
-        } else if (slope > ROCK_SLOPE_RATIO && altitude_meters > 1.2)
-            || altitude_meters > ALPINE_LINE_METERS
-        {
-            // Slope-rock needs some altitude: lake and river banks are
-            // just steep enough to trip the rule, but they're soil, not
-            // cliffs — gray rings around every pond look wrong.
-            Voxel::Stone
-        } else if water_distance
-            <= BEACH_LUSH_METERS + (BEACH_DRY_METERS - BEACH_LUSH_METERS) * self.dryness_at(x, z)
-            && altitude_meters <= BEACH_MAX_ALTITUDE_METERS
-        {
-            Voxel::Sand
-        } else {
-            Voxel::Grass
-        };
-        let subsoil = match cap {
-            Voxel::Sand => Voxel::Sand,
-            Voxel::Sediment => Voxel::Sediment,
-            Voxel::Grass => Voxel::Dirt,
-            _ => Voxel::Stone,
-        };
-
-        for y in underside_y..=column_height {
-            let voxel = if y == column_height {
-                cap
-            } else if y >= column_height - 3 {
-                subsoil
-            } else if y < underside_y + 10 {
-                // Earthy skin on the island's sculpted bottom, so the
-                // underside reads as hanging soil rather than gray slab.
-                Voxel::Dirt
-            } else {
-                Voxel::Stone
-            };
-            self.set(x, y, z, voxel);
-        }
-        for y in (column_height + 1)..=WATER_LEVEL {
-            self.set(x, y, z, Voxel::Water);
-        }
+        WorldBuilder::build(heights, seed, season, tree_positions.as_deref())
     }
 
     /// Places where the river spills over the island's rim: clusters of
@@ -430,14 +421,6 @@ impl VoxelWorld {
             .collect()
     }
 
-    /// Terrain steepness at a column (rise over run, 1.0 = 45°).
-    pub fn slope_at(&self, x: i32, z: i32) -> f32 {
-        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
-            return 0.0;
-        }
-        self.slope[(z as usize) * WORLD_SIZE_X + x as usize]
-    }
-
     /// Distance to the nearest water surface at a column, meters.
     pub fn water_distance_at(&self, x: i32, z: i32) -> f32 {
         if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
@@ -452,6 +435,245 @@ impl VoxelWorld {
             return 0.5;
         }
         self.tree_tone[(z as usize) * WORLD_SIZE_X + x as usize]
+    }
+}
+
+/// Dense scratch world used ONLY during generation: trees, boulders, and
+/// decoration need fast random writes, which RLE is bad at. Compresses
+/// into the RLE [`VoxelWorld`] when every pass has run.
+struct WorldBuilder {
+    voxels: Vec<Voxel>,
+    dryness: Vec<f32>,
+    ground_cover: Vec<f32>,
+    /// Per-column steepness (rise over run, 1.0 = 45°), from the heightmap.
+    /// Generation-only — nothing at runtime needs it.
+    slope: Vec<f32>,
+    water_distance: Vec<f32>,
+    tree_tone: Vec<f32>,
+}
+
+impl WorldBuilder {
+    fn index(x: usize, y: usize, z: usize) -> usize {
+        (y * WORLD_SIZE_Z + z) * WORLD_SIZE_X + x
+    }
+
+    fn get(&self, x: i32, y: i32, z: i32) -> Voxel {
+        if x < 0
+            || y < 0
+            || z < 0
+            || x >= WORLD_SIZE_X as i32
+            || y >= WORLD_SIZE_Y as i32
+            || z >= WORLD_SIZE_Z as i32
+        {
+            return Voxel::Air;
+        }
+        self.voxels[Self::index(x as usize, y as usize, z as usize)]
+    }
+
+    fn set(&mut self, x: i32, y: i32, z: i32, voxel: Voxel) {
+        if x < 0
+            || y < 0
+            || z < 0
+            || x >= WORLD_SIZE_X as i32
+            || y >= WORLD_SIZE_Y as i32
+            || z >= WORLD_SIZE_Z as i32
+        {
+            return;
+        }
+        self.voxels[Self::index(x as usize, y as usize, z as usize)] = voxel;
+    }
+
+    fn dryness_at(&self, x: i32, z: i32) -> f32 {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return 0.0;
+        }
+        self.dryness[(z as usize) * WORLD_SIZE_X + x as usize]
+    }
+
+    fn cover_at(&self, x: i32, z: i32) -> f32 {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return 0.0;
+        }
+        self.ground_cover[(z as usize) * WORLD_SIZE_X + x as usize]
+    }
+
+    /// Shared tail of every construction path: fill columns from the
+    /// heightmap, then decorate, plant trees, scatter bushes and boulders,
+    /// and compress the result into the RLE world. (The fog ring hiding
+    /// the world edge is a shader effect, not voxels — see `fog_ring.rs`.)
+    fn build(
+        heights: Vec<i32>,
+        seed: u32,
+        season: f32,
+        tree_positions: Option<&[(i32, i32)]>,
+    ) -> VoxelWorld {
+        let mut world = Self {
+            voxels: vec![Voxel::Air; WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z],
+            dryness: compute_dryness_map(seed),
+            ground_cover: compute_cover_map(seed),
+            slope: compute_slope_map(&heights),
+            water_distance: compute_water_distance_map(&heights),
+            tree_tone: vec![0.5; WORLD_SIZE_X * WORLD_SIZE_Z],
+        };
+
+        let underside = compute_underside_map(&heights, seed);
+        for z in 0..WORLD_SIZE_Z as i32 {
+            for x in 0..WORLD_SIZE_X as i32 {
+                let column_index = (z as usize) * WORLD_SIZE_X + x as usize;
+                let column_height = heights[column_index];
+                if column_height != NO_LAND {
+                    world.fill_column(x, z, column_height, underside[column_index], seed);
+                }
+            }
+        }
+
+        world.decorate(&heights, seed, season);
+        match tree_positions {
+            Some(positions) => world.plant_trees_at(positions, &heights, seed),
+            None => world.plant_trees(&heights, seed),
+        }
+        world.scatter_bushes(&heights, seed);
+        world.scatter_boulders(&heights, seed);
+        world.compress()
+    }
+
+    /// Compress the dense grid into per-column RLE. Two fully sequential
+    /// passes over the 256 MB array (never column-strided): pass 1 counts
+    /// runs per column, pass 2 fills them into exact slots — the dense
+    /// grid is dropped afterwards.
+    fn compress(self) -> VoxelWorld {
+        let column_count = WORLD_SIZE_X * WORLD_SIZE_Z;
+
+        let mut run_counts = vec![0_u32; column_count];
+        let mut previous = vec![Voxel::Air; column_count];
+        for y in 0..WORLD_SIZE_Y {
+            for column in 0..column_count {
+                let voxel = self.voxels[y * column_count + column];
+                if y == 0 || previous[column] != voxel {
+                    run_counts[column] += 1;
+                    previous[column] = voxel;
+                }
+            }
+        }
+
+        let mut column_starts = vec![0_u32; column_count + 1];
+        for column in 0..column_count {
+            column_starts[column + 1] = column_starts[column] + run_counts[column];
+        }
+
+        let total_runs = column_starts[column_count] as usize;
+        let mut runs = vec![
+            Run {
+                voxel: Voxel::Air,
+                length: 0,
+            };
+            total_runs
+        ];
+        let mut cursors: Vec<u32> = column_starts[..column_count].to_vec();
+        for y in 0..WORLD_SIZE_Y {
+            for column in 0..column_count {
+                let voxel = self.voxels[y * column_count + column];
+                let cursor = &mut cursors[column];
+                if y == 0 || runs[*cursor as usize - 1].voxel != voxel {
+                    runs[*cursor as usize] = Run { voxel, length: 1 };
+                    *cursor += 1;
+                } else {
+                    runs[*cursor as usize - 1].length += 1;
+                }
+            }
+        }
+
+        VoxelWorld {
+            runs,
+            column_starts,
+            dryness: self.dryness,
+            ground_cover: self.ground_cover,
+            water_distance: self.water_distance,
+            tree_tone: self.tree_tone,
+        }
+    }
+
+    /// One terrain column: sculpted underside bottom, stone core, subsoil,
+    /// biome-classified cap, water fill up to the water line.
+    fn fill_column(&mut self, x: i32, z: i32, column_height: i32, underside_y: i32, seed: u32) {
+        let altitude_meters = (column_height - WATER_LEVEL) as f32 * VOXEL_SIZE;
+        let slope = self.slope_at(x, z);
+        let water_distance = self.water_distance_at(x, z);
+
+        let cap = if column_height < WATER_LEVEL {
+            // Underwater bed: sandy shallows fading into dark sediment,
+            // with a noise-wavy boundary so the transition meanders.
+            let depth_meters = (WATER_LEVEL - column_height) as f32 * VOXEL_SIZE;
+            let sand_limit = 0.20
+                + 0.40
+                    * fractal_noise_2d(
+                        x as f32 * 0.03 + 7100.0,
+                        z as f32 * 0.03,
+                        2,
+                        seed.wrapping_add(67),
+                    );
+            if depth_meters <= sand_limit {
+                Voxel::Sand
+            } else {
+                Voxel::Sediment
+            }
+        } else if altitude_meters > SNOW_LINE_METERS && slope <= SNOW_MAX_SLOPE_RATIO {
+            Voxel::Snow
+        } else if (slope > ROCK_SLOPE_RATIO && altitude_meters > 1.2)
+            || altitude_meters > ALPINE_LINE_METERS
+        {
+            // Slope-rock needs some altitude: lake and river banks are
+            // just steep enough to trip the rule, but they're soil, not
+            // cliffs — gray rings around every pond look wrong.
+            Voxel::Stone
+        } else if water_distance
+            <= BEACH_LUSH_METERS + (BEACH_DRY_METERS - BEACH_LUSH_METERS) * self.dryness_at(x, z)
+            && altitude_meters <= BEACH_MAX_ALTITUDE_METERS
+        {
+            Voxel::Sand
+        } else {
+            Voxel::Grass
+        };
+        let subsoil = match cap {
+            Voxel::Sand => Voxel::Sand,
+            Voxel::Sediment => Voxel::Sediment,
+            Voxel::Grass => Voxel::Dirt,
+            _ => Voxel::Stone,
+        };
+
+        for y in underside_y..=column_height {
+            let voxel = if y == column_height {
+                cap
+            } else if y >= column_height - 3 {
+                subsoil
+            } else if y < underside_y + 10 {
+                // Earthy skin on the island's sculpted bottom, so the
+                // underside reads as hanging soil rather than gray slab.
+                Voxel::Dirt
+            } else {
+                Voxel::Stone
+            };
+            self.set(x, y, z, voxel);
+        }
+        for y in (column_height + 1)..=WATER_LEVEL {
+            self.set(x, y, z, Voxel::Water);
+        }
+    }
+
+    /// Terrain steepness at a column (rise over run, 1.0 = 45°).
+    fn slope_at(&self, x: i32, z: i32) -> f32 {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return 0.0;
+        }
+        self.slope[(z as usize) * WORLD_SIZE_X + x as usize]
+    }
+
+    /// Distance to the nearest water surface at a column, meters.
+    pub fn water_distance_at(&self, x: i32, z: i32) -> f32 {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return f32::MAX;
+        }
+        self.water_distance[(z as usize) * WORLD_SIZE_X + x as usize]
     }
 
     /// Stamp a tree's color identity in a disc around its base, so the
@@ -1465,7 +1687,9 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
             );
             let lake_amount = smoothstep(0.66, 0.80, lake_noise);
             if lake_amount > 0.0 {
-                let lake_bed = (WATER_LEVEL - 2) as f32 - lake_amount * 3.0;
+                // Proper depth toward the middle (~1.3 m at full mask) —
+                // the shoreline shelf keeps the edges wadeable regardless.
+                let lake_bed = (WATER_LEVEL - 3) as f32 - lake_amount * 7.0;
                 height += (lake_bed - height) * lake_amount;
             }
 
@@ -1698,6 +1922,45 @@ mod tests {
     fn generation_is_deterministic() {
         let world_a = VoxelWorld::generate(7, 0.0);
         let world_b = VoxelWorld::generate(7, 0.0);
-        assert_eq!(world_a.voxels, world_b.voxels);
+        assert_eq!(world_a.column_starts, world_b.column_starts);
+        assert_eq!(world_a.runs, world_b.runs);
+    }
+
+    #[test]
+    fn rle_round_trips_and_compresses() {
+        let world = VoxelWorld::generate(1, 0.0);
+
+        // Runs must reconstruct exactly what get() reports, and every
+        // column must span the full world height.
+        for z in [0, 250, 500, 750, WORLD_SIZE_Z as i32 - 1] {
+            for x in 0..WORLD_SIZE_X as i32 {
+                let mut spanned = 0;
+                for (voxel, y_start, length) in world.column_runs(x, z) {
+                    assert_eq!(spanned, y_start, "run gap at ({x},{z})");
+                    for y in y_start..y_start + length {
+                        assert_eq!(world.get(x, y, z), voxel);
+                    }
+                    spanned += length;
+                }
+                assert_eq!(spanned, WORLD_SIZE_Y as i32, "column ({x},{z}) short");
+            }
+        }
+
+        // A scratch window must agree with get() everywhere inside it.
+        let scratch = world.unpack_chunk(448, 512, 448, 512);
+        for z in 447..513 {
+            for x in 447..513 {
+                for y in (WATER_LEVEL - 20)..(WATER_LEVEL + 60) {
+                    assert_eq!(scratch.get(x, y, z), world.get(x, y, z));
+                }
+            }
+        }
+
+        let (run_count, rle_bytes) = world.memory_stats();
+        assert!(run_count > 1_000_000, "suspiciously few runs: {run_count}");
+        assert!(
+            rle_bytes < 64_000_000,
+            "RLE failed to compress: {rle_bytes} bytes"
+        );
     }
 }

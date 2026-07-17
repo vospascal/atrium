@@ -141,6 +141,8 @@ pub fn spawn_reflection_camera(mut commands: Commands, target: Res<ReflectionTar
         // pass tonemaps the night sky brighter and bluer than the main
         // camera shows it, and the mismatch reads as blue water at night.
         bevy::render::view::Hdr,
+        // No MSAA for the mirror — the wave wobble hides the jaggies.
+        Msaa::Off,
         RenderTarget::Image(target.image.clone().into()),
         Projection::Perspective(PerspectiveProjection {
             fov: 22_f32.to_radians(),
