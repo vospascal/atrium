@@ -45,6 +45,7 @@ use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight, NotShadowCaste
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use bevy::prelude::*;
+use bevy::render::storage::ShaderStorageBuffer;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use std::path::Path;
@@ -304,6 +305,7 @@ fn initial_world_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
     mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
@@ -317,6 +319,7 @@ fn initial_world_system(
         &mut meshes,
         &mut materials,
         &mut terrain_materials,
+        &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
         &mut waterfall_materials,
@@ -333,6 +336,7 @@ fn spawn_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     terrain_materials: &mut Assets<voxel_material::VoxelTerrainMaterial>,
+    storage_buffers: &mut Assets<ShaderStorageBuffer>,
     flame_materials: &mut Assets<FlameMaterial>,
     water_materials: &mut Assets<water::WaterMaterial>,
     waterfall_materials: &mut Assets<waterfall::WaterfallMaterial>,
@@ -445,9 +449,9 @@ fn spawn_world(
         },
         extension: voxel_material::voxel_extension(
             seed,
-            VOXEL_SIZE,
-            WORLD_SIZE_X as f32 / 2.0,
-            WORLD_SIZE_Z as f32 / 2.0,
+            storage_buffers.add(ShaderStorageBuffer::from(
+                voxel_world.solid_occupancy_bits(),
+            )),
         ),
     });
     let prop_material = materials.add(StandardMaterial {
@@ -664,6 +668,7 @@ fn regenerate_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
     mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
@@ -695,6 +700,7 @@ fn regenerate_system(
         &mut meshes,
         &mut materials,
         &mut terrain_materials,
+        &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
         &mut waterfall_materials,

@@ -1,10 +1,15 @@
-// Terrain jitter extension for StandardMaterial.
+// Terrain jitter + ambient-occlusion extension for StandardMaterial.
 //
-// Recomputes the per-voxel brightness speckle in the fragment shader (from the
-// fragment's world position) instead of reading it from baked vertex colors,
-// so the look survives greedy meshing. The hash matches
-// `voxel_core::noise::{hash_3d, hash_to_unit}` exactly, and the amplitude is
-// carried in the vertex-color alpha by the mesher. See `voxel_material.rs`.
+// Both the per-voxel brightness speckle (jitter) and the corner ambient
+// occlusion are recomputed here in the fragment shader — from the fragment's
+// world position and a global solid-occupancy bitset — instead of being baked
+// into vertex colors. That lets greedy meshing merge flat faces regardless of
+// their AO without smearing it across the merged quad.
+//
+// Cover geometry (grass/flowers/reeds) is squashed, so its world position
+// doesn't map cleanly to a voxel cell; it keeps its baked AO and is flagged by
+// a sentinel in the vertex-color alpha (>= 1.0) so this shader skips AO for it.
+// The jitter hash matches `voxel_core::noise::{hash_3d, hash_to_unit}`.
 
 #import bevy_pbr::pbr_fragment::pbr_input_from_standard_material
 #import bevy_pbr::pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing}
@@ -17,8 +22,12 @@ struct VoxelExtension {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> voxel_ext: VoxelExtension;
+// x = WORLD_SIZE_X, y = WORLD_SIZE_Y, z = WORLD_SIZE_Z
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+var<uniform> voxel_dims: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+var<storage, read> occupancy: array<u32>;
 
-// Integer lattice hash — identical to voxel_core::noise::hash_3d.
 fn hash_3d(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     var h: u32 = (seed * 0x9E3779B9u)
         ^ (u32(x) * 0x85EBCA6Bu)
@@ -32,38 +41,121 @@ fn hash_3d(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     return h;
 }
 
-// Map a hash to [0, 1) — identical to voxel_core::noise::hash_to_unit.
 fn hash_to_unit(h: u32) -> f32 {
     return f32(h >> 8u) / 16777216.0;
 }
 
+// Solid-occupancy lookup, matching voxel_core::world::solid_occupancy_bits:
+// bit index = (z * WX + x) * WY + y.
+fn is_solid(vx: i32, vy: i32, vz: i32) -> bool {
+    let wx = i32(voxel_dims.x);
+    let wy = i32(voxel_dims.y);
+    let wz = i32(voxel_dims.z);
+    if vx < 0 || vy < 0 || vz < 0 || vx >= wx || vy >= wy || vz >= wz {
+        return false;
+    }
+    let index = (u32(vz) * u32(wx) + u32(vx)) * u32(wy) + u32(vy);
+    return ((occupancy[index >> 5u] >> (index & 31u)) & 1u) == 1u;
+}
+
+// Vertex-corner ambient occlusion level (0..3), matching the CPU
+// voxel_core / mesh::ambient_occlusion_level.
+fn occlusion_level(side_1: bool, side_2: bool, corner: bool) -> f32 {
+    if side_1 && side_2 {
+        return 0.0;
+    }
+    return 3.0 - (f32(side_1) + f32(side_2) + f32(corner));
+}
+
+// Per-fragment ambient occlusion for a full-height terrain face. Reproduces
+// the mesher's per-corner AO bilinearly interpolated across the cell, but
+// evaluated per fragment so it stays tight to occluders on merged quads.
+fn terrain_ao(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let voxel_size = voxel_ext.params.y;
+    let offset = vec3<f32>(voxel_ext.params.z, 0.0, voxel_ext.params.w);
+
+    // Two positive world-axis tangents perpendicular to the (axis-aligned)
+    // normal. Labeling is arbitrary — AO is symmetric in the two tangents.
+    let axis = abs(normal);
+    var tangent_1: vec3<f32>;
+    var tangent_2: vec3<f32>;
+    if axis.x > 0.5 {
+        tangent_1 = vec3<f32>(0.0, 1.0, 0.0);
+        tangent_2 = vec3<f32>(0.0, 0.0, 1.0);
+    } else if axis.y > 0.5 {
+        tangent_1 = vec3<f32>(1.0, 0.0, 0.0);
+        tangent_2 = vec3<f32>(0.0, 0.0, 1.0);
+    } else {
+        tangent_1 = vec3<f32>(1.0, 0.0, 0.0);
+        tangent_2 = vec3<f32>(0.0, 1.0, 0.0);
+    }
+
+    // Owning cell (step half a voxel back along the normal), and the air layer
+    // just outside the face where the occluders are sampled.
+    let cell = floor(world_position / voxel_size + offset - 0.5 * normal);
+    let base = cell + normal;
+    let base_i = vec3<i32>(base);
+    let t1_i = vec3<i32>(tangent_1);
+    let t2_i = vec3<i32>(tangent_2);
+
+    // Fractional position within the cell along each tangent (0..1).
+    let frac = fract(world_position / voxel_size + offset);
+    let fu = dot(frac, tangent_1);
+    let fv = dot(frac, tangent_2);
+
+    // Four corner AO levels: (a1, a2) in {-1,+1}^2 → (fu,fv) in {0,1}^2.
+    let l00 = occlusion_level(
+        is_solid(base_i.x - t1_i.x, base_i.y - t1_i.y, base_i.z - t1_i.z),
+        is_solid(base_i.x - t2_i.x, base_i.y - t2_i.y, base_i.z - t2_i.z),
+        is_solid(base_i.x - t1_i.x - t2_i.x, base_i.y - t1_i.y - t2_i.y, base_i.z - t1_i.z - t2_i.z),
+    );
+    let l10 = occlusion_level(
+        is_solid(base_i.x + t1_i.x, base_i.y + t1_i.y, base_i.z + t1_i.z),
+        is_solid(base_i.x - t2_i.x, base_i.y - t2_i.y, base_i.z - t2_i.z),
+        is_solid(base_i.x + t1_i.x - t2_i.x, base_i.y + t1_i.y - t2_i.y, base_i.z + t1_i.z - t2_i.z),
+    );
+    let l11 = occlusion_level(
+        is_solid(base_i.x + t1_i.x, base_i.y + t1_i.y, base_i.z + t1_i.z),
+        is_solid(base_i.x + t2_i.x, base_i.y + t2_i.y, base_i.z + t2_i.z),
+        is_solid(base_i.x + t1_i.x + t2_i.x, base_i.y + t1_i.y + t2_i.y, base_i.z + t1_i.z + t2_i.z),
+    );
+    let l01 = occlusion_level(
+        is_solid(base_i.x - t1_i.x, base_i.y - t1_i.y, base_i.z - t1_i.z),
+        is_solid(base_i.x + t2_i.x, base_i.y + t2_i.y, base_i.z + t2_i.z),
+        is_solid(base_i.x - t1_i.x + t2_i.x, base_i.y - t1_i.y + t2_i.y, base_i.z - t1_i.z + t2_i.z),
+    );
+
+    let level = mix(mix(l00, l10, fu), mix(l01, l11, fu), fv);
+    return 0.55 + 0.15 * level;
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    // Jitter amplitude rides in the vertex-color alpha (0 = no jitter, e.g.
-    // flowers). Grab it before the standard material consumes the color.
-    let amplitude = in.color.a;
+    // Alpha carries the jitter amplitude. A sentinel offset of +10 marks cover
+    // geometry, which keeps its baked AO and skips the shader AO below.
+    let raw_alpha = in.color.a;
+    let is_cover = raw_alpha >= 1.0;
+    let amplitude = select(raw_alpha, raw_alpha - 10.0, is_cover);
 
-    // Evaluate the standard material (this multiplies base_color by the
-    // vertex color rgb — the un-jittered voxel color the mesher baked).
+    // Evaluate the standard material (multiplies base_color by vertex rgb).
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-    // Recover the owning voxel coordinate. Vertices sit on face boundaries, so
-    // step half a voxel back along the normal to land inside the cell — that
-    // way all six faces of a voxel share one jitter value, and merged quads
-    // still vary per cell across their surface.
+    // Per-voxel jitter (mean-1.0), recovered from world position.
     let seed = bitcast<u32>(voxel_ext.params.x);
     let voxel_size = voxel_ext.params.y;
-    let half_x = voxel_ext.params.z;
-    let half_z = voxel_ext.params.w;
+    let offset = vec3<f32>(voxel_ext.params.z, 0.0, voxel_ext.params.w);
     let sample = in.world_position.xyz - in.world_normal * (0.5 * voxel_size);
-    let vx = i32(floor(sample.x / voxel_size + half_x));
-    let vy = i32(floor(sample.y / voxel_size));
-    let vz = i32(floor(sample.z / voxel_size + half_z));
-
-    // roll in [0,1); jitter is mean-1.0: 1 + amplitude*(2*roll - 1).
-    let roll = hash_to_unit(hash_3d(vx, vy, vz, seed + 3u));
+    let voxel = vec3<i32>(floor(sample / voxel_size + offset));
+    let roll = hash_to_unit(hash_3d(voxel.x, voxel.y, voxel.z, seed + 3u));
     let jitter = 1.0 + amplitude * (2.0 * roll - 1.0);
-    pbr_input.material.base_color = vec4<f32>(pbr_input.material.base_color.rgb * jitter, 1.0);
+
+    var color = pbr_input.material.base_color.rgb * jitter;
+    if !is_cover {
+        // Terrain: baked AO was dropped from the mesh; apply it here so merged
+        // flat faces still show tight corner occlusion.
+        color = color * terrain_ao(in.world_position.xyz, in.world_normal);
+    }
+    pbr_input.material.base_color = vec4<f32>(color, 1.0);
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 

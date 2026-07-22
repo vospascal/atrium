@@ -18,19 +18,29 @@
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
+use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
+use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
-/// The terrain material: StandardMaterial PBR + the voxel jitter extension.
+/// The terrain material: StandardMaterial PBR + the voxel jitter/AO extension.
 pub type VoxelTerrainMaterial = ExtendedMaterial<StandardMaterial, VoxelExtension>;
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct VoxelExtension {
     /// `x` = world seed reinterpreted as f32 bits (`bitcast<u32>` in WGSL),
     /// `y` = VOXEL_SIZE (m), `z` = half world-X (voxels), `w` = half world-Z.
-    /// Together these let the shader recover each fragment's voxel coordinate
-    /// and hash it to the same jitter the CPU used to bake.
+    /// Lets the shader recover each fragment's voxel coordinate for both the
+    /// jitter hash and the ambient-occlusion neighbor lookups.
     #[uniform(100)]
     pub params: Vec4,
+    /// World voxel dimensions `(x, y, z, _)` — for indexing the occupancy bits.
+    #[uniform(101)]
+    pub dimensions: Vec4,
+    /// Packed solid-occupancy bitset (1 bit/voxel). The shader reads it to
+    /// recompute per-voxel ambient occlusion in the fragment stage, so greedy
+    /// meshing can merge flat faces regardless of their AO.
+    #[storage(102, read_only)]
+    pub occupancy: Handle<ShaderStorageBuffer>,
 }
 
 impl MaterialExtension for VoxelExtension {
@@ -39,9 +49,24 @@ impl MaterialExtension for VoxelExtension {
     }
 }
 
-/// Build the extension uniform for a given world seed and grid dimensions.
-pub fn voxel_extension(seed: u32, voxel_size: f32, half_x: f32, half_z: f32) -> VoxelExtension {
+/// Build the extension for a given world seed and a handle to its
+/// solid-occupancy bitset (upload the bits from
+/// [`voxel_core::world::VoxelWorld::solid_occupancy_bits`] into an
+/// `Assets<ShaderStorageBuffer>` and pass the handle here).
+pub fn voxel_extension(seed: u32, occupancy: Handle<ShaderStorageBuffer>) -> VoxelExtension {
     VoxelExtension {
-        params: Vec4::new(f32::from_bits(seed), voxel_size, half_x, half_z),
+        params: Vec4::new(
+            f32::from_bits(seed),
+            VOXEL_SIZE,
+            WORLD_SIZE_X as f32 / 2.0,
+            WORLD_SIZE_Z as f32 / 2.0,
+        ),
+        dimensions: Vec4::new(
+            WORLD_SIZE_X as f32,
+            WORLD_SIZE_Y as f32,
+            WORLD_SIZE_Z as f32,
+            0.0,
+        ),
+        occupancy,
     }
 }

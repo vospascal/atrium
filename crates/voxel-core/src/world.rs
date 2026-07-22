@@ -279,6 +279,31 @@ impl VoxelWorld {
     }
 
     /// (run count, resident bytes of the RLE + column index).
+    /// Packed solid-occupancy bitset, 1 bit per voxel, for the terrain shader
+    /// to recompute ambient occlusion per fragment. Bit index is
+    /// `(z * WORLD_SIZE_X + x) * WORLD_SIZE_Y + y` — y-contiguous within a
+    /// column, so each solid run sets a contiguous bit range. Solid = the same
+    /// `Voxel::is_solid` the mesher's baked AO used (cover/water are not solid).
+    pub fn solid_occupancy_bits(&self) -> Vec<u32> {
+        let total_bits = WORLD_SIZE_X * WORLD_SIZE_Y * WORLD_SIZE_Z;
+        let mut bits = vec![0_u32; total_bits.div_ceil(32)];
+        for z in 0..WORLD_SIZE_Z as i32 {
+            for x in 0..WORLD_SIZE_X as i32 {
+                let column_base = ((z as usize) * WORLD_SIZE_X + x as usize) * WORLD_SIZE_Y;
+                for (voxel, y_start, length) in self.column_runs(x, z) {
+                    if !voxel.is_solid() {
+                        continue;
+                    }
+                    for y in y_start..(y_start + length) {
+                        let index = column_base + y as usize;
+                        bits[index >> 5] |= 1 << (index & 31);
+                    }
+                }
+            }
+        }
+        bits
+    }
+
     pub fn memory_stats(&self) -> (usize, usize) {
         let bytes = self.runs.len() * std::mem::size_of::<Run>()
             + self.column_starts.len() * std::mem::size_of::<u32>();

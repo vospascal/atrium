@@ -198,6 +198,11 @@ fn build_chunk_meshes(
                 let Some(voxel_group) = group_of(voxel) else {
                     continue;
                 };
+                // Full-height terrain is emitted (merged) by the greedy pass;
+                // this per-voxel loop only handles cover and water.
+                if voxel_group == MeshGroup::Terrain {
+                    continue;
+                }
                 let voxel_position = IVec3::new(x, y, z);
                 let base_color = voxel_color(world, &scratch, voxel, x, y, z, seed, season);
                 let vertical_scale = visual_vertical_scale(&scratch, voxel, x, y, z, seed);
@@ -282,14 +287,6 @@ fn build_chunk_meshes(
                     let flip_diagonal = occlusion_levels[0] + occlusion_levels[2]
                         < occlusion_levels[1] + occlusion_levels[3];
 
-                    // Fully-AO-open full-height terrain faces are emitted, in
-                    // merged form, by the greedy pass after this loop. Skip
-                    // them here so they aren't drawn twice. Everything with
-                    // baked AO, plus cover and water, stays 1×1.
-                    if voxel_group == MeshGroup::Terrain && occlusion_levels == [3, 3, 3, 3] {
-                        continue;
-                    }
-
                     let buffers = match voxel_group {
                         MeshGroup::Terrain | MeshGroup::Cover => {
                             if face_center.y <= water_plane_y {
@@ -360,8 +357,6 @@ fn terrain_merge_face(
     y: i32,
     z: i32,
     normal: IVec3,
-    tangent_1: IVec3,
-    tangent_2: IVec3,
     water_plane_y: f32,
 ) -> Option<MergeFace> {
     let voxel = scratch.get(x, y, z);
@@ -375,26 +370,11 @@ fn terrain_merge_face(
         neighbor_position.y,
         neighbor_position.z,
     );
-    // A face exists only where the neighbor is not also terrain.
+    // A face exists only where the neighbor is not also terrain. Ambient
+    // occlusion is no longer a merge gate — the shader recomputes it per
+    // fragment — so every exposed flat terrain face is mergeable.
     if group_of(neighbor) == Some(MeshGroup::Terrain) {
         return None;
-    }
-    // Merge only where every corner is fully open (same rule and reads as the
-    // per-voxel loop, so the skip there matches exactly).
-    let occlusion_base = position + normal;
-    for &(along_1, along_2) in QUAD_CORNERS.iter() {
-        let side_1_solid = scratch
-            .get_offset(occlusion_base + tangent_1 * along_1)
-            .is_solid();
-        let side_2_solid = scratch
-            .get_offset(occlusion_base + tangent_2 * along_2)
-            .is_solid();
-        let corner_solid = scratch
-            .get_offset(occlusion_base + tangent_1 * along_1 + tangent_2 * along_2)
-            .is_solid();
-        if ambient_occlusion_level(side_1_solid, side_2_solid, corner_solid) != 3 {
-            return None;
-        }
     }
     let face_center_y = y as f32 + 0.5 + normal.y as f32 * 0.5;
     Some(MergeFace {
@@ -492,8 +472,6 @@ fn greedy_merge_terrain(
                         y,
                         z,
                         normal,
-                        tangent_1,
-                        tangent_2,
                         water_plane_y,
                     ) {
                         mask[vi * u_count + ui] = Some(Cell {
@@ -832,12 +810,14 @@ fn voxel_color(
         (srgb[2] * underside_bounce[2]).min(1.0),
     )
     .to_linear();
-    // Alpha carries the shader's jitter amplitude for terrain; for water it
-    // carries the transparency its own shader expects.
-    let out_alpha = if matches!(voxel, Voxel::Water) {
-        alpha
-    } else {
-        amplitude
+    // Alpha channel, by group: water carries the transparency its own shader
+    // expects; cover carries `amplitude + 10` as a sentinel so the terrain
+    // shader skips AO for it (cover keeps its baked AO and squashed geometry);
+    // terrain carries the bare jitter amplitude and gets shader AO.
+    let out_alpha = match group_of(voxel) {
+        Some(MeshGroup::Water) => alpha,
+        Some(MeshGroup::Cover) => amplitude + 10.0,
+        _ => amplitude,
     };
     [linear.red, linear.green, linear.blue, out_alpha]
 }
