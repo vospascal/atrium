@@ -103,22 +103,56 @@ tone) and underside-bounce stay baked (they interpolate fine across a quad).
 Later extension (its own step): move tint/AO too → full greedy + a **live
 season/biome slider** (uniform update, no 1.6 s rebake).
 
-### Stage 3 — Merge-safe binary greedy meshing  *(V3, V9)*
-Bit-array occupancy per chunk (`u32`/`u64` columns), merge faces on identical
-(type, tone-bucket, fully-open-AO) keys. Now look-preserving because jitter is
-shader-side. Expect >5× vertex cut. Pair with **vertex bit-packing** (V9:
-28 B → 4 B) / slim formats, unblocked by the custom material from Stage 2.
+### Stage 3 — Greedy meshing — ✅ DONE 2026-07-23  *(V3, V9)*
+Per face direction, per slice, greedy-merge exposed flat terrain faces into
+maximal rectangles (grow width then height), keyed by voxel type + water-plane
+bucket; corner colors sampled at the rectangle's 4 corner voxels so gradients
+interpolate. Cover/water stay 1×1.
+- **Step A (merge-safe, AO-open only):** −26% verts, look preserved.
+- **Step B (full greedy):** moved corner AO into the fragment shader too — a
+  packed 1-bit/voxel global occupancy buffer (`solid_occupancy_bits`) uploaded
+  as a `ShaderStorageBuffer`; the shader recomputes the 4-corner AO per
+  fragment (bilinear, matching the baked formula) so AO no longer gates
+  merging. Cover keeps baked AO via an alpha-sentinel (+10) the shader detects.
+  **Result: −47% verts overall (terrain −58%, 2.4×), look preserved**, user
+  confirmed a large frame-time drop in-app. Meshing ~865 ms, gen ~726 ms.
+- Deferred: vertex bit-packing / slim formats (further GPU-bandwidth win, its
+  own step); a subtle mesh-time cost (6× volume re-iteration) is acceptable
+  since it's one-time and the app is GPU-bound.
 
-### Stage 4 — RLE column storage  *(V6, V18; Phase 4)*
+### Stage 4 — RLE column storage — ✅ DONE 2026-07-17  *(V6, V18; Phase 4)*
+(Landed before this planning session — `VoxelWorld` is per-column RLE, 256 MB →
+17 MB, unpack-to-scratch when meshing.)
 Per-column RLE (`32×256×32`): 256 MB → ~5–15 MB. Never random-access — unpack
 a chunk (+1 apron) to a dense scratch buffer, mesh, discard (mesher already
 walks in this order). Dense overlay for edited chunks until re-compacted.
 Unlocks fast scene save/load and bigger/streamed worlds. Add **palette**
 per-chunk file encoding (V18) for save files.
 
-### Stage 5 — LOD  *(V3, V14; Phase 5, optional)*
-Distant chunks meshed at 2× voxel size (¼ faces); safe at tilt-shift
-distances. Only if orbit-view numbers still hurt after 1–4.
+### Stage 5 — LOD  *(V3, V14)*
+**ROI caveat (2026-07-23):** LOD simplifies terrain far from the camera, but
+this is a 125 m diorama viewed in full — orbit sees the whole island at ~equal
+distance (LOD would coarsen the beauty shot), and first-person's far edge is
+only ~125 m off. So LOD does little for the current scene; its payoff is
+**large/streamed worlds and an eventual Quest standalone build**. Higher-ROI
+perf levers for *this* scene: slim vertex formats (bandwidth) + trimming the
+fullscreen raymarch/reflection costs. Keep LOD for when worlds grow.
+
+Distant chunks meshed at coarser voxel size (¼ faces per level). Approach:
+- **Coarse meshing:** `build_chunk_meshes` gains an `lod` level; at lod>0 it
+  samples the world at stride `2^lod` (representative center sample per coarse
+  cell) and emits faces at voxel size `VOXEL_SIZE·2^lod`, greedy-merged.
+- **AO on LOD chunks:** skip the per-fragment shader AO (distant + fog hides
+  it) via the same alpha sentinel cover uses — avoids full-res AO on coarse
+  geometry.
+- **Selection:** bake LOD0 (near) + LOD1 (far) meshes per chunk; spawn both
+  with complementary **`VisibilityRange`** (already used for fireflies) so
+  Bevy dither-crossfades between them by camera distance — no custom
+  selection system, and the dither hides the pop.
+- **Cracks:** try fog+distance+dither first; add downward **skirts** on chunk
+  edges only if seams show.
+- Further perf lever (own step): **slim vertex formats** (Unorm8x4 color +
+  packed normal, needs a custom vertex shader) to halve GPU vertex bandwidth.
 
 > Stages 1–5 are the mesh-perf core. Expected after 1+2: ~10× fewer verts/pass,
 > reflection+shadow nearly free, FP fps >120 in debug, full remesh <300 ms.

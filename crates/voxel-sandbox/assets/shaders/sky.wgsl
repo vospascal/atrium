@@ -146,11 +146,17 @@ fn march_clouds(origin: vec3<f32>, direction: vec3<f32>) -> CloudResult {
     let ambient = mix(sky.horizon_color.rgb, sky.zenith_color.rgb, 0.5)
         * (0.55 + 0.45 * daylight);
 
-    let step_count = 14;
+    // Perf: 14 → 10 steps, and this march runs per pixel for both the main
+    // and reflection views. Optical depth is conserved (sigma scales with the
+    // now-longer step_length), so cloud opacity is unchanged; a dithered start
+    // (like the fog sea) turns the coarser sampling into spatial churn rather
+    // than banding.
+    let step_count = 10;
     let step_length = (t_exit - t_enter) / f32(step_count);
     let extinction = 0.028;
 
-    var t = t_enter + step_length * 0.5;
+    let dither = hash31(direction * 511.0);
+    var t = t_enter + step_length * (0.25 + 0.5 * dither);
     for (var i = 0; i < step_count; i++) {
         let position = origin + direction * t;
         let density = cloud_density(position, layer, coverage);

@@ -50,15 +50,18 @@ fn value_noise(p: vec3<f32>) -> f32 {
 }
 
 fn fbm(p: vec3<f32>) -> f32 {
+    // Perf: 2 octaves instead of 3. `value_noise` is the fog's hottest inner
+    // cost (per step, per fullscreen pixel); the soft fog sea doesn't show the
+    // third octave's fine detail. Normalize by 0.5 + 0.25 = 0.75.
     var total = 0.0;
     var amplitude = 0.5;
     var q = p;
-    for (var octave = 0; octave < 3; octave++) {
+    for (var octave = 0; octave < 2; octave++) {
         total += value_noise(q) * amplitude;
         q = q * 2.13 + vec3<f32>(11.7, 5.3, 7.1);
         amplitude *= 0.5;
     }
-    return total / 0.875;
+    return total / 0.75;
 }
 
 @fragment
@@ -91,7 +94,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let step_count = 24;
+    // Perf: 24 → 12 steps. The dithered start (below) turns the coarser
+    // sampling into churn rather than banding, so the soft fog looks the same.
+    let step_count = 12;
     let step_length = (t_exit - t_enter) / f32(step_count);
     // Dither the start so undersampling churns instead of banding.
     let dither = hash31(vec3<f32>(in.position.xy, fract(globals.time) * 61.7));
