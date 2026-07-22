@@ -196,6 +196,40 @@ pose; feed head pose to the atrium listener for head-tracked binaural audio.
 Windows/Linux box; note macOS OpenXR is limited) vs. a stripped standalone
 Android build leaning hard on Stage 5 LOD. Revisit when we get here.
 
+## Performance status (2026-07-23)
+
+Current state after the mesh-perf arc + fragment trims — the engine is in good
+shape; the levers below are **deferred, to pull only if FPS ever needs it.**
+
+**Landed & confirmed:**
+- Greedy meshing with shader-side AO — **−47% vertices** (terrain −58%), cuts
+  main + reflection + shadow passes. Big confirmed frame-time drop.
+- Fog sea render cost **~⅓** (raymarch steps 24→12, `fbm` octaves 3→2) — look
+  identical (density conserved via `sigma ∝ step_length`; dither hides
+  sampling). Fog was the confirmed fill-bound hog.
+- Sky cloud march **~30%** cheaper (steps 14→10 + dithered start); runs for
+  both the main and reflection views, so it counts double.
+
+**Deferred perf levers (ranked by remaining payoff for *this* 125 m diorama):**
+1. **Half-res fog pass** — render the soft fog sea to a half-res target and
+   upsample (~4× on top of the ⅓ already done). Biggest remaining win.
+   Architectural: separate render target + composite. Fog is soft/low-freq so
+   half-res is nearly invisible.
+2. **Reflection per-camera trims** — give the reflection (wavy, half-res
+   mirror) a cheap sky (gradient, no cloud march) and/or no shadows. Needs the
+   sky/light shaders to know which camera they're rendering for. Medium effort,
+   smaller payoff (reflection is already dynamic-res + off past 120 m).
+3. **Slim vertex formats** — pack 40 B → ~20 B/vertex (Unorm8x4 color + packed
+   normal). Needs a custom vertex shader reproducing Bevy's PBR vertex path
+   *including* `VISIBILITY_RANGE_DITHER` (which LOD depends on). Look-safe but
+   fiddly + uncertain gain on a fill-bound machine — do only if we become
+   vertex-bound.
+4. **LOD** (Stage 5) — low ROI here (diorama viewed in full); real value for
+   large/streamed worlds and an eventual Quest standalone build.
+
+Live `P`-overlay levers (MSAA / reflections / DoF / bloom) remain the way to
+identify the top cost per machine before pulling any deferred lever.
+
 ## Ray-marched renderer: a toggleable second backend (build later)
 The Teardown-family renderer (V1, V2, V8, V10, V12, V17, V19) — GPU DDA
 (Amanatides & Woo), brick maps / octrees / SVO-DAG for empty-space skipping,
