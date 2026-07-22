@@ -83,7 +83,14 @@ remesh. **Biggest architectural unlock**; enables editing, fluids, LOD.
 > the per-voxel speckle on flat regions). So the shader material must come
 > first. This matches the user's original priority (greedy last).
 
-### Stage 2 — Shader-driven voxel material  *(V3 backface split, V16 materials)*
+### Stage 2 — Shader-driven voxel material — ✅ DONE 2026-07-23  *(V3 backface split, V16 materials)*
+Landed as `voxel_material.rs` (`VoxelTerrainMaterial = ExtendedMaterial<StandardMaterial,
+VoxelExtension>`) + `assets/shaders/voxel_terrain.wgsl`. Per-voxel jitter now
+recomputed per-fragment from world position (hash matches `voxel_core::noise`
+exactly; sample offset half a voxel inward along the normal so all 6 faces of a
+voxel share one value). Mesher bakes un-jittered color + packs per-type
+amplitude in vertex alpha; props stay on a plain StandardMaterial. Build +
+clippy + fmt + test green; user confirmed the look is preserved in-app.
 Move the per-voxel hash **jitter** off the vertices into a fragment shader that
 recomputes it from world position, so a later greedy merge preserves it.
 Vehicle: `ExtendedMaterial<StandardMaterial, VoxelExtension>` — keeps all of

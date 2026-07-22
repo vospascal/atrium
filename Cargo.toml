@@ -56,6 +56,12 @@ opt-level = 3
 [profile.dev.package.voxel-sandbox]
 opt-level = 2
 
+# voxel-core holds the hot generation + noise math (moved out of voxel-sandbox
+# in the Stage 0 refactor). The `*` glob above only covers dependencies, not
+# workspace members, so without this generation runs unoptimized (~20× slower).
+[profile.dev.package.voxel-core]
+opt-level = 2
+
 [profile.profiling]
 inherits = "release"
 debug = true

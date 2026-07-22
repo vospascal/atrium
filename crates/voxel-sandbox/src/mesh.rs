@@ -282,6 +282,14 @@ fn build_chunk_meshes(
                     let flip_diagonal = occlusion_levels[0] + occlusion_levels[2]
                         < occlusion_levels[1] + occlusion_levels[3];
 
+                    // Fully-AO-open full-height terrain faces are emitted, in
+                    // merged form, by the greedy pass after this loop. Skip
+                    // them here so they aren't drawn twice. Everything with
+                    // baked AO, plus cover and water, stays 1×1.
+                    if voxel_group == MeshGroup::Terrain && occlusion_levels == [3, 3, 3, 3] {
+                        continue;
+                    }
+
                     let buffers = match voxel_group {
                         MeshGroup::Terrain | MeshGroup::Cover => {
                             if face_center.y <= water_plane_y {
@@ -302,6 +310,21 @@ fn build_chunk_meshes(
         }
     }
 
+    // Merge the flat, fully-open terrain faces skipped above into big quads.
+    greedy_merge_terrain(
+        world,
+        &scratch,
+        seed,
+        season,
+        x_range.clone(),
+        z_range.clone(),
+        half_x,
+        half_z,
+        water_plane_y,
+        &mut above_water_buffers,
+        &mut below_water_buffers,
+    );
+
     let into_optional_mesh = |buffers: MeshBuffers| {
         if buffers.is_empty() {
             None
@@ -314,6 +337,283 @@ fn build_chunk_meshes(
         meadow_cover: into_optional_mesh(meadow_cover_buffers),
         terrain_below_water: into_optional_mesh(below_water_buffers),
         water: into_optional_mesh(water_buffers),
+    }
+}
+
+/// A full-height terrain face that is safe to greedy-merge: exposed, and
+/// fully ambient-occlusion-open (all four corners level 3) so there is no
+/// baked shading to lose. Carries its un-jittered color (alpha = jitter
+/// amplitude), voxel type (the merge key), and water-plane bucket.
+struct MergeFace {
+    color: [f32; 4],
+    voxel: Voxel,
+    below_water: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terrain_merge_face(
+    world: &VoxelWorld,
+    scratch: &voxel_core::world::ChunkScratch,
+    seed: u32,
+    season: f32,
+    x: i32,
+    y: i32,
+    z: i32,
+    normal: IVec3,
+    tangent_1: IVec3,
+    tangent_2: IVec3,
+    water_plane_y: f32,
+) -> Option<MergeFace> {
+    let voxel = scratch.get(x, y, z);
+    if group_of(voxel) != Some(MeshGroup::Terrain) {
+        return None;
+    }
+    let position = IVec3::new(x, y, z);
+    let neighbor_position = position + normal;
+    let neighbor = scratch.get(
+        neighbor_position.x,
+        neighbor_position.y,
+        neighbor_position.z,
+    );
+    // A face exists only where the neighbor is not also terrain.
+    if group_of(neighbor) == Some(MeshGroup::Terrain) {
+        return None;
+    }
+    // Merge only where every corner is fully open (same rule and reads as the
+    // per-voxel loop, so the skip there matches exactly).
+    let occlusion_base = position + normal;
+    for &(along_1, along_2) in QUAD_CORNERS.iter() {
+        let side_1_solid = scratch
+            .get_offset(occlusion_base + tangent_1 * along_1)
+            .is_solid();
+        let side_2_solid = scratch
+            .get_offset(occlusion_base + tangent_2 * along_2)
+            .is_solid();
+        let corner_solid = scratch
+            .get_offset(occlusion_base + tangent_1 * along_1 + tangent_2 * along_2)
+            .is_solid();
+        if ambient_occlusion_level(side_1_solid, side_2_solid, corner_solid) != 3 {
+            return None;
+        }
+    }
+    let face_center_y = y as f32 + 0.5 + normal.y as f32 * 0.5;
+    Some(MergeFace {
+        color: voxel_color(world, scratch, voxel, x, y, z, seed, season),
+        voxel,
+        below_water: face_center_y <= water_plane_y,
+    })
+}
+
+/// Greedy-merge the flat, fully-open terrain faces (per face direction, per
+/// slice) into maximal rectangles — one quad each instead of one per voxel.
+/// Corner colors are sampled at the rectangle's four corner voxels so the
+/// low-frequency biome/season gradients still interpolate across the quad;
+/// the per-voxel brightness jitter is added later by the terrain shader.
+#[allow(clippy::too_many_arguments)]
+fn greedy_merge_terrain(
+    world: &VoxelWorld,
+    scratch: &voxel_core::world::ChunkScratch,
+    seed: u32,
+    season: f32,
+    x_range: std::ops::Range<i32>,
+    z_range: std::ops::Range<i32>,
+    half_x: f32,
+    half_z: f32,
+    water_plane_y: f32,
+    above_water: &mut MeshBuffers,
+    below_water: &mut MeshBuffers,
+) {
+    #[derive(Clone, Copy)]
+    struct Cell {
+        color: [f32; 4],
+        voxel: Voxel,
+        below: bool,
+    }
+
+    let axis_of = |vector: IVec3| {
+        if vector.x != 0 {
+            0
+        } else if vector.y != 0 {
+            1
+        } else {
+            2
+        }
+    };
+
+    for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
+        // `na` = normal axis; the slice sweeps along it, and the in-slice grid
+        // spans the other two axes (u, v).
+        let na = axis_of(normal);
+        let (slice_lo, slice_hi, u_lo, u_hi, v_lo, v_hi) = match na {
+            0 => (
+                x_range.start,
+                x_range.end,
+                0,
+                WORLD_SIZE_Y as i32,
+                z_range.start,
+                z_range.end,
+            ), // u = y, v = z
+            1 => (
+                0,
+                WORLD_SIZE_Y as i32,
+                x_range.start,
+                x_range.end,
+                z_range.start,
+                z_range.end,
+            ), // u = x, v = z
+            _ => (
+                z_range.start,
+                z_range.end,
+                x_range.start,
+                x_range.end,
+                0,
+                WORLD_SIZE_Y as i32,
+            ), // u = x, v = y
+        };
+        let u_count = (u_hi - u_lo) as usize;
+        let v_count = (v_hi - v_lo) as usize;
+        let to_world = |s: i32, u: i32, v: i32| match na {
+            0 => (s, u, v),
+            1 => (u, s, v),
+            _ => (u, v, s),
+        };
+
+        for s in slice_lo..slice_hi {
+            let mut mask: Vec<Option<Cell>> = vec![None; u_count * v_count];
+            for vi in 0..v_count {
+                for ui in 0..u_count {
+                    let (x, y, z) = to_world(s, u_lo + ui as i32, v_lo + vi as i32);
+                    if let Some(face) = terrain_merge_face(
+                        world,
+                        scratch,
+                        seed,
+                        season,
+                        x,
+                        y,
+                        z,
+                        normal,
+                        tangent_1,
+                        tangent_2,
+                        water_plane_y,
+                    ) {
+                        mask[vi * u_count + ui] = Some(Cell {
+                            color: face.color,
+                            voxel: face.voxel,
+                            below: face.below_water,
+                        });
+                    }
+                }
+            }
+
+            let mut used = vec![false; u_count * v_count];
+            for vi0 in 0..v_count {
+                for ui0 in 0..u_count {
+                    let start = vi0 * u_count + ui0;
+                    if used[start] {
+                        continue;
+                    }
+                    let Some(cell) = mask[start] else {
+                        continue;
+                    };
+                    // Grow the run along u, then the block along v. Checks are
+                    // inlined (not a closure) so the immutable reads release
+                    // before `used` is written below.
+                    let mut width = 1;
+                    while ui0 + width < u_count {
+                        let index = vi0 * u_count + ui0 + width;
+                        let matches = !used[index]
+                            && matches!(mask[index], Some(other)
+                                if other.voxel == cell.voxel && other.below == cell.below);
+                        if !matches {
+                            break;
+                        }
+                        width += 1;
+                    }
+                    let mut height = 1;
+                    'grow: while vi0 + height < v_count {
+                        for du in 0..width {
+                            let index = (vi0 + height) * u_count + ui0 + du;
+                            let matches = !used[index]
+                                && matches!(mask[index], Some(other)
+                                    if other.voxel == cell.voxel && other.below == cell.below);
+                            if !matches {
+                                break 'grow;
+                            }
+                        }
+                        height += 1;
+                    }
+                    for dv in 0..height {
+                        for du in 0..width {
+                            used[(vi0 + dv) * u_count + ui0 + du] = true;
+                        }
+                    }
+
+                    // Rectangle bounds in world voxel coordinates.
+                    let u0 = u_lo + ui0 as i32;
+                    let v0 = v_lo + vi0 as i32;
+                    let u1 = u0 + width as i32 - 1;
+                    let v1 = v0 + height as i32 - 1;
+                    let (min_x, max_x, min_y, max_y, min_z, max_z) = match na {
+                        0 => (s, s, u0, u1, v0, v1),
+                        1 => (u0, u1, s, s, v0, v1),
+                        _ => (u0, u1, v0, v1, s, s),
+                    };
+                    let centroid = Vec3::new(
+                        (min_x + max_x) as f32 / 2.0 + 0.5,
+                        (min_y + max_y) as f32 / 2.0 + 0.5,
+                        (min_z + max_z) as f32 / 2.0 + 0.5,
+                    );
+                    let half_axis = [
+                        (max_x - min_x + 1) as f32 / 2.0,
+                        (max_y - min_y + 1) as f32 / 2.0,
+                        (max_z - min_z + 1) as f32 / 2.0,
+                    ];
+                    let half_t1 = half_axis[axis_of(tangent_1)];
+                    let half_t2 = half_axis[axis_of(tangent_2)];
+
+                    let mut corners = [Vec3::ZERO; 4];
+                    let mut corner_colors = [[0.0f32; 4]; 4];
+                    for (corner_index, &(along_1, along_2)) in QUAD_CORNERS.iter().enumerate() {
+                        let point = centroid
+                            + normal.as_vec3() * 0.5
+                            + tangent_1.as_vec3() * (along_1 as f32 * half_t1)
+                            + tangent_2.as_vec3() * (along_2 as f32 * half_t2);
+                        corners[corner_index] = Vec3::new(
+                            (point.x - half_x) * VOXEL_SIZE,
+                            point.y * VOXEL_SIZE,
+                            (point.z - half_z) * VOXEL_SIZE,
+                        );
+                        // Sample the color at the corner voxel so gradients
+                        // interpolate across the merged quad.
+                        let corner_cell = centroid
+                            + tangent_1.as_vec3() * (along_1 as f32 * (half_t1 - 0.5))
+                            + tangent_2.as_vec3() * (along_2 as f32 * (half_t2 - 0.5));
+                        let (cell_x, cell_y, cell_z) = (
+                            corner_cell.x.floor() as i32,
+                            corner_cell.y.floor() as i32,
+                            corner_cell.z.floor() as i32,
+                        );
+                        let (corner_ui, corner_vi) = match na {
+                            0 => (cell_y - u_lo, cell_z - v_lo),
+                            1 => (cell_x - u_lo, cell_z - v_lo),
+                            _ => (cell_x - u_lo, cell_y - v_lo),
+                        };
+                        let corner_mask_index = corner_vi as usize * u_count + corner_ui as usize;
+                        corner_colors[corner_index] = mask
+                            .get(corner_mask_index)
+                            .and_then(|maybe| maybe.map(|c| c.color))
+                            .unwrap_or(cell.color);
+                    }
+
+                    let buffers = if cell.below {
+                        &mut *below_water
+                    } else {
+                        &mut *above_water
+                    };
+                    buffers.add_quad(corners, normal.as_vec3(), corner_colors, false);
+                }
+            }
+        }
     }
 }
 
