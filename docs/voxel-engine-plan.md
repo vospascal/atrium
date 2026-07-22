@@ -77,17 +77,30 @@ or greedy meshing lands.*
 AABB **frustum culling** for main + reflection + shadow views. Localized
 remesh. **Biggest architectural unlock**; enables editing, fluids, LOD.
 
-### Stage 2 — Merge-safe binary greedy meshing  *(V3, V9; Phase 2)*
-Bit-array occupancy per chunk (`u32`/`u64` columns), merge faces on identical
-(type, tone-bucket, fully-open-AO) keys. Expect >5× vertex cut, look
-preserved. Pair with **vertex bit-packing** (V9: 28 B → 4 B) inside the slim
-format work.
+> **Reorder (approved 2026-07-22): Stage 2 and Stage 3 were swapped.** Studying
+> the mesher showed greedy meshing cannot preserve the look while per-voxel
+> jitter is baked into vertex colors (merging N voxels into one quad destroys
+> the per-voxel speckle on flat regions). So the shader material must come
+> first. This matches the user's original priority (greedy last).
 
-### Stage 3 — Shader-driven voxel material  *(V3 backface split, V16 materials; Phase 3)*
-Move jitter/tint/corner-AO into a fragment shader reading a per-chunk R8
-occupancy 3D texture. Then *everything* greedy-merges, and season/biome become
-a uniform update (live slider) instead of a 1.5 s remesh. Foliage two-mesh
-backface split (V3) lands here.
+### Stage 2 — Shader-driven voxel material  *(V3 backface split, V16 materials)*
+Move the per-voxel hash **jitter** off the vertices into a fragment shader that
+recomputes it from world position, so a later greedy merge preserves it.
+Vehicle: `ExtendedMaterial<StandardMaterial, VoxelExtension>` — keeps all of
+StandardMaterial's PBR/shadows/fog, just adds a jitter multiply. Key insight:
+every voxel-type's jitter is already **mean-1.0** (`center + span·roll` with
+`center = 1 − span/2`), so only the per-type **amplitude** (`span/2`) needs to
+travel — carried in the otherwise-unused vertex-color **alpha** (terrain is
+opaque). AO stays per-corner baked; low-frequency gradients (dryness / season /
+tone) and underside-bounce stay baked (they interpolate fine across a quad).
+Later extension (its own step): move tint/AO too → full greedy + a **live
+season/biome slider** (uniform update, no 1.6 s rebake).
+
+### Stage 3 — Merge-safe binary greedy meshing  *(V3, V9)*
+Bit-array occupancy per chunk (`u32`/`u64` columns), merge faces on identical
+(type, tone-bucket, fully-open-AO) keys. Now look-preserving because jitter is
+shader-side. Expect >5× vertex cut. Pair with **vertex bit-packing** (V9:
+28 B → 4 B) / slim formats, unblocked by the custom material from Stage 2.
 
 ### Stage 4 — RLE column storage  *(V6, V18; Phase 4)*
 Per-column RLE (`32×256×32`): 256 MB → ~5–15 MB. Never random-access — unpack

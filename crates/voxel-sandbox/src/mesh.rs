@@ -2,9 +2,10 @@
 //!
 //! Produces two meshes per world: opaque terrain and translucent water.
 //! Colors are per-vertex: material palette × biome dryness gradient ×
-//! per-voxel hash jitter × corner ambient occlusion (plus a baked bounce
-//! that keeps the island's underside readable) — the combination that
-//! gives the MagicaVoxel-render look.
+//! corner ambient occlusion (plus a baked bounce that keeps the island's
+//! underside readable). The per-voxel brightness *jitter* is applied in the
+//! terrain fragment shader instead (see `voxel_material.rs`) so it survives
+//! greedy meshing; the mesher passes its per-type amplitude in vertex alpha.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -377,7 +378,9 @@ fn lerp_rgb(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
 /// Base color of one voxel: palette entry, biome-dryness gradient for
 /// vegetation, waterside-lushness and altitude gradients, seasonal foliage
 /// (0 = summer, 1 = autumn, per-tree turning order from the tone map),
-/// water depth tint, and per-voxel brightness jitter.
+/// water depth tint. The RGB is *un-jittered* (the fragment shader adds the
+/// per-voxel brightness speckle); the returned alpha carries either the
+/// jitter amplitude (terrain) or the water transparency (water voxels).
 #[allow(clippy::too_many_arguments)]
 fn voxel_color(
     world: &VoxelWorld,
@@ -396,7 +399,15 @@ fn voxel_color(
     let lushness = voxel_core::noise::smoothstep(9.0, 1.5, world.water_distance_at(x, z));
     let paling = voxel_core::noise::smoothstep(3.5, 11.0, altitude_meters);
 
-    let (srgb, alpha, jitter) = match voxel {
+    // Per-voxel brightness jitter is now applied in the terrain fragment
+    // shader (so it survives greedy meshing). Each arm returns the jitter
+    // *amplitude* `a` (= span/2) instead of a baked multiplier; every type is
+    // mean-1.0 (`center + span·roll`, `center = 1 − span/2`), so the shader
+    // reconstructs `1 + a·(2·roll − 1)`. The amplitude rides in the returned
+    // alpha for terrain; water keeps its transparency in alpha (its own
+    // shader), so its amplitude is unused. Birch bark still selects its fleck
+    // *color* from the hash here (a color choice, not brightness).
+    let (srgb, alpha, amplitude) = match voxel {
         Voxel::Grass => {
             // Ground reads as dirt between the grass clumps and olive-green
             // under them, before the biome dryness sweep.
@@ -405,21 +416,13 @@ fn voxel_color(
             ground = lerp_rgb(ground, [0.33, 0.50, 0.25], lushness * 0.55);
             ground = lerp_rgb(ground, [0.57, 0.55, 0.33], paling * 0.55);
             ground = lerp_rgb(ground, [0.63, 0.52, 0.28], season * 0.55);
-            (
-                lerp_rgb(ground, [0.72, 0.64, 0.38], dryness),
-                1.0,
-                0.92 + 0.16 * jitter_roll,
-            )
+            (lerp_rgb(ground, [0.72, 0.64, 0.38], dryness), 1.0, 0.08)
         }
         Voxel::TallGrass => {
             let mut blade = [0.28, 0.45, 0.23];
             blade = lerp_rgb(blade, [0.23, 0.46, 0.20], lushness * 0.45);
             blade = lerp_rgb(blade, [0.62, 0.50, 0.26], season * 0.60);
-            (
-                lerp_rgb(blade, [0.66, 0.60, 0.35], dryness),
-                1.0,
-                0.85 + 0.30 * jitter_roll,
-            )
+            (lerp_rgb(blade, [0.66, 0.60, 0.35], dryness), 1.0, 0.15)
         }
         Voxel::Leaves | Voxel::LeavesDark => {
             // Oak / willow / bush canopy. Per-tree tone picks the summer
@@ -441,18 +444,14 @@ fn voxel_color(
             if voxel == Voxel::LeavesDark {
                 leaf = [leaf[0] * 0.74, leaf[1] * 0.74, leaf[2] * 0.74];
             }
-            (leaf, 1.0, 0.86 + 0.26 * jitter_roll)
+            (leaf, 1.0, 0.13)
         }
         Voxel::LeavesBirch => {
             let tone = world.tree_tone_at(x, z);
             let summer = lerp_rgb([0.47, 0.56, 0.26], [0.55, 0.60, 0.30], tone);
             // Birches turn early and go pure gold.
             let turn = voxel_core::noise::smoothstep(tone * 0.35, tone * 0.35 + 0.25, season);
-            (
-                lerp_rgb(summer, [0.88, 0.66, 0.14], turn),
-                1.0,
-                0.86 + 0.26 * jitter_roll,
-            )
+            (lerp_rgb(summer, [0.88, 0.66, 0.14], turn), 1.0, 0.13)
         }
         Voxel::LeavesPine => {
             let tone = world.tree_tone_at(x, z);
@@ -461,43 +460,43 @@ fn voxel_color(
             (
                 lerp_rgb(needles, [0.24, 0.33, 0.22], season * 0.35),
                 1.0,
-                0.88 + 0.22 * jitter_roll,
+                0.11,
             )
         }
-        Voxel::Dirt => ([0.44, 0.32, 0.22], 1.0, 0.92 + 0.16 * jitter_roll),
+        Voxel::Dirt => ([0.44, 0.32, 0.22], 1.0, 0.08),
         Voxel::Sand => {
             // Wet sand below the waterline is darker, so the shallows stay
             // believable through the transparent water.
             if y <= voxel_core::world::WATER_LEVEL {
-                ([0.38, 0.33, 0.23], 1.0, 0.94 + 0.12 * jitter_roll)
+                ([0.38, 0.33, 0.23], 1.0, 0.06)
             } else {
-                ([0.86, 0.77, 0.55], 1.0, 0.94 + 0.12 * jitter_roll)
+                ([0.86, 0.77, 0.55], 1.0, 0.06)
             }
         }
-        Voxel::Sediment => ([0.17, 0.16, 0.11], 1.0, 0.90 + 0.20 * jitter_roll),
-        Voxel::Stone => ([0.52, 0.52, 0.55], 1.0, 0.90 + 0.20 * jitter_roll),
-        Voxel::Trunk => ([0.45, 0.31, 0.19], 1.0, 0.88 + 0.24 * jitter_roll),
+        Voxel::Sediment => ([0.17, 0.16, 0.11], 1.0, 0.10),
+        Voxel::Stone => ([0.52, 0.52, 0.55], 1.0, 0.10),
+        Voxel::Trunk => ([0.45, 0.31, 0.19], 1.0, 0.12),
         Voxel::TrunkBirch => {
             // White paper bark broken by dark horizontal flecks.
             if jitter_roll < 0.16 {
-                ([0.20, 0.18, 0.16], 1.0, 0.90 + 0.20 * jitter_roll)
+                ([0.20, 0.18, 0.16], 1.0, 0.10)
             } else {
-                ([0.80, 0.78, 0.72], 1.0, 0.92 + 0.14 * jitter_roll)
+                ([0.80, 0.78, 0.72], 1.0, 0.07)
             }
         }
-        Voxel::FlowerPink => ([0.93, 0.55, 0.75], 1.0, 1.0),
-        Voxel::FlowerWhite => ([0.96, 0.95, 0.90], 1.0, 1.0),
-        Voxel::FlowerYellow => ([0.95, 0.83, 0.35], 1.0, 1.0),
-        Voxel::FlowerBlue => ([0.45, 0.52, 0.92], 1.0, 1.0),
-        Voxel::WaterWeed => ([0.15, 0.30, 0.19], 1.0, 0.80 + 0.40 * jitter_roll),
-        Voxel::LilyPad => ([0.26, 0.50, 0.24], 1.0, 0.90 + 0.20 * jitter_roll),
-        Voxel::LilyBloom => ([0.95, 0.92, 0.85], 1.0, 0.95 + 0.10 * jitter_roll),
-        Voxel::CattailHead => ([0.32, 0.18, 0.08], 1.0, 0.88 + 0.24 * jitter_roll),
+        Voxel::FlowerPink => ([0.93, 0.55, 0.75], 1.0, 0.0),
+        Voxel::FlowerWhite => ([0.96, 0.95, 0.90], 1.0, 0.0),
+        Voxel::FlowerYellow => ([0.95, 0.83, 0.35], 1.0, 0.0),
+        Voxel::FlowerBlue => ([0.45, 0.52, 0.92], 1.0, 0.0),
+        Voxel::WaterWeed => ([0.15, 0.30, 0.19], 1.0, 0.20),
+        Voxel::LilyPad => ([0.26, 0.50, 0.24], 1.0, 0.10),
+        Voxel::LilyBloom => ([0.95, 0.92, 0.85], 1.0, 0.05),
+        Voxel::CattailHead => ([0.32, 0.18, 0.08], 1.0, 0.12),
         Voxel::Reed => {
             let stalk = lerp_rgb([0.55, 0.56, 0.31], [0.63, 0.52, 0.26], season * 0.5);
-            (stalk, 1.0, 0.85 + 0.30 * jitter_roll)
+            (stalk, 1.0, 0.15)
         }
-        Voxel::Snow => ([0.92, 0.93, 0.96], 1.0, 0.96 + 0.07 * jitter_roll),
+        Voxel::Snow => ([0.92, 0.93, 0.96], 1.0, 0.035),
         Voxel::Water => {
             // Deeper water → darker blue and more opaque. (The water shader
             // recomputes absorption from real optical depth; this vertex
@@ -510,7 +509,7 @@ fn voxel_color(
             (
                 lerp_rgb([0.30, 0.72, 0.82], [0.08, 0.32, 0.60], depth_amount),
                 0.55 + 0.30 * depth_amount,
-                1.0,
+                0.0,
             )
         }
         Voxel::Air => unreachable!("air voxels are never meshed"),
@@ -528,12 +527,19 @@ fn voxel_color(
     };
 
     let linear = Color::srgb(
-        (srgb[0] * jitter * underside_bounce[0]).min(1.0),
-        (srgb[1] * jitter * underside_bounce[1]).min(1.0),
-        (srgb[2] * jitter * underside_bounce[2]).min(1.0),
+        (srgb[0] * underside_bounce[0]).min(1.0),
+        (srgb[1] * underside_bounce[1]).min(1.0),
+        (srgb[2] * underside_bounce[2]).min(1.0),
     )
     .to_linear();
-    [linear.red, linear.green, linear.blue, alpha]
+    // Alpha carries the shader's jitter amplitude for terrain; for water it
+    // carries the transparency its own shader expects.
+    let out_alpha = if matches!(voxel, Voxel::Water) {
+        alpha
+    } else {
+        amplitude
+    };
+    [linear.red, linear.green, linear.blue, out_alpha]
 }
 
 #[cfg(test)]

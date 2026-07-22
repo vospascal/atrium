@@ -35,6 +35,7 @@ mod mesh;
 mod sky;
 mod tweak_panel;
 mod vox_import;
+mod voxel_material;
 mod water;
 mod waterfall;
 mod weather;
@@ -133,6 +134,7 @@ fn main() {
         })
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
+        .add_plugins(MaterialPlugin::<voxel_material::VoxelTerrainMaterial>::default())
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
         .add_plugins(MaterialPlugin::<sky::SkyMaterial>::default())
         .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
@@ -301,6 +303,7 @@ fn initial_world_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
     mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
@@ -313,6 +316,7 @@ fn initial_world_system(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut terrain_materials,
         &mut flame_materials,
         &mut water_materials,
         &mut waterfall_materials,
@@ -328,6 +332,7 @@ fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    terrain_materials: &mut Assets<voxel_material::VoxelTerrainMaterial>,
     flame_materials: &mut Assets<FlameMaterial>,
     water_materials: &mut Assets<water::WaterMaterial>,
     waterfall_materials: &mut Assets<waterfall::WaterfallMaterial>,
@@ -429,7 +434,23 @@ fn spawn_world(
         waterfall::spawn_waterfalls(commands, meshes, waterfall_materials, &river_exits);
     info!("{waterfall_count} waterfall(s) at the rim");
 
-    let terrain_material = materials.add(StandardMaterial {
+    // Terrain uses the voxel jitter material (StandardMaterial PBR + the
+    // per-fragment brightness speckle). Props keep a plain StandardMaterial —
+    // they bake their own jitter in vox_import and aren't greedy-meshed.
+    let terrain_material = terrain_materials.add(voxel_material::VoxelTerrainMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
+            ..default()
+        },
+        extension: voxel_material::voxel_extension(
+            seed,
+            VOXEL_SIZE,
+            WORLD_SIZE_X as f32 / 2.0,
+            WORLD_SIZE_Z as f32 / 2.0,
+        ),
+    });
+    let prop_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
         ..default()
@@ -471,7 +492,7 @@ fn spawn_world(
                     if let Some(solid_mesh) = prop_meshes.solid {
                         commands.spawn((
                             Mesh3d(meshes.add(solid_mesh)),
-                            MeshMaterial3d(terrain_material.clone()),
+                            MeshMaterial3d(prop_material.clone()),
                             Transform::from_xyz(x, ground + lift, z),
                             water::reflective_layers(),
                             WorldMesh,
@@ -642,6 +663,7 @@ fn regenerate_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
     mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
@@ -672,6 +694,7 @@ fn regenerate_system(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut terrain_materials,
         &mut flame_materials,
         &mut water_materials,
         &mut waterfall_materials,
