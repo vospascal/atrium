@@ -76,10 +76,14 @@ pub struct PerfReadout {
     entities: Option<f64>,
 }
 
-/// FPS / frame-time / world-build stats in the top-right corner. Runs
+/// FPS / frame-time / world-build stats in the top-right corner, plus
+/// live GPU levers (MSAA, reflections, depth of field, bloom) to
+/// attribute frame cost by toggling features while watching the ms. Runs
 /// after `view_tweak_panel`, so it ORs its pointer capture into
 /// `pointer_over_panel` (dragging the overlay must not spin the camera).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn perf_overlay(
+    mut commands: Commands,
     mut contexts: EguiContexts,
     perf: Res<PerfOverlay>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
@@ -87,6 +91,16 @@ pub fn perf_overlay(
     time: Res<Time>,
     mut readout: Local<PerfReadout>,
     mut tweaks: ResMut<ViewTweaks>,
+    mut main_camera: Query<
+        (
+            Entity,
+            &mut Msaa,
+            Option<&mut bevy::post_process::dof::DepthOfField>,
+            Option<&bevy::post_process::bloom::Bloom>,
+        ),
+        With<bevy::core_pipeline::prepass::DepthPrepass>,
+    >,
+    mut reflection: ResMut<crate::water::ReflectionSettings>,
 ) {
     if !perf.visible {
         return;
@@ -143,6 +157,98 @@ pub fn perf_overlay(
                     stats.generation.as_secs_f32() * 1000.0,
                     stats.meshing.as_secs_f32() * 1000.0
                 ));
+            }
+
+            // GPU levers: flip a feature, watch the frame time move — the
+            // difference is that feature's cost on THIS machine.
+            if let Ok((camera_entity, mut msaa, mut depth_of_field, bloom)) =
+                main_camera.single_mut()
+            {
+                ui.separator();
+                ui.label("GPU levers (live)");
+
+                ui.horizontal(|ui| {
+                    ui.label("MSAA");
+                    for (label, samples) in [
+                        ("off", Msaa::Off),
+                        ("2×", Msaa::Sample2),
+                        ("4×", Msaa::Sample4),
+                    ] {
+                        if ui.selectable_label(*msaa == samples, label).clicked() {
+                            *msaa = samples;
+                        }
+                    }
+                });
+
+                ui.checkbox(&mut reflection.enabled, "water reflections");
+                if reflection.enabled {
+                    if reflection.current_strength <= 0.0 {
+                        ui.small(if reflection.water_on_screen {
+                            "mirror parked (water too far)"
+                        } else {
+                            "mirror parked (no water on screen)"
+                        });
+                    } else {
+                        ui.small(format!(
+                            "mirror: {:.0}% res · strength {:.2} · water {:.0} m away",
+                            reflection.current_tier * 100.0,
+                            reflection.current_strength,
+                            reflection.current_distance,
+                        ));
+                    }
+                }
+
+                let mut dof_enabled = depth_of_field.is_some();
+                if ui.checkbox(&mut dof_enabled, "depth of field").changed() {
+                    if dof_enabled {
+                        commands.entity(camera_entity).insert(
+                            bevy::post_process::dof::DepthOfField {
+                                mode: bevy::post_process::dof::DepthOfFieldMode::Bokeh,
+                                max_depth: 300.0,
+                                ..default()
+                            },
+                        );
+                    } else {
+                        commands
+                            .entity(camera_entity)
+                            .remove::<bevy::post_process::dof::DepthOfField>();
+                    }
+                }
+                if let Some(depth_of_field) = depth_of_field.as_mut() {
+                    ui.horizontal(|ui| {
+                        ui.label("   mode");
+                        for (label, mode) in [
+                            (
+                                "bokeh (pretty)",
+                                bevy::post_process::dof::DepthOfFieldMode::Bokeh,
+                            ),
+                            (
+                                "gaussian (fast)",
+                                bevy::post_process::dof::DepthOfFieldMode::Gaussian,
+                            ),
+                        ] {
+                            if ui
+                                .selectable_label(depth_of_field.mode == mode, label)
+                                .clicked()
+                            {
+                                depth_of_field.mode = mode;
+                            }
+                        }
+                    });
+                }
+
+                let mut bloom_enabled = bloom.is_some();
+                if ui.checkbox(&mut bloom_enabled, "bloom").changed() {
+                    if bloom_enabled {
+                        commands
+                            .entity(camera_entity)
+                            .insert(bevy::post_process::bloom::Bloom::default());
+                    } else {
+                        commands
+                            .entity(camera_entity)
+                            .remove::<bevy::post_process::bloom::Bloom>();
+                    }
+                }
             }
             ui.small("P hides this overlay");
         });

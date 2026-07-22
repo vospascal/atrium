@@ -126,6 +126,7 @@ fn build_dome_mesh() -> Mesh {
 
 /// Keep the dome centered on the camera and its uniforms in sync with the
 /// day/night cycle and the weather.
+#[allow(clippy::type_complexity)]
 pub fn update_sky(
     celestial: Res<CelestialState>,
     weather: Res<WeatherState>,

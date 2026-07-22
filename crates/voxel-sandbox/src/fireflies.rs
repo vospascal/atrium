@@ -19,8 +19,8 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
 use crate::day_night::CelestialState;
-use crate::noise::{hash_3d, hash_to_unit};
 use crate::ViewMode;
+use voxel_core::noise::{hash_3d, hash_to_unit};
 
 /// Quads built into the shared swarm mesh — the ceiling for the panel's
 /// amount slider (unused motes collapse in the vertex shader).

@@ -9,7 +9,7 @@
 
 use std::f32::consts::TAU;
 
-use bevy::math::IVec3;
+use glam::IVec3;
 
 use crate::noise::{fractal_noise_2d, hash_3d, hash_to_unit, smoothstep};
 
@@ -571,9 +571,9 @@ impl WorldBuilder {
         ];
         let mut cursors: Vec<u32> = column_starts[..column_count].to_vec();
         for y in 0..WORLD_SIZE_Y {
-            for column in 0..column_count {
-                let voxel = self.voxels[y * column_count + column];
-                let cursor = &mut cursors[column];
+            let row_base = y * column_count;
+            for (column, cursor) in cursors.iter_mut().enumerate() {
+                let voxel = self.voxels[row_base + column];
                 if y == 0 || runs[*cursor as usize - 1].voxel != voxel {
                     runs[*cursor as usize] = Run { voxel, length: 1 };
                     *cursor += 1;

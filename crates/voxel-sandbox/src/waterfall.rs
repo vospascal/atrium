@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
-use crate::world::{RiverExit, VOXEL_SIZE, WATER_LEVEL};
+use voxel_core::world::{RiverExit, VOXEL_SIZE, WATER_LEVEL};
 
 /// The ribbon dissolves into the fog sea around this height (m).
 const WATERFALL_BOTTOM_METERS: f32 = 3.0;

@@ -18,9 +18,9 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
 use crate::flame::FlameLight;
-use crate::noise::{hash_3d, hash_to_unit};
 use crate::vox_import::{build_prop_meshes, VoxModel};
 use crate::ViewMode;
+use voxel_core::noise::{hash_3d, hash_to_unit};
 
 /// Rising embers built into the fire mesh.
 const EMBER_COUNT: usize = 14;

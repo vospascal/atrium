@@ -29,6 +29,9 @@ struct WaterUniform {
     horizon: vec4<f32>,
     light_direction: vec4<f32>,
     light_color: vec4<f32>,
+    // xy = fraction of the reflection texture in use (dynamic-resolution
+    // viewport), z = live-mirror strength (0 = procedural fallback only).
+    reflection: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> water: WaterUniform;
@@ -141,20 +144,28 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let wobble = vec3<f32>(normal.x, 0.0, normal.z) * 1.4;
     let reflection_clip = reflection_clip_from_world
         * vec4<f32>(in.world_position.xyz + wobble, 1.0);
+    // Fallback when the mirror is off (far from water) or out of frame.
     var reflected_scene = sky_color * 0.55;
-    if (reflection_clip.w > 0.0) {
+    let mirror_strength = water.reflection.z;
+    if (mirror_strength > 0.001 && reflection_clip.w > 0.0) {
         let reflection_ndc = reflection_clip.xy / reflection_clip.w;
         let reflection_uv = vec2<f32>(
             reflection_ndc.x * 0.5 + 0.5,
             -reflection_ndc.y * 0.5 + 0.5,
         );
         if (all(reflection_uv >= vec2<f32>(0.0)) && all(reflection_uv <= vec2<f32>(1.0))) {
-            reflected_scene = textureSampleLevel(
+            // The live frame occupies only the dynamic-resolution viewport
+            // corner of the texture; clamp away from its edge so filtering
+            // never bleeds in stale texels from a previous, larger tier.
+            let scaled_uv = clamp(reflection_uv, vec2<f32>(0.002), vec2<f32>(0.998))
+                * water.reflection.xy;
+            let mirror = textureSampleLevel(
                 reflection_texture,
                 reflection_sampler,
-                reflection_uv,
+                scaled_uv,
                 0.0,
             ).rgb;
+            reflected_scene = mix(reflected_scene, mirror, mirror_strength);
         }
     }
 

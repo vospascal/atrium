@@ -139,6 +139,7 @@ fn build_proxy_dome() -> Mesh {
 
 /// Follow the camera and keep the fog tinted by the sky and drifting
 /// with the wind.
+#[allow(clippy::type_complexity)]
 pub fn update_fog_ring(
     celestial: Res<CelestialState>,
     weather: Res<WeatherState>,

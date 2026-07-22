@@ -10,8 +10,8 @@ use std::path::Path;
 use bevy::prelude::*;
 
 use crate::mesh::{ambient_occlusion_level, MeshBuffers, FACE_DIRECTIONS, QUAD_CORNERS};
-use crate::noise::{hash_3d, hash_to_unit};
-use crate::world::VOXEL_SIZE;
+use voxel_core::noise::{hash_3d, hash_to_unit};
+use voxel_core::world::VOXEL_SIZE;
 
 pub struct VoxModel {
     size_x: i32,

@@ -5,6 +5,7 @@ edition = "2021"
 description = "Procedural voxel diorama sandbox — prototype for the Atrium visual layer"
 
 [dependencies]
+voxel-core = { path = "../voxel-core" }
 bevy = "0.18"
 bevy_egui = "0.39"
 dot_vox = "5"

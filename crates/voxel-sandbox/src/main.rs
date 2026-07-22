@@ -32,15 +32,12 @@ mod fireflies;
 mod flame;
 mod fog_ring;
 mod mesh;
-mod noise;
 mod sky;
-mod terrain_import;
 mod tweak_panel;
 mod vox_import;
 mod water;
 mod waterfall;
 mod weather;
-mod world;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight, NotShadowCaster};
@@ -53,7 +50,7 @@ use std::path::Path;
 
 use crate::flame::{FlameLight, FlameMaterial};
 use crate::tweak_panel::ViewTweaks;
-use crate::world::{Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
 
 /// Pale haze that washes out the distance, like the reference shots.
 const HAZE_COLOR: Color = Color::srgb(0.80, 0.82, 0.79);
@@ -63,22 +60,24 @@ const HAZE_COLOR: Color = Color::srgb(0.80, 0.82, 0.79);
 #[derive(Resource)]
 enum WorldSource {
     Procedural,
-    Imported(terrain_import::ImportedTerrain),
+    Imported(voxel_core::terrain_import::ImportedTerrain),
 }
 
 fn main() {
     let start_first_person = std::env::var("VOXEL_START_FIRST_PERSON").is_ok();
     let world_source = match std::env::args().nth(1) {
-        Some(terrain_path) => match terrain_import::load_terrain(Path::new(&terrain_path)) {
-            Ok(terrain) => {
-                println!("loaded Blender terrain from {terrain_path}");
-                WorldSource::Imported(terrain)
+        Some(terrain_path) => {
+            match voxel_core::terrain_import::load_terrain(Path::new(&terrain_path)) {
+                Ok(terrain) => {
+                    println!("loaded Blender terrain from {terrain_path}");
+                    WorldSource::Imported(terrain)
+                }
+                Err(error) => {
+                    eprintln!("failed to load terrain: {error}");
+                    std::process::exit(1);
+                }
             }
-            Err(error) => {
-                eprintln!("failed to load terrain: {error}");
-                std::process::exit(1);
-            }
-        },
+        }
         None => WorldSource::Procedural,
     };
 
@@ -86,6 +85,15 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Atrium — Voxel Plateau Sandbox".to_string(),
+                // VSync locks the frame rate to the monitor's refresh (a
+                // 60 Hz display reads as "60 fps" no matter how fast the
+                // engine is). `VOXEL_NO_VSYNC=1` uncaps it so the `P`
+                // overlay shows real headroom when benchmarking.
+                present_mode: if std::env::var("VOXEL_NO_VSYNC").is_ok() {
+                    bevy::window::PresentMode::AutoNoVsync
+                } else {
+                    bevy::window::PresentMode::AutoVsync
+                },
                 ..default()
             }),
             ..default()
@@ -118,6 +126,7 @@ fn main() {
         .init_resource::<weather::WeatherState>()
         .init_resource::<fireflies::FireflySettings>()
         .init_resource::<water::ReflectionTarget>()
+        .init_resource::<water::ReflectionSettings>()
         .init_resource::<ViewTweaks>()
         .insert_resource(tweak_panel::PerfOverlay {
             visible: std::env::var("VOXEL_PERF").is_ok(),
@@ -371,6 +380,9 @@ fn spawn_world(
     });
 
     let ground_heights = GroundHeights::from_world(&voxel_world);
+    // The reflection system scales mirror quality by camera-to-water
+    // distance; give it a coarse copy of the water-distance field.
+    commands.insert_resource(water::WaterProximity::from_world(&voxel_world));
 
     // Log the shoreline nearest the island center and the widest open
     // water, so screenshot runs can aim at them (`VOXEL_POSITION`/`VOXEL_LOOK`).
@@ -619,7 +631,7 @@ impl GroundHeights {
     }
 }
 
-const PLATEAU_FLOOR_RENDER: f32 = world::PLATEAU_FLOOR as f32 * VOXEL_SIZE;
+const PLATEAU_FLOOR_RENDER: f32 = voxel_core::world::PLATEAU_FLOOR as f32 * VOXEL_SIZE;
 
 /// Press `R` for a fresh plateau; the panel's season slider requests a
 /// rebuild of the current one.
@@ -783,7 +795,9 @@ fn camera_system(
         (
             &mut Transform,
             &mut Projection,
-            &mut DepthOfField,
+            // Optional: the perf overlay's GPU levers may strip the DoF
+            // component entirely to measure its cost.
+            Option<&mut DepthOfField>,
             &mut DistanceFog,
         ),
         With<Camera3d>,
@@ -820,8 +834,10 @@ fn camera_system(
                 mouse_free,
             );
             *camera_transform = orbit_state.transform();
-            depth_of_field.focal_distance = orbit_state.distance;
-            depth_of_field.aperture_f_stops = tweaks.orbit_aperture_f_stops;
+            if let Some(depth_of_field) = depth_of_field.as_mut() {
+                depth_of_field.focal_distance = orbit_state.distance;
+                depth_of_field.aperture_f_stops = tweaks.orbit_aperture_f_stops;
+            }
             set_fov(&mut projection, tweaks.orbit_fov_degrees);
             // Haze must stay behind the diorama from up here, or the whole
             // scene washes out; only the far rim picks up a little depth —
@@ -845,8 +861,10 @@ fn camera_system(
             *camera_transform = Transform::from_translation(walk_state.position).with_rotation(
                 Quat::from_euler(EulerRot::YXZ, walk_state.yaw, walk_state.pitch, 0.0),
             );
-            depth_of_field.focal_distance = tweaks.walk_focal_distance;
-            depth_of_field.aperture_f_stops = tweaks.walk_aperture_f_stops;
+            if let Some(depth_of_field) = depth_of_field.as_mut() {
+                depth_of_field.focal_distance = tweaks.walk_focal_distance;
+                depth_of_field.aperture_f_stops = tweaks.walk_aperture_f_stops;
+            }
             set_fov(&mut projection, tweaks.first_person_fov_degrees);
             fog.falloff = FogFalloff::Linear {
                 start: fog_range(35.0, 2.5),

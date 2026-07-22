@@ -30,7 +30,7 @@ use bevy::shader::ShaderRef;
 
 use crate::day_night::CelestialState;
 use crate::weather::WeatherState;
-use crate::world::{VOXEL_SIZE, WATER_LEVEL};
+use voxel_core::world::{VOXEL_SIZE, WATER_LEVEL};
 
 /// Reflections render at half resolution — the wave perturbation hides it.
 const REFLECTION_WIDTH: u32 = 960;
@@ -61,6 +61,9 @@ pub struct WaterUniform {
     pub light_direction: Vec4,
     /// rgb = light color (linear), w = wave choppiness from the wind.
     pub light_color: Vec4,
+    /// xy = fraction of the reflection texture in use (dynamic-resolution
+    /// viewport), z = live-mirror strength (0 = procedural fallback).
+    pub reflection: Vec4,
 }
 
 impl Default for WaterUniform {
@@ -70,6 +73,81 @@ impl Default for WaterUniform {
             horizon: Vec4::new(0.60, 0.64, 0.60, 0.0),
             light_direction: Vec4::new(0.0, 1.0, 0.0, 1.0),
             light_color: Vec4::new(1.0, 0.96, 0.87, 0.2),
+            reflection: Vec4::new(1.0, 1.0, 1.0, 0.0),
+        }
+    }
+}
+
+/// Coarse copy of the world's distance-to-water field (sampled every 8th
+/// column, ~1 m grid), kept as a resource so the reflection system can ask
+/// "how far is the camera from any water?" long after the full world data
+/// is compressed away.
+#[derive(Resource)]
+pub struct WaterProximity {
+    grid: Vec<f32>,
+    columns_x: usize,
+    columns_z: usize,
+}
+
+impl WaterProximity {
+    const STEP: usize = 8;
+
+    pub fn from_world(world: &voxel_core::world::VoxelWorld) -> Self {
+        let columns_x = voxel_core::world::WORLD_SIZE_X / Self::STEP;
+        let columns_z = voxel_core::world::WORLD_SIZE_Z / Self::STEP;
+        let mut grid = vec![f32::MAX; columns_x * columns_z];
+        for z in 0..columns_z {
+            for x in 0..columns_x {
+                grid[z * columns_x + x] =
+                    world.water_distance_at((x * Self::STEP) as i32, (z * Self::STEP) as i32);
+            }
+        }
+        Self {
+            grid,
+            columns_x,
+            columns_z,
+        }
+    }
+
+    /// Horizontal distance (meters) from a render-space position to the
+    /// nearest water surface.
+    pub fn horizontal_distance(&self, render_x: f32, render_z: f32) -> f32 {
+        let column_x = ((render_x / VOXEL_SIZE + voxel_core::world::WORLD_SIZE_X as f32 / 2.0)
+            / Self::STEP as f32)
+            .clamp(0.0, self.columns_x as f32 - 1.0) as usize;
+        let column_z = ((render_z / VOXEL_SIZE + voxel_core::world::WORLD_SIZE_Z as f32 / 2.0)
+            / Self::STEP as f32)
+            .clamp(0.0, self.columns_z as f32 - 1.0) as usize;
+        self.grid[column_z * self.columns_x + column_x]
+    }
+}
+
+/// Runtime knobs + readout for the planar reflection.
+#[derive(Resource)]
+pub struct ReflectionSettings {
+    /// Master switch (perf overlay lever).
+    pub enabled: bool,
+    /// Written by the update system: current resolution tier (1.0, 0.5,
+    /// 0.25) — for the overlay readout.
+    pub current_tier: f32,
+    /// Written by the update system: live-mirror strength after the
+    /// distance fade (0 = camera off, fallback in the shader).
+    pub current_strength: f32,
+    /// Camera's 3D distance to the nearest water, meters (readout).
+    pub current_distance: f32,
+    /// Whether any water chunk survived the main view's frustum culling
+    /// last frame — no water on screen means no mirror to render.
+    pub water_on_screen: bool,
+}
+
+impl Default for ReflectionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            current_tier: 1.0,
+            current_strength: 1.0,
+            current_distance: 0.0,
+            water_on_screen: true,
         }
     }
 }
@@ -158,6 +236,13 @@ pub fn spawn_reflection_camera(mut commands: Commands, target: Res<ReflectionTar
 /// Mirror the main camera below the water plane and hand the resulting
 /// clip matrix to every water material, so the shader can look up "what
 /// does the reflected ray see" in the freshly rendered texture.
+///
+/// The mirror's cost scales with how close the camera is to water:
+/// full-resolution viewport when standing at the shore, half beyond 25 m,
+/// quarter beyond 60 m, and past ~120 m the camera switches off entirely
+/// while the shader cross-fades to a procedural sky tint (at that range
+/// the mirror is mostly sky anyway).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn update_reflection_camera(
     main_camera: Query<
         (&Transform, &Projection),
@@ -166,18 +251,79 @@ pub fn update_reflection_camera(
             Without<ReflectionCamera>,
         ),
     >,
-    mut reflection_camera: Query<(&mut Transform, &mut Projection), With<ReflectionCamera>>,
+    mut reflection_camera: Query<
+        (&mut Transform, &mut Projection, &mut Camera),
+        With<ReflectionCamera>,
+    >,
+    proximity: Option<Res<WaterProximity>>,
+    water_chunks: Query<&ViewVisibility, With<MeshMaterial3d<WaterMaterial>>>,
+    time: Res<Time>,
+    mut settings: ResMut<ReflectionSettings>,
     mut materials: ResMut<Assets<WaterMaterial>>,
 ) {
     let Ok((main_transform, main_projection)) = main_camera.single() else {
         return;
     };
-    let Ok((mut mirror_transform, mut mirror_projection)) = reflection_camera.single_mut() else {
+    let Ok((mut mirror_transform, mut mirror_projection, mut mirror_camera)) =
+        reflection_camera.single_mut()
+    else {
         return;
     };
 
     let plane_y = water_surface_y();
     let position = main_transform.translation;
+
+    // No water chunk survived the main view's frustum culling (last
+    // frame's result — water is layer 0 only, so no other view counts):
+    // nothing would show the mirror, park the camera entirely.
+    let water_on_screen = water_chunks
+        .iter()
+        .any(|view_visibility| view_visibility.get());
+    settings.water_on_screen = water_on_screen;
+
+    // Distance-scaled quality: 3D distance from the camera to the nearest
+    // water surface picks the viewport tier and the live-mirror strength.
+    let horizontal = proximity
+        .map(|proximity| proximity.horizontal_distance(position.x, position.z))
+        .unwrap_or(0.0);
+    let vertical = (position.y - plane_y).abs();
+    let water_distance = (horizontal * horizontal + vertical * vertical).sqrt();
+    let tier = if water_distance < 25.0 {
+        1.0
+    } else if water_distance < 60.0 {
+        0.5
+    } else {
+        0.25
+    };
+    let target_strength = if settings.enabled && water_on_screen {
+        ((125.0 - water_distance) / 25.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // Ease toward the target so the mirror fades in when water swings
+    // back into frame instead of popping.
+    let blend = (time.delta_secs() * 6.0).min(1.0);
+    let mut strength =
+        settings.current_strength + (target_strength - settings.current_strength) * blend;
+    if strength < 0.004 {
+        strength = 0.0;
+    }
+    settings.current_tier = tier;
+    settings.current_strength = strength;
+    settings.current_distance = water_distance;
+
+    let viewport_width = ((REFLECTION_WIDTH as f32 * tier) as u32).max(1);
+    let viewport_height = ((REFLECTION_HEIGHT as f32 * tier) as u32).max(1);
+    mirror_camera.is_active = strength > 0.005;
+    mirror_camera.viewport = Some(bevy::camera::Viewport {
+        physical_position: UVec2::ZERO,
+        physical_size: UVec2::new(viewport_width, viewport_height),
+        ..default()
+    });
+    let uv_scale = Vec2::new(
+        viewport_width as f32 / REFLECTION_WIDTH as f32,
+        viewport_height as f32 / REFLECTION_HEIGHT as f32,
+    );
     let mirrored_position = Vec3::new(position.x, 2.0 * plane_y - position.y, position.z);
     let forward = main_transform.forward();
     let up = main_transform.up();
@@ -197,6 +343,7 @@ pub fn update_reflection_camera(
         mirror_projection.get_clip_from_view() * mirror_transform.to_matrix().inverse();
     for (_, material) in materials.iter_mut() {
         material.reflection_clip_from_world = clip_from_world;
+        material.water.reflection = Vec4::new(uv_scale.x, uv_scale.y, strength, 0.0);
     }
 }
 

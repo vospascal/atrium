@@ -10,8 +10,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::noise::{hash_3d, hash_to_unit};
-use crate::world::{
+use voxel_core::noise::{hash_3d, hash_to_unit};
+use voxel_core::world::{
     Voxel, VoxelWorld, PLATEAU_FLOOR, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
 };
 
@@ -177,7 +177,7 @@ fn build_chunk_meshes(
     let mut below_water_buffers = MeshBuffers::default();
     let mut water_buffers = MeshBuffers::default();
     // Faces above this (voxel units) belong to the reflection-visible mesh.
-    let water_plane_y = (crate::world::WATER_LEVEL + 1) as f32 + 0.01;
+    let water_plane_y = (voxel_core::world::WATER_LEVEL + 1) as f32 + 0.01;
 
     let half_x = WORLD_SIZE_X as f32 / 2.0;
     let half_z = WORLD_SIZE_Z as f32 / 2.0;
@@ -319,7 +319,7 @@ fn build_chunk_meshes(
 /// Visual height of a voxel as a fraction of a full cube. Ground cover is
 /// squashed — tufts vary per-cell so the meadow reads as an uneven carpet.
 fn visual_vertical_scale(
-    scratch: &crate::world::ChunkScratch,
+    scratch: &voxel_core::world::ChunkScratch,
     voxel: Voxel,
     x: i32,
     y: i32,
@@ -378,9 +378,10 @@ fn lerp_rgb(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
 /// vegetation, waterside-lushness and altitude gradients, seasonal foliage
 /// (0 = summer, 1 = autumn, per-tree turning order from the tone map),
 /// water depth tint, and per-voxel brightness jitter.
+#[allow(clippy::too_many_arguments)]
 fn voxel_color(
     world: &VoxelWorld,
-    scratch: &crate::world::ChunkScratch,
+    scratch: &voxel_core::world::ChunkScratch,
     voxel: Voxel,
     x: i32,
     y: i32,
@@ -390,16 +391,16 @@ fn voxel_color(
 ) -> [f32; 4] {
     let jitter_roll = hash_to_unit(hash_3d(x, y, z, seed.wrapping_add(3)));
     let dryness = world.dryness_at(x, z);
-    let altitude_meters = (y - crate::world::WATER_LEVEL) as f32 * VOXEL_SIZE;
+    let altitude_meters = (y - voxel_core::world::WATER_LEVEL) as f32 * VOXEL_SIZE;
     // Lush right at the water, paling as the land climbs.
-    let lushness = crate::noise::smoothstep(9.0, 1.5, world.water_distance_at(x, z));
-    let paling = crate::noise::smoothstep(3.5, 11.0, altitude_meters);
+    let lushness = voxel_core::noise::smoothstep(9.0, 1.5, world.water_distance_at(x, z));
+    let paling = voxel_core::noise::smoothstep(3.5, 11.0, altitude_meters);
 
     let (srgb, alpha, jitter) = match voxel {
         Voxel::Grass => {
             // Ground reads as dirt between the grass clumps and olive-green
             // under them, before the biome dryness sweep.
-            let patchiness = crate::noise::smoothstep(0.35, 0.70, world.cover_at(x, z));
+            let patchiness = voxel_core::noise::smoothstep(0.35, 0.70, world.cover_at(x, z));
             let mut ground = lerp_rgb([0.50, 0.42, 0.30], [0.41, 0.52, 0.29], patchiness);
             ground = lerp_rgb(ground, [0.33, 0.50, 0.25], lushness * 0.55);
             ground = lerp_rgb(ground, [0.57, 0.55, 0.33], paling * 0.55);
@@ -433,7 +434,8 @@ fn voxel_color(
                 [0.82, 0.62, 0.16]
             };
             let turn_start = 0.15 + tone * 0.45;
-            let turn = crate::noise::smoothstep(turn_start, (turn_start + 0.30).min(1.0), season);
+            let turn =
+                voxel_core::noise::smoothstep(turn_start, (turn_start + 0.30).min(1.0), season);
             let mut leaf = lerp_rgb(summer, autumn, turn);
             leaf = lerp_rgb(leaf, [0.55, 0.55, 0.28], dryness * 0.5);
             if voxel == Voxel::LeavesDark {
@@ -445,7 +447,7 @@ fn voxel_color(
             let tone = world.tree_tone_at(x, z);
             let summer = lerp_rgb([0.47, 0.56, 0.26], [0.55, 0.60, 0.30], tone);
             // Birches turn early and go pure gold.
-            let turn = crate::noise::smoothstep(tone * 0.35, tone * 0.35 + 0.25, season);
+            let turn = voxel_core::noise::smoothstep(tone * 0.35, tone * 0.35 + 0.25, season);
             (
                 lerp_rgb(summer, [0.88, 0.66, 0.14], turn),
                 1.0,
@@ -466,7 +468,7 @@ fn voxel_color(
         Voxel::Sand => {
             // Wet sand below the waterline is darker, so the shallows stay
             // believable through the transparent water.
-            if y <= crate::world::WATER_LEVEL {
+            if y <= voxel_core::world::WATER_LEVEL {
                 ([0.38, 0.33, 0.23], 1.0, 0.94 + 0.12 * jitter_roll)
             } else {
                 ([0.86, 0.77, 0.55], 1.0, 0.94 + 0.12 * jitter_roll)

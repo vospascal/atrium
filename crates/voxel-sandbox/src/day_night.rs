@@ -17,8 +17,8 @@ use bevy::light::GlobalAmbientLight;
 use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 
-use crate::noise::smoothstep;
 use crate::weather::WeatherState;
+use voxel_core::noise::smoothstep;
 
 /// Seconds of real time for one full in-world day.
 const DAY_LENGTH_SECONDS: f32 = 240.0;

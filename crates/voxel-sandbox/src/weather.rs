@@ -18,8 +18,8 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
 use crate::day_night::CelestialState;
-use crate::noise::{hash_3d, hash_to_unit};
 use crate::ViewMode;
+use voxel_core::noise::{hash_3d, hash_to_unit};
 
 /// Particles in the precipitation volume (each is one billboarded quad).
 const PARTICLE_COUNT: usize = 16_000;
@@ -252,6 +252,7 @@ fn build_precipitation_mesh() -> Mesh {
 /// Drive the precipitation volume: follow the camera (or drape the diorama
 /// in orbit view), and refresh the material for the current weather.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 pub fn update_precipitation(
     weather: Res<WeatherState>,
     celestial: Res<CelestialState>,
