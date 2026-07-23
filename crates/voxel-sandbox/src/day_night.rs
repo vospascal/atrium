@@ -42,6 +42,9 @@ pub struct DayNightCycle {
     pub run_clock: bool,
     /// 0 = new moon, 0.5 = full moon, 1 = new again (waxing in between).
     pub moon_phase: f32,
+    /// Multiplier on the sun/moon directional-light strength (panel slider).
+    /// 1.0 = default; lower softens the harsh midday contrast.
+    pub sun_intensity: f32,
 }
 
 impl Default for DayNightCycle {
@@ -61,6 +64,7 @@ impl Default for DayNightCycle {
             // checkbox (or holding N) runs the cycle when wanted.
             run_clock: false,
             moon_phase: moon_phase.clamp(0.0, 1.0),
+            sun_intensity: 1.0,
         }
     }
 }
@@ -148,6 +152,11 @@ pub fn advance_day_night(
     // −1 at midnight, 0 at sunrise/sunset, +1 at noon.
     let sun_height = ((cycle.time_fraction - 0.25) * TAU).sin();
     let daylight = smoothstep(0.0, 0.25, sun_height);
+    // Aesthetic sun-strength curve (user-dialed): softer when the sun is high
+    // and harsh, warmer at the golden hours. ~0.35 at noon (sun_height 1.0)
+    // rising to ~0.75 near 06:30/17:30 (sun_height ≈ 0.13). Shapes the direct
+    // light on top of the daylight fade; the panel slider is a master on top.
+    let sun_curve = 0.81 - 0.46 * sun_height.clamp(0.0, 1.0);
 
     // The same directional light plays sun by day and moon by night; the
     // moon rises where the sun set (mirrored azimuth).
@@ -187,11 +196,13 @@ pub fn advance_day_night(
         let horizon_warmth = 1.0 - smoothstep(0.0, 0.35, sun_height);
         let sun_color = lerp_rgb([1.0, 0.96, 0.87], [1.0, 0.62, 0.36], horizon_warmth);
         sun_light.color = Color::srgb(sun_color[0], sun_color[1], sun_color[2]);
-        sun_light.illuminance = (400.0 + 9_600.0 * daylight) * cloud_dim;
+        sun_light.illuminance =
+            (400.0 + 9_600.0 * daylight) * cloud_dim * sun_curve * cycle.sun_intensity;
         celestial.light_color = linear_rgb(sun_color);
     } else {
         sun_light.color = Color::srgb(0.55, 0.66, 1.0);
-        sun_light.illuminance = (20.0 + 160.0 * moonlight) * (1.0 - 0.5 * coverage);
+        sun_light.illuminance =
+            (20.0 + 160.0 * moonlight) * (1.0 - 0.5 * coverage) * cycle.sun_intensity;
         // Moon brightness follows its phase: a crescent barely lights clouds.
         let phase_brightness = 0.15 + 0.85 * moon_lit_fraction(cycle.moon_phase);
         celestial.light_color = linear_rgb([0.55, 0.66, 1.0]) * phase_brightness;

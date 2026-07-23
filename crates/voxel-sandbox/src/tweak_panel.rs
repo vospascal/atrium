@@ -349,6 +349,10 @@ pub fn view_tweak_panel(
             ui.add(
                 egui::Slider::new(&mut cycle.moon_phase, 0.0..=1.0).text("moon phase (0.5 = full)"),
             );
+            ui.add(
+                egui::Slider::new(&mut cycle.sun_intensity, 0.0..=2.0)
+                    .text("sun intensity (1.0 = default)"),
+            );
 
             ui.separator();
             ui.label("Clouds");

@@ -332,6 +332,7 @@ impl VoxelWorld {
     pub fn generate(seed: u32, season: f32) -> Self {
         let mut heights = compute_heightmap(seed);
         smooth_shorelines(&mut heights);
+        quantize_cliffs(&mut heights);
         WorldBuilder::build(heights, seed, season, None)
     }
 
@@ -1505,6 +1506,35 @@ fn chamfer_distance_map(is_seed: impl Fn(usize) -> bool) -> Vec<f32> {
 /// Distance to the nearest water column, meters.
 fn compute_water_distance_map(heights: &[i32]) -> Vec<f32> {
     chamfer_distance_map(|index| heights[index] != NO_LAND && heights[index] < WATER_LEVEL)
+}
+
+/// Quantize the heightmap into chunky vertical steps where the terrain is
+/// steep, so cliffs and rock faces read as big MagicaVoxel-style blocks while
+/// gentle rolling ground stays smooth (procedural terrain only — imported
+/// heightmaps keep their authored shape). Runs after shoreline smoothing.
+///
+/// The slope is measured on the *pre-quantized* heightmap, and the snap is
+/// blended in by slope (`smoothstep`), so only genuinely steep columns terrace
+/// and there is no hard seam at the threshold. Sky rim and underwater beds are
+/// left untouched.
+fn quantize_cliffs(heights: &mut [i32]) {
+    /// Voxels per chunky terrace (~0.375 m at VOXEL_SIZE 0.125).
+    const CLIFF_STEP: f32 = 3.0;
+    let slope = compute_slope_map(heights);
+    let original: Vec<i32> = heights.to_vec();
+    for index in 0..heights.len() {
+        let height = original[index];
+        if height == NO_LAND || height < WATER_LEVEL {
+            continue;
+        }
+        let cliff_strength = smoothstep(0.7, 1.3, slope[index]);
+        if cliff_strength <= 0.0 {
+            continue;
+        }
+        let snapped = (height as f32 / CLIFF_STEP).round() * CLIFF_STEP;
+        let blended = height as f32 + (snapped - height as f32) * cliff_strength;
+        heights[index] = blended.round() as i32;
+    }
 }
 
 /// Ease every shoreline (procedural terrain only — imported heightmaps

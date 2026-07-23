@@ -38,6 +38,10 @@ enum MeshGroup {
     /// touch can never be culled as hidden — neither theirs nor a
     /// full-height neighbor's, or see-through holes open up.
     Cover,
+    /// Tree-leaf voxels. Rendered as shrunken, per-voxel-offset cubes (all
+    /// six faces) so canopies read as fluffy MagicaVoxel-style clumps rather
+    /// than solid blobs. Emitted in a dedicated pass, not greedy-merged.
+    Canopy,
     Water,
 }
 
@@ -55,6 +59,9 @@ fn group_of(voxel: Voxel) -> Option<MeshGroup> {
         | Voxel::LilyBloom
         | Voxel::Reed
         | Voxel::CattailHead => Some(MeshGroup::Cover),
+        Voxel::Leaves | Voxel::LeavesDark | Voxel::LeavesBirch | Voxel::LeavesPine => {
+            Some(MeshGroup::Canopy)
+        }
         _ => Some(MeshGroup::Terrain),
     }
 }
@@ -132,6 +139,12 @@ pub struct ChunkMeshes {
     /// camera sits under the plane, and underwater geometry would occlude
     /// the very reflection it is trying to render.
     pub terrain_below_water: Option<Mesh>,
+    /// Tree-leaf confetti (shrunken, offset cubes). Above the plane, so it is
+    /// reflection-visible like the above-water terrain.
+    pub canopy: Option<Mesh>,
+    /// Solid inner canopy behind the confetti: the (cheap) tree shadow caster
+    /// and gap backing. Confetti covers it; only its silhouette matters.
+    pub canopy_solid: Option<Mesh>,
     pub water: Option<Mesh>,
 }
 
@@ -140,6 +153,8 @@ impl ChunkMeshes {
         self.terrain_above_water.is_none()
             && self.meadow_cover.is_none()
             && self.terrain_below_water.is_none()
+            && self.canopy.is_none()
+            && self.canopy_solid.is_none()
             && self.water.is_none()
     }
 }
@@ -176,6 +191,8 @@ fn build_chunk_meshes(
     let mut above_water_buffers = MeshBuffers::default();
     let mut meadow_cover_buffers = MeshBuffers::default();
     let mut below_water_buffers = MeshBuffers::default();
+    let mut canopy_buffers = MeshBuffers::default();
+    let mut canopy_solid_buffers = MeshBuffers::default();
     let mut water_buffers = MeshBuffers::default();
     // Faces above this (voxel units) belong to the reflection-visible mesh.
     let water_plane_y = (voxel_core::world::WATER_LEVEL + 1) as f32 + 0.01;
@@ -198,14 +215,16 @@ fn build_chunk_meshes(
                 let Some(voxel_group) = group_of(voxel) else {
                     continue;
                 };
-                // Full-height terrain is emitted (merged) by the greedy pass;
-                // this per-voxel loop only handles cover and water.
-                if voxel_group == MeshGroup::Terrain {
+                // Full-height terrain is emitted (merged) by the greedy pass,
+                // and canopy leaves by the confetti pass; this per-voxel loop
+                // only handles cover and water.
+                if matches!(voxel_group, MeshGroup::Terrain | MeshGroup::Canopy) {
                     continue;
                 }
                 let voxel_position = IVec3::new(x, y, z);
                 let base_color = voxel_color(world, &scratch, voxel, x, y, z, seed, season);
                 let vertical_scale = visual_vertical_scale(&scratch, voxel, x, y, z, seed);
+                let footprint_scale = visual_footprint_scale(voxel);
 
                 for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
                     let neighbor_position = voxel_position + normal;
@@ -249,11 +268,19 @@ fn build_chunk_meshes(
                             + tangent_2.as_vec3() * along_2 as f32)
                             * 0.5;
                         let mut corner = face_center + corner_offset;
-                        // Ground-cover voxels render squashed (grass carpet,
-                        // not knee-high blocks): compress the voxel's local
-                        // y-extent while keeping its footprint.
+                        // Ground-cover voxels render squashed AND narrowed:
+                        // compress the local y-extent (grass carpet, not
+                        // knee-high blocks) and shrink the x/z footprint toward
+                        // the voxel center so tufts read as thin blades rather
+                        // than fat cubes. Cover is its own culling group, so
+                        // shrinking the footprint never opens holes in the
+                        // terrain or neighboring cover.
                         corner.y = voxel_position.y as f32
                             + (corner.y - voxel_position.y as f32) * vertical_scale;
+                        let center_x = voxel_position.x as f32 + 0.5;
+                        let center_z = voxel_position.z as f32 + 0.5;
+                        corner.x = center_x + (corner.x - center_x) * footprint_scale;
+                        corner.z = center_z + (corner.z - center_z) * footprint_scale;
                         corners[corner_index] = Vec3::new(
                             (corner.x - half_x) * VOXEL_SIZE,
                             corner.y * VOXEL_SIZE,
@@ -300,6 +327,8 @@ fn build_chunk_meshes(
                             }
                         }
                         MeshGroup::Water => &mut water_buffers,
+                        // Skipped above; the confetti pass emits these.
+                        MeshGroup::Canopy => unreachable!("canopy is emitted separately"),
                     };
                     buffers.add_quad(corners, normal.as_vec3(), corner_colors, flip_diagonal);
                 }
@@ -322,6 +351,31 @@ fn build_chunk_meshes(
         &mut below_water_buffers,
     );
 
+    // Emit tree-leaf voxels as fluffy confetti cubes, plus a cheap solid inner
+    // canopy behind them (the shadow caster + gap backing).
+    emit_canopy(
+        world,
+        &scratch,
+        seed,
+        season,
+        x_range.clone(),
+        z_range.clone(),
+        half_x,
+        half_z,
+        &mut canopy_buffers,
+    );
+    emit_canopy_solid(
+        world,
+        &scratch,
+        seed,
+        season,
+        x_range.clone(),
+        z_range.clone(),
+        half_x,
+        half_z,
+        &mut canopy_solid_buffers,
+    );
+
     let into_optional_mesh = |buffers: MeshBuffers| {
         if buffers.is_empty() {
             None
@@ -333,6 +387,8 @@ fn build_chunk_meshes(
         terrain_above_water: into_optional_mesh(above_water_buffers),
         meadow_cover: into_optional_mesh(meadow_cover_buffers),
         terrain_below_water: into_optional_mesh(below_water_buffers),
+        canopy: into_optional_mesh(canopy_buffers),
+        canopy_solid: into_optional_mesh(canopy_solid_buffers),
         water: into_optional_mesh(water_buffers),
     }
 }
@@ -595,6 +651,187 @@ fn greedy_merge_terrain(
     }
 }
 
+/// Emit tree-leaf voxels as fluffy confetti: each *surface* leaf voxel becomes
+/// a shrunken cube (all six faces) nudged by a per-voxel offset, so canopies
+/// read as clusters of chunky leaf blocks rather than solid blobs. Not
+/// greedy-merged; ambient occlusion is skipped (the shrunk/offset geometry
+/// doesn't map to voxel cells — the cover alpha sentinel tells the shader to
+/// skip it), so the PBR normals do the shading. Interior leaves (fully
+/// enclosed by leaves) are skipped — they'd never show through the shell.
+#[allow(clippy::too_many_arguments)]
+fn emit_canopy(
+    world: &VoxelWorld,
+    scratch: &voxel_core::world::ChunkScratch,
+    seed: u32,
+    season: f32,
+    x_range: std::ops::Range<i32>,
+    z_range: std::ops::Range<i32>,
+    half_x: f32,
+    half_z: f32,
+    buffers: &mut MeshBuffers,
+) {
+    /// Leaves are grouped into cubes this many voxels wide — chunky confetti
+    /// (~1/STRIDE³ the cube count of per-voxel), still fluffy but far cheaper.
+    const STRIDE: i32 = 2;
+    /// Cube edge as a fraction of a block (gaps between cubes = fluff).
+    const SHRINK: f32 = 0.82;
+    /// Max per-axis positional jitter (voxels), for irregular clumping.
+    const OFFSET: f32 = 0.25;
+
+    let block = STRIDE as f32;
+    let half_edge = 0.5 * block * SHRINK;
+    // Blocks are aligned to the global grid (chunk starts are multiples of the
+    // chunk size, itself a multiple of STRIDE), so no block straddles a chunk
+    // border — no seams or double-emitted cubes.
+    for block_y in (0..WORLD_SIZE_Y as i32).step_by(STRIDE as usize) {
+        for block_z in (z_range.start..z_range.end).step_by(STRIDE as usize) {
+            for block_x in (x_range.start..x_range.end).step_by(STRIDE as usize) {
+                // Find any leaf voxel in this block; it names the cube's color.
+                let mut representative: Option<(i32, i32, i32)> = None;
+                'scan: for dy in 0..STRIDE {
+                    for dz in 0..STRIDE {
+                        for dx in 0..STRIDE {
+                            let (cx, cy, cz) = (block_x + dx, block_y + dy, block_z + dz);
+                            if group_of(scratch.get(cx, cy, cz)) == Some(MeshGroup::Canopy) {
+                                representative = Some((cx, cy, cz));
+                                break 'scan;
+                            }
+                        }
+                    }
+                }
+                let Some((rx, ry, rz)) = representative else {
+                    continue;
+                };
+
+                let color = voxel_color(
+                    world,
+                    scratch,
+                    scratch.get(rx, ry, rz),
+                    rx,
+                    ry,
+                    rz,
+                    seed,
+                    season,
+                );
+                let offset = Vec3::new(
+                    (hash_to_unit(hash_3d(block_x, block_y, block_z, seed.wrapping_add(21))) - 0.5)
+                        * 2.0
+                        * OFFSET,
+                    (hash_to_unit(hash_3d(block_x, block_y, block_z, seed.wrapping_add(22))) - 0.5)
+                        * 2.0
+                        * OFFSET,
+                    (hash_to_unit(hash_3d(block_x, block_y, block_z, seed.wrapping_add(23))) - 0.5)
+                        * 2.0
+                        * OFFSET,
+                );
+                let center = Vec3::new(
+                    block_x as f32 + block / 2.0,
+                    block_y as f32 + block / 2.0,
+                    block_z as f32 + block / 2.0,
+                ) + offset;
+
+                for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
+                    let face_center = center + normal.as_vec3() * half_edge;
+                    let mut corners = [Vec3::ZERO; 4];
+                    for (corner_index, &(along_1, along_2)) in QUAD_CORNERS.iter().enumerate() {
+                        let corner = face_center
+                            + (tangent_1.as_vec3() * along_1 as f32
+                                + tangent_2.as_vec3() * along_2 as f32)
+                                * half_edge;
+                        corners[corner_index] = Vec3::new(
+                            (corner.x - half_x) * VOXEL_SIZE,
+                            corner.y * VOXEL_SIZE,
+                            (corner.z - half_z) * VOXEL_SIZE,
+                        );
+                    }
+                    buffers.add_quad(corners, normal.as_vec3(), [color; 4], false);
+                }
+            }
+        }
+    }
+}
+
+/// A cheap solid inner canopy: surface-culled, slightly-shrunk full-size leaf
+/// cubes, a touch darker (canopy interior). It sits *behind* the confetti
+/// shell — the confetti covers it — so its job is twofold: cast the trees'
+/// shadows without the confetti's ~1.8M-cube shadow cost (this mesh is the
+/// only canopy shadow caster), and back the shell so gaps can never see
+/// through to the sky. Same cheap surface-face count the old merged leaves had.
+#[allow(clippy::too_many_arguments)]
+fn emit_canopy_solid(
+    world: &VoxelWorld,
+    scratch: &voxel_core::world::ChunkScratch,
+    seed: u32,
+    season: f32,
+    x_range: std::ops::Range<i32>,
+    z_range: std::ops::Range<i32>,
+    half_x: f32,
+    half_z: f32,
+    buffers: &mut MeshBuffers,
+) {
+    // Full-size (1.0) so adjacent surface cubes touch into a gap-free
+    // silhouette — the shadow reads as one solid (soft) tree shadow instead of
+    // a stippled grid. The confetti shell (bigger, offset) still covers it.
+    const SHRINK: f32 = 1.0;
+    let half_edge = 0.5 * SHRINK;
+
+    for y in 0..WORLD_SIZE_Y as i32 {
+        for z in z_range.clone() {
+            for x in x_range.clone() {
+                let voxel = scratch.get(x, y, z);
+                if group_of(voxel) != Some(MeshGroup::Canopy) {
+                    continue;
+                }
+                let position = IVec3::new(x, y, z);
+                let mut color = voxel_color(world, scratch, voxel, x, y, z, seed, season);
+                // Slightly darker so it reads as canopy interior through gaps
+                // (alpha carries the AO-skip sentinel — leave it alone).
+                color[0] *= 0.8;
+                color[1] *= 0.8;
+                color[2] *= 0.8;
+                let center = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
+                    // Surface only: skip faces against other leaves.
+                    let neighbor = position + normal;
+                    if group_of(scratch.get(neighbor.x, neighbor.y, neighbor.z))
+                        == Some(MeshGroup::Canopy)
+                    {
+                        continue;
+                    }
+                    let face_center = center + normal.as_vec3() * half_edge;
+                    let mut corners = [Vec3::ZERO; 4];
+                    for (corner_index, &(along_1, along_2)) in QUAD_CORNERS.iter().enumerate() {
+                        let corner = face_center
+                            + (tangent_1.as_vec3() * along_1 as f32
+                                + tangent_2.as_vec3() * along_2 as f32)
+                                * half_edge;
+                        corners[corner_index] = Vec3::new(
+                            (corner.x - half_x) * VOXEL_SIZE,
+                            corner.y * VOXEL_SIZE,
+                            (corner.z - half_z) * VOXEL_SIZE,
+                        );
+                    }
+                    buffers.add_quad(corners, normal.as_vec3(), [color; 4], false);
+                }
+            }
+        }
+    }
+}
+
+/// Horizontal footprint of a cover voxel as a fraction of a full cube, shrunk
+/// toward the cell center. Blades/flowers/reeds read as slender stalks rather
+/// than fat cubes; flat pads keep their full width. Terrain is always 1.0.
+fn visual_footprint_scale(voxel: Voxel) -> f32 {
+    match voxel {
+        Voxel::TallGrass => 0.5,
+        Voxel::FlowerPink | Voxel::FlowerWhite | Voxel::FlowerYellow | Voxel::FlowerBlue => 0.55,
+        Voxel::WaterWeed => 0.55,
+        Voxel::Reed | Voxel::CattailHead => 0.6,
+        // Lily pads are flat and wide — keep their footprint.
+        _ => 1.0,
+    }
+}
+
 /// Visual height of a voxel as a fraction of a full cube. Ground cover is
 /// squashed — tufts vary per-cell so the meadow reads as an uneven carpet.
 fn visual_vertical_scale(
@@ -816,7 +1053,7 @@ fn voxel_color(
     // terrain carries the bare jitter amplitude and gets shader AO.
     let out_alpha = match group_of(voxel) {
         Some(MeshGroup::Water) => alpha,
-        Some(MeshGroup::Cover) => amplitude + 10.0,
+        Some(MeshGroup::Cover) | Some(MeshGroup::Canopy) => amplitude + 10.0,
         _ => amplitude,
     };
     [linear.red, linear.green, linear.blue, out_alpha]

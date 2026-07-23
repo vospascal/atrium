@@ -369,14 +369,17 @@ fn spawn_world(
     let total_vertices = count_bucket(|chunk| &chunk.terrain_above_water)
         + count_bucket(|chunk| &chunk.meadow_cover)
         + count_bucket(|chunk| &chunk.terrain_below_water)
+        + count_bucket(|chunk| &chunk.canopy)
+        + count_bucket(|chunk| &chunk.canopy_solid)
         + count_bucket(|chunk| &chunk.water);
     info!(
         "world generated in {generation_elapsed:.2?}, meshed in {meshing_elapsed:.2?} \
-         ({} chunks: terrain {} + meadow {} + underwater {} verts, water {} verts)",
+         ({} chunks: terrain {} + meadow {} + underwater {} + canopy {} verts, water {} verts)",
         chunk_meshes.len(),
         count_bucket(|chunk| &chunk.terrain_above_water),
         count_bucket(|chunk| &chunk.meadow_cover),
         count_bucket(|chunk| &chunk.terrain_below_water),
+        count_bucket(|chunk| &chunk.canopy),
         count_bucket(|chunk| &chunk.water),
     );
     commands.insert_resource(WorldStats {
@@ -575,6 +578,30 @@ fn spawn_world(
                 Mesh3d(meshes.add(chunk_mesh)),
                 MeshMaterial3d(terrain_material.clone()),
                 NotShadowCaster,
+                WorldMesh,
+            ));
+        }
+        // Canopy confetti: reflection-visible (trees in the mirror), but NOT a
+        // shadow caster — 1.8M little cubes rendered through 4 shadow cascades
+        // ×2 camera views cost ~30 fps. Shadow cascades render per view, so
+        // the confetti's cast shade isn't worth that; the ambient + directional
+        // lighting on the leaves still reads fine.
+        if let Some(chunk_mesh) = chunk.canopy {
+            commands.spawn((
+                Mesh3d(meshes.add(chunk_mesh)),
+                MeshMaterial3d(terrain_material.clone()),
+                NotShadowCaster,
+                water::reflective_layers(),
+                WorldMesh,
+            ));
+        }
+        // The solid inner canopy IS the tree shadow caster (cheap, ~0.3M),
+        // behind the confetti. Reflection-visible + shadow-casting.
+        if let Some(chunk_mesh) = chunk.canopy_solid {
+            commands.spawn((
+                Mesh3d(meshes.add(chunk_mesh)),
+                MeshMaterial3d(terrain_material.clone()),
+                water::reflective_layers(),
                 WorldMesh,
             ));
         }
