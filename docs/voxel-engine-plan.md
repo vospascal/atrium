@@ -157,11 +157,52 @@ Distant chunks meshed at coarser voxel size (¼ faces per level). Approach:
 > Stages 1–5 are the mesh-perf core. Expected after 1+2: ~10× fewer verts/pass,
 > reflection+shadow nearly free, FP fps >120 in debug, full remesh <300 ms.
 
-### Stage 6 — Materials & art direction  *(V16; research-doc "mixed density")*
+### Stage 6 — Materials & art direction  *(V16; research-doc "mixed density")* — ✅ mixed-density done
 3D textures spanning multiple voxels + gradient-lookup + procedural (formula)
 materials. Mixed voxel density (chunky cliffs, confetti canopies, thin grass)
 from the existing art-direction notes. Rasterized particle system for
 wind-blown grass/leaves (V16: instanced, doesn't cast shadows — accepted).
+- ✅ Done 2026-07-23: thin grass blades, chunky cliffs, confetti canopies
+  (with cheap solid shadow-proxy), sun-softening curve + slider.
+- Remaining: 3D/gradient textures, procedural materials — and the wind-blown
+  grass, which folds into the foliage-instancing arc below.
+
+### Stage 6b — Foliage instancing → collision arc  *(V3 backface split, V5 instancing, V16)*
+Rework grass and trees from **baked per-voxel geometry** (static, no
+per-object identity → no collision, ~1.2M grass verts in the chunk mesh) into
+**instanced discrete objects**: a small palette of variant meshes stamped many
+times from a per-instance buffer. Cheaper, and it unlocks LOD, wind, and
+collision. (User direction 2026-07-23. Baked cross-quad blades were tried and
+reverted — a dead end; the blade only wins as single-sided + cull-off, which
+belongs here.)
+
+Ordered steps (collision + wading deferred to the end / Stage 8):
+1. **Instanced grass base** — custom instanced render pipeline (Bevy's
+   `shader_instancing` / `custom_shader_instancing` pattern: one entity, an
+   instance buffer, a `RenderCommand` that draws the base mesh instanced). Base
+   mesh = a **single-sided cross-quad blade** with a **cull-off material**
+   (8 verts). Instance buffer built from the grass cells: position + per-
+   instance height / lean / tint / sway-phase. Replaces the baked meadow-cover
+   grass → big vert + memory cut. Precedent in-repo: fireflies / precipitation
+   (bounded pseudo-instancing via shared mesh + per-instance vertex attrs).
+2. **Variants** — ~5 pre-made blade/tuft meshes; each instance hash-picks one
+   → a more natural, less uniform meadow.
+3. **LOD / render distance** — **view-aware**: full blades near, cheaper/fewer
+   far, none beyond X in first-person; orbit keeps all (the diorama). Filter
+   the instance set by camera distance (per-chunk instance groups).
+4. **Tree instancing** — same pattern for trees: X pre-made tree meshes
+   (VoxModel-based) instanced at the generator's tree positions with variation.
+   Removes trees from the terrain mesh → discrete objects.
+5. **Tree collision** *(Stage 8)* — discrete tree instances get colliders
+   (cylinder/capsule for the trunk) so the first-person walker can't pass
+   through them (currently does).
+6. **Water wading** *(Stage 8)* — `GroundHeights` / first-person terrain-follow
+   currently treats the water *surface* as standable ("walk on water like
+   Jesus"); make the walker wade INTO water (sink to a wade depth / the bed),
+   not stand on top.
+
+**Wind sway** (the Stage-6 wind-blown-grass item) folds into steps 1–2 as
+per-instance vertex-shader animation.
 
 ### Stage 7 — Lighting upgrades  *(V1, V2, V15)*
 Start with what Bevy gives (PBR + cascaded shadows, already in use). Then

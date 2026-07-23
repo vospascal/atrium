@@ -145,9 +145,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let voxel_size = voxel_ext.params.y;
     let offset = vec3<f32>(voxel_ext.params.z, 0.0, voxel_ext.params.w);
     let sample = in.world_position.xyz - in.world_normal * (0.5 * voxel_size);
-    let voxel = vec3<i32>(floor(sample / voxel_size + offset));
+    let voxel_coord = sample / voxel_size + offset;
+    let voxel = vec3<i32>(floor(voxel_coord));
     let roll = hash_to_unit(hash_3d(voxel.x, voxel.y, voxel.z, seed + 3u));
-    let jitter = 1.0 + amplitude * (2.0 * roll - 1.0);
+    // Fade the hard per-voxel hash out under minification: when one pixel spans
+    // ~a voxel or more (distance / the orbit miniature), the un-mipmapped hash
+    // aliases into sparkling speckle across the whole scene. `fwidth` measures
+    // voxels-per-pixel; keep full jitter up close, fade to a flat tone by the
+    // time a pixel covers ~1.5 voxels.
+    let voxels_per_pixel = length(fwidth(voxel_coord));
+    let jitter_fade = clamp(1.5 - voxels_per_pixel, 0.0, 1.0);
+    let jitter = 1.0 + amplitude * jitter_fade * (2.0 * roll - 1.0);
 
     var color = pbr_input.material.base_color.rgb * jitter;
     if !is_cover {

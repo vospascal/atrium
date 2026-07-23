@@ -31,6 +31,7 @@ mod day_night;
 mod fireflies;
 mod flame;
 mod fog_ring;
+mod grass;
 mod mesh;
 mod sky;
 mod tweak_panel;
@@ -47,6 +48,7 @@ use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::ColorGrading;
 
 use std::path::Path;
 
@@ -136,6 +138,7 @@ fn main() {
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
         .add_plugins(bevy::diagnostic::EntityCountDiagnosticsPlugin::default())
         .add_plugins(MaterialPlugin::<voxel_material::VoxelTerrainMaterial>::default())
+        .add_plugins(MaterialPlugin::<voxel_material::GrassMaterial>::default())
         .add_plugins(MaterialPlugin::<FlameMaterial>::default())
         .add_plugins(MaterialPlugin::<sky::SkyMaterial>::default())
         .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
@@ -191,6 +194,7 @@ fn main() {
                 campfire::spawn_env_campfires,
                 regenerate_system,
                 flame::flicker_flame_lights,
+                grass::update_grass_wind_time,
                 screenshot_system,
             )
                 .chain(),
@@ -228,7 +232,7 @@ struct RegenerateRequest {
 
 /// Marker for everything despawned and rebuilt on regeneration.
 #[derive(Component)]
-struct WorldMesh;
+pub(crate) struct WorldMesh;
 
 #[derive(Resource, Clone, Copy, PartialEq)]
 enum ViewMode {
@@ -238,9 +242,18 @@ enum ViewMode {
     FirstPerson,
 }
 
+/// Scene bloom. Kept at Bevy's default strength — a shared helper so the
+/// tweak-panel toggle re-inserts exactly this, not a divergent value.
+pub(crate) fn scene_bloom() -> bevy::post_process::bloom::Bloom {
+    bevy::post_process::bloom::Bloom::default()
+}
+
 fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
     commands.spawn((
         Camera3d::default(),
+        // 2× MSAA: 4× roughly doubles the frametime on this fill-bound GPU for
+        // little visual gain, and 2× is the sweet spot (Bevy defaults to 4×).
+        Msaa::Sample2,
         bevy::render::view::Hdr,
         // The UI belongs to this camera (see EguiGlobalSettings above).
         bevy_egui::PrimaryEguiContext,
@@ -274,7 +287,11 @@ fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
             ..default()
         },
         // HDR flame voxels bloom into a glow.
-        bevy::post_process::bloom::Bloom::default(),
+        scene_bloom(),
+        // Neutral filmic grade — identity by default (exposure 0, shadow lift
+        // 0, mid-contrast 1, saturation 1). The `V` panel exposes live sliders
+        // so the look is dialed by eye, not guessed.
+        ColorGrading::default(),
     ));
 
     // Sun by day, moon by night; the day/night system drives rotation,
@@ -305,6 +322,7 @@ fn initial_world_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
+    mut grass_materials: ResMut<Assets<voxel_material::GrassMaterial>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
@@ -319,6 +337,7 @@ fn initial_world_system(
         &mut meshes,
         &mut materials,
         &mut terrain_materials,
+        &mut grass_materials,
         &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
@@ -336,6 +355,7 @@ fn spawn_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     terrain_materials: &mut Assets<voxel_material::VoxelTerrainMaterial>,
+    grass_materials: &mut Assets<voxel_material::GrassMaterial>,
     storage_buffers: &mut Assets<ShaderStorageBuffer>,
     flame_materials: &mut Assets<FlameMaterial>,
     water_materials: &mut Assets<water::WaterMaterial>,
@@ -444,18 +464,16 @@ fn spawn_world(
     // Terrain uses the voxel jitter material (StandardMaterial PBR + the
     // per-fragment brightness speckle). Props keep a plain StandardMaterial —
     // they bake their own jitter in vox_import and aren't greedy-meshed.
+    let occupancy = storage_buffers.add(ShaderStorageBuffer::from(
+        voxel_world.solid_occupancy_bits(),
+    ));
     let terrain_material = terrain_materials.add(voxel_material::VoxelTerrainMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 0.95,
             ..default()
         },
-        extension: voxel_material::voxel_extension(
-            seed,
-            storage_buffers.add(ShaderStorageBuffer::from(
-                voxel_world.solid_occupancy_bits(),
-            )),
-        ),
+        extension: voxel_material::voxel_extension(seed, occupancy.clone()),
     });
     let prop_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
@@ -614,6 +632,10 @@ fn spawn_world(
             ));
         }
     }
+
+    // Grass is instanced (auto-instancing over a small variant palette), not
+    // baked into the chunk meshes — the mesher skips TallGrass.
+    grass::spawn_instanced_grass(commands, meshes, grass_materials, &voxel_world, seed);
 }
 
 /// Parse `"index@x,z"` or `"index@x,z,lift"` prop placements (meters,
@@ -695,6 +717,7 @@ fn regenerate_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
+    mut grass_materials: ResMut<Assets<voxel_material::GrassMaterial>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
@@ -727,6 +750,7 @@ fn regenerate_system(
         &mut meshes,
         &mut materials,
         &mut terrain_materials,
+        &mut grass_materials,
         &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,

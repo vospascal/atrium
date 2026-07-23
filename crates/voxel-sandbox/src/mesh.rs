@@ -221,6 +221,11 @@ fn build_chunk_meshes(
                 if matches!(voxel_group, MeshGroup::Terrain | MeshGroup::Canopy) {
                     continue;
                 }
+                // Tall grass is spawned as instanced clumps (see `grass.rs`),
+                // not baked here.
+                if voxel == Voxel::TallGrass {
+                    continue;
+                }
                 let voxel_position = IVec3::new(x, y, z);
                 let base_color = voxel_color(world, &scratch, voxel, x, y, z, seed, season);
                 let vertical_scale = visual_vertical_scale(&scratch, voxel, x, y, z, seed);

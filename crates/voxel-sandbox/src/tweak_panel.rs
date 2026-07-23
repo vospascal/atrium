@@ -7,6 +7,7 @@
 //! dynamically later.
 
 use bevy::prelude::*;
+use bevy::render::view::ColorGrading;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::day_night::DayNightCycle;
@@ -101,6 +102,9 @@ pub fn perf_overlay(
         With<bevy::core_pipeline::prepass::DepthPrepass>,
     >,
     mut reflection: ResMut<crate::water::ReflectionSettings>,
+    mut grass: Query<&mut Visibility, With<crate::grass::GrassClump>>,
+    mut grass_hidden: Local<bool>,
+    mut sun: Query<&mut DirectionalLight, With<crate::day_night::SunLight>>,
 ) {
     if !perf.visible {
         return;
@@ -240,14 +244,33 @@ pub fn perf_overlay(
                 let mut bloom_enabled = bloom.is_some();
                 if ui.checkbox(&mut bloom_enabled, "bloom").changed() {
                     if bloom_enabled {
-                        commands
-                            .entity(camera_entity)
-                            .insert(bevy::post_process::bloom::Bloom::default());
+                        commands.entity(camera_entity).insert(crate::scene_bloom());
                     } else {
                         commands
                             .entity(camera_entity)
                             .remove::<bevy::post_process::bloom::Bloom>();
                     }
+                }
+
+                // Grass on/off — flip it to read grass's exact frametime cost,
+                // or to isolate whether an artifact is grass or the terrain.
+                let mut grass_visible = !*grass_hidden;
+                if ui.checkbox(&mut grass_visible, "grass").changed() {
+                    *grass_hidden = !grass_visible;
+                    let visibility = if grass_visible {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    };
+                    for mut grass_visibility in &mut grass {
+                        *grass_visibility = visibility;
+                    }
+                }
+
+                // Sun shadows on/off — flip it to test whether the diagonal
+                // shimmer is shadow-map acne.
+                if let Ok(mut sun_light) = sun.single_mut() {
+                    ui.checkbox(&mut sun_light.shadows_enabled, "sun shadows");
                 }
             }
             ui.small("P hides this overlay");
@@ -266,6 +289,13 @@ pub fn view_tweak_panel(
     mut season: ResMut<crate::Season>,
     mut regenerate: ResMut<crate::RegenerateRequest>,
     view_mode: Res<ViewMode>,
+    mut main_camera: Query<
+        (
+            Option<&mut bevy::post_process::bloom::Bloom>,
+            &mut ColorGrading,
+        ),
+        With<bevy::core_pipeline::prepass::DepthPrepass>,
+    >,
 ) {
     if !tweaks.panel_visible {
         tweaks.pointer_over_panel = false;
@@ -274,6 +304,7 @@ pub fn view_tweak_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    let camera_look = main_camera.single_mut().ok();
 
     egui::Window::new("View tuning")
         .default_pos((12.0, 12.0))
@@ -314,6 +345,32 @@ pub fn view_tweak_panel(
                             .logarithmic(true)
                             .text("focus width (f-stops)"),
                     );
+                }
+            }
+            ui.separator();
+            ui.label("Look / grade (live)");
+            if let Some((mut bloom, mut grading)) = camera_look {
+                if let Some(bloom) = bloom.as_mut() {
+                    ui.add(
+                        egui::Slider::new(&mut bloom.intensity, 0.0..=0.6).text("bloom intensity"),
+                    );
+                }
+                ui.add(
+                    egui::Slider::new(&mut grading.global.exposure, -1.0..=1.0).text("exposure"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut grading.shadows.lift, -0.2..=0.2).text("shadow lift"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut grading.midtones.contrast, 0.5..=1.5)
+                        .text("mid contrast"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut grading.global.post_saturation, 0.0..=2.0)
+                        .text("saturation"),
+                );
+                if ui.button("reset grade").clicked() {
+                    *grading = ColorGrading::default();
                 }
             }
             ui.separator();

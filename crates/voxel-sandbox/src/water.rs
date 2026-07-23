@@ -32,9 +32,15 @@ use crate::day_night::CelestialState;
 use crate::weather::WeatherState;
 use voxel_core::world::{VOXEL_SIZE, WATER_LEVEL};
 
-/// Reflections render at half resolution — the wave perturbation hides it.
-const REFLECTION_WIDTH: u32 = 960;
-const REFLECTION_HEIGHT: u32 = 540;
+/// Reflections render at reduced resolution — the wave perturbation hides it,
+/// and the mirror pass is the single biggest GPU cost on a fill-bound machine.
+const REFLECTION_WIDTH: u32 = 720;
+const REFLECTION_HEIGHT: u32 = 405;
+
+/// Re-render the mirror only every Nth frame; the wave distortion hides the
+/// staleness. Cuts the mirror's cost proportionally (both fill and draw), so
+/// it's the most robust reflection optimisation here. 1 = every frame.
+const REFLECTION_UPDATE_INTERVAL: u32 = 2;
 
 /// Entities on this layer are visible to the reflection camera (they still
 /// need layer 0 to be visible to the main camera).
@@ -238,10 +244,10 @@ pub fn spawn_reflection_camera(mut commands: Commands, target: Res<ReflectionTar
 /// does the reflected ray see" in the freshly rendered texture.
 ///
 /// The mirror's cost scales with how close the camera is to water:
-/// full-resolution viewport when standing at the shore, half beyond 25 m,
-/// quarter beyond 60 m, and past ~120 m the camera switches off entirely
-/// while the shader cross-fades to a procedural sky tint (at that range
-/// the mirror is mostly sky anyway).
+/// half-resolution viewport within 60 m, quarter beyond, and past ~120 m the
+/// camera switches off entirely while the shader cross-fades to a procedural
+/// sky tint (at that range the mirror is mostly sky anyway). It also only
+/// re-renders every `REFLECTION_UPDATE_INTERVAL` frames.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn update_reflection_camera(
     main_camera: Query<
@@ -260,6 +266,7 @@ pub fn update_reflection_camera(
     time: Res<Time>,
     mut settings: ResMut<ReflectionSettings>,
     mut materials: ResMut<Assets<WaterMaterial>>,
+    mut frame_counter: Local<u32>,
 ) {
     let Ok((main_transform, main_projection)) = main_camera.single() else {
         return;
@@ -288,13 +295,10 @@ pub fn update_reflection_camera(
         .unwrap_or(0.0);
     let vertical = (position.y - plane_y).abs();
     let water_distance = (horizontal * horizontal + vertical * vertical).sqrt();
-    let tier = if water_distance < 25.0 {
-        1.0
-    } else if water_distance < 60.0 {
-        0.5
-    } else {
-        0.25
-    };
+    // Wave distortion hides the low resolution; a full-res mirror is far too
+    // expensive on a fill-bound machine, so even the close tier is capped at
+    // half.
+    let tier = if water_distance < 60.0 { 0.5 } else { 0.25 };
     let target_strength = if settings.enabled && water_on_screen {
         ((125.0 - water_distance) / 25.0).clamp(0.0, 1.0)
     } else {
@@ -314,7 +318,11 @@ pub fn update_reflection_camera(
 
     let viewport_width = ((REFLECTION_WIDTH as f32 * tier) as u32).max(1);
     let viewport_height = ((REFLECTION_HEIGHT as f32 * tier) as u32).max(1);
-    mirror_camera.is_active = strength > 0.005;
+    // Only re-render the mirror every Nth frame; on the skipped frames the
+    // render target keeps its last contents and the wave wobble hides it.
+    *frame_counter = frame_counter.wrapping_add(1);
+    let render_this_frame = frame_counter.is_multiple_of(REFLECTION_UPDATE_INTERVAL);
+    mirror_camera.is_active = strength > 0.005 && render_this_frame;
     mirror_camera.viewport = Some(bevy::camera::Viewport {
         physical_position: UVec2::ZERO,
         physical_size: UVec2::new(viewport_width, viewport_height),

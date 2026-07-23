@@ -25,6 +25,37 @@ use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 /// The terrain material: StandardMaterial PBR + the voxel jitter/AO extension.
 pub type VoxelTerrainMaterial = ExtendedMaterial<StandardMaterial, VoxelExtension>;
 
+/// The grass material: plain StandardMaterial PBR (vertex-color tone) plus a
+/// **wind** extension that overrides *both* the main-pass and depth-prepass
+/// vertex shaders with the same sway. It is a **separate type** from the
+/// terrain material on purpose: a custom vertex stage must be matched by a
+/// custom prepass vertex stage or the two passes disagree on depth and
+/// z-fight, so we keep that machinery off the shared terrain material entirely.
+pub type GrassMaterial = ExtendedMaterial<StandardMaterial, GrassExtension>;
+
+/// Wind extension: swaps in the grass vertex + prepass-vertex shaders and
+/// carries the wind time. Time rides on the material (not `globals`) because
+/// `globals` is only bound in the main pass, not the depth prepass — and both
+/// passes must read the *same* time so their displaced depths match.
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
+pub struct GrassExtension {
+    /// `x` = current time (s), `y` = previous-frame time (s, for motion
+    /// vectors). Updated every frame by `update_grass_wind_time`.
+    #[uniform(100)]
+    pub time: Vec4,
+}
+
+impl MaterialExtension for GrassExtension {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/grass.wgsl".into()
+    }
+    // MUST match the main vertex shader's positions bit-for-bit (same wind, same
+    // math) so the depth prepass agrees and grass doesn't z-fight.
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/grass_prepass.wgsl".into()
+    }
+}
+
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct VoxelExtension {
     /// `x` = world seed reinterpreted as f32 bits (`bitcast<u32>` in WGSL),
