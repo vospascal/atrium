@@ -253,6 +253,7 @@ fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
         Camera3d::default(),
         // 2× MSAA: 4× roughly doubles the frametime on this fill-bound GPU for
         // little visual gain, and 2× is the sweet spot (Bevy defaults to 4×).
+        // SSAO (mutually exclusive with MSAA) is opt-in via the P-overlay toggle.
         Msaa::Sample2,
         bevy::render::view::Hdr,
         // The UI belongs to this camera (see EguiGlobalSettings above).
@@ -412,6 +413,8 @@ fn spawn_world(
     });
 
     let ground_heights = GroundHeights::from_world(&voxel_world);
+    // Trunk colliders for first-person tree collision.
+    commands.insert_resource(TreeColliders::from_world(&voxel_world));
     // The reflection system scales mirror quality by camera-to-water
     // distance; give it a coarse copy of the water-distance field.
     commands.insert_resource(water::WaterProximity::from_world(&voxel_world));
@@ -661,12 +664,18 @@ fn parse_prop_layout(layout: &str) -> Vec<(usize, f32, f32, f32)> {
 /// and clouds are not ground: you walk under canopies and through tufts.
 #[derive(Resource)]
 struct GroundHeights {
+    /// Surface clamped UP to the water plane — used for prop placement.
     heights: Vec<f32>,
+    /// True terrain floor (river/lake bed), NOT clamped to water — the
+    /// walker wades on this, so it sinks into water instead of standing on it.
+    bed: Vec<f32>,
 }
 
 impl GroundHeights {
     fn from_world(voxel_world: &VoxelWorld) -> Self {
         let mut heights = vec![PLATEAU_FLOOR_RENDER; WORLD_SIZE_X * WORLD_SIZE_Z];
+        let mut bed = vec![PLATEAU_FLOOR_RENDER; WORLD_SIZE_X * WORLD_SIZE_Z];
+        let water_plane = (WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
         for z in 0..WORLD_SIZE_Z as i32 {
             for x in 0..WORLD_SIZE_X as i32 {
                 // Topmost walkable ground, straight off the column's RLE
@@ -681,17 +690,17 @@ impl GroundHeights {
                     }
                 }
                 if let Some(y) = ground_top {
-                    // Wade on the river surface rather than its bed.
-                    let ground = (y + 1).max(WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
-                    heights[(z as usize) * WORLD_SIZE_X + x as usize] = ground;
+                    let index = (z as usize) * WORLD_SIZE_X + x as usize;
+                    let floor = (y + 1) as f32 * VOXEL_SIZE;
+                    bed[index] = floor;
+                    heights[index] = floor.max(water_plane);
                 }
             }
         }
-        Self { heights }
+        Self { heights, bed }
     }
 
-    /// Ground height at a render-space position (centered world).
-    fn ground_at(&self, x: f32, z: f32) -> f32 {
+    fn column_index(x: f32, z: f32) -> Option<usize> {
         let column_x = (x / VOXEL_SIZE + WORLD_SIZE_X as f32 / 2.0) as i32;
         let column_z = (z / VOXEL_SIZE + WORLD_SIZE_Z as f32 / 2.0) as i32;
         if column_x < 0
@@ -699,9 +708,114 @@ impl GroundHeights {
             || column_x >= WORLD_SIZE_X as i32
             || column_z >= WORLD_SIZE_Z as i32
         {
-            return PLATEAU_FLOOR_RENDER;
+            return None;
         }
-        self.heights[(column_z as usize) * WORLD_SIZE_X + column_x as usize]
+        Some((column_z as usize) * WORLD_SIZE_X + column_x as usize)
+    }
+
+    /// Water-clamped surface height at a render-space position (for placement).
+    fn ground_at(&self, x: f32, z: f32) -> f32 {
+        match Self::column_index(x, z) {
+            Some(index) => self.heights[index],
+            None => PLATEAU_FLOOR_RENDER,
+        }
+    }
+
+    /// True terrain-floor (bed) height — the walker wades on this.
+    fn bed_at(&self, x: f32, z: f32) -> f32 {
+        match Self::column_index(x, z) {
+            Some(index) => self.bed[index],
+            None => PLATEAU_FLOOR_RENDER,
+        }
+    }
+}
+
+/// Half-width of the walker's collision circle (m). Keeps a small gap off trunks.
+const PLAYER_RADIUS: f32 = 0.32;
+
+/// Which columns contain a tree trunk, so the walker can be pushed out of them
+/// (trees are still baked voxels — this just adds collision, no instancing).
+/// Leaves are passable; only `Trunk`/`TrunkBirch` block.
+#[derive(Resource)]
+struct TreeColliders {
+    trunk: Vec<bool>,
+}
+
+impl TreeColliders {
+    fn from_world(voxel_world: &VoxelWorld) -> Self {
+        let mut trunk = vec![false; WORLD_SIZE_X * WORLD_SIZE_Z];
+        for z in 0..WORLD_SIZE_Z as i32 {
+            for x in 0..WORLD_SIZE_X as i32 {
+                let is_trunk = voxel_world
+                    .column_runs(x, z)
+                    .any(|(voxel, _, _)| matches!(voxel, Voxel::Trunk | Voxel::TrunkBirch));
+                if is_trunk {
+                    trunk[(z as usize) * WORLD_SIZE_X + x as usize] = true;
+                }
+            }
+        }
+        Self { trunk }
+    }
+
+    /// Push a circle of `radius` at render-space `(x, z)` out of any trunk cell
+    /// it overlaps (circle-vs-AABB), returning the resolved `(x, z)`.
+    fn resolve(&self, x: f32, z: f32, radius: f32) -> (f32, f32) {
+        let half_x = WORLD_SIZE_X as f32 / 2.0;
+        let half_z = WORLD_SIZE_Z as f32 / 2.0;
+        // Work in voxel-space where each trunk cell is the unit square [c, c+1].
+        let mut px = x / VOXEL_SIZE + half_x;
+        let mut pz = z / VOXEL_SIZE + half_z;
+        let r = radius / VOXEL_SIZE;
+
+        let min_cx = (px - r - 1.0).floor() as i32;
+        let max_cx = (px + r + 1.0).ceil() as i32;
+        let min_cz = (pz - r - 1.0).floor() as i32;
+        let max_cz = (pz + r + 1.0).ceil() as i32;
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                if cx < 0 || cz < 0 || cx >= WORLD_SIZE_X as i32 || cz >= WORLD_SIZE_Z as i32 {
+                    continue;
+                }
+                if !self.trunk[(cz as usize) * WORLD_SIZE_X + cx as usize] {
+                    continue;
+                }
+                let cell_x = cx as f32;
+                let cell_z = cz as f32;
+                let nearest_x = px.clamp(cell_x, cell_x + 1.0);
+                let nearest_z = pz.clamp(cell_z, cell_z + 1.0);
+                let dx = px - nearest_x;
+                let dz = pz - nearest_z;
+                let dist_squared = dx * dx + dz * dz;
+                if dist_squared >= r * r {
+                    continue;
+                }
+                if dist_squared > 1e-6 {
+                    // Outside the cell but within the circle: push along the
+                    // normal away from the nearest edge.
+                    let dist = dist_squared.sqrt();
+                    let push = r - dist;
+                    px += dx / dist * push;
+                    pz += dz / dist * push;
+                } else {
+                    // Center inside the cell: eject along the shallowest axis.
+                    let left = px - cell_x;
+                    let right = cell_x + 1.0 - px;
+                    let back = pz - cell_z;
+                    let front = cell_z + 1.0 - pz;
+                    let min_pen = left.min(right).min(back).min(front);
+                    if min_pen == left {
+                        px = cell_x - r;
+                    } else if min_pen == right {
+                        px = cell_x + 1.0 + r;
+                    } else if min_pen == back {
+                        pz = cell_z - r;
+                    } else {
+                        pz = cell_z + 1.0 + r;
+                    }
+                }
+            }
+        }
+        ((px - half_x) * VOXEL_SIZE, (pz - half_z) * VOXEL_SIZE)
     }
 }
 
@@ -803,6 +917,10 @@ struct FirstPersonState {
     yaw: f32,
     /// Positive looks up, radians.
     pitch: f32,
+    /// Vertical speed (m/s) for gravity + jumping; 0 while grounded.
+    vertical_velocity: f32,
+    /// True when the walker is resting on the ground (can jump).
+    grounded: bool,
 }
 
 impl Default for FirstPersonState {
@@ -832,6 +950,8 @@ impl Default for FirstPersonState {
             position: Vec3::new(start_x, 13.0, start_z),
             yaw,
             pitch,
+            vertical_velocity: 0.0,
+            grounded: false,
         }
     }
 }
@@ -871,6 +991,7 @@ fn camera_system(
     mut orbit_state: ResMut<OrbitCameraState>,
     mut walk_state: ResMut<FirstPersonState>,
     ground_heights: Option<Res<GroundHeights>>,
+    tree_colliders: Option<Res<TreeColliders>>,
     mut camera_query: Query<
         (
             &mut Transform,
@@ -931,6 +1052,7 @@ fn camera_system(
             first_person_update(
                 &mut walk_state,
                 ground_heights.as_deref(),
+                tree_colliders.as_deref(),
                 &mouse_buttons,
                 &keyboard,
                 &mouse_motion,
@@ -1020,10 +1142,17 @@ fn orbit_update(
     camera_state.focus += pan;
 }
 
+/// Gravity for the first-person walker (m/s²) — a touch snappier than real
+/// gravity for a game feel.
+const GRAVITY: f32 = 22.0;
+/// Jump launch speed (m/s): ≈ `sqrt(2·GRAVITY·height)`, ~1.3 m apex.
+const JUMP_SPEED: f32 = 7.5;
+
 #[allow(clippy::too_many_arguments)]
 fn first_person_update(
     walk_state: &mut FirstPersonState,
     ground_heights: Option<&GroundHeights>,
+    tree_colliders: Option<&TreeColliders>,
     mouse_buttons: &ButtonInput<MouseButton>,
     keyboard: &ButtonInput<KeyCode>,
     mouse_motion: &AccumulatedMouseMotion,
@@ -1065,12 +1194,39 @@ fn first_person_update(
     };
     walk_state.position += walk_direction.normalize_or_zero() * walk_speed * time.delta_secs();
 
-    // Follow the terrain, smoothed so voxel steps don't jolt the camera.
+    // Push out of tree trunks (XZ only — leaves stay passable).
+    if let Some(colliders) = tree_colliders {
+        let (resolved_x, resolved_z) =
+            colliders.resolve(walk_state.position.x, walk_state.position.z, PLAYER_RADIUS);
+        walk_state.position.x = resolved_x;
+        walk_state.position.z = resolved_z;
+    }
+
+    // Vertical motion: gravity + jump, with the terrain surface as the floor.
+    // `ground_at` is the surface height; the eye sits `eye_height` above it.
     if let Some(heights) = ground_heights {
-        let target_eye =
-            heights.ground_at(walk_state.position.x, walk_state.position.z) + eye_height;
-        let blend = (time.delta_secs() * 10.0).min(1.0);
-        walk_state.position.y += (target_eye - walk_state.position.y) * blend;
+        let dt = time.delta_secs();
+        // Wade on the bed, not the water surface — the camera sinks into water
+        // as it deepens instead of standing on top.
+        let floor_eye = heights.bed_at(walk_state.position.x, walk_state.position.z) + eye_height;
+
+        // Jump only from the ground.
+        if walk_state.grounded && keyboard.just_pressed(KeyCode::Space) {
+            walk_state.vertical_velocity = JUMP_SPEED;
+            walk_state.grounded = false;
+        }
+
+        walk_state.vertical_velocity -= GRAVITY * dt;
+        walk_state.position.y += walk_state.vertical_velocity * dt;
+
+        // Land on (or step up to) the floor.
+        if walk_state.position.y <= floor_eye {
+            walk_state.position.y = floor_eye;
+            walk_state.vertical_velocity = 0.0;
+            walk_state.grounded = true;
+        } else {
+            walk_state.grounded = false;
+        }
     }
 }
 

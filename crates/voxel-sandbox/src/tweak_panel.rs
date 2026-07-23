@@ -98,6 +98,7 @@ pub fn perf_overlay(
             &mut Msaa,
             Option<&mut bevy::post_process::dof::DepthOfField>,
             Option<&bevy::post_process::bloom::Bloom>,
+            Option<&bevy::pbr::ScreenSpaceAmbientOcclusion>,
         ),
         With<bevy::core_pipeline::prepass::DepthPrepass>,
     >,
@@ -165,7 +166,7 @@ pub fn perf_overlay(
 
             // GPU levers: flip a feature, watch the frame time move — the
             // difference is that feature's cost on THIS machine.
-            if let Ok((camera_entity, mut msaa, mut depth_of_field, bloom)) =
+            if let Ok((camera_entity, mut msaa, mut depth_of_field, bloom, ssao)) =
                 main_camera.single_mut()
             {
                 ui.separator();
@@ -183,6 +184,30 @@ pub fn perf_overlay(
                         }
                     }
                 });
+
+                // SSAO vs MSAA are mutually exclusive in Bevy (SSAO needs
+                // Msaa::Off + a normal prepass). This toggle swaps the whole
+                // mode so the two can be A/B'd: SSAO on → MSAA off; off → 2×.
+                let mut ssao_enabled = ssao.is_some();
+                if ui
+                    .checkbox(&mut ssao_enabled, "SSAO (turns MSAA off)")
+                    .changed()
+                {
+                    if ssao_enabled {
+                        // #[require] auto-adds the DepthPrepass (already here)
+                        // and NormalPrepass GTAO needs.
+                        commands
+                            .entity(camera_entity)
+                            .insert(bevy::pbr::ScreenSpaceAmbientOcclusion::default());
+                        *msaa = Msaa::Off;
+                    } else {
+                        commands
+                            .entity(camera_entity)
+                            .remove::<bevy::pbr::ScreenSpaceAmbientOcclusion>()
+                            .remove::<bevy::core_pipeline::prepass::NormalPrepass>();
+                        *msaa = Msaa::Sample2;
+                    }
+                }
 
                 ui.checkbox(&mut reflection.enabled, "water reflections");
                 if reflection.enabled {

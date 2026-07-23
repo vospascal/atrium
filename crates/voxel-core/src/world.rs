@@ -21,8 +21,10 @@ pub const WORLD_SIZE_Z: usize = 1000;
 pub const WATER_LEVEL: i32 = 84;
 
 /// The island's flat rim underside starts here; toward the center the
-/// sculpted underside tapers well below (floating-island bottom).
-pub const PLATEAU_FLOOR: i32 = 72;
+/// sculpted underside tapers well below (floating-island bottom). Lowered so
+/// lake basins can carve a proper ~3 m deep pool with rock beneath (the clamp
+/// min is `PLATEAU_FLOOR + 2`).
+pub const PLATEAU_FLOOR: i32 = 58;
 
 /// The underside reaches at most this far below the rim lip (meters),
 /// deepest toward the island's center.
@@ -1742,9 +1744,10 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
             );
             let lake_amount = smoothstep(0.66, 0.80, lake_noise);
             if lake_amount > 0.0 {
-                // Proper depth toward the middle (~1.3 m at full mask) —
-                // the shoreline shelf keeps the edges wadeable regardless.
-                let lake_bed = (WATER_LEVEL - 3) as f32 - lake_amount * 7.0;
+                // Proper depth toward the middle (~3 m at full mask, deep
+                // enough to swim/submerge) — the shoreline shelf keeps the
+                // edges wadeable regardless.
+                let lake_bed = (WATER_LEVEL - 3) as f32 - lake_amount * 20.0;
                 height += (lake_bed - height) * lake_amount;
             }
 
