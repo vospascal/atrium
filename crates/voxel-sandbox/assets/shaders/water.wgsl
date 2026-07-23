@@ -120,17 +120,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let facing = max(dot(view_direction, normal), 0.0);
     let fresnel = 0.03 + 0.97 * pow(1.0 - facing, 5.0);
 
-    // Beer–Lambert absorption. Real pond water has almost NO color of its
-    // own (reference check): what you see is the dimmed bed plus the
-    // reflection. The body term only darkens with depth — near-black with
-    // the faintest green, never teal.
-    let attenuation = vec3<f32>(1.8, 0.9, 0.65);
+    // Depth via Beer–Lambert absorption, kept SUBTLE — the water isn't really
+    // "tinted": shallows read clear (the bed shows through) and deep water only
+    // darkens with a faint cool cast. Depth reads as clarity + darkening, and
+    // the surface colour is carried mostly by the fresnel reflection.
+    let attenuation = vec3<f32>(1.4, 0.7, 0.5);
     let transmit = exp(-attenuation * thickness);
     let daylight = water.zenith.w;
     let moonlight = water.horizon.w;
     let light_level = max(daylight, moonlight * 0.25);
-    let shallow_tint = vec3<f32>(0.035, 0.075, 0.065) * light_level;
-    let deep_color = vec3<f32>(0.004, 0.011, 0.010) * light_level;
+    let shallow_tint = vec3<f32>(0.03, 0.06, 0.07) * light_level; // near-clear
+    let deep_color = vec3<f32>(0.006, 0.018, 0.04) * light_level; // faint cool depth
     let body = mix(deep_color, shallow_tint, transmit);
 
     // REAL planar reflections: a mirrored camera has already rendered the
@@ -174,11 +174,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Waterline melts into the shore instead of a hard voxel seam.
     alpha *= smoothstep(0.0, 0.05, thickness);
 
-    // Foam: a noisy band hugging the shore (and anything poking through).
-    let shore = 1.0 - smoothstep(0.02, 0.32, thickness);
-    let foam_noise = value_noise_2d(in.world_position.xz * 9.0 + vec2<f32>(t * 0.7, -t * 0.5));
-    let foam = shore * smoothstep(0.42, 0.72, foam_noise + shore * 0.30);
-
     // Glints: a soft specular lobe plus pin-prick sparkles for the bloom.
     let half_direction = normalize(view_direction + water.light_direction.xyz);
     let spec_base = max(dot(normal, half_direction), 0.0);
@@ -188,8 +183,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var color = mix(body, reflected_scene, fresnel);
     color += water.light_color.rgb * (specular + sparkle);
-    color = mix(color, vec3<f32>(0.92, 0.96, 0.97) * max(light_level, 0.06), foam);
-    alpha = max(alpha, foam * 0.85);
     alpha = clamp(alpha + fresnel * 0.18, 0.0, 1.0);
 
     return vec4<f32>(color, alpha);
