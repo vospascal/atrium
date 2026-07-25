@@ -8,4 +8,5 @@
 
 pub mod noise;
 pub mod terrain_import;
+pub mod water_sim;
 pub mod world;

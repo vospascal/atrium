@@ -44,6 +44,8 @@ pub struct FogSeaUniform {
     /// x = radius where fog starts, y = radius of full fog,
     /// z = mean top height, w = bottom of the marched slab.
     pub band: Vec4,
+    /// x = raymarch step count (live quality lever). Rest reserved.
+    pub quality: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -83,6 +85,7 @@ pub fn spawn_fog_ring(
                     FOG_TOP_METERS,
                     FOG_BOTTOM_METERS,
                 ),
+                quality: Vec4::new(12.0, 0.0, 0.0, 0.0),
             },
         })),
         Transform::default(),
@@ -143,6 +146,7 @@ fn build_proxy_dome() -> Mesh {
 pub fn update_fog_ring(
     celestial: Res<CelestialState>,
     weather: Res<WeatherState>,
+    quality: Res<crate::RenderQuality>,
     mut materials: ResMut<Assets<FogSeaMaterial>>,
     mut dome_query: Query<(&mut Transform, &MeshMaterial3d<FogSeaMaterial>), With<FogSea>>,
     camera_query: Query<
@@ -172,4 +176,5 @@ pub fn update_fog_ring(
     material.fog.drift.x = scroll.x;
     material.fog.drift.y = scroll.y;
     material.fog.drift.w = celestial.daylight;
+    material.fog.quality.x = quality.fog_steps as f32;
 }

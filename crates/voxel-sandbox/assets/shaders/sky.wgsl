@@ -20,6 +20,8 @@ struct SkyUniform {
     zenith_color: vec4<f32>,
     horizon_color: vec4<f32>,
     scroll: vec4<f32>,
+    // x = cloud march step count (live quality lever). Rest reserved.
+    quality: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> sky: SkyUniform;
@@ -146,12 +148,10 @@ fn march_clouds(origin: vec3<f32>, direction: vec3<f32>) -> CloudResult {
     let ambient = mix(sky.horizon_color.rgb, sky.zenith_color.rgb, 0.5)
         * (0.55 + 0.45 * daylight);
 
-    // Perf: 14 → 10 steps, and this march runs per pixel for both the main
-    // and reflection views. Optical depth is conserved (sigma scales with the
-    // now-longer step_length), so cloud opacity is unchanged; a dithered start
-    // (like the fog sea) turns the coarser sampling into spatial churn rather
-    // than banding.
-    let step_count = 10;
+    // Live quality lever (P-overlay). Optical depth is conserved (sigma scales
+    // with step_length) so cloud opacity is unchanged; a dithered start (like
+    // the fog sea) turns coarser sampling into spatial churn rather than banding.
+    let step_count = max(i32(sky.quality.x), 1);
     let step_length = (t_exit - t_enter) / f32(step_count);
     let extinction = 0.028;
 

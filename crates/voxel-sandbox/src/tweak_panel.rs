@@ -48,6 +48,57 @@ impl Default for ViewTweaks {
     }
 }
 
+/// Live-tunable underwater look, using a physically-based **atmospheric**
+/// (per-channel Beer–Lambert) model — the way real underwater rendering works:
+/// each colour channel is absorbed at its own rate over distance (red dies
+/// fastest), and the water's own colour scatters in as things get further away.
+/// That per-channel absorption is what a single-colour fog could never do, and
+/// why the old version never looked right no matter the slider.
+#[derive(Resource)]
+pub struct UnderwaterTint {
+    /// Whole-screen water tint the ENTIRE view is multiplied toward while
+    /// submerged (KUDA's `color * waterColor`) — this is what stops near objects
+    /// looking "too clear". Strength is how far toward it the view is pushed.
+    pub screen_color: [f32; 3],
+    pub screen_strength: f32,
+    /// How far you can see underwater (world metres, ~5% contrast). Lower =
+    /// murkier — the depth gradient on top of the screen tint.
+    pub visibility: f32,
+    /// Colour that *survives* absorption per channel — high channels reach far,
+    /// low channels are absorbed fast. Red low → warm tones vanish first.
+    pub extinction_color: [f32; 3],
+    /// The water's own colour that scatters into view, filling in with distance
+    /// (what the scene fades toward far away).
+    pub inscattering_color: [f32; 3],
+    /// Ambient brightness while submerged. Real fix for "black silhouettes":
+    /// backlit underwater geometry only gets ambient, which is low by day, so it
+    /// crushes to near-black against the bright surface. Lifting + water-tinting
+    /// the ambient underwater makes solids read as submerged, not cut-outs.
+    pub ambient_brightness: f32,
+}
+
+impl Default for UnderwaterTint {
+    fn default() -> Self {
+        // Physically honest clear water: near geometry stays ~natural (only a
+        // faint cool ambient cast), and the blue-green builds with DISTANCE via
+        // per-channel absorption + short visibility (you just can't see far
+        // underwater — that's what fixes "too clear", not a flat filter). Push
+        // `screen_strength` up for murky/silty water where particles tint even
+        // close up. Tune by diving with the panel open.
+        // Hand-tuned by the user against a Minecraft-shader reference (egui-linear
+        // form of picker readouts: screen 85,110,125 · extinction 81,125,165 ·
+        // in-scatter 81,120,140).
+        Self {
+            screen_color: [0.0908, 0.1559, 0.2051],
+            screen_strength: 0.15,
+            visibility: 8.5,
+            extinction_color: [0.0823, 0.2051, 0.3763],
+            inscattering_color: [0.0823, 0.1878, 0.2623],
+            ambient_brightness: 4000.0,
+        }
+    }
+}
+
 /// Live performance readout, toggled with `P` (or `VOXEL_PERF=1`).
 #[derive(Resource, Default)]
 pub struct PerfOverlay {
@@ -106,6 +157,8 @@ pub fn perf_overlay(
     mut grass: Query<&mut Visibility, With<crate::grass::GrassClump>>,
     mut grass_hidden: Local<bool>,
     mut sun: Query<&mut DirectionalLight, With<crate::day_night::SunLight>>,
+    mut quality: ResMut<crate::RenderQuality>,
+    mut shadow_map: ResMut<bevy::light::DirectionalLightShadowMap>,
 ) {
     if !perf.visible {
         return;
@@ -171,6 +224,19 @@ pub fn perf_overlay(
             {
                 ui.separator();
                 ui.label("GPU levers (live)");
+
+                // Quality levers: dial the fill-bound raymarches down and watch
+                // the ms drop — dither hides the coarser sampling.
+                ui.add(
+                    egui::Slider::new(&mut quality.fog_steps, 2..=24).text("fog steps"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut quality.cloud_steps, 2..=16).text("cloud steps"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut quality.reflection_interval, 1..=6)
+                        .text("reflect: every N frames"),
+                );
 
                 ui.horizontal(|ui| {
                     ui.label("MSAA");
@@ -297,6 +363,19 @@ pub fn perf_overlay(
                 if let Ok(mut sun_light) = sun.single_mut() {
                     ui.checkbox(&mut sun_light.shadows_enabled, "sun shadows");
                 }
+                // Shadow-map resolution: the cascade textures cost fill for every
+                // caster in every view — dropping the size is a cheap win.
+                ui.horizontal(|ui| {
+                    ui.label("shadow res");
+                    for size in [1024usize, 2048, 4096] {
+                        if ui
+                            .selectable_label(shadow_map.size == size, format!("{size}"))
+                            .clicked()
+                        {
+                            shadow_map.size = size;
+                        }
+                    }
+                });
             }
             ui.small("P hides this overlay");
         });
@@ -311,6 +390,8 @@ pub fn view_tweak_panel(
     mut cycle: ResMut<DayNightCycle>,
     mut weather: ResMut<WeatherState>,
     mut fireflies: ResMut<FireflySettings>,
+    mut underwater: ResMut<UnderwaterTint>,
+    mut surface: ResMut<crate::water::SurfaceTuning>,
     mut season: ResMut<crate::Season>,
     mut regenerate: ResMut<crate::RegenerateRequest>,
     view_mode: Res<ViewMode>,
@@ -398,6 +479,55 @@ pub fn view_tweak_panel(
                     *grading = ColorGrading::default();
                 }
             }
+            ui.separator();
+            ui.label("Underwater (live)");
+            ui.horizontal(|ui| {
+                ui.label("screen tint");
+                ui.color_edit_button_rgb(&mut underwater.screen_color);
+            });
+            ui.add(
+                egui::Slider::new(&mut underwater.screen_strength, 0.0..=0.95)
+                    .text("tint strength"),
+            );
+            ui.add(
+                egui::Slider::new(&mut underwater.visibility, 2.0..=40.0)
+                    .logarithmic(true)
+                    .text("visibility m"),
+            );
+            ui.horizontal(|ui| {
+                ui.label("survives (extinction)");
+                ui.color_edit_button_rgb(&mut underwater.extinction_color);
+            });
+            ui.horizontal(|ui| {
+                ui.label("water color (in-scatter)");
+                ui.color_edit_button_rgb(&mut underwater.inscattering_color);
+            });
+            ui.add(
+                egui::Slider::new(&mut underwater.ambient_brightness, 0.0..=8000.0)
+                    .text("submerged ambient (lift)"),
+            );
+            if ui.button("reset underwater").clicked() {
+                *underwater = UnderwaterTint::default();
+            }
+            ui.small("dive (Space, in water) to preview · tint = whole-screen, fog = distance");
+            ui.separator();
+            ui.label("Water surface (live · from above)");
+            ui.horizontal(|ui| {
+                ui.label("water tint");
+                ui.color_edit_button_rgb(&mut surface.tint);
+            });
+            ui.add(
+                egui::Slider::new(&mut surface.reflectivity, 0.0..=2.0).text("reflectivity"),
+            );
+            ui.add(egui::Slider::new(&mut surface.depth, 0.2..=4.0).text("depth darkening"));
+            ui.add(
+                egui::Slider::new(&mut surface.underside_opacity, 0.0..=1.0)
+                    .text("underside opacity (from below)"),
+            );
+            if ui.button("reset surface").clicked() {
+                *surface = crate::water::SurfaceTuning::default();
+            }
+            ui.small("tint = water's own colour · reflectivity = sky/mirror amount");
             ui.separator();
             ui.small("Tab switches view · smaller f-stops = blurrier");
         });

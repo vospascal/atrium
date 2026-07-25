@@ -12,7 +12,10 @@
 //!         `V` tuning panels (view + time & weather)
 //!         `P` performance overlay (or start with `VOXEL_PERF=1`)
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
-//! Walk:   left-drag look around · WASD walk · Shift run
+//! Walk:   left-drag look around · WASD walk · Shift run · Space jump
+//!         (on land) / dive (in water; release to float up)
+//! Water:  hold `G` to pour water where you look · `H` to scoop it away
+//!         (the fluid sim flows/pools/spills what you add)
 //!
 //! `VOXEL_TIME=0.0..1.0` sets the starting time of day (0 = midnight,
 //! 0.25 = sunrise, 0.5 = noon, 0.75 = sunset); `VOXEL_MOON=0.0..1.0` the
@@ -24,12 +27,14 @@
 //!
 //! Set `VOXEL_SCREENSHOT_PATH=/some/dir/shot.png` to capture one frame and
 //! exit (automated visual verification); add `VOXEL_START_FIRST_PERSON=1`
-//! to capture from the walking view.
+//! to capture from the walking view. `VOXEL_FORCE_UNDERWATER=1` forces the
+//! submerged look (tint + fog) from any camera, to preview/tune it.
 
 mod campfire;
 mod day_night;
 mod fireflies;
 mod flame;
+mod fluid;
 mod fog_ring;
 mod grass;
 mod mesh;
@@ -38,7 +43,6 @@ mod tweak_panel;
 mod vox_import;
 mod voxel_material;
 mod water;
-mod waterfall;
 mod weather;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
@@ -132,6 +136,10 @@ fn main() {
         .init_resource::<water::ReflectionTarget>()
         .init_resource::<water::ReflectionSettings>()
         .init_resource::<ViewTweaks>()
+        .init_resource::<tweak_panel::UnderwaterTint>()
+        .init_resource::<water::SurfaceTuning>()
+        .init_resource::<Submerged>()
+        .init_resource::<RenderQuality>()
         .insert_resource(tweak_panel::PerfOverlay {
             visible: std::env::var("VOXEL_PERF").is_ok(),
         })
@@ -144,7 +152,6 @@ fn main() {
         .add_plugins(MaterialPlugin::<weather::PrecipitationMaterial>::default())
         .add_plugins(MaterialPlugin::<fog_ring::FogSeaMaterial>::default())
         .add_plugins(MaterialPlugin::<water::WaterMaterial>::default())
-        .add_plugins(MaterialPlugin::<waterfall::WaterfallMaterial>::default())
         .add_plugins(MaterialPlugin::<fireflies::FireflyMaterial>::default())
         .add_plugins(MaterialPlugin::<campfire::FireMaterial>::default())
         // With two cameras (main + water reflection), bevy_egui must not
@@ -172,6 +179,7 @@ fn main() {
                 water::spawn_reflection_camera,
                 fireflies::setup_fireflies,
                 campfire::setup_campfires,
+                spawn_underwater_overlay,
             ),
         )
         .add_systems(
@@ -181,12 +189,13 @@ fn main() {
                 camera_system,
                 weather::ease_weather,
                 day_night::advance_day_night,
+                // After day_night sets the sky-driven fog, so it wins when submerged.
+                underwater_fog,
                 sky::update_sky,
                 fog_ring::update_fog_ring,
                 weather::update_precipitation,
                 water::update_reflection_camera,
                 water::update_water,
-                waterfall::update_waterfalls,
                 fireflies::firefly_controls,
                 fireflies::spawn_env_fireflies,
                 fireflies::update_fireflies,
@@ -194,8 +203,15 @@ fn main() {
                 campfire::spawn_env_campfires,
                 regenerate_system,
                 flame::flicker_flame_lights,
-                grass::update_grass_wind_time,
-                screenshot_system,
+                // Nested to stay under Bevy's 20-system tuple limit; order
+                // among these three is irrelevant.
+                (
+                    grass::update_grass_wind_time,
+                    fluid::water_interaction,
+                    fluid::step_fluid_water,
+                    fluid::update_water_heights,
+                    screenshot_system,
+                ),
             )
                 .chain(),
         )
@@ -256,8 +272,11 @@ fn setup_scene(mut commands: Commands, camera_state: Res<OrbitCameraState>) {
         // SSAO (mutually exclusive with MSAA) is opt-in via the P-overlay toggle.
         Msaa::Sample2,
         bevy::render::view::Hdr,
-        // The UI belongs to this camera (see EguiGlobalSettings above).
+        // The UI belongs to this camera (see EguiGlobalSettings above). With two
+        // cameras (main + reflection), bevy_ui also needs to be told which one
+        // renders UI nodes (e.g. the underwater tint overlay).
         bevy_egui::PrimaryEguiContext,
+        bevy::ui::IsDefaultUiCamera,
         // The volumetric fog sea reads scene depth to march up to terrain.
         bevy::core_pipeline::prepass::DepthPrepass,
         // Long lens + far camera: compressed perspective like tilt-shift
@@ -327,7 +346,6 @@ fn initial_world_system(
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
-    mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
     reflection_target: Res<water::ReflectionTarget>,
     seed: Res<WorldSeed>,
     season: Res<Season>,
@@ -342,7 +360,6 @@ fn initial_world_system(
         &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
-        &mut waterfall_materials,
         &reflection_target,
         &source,
         seed.0,
@@ -360,7 +377,6 @@ fn spawn_world(
     storage_buffers: &mut Assets<ShaderStorageBuffer>,
     flame_materials: &mut Assets<FlameMaterial>,
     water_materials: &mut Assets<water::WaterMaterial>,
-    waterfall_materials: &mut Assets<waterfall::WaterfallMaterial>,
     reflection_target: &water::ReflectionTarget,
     source: &WorldSource,
     seed: u32,
@@ -415,6 +431,17 @@ fn spawn_world(
     let ground_heights = GroundHeights::from_world(&voxel_world);
     // Trunk colliders for first-person tree collision.
     commands.insert_resource(TreeColliders::from_world(&voxel_world));
+    // Live water simulation (F2), bounded to the wet region. When present it
+    // drives a dynamic surface mesh that *replaces* the static chunk water
+    // (spawned below), so the water flows and settles. Built here but inserted
+    // as a resource after the mesh spawn, so the wet region is known while
+    // deciding whether to emit the static water.
+    let fluid_water = fluid::FluidWater::from_world(&voxel_world);
+    let has_fluid = fluid_water.is_some();
+    if !has_fluid {
+        commands.remove_resource::<fluid::FluidWater>();
+        commands.remove_resource::<fluid::WaterHeightBuffer>();
+    }
     // The reflection system scales mirror quality by camera-to-water
     // distance; give it a coarse copy of the water-distance field.
     commands.insert_resource(water::WaterProximity::from_world(&voxel_world));
@@ -458,11 +485,9 @@ fn spawn_world(
         );
     }
 
-    // Waterfalls wherever the river spills over the rim.
-    let river_exits = voxel_world.river_rim_exits();
-    let waterfall_count =
-        waterfall::spawn_waterfalls(commands, meshes, waterfall_materials, &river_exits);
-    info!("{waterfall_count} waterfall(s) at the rim");
+    // Waterfalls are no longer faked ribbons — they emerge from the fluid sim
+    // (rim lips spill, curtains hang where water actually pours over; see
+    // `fluid::build_surface_mesh`).
 
     // Terrain uses the voxel jitter material (StandardMaterial PBR + the
     // per-fragment brightness speckle). Props keep a plain StandardMaterial —
@@ -561,11 +586,6 @@ fn spawn_world(
     }
 
     commands.insert_resource(ground_heights);
-    let water_material = water_materials.add(water::WaterMaterial {
-        water: water::WaterUniform::default(),
-        reflection: reflection_target.image.clone(),
-        reflection_clip_from_world: Mat4::IDENTITY,
-    });
 
     // One entity per chunk bucket, so bevy's per-entity frustum culling
     // trims every pass (main, reflection, shadow cascades) to what each
@@ -626,14 +646,43 @@ fn spawn_world(
                 WorldMesh,
             ));
         }
-        if let Some(chunk_mesh) = chunk.water {
-            commands.spawn((
-                Mesh3d(meshes.add(chunk_mesh)),
-                MeshMaterial3d(water_material.clone()),
-                NotShadowCaster,
-                WorldMesh,
-            ));
-        }
+        // The static per-chunk water mesh (`chunk.water`) is intentionally not
+        // spawned: any world with water has a fluid sim, whose dynamic surface
+        // (below) covers the same region. It exists only when there's no water,
+        // in which case `chunk.water` is `None` anyway.
+        let _ = &chunk.water;
+    }
+
+    // Dynamic water surface: a STATIC grid mesh built once, displaced every sim
+    // tick by the GPU from the `heights` storage buffer (F4). The sim only
+    // re-uploads that small buffer — the mesh itself never changes.
+    if let Some(fluid_water) = fluid_water {
+        let surface_mesh = meshes.add(fluid::build_static_surface_mesh(&fluid_water));
+        let heights = storage_buffers.add(ShaderStorageBuffer::from(
+            fluid::corner_heights(&fluid_water).as_slice(),
+        ));
+        info!(
+            "fluid sim: {}×{} cells, static surface {} verts, heights buffer {} floats",
+            fluid_water.sim.size_x,
+            fluid_water.sim.size_z,
+            meshes.get(&surface_mesh).map_or(0, Mesh::count_vertices),
+            (fluid_water.sim.size_x + 1) * (fluid_water.sim.size_z + 1),
+        );
+        let water_material = water_materials.add(water::WaterMaterial {
+            water: water::WaterUniform::default(),
+            reflection: reflection_target.image.clone(),
+            reflection_clip_from_world: Mat4::IDENTITY,
+            heights: heights.clone(),
+        });
+        commands.spawn((
+            Mesh3d(surface_mesh),
+            MeshMaterial3d(water_material),
+            NotShadowCaster,
+            fluid::DynamicWaterSurface,
+            WorldMesh,
+        ));
+        commands.insert_resource(fluid::WaterHeightBuffer(heights));
+        commands.insert_resource(fluid_water);
     }
 
     // Grass is instanced (auto-instancing over a small variant palette), not
@@ -835,7 +884,6 @@ fn regenerate_system(
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
-    mut waterfall_materials: ResMut<Assets<waterfall::WaterfallMaterial>>,
     reflection_target: Res<water::ReflectionTarget>,
     mut seed: ResMut<WorldSeed>,
     season: Res<Season>,
@@ -868,7 +916,6 @@ fn regenerate_system(
         &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
-        &mut waterfall_materials,
         &reflection_target,
         &source,
         seed.0,
@@ -1142,11 +1189,151 @@ fn orbit_update(
     camera_state.focus += pan;
 }
 
+/// When the first-person camera drops below the water surface, drown the view
+/// in a murky blue-green with short visibility. Runs LAST in the frame (after
+/// `day_night` sets the sky-driven fog) so it gets the final say on the fog,
+/// and reverts automatically the moment the eye surfaces.
+/// Whether the eye is currently underwater. Set by `underwater_fog`, read by
+/// the sky (to drop clouds) and anything else that should change when submerged.
+#[derive(Resource, Default)]
+pub struct Submerged(pub bool);
+
+/// Live render-quality / optimization levers, each toggleable from the P-overlay
+/// so their cost can be A/B'd. Defaults reproduce the current look.
+#[derive(Resource)]
+pub struct RenderQuality {
+    /// Fog-sea raymarch steps (fill-bound hog). Fewer = cheaper, dither hides it.
+    pub fog_steps: u32,
+    /// Sky cloud march steps (runs for main + reflection views).
+    pub cloud_steps: u32,
+    /// Re-render the planar reflection only every Nth frame (1 = every frame).
+    /// The reflection is the single biggest GPU cost; the wave wobble hides
+    /// staleness, so higher = much cheaper.
+    pub reflection_interval: u32,
+}
+
+impl Default for RenderQuality {
+    fn default() -> Self {
+        Self {
+            fog_steps: 12,
+            cloud_steps: 10,
+            reflection_interval: 2,
+        }
+    }
+}
+
+/// Full-screen tint quad shown while the eye is underwater — copies KUDA's
+/// whole-view `color * waterColor` so *near* geometry is tinted too (distance
+/// fog alone left it "too clear"). Spawned once, transparent; `underwater_fog`
+/// drives its color/alpha.
+#[derive(Component)]
+struct UnderwaterOverlay;
+
+fn spawn_underwater_overlay(mut commands: Commands) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        // Above the 3D scene, below the egui panels (their own pass) so tuning
+        // stays readable; ignore pointer so it never eats camera drags.
+        GlobalZIndex(5),
+        bevy::picking::Pickable::IGNORE,
+        UnderwaterOverlay,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn underwater_fog(
+    view_mode: Res<ViewMode>,
+    walk_state: Res<FirstPersonState>,
+    tint: Res<tweak_panel::UnderwaterTint>,
+    mut fog_query: Query<&mut DistanceFog, With<Camera3d>>,
+    mut overlay: Query<&mut BackgroundColor, With<UnderwaterOverlay>>,
+    mut ambient: ResMut<bevy::light::GlobalAmbientLight>,
+    mut fog_sea: Query<&mut Visibility, With<fog_ring::FogSea>>,
+    mut submerged_state: ResMut<Submerged>,
+) {
+    // `VOXEL_FORCE_UNDERWATER=1` previews the submerged look from any camera
+    // (you otherwise have to hold a dive, which a screenshot can't).
+    let submerged = (*view_mode == ViewMode::FirstPerson
+        && walk_state.position.y < water::water_surface_y())
+        || std::env::var("VOXEL_FORCE_UNDERWATER").is_ok();
+    submerged_state.0 = submerged;
+
+    // Whole-screen tint (KUDA `color * waterColor`): the dominant "you're
+    // underwater" cue, and what fixes near geometry looking too clear.
+    // The fog-sea dome is a custom-shader mesh (ignores lighting); from below it
+    // reads as dark shards against the surface. Hide it while submerged — you're
+    // under the fog, not looking across it.
+    if let Ok(mut fog_visibility) = fog_sea.single_mut() {
+        *fog_visibility = if submerged {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+    }
+
+    if let Ok(mut background) = overlay.single_mut() {
+        background.0 = if submerged {
+            Color::srgba(
+                tint.screen_color[0],
+                tint.screen_color[1],
+                tint.screen_color[2],
+                tint.screen_strength,
+            )
+        } else {
+            Color::NONE
+        };
+    }
+
+    if !submerged {
+        return;
+    }
+    // Optional ambient lift/tint for submerged solids (0 = leave day_night's
+    // value; the near bed already reads fine, so this is opt-in via the panel).
+    // `day_night` resets ambient every frame, so it only holds while submerged.
+    if tint.ambient_brightness > 0.0 {
+        ambient.brightness = tint.ambient_brightness;
+        ambient.color = Color::srgb(
+            tint.inscattering_color[0],
+            tint.inscattering_color[1],
+            tint.inscattering_color[2],
+        );
+    }
+
+    let Ok(mut fog) = fog_query.single_mut() else {
+        return;
+    };
+    // Per-channel Beer–Lambert depth gradient on top of the screen tint: red
+    // extinguishes fastest so distance drifts green→blue, fading to the water's
+    // in-scatter colour. Colours + visibility are live in the V-panel.
+    let color = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
+    fog.falloff = FogFalloff::from_visibility_colors(
+        tint.visibility,
+        color(tint.extinction_color),
+        color(tint.inscattering_color),
+    );
+}
+
 /// Gravity for the first-person walker (m/s²) — a touch snappier than real
 /// gravity for a game feel.
 const GRAVITY: f32 = 22.0;
 /// Jump launch speed (m/s): ≈ `sqrt(2·GRAVITY·height)`, ~1.3 m apex.
 const JUMP_SPEED: f32 = 7.5;
+/// Eye rest height relative to the water surface while swimming (m): slightly
+/// above, so you bob head-out by default and dive under by holding Space.
+const SWIM_EYE_OFFSET: f32 = 0.1;
+/// Buoyancy spring stiffness pulling the swimmer toward the float line.
+const BUOYANCY_SPRING: f32 = 6.0;
+/// Dive acceleration from holding Space while swimming (m/s²); buoyancy floats
+/// you back to the surface on release.
+const SWIM_ACCEL: f32 = 20.0;
+/// Water drag damping the swimmer's vertical velocity (per second).
+const WATER_DRAG: f32 = 4.0;
 
 #[allow(clippy::too_many_arguments)]
 fn first_person_update(
@@ -1202,30 +1389,57 @@ fn first_person_update(
         walk_state.position.z = resolved_z;
     }
 
-    // Vertical motion: gravity + jump, with the terrain surface as the floor.
-    // `ground_at` is the surface height; the eye sits `eye_height` above it.
+    // Vertical motion: on land it's gravity + jump with the terrain as the
+    // floor; in deep water it switches to buoyant swimming (Space up/Ctrl down).
     if let Some(heights) = ground_heights {
         let dt = time.delta_secs();
+        let water_surface = water::water_surface_y();
         // Wade on the bed, not the water surface — the camera sinks into water
         // as it deepens instead of standing on top.
         let floor_eye = heights.bed_at(walk_state.position.x, walk_state.position.z) + eye_height;
+        // Deep enough that standing on the bed would submerge the eye → swim.
+        let swimming = floor_eye < water_surface - 0.05;
 
-        // Jump only from the ground.
-        if walk_state.grounded && keyboard.just_pressed(KeyCode::Space) {
-            walk_state.vertical_velocity = JUMP_SPEED;
+        if swimming {
+            // Buoyancy: a damped spring floats the eye toward just above the
+            // surface. Hold Space to swim up (out of the water), Ctrl to dive;
+            // the bed still stops a dive at the bottom.
+            let float_target = water_surface + SWIM_EYE_OFFSET;
+            walk_state.vertical_velocity +=
+                (float_target - walk_state.position.y) * BUOYANCY_SPRING * dt;
+            // In water, hold Space to dive; release and buoyancy floats you
+            // back up to the surface (no separate up key needed).
+            if keyboard.pressed(KeyCode::Space) {
+                walk_state.vertical_velocity -= SWIM_ACCEL * dt;
+            }
+            walk_state.vertical_velocity *= (1.0 - WATER_DRAG * dt).max(0.0);
+            walk_state.position.y += walk_state.vertical_velocity * dt;
+            if walk_state.position.y < floor_eye {
+                walk_state.position.y = floor_eye;
+                walk_state.vertical_velocity = walk_state.vertical_velocity.max(0.0);
+            }
             walk_state.grounded = false;
-        }
-
-        walk_state.vertical_velocity -= GRAVITY * dt;
-        walk_state.position.y += walk_state.vertical_velocity * dt;
-
-        // Land on (or step up to) the floor.
-        if walk_state.position.y <= floor_eye {
-            walk_state.position.y = floor_eye;
-            walk_state.vertical_velocity = 0.0;
-            walk_state.grounded = true;
         } else {
-            walk_state.grounded = false;
+            // On land: gravity + jump, with the terrain as the floor.
+            if walk_state.grounded && keyboard.just_pressed(KeyCode::Space) {
+                walk_state.vertical_velocity = JUMP_SPEED;
+                walk_state.grounded = false;
+            }
+            walk_state.vertical_velocity -= GRAVITY * dt;
+            walk_state.position.y += walk_state.vertical_velocity * dt;
+            // Land on (or step up to) the floor.
+            if walk_state.position.y <= floor_eye {
+                walk_state.position.y = floor_eye;
+                walk_state.vertical_velocity = 0.0;
+                walk_state.grounded = true;
+            } else {
+                walk_state.grounded = false;
+            }
+        }
+        // Debug: pin the eye below the surface so screenshots can inspect the
+        // underwater / look-up (Snell's window) view regardless of buoyancy.
+        if std::env::var("VOXEL_FORCE_UNDERWATER").is_ok() {
+            walk_state.position.y = water_surface - 1.0;
         }
     }
 }

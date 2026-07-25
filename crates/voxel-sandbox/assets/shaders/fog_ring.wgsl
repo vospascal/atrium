@@ -18,10 +18,12 @@
     prepass_utils,
 }
 
+// quality: x = raymarch step count (live lever). Rest reserved.
 struct FogSeaUniform {
     color: vec4<f32>,
     drift: vec4<f32>,
     band: vec4<f32>,
+    quality: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> fog: FogSeaUniform;
@@ -94,9 +96,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    // Perf: 24 → 12 steps. The dithered start (below) turns the coarser
-    // sampling into churn rather than banding, so the soft fog looks the same.
-    let step_count = 12;
+    // Live quality lever (P-overlay): step count comes from the uniform. The
+    // dithered start (below) turns coarser sampling into churn not banding, so
+    // the soft fog looks the same at fewer steps.
+    let step_count = max(i32(fog.quality.x), 1);
     let step_length = (t_exit - t_enter) / f32(step_count);
     // Dither the start so undersampling churns instead of banding.
     let dither = hash31(vec3<f32>(in.position.xy, fract(globals.time) * 61.7));

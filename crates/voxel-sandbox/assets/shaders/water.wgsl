@@ -32,6 +32,10 @@ struct WaterUniform {
     // xy = fraction of the reflection texture in use (dynamic-resolution
     // viewport), z = live-mirror strength (0 = procedural fallback only).
     reflection: vec4<f32>,
+    // rgb = body-colour tint, w = reflectivity (V-panel surface controls).
+    surface: vec4<f32>,
+    // x = depth-darkening scale. Rest reserved.
+    surface_extra: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> water: WaterUniform;
@@ -86,6 +90,26 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let t_fragment = length(to_fragment);
     let ray = to_fragment / t_fragment;
 
+    // Underwater looking UP at the surface (camera below it, top face, ray
+    // heading up). The material is double-sided so this face renders from below.
+    // Keep it DEAD SIMPLE: a clean tinted glass — NO shimmer, NO reflections, NO
+    // bright rim (all of which read as an unwanted "white haze" looking up).
+    // Just the water tint at the chosen transparency; the sky shows through.
+    if camera.y < in.world_position.y - 0.02 && ray.y > 0.0 && in.world_normal.y > 0.5 {
+        let light_level = max(water.zenith.w, water.horizon.w * 0.25);
+        let film = water.surface.rgb * 2.0 * max(light_level, 0.12);
+        // DISTANCE DARKENING: the surface straight overhead is close, so it stays
+        // clear (see the sky through); toward the horizon each surface point is
+        // seen through far more water, so it fogs to the opaque water tint.
+        // `t_fragment` is the distance to this surface point. `surface_extra.y`
+        // (underside opacity) sets the base clarity straight up.
+        let opacity = clamp(water.surface_extra.y, 0.0, 1.0);
+        let fade = 1.0 - exp(-t_fragment * 0.15);
+        let near_alpha = 0.04 + opacity * 0.55;
+        let alpha = clamp(mix(near_alpha, 0.96, fade), 0.0, 0.97);
+        return vec4<f32>(film, alpha);
+    }
+
     // Optical depth: how much water the ray crosses before the terrain
     // behind this surface. No prepass hit (rim spill against sky) = deep.
     var thickness = 4.0;
@@ -124,14 +148,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // "tinted": shallows read clear (the bed shows through) and deep water only
     // darkens with a faint cool cast. Depth reads as clarity + darkening, and
     // the surface colour is carried mostly by the fresnel reflection.
-    let attenuation = vec3<f32>(1.4, 0.7, 0.5);
+    let attenuation = vec3<f32>(1.4, 0.7, 0.5) * water.surface_extra.x;
     let transmit = exp(-attenuation * thickness);
     let daylight = water.zenith.w;
     let moonlight = water.horizon.w;
     let light_level = max(daylight, moonlight * 0.25);
     let shallow_tint = vec3<f32>(0.03, 0.06, 0.07) * light_level; // near-clear
     let deep_color = vec3<f32>(0.006, 0.018, 0.04) * light_level; // faint cool depth
-    let body = mix(deep_color, shallow_tint, transmit);
+    // Surface tint (V-panel) shifts the water's own body colour.
+    let body = mix(deep_color, shallow_tint, transmit) * water.surface.rgb;
 
     // REAL planar reflections: a mirrored camera has already rendered the
     // above-water world this frame. Project this surface point through its
@@ -181,9 +206,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular = pow(spec_base, 240.0) * glint * 4.5;
     let sparkle = pow(spec_base, 1300.0) * glint * 7.0;
 
-    var color = mix(body, reflected_scene, fresnel);
+    // Reflectivity (V-panel) scales how much sky/mirror the surface shows.
+    let reflect_amount = clamp(fresnel * water.surface.w, 0.0, 1.0);
+    var color = mix(body, reflected_scene, reflect_amount);
     color += water.light_color.rgb * (specular + sparkle);
-    alpha = clamp(alpha + fresnel * 0.18, 0.0, 1.0);
+    alpha = clamp(alpha + reflect_amount * 0.18, 0.0, 1.0);
 
     return vec4<f32>(color, alpha);
 }

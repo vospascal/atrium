@@ -34,6 +34,8 @@ pub struct SkyUniform {
     pub horizon_color: Vec4,
     /// xy = cloud scroll (m), z = moonlight 0..1, w = fog 0..1.
     pub scroll: Vec4,
+    /// x = cloud march step count (live quality lever). Rest reserved.
+    pub quality: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -67,6 +69,7 @@ pub fn spawn_sky(
                 zenith_color: Vec4::new(0.09, 0.22, 0.57, 0.4),
                 horizon_color: Vec4::new(0.60, 0.64, 0.60, 1.0),
                 scroll: Vec4::ZERO,
+                quality: Vec4::new(10.0, 0.0, 0.0, 0.0),
             },
         })),
         Transform::default(),
@@ -127,6 +130,7 @@ fn build_dome_mesh() -> Mesh {
 /// Keep the dome centered on the camera and its uniforms in sync with the
 /// day/night cycle and the weather.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub fn update_sky(
     celestial: Res<CelestialState>,
     weather: Res<WeatherState>,
@@ -141,6 +145,8 @@ pub fn update_sky(
             Without<crate::water::ReflectionCamera>,
         ),
     >,
+    submerged: Res<crate::Submerged>,
+    quality: Res<crate::RenderQuality>,
 ) {
     let Ok((mut dome_transform, material_handle)) = dome_query.single_mut() else {
         return;
@@ -155,9 +161,15 @@ pub fn update_sky(
     material.sky.sun_direction = celestial.sun_direction.extend(celestial.daylight);
     material.sky.moon_direction = celestial.moon_direction.extend(cycle.moon_phase);
     material.sky.light_color = celestial.light_color.extend(celestial.star_rotation);
-    material.sky.zenith_color = celestial
-        .zenith_color
-        .extend(weather.effective_cloud_coverage());
+    // Drop clouds while submerged — seen through the water surface from below
+    // they read as an unwanted white haze; a clean sky is what you want looking
+    // up. Restores instantly on surfacing.
+    let cloud_coverage = if submerged.0 {
+        0.0
+    } else {
+        weather.effective_cloud_coverage()
+    };
+    material.sky.zenith_color = celestial.zenith_color.extend(cloud_coverage);
     material.sky.horizon_color = celestial
         .horizon_color
         .extend(weather.current.cloud_type.clamp(0.0, 2.0));
@@ -167,4 +179,5 @@ pub fn update_sky(
         celestial.moonlight,
         weather.current.fog,
     );
+    material.sky.quality.x = quality.cloud_steps as f32;
 }

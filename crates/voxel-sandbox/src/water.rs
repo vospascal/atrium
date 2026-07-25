@@ -21,11 +21,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
 use bevy::image::Image;
-use bevy::pbr::Material;
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
+    AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    TextureDimension, TextureFormat, TextureUsages,
 };
+use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 
 use crate::day_night::CelestialState;
@@ -36,11 +39,6 @@ use voxel_core::world::{VOXEL_SIZE, WATER_LEVEL};
 /// and the mirror pass is the single biggest GPU cost on a fill-bound machine.
 const REFLECTION_WIDTH: u32 = 720;
 const REFLECTION_HEIGHT: u32 = 405;
-
-/// Re-render the mirror only every Nth frame; the wave distortion hides the
-/// staleness. Cuts the mirror's cost proportionally (both fill and draw), so
-/// it's the most robust reflection optimisation here. 1 = every frame.
-const REFLECTION_UPDATE_INTERVAL: u32 = 2;
 
 /// Entities on this layer are visible to the reflection camera (they still
 /// need layer 0 to be visible to the main camera).
@@ -70,6 +68,13 @@ pub struct WaterUniform {
     /// xy = fraction of the reflection texture in use (dynamic-resolution
     /// viewport), z = live-mirror strength (0 = procedural fallback).
     pub reflection: Vec4,
+    /// Live surface tuning (V-panel): rgb = tint multiplying the water's own
+    /// body colour, w = reflectivity (scales the fresnel reflection). Defaults
+    /// (1,1,1,1) leave the look unchanged.
+    pub surface: Vec4,
+    /// x = depth-darkening scale (multiplies the Beer–Lambert absorption; >1
+    /// darkens sooner, <1 keeps it clearer). Rest reserved.
+    pub surface_extra: Vec4,
 }
 
 impl Default for WaterUniform {
@@ -80,6 +85,36 @@ impl Default for WaterUniform {
             light_direction: Vec4::new(0.0, 1.0, 0.0, 1.0),
             light_color: Vec4::new(1.0, 0.96, 0.87, 0.2),
             reflection: Vec4::new(1.0, 1.0, 1.0, 0.0),
+            surface: Vec4::new(1.0, 1.0, 1.0, 1.0),
+            surface_extra: Vec4::new(1.0, 0.0, 0.0, 0.0),
+        }
+    }
+}
+
+/// Live-tunable look of the water SURFACE seen from above (V-panel). Separate
+/// from the underwater/murk controls. Defaults reproduce the current look.
+#[derive(Resource)]
+pub struct SurfaceTuning {
+    /// Tint multiplying the water's own (through-depth) body colour.
+    pub tint: [f32; 3],
+    /// Reflection strength (scales the fresnel sky/mirror reflection).
+    pub reflectivity: f32,
+    /// Depth-darkening scale for the TOP view (higher = darkens faster).
+    pub depth: f32,
+    /// Opacity of the surface seen from BELOW (0 = clear glass, see the sky
+    /// through; 1 = opaque tinted ceiling). Decoupled from `depth` so the top
+    /// view can darken while the underside stays transparent.
+    pub underside_opacity: f32,
+}
+
+impl Default for SurfaceTuning {
+    fn default() -> Self {
+        // User hand-tuned (egui-linear form of picker readout 85,110,125).
+        Self {
+            tint: [0.0908, 0.1559, 0.2051],
+            reflectivity: 0.25,
+            depth: 4.0,
+            underside_opacity: 0.25,
         }
     }
 }
@@ -170,6 +205,12 @@ pub struct WaterMaterial {
     /// reflection texels.
     #[uniform(3)]
     pub reflection_clip_from_world: Mat4,
+    /// Live per-corner water surface heights (render metres), indexed by the
+    /// corner id baked into each vertex's UV.x. The vertex shader displaces the
+    /// static grid mesh's Y from this, so the fluid sim only re-uploads this
+    /// small buffer each tick instead of rebuilding the whole surface mesh.
+    #[storage(4, read_only)]
+    pub heights: Handle<ShaderStorageBuffer>,
 }
 
 impl Material for WaterMaterial {
@@ -177,8 +218,29 @@ impl Material for WaterMaterial {
         "shaders/water.wgsl".into()
     }
 
+    // The grid mesh is flat (y=0); this vertex shader lifts each corner to its
+    // live sim height read from the `heights` storage buffer. Water is
+    // alpha-blended (excluded from the depth prepass), so no matching prepass
+    // vertex shader is needed — unlike the grass material.
+    fn vertex_shader() -> ShaderRef {
+        "shaders/water_surface.wgsl".into()
+    }
+
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
+    }
+
+    // Double-sided so the surface is visible from *below* — the shader renders
+    // a Snell's-window look for the underwater viewer. `Material` has no
+    // `cull_mode` hook, so drop culling in `specialize`.
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }
 
@@ -247,7 +309,7 @@ pub fn spawn_reflection_camera(mut commands: Commands, target: Res<ReflectionTar
 /// half-resolution viewport within 60 m, quarter beyond, and past ~120 m the
 /// camera switches off entirely while the shader cross-fades to a procedural
 /// sky tint (at that range the mirror is mostly sky anyway). It also only
-/// re-renders every `REFLECTION_UPDATE_INTERVAL` frames.
+/// re-renders every `RenderQuality::reflection_interval` frames.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn update_reflection_camera(
     main_camera: Query<
@@ -266,6 +328,7 @@ pub fn update_reflection_camera(
     time: Res<Time>,
     mut settings: ResMut<ReflectionSettings>,
     mut materials: ResMut<Assets<WaterMaterial>>,
+    quality: Res<crate::RenderQuality>,
     mut frame_counter: Local<u32>,
 ) {
     let Ok((main_transform, main_projection)) = main_camera.single() else {
@@ -321,7 +384,7 @@ pub fn update_reflection_camera(
     // Only re-render the mirror every Nth frame; on the skipped frames the
     // render target keeps its last contents and the wave wobble hides it.
     *frame_counter = frame_counter.wrapping_add(1);
-    let render_this_frame = frame_counter.is_multiple_of(REFLECTION_UPDATE_INTERVAL);
+    let render_this_frame = frame_counter.is_multiple_of(quality.reflection_interval.max(1));
     mirror_camera.is_active = strength > 0.005 && render_this_frame;
     mirror_camera.viewport = Some(bevy::camera::Viewport {
         physical_position: UVec2::ZERO,
@@ -360,6 +423,7 @@ pub fn update_reflection_camera(
 pub fn update_water(
     celestial: Res<CelestialState>,
     weather: Res<WeatherState>,
+    surface: Res<SurfaceTuning>,
     mut materials: ResMut<Assets<WaterMaterial>>,
 ) {
     let daylight = celestial.daylight;
@@ -376,5 +440,13 @@ pub fn update_water(
         material.water.horizon = celestial.horizon_color.extend(moonlight);
         material.water.light_direction = light_direction.extend(glint);
         material.water.light_color = celestial.light_color.extend(choppiness);
+        material.water.surface = Vec4::new(
+            surface.tint[0],
+            surface.tint[1],
+            surface.tint[2],
+            surface.reflectivity,
+        );
+        material.water.surface_extra =
+            Vec4::new(surface.depth, surface.underside_opacity, 0.0, 0.0);
     }
 }
