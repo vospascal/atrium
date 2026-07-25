@@ -27,6 +27,12 @@ var<uniform> voxel_ext: VoxelExtension;
 var<uniform> voxel_dims: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102)
 var<storage, read> occupancy: array<u32>;
+// Hemisphere ambient (GI feel): sky = up-facing colour + strength (w),
+// ground = down-facing bounce colour.
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+var<uniform> ambient_sky: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var<uniform> ambient_ground: vec4<f32>;
 
 fn hash_3d(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     var h: u32 = (seed * 0x9E3779B9u)
@@ -160,8 +166,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var color = pbr_input.material.base_color.rgb * jitter;
     if !is_cover {
         // Terrain: baked AO was dropped from the mesh; apply it here so merged
-        // flat faces still show tight corner occlusion.
-        color = color * terrain_ao(in.world_position.xyz, in.world_normal);
+        // flat faces still show tight corner occlusion. `ambient_ground.w` is a
+        // live strength (1 = baked look, >1 deepens crevices, 0 = AO off).
+        let ao = terrain_ao(in.world_position.xyz, in.world_normal);
+        let ao_strength = clamp(1.0 - (1.0 - ao) * ambient_ground.w, 0.0, 1.0);
+        color = color * ao_strength;
     }
     pbr_input.material.base_color = vec4<f32>(color, 1.0);
 
@@ -169,6 +178,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
+
+    // Hemisphere ambient (Stage-7 GI feel): add sky colour to up-facing faces
+    // and a warm ground-bounce to down-facing ones, tinted by the surface
+    // colour. `ambient_sky.w` is the strength (0 = off, look unchanged).
+    if ambient_sky.w > 0.0 {
+        let up = in.world_normal.y * 0.5 + 0.5;
+        let hemi = mix(ambient_ground.rgb, ambient_sky.rgb, up);
+        out.color = vec4<f32>(out.color.rgb + color * hemi * ambient_sky.w, out.color.a);
+    }
+
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

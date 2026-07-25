@@ -72,6 +72,13 @@ pub struct VoxelExtension {
     /// meshing can merge flat faces regardless of their AO.
     #[storage(102, read_only)]
     pub occupancy: Handle<ShaderStorageBuffer>,
+    /// Hemisphere ambient (GI feel): rgb = sky ambient colour (up-facing),
+    /// w = strength (0 = off). Updated per-frame from the sky.
+    #[uniform(103)]
+    pub ambient_sky: Vec4,
+    /// rgb = ground-bounce ambient colour (down-facing), w = AO-strength boost.
+    #[uniform(104)]
+    pub ambient_ground: Vec4,
 }
 
 impl MaterialExtension for VoxelExtension {
@@ -99,5 +106,9 @@ pub fn voxel_extension(seed: u32, occupancy: Handle<ShaderStorageBuffer>) -> Vox
             0.0,
         ),
         occupancy,
+        // `update_terrain_lighting` fills these from the sky + LightingSettings
+        // each frame. Ground .w = AO strength; default 1.0 = the baked AO look.
+        ambient_sky: Vec4::ZERO,
+        ambient_ground: Vec4::new(0.0, 0.0, 0.0, 1.0),
     }
 }

@@ -170,6 +170,7 @@ pub fn perf_overlay(
             Option<&mut bevy::post_process::dof::DepthOfField>,
             Option<&bevy::post_process::bloom::Bloom>,
             Option<&bevy::pbr::ScreenSpaceAmbientOcclusion>,
+            Option<&bevy::light::ShadowFilteringMethod>,
         ),
         With<bevy::core_pipeline::prepass::DepthPrepass>,
     >,
@@ -238,7 +239,7 @@ pub fn perf_overlay(
 
             // GPU levers: flip a feature, watch the frame time move — the
             // difference is that feature's cost on THIS machine.
-            if let Ok((camera_entity, mut msaa, mut depth_of_field, bloom, ssao)) =
+            if let Ok((camera_entity, mut msaa, mut depth_of_field, bloom, ssao, shadow_filter)) =
                 main_camera.single_mut()
             {
                 ui.separator();
@@ -415,7 +416,28 @@ pub fn perf_overlay(
                 // shimmer is shadow-map acne.
                 if let Ok(mut sun_light) = sun.single_mut() {
                     ui.checkbox(&mut sun_light.shadows_enabled, "sun shadows");
+                    // Normal bias kills the diagonal shadow acne/shimmer.
+                    ui.add(
+                        egui::Slider::new(&mut sun_light.shadow_normal_bias, 0.0..=5.0)
+                            .text("shadow bias"),
+                    );
                 }
+                // Shadow filtering: Hardware2x2 (hard, cheap) → Gaussian (soft) →
+                // Temporal (softest). Softer edges = less harsh sun.
+                use bevy::light::ShadowFilteringMethod as SFM;
+                let current = shadow_filter.copied().unwrap_or(SFM::Gaussian);
+                ui.horizontal(|ui| {
+                    ui.label("shadow filter");
+                    for (label, method) in [
+                        ("hard", SFM::Hardware2x2),
+                        ("soft", SFM::Gaussian),
+                        ("softest", SFM::Temporal),
+                    ] {
+                        if ui.selectable_label(current == method, label).clicked() {
+                            commands.entity(camera_entity).insert(method);
+                        }
+                    }
+                });
                 // Shadow-map resolution: the cascade textures cost fill for every
                 // caster in every view — dropping the size is a cheap win.
                 ui.horizontal(|ui| {
@@ -445,6 +467,7 @@ pub fn view_tweak_panel(
     mut fireflies: ResMut<FireflySettings>,
     mut underwater: ResMut<UnderwaterTint>,
     mut surface: ResMut<crate::water::SurfaceTuning>,
+    mut lighting: ResMut<crate::LightingSettings>,
     mut season: ResMut<crate::Season>,
     mut regenerate: ResMut<crate::RegenerateRequest>,
     view_mode: Res<ViewMode>,
@@ -532,6 +555,19 @@ pub fn view_tweak_panel(
                     *grading = ColorGrading::default();
                 }
             }
+            ui.separator();
+            ui.label("Lighting (live)");
+            ui.checkbox(&mut lighting.sky_ambient, "sky ambient (GI feel)");
+            if lighting.sky_ambient {
+                ui.add(
+                    egui::Slider::new(&mut lighting.sky_ambient_strength, 0.0..=1.5)
+                        .text("ambient strength"),
+                );
+            }
+            ui.add(
+                egui::Slider::new(&mut lighting.ao_strength, 0.0..=3.0).text("AO strength"),
+            );
+
             ui.separator();
             ui.label("Underwater (live)");
             ui.horizontal(|ui| {

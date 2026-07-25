@@ -140,6 +140,7 @@ fn main() {
         .init_resource::<water::SurfaceTuning>()
         .init_resource::<Submerged>()
         .init_resource::<RenderQuality>()
+        .init_resource::<LightingSettings>()
         .insert_resource(tweak_panel::PerfOverlay {
             visible: std::env::var("VOXEL_PERF").is_ok(),
         })
@@ -196,6 +197,7 @@ fn main() {
                 weather::update_precipitation,
                 water::update_reflection_camera,
                 water::update_water,
+                update_terrain_lighting,
                 fireflies::firefly_controls,
                 fireflies::spawn_env_fireflies,
                 fireflies::update_fireflies,
@@ -1199,6 +1201,28 @@ fn orbit_update(
 #[derive(Resource, Default)]
 pub struct Submerged(pub bool);
 
+/// Live lighting upgrades (Stage 7), each modular. Defaults are a tasteful
+/// on so the upgrade is visible; toggle/dial in the V-panel.
+#[derive(Resource)]
+pub struct LightingSettings {
+    /// Sky-tinted hemisphere ambient (GI feel) on the terrain.
+    pub sky_ambient: bool,
+    /// Strength of the hemisphere ambient (0 = off).
+    pub sky_ambient_strength: f32,
+    /// Terrain corner-AO strength (1 = baked look, >1 deepens crevices).
+    pub ao_strength: f32,
+}
+
+impl Default for LightingSettings {
+    fn default() -> Self {
+        Self {
+            sky_ambient: true,
+            sky_ambient_strength: 0.5,
+            ao_strength: 1.0,
+        }
+    }
+}
+
 /// The canopy "confetti" leaf cubes (~1.8M) — a P-overlay toggle hides them to
 /// A/B their cost (they render through the reflection view too).
 #[derive(Component)]
@@ -1255,6 +1279,29 @@ fn spawn_underwater_overlay(mut commands: Commands) {
         bevy::picking::Pickable::IGNORE,
         UnderwaterOverlay,
     ));
+}
+
+/// Feed the terrain's hemisphere-ambient uniforms from the sky each frame
+/// (Stage-7 GI): sky colour on up-faces, a warm ground-bounce on undersides,
+/// dimming at night. Strength 0 when the lever is off (look unchanged).
+fn update_terrain_lighting(
+    celestial: Res<day_night::CelestialState>,
+    lighting: Res<LightingSettings>,
+    mut materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
+) {
+    let light = celestial.daylight.max(celestial.moonlight * 0.3);
+    let strength = if lighting.sky_ambient {
+        lighting.sky_ambient_strength * light
+    } else {
+        0.0
+    };
+    // Sky ambient = the zenith blue; ground bounce = a dim warm horizon tint.
+    let sky = celestial.zenith_color;
+    let ground = celestial.horizon_color * 0.45;
+    for (_, material) in materials.iter_mut() {
+        material.extension.ambient_sky = sky.extend(strength);
+        material.extension.ambient_ground = ground.extend(lighting.ao_strength);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
