@@ -27,6 +27,7 @@ pub struct FoliageToggles<'w, 's> {
         ),
     >,
     canopy_hidden: Local<'s, bool>,
+    window: Query<'w, 's, &'static mut Window, With<bevy::window::PrimaryWindow>>,
 }
 
 use crate::day_night::DayNightCycle;
@@ -245,6 +246,21 @@ pub fn perf_overlay(
 
                 // Quality levers: dial the fill-bound raymarches down and watch
                 // the ms drop — dither hides the coarser sampling.
+                // VSync: with it on, fps caps at the monitor's refresh (e.g.
+                // 120), hiding the true cost/benefit of these levers. Flip it off
+                // to read raw uncapped fps while tuning.
+                if let Ok(mut window) = foliage.window.single_mut() {
+                    use bevy::window::PresentMode;
+                    let mut vsync = window.present_mode != PresentMode::AutoNoVsync;
+                    if ui.checkbox(&mut vsync, "vsync (uncap to measure)").changed() {
+                        window.present_mode = if vsync {
+                            PresentMode::AutoVsync
+                        } else {
+                            PresentMode::AutoNoVsync
+                        };
+                    }
+                }
+
                 ui.add(
                     egui::Slider::new(&mut quality.fog_steps, 2..=24).text("fog steps"),
                 );
