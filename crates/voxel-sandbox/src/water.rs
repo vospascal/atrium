@@ -361,7 +361,8 @@ pub fn update_reflection_camera(
     // Wave distortion hides the low resolution; a full-res mirror is far too
     // expensive on a fill-bound machine, so even the close tier is capped at
     // half.
-    let tier = if water_distance < 60.0 { 0.5 } else { 0.25 };
+    let base_tier = if water_distance < 60.0 { 0.5 } else { 0.25 };
+    let tier = (base_tier * quality.reflection_scale).clamp(0.05, 1.0);
     let target_strength = if settings.enabled && water_on_screen {
         ((125.0 - water_distance) / 25.0).clamp(0.0, 1.0)
     } else {

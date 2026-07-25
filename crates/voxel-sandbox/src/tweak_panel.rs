@@ -6,9 +6,28 @@
 //! fog, and precipitation — the same values biome presets will drive
 //! dynamically later.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::view::ColorGrading;
 use bevy_egui::{egui, EguiContexts};
+
+/// Foliage visibility toggles bundled into one `SystemParam` so `perf_overlay`
+/// stays under Bevy's 16-parameter system limit.
+#[derive(SystemParam)]
+pub struct FoliageToggles<'w, 's> {
+    grass: Query<'w, 's, &'static mut Visibility, With<crate::grass::GrassClump>>,
+    grass_hidden: Local<'s, bool>,
+    canopy: Query<
+        'w,
+        's,
+        &'static mut Visibility,
+        (
+            With<crate::CanopyConfetti>,
+            Without<crate::grass::GrassClump>,
+        ),
+    >,
+    canopy_hidden: Local<'s, bool>,
+}
 
 use crate::day_night::DayNightCycle;
 use crate::fireflies::FireflySettings;
@@ -154,11 +173,10 @@ pub fn perf_overlay(
         With<bevy::core_pipeline::prepass::DepthPrepass>,
     >,
     mut reflection: ResMut<crate::water::ReflectionSettings>,
-    mut grass: Query<&mut Visibility, With<crate::grass::GrassClump>>,
-    mut grass_hidden: Local<bool>,
     mut sun: Query<&mut DirectionalLight, With<crate::day_night::SunLight>>,
     mut quality: ResMut<crate::RenderQuality>,
     mut shadow_map: ResMut<bevy::light::DirectionalLightShadowMap>,
+    mut foliage: FoliageToggles,
 ) {
     if !perf.visible {
         return;
@@ -236,6 +254,10 @@ pub fn perf_overlay(
                 ui.add(
                     egui::Slider::new(&mut quality.reflection_interval, 1..=6)
                         .text("reflect: every N frames"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut quality.reflection_scale, 0.25..=1.0)
+                        .text("reflect: resolution"),
                 );
 
                 ui.horizontal(|ui| {
@@ -345,16 +367,31 @@ pub fn perf_overlay(
 
                 // Grass on/off — flip it to read grass's exact frametime cost,
                 // or to isolate whether an artifact is grass or the terrain.
-                let mut grass_visible = !*grass_hidden;
+                let mut grass_visible = !*foliage.grass_hidden;
                 if ui.checkbox(&mut grass_visible, "grass").changed() {
-                    *grass_hidden = !grass_visible;
+                    *foliage.grass_hidden = !grass_visible;
                     let visibility = if grass_visible {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
                     };
-                    for mut grass_visibility in &mut grass {
+                    for mut grass_visibility in &mut foliage.grass {
                         *grass_visibility = visibility;
+                    }
+                }
+
+                // Canopy confetti on/off — the 1.8M leaf cubes are a big vert +
+                // reflection cost; flip to read their exact frametime.
+                let mut canopy_visible = !*foliage.canopy_hidden;
+                if ui.checkbox(&mut canopy_visible, "canopy confetti").changed() {
+                    *foliage.canopy_hidden = !canopy_visible;
+                    let visibility = if canopy_visible {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    };
+                    for mut canopy_visibility in &mut foliage.canopy {
+                        *canopy_visibility = visibility;
                     }
                 }
 

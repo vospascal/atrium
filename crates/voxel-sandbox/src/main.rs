@@ -632,6 +632,7 @@ fn spawn_world(
                 Mesh3d(meshes.add(chunk_mesh)),
                 MeshMaterial3d(terrain_material.clone()),
                 NotShadowCaster,
+                CanopyConfetti,
                 water::reflective_layers(),
                 WorldMesh,
             ));
@@ -1198,6 +1199,11 @@ fn orbit_update(
 #[derive(Resource, Default)]
 pub struct Submerged(pub bool);
 
+/// The canopy "confetti" leaf cubes (~1.8M) — a P-overlay toggle hides them to
+/// A/B their cost (they render through the reflection view too).
+#[derive(Component)]
+pub struct CanopyConfetti;
+
 /// Live render-quality / optimization levers, each toggleable from the P-overlay
 /// so their cost can be A/B'd. Defaults reproduce the current look.
 #[derive(Resource)]
@@ -1210,6 +1216,10 @@ pub struct RenderQuality {
     /// The reflection is the single biggest GPU cost; the wave wobble hides
     /// staleness, so higher = much cheaper.
     pub reflection_interval: u32,
+    /// Extra multiplier on the reflection's dynamic-resolution tier (0.25–1.0).
+    /// The wave distortion hides low res, so this trades mirror sharpness for
+    /// fill directly on the biggest cost.
+    pub reflection_scale: f32,
 }
 
 impl Default for RenderQuality {
@@ -1218,6 +1228,7 @@ impl Default for RenderQuality {
             fog_steps: 12,
             cloud_steps: 10,
             reflection_interval: 2,
+            reflection_scale: 1.0,
         }
     }
 }
