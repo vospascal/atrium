@@ -33,6 +33,16 @@ var<storage, read> occupancy: array<u32>;
 var<uniform> ambient_sky: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104)
 var<uniform> ambient_ground: vec4<f32>;
+// Procedural env reflection (IBL feel): rgb = sky reflection colour, w = intensity.
+@group(#{MATERIAL_BIND_GROUP}) @binding(105)
+var<uniform> env_reflection: vec4<f32>;
+// Occupancy indexing origin in voxels: x = origin_x, z = origin_z (y, w unused).
+// The island binds a global occupancy buffer and leaves this (0, 0). The
+// infinite streamed world binds a per-chunk buffer whose local origin is this,
+// so `is_solid` can convert a global voxel coordinate into that buffer's local
+// index. `voxel_dims` then carries the buffer's local span, not the world size.
+@group(#{MATERIAL_BIND_GROUP}) @binding(106)
+var<uniform> chunk_origin: vec4<f32>;
 
 fn hash_3d(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     var h: u32 = (seed * 0x9E3779B9u)
@@ -54,13 +64,19 @@ fn hash_to_unit(h: u32) -> f32 {
 // Solid-occupancy lookup, matching voxel_core::world::solid_occupancy_bits:
 // bit index = (z * WX + x) * WY + y.
 fn is_solid(vx: i32, vy: i32, vz: i32) -> bool {
+    // Convert the global voxel coordinate into the bound buffer's local space.
+    // Island: chunk_origin is (0,0) and voxel_dims is the world size, so this is
+    // the identity. Streamed chunk: local = global - chunk_origin, bounds-checked
+    // against the per-chunk span in voxel_dims.
+    let lx = vx - i32(chunk_origin.x);
+    let lz = vz - i32(chunk_origin.z);
     let wx = i32(voxel_dims.x);
     let wy = i32(voxel_dims.y);
     let wz = i32(voxel_dims.z);
-    if vx < 0 || vy < 0 || vz < 0 || vx >= wx || vy >= wy || vz >= wz {
+    if lx < 0 || vy < 0 || lz < 0 || lx >= wx || vy >= wy || lz >= wz {
         return false;
     }
-    let index = (u32(vz) * u32(wx) + u32(vx)) * u32(wy) + u32(vy);
+    let index = (u32(lz) * u32(wx) + u32(lx)) * u32(wy) + u32(vy);
     return ((occupancy[index >> 5u] >> (index & 31u)) & 1u) == 1u;
 }
 
@@ -186,6 +202,19 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let up = in.world_normal.y * 0.5 + 0.5;
         let hemi = mix(ambient_ground.rgb, ambient_sky.rgb, up);
         out.color = vec4<f32>(out.color.rgb + color * hemi * ambient_sky.w, out.color.a);
+    }
+
+    // Procedural environment reflection (IBL feel): reflect the view off the
+    // surface and add sky colour in that direction, fresnel-boosted so it reads
+    // as a sky sheen at grazing angles (a wet/reflective look). Not a prefiltered
+    // cubemap — a cheap sky-tinted reflection, no render-to-cubemap pipeline.
+    if env_reflection.w > 0.0 {
+        let n = pbr_input.N;
+        let v = pbr_input.V;
+        let fresnel = pow(clamp(1.0 - max(dot(n, v), 0.0), 0.0, 1.0), 4.0);
+        let refl = reflect(-v, n);
+        let sky = env_reflection.rgb * (0.4 + 0.6 * clamp(refl.y, 0.0, 1.0));
+        out.color = vec4<f32>(out.color.rgb + sky * fresnel * env_reflection.w, out.color.a);
     }
 
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

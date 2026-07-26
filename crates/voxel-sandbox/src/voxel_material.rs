@@ -40,10 +40,21 @@ pub type GrassMaterial = ExtendedMaterial<StandardMaterial, GrassExtension>;
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
 pub struct GrassExtension {
     /// `x` = current time (s), `y` = previous-frame time (s, for motion
-    /// vectors). Updated every frame by `update_grass_wind_time`.
+    /// vectors). Updated every frame by `update_grass_wind`.
     #[uniform(100)]
     pub time: Vec4,
+    /// The live weather wind: `xy` = unit direction on the ground plane
+    /// (x, z), `z` = strength `0..1` (wind speed against
+    /// [`FULL_SWAY_WIND_SPEED`]). Rides on the material for the same reason the
+    /// time does — the depth prepass has no `globals`, and both passes must read
+    /// identical values or the displaced grass z-fights.
+    #[uniform(101)]
+    pub wind: Vec4,
 }
+
+/// Wind speed (m/s) at which grass sway saturates — full flutter rate, full
+/// amplitude, fully leaned downwind. Above this the grass simply stays pinned.
+pub const FULL_SWAY_WIND_SPEED: f32 = 20.0;
 
 impl MaterialExtension for GrassExtension {
     fn vertex_shader() -> ShaderRef {
@@ -79,6 +90,17 @@ pub struct VoxelExtension {
     /// rgb = ground-bounce ambient colour (down-facing), w = AO-strength boost.
     #[uniform(104)]
     pub ambient_ground: Vec4,
+    /// Procedural environment reflection (IBL feel): rgb = sky reflection colour
+    /// (zenith), w = intensity (0 = off). Fresnel-boosted so it reads as a sky
+    /// sheen at grazing angles.
+    #[uniform(105)]
+    pub env_reflection: Vec4,
+    /// Occupancy indexing origin in voxels `(origin_x, 0, origin_z, 0)`. The
+    /// island leaves this `ZERO` (its occupancy buffer is global, indexed in
+    /// world coords); a streamed chunk sets it to its per-chunk buffer origin so
+    /// the shader can localize global voxel coordinates. See `voxel_terrain.wgsl`.
+    #[uniform(106)]
+    pub chunk_origin: Vec4,
 }
 
 impl MaterialExtension for VoxelExtension {
@@ -110,5 +132,34 @@ pub fn voxel_extension(seed: u32, occupancy: Handle<ShaderStorageBuffer>) -> Vox
         // each frame. Ground .w = AO strength; default 1.0 = the baked AO look.
         ambient_sky: Vec4::ZERO,
         ambient_ground: Vec4::new(0.0, 0.0, 0.0, 1.0),
+        env_reflection: Vec4::ZERO,
+        // Island occupancy is global / world-indexed, so no origin shift.
+        chunk_origin: Vec4::ZERO,
+    }
+}
+
+/// Extension for one streamed chunk of the infinite world. Two differences from
+/// the island's [`voxel_extension`]: the jitter is **un-centered** (offset `0`,
+/// so the per-voxel hash keys on raw world-voxel coordinates and stays seamless
+/// across chunks), and ambient occlusion reads a **per-chunk** occupancy buffer
+/// localized by `chunk_origin` + a per-chunk `dimensions` span (the infinite
+/// world has no single global occupancy buffer). `origin`/`span` come from the
+/// chunk's [`voxel_core::world::ChunkScratch::window`].
+pub fn streamed_voxel_extension(
+    seed: u32,
+    occupancy: Handle<ShaderStorageBuffer>,
+    origin_x: i32,
+    origin_z: i32,
+    span_x: i32,
+    span_z: i32,
+) -> VoxelExtension {
+    VoxelExtension {
+        params: Vec4::new(f32::from_bits(seed), VOXEL_SIZE, 0.0, 0.0),
+        dimensions: Vec4::new(span_x as f32, WORLD_SIZE_Y as f32, span_z as f32, 0.0),
+        occupancy,
+        ambient_sky: Vec4::ZERO,
+        ambient_ground: Vec4::new(0.0, 0.0, 0.0, 1.0),
+        env_reflection: Vec4::ZERO,
+        chunk_origin: Vec4::new(origin_x as f32, 0.0, origin_z as f32, 0.0),
     }
 }

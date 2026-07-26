@@ -16,17 +16,31 @@
 // this same uniform so both passes agree on depth.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> grass_wind_time: vec4<f32>;
+// The live weather wind: xy = unit ground direction (x, z), z = strength 0..1
+// (see `FULL_SWAY_WIND_SPEED`). Same uniform in both passes, for the same reason.
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+var<uniform> grass_wind: vec4<f32>;
 
 // Wind offset, INLINED (kept byte-identical to grass_prepass.wgsl so the main
 // and prepass passes compute the same depth). `base` = clump world origin,
 // `height` = object-space height up the blade, `time` = sample time.
 const WIND_STRENGTH: f32 = 0.35;
 fn grass_wind_offset(base: vec3<f32>, height: f32, time: f32) -> vec3<f32> {
+    // `grass_wind.z` is the weather's wind speed normalised to 0..1. It drives
+    // three things at once, which is what makes the blades actually read as
+    // responding to the wind rather than idling at a fixed wobble:
+    //   1. flutter RATE  — blades whip faster as it picks up,
+    //   2. wobble DEPTH  — a calm day keeps a small idle breeze,
+    //   3. a steady LEAN downwind, which is the cue that says "wind direction".
+    let strength = clamp(grass_wind.z, 0.0, 1.0);
+    let rate = 0.55 + 1.45 * strength;
     let phase = base.x * 0.6 + base.z * 0.8;
-    let sway_x = sin(time * 1.4 + phase) * 0.6 + sin(time * 2.7 + phase * 1.9) * 0.4;
-    let sway_z = cos(time * 1.1 + phase * 1.3) * 0.6 + cos(time * 2.3 + phase * 0.7) * 0.4;
+    let sway_x = sin(time * 1.4 * rate + phase) * 0.6 + sin(time * 2.7 * rate + phase * 1.9) * 0.4;
+    let sway_z = cos(time * 1.1 * rate + phase * 1.3) * 0.6 + cos(time * 2.3 * rate + phase * 0.7) * 0.4;
+    let wobble = 0.22 + 0.78 * strength;
+    let lean = grass_wind.xy * (0.95 * strength);
     let bend = max(height, 0.0) * 0.66 * WIND_STRENGTH;
-    return vec3<f32>(sway_x * bend, 0.0, sway_z * bend);
+    return vec3<f32>((sway_x * wobble + lean.x) * bend, 0.0, (sway_z * wobble + lean.y) * bend);
 }
 
 @vertex

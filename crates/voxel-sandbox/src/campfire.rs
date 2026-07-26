@@ -281,7 +281,7 @@ pub fn campfire_controls(
     };
 
     let anchor = match *view_mode {
-        ViewMode::FirstPerson => {
+        ViewMode::FirstPerson | ViewMode::Fly => {
             let Ok(camera_transform) = camera_query.single() else {
                 return;
             };

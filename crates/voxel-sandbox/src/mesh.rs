@@ -12,6 +12,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use voxel_core::noise::{hash_3d, hash_to_unit};
+use voxel_core::voxel_source::VoxelSource;
 use voxel_core::world::{
     Voxel, VoxelWorld, PLATEAU_FLOOR, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
 };
@@ -172,21 +173,84 @@ pub fn build_all_chunk_meshes(world: &VoxelWorld, seed: u32, season: f32) -> Vec
 
     coordinates
         .par_iter()
-        .map(|&(chunk_x, chunk_z)| build_chunk_meshes(world, seed, season, chunk_x, chunk_z))
+        .map(|&(chunk_x, chunk_z)| {
+            let scratch = unpack_chunk_window(world, chunk_x, chunk_z);
+            build_chunk_meshes(
+                world,
+                &scratch,
+                seed,
+                season,
+                chunk_x,
+                chunk_z,
+                AmbientOcclusion::PerFragment,
+            )
+        })
         .filter(|chunk| !chunk.is_empty())
         .collect()
 }
 
-/// Mesh one 64×256×64 column chunk. Neighbor lookups go through the whole
-/// world, so face culling and ambient occlusion are seamless across chunk
-/// borders. Vertices stay in world space (identity transforms) — bevy
-/// derives each mesh's culling AABB from them.
-fn build_chunk_meshes(
-    world: &VoxelWorld,
+/// Unpack the dense voxel window one chunk needs: its own columns plus the
+/// 1-cell apron used for neighbor face culling and corner ambient occlusion.
+///
+/// Separate from [`build_chunk_meshes`] so a caller that needs the same voxels
+/// for something else — the streamed world packs its shader occupancy bitset
+/// from them — can unpack once and share, instead of generating the window twice.
+pub fn unpack_chunk_window(
+    world: &impl VoxelSource,
+    chunk_x: i32,
+    chunk_z: i32,
+) -> voxel_core::world::ChunkScratch {
+    world.unpack_chunk(
+        chunk_x * CHUNK_SIZE,
+        (chunk_x + 1) * CHUNK_SIZE,
+        chunk_z * CHUNK_SIZE,
+        (chunk_z + 1) * CHUNK_SIZE,
+    )
+}
+
+/// Where a chunk's terrain ambient occlusion comes from.
+///
+/// The island uses [`AmbientOcclusion::PerFragment`]: the mesher merges flat
+/// faces freely and the shader recomputes exact corner AO per fragment from a
+/// solid-occupancy bitset. That bitset has to cover the chunk, so **each chunk
+/// needs its own material** — fine for one world built once, but in the streamed
+/// world it means a material per resident chunk, which stops bevy batching chunk
+/// meshes together. Measured on this world, that cost ~2.5× the frame time.
+///
+/// So streamed chunks use [`AmbientOcclusion::Baked`]: AO is sampled at the
+/// merged quad's four corners and multiplied into its vertex colours, and the
+/// vertex alpha carries the shader's existing "AO already baked" sentinel (the
+/// same one cover geometry uses). No occupancy buffer, so **every streamed chunk
+/// shares one material**. The trade-off is honest: AO interpolates across a
+/// merged quad instead of being exact per fragment, so an occluder in the middle
+/// of a large flat face is missed. Uniform cases (a wall base, a step) still read
+/// correctly because every face along them samples the same occlusion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AmbientOcclusion {
+    /// Shader recomputes AO from an occupancy bitset (needs a per-chunk material).
+    PerFragment,
+    /// AO baked into vertex colours (lets all chunks share one material).
+    Baked,
+}
+
+/// The offset added to vertex alpha to tell the terrain shader "ambient occlusion
+/// is already baked into these colours, don't apply your own". Matches the
+/// sentinel `voxel_terrain.wgsl` already uses for cover geometry.
+const BAKED_AO_SENTINEL: f32 = 10.0;
+
+/// Mesh one 64×256×64 column chunk from its unpacked window (see
+/// [`unpack_chunk_window`]). Neighbor lookups reach into the window's apron, so
+/// face culling and ambient occlusion are seamless across chunk borders.
+/// Vertices stay in world space (identity transforms) — bevy derives each mesh's
+/// culling AABB from them.
+pub fn build_chunk_meshes(
+    world: &impl VoxelSource,
+    scratch: &voxel_core::world::ChunkScratch,
     seed: u32,
     season: f32,
     chunk_x: i32,
     chunk_z: i32,
+    ambient_occlusion: AmbientOcclusion,
 ) -> ChunkMeshes {
     let mut above_water_buffers = MeshBuffers::default();
     let mut meadow_cover_buffers = MeshBuffers::default();
@@ -197,16 +261,16 @@ fn build_chunk_meshes(
     // Faces above this (voxel units) belong to the reflection-visible mesh.
     let water_plane_y = (voxel_core::world::WATER_LEVEL + 1) as f32 + 0.01;
 
-    let half_x = WORLD_SIZE_X as f32 / 2.0;
-    let half_z = WORLD_SIZE_Z as f32 / 2.0;
+    // Vertex-centering offset: (half_x, half_z) for the island (so it straddles
+    // the origin), (0, 0) for the infinite streamed world.
+    let (half_x, half_z) = world.world_offset();
 
-    let x_range = (chunk_x * CHUNK_SIZE)..((chunk_x + 1) * CHUNK_SIZE).min(WORLD_SIZE_X as i32);
-    let z_range = (chunk_z * CHUNK_SIZE)..((chunk_z + 1) * CHUNK_SIZE).min(WORLD_SIZE_Z as i32);
-
-    // The RLE world is unpacked once per chunk (plus a 1-cell apron for
-    // neighbor culling and corner AO) into a dense window — voxel reads
-    // below are plain array lookups, never run walks.
-    let scratch = world.unpack_chunk(x_range.start, x_range.end, z_range.start, z_range.end);
+    // Raw chunk span in world voxels — no world-size clamp, so streamed chunks
+    // at any coordinate mesh correctly. Each source clamps its own bounds in
+    // `unpack_chunk` (the island returns air past its footprint). Voxel reads
+    // below go to the caller's dense window, never to run walks.
+    let x_range = (chunk_x * CHUNK_SIZE)..((chunk_x + 1) * CHUNK_SIZE);
+    let z_range = (chunk_z * CHUNK_SIZE)..((chunk_z + 1) * CHUNK_SIZE);
 
     for y in 0..WORLD_SIZE_Y as i32 {
         for z in z_range.clone() {
@@ -227,8 +291,8 @@ fn build_chunk_meshes(
                     continue;
                 }
                 let voxel_position = IVec3::new(x, y, z);
-                let base_color = voxel_color(world, &scratch, voxel, x, y, z, seed, season);
-                let vertical_scale = visual_vertical_scale(&scratch, voxel, x, y, z, seed);
+                let base_color = voxel_color(world, scratch, voxel, x, y, z, seed, season);
+                let vertical_scale = visual_vertical_scale(scratch, voxel, x, y, z, seed);
                 let footprint_scale = visual_footprint_scale(voxel);
 
                 for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
@@ -244,7 +308,7 @@ fn build_chunk_meshes(
                     // A blooming lily is a green pad with a white blossom
                     // dot: only its top face takes the flower color.
                     let face_base_color = if voxel == Voxel::LilyBloom && normal != IVec3::Y {
-                        voxel_color(world, &scratch, Voxel::LilyPad, x, y, z, seed, season)
+                        voxel_color(world, scratch, Voxel::LilyPad, x, y, z, seed, season)
                     } else {
                         base_color
                     };
@@ -344,7 +408,7 @@ fn build_chunk_meshes(
     // Merge the flat, fully-open terrain faces skipped above into big quads.
     greedy_merge_terrain(
         world,
-        &scratch,
+        scratch,
         seed,
         season,
         x_range.clone(),
@@ -352,6 +416,7 @@ fn build_chunk_meshes(
         half_x,
         half_z,
         water_plane_y,
+        ambient_occlusion,
         &mut above_water_buffers,
         &mut below_water_buffers,
     );
@@ -360,7 +425,7 @@ fn build_chunk_meshes(
     // canopy behind them (the shadow caster + gap backing).
     emit_canopy(
         world,
-        &scratch,
+        scratch,
         seed,
         season,
         x_range.clone(),
@@ -371,7 +436,7 @@ fn build_chunk_meshes(
     );
     emit_canopy_solid(
         world,
-        &scratch,
+        scratch,
         seed,
         season,
         x_range.clone(),
@@ -410,7 +475,7 @@ struct MergeFace {
 
 #[allow(clippy::too_many_arguments)]
 fn terrain_merge_face(
-    world: &VoxelWorld,
+    world: &impl VoxelSource,
     scratch: &voxel_core::world::ChunkScratch,
     seed: u32,
     season: f32,
@@ -452,7 +517,7 @@ fn terrain_merge_face(
 /// the per-voxel brightness jitter is added later by the terrain shader.
 #[allow(clippy::too_many_arguments)]
 fn greedy_merge_terrain(
-    world: &VoxelWorld,
+    world: &impl VoxelSource,
     scratch: &voxel_core::world::ChunkScratch,
     seed: u32,
     season: f32,
@@ -461,6 +526,7 @@ fn greedy_merge_terrain(
     half_x: f32,
     half_z: f32,
     water_plane_y: f32,
+    ambient_occlusion: AmbientOcclusion,
     above_water: &mut MeshBuffers,
     below_water: &mut MeshBuffers,
 ) {
@@ -638,10 +704,38 @@ fn greedy_merge_terrain(
                             _ => (cell_x - u_lo, cell_y - v_lo),
                         };
                         let corner_mask_index = corner_vi as usize * u_count + corner_ui as usize;
-                        corner_colors[corner_index] = mask
+                        let mut corner_color = mask
                             .get(corner_mask_index)
                             .and_then(|maybe| maybe.map(|c| c.color))
                             .unwrap_or(cell.color);
+
+                        if ambient_occlusion == AmbientOcclusion::Baked {
+                            // Same neighbourhood and brightness curve the shader
+                            // (and the per-voxel cover path) use, sampled at this
+                            // corner's own voxel — see `AmbientOcclusion`.
+                            let occlusion_base = IVec3::new(cell_x, cell_y, cell_z) + normal;
+                            let side_1 = scratch
+                                .get_offset(occlusion_base + tangent_1 * along_1)
+                                .is_solid();
+                            let side_2 = scratch
+                                .get_offset(occlusion_base + tangent_2 * along_2)
+                                .is_solid();
+                            let diagonal = scratch
+                                .get_offset(
+                                    occlusion_base + tangent_1 * along_1 + tangent_2 * along_2,
+                                )
+                                .is_solid();
+                            let brightness = 0.55
+                                + 0.15 * ambient_occlusion_level(side_1, side_2, diagonal) as f32;
+                            corner_color = [
+                                corner_color[0] * brightness,
+                                corner_color[1] * brightness,
+                                corner_color[2] * brightness,
+                                // Tell the shader the AO is already applied.
+                                corner_color[3] + BAKED_AO_SENTINEL,
+                            ];
+                        }
+                        corner_colors[corner_index] = corner_color;
                     }
 
                     let buffers = if cell.below {
@@ -665,7 +759,7 @@ fn greedy_merge_terrain(
 /// enclosed by leaves) are skipped — they'd never show through the shell.
 #[allow(clippy::too_many_arguments)]
 fn emit_canopy(
-    world: &VoxelWorld,
+    world: &impl VoxelSource,
     scratch: &voxel_core::world::ChunkScratch,
     seed: u32,
     season: f32,
@@ -707,6 +801,30 @@ fn emit_canopy(
                 let Some((rx, ry, rz)) = representative else {
                     continue;
                 };
+
+                // Skip cubes buried inside the canopy. The confetti is a fluffy
+                // SHELL: the solid inner canopy mesh already fills the volume
+                // behind it, so a cube whose six neighbouring blocks are all
+                // leaves contributes nothing but vertices. (Only fully enclosed
+                // blocks are dropped — the shrunken cubes leave gaps you can see
+                // through, so any block on the surface keeps all six faces.)
+                let block_has_leaves = |block: IVec3| {
+                    (0..STRIDE).any(|dy| {
+                        (0..STRIDE).any(|dz| {
+                            (0..STRIDE).any(|dx| {
+                                group_of(scratch.get(block.x + dx, block.y + dy, block.z + dz))
+                                    == Some(MeshGroup::Canopy)
+                            })
+                        })
+                    })
+                };
+                let here = IVec3::new(block_x, block_y, block_z);
+                let enclosed = FACE_DIRECTIONS
+                    .iter()
+                    .all(|(normal, _, _)| block_has_leaves(here + *normal * STRIDE));
+                if enclosed {
+                    continue;
+                }
 
                 let color = voxel_color(
                     world,
@@ -764,7 +882,7 @@ fn emit_canopy(
 /// through to the sky. Same cheap surface-face count the old merged leaves had.
 #[allow(clippy::too_many_arguments)]
 fn emit_canopy_solid(
-    world: &VoxelWorld,
+    world: &impl VoxelSource,
     scratch: &voxel_core::world::ChunkScratch,
     seed: u32,
     season: f32,
@@ -903,7 +1021,7 @@ fn lerp_rgb(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
 /// jitter amplitude (terrain) or the water transparency (water voxels).
 #[allow(clippy::too_many_arguments)]
 fn voxel_color(
-    world: &VoxelWorld,
+    world: &impl VoxelSource,
     scratch: &voxel_core::world::ChunkScratch,
     voxel: Voxel,
     x: i32,

@@ -25,22 +25,36 @@ use bevy::prelude::*;
 use voxel_core::noise::{hash_3d, hash_to_unit, smoothstep};
 use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Z};
 
-use crate::voxel_material::{GrassExtension, GrassMaterial};
+use crate::voxel_material::{GrassExtension, GrassMaterial, FULL_SWAY_WIND_SPEED};
+use crate::weather::WeatherState;
 use crate::WorldMesh;
 
 /// Marker for spawned grass clumps (despawned on world regenerate).
 #[derive(Component)]
 pub struct GrassClump;
 
-/// Feed the current + previous frame time into every grass material so the
-/// wind vertex shaders can animate. Time rides on the material (not `globals`)
-/// because `globals` isn't bound in the depth prepass — and the main and
-/// prepass vertex shaders must read the *same* value or their depths diverge.
-pub fn update_grass_wind_time(time: Res<Time>, mut materials: ResMut<Assets<GrassMaterial>>) {
+/// Feed the frame time **and the live weather wind** into every grass material so
+/// the sway both animates and answers the wind. Both ride on the material (not
+/// `globals`) because `globals` isn't bound in the depth prepass — and the main
+/// and prepass vertex shaders must read the *same* values or their depths
+/// diverge and the grass z-fights.
+///
+/// The wind speed is normalised against [`FULL_SWAY_WIND_SPEED`]; the shader
+/// turns that into flutter rate, wobble depth, and a steady downwind lean.
+pub fn update_grass_wind(
+    time: Res<Time>,
+    weather: Res<WeatherState>,
+    mut materials: ResMut<Assets<GrassMaterial>>,
+) {
     let now = time.elapsed_secs();
     let previous = now - time.delta_secs();
+    let direction = weather.wind_direction();
+    // The GUSTING speed, not the mean: grass answering the wind in waves is the
+    // whole point (see `WeatherState::gusting_wind_speed`).
+    let strength = (weather.gusting_wind_speed() / FULL_SWAY_WIND_SPEED).clamp(0.0, 1.0);
     for (_, material) in materials.iter_mut() {
         material.extension.time = Vec4::new(now, previous, 0.0, 0.0);
+        material.extension.wind = Vec4::new(direction.x, direction.y, strength, 0.0);
     }
 }
 
@@ -71,6 +85,71 @@ const CLUMP_SPREAD: f32 = 0.13;
 const ROOT_DARKEN: f32 = 0.55;
 const TIP_BRIGHTEN: f32 = 1.4;
 
+/// The clump-mesh palette, one pre-coloured mesh per biome tone. Shared by the
+/// island and the streamed world, so both draw the same instanced grass.
+pub fn build_clump_meshes(meshes: &mut Assets<Mesh>) -> Vec<Handle<Mesh>> {
+    GRASS_TONES
+        .iter()
+        .map(|tone| meshes.add(build_clump_mesh(*tone)))
+        .collect()
+}
+
+/// The shared wind material. Solid voxel-box blades → default back-face
+/// culling; the wind extension swaps in the sway vertex shaders and the tone
+/// comes from the mesh's vertex colours.
+pub fn build_grass_material(materials: &mut Assets<GrassMaterial>) -> Handle<GrassMaterial> {
+    materials.add(GrassMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
+            ..default()
+        },
+        extension: GrassExtension::default(),
+    })
+}
+
+/// Which tone in [`GRASS_TONES`] a column gets: drier and farther from water →
+/// straw. Indexes the palette from [`build_clump_meshes`].
+pub fn clump_variant(dryness: f32, water_distance: f32) -> usize {
+    let lushness = smoothstep(9.0, 1.5, water_distance);
+    let strawness = (dryness * 0.7 + (1.0 - lushness) * 0.3).clamp(0.0, 1.0);
+    ((strawness * GRASS_TONES.len() as f32) as usize).min(GRASS_TONES.len() - 1)
+}
+
+/// Is this column a clump site? One clump per [`CLUMP_STRIDE`]-th column on each
+/// axis, keyed on **world** coordinates so streamed chunks tile at the same
+/// density as their neighbours (a chunk-local stride would break at borders,
+/// since the chunk span isn't a multiple of the stride).
+pub fn is_clump_column(world_x: i32, world_z: i32) -> bool {
+    world_x.rem_euclid(CLUMP_STRIDE as i32) == 0 && world_z.rem_euclid(CLUMP_STRIDE as i32) == 0
+}
+
+/// Per-instance placement for a clump sitting on top of `top_y`: centred in its
+/// column, with a hashed yaw and height so no two clumps look alike. `offset_x`
+/// / `offset_z` centre the world (the island straddles the origin, the streamed
+/// world does not).
+pub fn clump_transform(
+    world_x: i32,
+    top_y: i32,
+    world_z: i32,
+    offset_x: f32,
+    offset_z: f32,
+    seed: u32,
+) -> Transform {
+    let yaw =
+        hash_to_unit(hash_3d(world_x, 0, world_z, seed.wrapping_add(31))) * std::f32::consts::TAU;
+    let height = 0.7 + 0.6 * hash_to_unit(hash_3d(world_x, 1, world_z, seed.wrapping_add(32)));
+    Transform {
+        translation: Vec3::new(
+            (world_x as f32 + 0.5 - offset_x) * VOXEL_SIZE,
+            top_y as f32 * VOXEL_SIZE,
+            (world_z as f32 + 0.5 - offset_z) * VOXEL_SIZE,
+        ),
+        rotation: Quat::from_rotation_y(yaw),
+        scale: Vec3::new(1.0, height, 1.0),
+    }
+}
+
 /// Build the palette + material and spawn a clump at every `CLUMP_STRIDE`-th
 /// `TallGrass` column, picking a tone variant from the biome.
 pub fn spawn_instanced_grass(
@@ -80,20 +159,8 @@ pub fn spawn_instanced_grass(
     world: &VoxelWorld,
     seed: u32,
 ) {
-    let clumps: Vec<Handle<Mesh>> = GRASS_TONES
-        .iter()
-        .map(|tone| meshes.add(build_clump_mesh(*tone)))
-        .collect();
-    // Solid voxel-box blades → default back-face culling. The wind extension
-    // swaps in the sway vertex shaders; the tone comes from the vertex colors.
-    let material = materials.add(GrassMaterial {
-        base: StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.95,
-            ..default()
-        },
-        extension: GrassExtension::default(),
-    });
+    let clumps = build_clump_meshes(meshes);
+    let material = build_grass_material(materials);
 
     let half_x = WORLD_SIZE_X as f32 / 2.0;
     let half_z = WORLD_SIZE_Z as f32 / 2.0;
@@ -112,28 +179,11 @@ pub fn spawn_instanced_grass(
                 continue;
             };
 
-            // Biome tone: drier / farther from water → straw.
-            let dryness = world.dryness_at(x, z);
-            let lushness = smoothstep(9.0, 1.5, world.water_distance_at(x, z));
-            let strawness = (dryness * 0.7 + (1.0 - lushness) * 0.3).clamp(0.0, 1.0);
-            let variant =
-                ((strawness * GRASS_TONES.len() as f32) as usize).min(GRASS_TONES.len() - 1);
-
-            let yaw = hash_to_unit(hash_3d(x, 0, z, seed.wrapping_add(31))) * std::f32::consts::TAU;
-            let height = 0.7 + 0.6 * hash_to_unit(hash_3d(x, 1, z, seed.wrapping_add(32)));
-
+            let variant = clump_variant(world.dryness_at(x, z), world.water_distance_at(x, z));
             commands.spawn((
                 Mesh3d(clumps[variant].clone()),
                 MeshMaterial3d(material.clone()),
-                Transform {
-                    translation: Vec3::new(
-                        (x as f32 + 0.5 - half_x) * VOXEL_SIZE,
-                        top_y as f32 * VOXEL_SIZE,
-                        (z as f32 + 0.5 - half_z) * VOXEL_SIZE,
-                    ),
-                    rotation: Quat::from_rotation_y(yaw),
-                    scale: Vec3::new(1.0, height, 1.0),
-                },
+                clump_transform(x, top_y, z, half_x, half_z, seed),
                 NotShadowCaster,
                 GrassClump,
                 WorldMesh,

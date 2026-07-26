@@ -5,7 +5,7 @@
 //! sculpted rock underside, hovering above a volumetric fog sea.
 //!
 //! Run:    `cargo run -p voxel-sandbox`
-//! Keys:   `Tab` switch orbit ↔ first-person view · `R` new island
+//! Keys:   `Tab` cycle orbit → first-person → fly view · `R` new island
 //!         `F` release a firefly swarm · `Shift+F` clear swarms
 //!         `C` place a campfire · `Shift+C` clear campfires
 //!         hold `N` to fast-forward the day/night cycle
@@ -14,6 +14,8 @@
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
 //! Walk:   left-drag look around · WASD walk · Shift run · Space jump
 //!         (on land) / dive (in water; release to float up)
+//! Fly:    left-drag look around · WASD move · Space up · Ctrl down ·
+//!         Shift faster (no gravity, no collision — free roam)
 //! Water:  hold `G` to pour water where you look · `H` to scoop it away
 //!         (the fluid sim flows/pools/spills what you add)
 //!
@@ -39,6 +41,7 @@ mod fog_ring;
 mod grass;
 mod mesh;
 mod sky;
+mod streaming;
 mod tweak_panel;
 mod vox_import;
 mod voxel_material;
@@ -73,6 +76,9 @@ enum WorldSource {
 
 fn main() {
     let start_first_person = std::env::var("VOXEL_START_FIRST_PERSON").is_ok();
+    // Stage 9: `VOXEL_STREAMING=1` skips the fixed island and streams an infinite
+    // terrain world around the free-fly camera instead.
+    let streaming = std::env::var("VOXEL_STREAMING").is_ok();
     let world_source = match std::env::args().nth(1) {
         Some(terrain_path) => {
             match voxel_core::terrain_import::load_terrain(Path::new(&terrain_path)) {
@@ -124,11 +130,14 @@ fn main() {
         .insert_resource(world_source)
         .insert_resource(if start_first_person {
             ViewMode::FirstPerson
+        } else if streaming {
+            ViewMode::Fly
         } else {
             ViewMode::Orbit
         })
         .init_resource::<OrbitCameraState>()
         .init_resource::<FirstPersonState>()
+        .init_resource::<FlyCameraState>()
         .init_resource::<day_night::DayNightCycle>()
         .init_resource::<day_night::CelestialState>()
         .init_resource::<weather::WeatherState>()
@@ -208,10 +217,11 @@ fn main() {
                 // Nested to stay under Bevy's 20-system tuple limit; order
                 // among these three is irrelevant.
                 (
-                    grass::update_grass_wind_time,
+                    grass::update_grass_wind,
                     fluid::water_interaction,
                     fluid::step_fluid_water,
                     fluid::update_water_heights,
+                    streaming::stream_chunks,
                     screenshot_system,
                 ),
             )
@@ -258,6 +268,9 @@ enum ViewMode {
     Orbit,
     /// Walking on the plateau at eye height.
     FirstPerson,
+    /// Free-fly roam — no gravity, no collision — for exploring the streamed
+    /// world (see `docs/streaming-plan.md`, slice S4).
+    Fly,
 }
 
 /// Scene bloom. Kept at Bevy's default strength — a shared helper so the
@@ -353,6 +366,14 @@ fn initial_world_system(
     season: Res<Season>,
     source: Res<WorldSource>,
 ) {
+    // Streaming world (Stage 9): skip the fixed island entirely; the
+    // `ChunkStreamer` generates terrain around the fly camera instead. The
+    // camera, sun, and sky (spawned by other startup systems) still apply.
+    if std::env::var("VOXEL_STREAMING").is_ok() {
+        commands.insert_resource(streaming::ChunkStreamer::new(seed.0, season.0));
+        return;
+    }
+
     spawn_world(
         &mut commands,
         &mut meshes,
@@ -782,6 +803,21 @@ impl GroundHeights {
     }
 }
 
+/// Ground (bed) height at a render-space `(x, z)` — from the island's
+/// `GroundHeights` if present, else the streamed terrain (`terrain_column_height`,
+/// un-centred world coords). This lets the walker stand on either world.
+fn bed_height(ground: Option<&GroundHeights>, seed: u32, x: f32, z: f32) -> f32 {
+    match ground {
+        Some(heights) => heights.bed_at(x, z),
+        None => {
+            let world_x = (x / VOXEL_SIZE).floor() as i32;
+            let world_z = (z / VOXEL_SIZE).floor() as i32;
+            (voxel_core::world::terrain_column_height(world_x, world_z, seed) + 1) as f32
+                * VOXEL_SIZE
+        }
+    }
+}
+
 /// Half-width of the walker's collision circle (m). Keeps a small gap off trunks.
 const PLAYER_RADIUS: f32 = 0.32;
 
@@ -892,6 +928,7 @@ fn regenerate_system(
     season: Res<Season>,
     source: Res<WorldSource>,
     existing_meshes: Query<Entity, With<WorldMesh>>,
+    streamer: Option<ResMut<streaming::ChunkStreamer>>,
 ) {
     if keyboard.just_pressed(KeyCode::KeyR) {
         request.requested = true;
@@ -904,6 +941,15 @@ fn regenerate_system(
         seed.0 = seed.0.wrapping_add(1);
     }
     *request = RegenerateRequest::default();
+
+    // The streamed world has no single island to respawn: hand the new seed /
+    // season to the streamer, which rebuilds the chunks around the camera.
+    // Without this, a season change (or R) would build the whole fixed island
+    // and drop it at the origin on top of the streamed terrain.
+    if let Some(mut streamer) = streamer {
+        streamer.request_reload(seed.0, season.0);
+        return;
+    }
 
     for entity in &existing_meshes {
         commands.entity(entity).despawn();
@@ -1006,13 +1052,49 @@ impl Default for FirstPersonState {
     }
 }
 
-/// `Tab` switches orbit ↔ first-person; each mode resumes where the other
-/// left off (walk somewhere, Tab out, and you orbit around that spot).
+/// Free-fly camera (slice S4): no gravity, no collision. WASD moves relative
+/// to the yaw on the horizontal plane; `Space`/`Ctrl` climb and descend;
+/// `Shift` sprints. Mouse-look mirrors first-person (left-drag).
+#[derive(Resource)]
+struct FlyCameraState {
+    position: Vec3,
+    yaw: f32,
+    /// Positive looks up, radians.
+    pitch: f32,
+}
+
+impl Default for FlyCameraState {
+    fn default() -> Self {
+        Self {
+            // Start above the terrain, looking slightly down so the world is
+            // in view the moment you switch in.
+            position: Vec3::new(0.0, 30.0, 60.0),
+            yaw: 0.0,
+            pitch: -0.35,
+        }
+    }
+}
+
+impl FlyCameraState {
+    fn transform(&self) -> Transform {
+        Transform::from_translation(self.position).with_rotation(Quat::from_euler(
+            EulerRot::YXZ,
+            self.yaw,
+            self.pitch,
+            0.0,
+        ))
+    }
+}
+
+/// `Tab` cycles orbit → first-person → fly → orbit; each mode resumes where
+/// the previous one left off (walk somewhere, Tab into fly, and you lift off
+/// from that spot; Tab again and you orbit around where you flew to).
 fn toggle_view_mode(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut view_mode: ResMut<ViewMode>,
     mut orbit_state: ResMut<OrbitCameraState>,
     mut walk_state: ResMut<FirstPersonState>,
+    mut fly_state: ResMut<FlyCameraState>,
 ) {
     if !keyboard.just_pressed(KeyCode::Tab) {
         return;
@@ -1026,8 +1108,15 @@ fn toggle_view_mode(
             ViewMode::FirstPerson
         }
         ViewMode::FirstPerson => {
-            orbit_state.focus = walk_state.position;
-            orbit_state.yaw = walk_state.yaw;
+            // Lift off from the walker's position and heading.
+            fly_state.position = walk_state.position;
+            fly_state.yaw = walk_state.yaw;
+            fly_state.pitch = walk_state.pitch;
+            ViewMode::Fly
+        }
+        ViewMode::Fly => {
+            orbit_state.focus = fly_state.position;
+            orbit_state.yaw = fly_state.yaw;
             ViewMode::Orbit
         }
     };
@@ -1040,6 +1129,7 @@ fn camera_system(
     weather: Res<weather::WeatherState>,
     mut orbit_state: ResMut<OrbitCameraState>,
     mut walk_state: ResMut<FirstPersonState>,
+    mut fly_state: ResMut<FlyCameraState>,
     ground_heights: Option<Res<GroundHeights>>,
     tree_colliders: Option<Res<TreeColliders>>,
     mut camera_query: Query<
@@ -1058,6 +1148,7 @@ fn camera_system(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
+    seed: Res<WorldSeed>,
 ) {
     let Ok((mut camera_transform, mut projection, mut depth_of_field, mut fog)) =
         camera_query.single_mut()
@@ -1109,10 +1200,32 @@ fn camera_system(
                 &time,
                 tweaks.eye_height,
                 mouse_free,
+                seed.0,
             );
             *camera_transform = Transform::from_translation(walk_state.position).with_rotation(
                 Quat::from_euler(EulerRot::YXZ, walk_state.yaw, walk_state.pitch, 0.0),
             );
+            if let Some(depth_of_field) = depth_of_field.as_mut() {
+                depth_of_field.focal_distance = tweaks.walk_focal_distance;
+                depth_of_field.aperture_f_stops = tweaks.walk_aperture_f_stops;
+            }
+            set_fov(&mut projection, tweaks.first_person_fov_degrees);
+            fog.falloff = FogFalloff::Linear {
+                start: fog_range(35.0, 2.5),
+                end: fog_range(170.0, 26.0),
+            };
+        }
+        ViewMode::Fly => {
+            fly_update(
+                &mut fly_state,
+                &mouse_buttons,
+                &keyboard,
+                &mouse_motion,
+                &time,
+                mouse_free,
+            );
+            *camera_transform = fly_state.transform();
+            // No tilt-shift blur while roaming — keep the whole world crisp.
             if let Some(depth_of_field) = depth_of_field.as_mut() {
                 depth_of_field.focal_distance = tweaks.walk_focal_distance;
                 depth_of_field.aperture_f_stops = tweaks.walk_aperture_f_stops;
@@ -1211,6 +1324,10 @@ pub struct LightingSettings {
     pub sky_ambient_strength: f32,
     /// Terrain corner-AO strength (1 = baked look, >1 deepens crevices).
     pub ao_strength: f32,
+    /// Procedural sky reflection on terrain (IBL feel).
+    pub env_reflection: bool,
+    /// Strength of the sky-reflection sheen (0 = off).
+    pub env_reflection_intensity: f32,
 }
 
 impl Default for LightingSettings {
@@ -1219,6 +1336,8 @@ impl Default for LightingSettings {
             sky_ambient: true,
             sky_ambient_strength: 0.5,
             ao_strength: 1.0,
+            env_reflection: true,
+            env_reflection_intensity: 0.2,
         }
     }
 }
@@ -1244,6 +1363,20 @@ pub struct RenderQuality {
     /// The wave distortion hides low res, so this trades mirror sharpness for
     /// fill directly on the biggest cost.
     pub reflection_scale: f32,
+    /// Streamed-world view distance, in chunks around the camera (a chunk is 64
+    /// voxels ≈ 8 m). Sets how far the terrain silhouette reaches. Ignored by
+    /// the fixed island.
+    pub stream_radius: u32,
+    /// Streamed-world radius (chunks) within which instanced grass is spawned.
+    /// Streaming is **entity-bound**, not geometry-bound — measured here,
+    /// dropping ~6k tiny grass entities won twice the frame time that dropping
+    /// 2.3M vertices of leaf confetti did — so this is the sharpest lever in
+    /// streaming mode. Grass is only readable close up anyway.
+    pub grass_radius: u32,
+    /// Streamed-world radius (chunks) within which leaf confetti is spawned.
+    /// Beyond it the solid inner canopy still draws, so distant trees keep their
+    /// silhouette and shadow — they just lose the fluffy per-leaf cubes.
+    pub confetti_radius: u32,
 }
 
 impl Default for RenderQuality {
@@ -1253,6 +1386,13 @@ impl Default for RenderQuality {
             cloud_steps: 10,
             reflection_interval: 2,
             reflection_scale: 1.0,
+            // 6 chunks ≈ 48 m of terrain in every direction, which measured
+            // ~40 fps with the island's full tree/grass/AO treatment.
+            stream_radius: 6,
+            // Detail tiers well inside the view distance: grass reads as texture
+            // past ~25 m, and confetti past ~35 m is carried by the solid canopy.
+            grass_radius: 3,
+            confetti_radius: 4,
         }
     }
 }
@@ -1298,9 +1438,15 @@ fn update_terrain_lighting(
     // Sky ambient = the zenith blue; ground bounce = a dim warm horizon tint.
     let sky = celestial.zenith_color;
     let ground = celestial.horizon_color * 0.45;
+    let env_intensity = if lighting.env_reflection {
+        lighting.env_reflection_intensity * light
+    } else {
+        0.0
+    };
     for (_, material) in materials.iter_mut() {
         material.extension.ambient_sky = sky.extend(strength);
         material.extension.ambient_ground = ground.extend(lighting.ao_strength);
+        material.extension.env_reflection = sky.extend(env_intensity);
     }
 }
 
@@ -1393,6 +1539,60 @@ const SWIM_ACCEL: f32 = 20.0;
 /// Water drag damping the swimmer's vertical velocity (per second).
 const WATER_DRAG: f32 = 4.0;
 
+/// Free-fly camera update (slice S4): mouse-look while left-dragging (matching
+/// first-person), WASD moves on the horizontal plane relative to yaw, `Space`
+/// climbs / `Ctrl` descends, `Shift` sprints. No gravity, no collision.
+fn fly_update(
+    fly_state: &mut FlyCameraState,
+    mouse_buttons: &ButtonInput<MouseButton>,
+    keyboard: &ButtonInput<KeyCode>,
+    mouse_motion: &AccumulatedMouseMotion,
+    time: &Time,
+    mouse_free: bool,
+) {
+    let motion_delta = if mouse_free {
+        mouse_motion.delta
+    } else {
+        Vec2::ZERO
+    };
+    if mouse_buttons.pressed(MouseButton::Left) && motion_delta != Vec2::ZERO {
+        fly_state.yaw -= motion_delta.x * 0.003;
+        fly_state.pitch = (fly_state.pitch - motion_delta.y * 0.003).clamp(-1.54, 1.54);
+    }
+
+    let yaw_rotation = Quat::from_rotation_y(fly_state.yaw);
+    let forward = yaw_rotation * Vec3::NEG_Z;
+    let right = yaw_rotation * Vec3::X;
+
+    let mut move_direction = Vec3::ZERO;
+    if keyboard.pressed(KeyCode::KeyW) {
+        move_direction += forward;
+    }
+    if keyboard.pressed(KeyCode::KeyS) {
+        move_direction -= forward;
+    }
+    if keyboard.pressed(KeyCode::KeyD) {
+        move_direction += right;
+    }
+    if keyboard.pressed(KeyCode::KeyA) {
+        move_direction -= right;
+    }
+    // Vertical is world-up/down, independent of pitch, so ascent stays true.
+    if keyboard.pressed(KeyCode::Space) {
+        move_direction += Vec3::Y;
+    }
+    if keyboard.pressed(KeyCode::ControlLeft) {
+        move_direction -= Vec3::Y;
+    }
+
+    let fly_speed = if keyboard.pressed(KeyCode::ShiftLeft) {
+        60.0
+    } else {
+        15.0
+    };
+    fly_state.position += move_direction.normalize_or_zero() * fly_speed * time.delta_secs();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn first_person_update(
     walk_state: &mut FirstPersonState,
@@ -1404,6 +1604,7 @@ fn first_person_update(
     time: &Time,
     eye_height: f32,
     mouse_free: bool,
+    seed: u32,
 ) {
     let motion_delta = if mouse_free {
         mouse_motion.delta
@@ -1449,12 +1650,18 @@ fn first_person_update(
 
     // Vertical motion: on land it's gravity + jump with the terrain as the
     // floor; in deep water it switches to buoyant swimming (Space up/Ctrl down).
-    if let Some(heights) = ground_heights {
+    {
         let dt = time.delta_secs();
         let water_surface = water::water_surface_y();
         // Wade on the bed, not the water surface — the camera sinks into water
-        // as it deepens instead of standing on top.
-        let floor_eye = heights.bed_at(walk_state.position.x, walk_state.position.z) + eye_height;
+        // as it deepens instead of standing on top. Works on the island
+        // (`GroundHeights`) and the streamed world (`terrain_column_height`).
+        let floor_eye = bed_height(
+            ground_heights,
+            seed,
+            walk_state.position.x,
+            walk_state.position.z,
+        ) + eye_height;
         // Deep enough that standing on the bed would submerge the eye → swim.
         let swimming = floor_eye < water_surface - 0.05;
 
@@ -1513,17 +1720,33 @@ fn screenshot_system(
     let Ok(path) = std::env::var("VOXEL_SCREENSHOT_PATH") else {
         return;
     };
+    // Streamed worlds need more frames to settle (async chunk gen), so the
+    // capture/exit frames are overridable: `VOXEL_SCREENSHOT_FRAME` (default 30)
+    // and `VOXEL_SCREENSHOT_EXIT` (default 90).
+    let capture_frame: u32 = std::env::var("VOXEL_SCREENSHOT_FRAME")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(30);
+    let exit_frame: u32 = std::env::var("VOXEL_SCREENSHOT_EXIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(90);
     *frame_counter += 1;
-    if *frame_counter == 30 {
+    if *frame_counter == capture_frame {
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(path));
         *capture_time = Some(std::time::Instant::now());
     }
-    if *frame_counter >= 90 {
+    if *frame_counter >= exit_frame {
         if let Some(started) = *capture_time {
-            let average_fps = 60.0 / started.elapsed().as_secs_f64();
-            info!("frames 30..90 averaged {average_fps:.1} fps");
+            // Count the frames actually measured — the window is
+            // capture_frame..exit_frame, which the env vars can widen (a streamed
+            // world needs a late window to measure steady state rather than the
+            // chunk-loading ramp).
+            let measured_frames = exit_frame.saturating_sub(capture_frame).max(1);
+            let average_fps = measured_frames as f64 / started.elapsed().as_secs_f64();
+            info!("frames {capture_frame}..{exit_frame} averaged {average_fps:.1} fps");
         }
         exit.write(AppExit::Success);
     }

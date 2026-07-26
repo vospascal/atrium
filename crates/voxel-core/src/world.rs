@@ -51,19 +51,19 @@ const NO_LAND: i32 = -1;
 
 /// Beach width scales with biome dryness: the lush side keeps grass to
 /// the water's edge (a sliver of wet sand), the dry side gets real beaches.
-const BEACH_LUSH_METERS: f32 = 0.4;
-const BEACH_DRY_METERS: f32 = 2.6;
-const BEACH_MAX_ALTITUDE_METERS: f32 = 0.8;
+pub(crate) const BEACH_LUSH_METERS: f32 = 0.4;
+pub(crate) const BEACH_DRY_METERS: f32 = 2.6;
+pub(crate) const BEACH_MAX_ALTITUDE_METERS: f32 = 0.8;
 /// Steeper than this (rise/run, 1.0 = 45°) the soil gives way to bare rock.
-const ROCK_SLOPE_RATIO: f32 = 0.95;
+pub(crate) const ROCK_SLOPE_RATIO: f32 = 0.95;
 /// Above this altitude everything is bare rock (alpine zone)…
-const ALPINE_LINE_METERS: f32 = 14.0;
+pub(crate) const ALPINE_LINE_METERS: f32 = 14.0;
 /// …and above this it is snow, unless too steep for snow to settle.
-const SNOW_LINE_METERS: f32 = 17.0;
-const SNOW_MAX_SLOPE_RATIO: f32 = 1.3;
+pub(crate) const SNOW_LINE_METERS: f32 = 17.0;
+pub(crate) const SNOW_MAX_SLOPE_RATIO: f32 = 1.3;
 /// Trees need gentle slopes and stop below the alpine zone.
-const TREE_LINE_METERS: f32 = 12.0;
-const TREE_MAX_SLOPE_RATIO: f32 = 0.65;
+pub(crate) const TREE_LINE_METERS: f32 = 12.0;
+pub(crate) const TREE_MAX_SLOPE_RATIO: f32 = 0.65;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Voxel {
@@ -193,6 +193,63 @@ impl ChunkScratch {
 
     pub fn get_offset(&self, position: IVec3) -> Voxel {
         self.get(position.x, position.y, position.z)
+    }
+
+    /// Build a window by filling one column at a time. `fill(world_x, world_z,
+    /// column)` receives a `WORLD_SIZE_Y`-long slice (index = y) to write into.
+    /// Lets any [`crate::voxel_source::VoxelSource`] produce a scratch window
+    /// without depending on the internal cell layout.
+    pub fn from_columns(
+        origin_x: i32,
+        origin_z: i32,
+        span_x: i32,
+        span_z: i32,
+        mut fill: impl FnMut(i32, i32, &mut [Voxel]),
+    ) -> ChunkScratch {
+        let column_height = WORLD_SIZE_Y as i32;
+        let mut cells = vec![Voxel::Air; (span_x * span_z * column_height) as usize];
+        for local_z in 0..span_z {
+            for local_x in 0..span_x {
+                let base = ((local_z * span_x + local_x) * column_height) as usize;
+                fill(
+                    origin_x + local_x,
+                    origin_z + local_z,
+                    &mut cells[base..base + WORLD_SIZE_Y],
+                );
+            }
+        }
+        ChunkScratch {
+            origin_x,
+            origin_z,
+            span_x,
+            span_z,
+            cells,
+        }
+    }
+
+    /// This window's `(origin_x, origin_z, span_x, span_z)` in world voxels
+    /// (origin includes the 1-cell apron). The terrain shader binds these as the
+    /// per-chunk occupancy origin + span so `is_solid` can localize world coords.
+    pub fn window(&self) -> (i32, i32, i32, i32) {
+        (self.origin_x, self.origin_z, self.span_x, self.span_z)
+    }
+
+    /// Packed solid-occupancy bitset for this window, 1 bit per cell, laid out
+    /// exactly as [`ChunkScratch`]'s cells — `((local_z * span_x + local_x) *
+    /// WORLD_SIZE_Y + y)`. The streamed terrain shader recomputes ambient
+    /// occlusion from this per-chunk buffer (see `chunk_origin` in
+    /// `voxel_terrain.wgsl`), the infinite-world analogue of the island's global
+    /// [`VoxelWorld::solid_occupancy_bits`]. Solid = the same [`Voxel::is_solid`]
+    /// the mesher's culling uses (cover/water are not solid).
+    pub fn solid_occupancy_bits(&self) -> Vec<u32> {
+        let total_bits = (self.span_x * self.span_z * WORLD_SIZE_Y as i32) as usize;
+        let mut bits = vec![0_u32; total_bits.div_ceil(32)];
+        for (index, voxel) in self.cells.iter().enumerate() {
+            if voxel.is_solid() {
+                bits[index >> 5] |= 1 << (index & 31);
+            }
+        }
+        bits
     }
 }
 
@@ -1600,6 +1657,52 @@ fn compute_dryness_map(seed: u32) -> Vec<f32> {
     dryness_map
 }
 
+/// Infinite terrain height for a single column, in voxels, from position-based
+/// noise ONLY — no island falloff, so it tiles forever. This is the foundation
+/// for chunk streaming (Stage 9): a column at world `(x, z)` generates the same
+/// height no matter which chunk asks, so chunk seams are seamless. The finite
+/// island ([`compute_heightmap`]) masks this radially on top.
+pub fn terrain_column_height(world_x: i32, world_z: i32, seed: u32) -> i32 {
+    let world_x = world_x as f32;
+    let world_z = world_z as f32;
+
+    // Gentle rolling hills, barely above the water line so shores flood shallow.
+    let rolling = fractal_noise_2d(world_x * 0.007, world_z * 0.007, 5, seed);
+    let detail = fractal_noise_2d(world_x * 0.03, world_z * 0.03, 4, seed.wrapping_add(7));
+    let hill_shape = rolling * 0.85 + detail * 0.15;
+    let mut height = (WATER_LEVEL + 4) as f32 + hill_shape * 12.0;
+
+    // River: carve where the channel noise crosses its midline (wide banks).
+    let river_noise = fractal_noise_2d(
+        world_x * 0.006 + 400.0,
+        world_z * 0.006,
+        4,
+        seed.wrapping_add(13),
+    );
+    let channel_distance = (river_noise - 0.5).abs();
+    let channel_width = 0.105;
+    if channel_distance < channel_width {
+        let carve = smoothstep(channel_width, 0.02, channel_distance);
+        let river_bed = (WATER_LEVEL - 4) as f32 - carve * 2.5;
+        height += (river_bed - height) * carve;
+    }
+
+    // Lake basins: broad noise blobs sink below the water line.
+    let lake_noise = fractal_noise_2d(
+        world_x * 0.004 + 2300.0,
+        world_z * 0.004,
+        3,
+        seed.wrapping_add(19),
+    );
+    let lake_amount = smoothstep(0.66, 0.80, lake_noise);
+    if lake_amount > 0.0 {
+        let lake_bed = (WATER_LEVEL - 3) as f32 - lake_amount * 20.0;
+        height += (lake_bed - height) * lake_amount;
+    }
+
+    (height.round() as i32).clamp(PLATEAU_FLOOR + 2, WORLD_SIZE_Y as i32 - 8)
+}
+
 /// Heightmap: rolling fBm hills on a plateau slab with an organic rim,
 /// and a river channel carved below the water line. `NO_LAND` beyond the rim.
 fn compute_heightmap(seed: u32) -> Vec<i32> {
@@ -1628,51 +1731,10 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
                 continue;
             }
 
-            // Gentle rolling hills: long slopes that terrace into single-voxel
-            // contour steps, not steep blocky terrain. The base sits barely
-            // above the water line so shores flood wide and shallow.
-            let rolling = fractal_noise_2d(world_x * 0.007, world_z * 0.007, 5, seed);
-            let detail = fractal_noise_2d(world_x * 0.03, world_z * 0.03, 4, seed.wrapping_add(7));
-            let hill_shape = rolling * 0.85 + detail * 0.15;
-            let mut height = (WATER_LEVEL + 4) as f32 + hill_shape * 12.0;
-
-            // River: carve wherever the channel noise crosses its midline.
-            let river_noise = fractal_noise_2d(
-                world_x * 0.006 + 400.0,
-                world_z * 0.006,
-                4,
-                seed.wrapping_add(13),
-            );
-            let channel_distance = (river_noise - 0.5).abs();
-            // Wide gentle banks (out to channel_width) around a full-depth
-            // channel core, so the river reads as a river, not a slot canyon.
-            let channel_width = 0.105;
-            if channel_distance < channel_width {
-                let carve = smoothstep(channel_width, 0.02, channel_distance);
-                let river_bed = (WATER_LEVEL - 4) as f32 - carve * 2.5;
-                height += (river_bed - height) * carve;
-            }
-
-            // Lake basins: broad noise blobs sink softly below the water
-            // line — ponds where they sit alone, widenings where the river
-            // crosses them. The smooth mask doubles as the gentle shore.
-            let lake_noise = fractal_noise_2d(
-                world_x * 0.004 + 2300.0,
-                world_z * 0.004,
-                3,
-                seed.wrapping_add(19),
-            );
-            let lake_amount = smoothstep(0.66, 0.80, lake_noise);
-            if lake_amount > 0.0 {
-                // Proper depth toward the middle (~3 m at full mask, deep
-                // enough to swim/submerge) — the shoreline shelf keeps the
-                // edges wadeable regardless.
-                let lake_bed = (WATER_LEVEL - 3) as f32 - lake_amount * 20.0;
-                height += (lake_bed - height) * lake_amount;
-            }
-
-            heights[z * WORLD_SIZE_X + x] =
-                (height.round() as i32).clamp(PLATEAU_FLOOR + 2, WORLD_SIZE_Y as i32 - 8);
+            // The island is the infinite terrain masked to a radius; the hills /
+            // river / lakes themselves are position-based and shared with the
+            // streaming path.
+            heights[z * WORLD_SIZE_X + x] = terrain_column_height(x as i32, z as i32, seed);
         }
     }
     heights
@@ -1681,6 +1743,36 @@ fn compute_heightmap(seed: u32) -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_height_deterministic_and_seamless() {
+        // A column's height depends only on (x, z, seed) — never on which chunk
+        // asks — so streamed chunks meet seamlessly at their borders.
+        for &(x, z) in &[(0, 0), (63, 64), (1000, -1000), (-5, 12), (i32::MIN / 4, 7)] {
+            let a = terrain_column_height(x, z, 42);
+            let b = terrain_column_height(x, z, 42);
+            assert_eq!(a, b, "non-deterministic height at ({x},{z})");
+        }
+        // Adjacent columns across a chunk boundary are independent + in range.
+        for x in 60..70 {
+            let h = terrain_column_height(x, 0, 42);
+            assert!(
+                (PLATEAU_FLOOR + 2..=WORLD_SIZE_Y as i32 - 8).contains(&h),
+                "height {h} out of range at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_height_infinite_generates_land_everywhere() {
+        // Unlike the island, the raw terrain has no radial cutoff — it produces
+        // valid land arbitrarily far from the origin (the streaming base).
+        let far = terrain_column_height(500_000, -500_000, 7);
+        assert!(
+            far > PLATEAU_FLOOR,
+            "expected land far from origin, got {far}"
+        );
+    }
 
     #[test]
     fn beyond_the_rim_is_open_sky() {

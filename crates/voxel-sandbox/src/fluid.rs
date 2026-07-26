@@ -273,7 +273,12 @@ fn is_rim_void(world: &VoxelWorld, x: i32, z: i32) -> bool {
 }
 
 /// In-bounds 4-neighbours of a sub-grid cell.
-fn neighbors(lx: usize, lz: usize, size_x: usize, size_z: usize) -> impl Iterator<Item = (usize, usize)> {
+fn neighbors(
+    lx: usize,
+    lz: usize,
+    size_x: usize,
+    size_z: usize,
+) -> impl Iterator<Item = (usize, usize)> {
     [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)]
         .into_iter()
         .filter_map(move |(dx, dz)| {
@@ -288,11 +293,7 @@ fn neighbors(lx: usize, lz: usize, size_x: usize, size_z: usize) -> impl Iterato
 /// frame. Before each step, recharge the rim-connected bodies back toward their
 /// original level (capped, so they refill but never flood) — this is what keeps
 /// a steady current running to the spill lips instead of the river draining dry.
-pub fn step_fluid_water(
-    time: Res<Time>,
-    fluid: Option<ResMut<FluidWater>>,
-    mut tick: Local<u32>,
-) {
+pub fn step_fluid_water(time: Res<Time>, fluid: Option<ResMut<FluidWater>>, mut tick: Local<u32>) {
     let Some(mut fluid) = fluid else {
         return;
     };

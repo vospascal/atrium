@@ -253,7 +253,10 @@ pub fn perf_overlay(
                 if let Ok(mut window) = foliage.window.single_mut() {
                     use bevy::window::PresentMode;
                     let mut vsync = window.present_mode != PresentMode::AutoNoVsync;
-                    if ui.checkbox(&mut vsync, "vsync (uncap to measure)").changed() {
+                    if ui
+                        .checkbox(&mut vsync, "vsync (uncap to measure)")
+                        .changed()
+                    {
                         window.present_mode = if vsync {
                             PresentMode::AutoVsync
                         } else {
@@ -262,12 +265,8 @@ pub fn perf_overlay(
                     }
                 }
 
-                ui.add(
-                    egui::Slider::new(&mut quality.fog_steps, 2..=24).text("fog steps"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut quality.cloud_steps, 2..=16).text("cloud steps"),
-                );
+                ui.add(egui::Slider::new(&mut quality.fog_steps, 2..=24).text("fog steps"));
+                ui.add(egui::Slider::new(&mut quality.cloud_steps, 2..=16).text("cloud steps"));
                 ui.add(
                     egui::Slider::new(&mut quality.reflection_interval, 1..=6)
                         .text("reflect: every N frames"),
@@ -275,6 +274,24 @@ pub fn perf_overlay(
                 ui.add(
                     egui::Slider::new(&mut quality.reflection_scale, 0.25..=1.0)
                         .text("reflect: resolution"),
+                );
+                // Streamed world only (VOXEL_STREAMING=1): resident geometry
+                // grows with the square of this, so it is the big lever there.
+                // Lowering it despawns the far ring immediately; raising it
+                // streams the new ring in over the next few frames.
+                ui.add(
+                    egui::Slider::new(&mut quality.stream_radius, 2..=12)
+                        .text("stream: view distance (chunks)"),
+                );
+                // Detail tiers. Streaming is entity-bound, so these two buy more
+                // frame time than the view distance does — grass especially.
+                ui.add(
+                    egui::Slider::new(&mut quality.grass_radius, 0..=8)
+                        .text("stream: grass distance"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut quality.confetti_radius, 0..=8)
+                        .text("stream: leaf-confetti distance"),
                 );
 
                 ui.horizontal(|ui| {
@@ -400,7 +417,10 @@ pub fn perf_overlay(
                 // Canopy confetti on/off — the 1.8M leaf cubes are a big vert +
                 // reflection cost; flip to read their exact frametime.
                 let mut canopy_visible = !*foliage.canopy_hidden;
-                if ui.checkbox(&mut canopy_visible, "canopy confetti").changed() {
+                if ui
+                    .checkbox(&mut canopy_visible, "canopy confetti")
+                    .changed()
+                {
                     *foliage.canopy_hidden = !canopy_visible;
                     let visibility = if canopy_visible {
                         Visibility::Inherited
@@ -528,6 +548,14 @@ pub fn view_tweak_panel(
                             .text("focus width (f-stops)"),
                     );
                 }
+                ViewMode::Fly => {
+                    // Fly shares the first-person FOV lever (see `camera_system`).
+                    ui.label("Fly (active)");
+                    ui.add(
+                        egui::Slider::new(&mut tweaks.first_person_fov_degrees, 30.0..=100.0)
+                            .text("FOV °"),
+                    );
+                }
             }
             ui.separator();
             ui.label("Look / grade (live)");
@@ -564,9 +592,14 @@ pub fn view_tweak_panel(
                         .text("ambient strength"),
                 );
             }
-            ui.add(
-                egui::Slider::new(&mut lighting.ao_strength, 0.0..=3.0).text("AO strength"),
-            );
+            ui.add(egui::Slider::new(&mut lighting.ao_strength, 0.0..=3.0).text("AO strength"));
+            ui.checkbox(&mut lighting.env_reflection, "env reflection (sky sheen)");
+            if lighting.env_reflection {
+                ui.add(
+                    egui::Slider::new(&mut lighting.env_reflection_intensity, 0.0..=0.8)
+                        .text("reflection intensity"),
+                );
+            }
 
             ui.separator();
             ui.label("Underwater (live)");
@@ -605,13 +638,17 @@ pub fn view_tweak_panel(
                 ui.label("water tint");
                 ui.color_edit_button_rgb(&mut surface.tint);
             });
-            ui.add(
-                egui::Slider::new(&mut surface.reflectivity, 0.0..=2.0).text("reflectivity"),
-            );
+            ui.add(egui::Slider::new(&mut surface.reflectivity, 0.0..=2.0).text("reflectivity"));
             ui.add(egui::Slider::new(&mut surface.depth, 0.2..=4.0).text("depth darkening"));
             ui.add(
                 egui::Slider::new(&mut surface.underside_opacity, 0.0..=1.0)
                     .text("underside opacity (from below)"),
+            );
+            // Wave SHADING was always there; this is how far the surface
+            // actually heaves. 0 = the old flat pane.
+            ui.add(
+                egui::Slider::new(&mut surface.wave_height, 0.0..=0.6)
+                    .text("wave height (m, at full chop)"),
             );
             if ui.button("reset surface").clicked() {
                 *surface = crate::water::SurfaceTuning::default();
@@ -672,11 +709,32 @@ pub fn view_tweak_panel(
                     })
                     .text("type"),
             );
-            ui.add(egui::Slider::new(&mut weather.target.wind_speed, 0.0..=40.0).text("wind m/s"));
+            ui.add(
+                egui::Slider::new(&mut weather.target.wind_speed, 0.0..=40.0)
+                    .text("wind m/s (gust peak)"),
+            );
             ui.add(
                 egui::Slider::new(&mut weather.target.wind_direction_degrees, 0.0..=360.0)
                     .text("wind direction °"),
             );
+            // Wind arrives in waves. Same hierarchical model (slow air mass →
+            // gusts → eddies) the audio field-wind synth uses, so the wind you
+            // see and the wind you hear can be driven from one state later.
+            ui.add(
+                egui::Slider::new(&mut weather.gustiness, 0.0..=1.0)
+                    .text("gustiness (gusts vs slow drift)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut weather.gust_lull, 0.0..=1.0)
+                    .text("lull depth (fraction of peak)"),
+            );
+            let gust = weather.gust;
+            ui.small(format!(
+                "live wind {:.1} m/s · gust {:.0}% · air mass {:.0}%",
+                gust.speed,
+                gust.gust * 100.0,
+                gust.weather * 100.0
+            ));
 
             ui.separator();
             ui.label("Air");

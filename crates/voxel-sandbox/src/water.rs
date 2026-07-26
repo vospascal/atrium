@@ -32,6 +32,7 @@ use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 
 use crate::day_night::CelestialState;
+use crate::voxel_material;
 use crate::weather::WeatherState;
 use voxel_core::world::{VOXEL_SIZE, WATER_LEVEL};
 
@@ -105,6 +106,11 @@ pub struct SurfaceTuning {
     /// through; 1 = opaque tinted ceiling). Decoupled from `depth` so the top
     /// view can darken while the underside stays transparent.
     pub underside_opacity: f32,
+    /// How far the surface actually heaves, in metres, at full choppiness. The
+    /// wave *shading* was always there; without this the geometry stayed a flat
+    /// pane, which is why still water read as a sheet of glass. A voxel is
+    /// 0.125 m, so ~0.15 reads as a gentle swell.
+    pub wave_height: f32,
 }
 
 impl Default for SurfaceTuning {
@@ -115,6 +121,14 @@ impl Default for SurfaceTuning {
             reflectivity: 0.25,
             depth: 4.0,
             underside_opacity: 0.25,
+            // `VOXEL_WAVE_HEIGHT=0` pins the surface flat, which is how the
+            // swell can be A/B'd in a screenshot (and how the old look is
+            // recovered).
+            wave_height: std::env::var("VOXEL_WAVE_HEIGHT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.15_f32)
+                .clamp(0.0, 2.0),
         }
     }
 }
@@ -434,7 +448,11 @@ pub fn update_water(
     } else {
         (celestial.moon_direction, moonlight * 0.6)
     };
-    let choppiness = (weather.current.wind_speed / 40.0).clamp(0.0, 1.0);
+    // The GUSTING wind, so the water swells and settles in waves with the gusts
+    // rather than sitting at one fixed chop. Referenced against the same speed
+    // the grass saturates at, so a gust moves the grass and the water together.
+    let choppiness =
+        (weather.gusting_wind_speed() / voxel_material::FULL_SWAY_WIND_SPEED).clamp(0.0, 1.0);
 
     for (_, material) in materials.iter_mut() {
         material.water.zenith = celestial.zenith_color.extend(daylight);
@@ -447,7 +465,11 @@ pub fn update_water(
             surface.tint[2],
             surface.reflectivity,
         );
-        material.water.surface_extra =
-            Vec4::new(surface.depth, surface.underside_opacity, 0.0, 0.0);
+        material.water.surface_extra = Vec4::new(
+            surface.depth,
+            surface.underside_opacity,
+            surface.wave_height,
+            0.0,
+        );
     }
 }

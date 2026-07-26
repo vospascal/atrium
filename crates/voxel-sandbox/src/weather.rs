@@ -16,6 +16,7 @@ use bevy::pbr::Material;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
+use voxel_core::wind::{WindDriver, WindFrame, WindShape};
 
 use crate::day_night::CelestialState;
 use crate::ViewMode;
@@ -65,6 +66,21 @@ pub struct WeatherState {
     pub cloud_scroll: Vec2,
     /// Accumulated precipitation drift (m).
     pub precipitation_drift: Vec2,
+    /// Ground-level gust driver. `current.wind_speed` is the *mean* wind the
+    /// slider sets; real wind arrives in waves, so this modulates it into gusts
+    /// and lulls. It is deliberately [`voxel_core::wind`] — the SAME hierarchical
+    /// model the audio field-wind synth uses — so the wind you see and the wind
+    /// you hear can eventually be driven from one state instead of two unrelated
+    /// wobbles. Clouds keep the steady mean: air at altitude doesn't share the
+    /// ground's eddies.
+    wind_driver: WindDriver,
+    /// This frame's gust state (speed, plus the slow/gust/eddy components, so
+    /// different consumers can follow different scales).
+    pub gust: WindFrame,
+    /// How much of the wind arrives as gusts rather than slow drift (`0..1`).
+    pub gustiness: f32,
+    /// How deep the lulls go, as a fraction of the mean wind speed.
+    pub gust_lull: f32,
 }
 
 impl Default for WeatherState {
@@ -91,17 +107,35 @@ impl Default for WeatherState {
             Ok("snow") => Precipitation::Snow,
             _ => Precipitation::None,
         };
+        let gustiness = env_f32("VOXEL_GUSTINESS", 0.55).clamp(0.0, 1.0);
         Self {
             target: settings,
             current: settings,
             precipitation,
             cloud_scroll: Vec2::ZERO,
             precipitation_drift: Vec2::ZERO,
+            wind_driver: WindDriver::new(
+                env_f32("VOXEL_WIND_SEED", 7.0) as u64,
+                WindShape {
+                    gust_strength: gustiness,
+                    ..WindShape::default()
+                },
+            ),
+            gust: WindFrame::default(),
+            gustiness,
+            gust_lull: env_f32("VOXEL_GUST_LULL", 0.18).clamp(0.0, 1.0),
         }
     }
 }
 
 impl WeatherState {
+    /// The wind a ground-level thing (grass, water) should react to: the mean
+    /// wind shaped into gusts and lulls. Use this rather than
+    /// `current.wind_speed`, which is the mean the slider sets.
+    pub fn gusting_wind_speed(&self) -> f32 {
+        self.gust.speed
+    }
+
     /// Unit vector of the wind on the ground plane (x, z).
     pub fn wind_direction(&self) -> Vec2 {
         let radians = self.current.wind_direction_degrees.to_radians();
@@ -142,9 +176,22 @@ pub fn ease_weather(time: Res<Time>, mut weather: ResMut<WeatherState>) {
     current.precipitation_intensity +=
         (target.precipitation_intensity - current.precipitation_intensity) * precipitation_blend;
 
+    // Clouds and precipitation ride the steady mean wind: a gust at head height
+    // shouldn't jerk the whole cloud deck.
     let wind = weather.wind_direction() * weather.current.wind_speed;
     weather.cloud_scroll += wind * delta;
     weather.precipitation_drift += wind * 0.35 * delta;
+
+    // Ground gusts: the mean wind is the gust *peak*, and lulls fall back to
+    // `gust_lull` of it, so raising the slider raises both.
+    let weather = &mut *weather;
+    let mean_speed = weather.current.wind_speed;
+    let mut shape = weather.wind_driver.shape();
+    shape.gust_strength = weather.gustiness;
+    shape.min_speed = mean_speed * weather.gust_lull.clamp(0.0, 1.0);
+    shape.max_speed = mean_speed;
+    weather.wind_driver.set_shape(shape);
+    weather.gust = weather.wind_driver.advance(delta);
 }
 
 #[derive(Clone, Copy, Debug, ShaderType)]
@@ -292,7 +339,7 @@ pub fn update_precipitation(
     }
 
     match *view_mode {
-        ViewMode::FirstPerson => {
+        ViewMode::FirstPerson | ViewMode::Fly => {
             if let Ok(camera_transform) = camera_query.single() {
                 transform.translation =
                     camera_transform.translation - Vec3::Y * (VOLUME_HEIGHT * 0.55);
