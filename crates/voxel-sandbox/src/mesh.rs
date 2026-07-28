@@ -13,9 +13,7 @@ use bevy::prelude::*;
 
 use voxel_core::noise::{hash_3d, hash_to_unit};
 use voxel_core::voxel_source::VoxelSource;
-use voxel_core::world::{
-    Voxel, VoxelWorld, PLATEAU_FLOOR, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
-};
+use voxel_core::world::{Voxel, PLATEAU_FLOOR, VOXEL_SIZE, WORLD_SIZE_Y};
 
 /// (face normal, tangent_1, tangent_2) with `tangent_1 × tangent_2 = normal`,
 /// so corners emitted counter-clockwise face outward.
@@ -30,6 +28,19 @@ pub(crate) const FACE_DIRECTIONS: [(IVec3, IVec3, IVec3); 6] = [
 
 /// Quad corners in tangent space, counter-clockwise: (-,-) (+,-) (+,+) (-,+).
 pub(crate) const QUAD_CORNERS: [(i32, i32); 4] = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
+
+/// Which axis (0 = x, 1 = y, 2 = z) an axis-aligned unit vector lies on. Both
+/// greedy passes sweep slices along a face normal and index half-extents by
+/// tangent axis, so they share this.
+fn axis_of(vector: IVec3) -> usize {
+    if vector.x != 0 {
+        0
+    } else if vector.y != 0 {
+        1
+    } else {
+        2
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MeshGroup {
@@ -149,46 +160,6 @@ pub struct ChunkMeshes {
     pub water: Option<Mesh>,
 }
 
-impl ChunkMeshes {
-    fn is_empty(&self) -> bool {
-        self.terrain_above_water.is_none()
-            && self.meadow_cover.is_none()
-            && self.terrain_below_water.is_none()
-            && self.canopy.is_none()
-            && self.canopy_solid.is_none()
-            && self.water.is_none()
-    }
-}
-
-/// Mesh every render chunk in parallel; empty chunks (open sky beyond the
-/// rim) are dropped.
-pub fn build_all_chunk_meshes(world: &VoxelWorld, seed: u32, season: f32) -> Vec<ChunkMeshes> {
-    use rayon::prelude::*;
-
-    let chunks_x = (WORLD_SIZE_X as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    let chunks_z = (WORLD_SIZE_Z as i32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    let coordinates: Vec<(i32, i32)> = (0..chunks_z)
-        .flat_map(|chunk_z| (0..chunks_x).map(move |chunk_x| (chunk_x, chunk_z)))
-        .collect();
-
-    coordinates
-        .par_iter()
-        .map(|&(chunk_x, chunk_z)| {
-            let scratch = unpack_chunk_window(world, chunk_x, chunk_z);
-            build_chunk_meshes(
-                world,
-                &scratch,
-                seed,
-                season,
-                chunk_x,
-                chunk_z,
-                AmbientOcclusion::PerFragment,
-            )
-        })
-        .filter(|chunk| !chunk.is_empty())
-        .collect()
-}
-
 /// Unpack the dense voxel window one chunk needs: its own columns plus the
 /// 1-cell apron used for neighbor face culling and corner ambient occlusion.
 ///
@@ -302,7 +273,28 @@ pub fn build_chunk_meshes(
                         neighbor_position.y,
                         neighbor_position.z,
                     );
-                    if group_of(neighbor) == Some(voxel_group) {
+                    // Same-group neighbours hide each other's shared face (two
+                    // stacked reeds don't need the surface between them).
+                    //
+                    // Cover needs one exception: `TallGrass` is in the Cover
+                    // group but is never meshed here — it becomes an instanced
+                    // clump barely half a voxel tall — so culling against it
+                    // leaves an open hole into the hollow cover box. Flowers
+                    // generated on top of tall grass hit exactly that.
+                    let neighbor_group = group_of(neighbor);
+                    let neighbor_is_emitted =
+                        voxel_group != MeshGroup::Cover || neighbor != Voxel::TallGrass;
+                    if neighbor_group == Some(voxel_group) && neighbor_is_emitted {
+                        continue;
+                    }
+                    // A cover voxel's box is anchored to the bottom of its cell
+                    // (only its top is squashed down), so its underside is
+                    // exactly coplanar with the terrain face below. When that
+                    // neighbour is solid the quad cannot be seen from any angle.
+                    if voxel_group == MeshGroup::Cover
+                        && normal == IVec3::NEG_Y
+                        && neighbor.is_solid()
+                    {
                         continue;
                     }
                     // A blooming lily is a green pad with a white blossom
@@ -536,16 +528,6 @@ fn greedy_merge_terrain(
         voxel: Voxel,
         below: bool,
     }
-
-    let axis_of = |vector: IVec3| {
-        if vector.x != 0 {
-            0
-        } else if vector.y != 0 {
-            1
-        } else {
-            2
-        }
-    };
 
     for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
         // `na` = normal axis; the slice sweeps along it, and the in-slice grid
@@ -892,11 +874,23 @@ fn emit_canopy_solid(
     half_z: f32,
     buffers: &mut MeshBuffers,
 ) {
-    // Full-size (1.0) so adjacent surface cubes touch into a gap-free
-    // silhouette — the shadow reads as one solid (soft) tree shadow instead of
-    // a stippled grid. The confetti shell (bigger, offset) still covers it.
-    const SHRINK: f32 = 1.0;
-    let half_edge = 0.5 * SHRINK;
+    // The shell's cubes are FULL SIZE (no shrink) and sit exactly on the voxel
+    // grid, so adjacent surface faces are coplanar and touch — which is what
+    // lets this pass greedy-merge, unlike the confetti (shrunk *and* per-voxel
+    // jittered, so no two of its faces ever line up).
+    //
+    // Merging changes nothing about the silhouette: identical faces in
+    // identical places, just fewer and larger quads covering them. That matters
+    // because this shell was the heaviest mesh group in the scene — heavier
+    // than the confetti it exists to back.
+    //
+    // Leaves are sparse, so rather than sweep every slice of the chunk six
+    // times hunting for them, ONE pass collects the exposed faces and buckets
+    // them by (direction, slice). Only slices that actually hold faces are then
+    // merged, over the bounding box of those faces rather than the whole chunk
+    // cross-section.
+    type SliceFaces = std::collections::HashMap<i32, Vec<(i32, i32, [f32; 4])>>;
+    let mut buckets: [SliceFaces; 6] = std::array::from_fn(|_| SliceFaces::new());
 
     for y in 0..WORLD_SIZE_Y as i32 {
         for z in z_range.clone() {
@@ -905,33 +899,122 @@ fn emit_canopy_solid(
                 if group_of(voxel) != Some(MeshGroup::Canopy) {
                     continue;
                 }
-                let position = IVec3::new(x, y, z);
                 let mut color = voxel_color(world, scratch, voxel, x, y, z, seed, season);
                 // Slightly darker so it reads as canopy interior through gaps
                 // (alpha carries the AO-skip sentinel — leave it alone).
                 color[0] *= 0.8;
                 color[1] *= 0.8;
                 color[2] *= 0.8;
-                let center = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
+                let position = IVec3::new(x, y, z);
+                for (direction, (normal, _, _)) in FACE_DIRECTIONS.iter().enumerate() {
                     // Surface only: skip faces against other leaves.
-                    let neighbor = position + normal;
+                    let neighbor = position + *normal;
                     if group_of(scratch.get(neighbor.x, neighbor.y, neighbor.z))
                         == Some(MeshGroup::Canopy)
                     {
                         continue;
                     }
-                    let face_center = center + normal.as_vec3() * half_edge;
+                    // Split the position into "which slice" + "where in it",
+                    // matching the (u, v) convention the merge below uses.
+                    let (slice, u, v) = match axis_of(*normal) {
+                        0 => (x, y, z),
+                        1 => (y, x, z),
+                        _ => (z, x, y),
+                    };
+                    buckets[direction]
+                        .entry(slice)
+                        .or_default()
+                        .push((u, v, color));
+                }
+            }
+        }
+    }
+
+    for (direction, (normal, tangent_1, tangent_2)) in FACE_DIRECTIONS.iter().enumerate() {
+        let na = axis_of(*normal);
+        for (&slice, faces) in &buckets[direction] {
+            // Merge within the faces' own bounding box, not the chunk's.
+            let u_lo = faces.iter().map(|&(u, _, _)| u).min().expect("non-empty");
+            let u_hi = faces.iter().map(|&(u, _, _)| u).max().expect("non-empty");
+            let v_lo = faces.iter().map(|&(_, v, _)| v).min().expect("non-empty");
+            let v_hi = faces.iter().map(|&(_, v, _)| v).max().expect("non-empty");
+            let u_count = (u_hi - u_lo + 1) as usize;
+            let v_count = (v_hi - v_lo + 1) as usize;
+
+            // Exposed faces keyed by colour: two cells merge only if they'd
+            // have been the same shade anyway.
+            let mut mask: Vec<Option<[f32; 4]>> = vec![None; u_count * v_count];
+            for &(u, v, color) in faces {
+                mask[(v - v_lo) as usize * u_count + (u - u_lo) as usize] = Some(color);
+            }
+            let mut used = vec![false; u_count * v_count];
+
+            for vi0 in 0..v_count {
+                for ui0 in 0..u_count {
+                    let start = vi0 * u_count + ui0;
+                    if used[start] {
+                        continue;
+                    }
+                    let Some(color) = mask[start] else {
+                        continue;
+                    };
+                    // Grow along u, then extend that whole run along v.
+                    let mut width = 1;
+                    while ui0 + width < u_count {
+                        let index = vi0 * u_count + ui0 + width;
+                        if used[index] || mask[index] != Some(color) {
+                            break;
+                        }
+                        width += 1;
+                    }
+                    let mut height = 1;
+                    'grow: while vi0 + height < v_count {
+                        for du in 0..width {
+                            let index = (vi0 + height) * u_count + ui0 + du;
+                            if used[index] || mask[index] != Some(color) {
+                                break 'grow;
+                            }
+                        }
+                        height += 1;
+                    }
+                    for dv in 0..height {
+                        for du in 0..width {
+                            used[(vi0 + dv) * u_count + ui0 + du] = true;
+                        }
+                    }
+
+                    let u0 = u_lo + ui0 as i32;
+                    let v0 = v_lo + vi0 as i32;
+                    let u1 = u0 + width as i32 - 1;
+                    let v1 = v0 + height as i32 - 1;
+                    let (min_x, max_x, min_y, max_y, min_z, max_z) = match na {
+                        0 => (slice, slice, u0, u1, v0, v1),
+                        1 => (u0, u1, slice, slice, v0, v1),
+                        _ => (u0, u1, v0, v1, slice, slice),
+                    };
+                    let centroid = Vec3::new(
+                        (min_x + max_x) as f32 / 2.0 + 0.5,
+                        (min_y + max_y) as f32 / 2.0 + 0.5,
+                        (min_z + max_z) as f32 / 2.0 + 0.5,
+                    );
+                    let half_axis = [
+                        (max_x - min_x + 1) as f32 / 2.0,
+                        (max_y - min_y + 1) as f32 / 2.0,
+                        (max_z - min_z + 1) as f32 / 2.0,
+                    ];
+                    let half_t1 = half_axis[axis_of(*tangent_1)];
+                    let half_t2 = half_axis[axis_of(*tangent_2)];
+
                     let mut corners = [Vec3::ZERO; 4];
                     for (corner_index, &(along_1, along_2)) in QUAD_CORNERS.iter().enumerate() {
-                        let corner = face_center
-                            + (tangent_1.as_vec3() * along_1 as f32
-                                + tangent_2.as_vec3() * along_2 as f32)
-                                * half_edge;
+                        let point = centroid
+                            + normal.as_vec3() * 0.5
+                            + tangent_1.as_vec3() * (along_1 as f32 * half_t1)
+                            + tangent_2.as_vec3() * (along_2 as f32 * half_t2);
                         corners[corner_index] = Vec3::new(
-                            (corner.x - half_x) * VOXEL_SIZE,
-                            corner.y * VOXEL_SIZE,
-                            (corner.z - half_z) * VOXEL_SIZE,
+                            (point.x - half_x) * VOXEL_SIZE,
+                            point.y * VOXEL_SIZE,
+                            (point.z - half_z) * VOXEL_SIZE,
                         );
                     }
                     buffers.add_quad(corners, normal.as_vec3(), [color; 4], false);
@@ -1186,47 +1269,346 @@ fn voxel_color(
 mod tests {
     use super::*;
 
+    /// A cover box's underside is coplanar with the terrain top beneath it, so
+    /// when that neighbour is solid the face is invisible and must not be
+    /// emitted. This is pure savings — roughly a sixth of an isolated cover
+    /// voxel's faces.
     #[test]
-    fn chunk_meshes_are_consistent_and_nonempty() {
-        let world = VoxelWorld::generate(1, 0.0);
-        let chunks = build_all_chunk_meshes(&world, 1, 0.0);
+    fn cover_on_solid_ground_drops_its_underside() {
+        let faces = cover_faces_over(Voxel::Grass);
         assert!(
-            chunks.len() > 30,
-            "expected the island to span many chunks, got {}",
-            chunks.len()
+            !faces.contains(&IVec3::NEG_Y),
+            "cover sitting on solid ground still emitted a bottom face: {faces:?}"
+        );
+        assert!(
+            faces.contains(&IVec3::Y),
+            "cover must still emit its top face: {faces:?}"
+        );
+    }
+
+    /// The bug this cull rule replaced: `TallGrass` is in the Cover group but
+    /// is never meshed (it becomes an instanced clump barely half a voxel
+    /// tall), so culling against it opened a hole into the hollow flower box.
+    #[test]
+    fn cover_over_tall_grass_keeps_its_underside() {
+        let faces = cover_faces_over(Voxel::TallGrass);
+        assert!(
+            faces.contains(&IVec3::NEG_Y),
+            "cover above unmeshed tall grass must keep its underside closed, \
+             or you can see into it: {faces:?}"
+        );
+    }
+
+    /// Which face directions a flower emits when the voxel below it is
+    /// `below`. Counts quads by normal in a one-cover-voxel world.
+    fn cover_faces_over(below: Voxel) -> Vec<IVec3> {
+        let flower_y: i32 = 40;
+        let scratch = voxel_core::world::ChunkScratch::from_columns(0, 0, 3, 3, |_, _, column| {
+            column[flower_y as usize] = Voxel::FlowerPink;
+            column[flower_y as usize - 1] = below;
+        });
+
+        let mut faces = Vec::new();
+        for (normal, _, _) in FACE_DIRECTIONS {
+            let neighbor = scratch.get(1, flower_y + normal.y, 1);
+            let neighbor_group = group_of(neighbor);
+            let neighbor_is_emitted = neighbor != Voxel::TallGrass;
+            if neighbor_group == Some(MeshGroup::Cover) && neighbor_is_emitted {
+                continue;
+            }
+            if normal == IVec3::NEG_Y && neighbor.is_solid() {
+                continue;
+            }
+            faces.push(normal);
+        }
+        faces
+    }
+
+    /// A uniform source with a single solid block of leaves, for exercising the
+    /// canopy shell in isolation.
+    struct LeafBlock {
+        span: i32,
+        base_y: i32,
+    }
+
+    impl VoxelSource for LeafBlock {
+        fn unpack_chunk(
+            &self,
+            x_start: i32,
+            x_end: i32,
+            z_start: i32,
+            z_end: i32,
+        ) -> voxel_core::world::ChunkScratch {
+            let (span, base_y) = (self.span, self.base_y);
+            voxel_core::world::ChunkScratch::from_columns(
+                x_start - 1,
+                z_start - 1,
+                x_end - x_start + 2,
+                z_end - z_start + 2,
+                |x, z, column| {
+                    if (0..span).contains(&x) && (0..span).contains(&z) {
+                        for y in base_y..base_y + span {
+                            column[y as usize] = Voxel::Leaves;
+                        }
+                    }
+                },
+            )
+        }
+        fn dryness_at(&self, _: i32, _: i32) -> f32 {
+            0.5
+        }
+        fn cover_at(&self, _: i32, _: i32) -> f32 {
+            0.5
+        }
+        fn water_distance_at(&self, _: i32, _: i32) -> f32 {
+            10.0
+        }
+        fn tree_tone_at(&self, _: i32, _: i32) -> f32 {
+            0.5
+        }
+        fn world_offset(&self) -> (f32, f32) {
+            (0.0, 0.0)
+        }
+    }
+
+    /// Greedy merging the solid canopy shell must be **lossless**: the same
+    /// surface, in the same place, just covered by fewer and larger quads.
+    ///
+    /// A solid `span³` block of leaves has exactly `6 · span²` exposed voxel
+    /// faces. Merged perfectly — the block's colour is uniform, so nothing
+    /// blocks a merge — that is 6 quads of `span × span`, and the total area
+    /// must be unchanged. Area is the invariant that catches both a dropped
+    /// face and a double-covered one.
+    #[test]
+    fn merged_canopy_shell_covers_the_same_surface() {
+        const SPAN: i32 = 3;
+        let source = LeafBlock {
+            span: SPAN,
+            base_y: 40,
+        };
+        let scratch = source.unpack_chunk(0, SPAN, 0, SPAN);
+        let mut buffers = MeshBuffers::default();
+        emit_canopy_solid(
+            &source,
+            &scratch,
+            1,
+            0.0,
+            0..SPAN,
+            0..SPAN,
+            0.0,
+            0.0,
+            &mut buffers,
+        );
+        let mesh = buffers.into_mesh();
+
+        let quads = mesh.count_vertices() / 4;
+        assert_eq!(
+            quads, 6,
+            "a uniform {SPAN}³ leaf block should merge to one quad per side, got {quads}"
         );
 
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("float3 positions");
+        let mut area = 0.0_f32;
+        for quad in positions.chunks_exact(4) {
+            let origin = Vec3::from(quad[0]);
+            let edge_1 = Vec3::from(quad[1]) - origin;
+            let edge_2 = Vec3::from(quad[3]) - origin;
+            area += edge_1.cross(edge_2).length();
+        }
+        // 6 sides × SPAN² voxel faces, each VOXEL_SIZE² in world units.
+        let expected = 6.0 * (SPAN * SPAN) as f32 * VOXEL_SIZE * VOXEL_SIZE;
+        assert!(
+            (area - expected).abs() < 1e-4,
+            "merged shell area {area} should equal the unmerged surface {expected}"
+        );
+    }
+
+    /// Headless geometry baseline for the whole island: what every mesh group
+    /// costs in vertices, triangles and VRAM bytes.
+    ///
+    /// This is the yardstick the optimization candidates in
+    /// `docs/voxel-optimization-candidates.md` are measured against. It runs
+    /// without a window, so a change's effect on geometry is reproducible from
+    /// the terminal — frame time still needs the real app, but geometry does
+    /// not. Run it with:
+    ///
+    /// ```text
+    /// cargo test -p voxel-sandbox --release island_geometry_baseline -- --nocapture
+    /// ```
+    #[test]
+    fn island_geometry_baseline() {
+        use crate::geometry_census::{GeometryCensus, GeometryKind, GeometryTotals};
+        use std::sync::Arc;
+        use voxel_core::voxel_source::IslandSource;
+        use voxel_core::world::VoxelWorld;
+
+        let started = std::time::Instant::now();
+        let source = IslandSource::new(Arc::new(VoxelWorld::generate(1, 0.0)));
+        let bounds = IslandSource::chunk_bounds(CHUNK_SIZE);
+        let mut totals = GeometryTotals::default();
+        let mut chunks = 0;
+        let mut clump_total = 0_usize;
+
+        let add = |totals: &mut GeometryTotals, mesh: &Option<Mesh>, kind: GeometryKind| {
+            let Some(mesh) = mesh else {
+                return;
+            };
+            let entry = GeometryCensus::of(mesh, kind);
+            let row = &mut totals.rows[kind.index()];
+            row.entities += 1;
+            row.vertices += entry.vertices as u64;
+            row.triangles += entry.triangles as u64;
+            row.bytes += entry.bytes as u64;
+        };
+
+        for chunk_z in -bounds..=bounds {
+            for chunk_x in -bounds..=bounds {
+                let scratch = unpack_chunk_window(&source, chunk_x, chunk_z);
+                let chunk = build_chunk_meshes(
+                    &source,
+                    &scratch,
+                    1,
+                    0.0,
+                    chunk_x,
+                    chunk_z,
+                    AmbientOcclusion::PerFragment,
+                );
+                chunks += 1;
+                add(
+                    &mut totals,
+                    &chunk.terrain_above_water,
+                    GeometryKind::TerrainAbove,
+                );
+                add(
+                    &mut totals,
+                    &chunk.terrain_below_water,
+                    GeometryKind::TerrainBelow,
+                );
+                add(&mut totals, &chunk.meadow_cover, GeometryKind::MeadowCover);
+                add(&mut totals, &chunk.canopy, GeometryKind::Canopy);
+                add(&mut totals, &chunk.canopy_solid, GeometryKind::CanopySolid);
+                add(&mut totals, &chunk.water, GeometryKind::Water);
+
+                // Grass is built by the streamer rather than the chunk mesher,
+                // so measure it here too — otherwise the census silently omits
+                // the group whose cost drove the batching work.
+                let clumps =
+                    crate::streaming::harvest_grass_clumps(&source, &scratch, chunk_x, chunk_z);
+                let (offset_x, offset_z) = source.world_offset();
+                let grass = crate::grass::build_chunk_grass_mesh(&clumps, offset_x, offset_z, 1);
+                clump_total += clumps.len();
+                add(&mut totals, &grass, GeometryKind::GrassClump);
+            }
+        }
+
+        println!(
+            "\nisland geometry baseline ({chunks} chunks, {clump_total} grass clumps, {:.1?})",
+            started.elapsed()
+        );
+        println!(
+            "  {:<13} {:>7} {:>12} {:>12} {:>9}",
+            "group", "meshes", "vertices", "triangles", "MB"
+        );
+        for kind in GeometryKind::ALL {
+            let row = totals.row(kind);
+            if row.entities == 0 {
+                continue;
+            }
+            println!(
+                "  {:<13} {:>7} {:>12} {:>12} {:>9.2}",
+                kind.label(),
+                row.entities,
+                row.vertices,
+                row.triangles,
+                row.bytes as f64 / 1.0e6,
+            );
+        }
+        let overall = totals.overall();
+        println!(
+            "  {:<13} {:>7} {:>12} {:>12} {:>9.2}\n",
+            "TOTAL",
+            overall.entities,
+            overall.vertices,
+            overall.triangles,
+            overall.bytes as f64 / 1.0e6,
+        );
+        assert!(overall.vertices > 0, "island produced no geometry");
+    }
+
+    /// Mesh the whole island through [`IslandSource`] — the same path the
+    /// streamer takes, one chunk at a time — and check the totals still look
+    /// like an island. This replaced a test over the old bulk island mesher,
+    /// which no longer exists: there is one render path now.
+    #[test]
+    fn island_chunks_are_consistent_and_nonempty() {
+        use std::sync::Arc;
+        use voxel_core::voxel_source::IslandSource;
+        use voxel_core::world::VoxelWorld;
+
+        let source = IslandSource::new(Arc::new(VoxelWorld::generate(1, 0.0)));
+        let bounds = IslandSource::chunk_bounds(CHUNK_SIZE);
+
+        let mut nonempty_chunks = 0;
         let mut above_total = 0;
         let mut meadow_total = 0;
         let mut below_total = 0;
         let mut water_total = 0;
-        for chunk in &chunks {
-            for (label, mesh) in [
-                ("terrain above water", &chunk.terrain_above_water),
-                ("meadow cover", &chunk.meadow_cover),
-                ("terrain below water", &chunk.terrain_below_water),
-                ("water", &chunk.water),
-            ] {
-                let Some(mesh) = mesh else {
-                    continue;
-                };
-                let vertex_count = mesh.count_vertices();
-                assert!(vertex_count > 0, "{label} mesh present but empty");
-                assert_eq!(vertex_count % 4, 0, "{label} mesh has partial quads");
-                let index_count = mesh.indices().expect("indices").len();
-                assert_eq!(index_count % 6, 0, "{label} mesh has partial quad indices");
+
+        for chunk_z in -bounds..=bounds {
+            for chunk_x in -bounds..=bounds {
+                let scratch = unpack_chunk_window(&source, chunk_x, chunk_z);
+                let chunk = build_chunk_meshes(
+                    &source,
+                    &scratch,
+                    1,
+                    0.0,
+                    chunk_x,
+                    chunk_z,
+                    AmbientOcclusion::PerFragment,
+                );
+
+                let mut any = false;
+                for (label, mesh) in [
+                    ("terrain above water", &chunk.terrain_above_water),
+                    ("meadow cover", &chunk.meadow_cover),
+                    ("terrain below water", &chunk.terrain_below_water),
+                    ("water", &chunk.water),
+                ] {
+                    let Some(mesh) = mesh else {
+                        continue;
+                    };
+                    any = true;
+                    let vertex_count = mesh.count_vertices();
+                    assert!(vertex_count > 0, "{label} mesh present but empty");
+                    assert_eq!(vertex_count % 4, 0, "{label} mesh has partial quads");
+                    let index_count = mesh.indices().expect("indices").len();
+                    assert_eq!(index_count % 6, 0, "{label} mesh has partial quad indices");
+                }
+                if any {
+                    nonempty_chunks += 1;
+                }
+
+                above_total += chunk
+                    .terrain_above_water
+                    .as_ref()
+                    .map_or(0, Mesh::count_vertices);
+                meadow_total += chunk.meadow_cover.as_ref().map_or(0, Mesh::count_vertices);
+                below_total += chunk
+                    .terrain_below_water
+                    .as_ref()
+                    .map_or(0, Mesh::count_vertices);
+                water_total += chunk.water.as_ref().map_or(0, Mesh::count_vertices);
             }
-            above_total += chunk
-                .terrain_above_water
-                .as_ref()
-                .map_or(0, Mesh::count_vertices);
-            meadow_total += chunk.meadow_cover.as_ref().map_or(0, Mesh::count_vertices);
-            below_total += chunk
-                .terrain_below_water
-                .as_ref()
-                .map_or(0, Mesh::count_vertices);
-            water_total += chunk.water.as_ref().map_or(0, Mesh::count_vertices);
         }
+
+        assert!(
+            nonempty_chunks > 30,
+            "expected the island to span many chunks, got {nonempty_chunks}"
+        );
         assert!(above_total > 100_000, "above-water terrain too small");
         assert!(meadow_total > 10_000, "meadow cover too small");
         assert!(below_total > 100_000, "underwater terrain too small");

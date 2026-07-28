@@ -18,16 +18,14 @@
 //! see `build_clump_mesh`.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use voxel_core::noise::{hash_3d, hash_to_unit, smoothstep};
-use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::VOXEL_SIZE;
 
 use crate::voxel_material::{GrassExtension, GrassMaterial, FULL_SWAY_WIND_SPEED};
 use crate::weather::WeatherState;
-use crate::WorldMesh;
 
 /// Marker for spawned grass clumps (despawned on world regenerate).
 #[derive(Component)]
@@ -87,13 +85,6 @@ const TIP_BRIGHTEN: f32 = 1.4;
 
 /// The clump-mesh palette, one pre-coloured mesh per biome tone. Shared by the
 /// island and the streamed world, so both draw the same instanced grass.
-pub fn build_clump_meshes(meshes: &mut Assets<Mesh>) -> Vec<Handle<Mesh>> {
-    GRASS_TONES
-        .iter()
-        .map(|tone| meshes.add(build_clump_mesh(*tone)))
-        .collect()
-}
-
 /// The shared wind material. Solid voxel-box blades → default back-face
 /// culling; the wind extension swaps in the sway vertex shaders and the tone
 /// comes from the mesh's vertex colours.
@@ -109,7 +100,7 @@ pub fn build_grass_material(materials: &mut Assets<GrassMaterial>) -> Handle<Gra
 }
 
 /// Which tone in [`GRASS_TONES`] a column gets: drier and farther from water →
-/// straw. Indexes the palette from [`build_clump_meshes`].
+/// straw. Baked straight into the batched mesh's vertex colours.
 pub fn clump_variant(dryness: f32, water_distance: f32) -> usize {
     let lushness = smoothstep(9.0, 1.5, water_distance);
     let strawness = (dryness * 0.7 + (1.0 - lushness) * 0.3).clamp(0.0, 1.0);
@@ -124,80 +115,159 @@ pub fn is_clump_column(world_x: i32, world_z: i32) -> bool {
     world_x.rem_euclid(CLUMP_STRIDE as i32) == 0 && world_z.rem_euclid(CLUMP_STRIDE as i32) == 0
 }
 
-/// Per-instance placement for a clump sitting on top of `top_y`: centred in its
-/// column, with a hashed yaw and height so no two clumps look alike. `offset_x`
-/// / `offset_z` centre the world (the island straddles the origin, the streamed
-/// world does not).
-pub fn clump_transform(
+/// How far a blade face's shading normal is bent toward world up: `0` keeps
+/// the true cube normal, `1` points every face straight up.
+///
+/// A grass blade is a thin box, so nearly all of what you see is its *sides* —
+/// and a vertical face catches almost no light from a high sun, which is why
+/// voxel grass reads as dark clutter sitting on a bright meadow. Real grass
+/// doesn't behave like a wall: the blades are thin and translucent and the
+/// field as a whole bounces light upward, so a meadow shades much closer to a
+/// lit horizontal surface than to a mass of vertical ones.
+///
+/// Bending the *shading* normal up recovers that. Geometry and winding are
+/// untouched, so back-face culling still works and the silhouette is identical
+/// — only the lighting changes. Kept below `1.0` so blades retain some
+/// side-to-side form instead of flattening into cardboard.
+const BLADE_NORMAL_LIFT: f32 = 0.75;
+
+/// Bend a face normal toward world up by [`BLADE_NORMAL_LIFT`].
+///
+/// The downward face is left alone: it is hidden against the ground, and
+/// lifting it would flip it to face the sky and make the blade glow from
+/// underneath.
+fn upward_shading_normal(normal: [f32; 3]) -> [f32; 3] {
+    if normal[1] < 0.0 {
+        return normal;
+    }
+    let lifted = Vec3::from(normal).lerp(Vec3::Y, BLADE_NORMAL_LIFT);
+    lifted.normalize_or(Vec3::Y).to_array()
+}
+
+/// Where one clump sits and how it is turned — previously an entity
+/// `Transform`, now baked into the batch mesh's vertices.
+struct ClumpPlacement {
+    /// Clump origin in world (render) space.
+    base: Vec3,
+    yaw: f32,
+    /// Per-clump height multiplier, so no two clumps are the same size.
+    height_scale: f32,
+    /// The wind phase for this clump. Baked per-vertex because the shader can
+    /// no longer read it from a per-clump transform — see
+    /// [`build_chunk_grass_mesh`].
+    phase: f32,
+}
+
+/// Hashed placement for a clump sitting on top of `top_y`: centred in its
+/// column, with a yaw and height so no two clumps look alike. `offset_x` /
+/// `offset_z` centre the world.
+fn clump_placement(
     world_x: i32,
     top_y: i32,
     world_z: i32,
     offset_x: f32,
     offset_z: f32,
     seed: u32,
-) -> Transform {
+) -> ClumpPlacement {
     let yaw =
         hash_to_unit(hash_3d(world_x, 0, world_z, seed.wrapping_add(31))) * std::f32::consts::TAU;
-    let height = 0.7 + 0.6 * hash_to_unit(hash_3d(world_x, 1, world_z, seed.wrapping_add(32)));
-    Transform {
-        translation: Vec3::new(
-            (world_x as f32 + 0.5 - offset_x) * VOXEL_SIZE,
-            top_y as f32 * VOXEL_SIZE,
-            (world_z as f32 + 0.5 - offset_z) * VOXEL_SIZE,
-        ),
-        rotation: Quat::from_rotation_y(yaw),
-        scale: Vec3::new(1.0, height, 1.0),
+    let height_scale =
+        0.7 + 0.6 * hash_to_unit(hash_3d(world_x, 1, world_z, seed.wrapping_add(32)));
+    let base = Vec3::new(
+        (world_x as f32 + 0.5 - offset_x) * VOXEL_SIZE,
+        top_y as f32 * VOXEL_SIZE,
+        (world_z as f32 + 0.5 - offset_z) * VOXEL_SIZE,
+    );
+    ClumpPlacement {
+        base,
+        yaw,
+        height_scale,
+        // Must stay identical to what the shader used to compute from the
+        // clump's transform translation, or the meadow's sway pattern shifts.
+        phase: base.x * 0.6 + base.z * 0.8,
     }
 }
 
-/// Build the palette + material and spawn a clump at every `CLUMP_STRIDE`-th
-/// `TallGrass` column, picking a tone variant from the biome.
-pub fn spawn_instanced_grass(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<GrassMaterial>,
-    world: &VoxelWorld,
+/// Bake **every clump in a chunk into one mesh**.
+///
+/// Grass used to be one entity per clump sharing a palette of pre-coloured
+/// meshes, leaning on bevy to auto-instance them. That made the meadow
+/// entity-bound: thousands of tiny entities cost far more frame time than
+/// their handful of vertices ever did, and the streamer's detail tier had to
+/// spawn and despawn them in bulk as the camera moved.
+///
+/// Batching moves that cost to build time. The catch is that a clump's
+/// identity used to live in its `Transform`, and the wind shader read it from
+/// there — so two things have to be baked into vertex data instead:
+///
+/// * **`UV.x` = wind phase.** The shader took this from the transform's
+///   translation. Merged, every clump in a chunk would share the chunk's
+///   origin and the whole patch would sway in lockstep.
+/// * **`UV.y` = unscaled blade height.** The shader took this from
+///   `position.y` in object space. Merged, positions are world space, so
+///   `position.y` is terrain height plus blade height — meaningless as a bend
+///   factor. It stays *unscaled* by `height_scale` deliberately: the old
+///   transform scaled the geometry but not the value handed to the wind
+///   function, and matching that keeps the sway looking the same.
+///
+/// Both `grass.wgsl` and `grass_prepass.wgsl` read these, and must agree
+/// bit-for-bit or the depth prepass z-fights.
+pub fn build_chunk_grass_mesh(
+    clumps: &[(i32, i32, i32, usize)],
+    offset_x: f32,
+    offset_z: f32,
     seed: u32,
-) {
-    let clumps = build_clump_meshes(meshes);
-    let material = build_grass_material(materials);
-
-    let half_x = WORLD_SIZE_X as f32 / 2.0;
-    let half_z = WORLD_SIZE_Z as f32 / 2.0;
-    let mut count = 0_usize;
-
-    for z in (0..WORLD_SIZE_Z as i32).step_by(CLUMP_STRIDE) {
-        for x in (0..WORLD_SIZE_X as i32).step_by(CLUMP_STRIDE) {
-            // Topmost tall-grass cell in this column, if any.
-            let mut grass_top: Option<i32> = None;
-            for (voxel, y_start, length) in world.column_runs(x, z) {
-                if voxel == Voxel::TallGrass {
-                    grass_top = Some(y_start + length - 1);
-                }
-            }
-            let Some(top_y) = grass_top else {
-                continue;
-            };
-
-            let variant = clump_variant(world.dryness_at(x, z), world.water_distance_at(x, z));
-            commands.spawn((
-                Mesh3d(clumps[variant].clone()),
-                MeshMaterial3d(material.clone()),
-                clump_transform(x, top_y, z, half_x, half_z, seed),
-                NotShadowCaster,
-                GrassClump,
-                WorldMesh,
-            ));
-            count += 1;
-        }
+) -> Option<Mesh> {
+    if clumps.is_empty() {
+        return None;
     }
-    info!("spawned {count} instanced grass clumps");
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for &(world_x, top_y, world_z, variant) in clumps {
+        let placement = clump_placement(world_x, top_y, world_z, offset_x, offset_z, seed);
+        let tone = GRASS_TONES[variant.min(GRASS_TONES.len() - 1)];
+        push_clump(
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut uvs,
+            &mut indices,
+            &placement,
+            tone,
+        );
+    }
+
+    Some(
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices)),
+    )
 }
 
-/// A clump = a few thin voxel-box columns fanned around the center (solid,
-/// back-face culled) — the gvox-style voxel blade. Vertex color = the biome
-/// tone (opaque); StandardMaterial multiplies it into the base color.
-fn build_clump_mesh(tone: [f32; 3]) -> Mesh {
+/// Append one clump — a few thin voxel-box blades fanned around its centre,
+/// placed by `placement`. The gvox-style voxel blade: solid boxes, back-face
+/// culled, root-dark to tip-bright.
+#[allow(clippy::too_many_arguments)]
+fn push_clump(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    placement: &ClumpPlacement,
+    tone: [f32; 3],
+) {
     let linear = Color::srgb(tone[0], tone[1], tone[2]).to_linear();
     let root_color = [
         linear.red * ROOT_DARKEN,
@@ -212,117 +282,241 @@ fn build_clump_mesh(tone: [f32; 3]) -> Mesh {
         1.0,
     ];
 
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    let rotation = Quat::from_rotation_y(placement.yaw);
+    // Object space → world: scale the blade's height, turn it by the clump's
+    // yaw, drop it at the clump's base. What the entity `Transform` used to do.
+    let place = |local: Vec3| {
+        placement.base + rotation * Vec3::new(local.x, local.y * placement.height_scale, local.z)
+    };
 
     for blade in 0..CLUMP_BLADES {
         let angle = blade as f32 * (std::f32::consts::TAU / CLUMP_BLADES as f32) + 0.4;
-        let base_x = angle.cos() * CLUMP_SPREAD;
-        let base_z = angle.sin() * CLUMP_SPREAD;
-        // One box per blade. Stacking separate cubes produced coincident
-        // internal faces (top of one == bottom of the next) that z-fought into
-        // jagged noise; the wind shader bends the single box smoothly by
-        // vertex height instead, so no segments are needed. The root/tip colors
-        // give the dark-base → bright-tip gradient.
-        push_box(
-            &mut positions,
-            &mut normals,
-            &mut colors,
-            &mut indices,
-            base_x,
-            base_z,
-            0.0,
-            CLUMP_HEIGHT,
-            BLADE_HALF_WIDTH,
-            root_color,
-            tip_color,
+        let center_x = angle.cos() * CLUMP_SPREAD;
+        let center_z = angle.sin() * CLUMP_SPREAD;
+        let (x0, x1) = (center_x - BLADE_HALF_WIDTH, center_x + BLADE_HALF_WIDTH);
+        let (z0, z1) = (center_z - BLADE_HALF_WIDTH, center_z + BLADE_HALF_WIDTH);
+        let (y0, y1) = (0.0, CLUMP_HEIGHT);
+
+        // Each face: TRUE outward normal + 4 corners wound CCW as seen from
+        // outside. The winding (and so back-face culling) uses the true normal;
+        // only the shading normal is bent upward — see `upward_shading_normal`.
+        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+            (
+                [0.0, 1.0, 0.0],
+                [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
+            ),
+            (
+                [0.0, -1.0, 0.0],
+                [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+            ),
+            (
+                [1.0, 0.0, 0.0],
+                [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
+            ),
+            (
+                [-1.0, 0.0, 0.0],
+                [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
+            ),
+            (
+                [0.0, 0.0, 1.0],
+                [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
+            ),
+            (
+                [0.0, 0.0, -1.0],
+                [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]],
+            ),
+        ];
+
+        for (normal, verts) in faces {
+            let base_index = positions.len() as u32;
+            // Lift then rotate: the lift is toward world up and a yaw rotation
+            // leaves Y alone, so the order doesn't matter — but doing it in
+            // object space keeps it the same maths the palette meshes used.
+            let shaded = rotation * Vec3::from(upward_shading_normal(normal));
+            for vertex in verts {
+                positions.push(place(Vec3::from(vertex)).to_array());
+                normals.push(shaded.to_array());
+                colors.push(if vertex[1] >= y1 - 1e-4 {
+                    tip_color
+                } else {
+                    root_color
+                });
+                // Wind phase + the UNSCALED object-space height the bend uses.
+                uvs.push([placement.phase, vertex[1]]);
+            }
+            indices.extend([
+                base_index,
+                base_index + 1,
+                base_index + 2,
+                base_index,
+                base_index + 2,
+                base_index + 3,
+            ]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the lift: a blade's side faces must shade closer to
+    /// a lit horizontal surface than to a wall, or a meadow reads as dark
+    /// clutter under a high sun.
+    #[test]
+    fn side_normals_are_bent_toward_up() {
+        for side in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            let lifted = upward_shading_normal(side);
+            assert!(
+                lifted[1] > 0.5,
+                "side normal {side:?} should tilt strongly upward, got {lifted:?}"
+            );
+            let along_face = lifted[0] * side[0] + lifted[2] * side[2];
+            assert!(
+                along_face > 0.0,
+                "side normal {side:?} lost its facing direction: {lifted:?}"
+            );
+        }
+    }
+
+    /// The underside is hidden against the ground. Lifting it would flip it to
+    /// face the sky and light the blade from below.
+    #[test]
+    fn downward_normal_is_left_alone() {
+        assert_eq!(upward_shading_normal([0.0, -1.0, 0.0]), [0.0, -1.0, 0.0]);
+    }
+
+    /// Normals must stay unit length or PBR shading skews.
+    #[test]
+    fn shading_normals_stay_unit_length() {
+        for normal in [
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, -1.0, 0.0],
+        ] {
+            let lifted = upward_shading_normal(normal);
+            let length = Vec3::from(lifted).length();
+            assert!(
+                (length - 1.0).abs() < 1e-5,
+                "normal {normal:?} → {lifted:?} has length {length}"
+            );
+        }
+    }
+
+    /// The mesh's UV_0 as `[f32; 2]` pairs. `Mesh` only exposes a typed
+    /// accessor for float3, so the two-component case is matched by hand.
+    fn uvs_of(mesh: &Mesh) -> &[[f32; 2]] {
+        match mesh.attribute(Mesh::ATTRIBUTE_UV_0).expect("uvs") {
+            bevy::mesh::VertexAttributeValues::Float32x2(values) => values,
+            other => panic!("UV_0 should be Float32x2, got {other:?}"),
+        }
+    }
+
+    fn clumps(count: i32) -> Vec<(i32, i32, i32, usize)> {
+        (0..count)
+            .map(|index| (index * CLUMP_STRIDE as i32, 40, 0, 0))
+            .collect()
+    }
+
+    /// Batching must produce exactly the geometry the per-clump entities did:
+    /// 4 blades × 6 faces × 4 corners each, all in one mesh.
+    #[test]
+    fn batched_mesh_holds_every_clump() {
+        let per_clump = CLUMP_BLADES * 6 * 4;
+        for count in [1, 5, 40] {
+            let mesh = build_chunk_grass_mesh(&clumps(count), 0.0, 0.0, 7).expect("clumps present");
+            assert_eq!(mesh.count_vertices(), per_clump * count as usize);
+        }
+        assert!(
+            build_chunk_grass_mesh(&[], 0.0, 0.0, 7).is_none(),
+            "a chunk with no clumps should produce no mesh at all"
         );
     }
 
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-    .with_inserted_indices(Indices::U32(indices))
-}
+    /// The regression batching could most easily cause: if every clump shared
+    /// one wind phase, a whole chunk of grass would sway in lockstep. Phase is
+    /// baked per-vertex in UV.x precisely to prevent that.
+    #[test]
+    fn clumps_keep_distinct_wind_phases() {
+        let mesh = build_chunk_grass_mesh(&clumps(8), 0.0, 0.0, 7).expect("clumps present");
+        let uvs = uvs_of(&mesh);
+        let per_clump = CLUMP_BLADES * 6 * 4;
 
-/// Append one axis-aligned cube (6 faces, per-face normals, CCW-front winding
-/// so back-face culling keeps the outside) centered at `(center_x, center_z)`
-/// in x/z, spanning `y0..y1` vertically, with half-width `half`. Vertices at
-/// `y0` get `color_bottom`, at `y1` get `color_top` — the blade's root→tip
-/// gradient.
-#[allow(clippy::too_many_arguments)]
-fn push_box(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-    center_x: f32,
-    center_z: f32,
-    y0: f32,
-    y1: f32,
-    half: f32,
-    color_bottom: [f32; 4],
-    color_top: [f32; 4],
-) {
-    let x0 = center_x - half;
-    let x1 = center_x + half;
-    let z0 = center_z - half;
-    let z1 = center_z + half;
-
-    // Each face: outward normal + 4 corners wound CCW as seen from outside.
-    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        // +Y (top)
-        (
-            [0.0, 1.0, 0.0],
-            [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]],
-        ),
-        // -Y (bottom)
-        (
-            [0.0, -1.0, 0.0],
-            [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-        ),
-        // +X
-        (
-            [1.0, 0.0, 0.0],
-            [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]],
-        ),
-        // -X
-        (
-            [-1.0, 0.0, 0.0],
-            [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
-        ),
-        // +Z
-        (
-            [0.0, 0.0, 1.0],
-            [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
-        ),
-        // -Z
-        (
-            [0.0, 0.0, -1.0],
-            [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]],
-        ),
-    ];
-
-    for (normal, verts) in faces {
-        let base = positions.len() as u32;
-        for vertex in verts {
-            positions.push(vertex);
-            normals.push(normal);
-            // Top vertices (at y1) get the bright tip color, base vertices the
-            // darkened root color.
-            let color = if vertex[1] >= y1 - 1e-4 {
-                color_top
-            } else {
-                color_bottom
-            };
-            colors.push(color);
+        // Within one clump the phase is constant; across clumps it differs.
+        let mut phases = Vec::new();
+        for clump in 0..8usize {
+            let first = uvs[clump * per_clump][0];
+            for vertex in 0..per_clump {
+                assert_eq!(
+                    uvs[clump * per_clump + vertex][0],
+                    first,
+                    "one clump must share a single wind phase"
+                );
+            }
+            phases.push(first);
         }
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        for (index, phase) in phases.iter().enumerate() {
+            for (other_index, other) in phases.iter().enumerate() {
+                if index != other_index {
+                    assert_ne!(
+                        phase, other,
+                        "clumps {index} and {other_index} share a wind phase — the patch \
+                         would sway in lockstep"
+                    );
+                }
+            }
+        }
+    }
+
+    /// UV.y carries the blade's UNSCALED object-space height, which is what the
+    /// old shader read from `position.y`. It must span root (0) to tip
+    /// regardless of the clump's height scale, or the sway strength changes.
+    #[test]
+    fn blade_height_is_baked_unscaled() {
+        let mesh = build_chunk_grass_mesh(&clumps(4), 0.0, 0.0, 7).expect("clumps present");
+        let uvs = uvs_of(&mesh);
+        let heights: Vec<f32> = uvs.iter().map(|uv| uv[1]).collect();
+        let lowest = heights.iter().copied().fold(f32::MAX, f32::min);
+        let highest = heights.iter().copied().fold(f32::MIN, f32::max);
+        assert_eq!(lowest, 0.0, "blade roots should bake height 0");
+        assert_eq!(
+            highest, CLUMP_HEIGHT,
+            "blade tips should bake the unscaled clump height"
+        );
+    }
+
+    /// Clumps must land where their placement says, so batching doesn't move
+    /// the meadow relative to the terrain it grows on.
+    #[test]
+    fn batched_clumps_sit_at_their_placement() {
+        let clump = (30, 40, 12, 0);
+        let placement = clump_placement(clump.0, clump.1, clump.2, 0.0, 0.0, 7);
+        let mesh = build_chunk_grass_mesh(&[clump], 0.0, 0.0, 7).expect("clump present");
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+            .as_float3()
+            .expect("float3 positions");
+
+        // Every vertex sits within a clump's reach of its base.
+        let reach = CLUMP_SPREAD + BLADE_HALF_WIDTH + 1e-4;
+        for position in positions {
+            let offset = Vec3::from(*position) - placement.base;
+            assert!(
+                offset.x.abs() <= reach && offset.z.abs() <= reach,
+                "vertex {position:?} is not within the clump at {:?}",
+                placement.base
+            );
+            assert!(
+                offset.y >= -1e-4 && offset.y <= CLUMP_HEIGHT * placement.height_scale + 1e-4,
+                "vertex {position:?} sits outside the blade's height range"
+            );
+        }
     }
 }

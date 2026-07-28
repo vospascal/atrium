@@ -227,6 +227,20 @@ impl ChunkScratch {
         }
     }
 
+    /// Re-anchor this window in another coordinate frame: the same cells, but
+    /// [`ChunkScratch::get`] now addresses them at coordinates shifted by
+    /// `(delta_x, delta_z)`.
+    ///
+    /// The island source uses this to hand the mesher a window in *world*
+    /// coordinates while having filled it by run-walking its own local grid —
+    /// the shift is the only difference between the two frames, so re-anchoring
+    /// costs two adds instead of a per-voxel rebuild.
+    pub fn translated(mut self, delta_x: i32, delta_z: i32) -> Self {
+        self.origin_x += delta_x;
+        self.origin_z += delta_z;
+        self
+    }
+
     /// This window's `(origin_x, origin_z, span_x, span_z)` in world voxels
     /// (origin includes the 1-cell apron). The terrain shader binds these as the
     /// per-chunk occupancy origin + span so `is_solid` can localize world coords.
@@ -303,8 +317,11 @@ impl VoxelWorld {
     pub fn unpack_chunk(&self, x_start: i32, x_end: i32, z_start: i32, z_end: i32) -> ChunkScratch {
         let origin_x = (x_start - 1).max(0);
         let origin_z = (z_start - 1).max(0);
-        let span_x = (x_end + 1).min(WORLD_SIZE_X as i32) - origin_x;
-        let span_z = (z_end + 1).min(WORLD_SIZE_Z as i32) - origin_z;
+        // Clamped at zero: a window can sit entirely outside the footprint now
+        // that the island is streamed — the rim chunk's apron reaches past the
+        // edge — and an unclamped span goes negative and blows up the alloc.
+        let span_x = ((x_end + 1).min(WORLD_SIZE_X as i32) - origin_x).max(0);
+        let span_z = ((z_end + 1).min(WORLD_SIZE_Z as i32) - origin_z).max(0);
         let mut cells = vec![Voxel::Air; (span_x * span_z * WORLD_SIZE_Y as i32) as usize];
         for local_z in 0..span_z {
             for local_x in 0..span_x {

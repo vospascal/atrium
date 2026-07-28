@@ -21,11 +21,15 @@ var<uniform> grass_wind_time: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var<uniform> grass_wind: vec4<f32>;
 
-// Wind offset, INLINED (kept byte-identical to grass_prepass.wgsl so the main
-// and prepass passes compute the same depth). `base` = clump world origin,
-// `height` = object-space height up the blade, `time` = sample time.
+// Wind offset, INLINED (kept byte-identical to the other pass so the main and
+// prepass passes compute the same depth). `phase` and `height` both arrive as
+// VERTEX DATA now, not from the instance transform: grass clumps are baked
+// into one mesh per chunk, so there is no per-clump transform left to read a
+// phase from, and `position.y` is world space rather than blade-local. See
+// `grass::build_chunk_grass_mesh` — UV.x is the clump's wind phase, UV.y is the
+// unscaled blade height.
 const WIND_STRENGTH: f32 = 0.35;
-fn grass_wind_offset(base: vec3<f32>, height: f32, time: f32) -> vec3<f32> {
+fn grass_wind_offset(phase: f32, height: f32, time: f32) -> vec3<f32> {
     // `grass_wind.z` is the weather's wind speed normalised to 0..1. It drives
     // three things at once, which is what makes the blades actually read as
     // responding to the wind rather than idling at a fixed wobble:
@@ -34,7 +38,6 @@ fn grass_wind_offset(base: vec3<f32>, height: f32, time: f32) -> vec3<f32> {
     //   3. a steady LEAN downwind, which is the cue that says "wind direction".
     let strength = clamp(grass_wind.z, 0.0, 1.0);
     let rate = 0.55 + 1.45 * strength;
-    let phase = base.x * 0.6 + base.z * 0.8;
     let sway_x = sin(time * 1.4 * rate + phase) * 0.6 + sin(time * 2.7 * rate + phase * 1.9) * 0.4;
     let sway_z = cos(time * 1.1 * rate + phase * 1.3) * 0.6 + cos(time * 2.3 * rate + phase * 0.7) * 0.4;
     let wobble = 0.22 + 0.78 * strength;
@@ -61,7 +64,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         world_from_local,
         vec4<f32>(vertex.position, 1.0),
     );
-    let wind = grass_wind_offset(world_from_local[3].xyz, vertex.position.y, grass_wind_time.x);
+    let wind = grass_wind_offset(vertex.uv.x, vertex.uv.y, grass_wind_time.x);
     out.world_position = vec4<f32>(out.world_position.xyz + wind, out.world_position.w);
     out.position = position_world_to_clip(out.world_position.xyz);
 #endif

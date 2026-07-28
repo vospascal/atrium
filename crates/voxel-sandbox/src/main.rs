@@ -14,7 +14,7 @@
 //! Orbit:  left-drag orbit · right-drag pan · scroll zoom · WASD pan
 //! Walk:   left-drag look around · WASD walk · Shift run · Space jump
 //!         (on land) / dive (in water; release to float up)
-//! Fly:    left-drag look around · WASD move · Space up · Ctrl down ·
+//! Fly:    left-drag look around · WASD move · Space/E up · Ctrl/Q down ·
 //!         Shift faster (no gravity, no collision — free roam)
 //! Water:  hold `G` to pour water where you look · `H` to scoop it away
 //!         (the fluid sim flows/pools/spills what you add)
@@ -38,6 +38,7 @@ mod fireflies;
 mod flame;
 mod fluid;
 mod fog_ring;
+mod geometry_census;
 mod grass;
 mod mesh;
 mod sky;
@@ -61,6 +62,8 @@ use std::path::Path;
 
 use crate::flame::{FlameLight, FlameMaterial};
 use crate::tweak_panel::ViewTweaks;
+use std::sync::Arc;
+use voxel_core::voxel_source::IslandSource;
 use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
 
 /// Pale haze that washes out the distance, like the reference shots.
@@ -149,6 +152,8 @@ fn main() {
         .init_resource::<water::SurfaceTuning>()
         .init_resource::<Submerged>()
         .init_resource::<RenderQuality>()
+        .init_resource::<geometry_census::GeometryTotals>()
+        .init_resource::<streaming::StreamStats>()
         .init_resource::<LightingSettings>()
         .insert_resource(tweak_panel::PerfOverlay {
             visible: std::env::var("VOXEL_PERF").is_ok(),
@@ -222,6 +227,7 @@ fn main() {
                     fluid::step_fluid_water,
                     fluid::update_water_heights,
                     streaming::stream_chunks,
+                    geometry_census::aggregate_geometry_census,
                     screenshot_system,
                 ),
             )
@@ -237,9 +243,6 @@ struct WorldSeed(u32);
 #[derive(Resource)]
 struct WorldStats {
     generation: std::time::Duration,
-    meshing: std::time::Duration,
-    chunk_count: usize,
-    total_vertices: usize,
     rle_runs: usize,
     rle_bytes: usize,
 }
@@ -356,8 +359,6 @@ fn initial_world_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
-    mut grass_materials: ResMut<Assets<voxel_material::GrassMaterial>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
@@ -366,11 +367,16 @@ fn initial_world_system(
     season: Res<Season>,
     source: Res<WorldSource>,
 ) {
-    // Streaming world (Stage 9): skip the fixed island entirely; the
-    // `ChunkStreamer` generates terrain around the fly camera instead. The
-    // camera, sun, and sky (spawned by other startup systems) still apply.
+    // `VOXEL_STREAMING=1` picks the infinite procedural world instead of the
+    // fixed island. That is the *only* difference between them: both are
+    // `VoxelSource`s streamed by the same `ChunkStreamer` into the same mesher
+    // and the same material. There is no separate island render path.
     if std::env::var("VOXEL_STREAMING").is_ok() {
-        commands.insert_resource(streaming::ChunkStreamer::new(seed.0, season.0));
+        commands.insert_resource(streaming::ChunkStreamer::new(
+            seed.0,
+            season.0,
+            streaming::ChunkSource::Streamed,
+        ));
         return;
     }
 
@@ -378,8 +384,6 @@ fn initial_world_system(
         &mut commands,
         &mut meshes,
         &mut materials,
-        &mut terrain_materials,
-        &mut grass_materials,
         &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
@@ -395,8 +399,6 @@ fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    terrain_materials: &mut Assets<voxel_material::VoxelTerrainMaterial>,
-    grass_materials: &mut Assets<voxel_material::GrassMaterial>,
     storage_buffers: &mut Assets<ShaderStorageBuffer>,
     flame_materials: &mut Assets<FlameMaterial>,
     water_materials: &mut Assets<water::WaterMaterial>,
@@ -417,36 +419,12 @@ fn spawn_world(
         rle_bytes as f32 / 1e6
     );
 
-    let meshing_start = std::time::Instant::now();
-    let chunk_meshes = mesh::build_all_chunk_meshes(&voxel_world, seed, season);
-    let count_bucket = |select: fn(&mesh::ChunkMeshes) -> &Option<Mesh>| {
-        chunk_meshes
-            .iter()
-            .map(|chunk| select(chunk).as_ref().map_or(0, Mesh::count_vertices))
-            .sum::<usize>()
-    };
-    let meshing_elapsed = meshing_start.elapsed();
-    let total_vertices = count_bucket(|chunk| &chunk.terrain_above_water)
-        + count_bucket(|chunk| &chunk.meadow_cover)
-        + count_bucket(|chunk| &chunk.terrain_below_water)
-        + count_bucket(|chunk| &chunk.canopy)
-        + count_bucket(|chunk| &chunk.canopy_solid)
-        + count_bucket(|chunk| &chunk.water);
-    info!(
-        "world generated in {generation_elapsed:.2?}, meshed in {meshing_elapsed:.2?} \
-         ({} chunks: terrain {} + meadow {} + underwater {} + canopy {} verts, water {} verts)",
-        chunk_meshes.len(),
-        count_bucket(|chunk| &chunk.terrain_above_water),
-        count_bucket(|chunk| &chunk.meadow_cover),
-        count_bucket(|chunk| &chunk.terrain_below_water),
-        count_bucket(|chunk| &chunk.canopy),
-        count_bucket(|chunk| &chunk.water),
-    );
+    info!("world generated in {generation_elapsed:.2?}");
+    // Meshing is no longer a startup phase: the streamer meshes chunks around
+    // the camera on the async compute pool. Live geometry totals come from the
+    // per-entity census instead (see `geometry_census`).
     commands.insert_resource(WorldStats {
         generation: generation_elapsed,
-        meshing: meshing_elapsed,
-        chunk_count: chunk_meshes.len(),
-        total_vertices,
         rle_runs: run_count,
         rle_bytes,
     });
@@ -512,20 +490,10 @@ fn spawn_world(
     // (rim lips spill, curtains hang where water actually pours over; see
     // `fluid::build_surface_mesh`).
 
-    // Terrain uses the voxel jitter material (StandardMaterial PBR + the
-    // per-fragment brightness speckle). Props keep a plain StandardMaterial —
-    // they bake their own jitter in vox_import and aren't greedy-meshed.
-    let occupancy = storage_buffers.add(ShaderStorageBuffer::from(
-        voxel_world.solid_occupancy_bits(),
-    ));
-    let terrain_material = terrain_materials.add(voxel_material::VoxelTerrainMaterial {
-        base: StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.95,
-            ..default()
-        },
-        extension: voxel_material::voxel_extension(seed, occupancy.clone()),
-    });
+    // Terrain material and its occupancy bitset now belong to the streamer (it
+    // owns the one handle every chunk shares). Props keep a plain
+    // StandardMaterial — they bake their own jitter in vox_import and aren't
+    // greedy-meshed.
     let prop_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
@@ -610,73 +578,6 @@ fn spawn_world(
 
     commands.insert_resource(ground_heights);
 
-    // One entity per chunk bucket, so bevy's per-entity frustum culling
-    // trims every pass (main, reflection, shadow cascades) to what each
-    // view actually sees. Vertices are in world space; transforms stay
-    // identity and the culling AABBs derive from the vertices.
-    for chunk in chunk_meshes {
-        // Above-water terrain is also on the reflection layer, so the
-        // mirrored camera sees it; the meadow carpet and underwater
-        // terrain stay main-view only.
-        if let Some(chunk_mesh) = chunk.terrain_above_water {
-            commands.spawn((
-                Mesh3d(meshes.add(chunk_mesh)),
-                MeshMaterial3d(terrain_material.clone()),
-                water::reflective_layers(),
-                WorldMesh,
-            ));
-        }
-        // Neither the grass carpet nor anything below the waterline casts
-        // a shadow worth seeing — keeping them out of the cascade shadow
-        // passes (which render per camera view) is a large win.
-        if let Some(chunk_mesh) = chunk.meadow_cover {
-            commands.spawn((
-                Mesh3d(meshes.add(chunk_mesh)),
-                MeshMaterial3d(terrain_material.clone()),
-                NotShadowCaster,
-                WorldMesh,
-            ));
-        }
-        if let Some(chunk_mesh) = chunk.terrain_below_water {
-            commands.spawn((
-                Mesh3d(meshes.add(chunk_mesh)),
-                MeshMaterial3d(terrain_material.clone()),
-                NotShadowCaster,
-                WorldMesh,
-            ));
-        }
-        // Canopy confetti: reflection-visible (trees in the mirror), but NOT a
-        // shadow caster — 1.8M little cubes rendered through 4 shadow cascades
-        // ×2 camera views cost ~30 fps. Shadow cascades render per view, so
-        // the confetti's cast shade isn't worth that; the ambient + directional
-        // lighting on the leaves still reads fine.
-        if let Some(chunk_mesh) = chunk.canopy {
-            commands.spawn((
-                Mesh3d(meshes.add(chunk_mesh)),
-                MeshMaterial3d(terrain_material.clone()),
-                NotShadowCaster,
-                CanopyConfetti,
-                water::reflective_layers(),
-                WorldMesh,
-            ));
-        }
-        // The solid inner canopy IS the tree shadow caster (cheap, ~0.3M),
-        // behind the confetti. Reflection-visible + shadow-casting.
-        if let Some(chunk_mesh) = chunk.canopy_solid {
-            commands.spawn((
-                Mesh3d(meshes.add(chunk_mesh)),
-                MeshMaterial3d(terrain_material.clone()),
-                water::reflective_layers(),
-                WorldMesh,
-            ));
-        }
-        // The static per-chunk water mesh (`chunk.water`) is intentionally not
-        // spawned: any world with water has a fluid sim, whose dynamic surface
-        // (below) covers the same region. It exists only when there's no water,
-        // in which case `chunk.water` is `None` anyway.
-        let _ = &chunk.water;
-    }
-
     // Dynamic water surface: a STATIC grid mesh built once, displaced every sim
     // tick by the GPU from the `heights` storage buffer (F4). The sim only
     // re-uploads that small buffer — the mesh itself never changes.
@@ -709,9 +610,17 @@ fn spawn_world(
         commands.insert_resource(fluid_water);
     }
 
-    // Grass is instanced (auto-instancing over a small variant palette), not
-    // baked into the chunk meshes — the mesher skips TallGrass.
-    grass::spawn_instanced_grass(commands, meshes, grass_materials, &voxel_world, seed);
+    // Hand the island to the streamer as a bounded source. From here it is
+    // rendered exactly like the infinite world: chunks meshed on the async pool
+    // around the camera, distance-tiered grass and canopy confetti, one shared
+    // material. Grass is no longer bulk-spawned for the whole footprint — the
+    // streamer harvests clump sites per chunk and only keeps the near ones
+    // alive.
+    commands.insert_resource(streaming::ChunkStreamer::new(
+        seed,
+        season,
+        streaming::ChunkSource::Island(Arc::new(IslandSource::new(Arc::new(voxel_world)))),
+    ));
 }
 
 /// Parse `"index@x,z"` or `"index@x,z,lift"` prop placements (meters,
@@ -918,8 +827,6 @@ fn regenerate_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut terrain_materials: ResMut<Assets<voxel_material::VoxelTerrainMaterial>>,
-    mut grass_materials: ResMut<Assets<voxel_material::GrassMaterial>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut flame_materials: ResMut<Assets<FlameMaterial>>,
     mut water_materials: ResMut<Assets<water::WaterMaterial>>,
@@ -928,6 +835,7 @@ fn regenerate_system(
     season: Res<Season>,
     source: Res<WorldSource>,
     existing_meshes: Query<Entity, With<WorldMesh>>,
+    streamed_meshes: Query<Entity, With<streaming::StreamedChunk>>,
     streamer: Option<ResMut<streaming::ChunkStreamer>>,
 ) {
     if keyboard.just_pressed(KeyCode::KeyR) {
@@ -942,16 +850,21 @@ fn regenerate_system(
     }
     *request = RegenerateRequest::default();
 
-    // The streamed world has no single island to respawn: hand the new seed /
-    // season to the streamer, which rebuilds the chunks around the camera.
-    // Without this, a season change (or R) would build the whole fixed island
-    // and drop it at the origin on top of the streamed terrain.
+    // The infinite world has no grid to rebuild — a new seed/season is all it
+    // needs, and its chunks stream back in around the camera.
     if let Some(mut streamer) = streamer {
-        streamer.request_reload(seed.0, season.0);
-        return;
+        if !streamer.is_island() {
+            streamer.request_reload(seed.0, season.0);
+            return;
+        }
     }
 
-    for entity in &existing_meshes {
+    // The island does have a grid, and everything derived from it (collision
+    // heights, tree colliders, the fluid sim, water proximity) has to be rebuilt
+    // with it. `spawn_world` does all of that and installs a fresh streamer over
+    // the new source — so drop the old streamer's chunk entities too, not just
+    // the `WorldMesh` props and water surface.
+    for entity in existing_meshes.iter().chain(streamed_meshes.iter()) {
         commands.entity(entity).despawn();
     }
     // Imported terrain keeps its heights; a new seed reshuffles the
@@ -960,8 +873,6 @@ fn regenerate_system(
         &mut commands,
         &mut meshes,
         &mut materials,
-        &mut terrain_materials,
-        &mut grass_materials,
         &mut storage_buffers,
         &mut flame_materials,
         &mut water_materials,
@@ -1053,7 +964,7 @@ impl Default for FirstPersonState {
 }
 
 /// Free-fly camera (slice S4): no gravity, no collision. WASD moves relative
-/// to the yaw on the horizontal plane; `Space`/`Ctrl` climb and descend;
+/// to the yaw on the horizontal plane; `Space`/`E` climb and `Ctrl`/`Q` descend;
 /// `Shift` sprints. Mouse-look mirrors first-person (left-drag).
 #[derive(Resource)]
 struct FlyCameraState {
@@ -1578,10 +1489,13 @@ fn fly_update(
         move_direction -= right;
     }
     // Vertical is world-up/down, independent of pitch, so ascent stays true.
-    if keyboard.pressed(KeyCode::Space) {
+    // `E`/`Q` alias `Space`/`Ctrl`: on macOS, holding Ctrl turns a left-drag
+    // into a system right-click, so Ctrl+drag can't descend and look around at
+    // the same time. `Q` has no such conflict.
+    if keyboard.pressed(KeyCode::Space) || keyboard.pressed(KeyCode::KeyE) {
         move_direction += Vec3::Y;
     }
-    if keyboard.pressed(KeyCode::ControlLeft) {
+    if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::KeyQ) {
         move_direction -= Vec3::Y;
     }
 

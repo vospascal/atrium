@@ -21,13 +21,13 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use voxel_core::streamed_source::StreamedSource;
-use voxel_core::voxel_source::VoxelSource;
-use voxel_core::world::{
-    terrain_column_height, ChunkScratch, Voxel, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_Y,
-};
+use voxel_core::voxel_source::{IslandSource, VoxelSource};
+use voxel_core::world::{ChunkScratch, Voxel, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_Y};
 
+use crate::geometry_census::{GeometryCensus, GeometryKind};
 use crate::grass;
 use crate::mesh::{self, CHUNK_SIZE};
 use crate::voxel_material::{self, VoxelTerrainMaterial};
@@ -55,11 +55,10 @@ struct BuiltChunk {
     /// Flat water surface for the chunk's sunken columns, rendered with the
     /// island's water shader (see [`build_water_surface_mesh`]).
     water_surface: Option<Mesh>,
-    /// Instanced-grass clump sites: `(world_x, top_y, world_z, tone_variant)`.
-    /// The mesher deliberately skips `TallGrass` (the island spawns it as swaying
-    /// instanced clumps), so streamed chunks must place their own or the terrain
-    /// reads bare. Harvested off-thread from the same voxel window.
-    grass_clumps: Vec<(i32, i32, i32, usize)>,
+    /// Every grass clump in the chunk, baked into ONE mesh off-thread. The
+    /// mesher deliberately skips `TallGrass`, so a chunk places its own grass
+    /// or the terrain reads bare (see [`grass::build_chunk_grass_mesh`]).
+    grass_mesh: Option<Mesh>,
 }
 
 /// A resident chunk: its always-drawn entities plus the **near-detail** it only
@@ -76,11 +75,74 @@ struct LoadedChunk {
     /// Leaf-confetti mesh, kept so the detail can come back when the camera
     /// returns without regenerating the chunk. The solid inner canopy stays
     /// resident, so distant trees keep their silhouette and shadow.
-    canopy_mesh: Option<Handle<Mesh>>,
+    canopy_mesh: Option<(Handle<Mesh>, GeometryCensus)>,
     canopy: Option<Entity>,
-    /// Instanced-grass clump sites, and their live entities when near.
-    grass_clumps: Vec<(i32, i32, i32, usize)>,
-    grass: Vec<Entity>,
+    /// The chunk's baked grass mesh, kept so the detail can come back when the
+    /// camera returns, and its live entity while near.
+    grass_mesh: Option<(Handle<Mesh>, GeometryCensus)>,
+    grass: Option<Entity>,
+}
+
+/// Where a chunk's voxels come from. Both variants are [`VoxelSource`]s meshed
+/// by the same greedy mesher into the same materials — the *only* difference
+/// between "the island" and "the infinite world" is which one of these the
+/// streamer holds. There is no island render path.
+///
+/// Cheap to clone (a unit or an `Arc` bump), because every queued chunk task
+/// takes its own handle onto the compute pool.
+#[derive(Clone)]
+pub enum ChunkSource {
+    /// The infinite procedural world. Stateless — a pure function of position
+    /// and seed — so each chunk task builds its own [`StreamedSource`] rather
+    /// than sharing one.
+    Streamed,
+    /// The fixed island, bounded and shared. Its dense grid is generated once
+    /// up front and read by every chunk task through the `Arc`.
+    Island(Arc<IslandSource>),
+}
+
+impl ChunkSource {
+    /// Half-extent in chunks beyond which no chunk is ever generated, or `None`
+    /// for the infinite world. The island's bound comes from its footprint; the
+    /// streamed world's is the optional `VOXEL_STREAM_BOUNDS` "set world size".
+    fn bounds(&self) -> Option<i32> {
+        match self {
+            ChunkSource::Streamed => std::env::var("VOXEL_STREAM_BOUNDS")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+            ChunkSource::Island(_) => Some(IslandSource::chunk_bounds(CHUNK_SIZE)),
+        }
+    }
+
+    /// Where this source's chunks get their ambient occlusion — and the reason
+    /// unifying the two worlds costs the island nothing visually.
+    ///
+    /// The island has a dense grid of the whole world, so it can hand the shader
+    /// **one global occupancy bitset** and recompute exact AO per fragment, with
+    /// every chunk still sharing a single material. The infinite world has no
+    /// such grid: per-fragment AO there would need a buffer, and therefore a
+    /// material, per resident chunk — which stops bevy batching and measured
+    /// ~2.5× the frame time. So it bakes AO into vertex colours instead.
+    ///
+    /// One material either way; the mode follows from what the source can offer.
+    fn ambient_occlusion(&self) -> mesh::AmbientOcclusion {
+        match self {
+            ChunkSource::Streamed => mesh::AmbientOcclusion::Baked,
+            ChunkSource::Island(_) => mesh::AmbientOcclusion::PerFragment,
+        }
+    }
+
+    /// The occupancy bitset backing per-fragment AO, in the shader's global
+    /// indexing (`(z * WORLD_SIZE_X + x) * WORLD_SIZE_Y + y`). The streamed
+    /// world bakes its AO, so it binds a one-word dummy: `AsBindGroup` has no
+    /// optional storage binding, and the vertex-alpha sentinel means the
+    /// shader's occupancy path is never taken.
+    fn occupancy_bits(&self) -> Vec<u32> {
+        match self {
+            ChunkSource::Streamed => vec![0],
+            ChunkSource::Island(island) => island.world().solid_occupancy_bits(),
+        }
+    }
 }
 
 /// Tracks streamed chunks around the camera. Generation + greedy meshing run on
@@ -98,13 +160,9 @@ pub struct ChunkStreamer {
     /// reflection, and glint. Water needs no per-chunk data, so one handle
     /// serves all chunks; `water::update_water` animates it for free.
     water_material: Option<Handle<water::WaterMaterial>>,
-    /// Shared instanced-grass assets (tone palette + wind material), created
-    /// once. Sharing one mesh+material handle per tone is what lets bevy batch
-    /// every clump of a tone into a single instanced draw.
-    grass_assets: Option<(
-        Vec<Handle<Mesh>>,
-        Handle<crate::voxel_material::GrassMaterial>,
-    )>,
+    /// The ONE shared grass wind material. Tones live in the batched meshes'
+    /// vertex colours, so a single material serves every chunk.
+    grass_material: Option<Handle<crate::voxel_material::GrassMaterial>>,
     seed: u32,
     /// The ONE terrain material every streamed chunk shares. Sharing it is what
     /// lets bevy batch chunk meshes together — worth ~2.5× the frame time here —
@@ -120,26 +178,33 @@ pub struct ChunkStreamer {
     reload_requested: bool,
     /// Half-extent of the world in chunks (`None` = infinite). Chunks outside
     /// `[-bounds, bounds]` on either axis are never generated — a "set world
-    /// size", also a hard cap on chunk count. From `VOXEL_STREAM_BOUNDS`.
+    /// size", also a hard cap on chunk count. Derived from the source.
     bounds: Option<i32>,
+    /// What the chunks are made of: the island or the infinite world.
+    source: ChunkSource,
 }
 
 impl ChunkStreamer {
-    pub fn new(seed: u32, season: f32) -> Self {
-        let bounds = std::env::var("VOXEL_STREAM_BOUNDS")
-            .ok()
-            .and_then(|value| value.parse().ok());
+    pub fn new(seed: u32, season: f32, source: ChunkSource) -> Self {
         Self {
             loaded: HashMap::new(),
             pending: HashMap::new(),
             water_material: None,
-            grass_assets: None,
+            grass_material: None,
             terrain_material: None,
             seed,
             season,
             reload_requested: false,
-            bounds,
+            bounds: source.bounds(),
+            source,
         }
+    }
+
+    /// Is this the fixed island? Regenerating it means building a whole new
+    /// grid (and everything derived from it), where the infinite world only
+    /// needs a new seed.
+    pub fn is_island(&self) -> bool {
+        matches!(self.source, ChunkSource::Island(_))
     }
 
     /// Rebuild every resident chunk with a new seed / season. The streamed world's
@@ -149,6 +214,38 @@ impl ChunkStreamer {
         self.seed = seed;
         self.season = season;
         self.reload_requested = true;
+    }
+}
+
+/// What the streamer did on the main thread this frame.
+///
+/// Chunk *generation* is off-thread, but three things are not: despawning far
+/// chunks, spawning the ones that finished, and the detail-tier pass that adds
+/// and removes grass and confetti entities. Those are the streaming costs that
+/// can actually spike a frame, so they are measured separately — a spike with
+/// `spawned` > 0 is chunk hand-off, a spike with `detail_churn` > 0 is the
+/// entity tiering, and a spike with neither is not the streamer's fault.
+#[derive(Resource, Default)]
+pub struct StreamStats {
+    pub loaded_chunks: usize,
+    pub pending_chunks: usize,
+    /// Chunks handed off to the main thread this frame.
+    pub spawned: usize,
+    /// Detail entities spawned + despawned this frame (grass clumps, confetti).
+    pub detail_churn: usize,
+    /// This frame's main-thread cost of `stream_chunks`, in milliseconds.
+    pub last_ms: f32,
+    /// Worst `last_ms` seen in the recent past; decays so an old spike doesn't
+    /// pin the readout forever.
+    pub peak_ms: f32,
+}
+
+impl StreamStats {
+    /// Fold this frame's cost in, decaying the peak so it tracks the recent
+    /// worst case rather than the all-time one.
+    fn record(&mut self, milliseconds: f32) {
+        self.last_ms = milliseconds;
+        self.peak_ms = self.peak_ms.max(milliseconds) * 0.99;
     }
 }
 
@@ -177,7 +274,7 @@ fn chunk_of(render_x: f32, render_z: f32) -> (i32, i32) {
 /// corner id `0` and the buffer holds the single flat water height — the island's
 /// fluid-sim displacement path, minus the sim. Positions are still emitted at the
 /// real water height so bevy derives a correct culling AABB.
-fn build_water_surface_mesh(chunk_x: i32, chunk_z: i32, seed: u32) -> Option<Mesh> {
+fn build_water_surface_mesh(scratch: &ChunkScratch, chunk_x: i32, chunk_z: i32) -> Option<Mesh> {
     let origin_x = chunk_x * CHUNK_SIZE;
     let origin_z = chunk_z * CHUNK_SIZE;
     let surface_y = water::water_surface_y();
@@ -191,8 +288,15 @@ fn build_water_surface_mesh(chunk_x: i32, chunk_z: i32, seed: u32) -> Option<Mes
         let world_z = origin_z + local_z;
         let mut local_x = 0;
         while local_x < CHUNK_SIZE {
-            let is_wet =
-                |offset: i32| terrain_column_height(origin_x + offset, world_z, seed) < WATER_LEVEL;
+            // Wetness is read from the voxels themselves rather than from a
+            // terrain-height function: both sources place real `Voxel::Water`
+            // cells, so this works for the island and the infinite world alike,
+            // and it costs a column scan of an already-unpacked window instead
+            // of a second round of terrain generation.
+            let is_wet = |offset: i32| {
+                let column_x = origin_x + offset;
+                (0..=WATER_LEVEL).any(|y| scratch.get(column_x, y, world_z) == Voxel::Water)
+            };
             if !is_wet(local_x) {
                 local_x += 1;
                 continue;
@@ -255,26 +359,65 @@ fn build_water_surface_mesh(chunk_x: i32, chunk_z: i32, seed: u32) -> Option<Mes
 /// ambient occlusion faithful to the island's — occupancy covers *every* solid
 /// voxel, tree trunks and leaves included, not just the terrain surface — while
 /// costing one generation pass per chunk instead of two.
-fn build_chunk(chunk_x: i32, chunk_z: i32, seed: u32, season: f32) -> BuiltChunk {
-    let source = StreamedSource::new(seed);
-    let scratch = mesh::unpack_chunk_window(&source, chunk_x, chunk_z);
-    let grass_clumps = harvest_grass_clumps(&source, &scratch, chunk_x, chunk_z);
+fn build_chunk(
+    chunk_x: i32,
+    chunk_z: i32,
+    seed: u32,
+    season: f32,
+    source: &ChunkSource,
+) -> BuiltChunk {
+    // The two arms differ only in which `VoxelSource` they hand to the shared
+    // builder: the infinite world is stateless so each task makes its own, the
+    // island is a shared grid read through the `Arc`.
+    match source {
+        ChunkSource::Streamed => build_chunk_from(
+            &StreamedSource::new(seed),
+            chunk_x,
+            chunk_z,
+            seed,
+            season,
+            source.ambient_occlusion(),
+        ),
+        ChunkSource::Island(island) => build_chunk_from(
+            island.as_ref(),
+            chunk_x,
+            chunk_z,
+            seed,
+            season,
+            source.ambient_occlusion(),
+        ),
+    }
+}
+
+/// The one chunk-building path, over any [`VoxelSource`].
+fn build_chunk_from<S: VoxelSource>(
+    source: &S,
+    chunk_x: i32,
+    chunk_z: i32,
+    seed: u32,
+    season: f32,
+    ambient_occlusion: mesh::AmbientOcclusion,
+) -> BuiltChunk {
+    let scratch = mesh::unpack_chunk_window(source, chunk_x, chunk_z);
+    let clumps = harvest_grass_clumps(source, &scratch, chunk_x, chunk_z);
+    // Baked here, on the compute pool, rather than spawned as thousands of
+    // per-clump entities on the main thread.
+    let (offset_x, offset_z) = source.world_offset();
+    let grass_mesh = grass::build_chunk_grass_mesh(&clumps, offset_x, offset_z, seed);
     let meshes = mesh::build_chunk_meshes(
-        &source,
+        source,
         &scratch,
         seed,
         season,
         chunk_x,
         chunk_z,
-        // Baked AO, so every streamed chunk can share ONE material — see
-        // `mesh::AmbientOcclusion` for why that matters so much here.
-        mesh::AmbientOcclusion::Baked,
+        ambient_occlusion,
     );
-    let water_surface = build_water_surface_mesh(chunk_x, chunk_z, seed);
+    let water_surface = build_water_surface_mesh(&scratch, chunk_x, chunk_z);
     BuiltChunk {
         meshes,
         water_surface,
-        grass_clumps,
+        grass_mesh,
     }
 }
 
@@ -282,8 +425,8 @@ fn build_chunk(chunk_x: i32, chunk_z: i32, seed: u32, season: f32) -> BuiltChunk
 /// cell of every clump column (see [`grass::is_clump_column`]), tagged with its
 /// biome tone variant. Reads the already-generated voxel window, so it costs a
 /// scan rather than another generation pass.
-fn harvest_grass_clumps(
-    source: &StreamedSource,
+pub(crate) fn harvest_grass_clumps<S: VoxelSource>(
+    source: &S,
     scratch: &ChunkScratch,
     chunk_x: i32,
     chunk_z: i32,
@@ -332,8 +475,10 @@ pub fn stream_chunks(
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     reflection_target: Res<water::ReflectionTarget>,
     quality: Res<crate::RenderQuality>,
+    mut stats: ResMut<StreamStats>,
     camera: Query<&GlobalTransform, With<bevy::core_pipeline::prepass::DepthPrepass>>,
 ) {
+    let stream_started = std::time::Instant::now();
     let debug = std::env::var("VOXEL_DEBUG_STREAM").is_ok();
     // Only active in the streaming world (the resource is inserted then).
     let Some(mut streamer) = streamer else {
@@ -359,7 +504,24 @@ pub fn stream_chunks(
     let seed = streamer.seed;
     let season = streamer.season;
     let bounds = streamer.bounds;
-    let load_radius = quality.stream_radius as i32;
+    // A bounded world is small and finite, so keep **all** of it resident
+    // instead of following the camera with a radius. Two reasons: the overhead
+    // and orbit views see the whole island at once, and a radius smaller than
+    // the footprint would clip it; and streaming a finite world means chunks
+    // churn in and out as the camera moves, which is a frame-time spike for
+    // geometry we were always going to need again. The infinite world has no
+    // such option and follows the live `stream_radius` lever.
+    // A finite world is small enough to hold entirely, so nothing about it is
+    // decided by where the camera is: not which chunks exist, not which keep
+    // their grass and confetti. That matters most in the orbit view, where the
+    // camera sits well outside the island looking back at it.
+    let finite = bounds.is_some();
+    let load_radius = match bounds {
+        Some(bound) => bound,
+        None => quality.stream_radius as i32,
+    };
+    // Beyond the bound there is nothing to unload, so this only ever bites in
+    // the infinite world.
     let unload_radius = load_radius + UNLOAD_MARGIN;
 
     // One shared water material, created on first run. Its `heights` buffer is a
@@ -379,30 +541,36 @@ pub fn stream_chunks(
     }
     let water_material = streamer.water_material.clone().unwrap();
 
-    // The one shared terrain material. Its occupancy binding is a single dummy
-    // element: streamed chunks bake AO into vertex colours, so the shader's
-    // occupancy path is never taken (the vertex-alpha sentinel switches it off).
+    // The ONE shared terrain material — for both worlds. The island binds its
+    // global occupancy bitset here and gets exact per-fragment AO; the infinite
+    // world binds a dummy word and reads its AO from baked vertex colours.
+    // Either way every chunk shares this one handle, which is what lets bevy
+    // batch them.
     if streamer.terrain_material.is_none() {
-        let occupancy = storage_buffers.add(ShaderStorageBuffer::from([0u32].as_slice()));
+        let occupancy =
+            storage_buffers.add(ShaderStorageBuffer::from(streamer.source.occupancy_bits()));
+        let extension = match &streamer.source {
+            ChunkSource::Island(_) => voxel_material::voxel_extension(seed, occupancy),
+            ChunkSource::Streamed => {
+                voxel_material::streamed_voxel_extension(seed, occupancy, 0, 0, 1, 1)
+            }
+        };
         streamer.terrain_material = Some(terrain_materials.add(VoxelTerrainMaterial {
             base: StandardMaterial {
                 base_color: Color::WHITE,
                 perceptual_roughness: 0.95,
                 ..default()
             },
-            extension: voxel_material::streamed_voxel_extension(seed, occupancy, 0, 0, 1, 1),
+            extension,
         }));
     }
     let terrain_material = streamer.terrain_material.clone().unwrap();
 
-    // Shared instanced-grass palette + wind material, created on first run.
-    if streamer.grass_assets.is_none() {
-        streamer.grass_assets = Some((
-            grass::build_clump_meshes(&mut meshes),
-            grass::build_grass_material(&mut grass_materials),
-        ));
+    // The one shared grass wind material, created on first run.
+    if streamer.grass_material.is_none() {
+        streamer.grass_material = Some(grass::build_grass_material(&mut grass_materials));
     }
-    let (clump_meshes, grass_material) = streamer.grass_assets.clone().unwrap();
+    let grass_material = streamer.grass_material.clone().unwrap();
 
     // A reload (new seed or season) drops everything; the chunks around the
     // camera then stream straight back in with the new values.
@@ -423,8 +591,11 @@ pub fn stream_chunks(
     }
 
     // Drop chunks (loaded entities + in-flight tasks) beyond the unload radius.
+    // A finite world has nothing to drop: it is entirely resident by definition,
+    // and unloading it by camera distance would tear the island apart the moment
+    // the orbit camera pulls back from it.
     let far = |cx: i32, cz: i32| {
-        (cx - center_x).abs() > unload_radius || (cz - center_z).abs() > unload_radius
+        !finite && ((cx - center_x).abs() > unload_radius || (cz - center_z).abs() > unload_radius)
     };
     let to_remove: Vec<(i32, i32)> = streamer
         .loaded
@@ -453,13 +624,14 @@ pub fn stream_chunks(
             completed.push((key, built));
         }
     }
+    stats.spawned = completed.len();
     for (key, built) in completed {
         streamer.pending.remove(&key);
 
         let BuiltChunk {
             meshes: chunk_meshes,
             water_surface,
-            grass_clumps,
+            grass_mesh,
         } = built;
 
         // `VOXEL_DEBUG_STREAM=1` logs each spawned chunk's sub-mesh vertex counts
@@ -488,27 +660,34 @@ pub fn stream_chunks(
         // system would despawn them behind the streamer's back.
         let mut entities: Vec<Entity> = Vec::new();
         if let Some(chunk_mesh) = chunk_meshes.terrain_above_water {
+            let census = GeometryCensus::of(&chunk_mesh, GeometryKind::TerrainAbove);
             entities.push(
                 commands
                     .spawn((
                         Mesh3d(meshes.add(chunk_mesh)),
                         MeshMaterial3d(terrain_material.clone()),
                         crate::water::reflective_layers(),
+                        census,
                         StreamedChunk,
                     ))
                     .id(),
             );
         }
-        for main_view_mesh in [chunk_meshes.meadow_cover, chunk_meshes.terrain_below_water]
-            .into_iter()
-            .flatten()
-        {
+        for (main_view_mesh, kind) in [
+            (chunk_meshes.meadow_cover, GeometryKind::MeadowCover),
+            (chunk_meshes.terrain_below_water, GeometryKind::TerrainBelow),
+        ] {
+            let Some(main_view_mesh) = main_view_mesh else {
+                continue;
+            };
+            let census = GeometryCensus::of(&main_view_mesh, kind);
             entities.push(
                 commands
                     .spawn((
                         Mesh3d(meshes.add(main_view_mesh)),
                         MeshMaterial3d(terrain_material.clone()),
                         NotShadowCaster,
+                        census,
                         StreamedChunk,
                     ))
                     .id(),
@@ -517,14 +696,22 @@ pub fn stream_chunks(
         // Leaf confetti is near-detail: the mesh is kept, and the detail pass
         // below spawns it only while the camera is close (the solid inner canopy
         // above stays resident, so distant trees keep their shape and shadow).
-        let canopy_mesh = chunk_meshes.canopy.map(|mesh| meshes.add(mesh));
+        let canopy_mesh = chunk_meshes.canopy.map(|mesh| {
+            // Measured here, kept alongside the handle: the mesh itself is
+            // uploaded and dropped, and the confetti entity comes and goes with
+            // the detail tier.
+            let census = GeometryCensus::of(&mesh, GeometryKind::Canopy);
+            (meshes.add(mesh), census)
+        });
         if let Some(chunk_mesh) = chunk_meshes.canopy_solid {
+            let census = GeometryCensus::of(&chunk_mesh, GeometryKind::CanopySolid);
             entities.push(
                 commands
                     .spawn((
                         Mesh3d(meshes.add(chunk_mesh)),
                         MeshMaterial3d(terrain_material.clone()),
                         crate::water::reflective_layers(),
+                        census,
                         StreamedChunk,
                     ))
                     .id(),
@@ -534,12 +721,14 @@ pub fn stream_chunks(
         // geometry with no UVs, which the water shader needs; the flat surface
         // built alongside it covers the same columns as a single clean layer.
         if let Some(surface_mesh) = water_surface {
+            let census = GeometryCensus::of(&surface_mesh, GeometryKind::Water);
             entities.push(
                 commands
                     .spawn((
                         Mesh3d(meshes.add(surface_mesh)),
                         MeshMaterial3d(water_material.clone()),
                         NotShadowCaster,
+                        census,
                         StreamedChunk,
                     ))
                     .id(),
@@ -551,24 +740,29 @@ pub fn stream_chunks(
                 base: entities,
                 canopy_mesh,
                 canopy: None,
-                grass_clumps,
-                grass: Vec::new(),
+                grass_mesh: grass_mesh.map(|mesh| {
+                    let census = GeometryCensus::of(&mesh, GeometryKind::GrassClump);
+                    (meshes.add(mesh), census)
+                }),
+                grass: None,
             },
         );
     }
 
-    // Detail tiers: spawn confetti + instanced grass only for chunks near the
-    // camera, and drop them again as it moves away. This is the streaming-mode
-    // perf lever that matters — the cost here is per-entity, not per-vertex.
+    // Detail tiers: spawn confetti + grass only for chunks near the camera, and
+    // drop them again as it moves away. Each is now ONE entity per chunk, so
+    // this pass costs a handful of spawns rather than thousands.
     let grass_radius = quality.grass_radius as i32;
     let confetti_radius = quality.confetti_radius as i32;
+    let mut detail_churn = 0_usize;
     for (&(chunk_x, chunk_z), chunk) in streamer.loaded.iter_mut() {
         let distance = (chunk_x - center_x).abs().max((chunk_z - center_z).abs());
 
-        let wants_canopy = distance <= confetti_radius && chunk.canopy_mesh.is_some();
+        let wants_canopy = (finite || distance <= confetti_radius) && chunk.canopy_mesh.is_some();
         match (wants_canopy, chunk.canopy) {
             (true, None) => {
-                let mesh = chunk.canopy_mesh.clone().unwrap();
+                let (mesh, census) = chunk.canopy_mesh.clone().unwrap();
+                detail_churn += 1;
                 chunk.canopy = Some(
                     commands
                         .spawn((
@@ -577,6 +771,7 @@ pub fn stream_chunks(
                             NotShadowCaster,
                             CanopyConfetti,
                             crate::water::reflective_layers(),
+                            census,
                             StreamedChunk,
                         ))
                         .id(),
@@ -585,44 +780,52 @@ pub fn stream_chunks(
             (false, Some(entity)) => {
                 commands.entity(entity).despawn();
                 chunk.canopy = None;
+                detail_churn += 1;
             }
             _ => {}
         }
 
-        let wants_grass = distance <= grass_radius && !chunk.grass_clumps.is_empty();
-        if wants_grass && chunk.grass.is_empty() {
-            // Sharing one mesh+material handle per tone is what lets bevy batch
-            // every clump of a tone into a single instanced draw.
-            for &(world_x, top_y, world_z, variant) in &chunk.grass_clumps {
-                chunk.grass.push(
+        let wants_grass = (finite || distance <= grass_radius) && chunk.grass_mesh.is_some();
+        match (wants_grass, chunk.grass) {
+            (true, None) => {
+                let (mesh, census) = chunk.grass_mesh.clone().unwrap();
+                detail_churn += 1;
+                chunk.grass = Some(
                     commands
                         .spawn((
-                            Mesh3d(clump_meshes[variant].clone()),
+                            Mesh3d(mesh),
                             MeshMaterial3d(grass_material.clone()),
-                            grass::clump_transform(world_x, top_y, world_z, 0.0, 0.0, seed),
                             NotShadowCaster,
                             grass::GrassClump,
+                            census,
                             StreamedChunk,
                         ))
                         .id(),
                 );
             }
-        } else if !wants_grass && !chunk.grass.is_empty() {
-            for entity in chunk.grass.drain(..) {
+            (false, Some(entity)) => {
                 commands.entity(entity).despawn();
+                chunk.grass = None;
+                detail_churn += 1;
             }
+            _ => {}
         }
     }
 
     // Queue the nearest missing chunks (within bounds) for async generation.
     let mut wanted: Vec<(i32, i32, i32)> = Vec::new();
-    for cz in (center_z - load_radius)..=(center_z + load_radius) {
-        for cx in (center_x - load_radius)..=(center_x + load_radius) {
-            if let Some(bound) = bounds {
-                if cx < -bound || cx > bound || cz < -bound || cz > bound {
-                    continue;
-                }
-            }
+    // Finite: sweep the world's own extent. Infinite: sweep a window around the
+    // camera. Sweeping a camera window over a finite world would leave the
+    // island half-built whenever the camera sat off to one side of it.
+    let (sweep_x, sweep_z) = match bounds {
+        Some(bound) => (-bound..=bound, -bound..=bound),
+        None => (
+            (center_x - load_radius)..=(center_x + load_radius),
+            (center_z - load_radius)..=(center_z + load_radius),
+        ),
+    };
+    for cz in sweep_z {
+        for cx in sweep_x.clone() {
             if streamer.loaded.contains_key(&(cx, cz)) || streamer.pending.contains_key(&(cx, cz)) {
                 continue;
             }
@@ -634,9 +837,17 @@ pub fn stream_chunks(
 
     let pool = AsyncComputeTaskPool::get();
     for &(_, cx, cz) in wanted.iter().take(TASKS_PER_FRAME) {
-        let task = pool.spawn(async move { build_chunk(cx, cz, seed, season) });
+        // Each task gets its own handle on the source (a unit, or an `Arc` bump
+        // onto the island's shared grid).
+        let source = streamer.source.clone();
+        let task = pool.spawn(async move { build_chunk(cx, cz, seed, season, &source) });
         streamer.pending.insert((cx, cz), task);
     }
+
+    stats.loaded_chunks = streamer.loaded.len();
+    stats.pending_chunks = streamer.pending.len();
+    stats.detail_churn = detail_churn;
+    stats.record(stream_started.elapsed().as_secs_f32() * 1000.0);
 }
 
 #[cfg(test)]
@@ -649,7 +860,7 @@ mod tests {
     #[test]
     fn build_chunk_produces_terrain() {
         let started = std::time::Instant::now();
-        let built = build_chunk(0, 0, 7, 0.2);
+        let built = build_chunk(0, 0, 7, 0.2, &ChunkSource::Streamed);
         let elapsed = started.elapsed();
 
         let count = |mesh: &Option<Mesh>| mesh.as_ref().map_or(0, Mesh::count_vertices);
@@ -688,7 +899,11 @@ mod tests {
             (bits[index >> 5] >> (index & 31)) & 1 == 1
         };
         for &(local_x, local_z) in &[(0, 0), (1, 1), (17, 40), (span_x - 1, span_z - 1)] {
-            let height = terrain_column_height(origin_x + local_x, origin_z + local_z, seed);
+            let height = voxel_core::world::terrain_column_height(
+                origin_x + local_x,
+                origin_z + local_z,
+                seed,
+            );
             assert!(
                 is_set(local_x, height, local_z),
                 "surface voxel should be solid at ({local_x}, {local_z})"
@@ -715,8 +930,8 @@ mod season_tests {
     /// top of the streamed world.
     #[test]
     fn season_changes_streamed_foliage() {
-        let summer = build_chunk(0, 0, 7, 0.0);
-        let autumn = build_chunk(0, 0, 7, 1.0);
+        let summer = build_chunk(0, 0, 7, 0.0, &ChunkSource::Streamed);
+        let autumn = build_chunk(0, 0, 7, 1.0, &ChunkSource::Streamed);
 
         let colors = |chunk: &BuiltChunk| {
             chunk
@@ -736,7 +951,7 @@ mod season_tests {
 
     #[test]
     fn reload_updates_seed_and_season() {
-        let mut streamer = ChunkStreamer::new(7, 0.0);
+        let mut streamer = ChunkStreamer::new(7, 0.0, ChunkSource::Streamed);
         streamer.request_reload(9, 0.75);
         assert_eq!(streamer.seed, 9);
         assert_eq!(streamer.season, 0.75);

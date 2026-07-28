@@ -145,6 +145,9 @@ pub struct PerfReadout {
     last_refresh_seconds: f32,
     fps: Option<f64>,
     frame_ms: Option<f64>,
+    /// Worst frame in the diagnostic's recent history — the number that
+    /// actually shows a stutter, which the smoothed average hides.
+    peak_frame_ms: Option<f64>,
     entities: Option<f64>,
 }
 
@@ -160,6 +163,8 @@ pub fn perf_overlay(
     perf: Res<PerfOverlay>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     world_stats: Option<Res<crate::WorldStats>>,
+    geometry: Res<crate::geometry_census::GeometryTotals>,
+    stream_stats: Res<crate::streaming::StreamStats>,
     time: Res<Time>,
     mut readout: Local<PerfReadout>,
     mut tweaks: ResMut<ViewTweaks>,
@@ -196,6 +201,16 @@ pub fn perf_overlay(
         readout.frame_ms = diagnostics
             .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
             .and_then(|diagnostic| diagnostic.smoothed());
+        readout.peak_frame_ms = diagnostics
+            .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+            .and_then(|diagnostic| {
+                diagnostic
+                    .values()
+                    .copied()
+                    .fold(None::<f64>, |worst, value| {
+                        Some(worst.map_or(value, |worst: f64| worst.max(value)))
+                    })
+            });
         readout.entities = diagnostics
             .get(&bevy::diagnostic::EntityCountDiagnosticsPlugin::ENTITY_COUNT)
             .and_then(|diagnostic| diagnostic.value());
@@ -209,6 +224,9 @@ pub fn perf_overlay(
             match (readout.fps, readout.frame_ms) {
                 (Some(fps), Some(frame_ms)) => {
                     ui.strong(format!("{fps:.0} fps   {frame_ms:.1} ms"));
+                    if let Some(peak) = readout.peak_frame_ms {
+                        ui.label(format!("worst frame: {peak:.1} ms"));
+                    }
                 }
                 _ => {
                     ui.strong("warming up…");
@@ -221,21 +239,66 @@ pub fn perf_overlay(
             if let Some(stats) = world_stats {
                 ui.separator();
                 ui.label(format!(
-                    "world: {} chunks · {:.1} M verts",
-                    stats.chunk_count,
-                    stats.total_vertices as f32 / 1e6
-                ));
-                ui.label(format!(
                     "RLE: {:.1} M runs · {:.1} MB",
                     stats.rle_runs as f32 / 1e6,
                     stats.rle_bytes as f32 / 1e6
                 ));
                 ui.label(format!(
-                    "gen {:.0} ms · mesh {:.0} ms",
+                    "gen {:.0} ms",
                     stats.generation.as_secs_f32() * 1000.0,
-                    stats.meshing.as_secs_f32() * 1000.0
                 ));
             }
+
+            // Streaming's main-thread cost. Generation runs off-thread, so a
+            // frame spike is one of these three: chunk hand-off (`spawned`),
+            // detail tiering (`churn`), or — if both are zero while `peak` is
+            // low — not the streamer at all.
+            ui.separator();
+            ui.label(format!(
+                "chunks: {} loaded · {} pending",
+                stream_stats.loaded_chunks, stream_stats.pending_chunks
+            ));
+            ui.label(format!(
+                "stream: {:.2} ms (peak {:.2})",
+                stream_stats.last_ms, stream_stats.peak_ms
+            ));
+            ui.label(format!(
+                "spawned {} · detail churn {}",
+                stream_stats.spawned, stream_stats.detail_churn
+            ));
+
+            // Live geometry census: where the scene's vertices actually are.
+            // This is the measuring stick for the mesh optimizations — flip a
+            // feature and watch the row it belongs to move.
+            ui.separator();
+            ui.label("geometry (live)");
+            egui::Grid::new("geometry-census")
+                .num_columns(4)
+                .spacing([10.0, 2.0])
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label("ent");
+                    ui.label("tris");
+                    ui.label("MB");
+                    ui.end_row();
+                    for kind in crate::geometry_census::GeometryKind::ALL {
+                        let row = geometry.row(kind);
+                        if row.entities == 0 {
+                            continue;
+                        }
+                        ui.label(kind.label());
+                        ui.label(format!("{}", row.entities));
+                        ui.label(format!("{:.0}k", row.triangles as f32 / 1e3));
+                        ui.label(format!("{:.1}", row.bytes as f32 / 1e6));
+                        ui.end_row();
+                    }
+                    let overall = geometry.overall();
+                    ui.strong("total");
+                    ui.strong(format!("{}", overall.entities));
+                    ui.strong(format!("{:.0}k", overall.triangles as f32 / 1e3));
+                    ui.strong(format!("{:.1}", overall.bytes as f32 / 1e6));
+                    ui.end_row();
+                });
 
             // GPU levers: flip a feature, watch the frame time move — the
             // difference is that feature's cost on THIS machine.
