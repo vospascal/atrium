@@ -153,6 +153,7 @@ fn main() {
         .init_resource::<Submerged>()
         .init_resource::<RenderQuality>()
         .init_resource::<geometry_census::GeometryTotals>()
+        .init_resource::<tweak_panel::PanelRegistry>()
         .init_resource::<streaming::StreamStats>()
         .init_resource::<LightingSettings>()
         .insert_resource(tweak_panel::PerfOverlay {
@@ -1239,6 +1240,13 @@ pub struct LightingSettings {
     pub env_reflection: bool,
     /// Strength of the sky-reflection sheen (0 = off).
     pub env_reflection_intensity: f32,
+    /// How hard the sub-voxel leaf dapple darkens foliage (0 = off). The
+    /// per-voxel jitter gives one flat tone per cube; this breaks the surface up
+    /// *inside* each face, which is what stops blocky canopies reading as mush.
+    pub leaf_dapple_depth: f32,
+    /// Dapple samples per voxel edge — higher is finer detail, but fades out
+    /// sooner under minification.
+    pub leaf_dapple_frequency: f32,
 }
 
 impl Default for LightingSettings {
@@ -1249,6 +1257,8 @@ impl Default for LightingSettings {
             ao_strength: 1.0,
             env_reflection: true,
             env_reflection_intensity: 0.2,
+            leaf_dapple_depth: 0.35,
+            leaf_dapple_frequency: 4.0,
         }
     }
 }
@@ -1358,6 +1368,12 @@ fn update_terrain_lighting(
         material.extension.ambient_sky = sky.extend(strength);
         material.extension.ambient_ground = ground.extend(lighting.ao_strength);
         material.extension.env_reflection = sky.extend(env_intensity);
+        material.extension.foliage = Vec4::new(
+            lighting.leaf_dapple_depth,
+            lighting.leaf_dapple_frequency,
+            0.0,
+            0.0,
+        );
     }
 }
 

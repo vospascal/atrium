@@ -43,6 +43,10 @@ var<uniform> env_reflection: vec4<f32>;
 // index. `voxel_dims` then carries the buffer's local span, not the world size.
 @group(#{MATERIAL_BIND_GROUP}) @binding(106)
 var<uniform> chunk_origin: vec4<f32>;
+// Live foliage look: x = leaf-dapple depth (0 = off), y = subdivisions per
+// voxel edge. Driven by the `P` overlay's sliders.
+@group(#{MATERIAL_BIND_GROUP}) @binding(107)
+var<uniform> foliage: vec4<f32>;
 
 fn hash_3d(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     var h: u32 = (seed * 0x9E3779B9u)
@@ -151,6 +155,12 @@ fn terrain_ao(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
     return 0.55 + 0.15 * level;
 }
 
+// Leaf dapple, foliage only. Samples per voxel edge — 4 gives visible detail
+// inside a cube face without collapsing into noise. Depth is how far it darkens
+// (0 = off, 0.35 = a clear leaf break-up).
+const LEAF_DAPPLE_SUBDIVISIONS: f32 = 4.0;
+const LEAF_DAPPLE_DEPTH: f32 = 0.35;
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     // Alpha carries the jitter amplitude. A sentinel offset of +10 marks cover
@@ -180,7 +190,33 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let jitter = 1.0 + amplitude * jitter_fade * (2.0 * roll - 1.0);
 
     var color = pbr_input.material.base_color.rgb * jitter;
-    if !is_cover {
+    if is_cover {
+        // Leaf dapple — foliage only.
+        //
+        // The jitter above is ONE flat tone per voxel, which is why blocky
+        // foliage reads as mush: every cube face is a single flat colour, so the
+        // canopy has no detail between the cube edges. Real foliage (and the
+        // blocky-plus-shader look) keeps the cube silhouette but breaks the
+        // surface up INSIDE each face.
+        //
+        // So sample the same hash on a finer grid — several samples per voxel —
+        // and use it to DARKEN only. Darkening reads as leaves shadowing each
+        // other and adds depth; brightening would just fizz and eat the
+        // silhouette. Fades under minification exactly like the jitter, or the
+        // fine grid aliases into sparkle at distance.
+        // Live from the `P` overlay: x = depth (0 = off), y = subdivisions.
+        let dapple_depth = foliage.x;
+        let fine_coord = voxel_coord * max(foliage.y, 1.0);
+        let fine_voxel = vec3<i32>(floor(fine_coord));
+        let fine_roll = hash_to_unit(hash_3d(
+            fine_voxel.x,
+            fine_voxel.y,
+            fine_voxel.z,
+            seed + 7u,
+        ));
+        let fine_fade = clamp(1.5 - length(fwidth(fine_coord)), 0.0, 1.0);
+        color = color * (1.0 - dapple_depth * fine_fade * fine_roll);
+    } else {
         // Terrain: baked AO was dropped from the mesh; apply it here so merged
         // flat faces still show tight corner occlusion. `ambient_ground.w` is a
         // live strength (1 = baked look, >1 deepens crevices, 0 = AO off).

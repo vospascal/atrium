@@ -79,6 +79,23 @@ fn group_of(voxel: Voxel) -> Option<MeshGroup> {
     }
 }
 
+/// The axis-aligned unit vector closest to `direction`, falling back to up for
+/// a degenerate input. Used to fit a smooth shading direction into the packed
+/// vertex's 3-bit face index.
+fn dominant_axis(direction: Vec3) -> Vec3 {
+    if direction.length_squared() < 1e-6 {
+        return Vec3::Y;
+    }
+    let magnitude = direction.abs();
+    if magnitude.x >= magnitude.y && magnitude.x >= magnitude.z {
+        Vec3::new(direction.x.signum(), 0.0, 0.0)
+    } else if magnitude.y >= magnitude.z {
+        Vec3::new(0.0, direction.y.signum(), 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, direction.z.signum())
+    }
+}
+
 /// Which entry of [`FACE_DIRECTIONS`] a unit normal is. Voxel faces only ever
 /// point six ways, so the normal travels as a 3-bit index and the vertex shader
 /// turns it back into a vector.
@@ -900,6 +917,43 @@ fn emit_canopy(
                     block_z as f32 + block / 2.0,
                 ) + offset;
 
+                // Which way is "out of the canopy" here? Sum the directions to
+                // neighbouring blocks that hold leaves and negate it: the result
+                // points away from the local leaf mass.
+                //
+                // This is the difference between a tree that reads as a tree and
+                // one that reads as noise. Shading each cube by its own six face
+                // normals means every cube has a lit top and a dark underside no
+                // matter where it sits, so the canopy dissolves into speckle with
+                // no form. Shading them all by the direction out of the clump
+                // instead gives the canopy one rounded light gradient — bright on
+                // the sunward outside, dark in the hollows — which is what makes
+                // it look like foliage.
+                //
+                // It is quantised to the dominant axis because a packed vertex
+                // stores its normal as a 3-bit face index (see
+                // `voxel_material::pack_face_word`). Six directions is coarse,
+                // but the win is that a cube's faces now agree with each other
+                // and with their neighbours, which is where the form comes from.
+                let mut mass_direction = Vec3::ZERO;
+                for step_z in -1..=1 {
+                    for step_y in -1..=1 {
+                        for step_x in -1..=1 {
+                            if step_x == 0 && step_y == 0 && step_z == 0 {
+                                continue;
+                            }
+                            let step = IVec3::new(step_x, step_y, step_z);
+                            let probe = here + step * STRIDE;
+                            if group_of(scratch.get(probe.x, probe.y, probe.z))
+                                == Some(MeshGroup::Canopy)
+                            {
+                                mass_direction += step.as_vec3().normalize();
+                            }
+                        }
+                    }
+                }
+                let outward = dominant_axis(-mass_direction);
+
                 for (normal, tangent_1, tangent_2) in FACE_DIRECTIONS {
                     let face_center = center + normal.as_vec3() * half_edge;
                     let mut corners = [Vec3::ZERO; 4];
@@ -914,7 +968,10 @@ fn emit_canopy(
                             (corner.z - half_z) * VOXEL_SIZE,
                         );
                     }
-                    buffers.add_quad(corners, normal.as_vec3(), [color; 4], false);
+                    // Corners came from the true face direction above, so
+                    // winding and back-face culling are untouched; only the
+                    // SHADING normal is swapped for the clump-outward one.
+                    buffers.add_quad(corners, outward, [color; 4], false);
                 }
             }
         }

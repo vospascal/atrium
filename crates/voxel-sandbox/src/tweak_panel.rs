@@ -1,10 +1,15 @@
-//! Live tuning panels (egui), hidden by default — `V` toggles them.
+//! Live tuning panels (egui), hidden by default.
 //!
-//! "View tuning": the camera values we keep second-guessing (FOV, eye
-//! height, depth-of-field), found by feel and then baked into the defaults
-//! here. "Time & weather": the day clock (0–23:59), moon phase, clouds,
-//! fog, and precipitation — the same values biome presets will drive
-//! dynamically later.
+//! `V` opens a small **launcher** of buttons; each opens its own window, closed
+//! independently by its `X`. `P` jumps straight to the performance window. See
+//! [`PanelRegistry`] for why it's built that way rather than as one long list.
+//!
+//! The panels: **View** (camera values we keep second-guessing — FOV, eye
+//! height, depth of field — plus colour grade), **Lighting & foliage** (ambient,
+//! AO, the leaf dapple), **Water** (underwater absorption and the surface),
+//! **Time & sky** (day clock, moon, clouds, fog, precipitation, season),
+//! **Fireflies**, and **Performance** (frame time, the geometry census, and the
+//! live GPU levers).
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -43,8 +48,6 @@ pub struct ViewTweaks {
     pub walk_aperture_f_stops: f32,
     pub orbit_fov_degrees: f32,
     pub orbit_aperture_f_stops: f32,
-    /// Panel hidden by default; `V` toggles it.
-    pub panel_visible: bool,
     /// True while the cursor is over the panel — camera ignores the mouse.
     pub pointer_over_panel: bool,
 }
@@ -62,7 +65,6 @@ impl Default for ViewTweaks {
             walk_aperture_f_stops: 2.2,
             orbit_fov_degrees: 22.0,
             orbit_aperture_f_stops: 2.2,
-            panel_visible: false,
             pointer_over_panel: false,
         }
     }
@@ -125,13 +127,45 @@ pub struct PerfOverlay {
     pub visible: bool,
 }
 
+/// Which tuning windows are open.
+///
+/// The panels used to be a couple of very tall windows holding every slider in
+/// the game, which meant scrolling past camera settings to reach the water. Now
+/// `V` opens a small launcher of buttons and each topic is its own window you
+/// open and close independently — so only what you're actually tuning is on
+/// screen. `P` still jumps straight to the performance window, since that is the
+/// one you want open while measuring.
+#[derive(Resource, Default)]
+pub struct PanelRegistry {
+    /// The launcher grid itself (`V`).
+    pub launcher: bool,
+    pub view: bool,
+    pub lighting: bool,
+    pub water: bool,
+    pub time_weather: bool,
+    pub fireflies: bool,
+}
+
+impl PanelRegistry {
+    /// Is any tuning window open? When nothing is, the panel system can skip all
+    /// of its work — including claiming the mouse.
+    fn any_open(&self) -> bool {
+        self.launcher
+            || self.view
+            || self.lighting
+            || self.water
+            || self.time_weather
+            || self.fireflies
+    }
+}
+
 pub fn toggle_panel(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut tweaks: ResMut<ViewTweaks>,
+    mut registry: ResMut<PanelRegistry>,
     mut perf: ResMut<PerfOverlay>,
 ) {
     if keyboard.just_pressed(KeyCode::KeyV) {
-        tweaks.panel_visible = !tweaks.panel_visible;
+        registry.launcher = !registry.launcher;
     }
     if keyboard.just_pressed(KeyCode::KeyP) {
         perf.visible = !perf.visible;
@@ -544,6 +578,8 @@ pub fn perf_overlay(
 #[allow(clippy::too_many_arguments)]
 pub fn view_tweak_panel(
     mut contexts: EguiContexts,
+    mut registry: ResMut<PanelRegistry>,
+    mut perf: ResMut<PerfOverlay>,
     mut tweaks: ResMut<ViewTweaks>,
     mut cycle: ResMut<DayNightCycle>,
     mut weather: ResMut<WeatherState>,
@@ -562,7 +598,7 @@ pub fn view_tweak_panel(
         With<bevy::core_pipeline::prepass::DepthPrepass>,
     >,
 ) {
-    if !tweaks.panel_visible {
+    if !registry.any_open() {
         tweaks.pointer_over_panel = false;
         return;
     }
@@ -571,9 +607,50 @@ pub fn view_tweak_panel(
     };
     let camera_look = main_camera.single_mut().ok();
 
-    egui::Window::new("View tuning")
-        .default_pos((12.0, 12.0))
+    // The launcher: a grid of buttons, one per topic. Text rather than icon
+    // glyphs — egui ships no icon set, and its default font's emoji coverage is
+    // inconsistent across platforms, so labels are the reliable choice. Swapping
+    // in real icons later only needs an image per button; the registry below
+    // already does the opening and closing.
+    if registry.launcher {
+        let mut launcher_open = registry.launcher;
+        egui::Window::new("Tuning")
+            .default_pos((12.0, 12.0))
+            .default_width(210.0)
+            .resizable(false)
+            .open(&mut launcher_open)
+            .show(ctx, |ui| {
+                ui.label("open a panel");
+                egui::Grid::new("panel-launcher")
+                    .num_columns(2)
+                    .spacing([6.0, 6.0])
+                    .show(ui, |ui| {
+                        let button = |ui: &mut egui::Ui, label: &str, open: &mut bool| {
+                            let button = egui::Button::new(label).min_size([92.0, 34.0].into());
+                            if ui.add(button).clicked() {
+                                *open = !*open;
+                            }
+                        };
+                        button(ui, "View", &mut registry.view);
+                        button(ui, "Lighting", &mut registry.lighting);
+                        ui.end_row();
+                        button(ui, "Water", &mut registry.water);
+                        button(ui, "Time & sky", &mut registry.time_weather);
+                        ui.end_row();
+                        button(ui, "Fireflies", &mut registry.fireflies);
+                        button(ui, "Performance", &mut perf.visible);
+                        ui.end_row();
+                    });
+                ui.small("V closes this · P toggles performance");
+            });
+        registry.launcher = launcher_open;
+    }
+
+    let mut view_open = registry.view;
+    egui::Window::new("View")
+        .default_pos((236.0, 12.0))
         .default_width(280.0)
+        .open(&mut view_open)
         .show(ctx, |ui| {
             match *view_mode {
                 ViewMode::FirstPerson => {
@@ -647,7 +724,16 @@ pub fn view_tweak_panel(
                 }
             }
             ui.separator();
-            ui.label("Lighting (live)");
+            ui.small("Tab switches view · smaller f-stops = blurrier");
+        });
+    registry.view = view_open;
+
+    let mut lighting_open = registry.lighting;
+    egui::Window::new("Lighting & foliage")
+        .default_pos((236.0, 12.0))
+        .default_width(280.0)
+        .open(&mut lighting_open)
+        .show(ctx, |ui| {
             ui.checkbox(&mut lighting.sky_ambient, "sky ambient (GI feel)");
             if lighting.sky_ambient {
                 ui.add(
@@ -656,6 +742,16 @@ pub fn view_tweak_panel(
                 );
             }
             ui.add(egui::Slider::new(&mut lighting.ao_strength, 0.0..=3.0).text("AO strength"));
+            // Leaf dapple: sub-voxel detail *inside* each foliage face. Set the
+            // depth to 0 to see the canopy without it.
+            ui.add(
+                egui::Slider::new(&mut lighting.leaf_dapple_depth, 0.0..=0.8)
+                    .text("leaf dapple depth"),
+            );
+            ui.add(
+                egui::Slider::new(&mut lighting.leaf_dapple_frequency, 1.0..=12.0)
+                    .text("leaf dapple detail"),
+            );
             ui.checkbox(&mut lighting.env_reflection, "env reflection (sky sheen)");
             if lighting.env_reflection {
                 ui.add(
@@ -663,8 +759,15 @@ pub fn view_tweak_panel(
                         .text("reflection intensity"),
                 );
             }
+        });
+    registry.lighting = lighting_open;
 
-            ui.separator();
+    let mut water_open = registry.water;
+    egui::Window::new("Water")
+        .default_pos((236.0, 12.0))
+        .default_width(280.0)
+        .open(&mut water_open)
+        .show(ctx, |ui| {
             ui.label("Underwater (live)");
             ui.horizontal(|ui| {
                 ui.label("screen tint");
@@ -717,13 +820,14 @@ pub fn view_tweak_panel(
                 *surface = crate::water::SurfaceTuning::default();
             }
             ui.small("tint = water's own colour · reflectivity = sky/mirror amount");
-            ui.separator();
-            ui.small("Tab switches view · smaller f-stops = blurrier");
         });
+    registry.water = water_open;
 
-    egui::Window::new("Time & weather")
-        .default_pos((12.0, 320.0))
+    let mut time_weather_open = registry.time_weather;
+    egui::Window::new("Time & sky")
+        .default_pos((236.0, 320.0))
         .default_width(280.0)
+        .open(&mut time_weather_open)
         .show(ctx, |ui| {
             ui.label("Time");
             // 10-minute steps: 00:00 .. 23:50.
@@ -847,10 +951,13 @@ pub fn view_tweak_panel(
             }
             ui.small("release to regrow the island (takes a few seconds)");
         });
+    registry.time_weather = time_weather_open;
 
+    let mut fireflies_open = registry.fireflies;
     egui::Window::new("Fireflies")
-        .default_pos((12.0, 640.0))
+        .default_pos((236.0, 640.0))
         .default_width(280.0)
+        .open(&mut fireflies_open)
         .show(ctx, |ui| {
             ui.add(egui::Slider::new(&mut fireflies.amount, 0..=150).text("amount per swarm"));
             ui.add(egui::Slider::new(&mut fireflies.width, 0.5..=8.0).text("width m"));
@@ -876,6 +983,7 @@ pub fn view_tweak_panel(
             });
             ui.small("F spawns a swarm · Shift+F clears · night only");
         });
+    registry.fireflies = fireflies_open;
 
     tweaks.pointer_over_panel = ctx.wants_pointer_input();
 }

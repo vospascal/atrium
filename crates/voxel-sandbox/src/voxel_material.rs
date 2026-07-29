@@ -104,7 +104,17 @@ pub struct VoxelExtension {
     /// the shader can localize global voxel coordinates. See `voxel_terrain.wgsl`.
     #[uniform(106)]
     pub chunk_origin: Vec4,
+    /// Live foliage look: `x` = leaf-dapple depth (0 = off), `y` = dapple
+    /// subdivisions per voxel edge. Driven by the `P` overlay's sliders, so the
+    /// canopy is tuned by eye rather than by editing the shader and restarting.
+    #[uniform(107)]
+    pub foliage: Vec4,
 }
+
+/// Starting leaf-dapple values: `x` = depth, `y` = subdivisions per voxel edge.
+/// `update_terrain_lighting` overwrites these from [`crate::LightingSettings`]
+/// every frame, so they only govern the first frame.
+pub const DEFAULT_FOLIAGE: Vec4 = Vec4::new(0.35, 4.0, 0.0, 0.0);
 
 /// Packed vertex position + face data: `x`, `y`, `z` as 16-bit fixed point in
 /// CHUNK-LOCAL space, then a bitfield (see [`pack_face_word`]).
@@ -229,6 +239,7 @@ pub fn voxel_extension(seed: u32, occupancy: Handle<ShaderStorageBuffer>) -> Vox
         env_reflection: Vec4::ZERO,
         // Island occupancy is global / world-indexed, so no origin shift.
         chunk_origin: Vec4::ZERO,
+        foliage: DEFAULT_FOLIAGE,
     }
 }
 
@@ -255,5 +266,6 @@ pub fn streamed_voxel_extension(
         ambient_ground: Vec4::new(0.0, 0.0, 0.0, 1.0),
         env_reflection: Vec4::ZERO,
         chunk_origin: Vec4::new(origin_x as f32, 0.0, origin_z as f32, 0.0),
+        foliage: DEFAULT_FOLIAGE,
     }
 }
