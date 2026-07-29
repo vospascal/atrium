@@ -1,0 +1,16 @@
+[package]
+name = "voxel-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone ray-traced voxel renderer — winit + wgpu + egui, no Bevy"
+
+[dependencies]
+bytemuck = "1"
+egui = "0.35"
+egui-wgpu = "0.35"
+egui-winit = "0.35"
+glam = "0.30"
+pollster = "0.4"
+voxel-core = { version = "0.1.0", path = "../voxel-core" }
+wgpu = "29"
+winit = "0.30"

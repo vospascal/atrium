@@ -17,17 +17,27 @@ Process rules (same as voxel-sandbox arc): stages in order, any deviation flagge
 approved first, optimize aggressively, stage-gate = Pascal runs the app and eyeballs
 it, checkbox roadmap shown every turn.
 
+**Architecture rule — as modular as possible (Pascal, 2026-07-29):** hard seams
+between platform/windowing ↔ GPU device ↔ render passes ↔ world data ↔ camera ↔
+overlay. Each render pass is its own module with a narrow interface (resources in,
+commands out) so passes can be added/swapped without touching others — the pass
+list will grow Stage by Stage (test pattern → DDA → shadow → CAGI → post). The
+brickmap stays renderer-independent (it doubles as the audio-ray structure); the
+camera stays windowing-independent (it doubles as the VR head pose slot); the
+platform layer stays thin (it gets replaced by OpenXR on Quest). Modular means
+clean seams — never compat shims or forwarding layers.
+
 ---
 
 ## Stages
 
-### Stage 0 — Scaffold ⬜
+### Stage 0 — Scaffold ✅ (gate passed 2026-07-29: 8 ms / 120 fps, vsync-capped)
 Binary crate `voxel-rt` in the workspace. `winit` window, `wgpu` device/surface
 (Metal), fullscreen **compute** pass writing a test pattern to a storage texture,
 blitted to the swapchain. `egui` overlay with FPS counter.
 **Gate:** app opens, animated test pattern, FPS readout.
 
-### Stage 1 — Brickmap + primary-ray DDA ⬜
+### Stage 1 — Brickmap + primary-ray DDA ✅ (gate passed 2026-07-29: ~4 ms uncapped; brickmap 61.7 ms / 71,941 bricks)
 Two-level brickmap built from `VoxelWorld`: dense brick-pointer grid (8³-voxel
 bricks), per-occupied-brick occupancy bits + material bytes; palette from the
 `Voxel` enum (hues matched to voxel-sandbox's). Upload to storage buffers.

@@ -1,0 +1,293 @@
+//! DDA compute pass: primary rays traced through the two-level brickmap
+//! (`shaders/dda.wgsl`), one thread per pixel, writing shaded colors into the
+//! frame's storage texture. Owns the brickmap GPU buffers (uploaded once at
+//! startup — the world is static in Stage 1) and the per-frame camera
+//! uniform.
+//!
+//! Bind group 0 layout mirrors the table at the top of `dda.wgsl`:
+//! camera uniform, brickmap metadata uniform, three read-only storage buffers
+//! (brick pointers, occupancy bits, material bytes), the palette storage
+//! buffer, and the write-only rgba8unorm output texture.
+
+use wgpu::util::DeviceExt;
+
+use crate::brickmap::Brickmap;
+use crate::camera::CameraUniform;
+
+const WORKGROUP_SIZE: u32 = 8;
+
+pub struct DdaPass {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    camera_uniform_buffer: wgpu::Buffer,
+    metadata_uniform_buffer: wgpu::Buffer,
+    brick_indices_buffer: wgpu::Buffer,
+    occupancy_words_buffer: wgpu::Buffer,
+    material_words_buffer: wgpu::Buffer,
+    palette_buffer: wgpu::Buffer,
+}
+
+impl DdaPass {
+    pub fn new(
+        device: &wgpu::Device,
+        brickmap: &Brickmap,
+        output_view: &wgpu::TextureView,
+    ) -> Self {
+        let (pipeline, bind_group_layout) = create_pipeline(device);
+
+        let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dda camera uniform"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let metadata_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dda brickmap metadata uniform"),
+                contents: bytemuck::bytes_of(&brickmap.metadata()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let brick_indices_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dda brick indices"),
+            contents: bytemuck::cast_slice(&brickmap.brick_indices),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let occupancy_words_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dda occupancy words"),
+            contents: bytemuck::cast_slice(&brickmap.occupancy_words),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let material_words_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dda material words"),
+            contents: bytemuck::cast_slice(&brickmap.material_words),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let palette_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dda palette"),
+            contents: bytemuck::cast_slice(&crate::brickmap::palette()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let bind_group = create_bind_group(
+            device,
+            &bind_group_layout,
+            &camera_uniform_buffer,
+            &metadata_uniform_buffer,
+            &brick_indices_buffer,
+            &occupancy_words_buffer,
+            &material_words_buffer,
+            &palette_buffer,
+            output_view,
+        );
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            bind_group,
+            camera_uniform_buffer,
+            metadata_uniform_buffer,
+            brick_indices_buffer,
+            occupancy_words_buffer,
+            material_words_buffer,
+            palette_buffer,
+        }
+    }
+
+    /// Refresh the output-texture binding after the storage texture is recreated.
+    pub fn rebind(&mut self, device: &wgpu::Device, output_view: &wgpu::TextureView) {
+        self.bind_group = create_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.camera_uniform_buffer,
+            &self.metadata_uniform_buffer,
+            &self.brick_indices_buffer,
+            &self.occupancy_words_buffer,
+            &self.material_words_buffer,
+            &self.palette_buffer,
+            output_view,
+        );
+    }
+
+    pub fn encode(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        camera_uniform: &CameraUniform,
+        output_width: u32,
+        output_height: u32,
+    ) {
+        queue.write_buffer(
+            &self.camera_uniform_buffer,
+            0,
+            bytemuck::bytes_of(camera_uniform),
+        );
+
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("dda pass"),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&self.pipeline);
+        compute_pass.set_bind_group(0, &self.bind_group, &[]);
+        compute_pass.dispatch_workgroups(
+            output_width.div_ceil(WORKGROUP_SIZE),
+            output_height.div_ceil(WORKGROUP_SIZE),
+            1,
+        );
+    }
+}
+
+/// Shader module + bind group layout + compute pipeline, separated from
+/// buffer upload so the headless pipeline test can validate the shader and
+/// layout without building a world.
+fn create_pipeline(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("dda shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/dda.wgsl").into()),
+    });
+
+    let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let storage_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("dda bind group layout"),
+        entries: &[
+            uniform_entry(0), // camera
+            uniform_entry(1), // brickmap metadata
+            storage_entry(2), // brick indices
+            storage_entry(3), // occupancy words
+            storage_entry(4), // material words
+            storage_entry(5), // palette
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("dda pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("dda pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader_module,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    (pipeline, bind_group_layout)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    camera_uniform_buffer: &wgpu::Buffer,
+    metadata_uniform_buffer: &wgpu::Buffer,
+    brick_indices_buffer: &wgpu::Buffer,
+    occupancy_words_buffer: &wgpu::Buffer,
+    material_words_buffer: &wgpu::Buffer,
+    palette_buffer: &wgpu::Buffer,
+    output_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("dda bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: metadata_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: brick_indices_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: occupancy_words_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: material_words_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: palette_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(output_view),
+            },
+        ],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless pipeline compile: prove `dda.wgsl` validates under wgpu 29's
+    /// naga and that the compute pipeline accepts the bind group layout — no
+    /// window, no world. Skips (with a note) when no GPU adapter exists,
+    /// e.g. on a bare CI runner.
+    #[test]
+    fn dda_pipeline_compiles_headless() {
+        let instance = wgpu::Instance::default();
+        let adapter = match pollster::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        ) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                eprintln!("skipping dda_pipeline_compiles_headless: no GPU adapter ({error})");
+                return;
+            }
+        };
+        let (device, _queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("dda headless test device"),
+                ..Default::default()
+            }))
+            .expect("adapter exists but device creation failed");
+
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let (_pipeline, _bind_group_layout) = create_pipeline(&device);
+        let validation_error = pollster::block_on(error_scope.pop());
+        assert!(
+            validation_error.is_none(),
+            "dda.wgsl failed wgpu validation: {validation_error:?}"
+        );
+    }
+}

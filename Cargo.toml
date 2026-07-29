@@ -7,6 +7,7 @@ members = [
     "crates/behavior",
     "crates/voxel-core",
     "crates/voxel-sandbox",
+    "crates/voxel-rt",
 ]
 
 [package]
@@ -60,6 +61,11 @@ opt-level = 2
 # in the Stage 0 refactor). The `*` glob above only covers dependencies, not
 # workspace members, so without this generation runs unoptimized (~20× slower).
 [profile.dev.package.voxel-core]
+opt-level = 2
+
+# voxel-rt traverses the voxel grid per pixel on the CPU side (brickmap builds,
+# uploads); same reasoning as voxel-sandbox/voxel-core above.
+[profile.dev.package.voxel-rt]
 opt-level = 2
 
 [profile.profiling]
