@@ -1,21 +1,21 @@
-//! Instanced grass.
+//! Batched grass.
 //!
-//! Grass used to be baked per-voxel into the chunk mesh (~1.2M verts, static).
-//! Here it's **auto-instanced** instead: a small palette of pre-colored
-//! grass-clump meshes, each spawned many times as its own entity sharing one
-//! mesh handle + one material handle. Bevy batches entities that share a
-//! mesh+material into a single instanced draw call, so all grass of one tone
-//! is one draw. It uses its own [`GrassMaterial`] (StandardMaterial PBR + a
-//! wind extension) — separate from the terrain material so the wind vertex
-//! shader (and its matching depth-prepass shader) stays off the terrain.
+//! Every clump in a chunk is baked into ONE mesh (see
+//! [`build_chunk_grass_mesh`]), chunk-local like the chunk meshes, placed by
+//! the chunk entity's `Transform`. Grass was previously one entity per clump
+//! sharing a palette of pre-coloured meshes; that made the meadow
+//! entity-bound, and thousands of tiny entities cost far more frame time than
+//! their handful of vertices ever did.
 //!
-//! Per-instance variation: the **variant mesh** gives the biome tone
-//! (green → straw), the entity `Transform` gives position + random yaw +
-//! height.
+//! Per-clump variation — biome tone, yaw, height, wind phase — is therefore
+//! baked into vertex data rather than read from a transform.
+//!
+//! It uses its own [`GrassMaterial`] (StandardMaterial PBR + a wind extension)
+//! — separate from the terrain material so the wind vertex shader (and its
+//! matching depth-prepass shader) stays off the terrain.
 //!
 //! Each blade is a thin vertical **voxel box** (gvox_engine's grass model),
-//! not a flat quad, and sways in the wind via the material's vertex shader —
-//! see `build_clump_mesh`.
+//! not a flat quad, and sways in the wind via the material's vertex shader.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -24,6 +24,7 @@ use bevy::prelude::*;
 use voxel_core::noise::{hash_3d, hash_to_unit, smoothstep};
 use voxel_core::world::VOXEL_SIZE;
 
+use crate::mesh::CHUNK_SIZE;
 use crate::voxel_material::{GrassExtension, GrassMaterial, FULL_SWAY_WIND_SPEED};
 use crate::weather::WeatherState;
 
@@ -83,8 +84,6 @@ const CLUMP_SPREAD: f32 = 0.13;
 const ROOT_DARKEN: f32 = 0.55;
 const TIP_BRIGHTEN: f32 = 1.4;
 
-/// The clump-mesh palette, one pre-coloured mesh per biome tone. Shared by the
-/// island and the streamed world, so both draw the same instanced grass.
 /// The shared wind material. Solid voxel-box blades → default back-face
 /// culling; the wind extension swaps in the sway vertex shaders and the tone
 /// comes from the mesh's vertex colours.
@@ -165,26 +164,34 @@ fn clump_placement(
     world_x: i32,
     top_y: i32,
     world_z: i32,
-    offset_x: f32,
-    offset_z: f32,
+    origin_x: i32,
+    origin_z: i32,
     seed: u32,
 ) -> ClumpPlacement {
     let yaw =
         hash_to_unit(hash_3d(world_x, 0, world_z, seed.wrapping_add(31))) * std::f32::consts::TAU;
     let height_scale =
         0.7 + 0.6 * hash_to_unit(hash_3d(world_x, 1, world_z, seed.wrapping_add(32)));
-    let base = Vec3::new(
-        (world_x as f32 + 0.5 - offset_x) * VOXEL_SIZE,
+    let world_base = Vec3::new(
+        (world_x as f32 + 0.5) * VOXEL_SIZE,
         top_y as f32 * VOXEL_SIZE,
-        (world_z as f32 + 0.5 - offset_z) * VOXEL_SIZE,
+        (world_z as f32 + 0.5) * VOXEL_SIZE,
+    );
+    // Chunk-local, to match the chunk meshes; the entity transform places it.
+    let base = Vec3::new(
+        world_base.x - origin_x as f32 * VOXEL_SIZE,
+        world_base.y,
+        world_base.z - origin_z as f32 * VOXEL_SIZE,
     );
     ClumpPlacement {
         base,
         yaw,
         height_scale,
-        // Must stay identical to what the shader used to compute from the
-        // clump's transform translation, or the meadow's sway pattern shifts.
-        phase: base.x * 0.6 + base.z * 0.8,
+        // Deliberately from the WORLD position, not the chunk-local one:
+        // derive it locally and every chunk repeats the same sway pattern,
+        // tiling the meadow visibly. Also identical to what the shader used to
+        // compute from the clump's transform translation.
+        phase: world_base.x * 0.6 + world_base.z * 0.8,
     }
 }
 
@@ -214,8 +221,8 @@ fn clump_placement(
 /// bit-for-bit or the depth prepass z-fights.
 pub fn build_chunk_grass_mesh(
     clumps: &[(i32, i32, i32, usize)],
-    offset_x: f32,
-    offset_z: f32,
+    chunk_x: i32,
+    chunk_z: i32,
     seed: u32,
 ) -> Option<Mesh> {
     if clumps.is_empty() {
@@ -228,8 +235,9 @@ pub fn build_chunk_grass_mesh(
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
+    let (origin_x, origin_z) = (chunk_x * CHUNK_SIZE, chunk_z * CHUNK_SIZE);
     for &(world_x, top_y, world_z, variant) in clumps {
-        let placement = clump_placement(world_x, top_y, world_z, offset_x, offset_z, seed);
+        let placement = clump_placement(world_x, top_y, world_z, origin_x, origin_z, seed);
         let tone = GRASS_TONES[variant.min(GRASS_TONES.len() - 1)];
         push_clump(
             &mut positions,
@@ -242,6 +250,8 @@ pub fn build_chunk_grass_mesh(
         );
     }
 
+    // 32-bit indices, uniformly — see the note in `mesh::MeshBuffers::into_mesh`
+    // on why a mixed index format costs more in batching than it saves in bytes.
     Some(
         Mesh::new(
             PrimitiveTopology::TriangleList,
@@ -430,11 +440,11 @@ mod tests {
     fn batched_mesh_holds_every_clump() {
         let per_clump = CLUMP_BLADES * 6 * 4;
         for count in [1, 5, 40] {
-            let mesh = build_chunk_grass_mesh(&clumps(count), 0.0, 0.0, 7).expect("clumps present");
+            let mesh = build_chunk_grass_mesh(&clumps(count), 0, 0, 7).expect("clumps present");
             assert_eq!(mesh.count_vertices(), per_clump * count as usize);
         }
         assert!(
-            build_chunk_grass_mesh(&[], 0.0, 0.0, 7).is_none(),
+            build_chunk_grass_mesh(&[], 0, 0, 7).is_none(),
             "a chunk with no clumps should produce no mesh at all"
         );
     }
@@ -444,7 +454,7 @@ mod tests {
     /// baked per-vertex in UV.x precisely to prevent that.
     #[test]
     fn clumps_keep_distinct_wind_phases() {
-        let mesh = build_chunk_grass_mesh(&clumps(8), 0.0, 0.0, 7).expect("clumps present");
+        let mesh = build_chunk_grass_mesh(&clumps(8), 0, 0, 7).expect("clumps present");
         let uvs = uvs_of(&mesh);
         let per_clump = CLUMP_BLADES * 6 * 4;
 
@@ -474,12 +484,41 @@ mod tests {
         }
     }
 
+    /// Wind phase comes from the clump's WORLD position, not its chunk-local
+    /// one. Derive it locally and every chunk would repeat the same sway
+    /// pattern — the meadow would visibly tile.
+    #[test]
+    fn wind_phase_does_not_repeat_per_chunk() {
+        // The same position *within* a chunk, in two different chunks.
+        let (far_x, far_z) = (5, 3);
+        let here = clump_placement(0, 40, 0, 0, 0, 7);
+        let there = clump_placement(
+            far_x * CHUNK_SIZE,
+            40,
+            far_z * CHUNK_SIZE,
+            far_x * CHUNK_SIZE,
+            far_z * CHUNK_SIZE,
+            7,
+        );
+
+        assert_ne!(
+            here.phase, there.phase,
+            "two chunks gave the same local position the same wind phase — the meadow would tile"
+        );
+        // ...while the chunk-local base is identical, which is what makes the
+        // geometry independent of which chunk it lands in.
+        assert_eq!(
+            here.base, there.base,
+            "chunk-local base should not depend on which chunk it is in"
+        );
+    }
+
     /// UV.y carries the blade's UNSCALED object-space height, which is what the
     /// old shader read from `position.y`. It must span root (0) to tip
     /// regardless of the clump's height scale, or the sway strength changes.
     #[test]
     fn blade_height_is_baked_unscaled() {
-        let mesh = build_chunk_grass_mesh(&clumps(4), 0.0, 0.0, 7).expect("clumps present");
+        let mesh = build_chunk_grass_mesh(&clumps(4), 0, 0, 7).expect("clumps present");
         let uvs = uvs_of(&mesh);
         let heights: Vec<f32> = uvs.iter().map(|uv| uv[1]).collect();
         let lowest = heights.iter().copied().fold(f32::MAX, f32::min);
@@ -496,8 +535,8 @@ mod tests {
     #[test]
     fn batched_clumps_sit_at_their_placement() {
         let clump = (30, 40, 12, 0);
-        let placement = clump_placement(clump.0, clump.1, clump.2, 0.0, 0.0, 7);
-        let mesh = build_chunk_grass_mesh(&[clump], 0.0, 0.0, 7).expect("clump present");
+        let placement = clump_placement(clump.0, clump.1, clump.2, 0, 0, 7);
+        let mesh = build_chunk_grass_mesh(&[clump], 0, 0, 7).expect("clump present");
         let positions = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")

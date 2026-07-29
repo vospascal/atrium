@@ -253,6 +253,18 @@ impl StreamStats {
 #[derive(Component)]
 pub struct StreamedChunk;
 
+/// Where a chunk sits in the world. Chunk meshes are built CHUNK-LOCAL (see
+/// `mesh::build_chunk_meshes`) so their positions can be quantised tightly, and
+/// this transform is what puts them back in the world. It is per-instance data
+/// bevy already uploads, so it costs no batching.
+fn chunk_transform(chunk_x: i32, chunk_z: i32) -> Transform {
+    Transform::from_xyz(
+        (chunk_x * CHUNK_SIZE) as f32 * VOXEL_SIZE,
+        0.0,
+        (chunk_z * CHUNK_SIZE) as f32 * VOXEL_SIZE,
+    )
+}
+
 /// Which chunk coordinate a render-space position sits in.
 fn chunk_of(render_x: f32, render_z: f32) -> (i32, i32) {
     let voxel_x = (render_x / voxel_core::world::VOXEL_SIZE).floor() as i32;
@@ -314,10 +326,12 @@ fn build_water_surface_mesh(scratch: &ChunkScratch, chunk_x: i32, chunk_z: i32) 
             {
                 local_x += 1;
             }
-            let x_min = (origin_x + run_start) as f32 * VOXEL_SIZE;
-            let x_max = (origin_x + local_x) as f32 * VOXEL_SIZE;
-            let z_min = world_z as f32 * VOXEL_SIZE;
-            let z_max = (world_z + 1) as f32 * VOXEL_SIZE;
+            // Chunk-local, like every other chunk mesh; the entity transform
+            // places it.
+            let x_min = run_start as f32 * VOXEL_SIZE;
+            let x_max = local_x as f32 * VOXEL_SIZE;
+            let z_min = local_z as f32 * VOXEL_SIZE;
+            let z_max = (local_z + 1) as f32 * VOXEL_SIZE;
 
             let base = positions.len() as u32;
             // Counter-clockwise seen from above, so the surface faces up.
@@ -401,9 +415,9 @@ fn build_chunk_from<S: VoxelSource>(
     let scratch = mesh::unpack_chunk_window(source, chunk_x, chunk_z);
     let clumps = harvest_grass_clumps(source, &scratch, chunk_x, chunk_z);
     // Baked here, on the compute pool, rather than spawned as thousands of
-    // per-clump entities on the main thread.
-    let (offset_x, offset_z) = source.world_offset();
-    let grass_mesh = grass::build_chunk_grass_mesh(&clumps, offset_x, offset_z, seed);
+    // per-clump entities on the main thread. Chunk-local, like the chunk
+    // meshes — the entity `Transform` places it.
+    let grass_mesh = grass::build_chunk_grass_mesh(&clumps, chunk_x, chunk_z, seed);
     let meshes = mesh::build_chunk_meshes(
         source,
         &scratch,
@@ -666,6 +680,7 @@ pub fn stream_chunks(
                     .spawn((
                         Mesh3d(meshes.add(chunk_mesh)),
                         MeshMaterial3d(terrain_material.clone()),
+                        chunk_transform(key.0, key.1),
                         crate::water::reflective_layers(),
                         census,
                         StreamedChunk,
@@ -686,6 +701,7 @@ pub fn stream_chunks(
                     .spawn((
                         Mesh3d(meshes.add(main_view_mesh)),
                         MeshMaterial3d(terrain_material.clone()),
+                        chunk_transform(key.0, key.1),
                         NotShadowCaster,
                         census,
                         StreamedChunk,
@@ -710,6 +726,7 @@ pub fn stream_chunks(
                     .spawn((
                         Mesh3d(meshes.add(chunk_mesh)),
                         MeshMaterial3d(terrain_material.clone()),
+                        chunk_transform(key.0, key.1),
                         crate::water::reflective_layers(),
                         census,
                         StreamedChunk,
@@ -727,6 +744,7 @@ pub fn stream_chunks(
                     .spawn((
                         Mesh3d(meshes.add(surface_mesh)),
                         MeshMaterial3d(water_material.clone()),
+                        chunk_transform(key.0, key.1),
                         NotShadowCaster,
                         census,
                         StreamedChunk,
@@ -768,6 +786,7 @@ pub fn stream_chunks(
                         .spawn((
                             Mesh3d(mesh),
                             MeshMaterial3d(terrain_material.clone()),
+                            chunk_transform(chunk_x, chunk_z),
                             NotShadowCaster,
                             CanopyConfetti,
                             crate::water::reflective_layers(),
@@ -795,6 +814,7 @@ pub fn stream_chunks(
                         .spawn((
                             Mesh3d(mesh),
                             MeshMaterial3d(grass_material.clone()),
+                            chunk_transform(chunk_x, chunk_z),
                             NotShadowCaster,
                             grass::GrassClump,
                             census,
@@ -934,11 +954,10 @@ mod season_tests {
         let autumn = build_chunk(0, 0, 7, 1.0, &ChunkSource::Streamed);
 
         let colors = |chunk: &BuiltChunk| {
-            chunk
-                .meshes
-                .canopy
-                .as_ref()
-                .and_then(|mesh| mesh.attribute(Mesh::ATTRIBUTE_COLOR).cloned())
+            chunk.meshes.canopy.as_ref().and_then(|mesh| {
+                mesh.attribute(crate::voxel_material::ATTRIBUTE_VOXEL_COLOR)
+                    .cloned()
+            })
         };
         let summer_colors = colors(&summer).expect("summer canopy");
         let autumn_colors = colors(&autumn).expect("autumn canopy");

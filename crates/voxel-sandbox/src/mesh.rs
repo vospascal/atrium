@@ -11,6 +11,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use crate::voxel_material;
 use voxel_core::noise::{hash_3d, hash_to_unit};
 use voxel_core::voxel_source::VoxelSource;
 use voxel_core::world::{Voxel, PLATEAU_FLOOR, VOXEL_SIZE, WORLD_SIZE_Y};
@@ -78,11 +79,25 @@ fn group_of(voxel: Voxel) -> Option<MeshGroup> {
     }
 }
 
+/// Which entry of [`FACE_DIRECTIONS`] a unit normal is. Voxel faces only ever
+/// point six ways, so the normal travels as a 3-bit index and the vertex shader
+/// turns it back into a vector.
+fn face_index_of(normal: Vec3) -> u16 {
+    FACE_DIRECTIONS
+        .iter()
+        .position(|(face, _, _)| face.as_vec3() == normal)
+        .unwrap_or_else(|| panic!("voxel faces must be axis-aligned, got {normal:?}")) as u16
+}
+
+/// Vertex buffers in the **packed** layout every terrain-material mesh shares:
+/// 12 bytes a vertex instead of 40 (see
+/// [`crate::voxel_material::ATTRIBUTE_VOXEL_POSITION`]).
 #[derive(Default)]
 pub(crate) struct MeshBuffers {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    colors: Vec<[f32; 4]>,
+    /// Chunk-local position as 16-bit fixed point, plus the packed face word.
+    packed_positions: Vec<[u16; 4]>,
+    /// Vertex colour, rgb as 8-bit unorm (alpha unused).
+    packed_colors: Vec<[u8; 4]>,
     indices: Vec<u32>,
 }
 
@@ -94,11 +109,33 @@ impl MeshBuffers {
         corner_colors: [[f32; 4]; 4],
         flip_diagonal: bool,
     ) {
-        let base_index = self.positions.len() as u32;
+        let base_index = self.packed_positions.len() as u32;
+        let face_index = face_index_of(normal);
         for corner_index in 0..4 {
-            self.positions.push(corners[corner_index].to_array());
-            self.normals.push(normal.to_array());
-            self.colors.push(corner_colors[corner_index]);
+            let corner = corners[corner_index];
+            let color = corner_colors[corner_index];
+            // Alpha arrives carrying the jitter amplitude, offset by
+            // `BAKED_AO_SENTINEL` where ambient occlusion is already in the
+            // colour. Split that back apart here: the flag and the amplitude
+            // get their own bits, so the colour channels can be plain unorm.
+            let ambient_occlusion_baked = color[3] >= 1.0;
+            let amplitude = if ambient_occlusion_baked {
+                color[3] - BAKED_AO_SENTINEL
+            } else {
+                color[3]
+            };
+            self.packed_positions.push([
+                voxel_material::pack_position_axis(corner.x),
+                voxel_material::pack_position_axis(corner.y),
+                voxel_material::pack_position_axis(corner.z),
+                voxel_material::pack_face_word(face_index, ambient_occlusion_baked, amplitude),
+            ]);
+            self.packed_colors.push([
+                (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                255,
+            ]);
         }
         // Two triangles; the diagonal choice follows ambient occlusion so
         // interpolation never smears a dark corner across the whole quad.
@@ -112,17 +149,34 @@ impl MeshBuffers {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.positions.is_empty()
+        self.packed_positions.is_empty()
     }
 
     pub(crate) fn into_mesh(self) -> Mesh {
+        // NOTE: do not "optimise" the indices into 16-bit for small meshes.
+        // It saves real VRAM (~16 MB here) and costs real frame time, because
+        // bevy keys mesh slabs by element layout and puts `index_slab` in the
+        // batch set key (`bevy_pbr`'s `material.rs`). A mix of 16- and 32-bit
+        // index formats therefore splits one batch set into two, and batching
+        // is worth far more to this scene than the bytes are. If every mesh
+        // could be 16-bit it would be uniform and fine — but some chunks
+        // exceed 65 536 vertices, so the formats would always be mixed.
+        //
+        // The same rule governs the packed attributes below: `vertex_slab` is
+        // in that key too, so EVERY mesh drawn with the terrain material has to
+        // use this exact layout.
         Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::RENDER_WORLD,
         )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
+        .with_inserted_attribute(
+            voxel_material::ATTRIBUTE_VOXEL_POSITION,
+            bevy::mesh::VertexAttributeValues::Uint16x4(self.packed_positions),
+        )
+        .with_inserted_attribute(
+            voxel_material::ATTRIBUTE_VOXEL_COLOR,
+            bevy::mesh::VertexAttributeValues::Unorm8x4(self.packed_colors),
+        )
         .with_inserted_indices(Indices::U32(self.indices))
     }
 }
@@ -232,9 +286,20 @@ pub fn build_chunk_meshes(
     // Faces above this (voxel units) belong to the reflection-visible mesh.
     let water_plane_y = (voxel_core::world::WATER_LEVEL + 1) as f32 + 0.01;
 
-    // Vertex-centering offset: (half_x, half_z) for the island (so it straddles
-    // the origin), (0, 0) for the infinite streamed world.
-    let (half_x, half_z) = world.world_offset();
+    // Vertices are emitted CHUNK-LOCAL — relative to this chunk's origin — and
+    // the entity's `Transform` puts the chunk in the world. They used to be
+    // world-space with identity transforms, which is simpler but caps how
+    // tightly a position can be quantised: the infinite world's coordinates
+    // grow without bound, so no fixed-point format can cover them. Chunk-local
+    // positions span a known 64 × 256 × 64 voxels, which 16 bits covers to well
+    // under a millimetre.
+    //
+    // Culling is unaffected: bevy derives the AABB from these vertices and
+    // transforms it. Batching is unaffected too — a `Transform` is per-instance
+    // data bevy already uploads, unlike a per-chunk material binding, which
+    // would have split the batch.
+    let half_x = (chunk_x * CHUNK_SIZE) as f32;
+    let half_z = (chunk_z * CHUNK_SIZE) as f32;
 
     // Raw chunk span in world voxels — no world-size clamp, so streamed chunks
     // at any coordinate mesh correctly. Each source clamps its own bounds in
@@ -1269,6 +1334,29 @@ fn voxel_color(
 mod tests {
     use super::*;
 
+    /// Vertex positions, unpacked back to chunk-local metres. Positions are
+    /// stored as 16-bit fixed point now (see `voxel_material`), so tests have
+    /// to undo the same quantisation the vertex shader does.
+    fn unpacked_positions(mesh: &Mesh) -> Vec<Vec3> {
+        let packed = match mesh
+            .attribute(voxel_material::ATTRIBUTE_VOXEL_POSITION)
+            .expect("packed positions")
+        {
+            bevy::mesh::VertexAttributeValues::Uint16x4(values) => values,
+            other => panic!("packed position should be Uint16x4, got {other:?}"),
+        };
+        packed
+            .iter()
+            .map(|value| {
+                Vec3::new(
+                    voxel_material::unpack_position_axis(value[0]),
+                    voxel_material::unpack_position_axis(value[1]),
+                    voxel_material::unpack_position_axis(value[2]),
+                )
+            })
+            .collect()
+    }
+
     /// A cover box's underside is coplanar with the terrain top beneath it, so
     /// when that neighbour is solid the face is invisible and must not be
     /// emitted. This is pure savings — roughly a sixth of an isolated cover
@@ -1366,9 +1454,6 @@ mod tests {
         fn tree_tone_at(&self, _: i32, _: i32) -> f32 {
             0.5
         }
-        fn world_offset(&self) -> (f32, f32) {
-            (0.0, 0.0)
-        }
     }
 
     /// Greedy merging the solid canopy shell must be **lossless**: the same
@@ -1407,23 +1492,84 @@ mod tests {
             "a uniform {SPAN}³ leaf block should merge to one quad per side, got {quads}"
         );
 
-        let positions = mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .expect("positions")
-            .as_float3()
-            .expect("float3 positions");
+        let positions = unpacked_positions(&mesh);
         let mut area = 0.0_f32;
         for quad in positions.chunks_exact(4) {
-            let origin = Vec3::from(quad[0]);
-            let edge_1 = Vec3::from(quad[1]) - origin;
-            let edge_2 = Vec3::from(quad[3]) - origin;
+            let edge_1 = quad[1] - quad[0];
+            let edge_2 = quad[3] - quad[0];
             area += edge_1.cross(edge_2).length();
         }
         // 6 sides × SPAN² voxel faces, each VOXEL_SIZE² in world units.
         let expected = 6.0 * (SPAN * SPAN) as f32 * VOXEL_SIZE * VOXEL_SIZE;
+        // Positions are 16-bit fixed point, so each corner can round by up to
+        // ~0.26 mm and the area drifts a fraction of a percent. Check the
+        // relative error: the point is that no face is dropped or doubled, not
+        // that the quantiser is lossless.
+        let relative_error = (area - expected).abs() / expected;
         assert!(
-            (area - expected).abs() < 1e-4,
-            "merged shell area {area} should equal the unmerged surface {expected}"
+            relative_error < 0.005,
+            "merged shell area {area} should match the unmerged surface {expected} \
+             (off by {:.3}%)",
+            relative_error * 100.0
+        );
+    }
+
+    /// Chunk meshes are emitted CHUNK-LOCAL, so every vertex must fall inside
+    /// its chunk's own footprint — and adding the chunk origin back must put it
+    /// exactly where the old world-space vertices were. If this drifts, the
+    /// world tears along chunk borders.
+    #[test]
+    fn chunk_meshes_are_local_to_their_chunk() {
+        use std::sync::Arc;
+        use voxel_core::voxel_source::IslandSource;
+        use voxel_core::world::VoxelWorld;
+
+        let source = IslandSource::new(Arc::new(VoxelWorld::generate(1, 0.0)));
+        let span = CHUNK_SIZE as f32 * VOXEL_SIZE;
+        // Cover geometry is shrunk and jittered a little past its cell, and the
+        // apron reaches one voxel out, so allow a voxel of slack either side.
+        let slack = VOXEL_SIZE * 2.0;
+
+        let mut checked = 0;
+        for (chunk_x, chunk_z) in [(0, 0), (-3, 2), (4, -1)] {
+            let scratch = unpack_chunk_window(&source, chunk_x, chunk_z);
+            let chunk = build_chunk_meshes(
+                &source,
+                &scratch,
+                1,
+                0.0,
+                chunk_x,
+                chunk_z,
+                AmbientOcclusion::PerFragment,
+            );
+            for mesh in [
+                &chunk.terrain_above_water,
+                &chunk.terrain_below_water,
+                &chunk.meadow_cover,
+                &chunk.canopy,
+                &chunk.canopy_solid,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for position in unpacked_positions(mesh) {
+                    assert!(
+                        position.x >= -slack && position.x <= span + slack,
+                        "chunk ({chunk_x},{chunk_z}) vertex x {} escapes its 0..{span} span",
+                        position.x
+                    );
+                    assert!(
+                        position.z >= -slack && position.z <= span + slack,
+                        "chunk ({chunk_x},{chunk_z}) vertex z {} escapes its 0..{span} span",
+                        position.z
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 1000,
+            "expected real geometry to check, saw {checked}"
         );
     }
 
@@ -1498,8 +1644,7 @@ mod tests {
                 // the group whose cost drove the batching work.
                 let clumps =
                     crate::streaming::harvest_grass_clumps(&source, &scratch, chunk_x, chunk_z);
-                let (offset_x, offset_z) = source.world_offset();
-                let grass = crate::grass::build_chunk_grass_mesh(&clumps, offset_x, offset_z, 1);
+                let grass = crate::grass::build_chunk_grass_mesh(&clumps, chunk_x, chunk_z, 1);
                 clump_total += clumps.len();
                 add(&mut totals, &grass, GeometryKind::GrassClump);
             }

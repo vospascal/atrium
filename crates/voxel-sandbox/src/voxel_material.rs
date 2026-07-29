@@ -7,17 +7,20 @@
 //! fragment shader from the fragment's world position, so it survives any
 //! future merge. Every voxel type's jitter is mean-1.0
 //! (`center + span·roll`, `center = 1 − span/2`), so only the per-type
-//! **amplitude** (`span/2`) has to travel — the mesher packs it into the
-//! otherwise-unused vertex-color alpha (terrain is opaque; water is a separate
-//! material). See `docs/voxel-engine-plan.md` Stage 2.
+//! **amplitude** (`span/2`) has to travel — the mesher packs it into spare bits
+//! of the vertex's face word, and the vertex shader re-presents it as vertex
+//! alpha for the fragment stage. See `docs/voxel-engine-plan.md` Stage 2.
 //!
 //! This is an [`ExtendedMaterial`] on top of [`StandardMaterial`], so all of
 //! Bevy's PBR lighting, shadows, and fog still apply — we only add the jitter
 //! multiply after the standard material is evaluated.
 
+use bevy::mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexFormat};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::pbr::{MaterialExtensionKey, MaterialExtensionPipeline};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{RenderPipelineDescriptor, SpecializedMeshPipelineError};
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::shader::ShaderRef;
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
@@ -103,9 +106,100 @@ pub struct VoxelExtension {
     pub chunk_origin: Vec4,
 }
 
+/// Packed vertex position + face data: `x`, `y`, `z` as 16-bit fixed point in
+/// CHUNK-LOCAL space, then a bitfield (see [`pack_face_word`]).
+///
+/// Voxel geometry doesn't need float positions. A chunk spans a known
+/// 64 × 256 × 64 voxels, so once vertices are chunk-local (the entity transform
+/// puts them back in the world) 16 bits per axis resolves them to about half a
+/// millimetre — 1/250th of a voxel. That takes the vertex from 40 bytes to 12,
+/// which matters most for *bandwidth*: every one of these vertices is read
+/// again by the depth prepass, four shadow cascades and the reflection view.
+pub const ATTRIBUTE_VOXEL_POSITION: MeshVertexAttribute =
+    MeshVertexAttribute::new("Voxel_Position", 91_534_001, VertexFormat::Uint16x4);
+
+/// Packed vertex colour: rgb as 8-bit unorm. Alpha is unused — the jitter
+/// amplitude and the baked-AO flag it used to carry now live in the position
+/// word's spare bits, where they get 12 bits instead of 8.
+pub const ATTRIBUTE_VOXEL_COLOR: MeshVertexAttribute =
+    MeshVertexAttribute::new("Voxel_Color", 91_534_002, VertexFormat::Unorm8x4);
+
+/// Lowest chunk-local coordinate the packed position can represent, in metres.
+/// A little below zero so cover geometry that pokes just outside its cell (and
+/// the mesher's 1-voxel apron) still encodes.
+pub const PACKED_POSITION_ORIGIN: f32 = -1.0;
+/// Span the packed position covers, in metres. A chunk is 32 m tall
+/// (`WORLD_SIZE_Y` voxels) and 8 m across, so this clears the tallest axis with
+/// headroom at both ends.
+pub const PACKED_POSITION_SPAN: f32 = 34.0;
+
+/// Quantise one chunk-local coordinate (metres) to 16-bit fixed point.
+pub fn pack_position_axis(value: f32) -> u16 {
+    let normalized = (value - PACKED_POSITION_ORIGIN) / PACKED_POSITION_SPAN;
+    (normalized.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16
+}
+
+/// Inverse of [`pack_position_axis`] — the same maths the vertex shaders do,
+/// available to Rust so tests can check geometry without a GPU.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn unpack_position_axis(packed: u16) -> f32 {
+    packed as f32 / u16::MAX as f32 * PACKED_POSITION_SPAN + PACKED_POSITION_ORIGIN
+}
+
+/// The fourth position component: face direction, the baked-AO flag, and the
+/// per-voxel jitter amplitude, packed into one 16-bit word.
+///
+/// * bits 0–2 — face index into `mesh::FACE_DIRECTIONS`; the shader turns it
+///   back into a unit normal, since voxel faces only ever point six ways.
+/// * bit 3 — "ambient occlusion is already baked into the vertex colour", the
+///   flag the terrain shader used to read as a `+10` sentinel on vertex alpha.
+/// * bits 4–15 — jitter amplitude, 12-bit unorm.
+pub fn pack_face_word(face_index: u16, ambient_occlusion_baked: bool, amplitude: f32) -> u16 {
+    let quantized_amplitude = (amplitude.clamp(0.0, 1.0) * 4095.0).round() as u16;
+    (face_index & 0x7) | (u16::from(ambient_occlusion_baked) << 3) | (quantized_amplitude << 4)
+}
+
 impl MaterialExtension for VoxelExtension {
     fn fragment_shader() -> ShaderRef {
         "shaders/voxel_terrain.wgsl".into()
+    }
+
+    fn vertex_shader() -> ShaderRef {
+        "shaders/voxel_terrain_vertex.wgsl".into()
+    }
+
+    /// A custom vertex stage MUST be mirrored in the depth prepass or the two
+    /// passes disagree on depth and the terrain z-fights against itself. Same
+    /// rule the grass material follows.
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/voxel_terrain_prepass_vertex.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // Every mesh drawn with this material must share this layout. Bevy keys
+        // mesh slabs by vertex stride and puts the slab in the batch set key, so
+        // a second layout here would split the batch — the same trap that made
+        // mixed-width index buffers a net loss.
+        let vertex_layout = layout.0.get_layout(&[
+            ATTRIBUTE_VOXEL_POSITION.at_shader_location(0),
+            ATTRIBUTE_VOXEL_COLOR.at_shader_location(1),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+
+        // `VertexOutput.color` — and the fragment shader's `in.color` — sit
+        // behind `#ifdef VERTEX_COLORS`, which bevy only defines when the mesh
+        // carries the *built-in* colour attribute. Ours is a custom packed one,
+        // so the def has to be declared by hand, for both stages.
+        descriptor.vertex.shader_defs.push("VERTEX_COLORS".into());
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.push("VERTEX_COLORS".into());
+        }
+        Ok(())
     }
 }
 

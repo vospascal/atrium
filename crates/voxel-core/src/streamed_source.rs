@@ -520,11 +520,6 @@ impl VoxelSource for StreamedSource {
         self.cache().tree_tones.insert((x, z), tone);
         tone
     }
-
-    fn world_offset(&self) -> (f32, f32) {
-        // The infinite world meshes in raw world-voxel coordinates.
-        (0.0, 0.0)
-    }
 }
 
 /// Grass-patch coverage at a column, `0.0` (bare) to `1.0` (dense clump).
@@ -1756,11 +1751,6 @@ mod tests {
             .map(|&column| contexts(&forward, column))
             .collect();
         assert_eq!(forward_values, repeat_values, "repeat reads drifted");
-    }
-
-    #[test]
-    fn world_offset_is_uncentered() {
-        assert_eq!(StreamedSource::new(1).world_offset(), (0.0, 0.0));
     }
 
     /// How many color-context reads the timing probe makes, matching the order

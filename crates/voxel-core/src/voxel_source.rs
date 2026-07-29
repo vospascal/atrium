@@ -32,12 +32,6 @@ pub trait VoxelSource: Sync {
 
     /// Per-tree color identity at a column (`0..1`, `0.5` where no tree grew).
     fn tree_tone_at(&self, x: i32, z: i32) -> f32;
-
-    /// Vertex-centering offset in voxels `(half_x, half_z)`: meshed geometry is
-    /// emitted at `(voxel - offset) * VOXEL_SIZE`. The island centers on its
-    /// footprint so it straddles the origin; the infinite world returns
-    /// `(0.0, 0.0)` and meshes in raw world-voxel coordinates.
-    fn world_offset(&self) -> (f32, f32);
 }
 
 /// Half the island's footprint, in voxels — the shift between the island's own
@@ -54,7 +48,7 @@ pub const ISLAND_HALF_Z: i32 = WORLD_SIZE_Z as i32 / 2;
 /// teach the streamer two coordinate conventions, this wrapper translates: a
 /// world coordinate maps to the island cell `+ (ISLAND_HALF_X, ISLAND_HALF_Z)`,
 /// which puts the island's centre at the world origin. Because the old
-/// `world_offset` of `(half, half)` placed it there too, the emitted geometry
+/// old centering offset of `(half, half)` placed it there too, the emitted geometry
 /// lands at byte-identical render positions — the island simply stops being a
 /// special case.
 ///
@@ -114,11 +108,6 @@ impl VoxelSource for IslandSource {
     fn tree_tone_at(&self, x: i32, z: i32) -> f32 {
         self.world
             .tree_tone_at(x + ISLAND_HALF_X, z + ISLAND_HALF_Z)
-    }
-
-    fn world_offset(&self) -> (f32, f32) {
-        // Already centred by the coordinate shift above.
-        (0.0, 0.0)
     }
 }
 
@@ -199,17 +188,14 @@ mod tests {
     }
 
     /// Geometry must land where it always did. The old path meshed island cells
-    /// and subtracted `world_offset = (half, half)`; the new path meshes world
-    /// cells and subtracts nothing. Those agree exactly when `world = island -
-    /// half`, which is the shift this source applies.
+    /// and subtracted a centering offset of `(half, half)`; the new path meshes
+    /// world cells and subtracts nothing. Those agree exactly when
+    /// `world = island - half`, which is the shift this source applies.
     #[test]
     fn render_positions_are_unchanged_by_the_reframing() {
-        let source = island();
-        assert_eq!(source.world_offset(), (0.0, 0.0));
         for island_x in [0, 1, 250, 500, 999] {
             let old_render_x = island_x as f32 - ISLAND_HALF_X as f32;
-            let world_x = island_x - ISLAND_HALF_X;
-            let new_render_x = world_x as f32 - source.world_offset().0;
+            let new_render_x = (island_x - ISLAND_HALF_X) as f32;
             assert_eq!(old_render_x, new_render_x);
         }
     }

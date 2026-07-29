@@ -141,6 +141,67 @@ displaced depth the grass z-fights against its own prepass.
 
 ---
 
+### After vertex packing (candidate B)
+
+40 B/vertex → **12 B**, across every mesh sharing the terrain material:
+
+| group | MB before | MB after |
+|---|---:|---:|
+| terrain | 61.68 | **24.14** |
+| underwater | 56.11 | **21.96** |
+| canopy | 45.24 | **18.94** |
+| canopy solid | 27.18 | **11.38** |
+| water | 33.46 | **14.01** |
+| cover | 5.90 | **2.47** |
+| grass | 19.59 | 19.59 *(own material/layout)* |
+| **TOTAL** | **256.96** | **112.47** |
+
+The layout: position as chunk-local 16-bit fixed point (`Uint16x4`), the fourth
+component a bitfield — 3 bits face index, 1 bit baked-AO flag, 12 bits jitter
+amplitude — and colour as `Unorm8x4`. Faces only point six ways, so the normal
+is an index the vertex shader expands, not three floats.
+
+This is a **bandwidth** win more than a VRAM one: every one of these vertices is
+re-read by the depth prepass, four shadow cascades and the reflection view.
+
+Three things that had to be right:
+
+- **`VertexOutput.color` sits behind `#ifdef VERTEX_COLORS`**, which bevy only
+  defines for the *built-in* colour attribute. With a custom one the def must be
+  pushed manually in `specialize`, for the fragment stage as well as the vertex
+  stage, or `in.color` simply doesn't exist.
+- **The fragment shader is unchanged.** The old `+10` alpha sentinel is now a
+  bit in the face word, and the vertex shader re-presents it as vertex alpha —
+  so the whole fragment stage carried over untouched.
+- **A custom vertex stage needs a matching prepass vertex stage**, or the two
+  passes compute different depths and the terrain z-fights against itself. The
+  unpacking is inlined identically in both files.
+
+Running total: **269.75 → 112.47 MB (−58%)**, 2 932 078 → 2 761 508 triangles.
+
+---
+
+## Rejected: 16-bit index buffers
+
+Tried and **reverted** — a genuine trap worth recording.
+
+Narrowing index buffers to `u16` for meshes under 65 536 vertices saved 16.6 MB
+(257 → 240 MB) and cost measurable frame rate. Why: bevy keys mesh slabs by
+element layout, and `ElementLayout::index` is size 2 for `U16` and 4 for `U32`
+(`bevy_render`'s `mesh/allocator.rs`). `index_slab` is then part of the **batch
+set key** (`bevy_pbr`'s `material.rs`), so a mix of index formats splits one
+batch set into two.
+
+Uniformity is what matters, not width. If *every* mesh could be 16-bit it would
+be fine — but some chunks exceed 65 536 vertices, so the mix is unavoidable and
+the formats stay split. Batching is worth far more to this scene than the bytes.
+
+The general lesson for this engine: **anything that varies per mesh — index
+format, vertex layout, material — fragments batching.** Check the batch set key
+before trading bytes for it.
+
+---
+
 ## Candidates, roughly by value/effort
 
 ### A. Instance the grass clumps — *high value, medium effort*
