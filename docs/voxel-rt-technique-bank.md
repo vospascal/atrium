@@ -18,13 +18,31 @@ data + triplanar + SDF instancing), [Ms33WB](https://www.shadertoy.com/view/Ms33
 
 ## Top candidates (highest value first)
 
-### T1 — Soft shadows from the distance field → E1b/E2-era shadow lever
+### T1 — Soft shadows from the distance field → ❌ MEASURED, RECOMMENDED AGAINST (E1b)
 IQ gets penumbrae from a *single* shadow ray: while marching, track
 `min(signed_distance_to_geometry / t)` and smoothstep it. **We already have a
-chebyshev distance field (Pascal's S2 win, bindings 9/10)** — the same quantity
-is already being fetched during traversal, so soft shadows may cost near zero
-extra work. Hard shadows stay the voxel-purist default; soft becomes a lever.
-A/B against hard shadows for look and ms.
+chebyshev distance field (Pascal's S2 win, bindings 9/10)**, so the cost
+prediction was right: **+0.10–0.35 ms, no extra rays**. The look is not: the
+field is per-BRICK, and a 1 m-resolution distance estimate stamps a visible
+lattice plus sun-aligned streaks into flat surfaces at every penumbra scale
+(k = 4…115 swept). Kept as a documented off-lever (`SHADOW_MODE = 1`); it needs
+voxel-level clearance data (≈37 MB at today's brick count — an E2/E3 memory
+decision) to become viable. Full verdict + PNG evidence in the bench doc's E1b
+section. **Confirmed broken in-app by Pascal, 2026-07-30** ("soft distance
+fields is broken") — bench and eyeball agree, so this is a closed negative.
+Note that hard shadows also suit the art direction: crisp voxel shadows are part
+of the xima/Voxile look, so this is a low-priority revival candidate at best.
+
+**Failure signature** (Pascal's in-app description): *"renders like blocks and
+then shadow around it"* — clearance is effectively constant inside each brick, so
+penumbra width is piecewise-constant on 1 m cells and every brick gets its own
+uniform halo instead of a continuous gradient. **If revived, try these in order:**
+(1) trilinearly interpolate the per-brick clearance between brick centres instead
+of a nearest-brick lookup — fixes the *quantization* (blockiness) with no new
+data, a few extra fetches; (2) only then consider voxel-level clearance, which
+also fixes the *magnitude* ceiling (grazing rays pass distance-1 bricks whose
+clearance is bounded by half a brick, so penumbrae can never widen properly).
+Idea (1) is untested and cheap; it is the first thing to bench if this comes back.
 
 ### T2 — Three-channel exponential atmosphere → E7
 One `exp(-density * distance)` per RGB channel with *different* constants:
@@ -46,6 +64,13 @@ Before real GI, IQ adds a second "sun" from roughly the opposite direction,
 tinted by the ground color, at ~1/10 the key intensity. This is the **cheap GI
 tier below CAGI** — exactly what a Potato/Quest preset needs, and a fallback if
 CAGI's cost lands badly. Nearly free.
+**Status after E1c (2026-07-30): NOT implemented yet** — the presets shipped
+without it (Potato = analytic corner AO + hard shadows + render scale 0.7 + AO
+fade 15→30 m). It is now a one-row change: add a lever to
+`src/variants.rs::REGISTRY` (compile-time flag + a runtime strength/tint in
+`ShadingParams`) and it appears in the bench sweep and the overlay panel
+automatically, with the Potato/Quest rows opting in. Best measured against E4's
+CAGI so the two cheap-GI options are compared on the same scene.
 
 ### T5 — Value noise with analytic derivatives + FBM → E3 (GPU worldgen)
 Cubic polynomial per unit tile with corner-shared coefficients and zero edge
@@ -60,11 +85,16 @@ Omit the FBM octaves whose wavelengths fall in the vegetation scale range
 (~64 m down to ~0.5 m) so rocky detail doesn't fight plants. Cheaper and
 cleaner than filtering after the fact.
 
-### T7 — Analytic AO from local occupancy → E1b
-[WtSfWK](https://www.shadertoy.com/view/WtSfWK)-style closed-form occlusion. For
-voxels: derive AO from the 3×3×3 neighbourhood bits already resident in the
-brick — no rays. Expected orders of magnitude cheaper than E1's measured
-3.4–4.3 ms per ray. Contact-only (misses distant overhangs) → pairs with T1/T8.
+### T7 — Analytic AO from local occupancy → ✅ WINNER (E1b)
+[WtSfWK](https://www.shadertoy.com/view/WtSfWK)-style closed-form occlusion. The
+form that won is **classic voxel corner AO**: the 8 occupancy bits in the voxel
+plane just outside the hit face, four corner values, bilinearly interpolated
+with the DDA hit's exact face-local UV. **+0.25–0.31 ms** (vs 2.1–4.3 ms per
+ray), 82% of RT-AO's frame coverage, and *noiseless* — RT-AO at 2 rays still
+crosshatches large near surfaces, this does not. Contact-only as predicted
+(misses recessed-but-not-touching geometry) → that band goes to CAGI at E4. The
+wider 3×3×3/26-neighbour form lost: 5× the cost, broad over-darkening, per-voxel
+flat facets.
 
 ### T8 — SSAO from a depth+normal G-buffer → E1b (middle tier)
 [Ms33WB](https://www.shadertoy.com/view/Ms33WB). Catches medium-scale occlusion

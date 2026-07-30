@@ -16,16 +16,13 @@ use crate::frame_timing::{GpuFrameTimers, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
 use crate::passes::blit::BlitPass;
 use crate::passes::dda::DdaPass;
+use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 
 /// Format of the compute-written intermediate texture. Srgb formats cannot be
 /// storage textures, so the DDA pass writes display-ready (sRGB-encoded)
 /// values into this linear-tagged format and the blit undoes the swapchain's
 /// re-encode (see `shaders/blit.wgsl`).
 const STORAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-
-/// Render-scale bounds exposed by the overlay slider.
-pub const MIN_RENDER_SCALE: f32 = 0.5;
-pub const MAX_RENDER_SCALE: f32 = 1.0;
 
 pub struct Renderer {
     storage_view: wgpu::TextureView,
@@ -81,11 +78,22 @@ impl Renderer {
         self.recreate_storage(device);
     }
 
-    /// Rebuild the DDA compute pipeline from a patched shader source (the E1
-    /// overlay path: an AO compile-time lever changed). Buffers and bind
-    /// groups are untouched.
-    pub fn rebuild_dda_pipeline(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.dda_pass.rebuild_pipeline(device, shader_source);
+    /// Switch the DDA pass to a patched shader source (the overlay path: a
+    /// compile-time lever or a preset changed). Buffers and bind groups are
+    /// untouched, and a prewarmed permutation costs a hash lookup.
+    pub fn set_dda_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
+        self.dda_pass.set_shader_source(device, shader_source);
+    }
+
+    /// Precompile the DDA pipeline permutations the quality presets need, so
+    /// switching preset in-app never compiles a shader mid-frame. Returns the
+    /// number of distinct pipelines the cache holds.
+    pub fn prewarm_dda_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        shader_sources: &[String],
+    ) -> usize {
+        self.dda_pass.prewarm_pipelines(device, shader_sources)
     }
 
     /// Apply the overlay's render-scale lever (clamped to the slider range).

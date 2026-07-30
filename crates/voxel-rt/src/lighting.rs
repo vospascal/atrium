@@ -46,7 +46,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 16     | `sun_color_intensity` | `vec4<f32>` | rgb = linear sun color, w = intensity |
 /// | 32     | `sky_ambient`         | `vec4<f32>` | rgb = linear sky ambient, w = ambient strength |
 /// | 48     | `ground_ambient`      | `vec4<f32>` | rgb = linear ground bounce, w = unused |
-/// | 64     | `ao_params`           | `vec4<f32>` | x = AO strength [0, 1] (E1), yzw = unused |
+/// | 64     | `shading_params`      | `vec4<f32>` | the runtime quality knobs — see [`ShadingParams`] |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -55,7 +55,7 @@ pub struct LightingUniform {
     pub sun_color_intensity: [f32; 4],
     pub sky_ambient: [f32; 4],
     pub ground_ambient: [f32; 4],
-    pub ao_params: [f32; 4],
+    pub shading_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -63,6 +63,38 @@ pub struct LightingUniform {
 // is an explicit field).
 unsafe impl bytemuck::Zeroable for LightingUniform {}
 unsafe impl bytemuck::Pod for LightingUniform {}
+
+/// The RUNTIME quality knobs, packed into `Lighting.shading_params` — the
+/// levers a preset switch can change WITHOUT a pipeline rebuild (E1c). The
+/// field order IS the vector's component order, and
+/// `crate::variants::REGISTRY` marks exactly these levers as
+/// `LeverKind::Runtime`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadingParams {
+    /// `x` — AO attenuation scale in [0, 1] (E1).
+    pub ambient_occlusion_strength: f32,
+    /// `y` — soft-shadow penumbra scale, the reciprocal of the light's angular
+    /// radius (E1b). Ignored in hard-shadow mode.
+    pub shadow_penumbra_scale: f32,
+    /// `z` — start of the AO distance-fade ramp, voxel units (E1b lever 2,
+    /// moved out of the shader consts in E1c). Ignored when the fade is
+    /// compiled off.
+    pub ambient_occlusion_fade_start_voxels: f32,
+    /// `w` — end of the AO distance-fade ramp, voxel units; past it the
+    /// estimator is skipped entirely.
+    pub ambient_occlusion_fade_end_voxels: f32,
+}
+
+impl ShadingParams {
+    fn to_array(self) -> [f32; 4] {
+        [
+            self.ambient_occlusion_strength,
+            self.shadow_penumbra_scale,
+            self.ambient_occlusion_fade_start_voxels,
+            self.ambient_occlusion_fade_end_voxels,
+        ]
+    }
+}
 
 /// User-facing sun position. The overlay mutates the angles; the platform
 /// layer converts to a [`LightingUniform`] once per frame.
@@ -105,10 +137,12 @@ impl SunSettings {
         )
     }
 
-    /// This frame's GPU lighting data. `ambient_occlusion_strength` is the
-    /// E1 runtime knob (`crate::ao::AoSettings::strength`); it is ignored by
-    /// the shader when the AO lever is compiled off.
-    pub fn lighting_uniform(&self, ambient_occlusion_strength: f32) -> LightingUniform {
+    /// This frame's GPU lighting data. `shading_params` carries the
+    /// experiments' runtime knobs (see [`ShadingParams`]);
+    /// `crate::variants::RenderQuality::shading_params` produces it from the
+    /// live quality settings, and each field is ignored by the shader when its
+    /// lever is compiled off.
+    pub fn lighting_uniform(&self, shading_params: ShadingParams) -> LightingUniform {
         let sun_direction = self.sun_direction();
         LightingUniform {
             sun_direction: sun_direction.to_array(),
@@ -126,7 +160,7 @@ impl SunSettings {
                 GROUND_AMBIENT_COLOR[2],
                 0.0,
             ],
-            ao_params: [ambient_occlusion_strength, 0.0, 0.0, 0.0],
+            shading_params: shading_params.to_array(),
         }
     }
 }
@@ -139,6 +173,20 @@ mod tests {
     fn uniform_layout_is_gpu_ready() {
         assert_eq!(std::mem::size_of::<LightingUniform>(), 80);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
+    }
+
+    /// The runtime knobs must land in their own slots of the shared
+    /// `shading_params` vector — swapping two would silently make the AO slider
+    /// control the penumbra width.
+    #[test]
+    fn shading_params_keep_their_vector_components() {
+        let uniform = SunSettings::default().lighting_uniform(ShadingParams {
+            ambient_occlusion_strength: 0.8,
+            shadow_penumbra_scale: 4.0,
+            ambient_occlusion_fade_start_voxels: 240.0,
+            ambient_occlusion_fade_end_voxels: 480.0,
+        });
+        assert_eq!(uniform.shading_params, [0.8, 4.0, 240.0, 480.0]);
     }
 
     #[test]

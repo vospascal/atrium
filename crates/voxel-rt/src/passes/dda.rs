@@ -12,11 +12,15 @@
 //! column-height early exit), and the two empty-space acceleration grids
 //! (1-bit-per-brick occupancy, chebyshev skip distances).
 
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use wgpu::util::DeviceExt;
 
 use crate::brickmap::Brickmap;
 use crate::camera::CameraUniform;
 use crate::lighting::LightingUniform;
+use crate::variants::RenderQuality;
 
 const WORKGROUP_SIZE: u32 = 8;
 
@@ -26,8 +30,33 @@ const WORKGROUP_SIZE: u32 = 8;
 /// `shaders/dda.wgsl`).
 pub const SHADER_SOURCE: &str = include_str!("../../shaders/dda.wgsl");
 
+/// [`SHADER_SOURCE`] with every experiment's compile-time levers patched in.
+/// The app's preset path and the benchmark's variant builder both go through
+/// this one function, so a new lever module cannot be forgotten at a call
+/// site. Returns [`SHADER_SOURCE`] verbatim for the shipped (Balanced) quality.
+pub fn build_shader_source(quality: &RenderQuality) -> String {
+    let traversal_patched = quality.traversal.patch_shader_source(SHADER_SOURCE);
+    let ao_patched = quality
+        .ambient_occlusion
+        .patch_shader_source(&traversal_patched);
+    quality.shadows.patch_shader_source(&ao_patched)
+}
+
+/// Cache key of a shader source — pipelines are keyed by the hash rather than
+/// the ~55 KB string itself.
+fn shader_source_key(shader_source: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    shader_source.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub struct DdaPass {
-    pipeline: wgpu::ComputePipeline,
+    /// Compiled pipelines by shader-source key. Switching a compile-time lever
+    /// (a preset change) is then a lookup, not a compile — the app prewarms
+    /// every preset's permutation at startup so the switch never stutters.
+    pipeline_cache: HashMap<u64, wgpu::ComputePipeline>,
+    /// Key of the pipeline [`DdaPass::encode`] dispatches.
+    active_pipeline_key: u64,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     camera_uniform_buffer: wgpu::Buffer,
@@ -62,7 +91,11 @@ impl DdaPass {
         shader_source: &str,
     ) -> Self {
         let bind_group_layout = create_bind_group_layout(device);
-        let pipeline = create_pipeline(device, shader_source, &bind_group_layout);
+        let active_pipeline_key = shader_source_key(shader_source);
+        let pipeline_cache = HashMap::from([(
+            active_pipeline_key,
+            create_pipeline(device, shader_source, &bind_group_layout),
+        )]);
 
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dda camera uniform"),
@@ -136,7 +169,8 @@ impl DdaPass {
         );
 
         Self {
-            pipeline,
+            pipeline_cache,
+            active_pipeline_key,
             bind_group_layout,
             bind_group,
             camera_uniform_buffer,
@@ -152,12 +186,43 @@ impl DdaPass {
         }
     }
 
-    /// Swap in a new compute pipeline built from `shader_source` (the E1
-    /// overlay path: AO compile-time levers changed). Buffers, bind group
-    /// layout and bind group are untouched — only the shader differs, so the
-    /// existing bind group stays valid against the new pipeline.
-    pub fn rebuild_pipeline(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.pipeline = create_pipeline(device, shader_source, &self.bind_group_layout);
+    /// Dispatch `shader_source` from now on, compiling it only on a cache miss
+    /// (the overlay path: a compile-time lever or a preset changed). Buffers,
+    /// bind group layout and bind group are untouched — only the shader
+    /// differs, so the existing bind group stays valid against every cached
+    /// pipeline.
+    pub fn set_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
+        self.active_pipeline_key = self.cache_pipeline(device, shader_source);
+    }
+
+    /// Precompile `shader_sources` (duplicates cost nothing) so that a later
+    /// [`DdaPass::set_shader_source`] to any of them is a hash lookup instead of
+    /// a shader compile — the reason a preset switch cannot stutter. Returns how
+    /// many pipelines the cache holds afterwards.
+    pub fn prewarm_pipelines(&mut self, device: &wgpu::Device, shader_sources: &[String]) -> usize {
+        for shader_source in shader_sources {
+            self.cache_pipeline(device, shader_source);
+        }
+        self.pipeline_cache.len()
+    }
+
+    /// Pipelines currently held (the memory the cache costs).
+    pub fn cached_pipeline_count(&self) -> usize {
+        self.pipeline_cache.len()
+    }
+
+    fn cache_pipeline(&mut self, device: &wgpu::Device, shader_source: &str) -> u64 {
+        let key = shader_source_key(shader_source);
+        self.pipeline_cache
+            .entry(key)
+            .or_insert_with(|| create_pipeline(device, shader_source, &self.bind_group_layout));
+        key
+    }
+
+    fn active_pipeline(&self) -> &wgpu::ComputePipeline {
+        self.pipeline_cache
+            .get(&self.active_pipeline_key)
+            .expect("the active DDA pipeline is always cached")
     }
 
     /// Refresh the output-texture binding after the storage texture is recreated.
@@ -205,7 +270,7 @@ impl DdaPass {
             label: Some("dda pass"),
             timestamp_writes,
         });
-        compute_pass.set_pipeline(&self.pipeline);
+        compute_pass.set_pipeline(self.active_pipeline());
         compute_pass.set_bind_group(0, &self.bind_group, &[]);
         compute_pass.dispatch_workgroups(
             output_width.div_ceil(WORKGROUP_SIZE),
@@ -367,30 +432,28 @@ fn create_bind_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ao::{AoDirectionMode, AoMode, AoSettings};
+    use crate::shadows::{ShadowMode, ShadowSettings};
+    use crate::traversal::TraversalSettings;
+    use crate::variants::{QualityPreset, QUALITY_PRESETS};
+
+    #[test]
+    fn default_settings_build_the_shipped_shader() {
+        assert_eq!(
+            build_shader_source(&RenderQuality::default()),
+            SHADER_SOURCE
+        );
+    }
 
     /// Headless pipeline compile: prove `dda.wgsl` validates under wgpu 29's
     /// naga and that the compute pipeline accepts the bind group layout — no
-    /// window, no world. Skips (with a note) when no GPU adapter exists,
-    /// e.g. on a bare CI runner.
+    /// window, no world. Skips (with a note) when no GPU adapter exists, e.g.
+    /// on a bare CI runner.
     #[test]
     fn dda_pipeline_compiles_headless() {
-        let instance = wgpu::Instance::default();
-        let adapter = match pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        ) {
-            Ok(adapter) => adapter,
-            Err(error) => {
-                eprintln!("skipping dda_pipeline_compiles_headless: no GPU adapter ({error})");
-                return;
-            }
+        let Some((device, _queue)) = headless_device() else {
+            return;
         };
-        let (device, _queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("dda headless test device"),
-                ..Default::default()
-            }))
-            .expect("adapter exists but device creation failed");
-
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let bind_group_layout = create_bind_group_layout(&device);
         let _pipeline = create_pipeline(&device, SHADER_SOURCE, &bind_group_layout);
@@ -399,5 +462,153 @@ mod tests {
             validation_error.is_none(),
             "dda.wgsl failed wgpu validation: {validation_error:?}"
         );
+    }
+
+    /// Headless pipeline compile of EVERY lever combination the overlay can
+    /// select: each AO technique x each shadow mode, the cost-cutting levers,
+    /// and every traversal off-lever must validate under naga. Without this, a
+    /// WGSL error on a non-default path only surfaces when someone clicks the
+    /// radio button.
+    #[test]
+    fn every_lever_combination_compiles_headless() {
+        let Some((device, _queue)) = headless_device() else {
+            return;
+        };
+        let mut ao_settings_to_check = Vec::new();
+        for mode in [
+            AoMode::RayTraced,
+            AoMode::AnalyticCorner,
+            AoMode::AnalyticNeighborhood,
+            AoMode::Off,
+        ] {
+            ao_settings_to_check.push(AoSettings {
+                mode,
+                ..AoSettings::default()
+            });
+        }
+        ao_settings_to_check.push(AoSettings {
+            brick_early_out: true,
+            distance_fade: true,
+            sun_aware_ray_budget: true,
+            direction_mode: AoDirectionMode::BentUp,
+            distance_falloff: false,
+            ray_count: 4,
+            max_distance_voxels: 32,
+            ..AoSettings::default()
+        });
+
+        let bind_group_layout = create_bind_group_layout(&device);
+        let compile = |quality: &RenderQuality, description: String| {
+            let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let _pipeline =
+                create_pipeline(&device, &build_shader_source(quality), &bind_group_layout);
+            let validation_error = pollster::block_on(error_scope.pop());
+            assert!(
+                validation_error.is_none(),
+                "{description} failed wgpu validation: {validation_error:?}"
+            );
+        };
+
+        for ambient_occlusion in ao_settings_to_check {
+            for shadow_mode in [ShadowMode::Hard, ShadowMode::SoftDistanceField] {
+                let quality = RenderQuality {
+                    ambient_occlusion,
+                    shadows: ShadowSettings {
+                        mode: shadow_mode,
+                        ..ShadowSettings::default()
+                    },
+                    ..RenderQuality::default()
+                };
+                compile(
+                    &quality,
+                    format!("AO {:?} + shadows {shadow_mode:?}", ambient_occlusion.mode),
+                );
+            }
+        }
+        // Every traversal off-lever on its own, plus the all-on combination:
+        // the column fast-forward paths are only reachable this way.
+        for traversal in [
+            TraversalSettings {
+                column_fast_forward: true,
+                ..TraversalSettings::default()
+            },
+            TraversalSettings {
+                descend_fast_forward: true,
+                ..TraversalSettings::default()
+            },
+            TraversalSettings {
+                any_hit_shadow: true,
+                ..TraversalSettings::default()
+            },
+            TraversalSettings {
+                brick_bit_grid: true,
+                ..TraversalSettings::default()
+            },
+            TraversalSettings {
+                column_fast_forward: true,
+                descend_fast_forward: true,
+                global_max_terminate: false,
+                any_hit_shadow: true,
+                brick_bit_grid: true,
+                distance_skip: false,
+            },
+        ] {
+            let quality = RenderQuality {
+                traversal,
+                ..RenderQuality::default()
+            };
+            compile(&quality, format!("traversal {traversal:?}"));
+        }
+    }
+
+    /// The pipeline cache must dedupe by shader source and hold every preset's
+    /// permutation after a prewarm, so a preset switch is a lookup.
+    #[test]
+    fn prewarming_the_presets_caches_one_pipeline_per_unique_source() {
+        let Some((device, _queue)) = headless_device() else {
+            return;
+        };
+        let bind_group_layout = create_bind_group_layout(&device);
+        let mut pass_pipelines: HashMap<u64, wgpu::ComputePipeline> = HashMap::new();
+        let mut keys = Vec::new();
+        for spec in QUALITY_PRESETS {
+            if spec.preset == QualityPreset::Custom {
+                continue;
+            }
+            let shader_source = build_shader_source(&spec.resolve());
+            let key = shader_source_key(&shader_source);
+            keys.push(key);
+            pass_pipelines
+                .entry(key)
+                .or_insert_with(|| create_pipeline(&device, &shader_source, &bind_group_layout));
+        }
+        assert_eq!(keys.len(), 4, "four named presets");
+        assert_eq!(
+            pass_pipelines.len(),
+            3,
+            "Quest and Balanced differ by render scale alone — same pipeline"
+        );
+    }
+
+    /// A real GPU device, or `None` on a machine without an adapter (bare CI
+    /// runner) so the GPU-dependent tests can skip with a note.
+    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter = match pollster::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        ) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                eprintln!("skipping GPU-dependent dda test: no adapter ({error})");
+                return None;
+            }
+        };
+        Some(
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("dda headless test device"),
+                ..Default::default()
+            }))
+            .expect("adapter exists but device creation failed"),
+        )
     }
 }

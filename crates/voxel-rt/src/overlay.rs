@@ -1,21 +1,33 @@
 //! egui overlay: stats panel (window/render sizes, moving-average frame time,
-//! FPS, per-pass GPU times), the perf levers (vsync checkbox, render-scale
-//! slider), a collapsible sun-position section, and the E1 AO section, drawn
-//! on top of the rendered frame in its own render pass (LoadOp::Load). The
-//! overlay only mutates the state it is handed (`vsync_enabled`,
-//! `render_scale`, [`SunSettings`], [`AoSettings`]) — reconfiguring the
-//! surface, resizing the storage texture, writing the lighting uniform, and
-//! rebuilding the pipeline on AO lever changes stay in the platform layer.
+//! FPS, per-pass GPU times), the vsync lever, a collapsible sun-position
+//! section, and the E1c **Quality** section — preset selector plus every lever
+//! grouped by subsystem, each carrying its measured verdict as hover text so
+//! "why is this off?" is answerable in-app. Drawn on top of the rendered frame
+//! in its own render pass (LoadOp::Load).
+//!
+//! The Quality section is generated from [`crate::variants::REGISTRY`]: the
+//! widget shape comes from each lever's [`LeverRange`], the hover text from its
+//! verdict, and reads/writes go through [`LeverId::read`] / [`LeverId::apply`].
+//! Adding a lever row therefore adds its control here automatically.
+//!
+//! Seam: the overlay only mutates the state it is handed (`vsync_enabled`,
+//! [`SunSettings`], [`RenderQuality`]) — reconfiguring the surface, resizing the
+//! storage texture, writing the lighting uniform, and switching the pipeline on
+//! a compile-time lever change all stay in the platform layer.
 
 use std::collections::VecDeque;
 
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-use crate::ao::{AoDirectionMode, AoSettings};
+use crate::ao::AoMode;
 use crate::frame_timing::FrameTimings;
 use crate::lighting::SunSettings;
-use crate::render::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
+use crate::shadows::ShadowMode;
+use crate::variants::{
+    levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
+    RenderQuality, QUALITY_PRESETS, VOXELS_PER_METER,
+};
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
 
@@ -89,9 +101,8 @@ impl Overlay {
         frame_data: &OverlayFrameData,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
         vsync_enabled: &mut bool,
-        render_scale: &mut f32,
         sun_settings: &mut SunSettings,
-        ao_settings: &mut AoSettings,
+        quality: &mut RenderQuality,
     ) {
         let average_frame_time_seconds = if self.frame_time_samples.is_empty() {
             0.0
@@ -148,10 +159,7 @@ impl Overlay {
                             }
                         }
                         ui.checkbox(vsync_enabled, "VSync");
-                        ui.add(
-                            egui::Slider::new(render_scale, MIN_RENDER_SCALE..=MAX_RENDER_SCALE)
-                                .text("render scale"),
-                        );
+                        draw_quality_section(ui, quality);
                         ui.collapsing("Sun", |ui| {
                             ui.add(
                                 egui::Slider::new(&mut sun_settings.azimuth_degrees, 0.0..=360.0)
@@ -161,55 +169,6 @@ impl Overlay {
                                 egui::Slider::new(&mut sun_settings.elevation_degrees, 2.0..=90.0)
                                     .text("elevation"),
                             );
-                        });
-                        // E1 AO levers. Everything except strength is a
-                        // compile-time shader const — the platform layer
-                        // rebuilds the DDA pipeline when one changes.
-                        ui.collapsing("AO", |ui| {
-                            ui.checkbox(&mut ao_settings.enabled, "enabled");
-                            ui.add(
-                                egui::Slider::new(&mut ao_settings.strength, 0.0..=1.0)
-                                    .text("strength"),
-                            );
-                            ui.horizontal(|ui| {
-                                ui.label("rays");
-                                for ray_count in [1_u32, 2, 4] {
-                                    ui.radio_value(
-                                        &mut ao_settings.ray_count,
-                                        ray_count,
-                                        ray_count.to_string(),
-                                    );
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("distance");
-                                for max_distance_voxels in [8_u32, 16, 32] {
-                                    ui.radio_value(
-                                        &mut ao_settings.max_distance_voxels,
-                                        max_distance_voxels,
-                                        max_distance_voxels.to_string(),
-                                    );
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("directions");
-                                ui.radio_value(
-                                    &mut ao_settings.direction_mode,
-                                    AoDirectionMode::CosineHemisphere,
-                                    "cosine",
-                                );
-                                ui.radio_value(
-                                    &mut ao_settings.direction_mode,
-                                    AoDirectionMode::UniformHemisphere,
-                                    "uniform",
-                                );
-                                ui.radio_value(
-                                    &mut ao_settings.direction_mode,
-                                    AoDirectionMode::BentUp,
-                                    "bent-up",
-                                );
-                            });
-                            ui.checkbox(&mut ao_settings.distance_falloff, "distance falloff");
                         });
                     });
                 });
@@ -264,6 +223,166 @@ impl Overlay {
             self.renderer.free_texture(texture_id);
         }
     }
+}
+
+/// The E1c Quality section: preset selector on top, then every registry lever
+/// grouped by subsystem. Selecting a preset overwrites the knobs; touching any
+/// knob switches the tag to [`QualityPreset::Custom`] — detected by comparing
+/// the knobs before and after the UI ran, so no widget can forget to do it.
+fn draw_quality_section(ui: &mut egui::Ui, quality: &mut RenderQuality) {
+    let knobs_before = *quality;
+    let mut preset_selected = false;
+
+    ui.collapsing("Quality", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("preset");
+            for spec in QUALITY_PRESETS {
+                if ui
+                    .radio(quality.preset == spec.preset, spec.label)
+                    .on_hover_text(spec.summary)
+                    .clicked()
+                {
+                    quality.apply_preset(spec.preset);
+                    preset_selected = true;
+                }
+            }
+        });
+        for subsystem in LeverSubsystem::ALL {
+            ui.collapsing(subsystem.label(), |ui| {
+                for lever in levers_of(subsystem) {
+                    ui.add_enabled_ui(lever_is_relevant(quality, lever.id), |ui| {
+                        draw_lever(ui, quality, lever);
+                    });
+                }
+            });
+        }
+    });
+
+    if !preset_selected && quality.knobs_differ(&knobs_before) {
+        quality.preset = QualityPreset::Custom;
+    }
+}
+
+/// Whether a lever currently does anything — the ray knobs are meaningless for
+/// the analytic estimators, the penumbra scale for hard shadows, the fade range
+/// with the fade off. Greyed out instead of hidden so the panel layout is
+/// stable and the verdict stays readable. Presentation only: the value itself
+/// is preserved either way.
+fn lever_is_relevant(quality: &RenderQuality, lever_id: LeverId) -> bool {
+    let ambient_occlusion = &quality.ambient_occlusion;
+    match lever_id {
+        LeverId::AoStrength => ambient_occlusion.mode != AoMode::Off,
+        LeverId::AoRayCount
+        | LeverId::AoMaxDistance
+        | LeverId::AoDirectionMode
+        | LeverId::AoDistanceFalloff
+        | LeverId::AoBrickEarlyOut
+        | LeverId::AoSunAwareRayBudget => ambient_occlusion.mode == AoMode::RayTraced,
+        LeverId::AoDistanceFade => ambient_occlusion.mode != AoMode::Off,
+        LeverId::AoFadeStart | LeverId::AoFadeEnd => {
+            ambient_occlusion.mode != AoMode::Off && ambient_occlusion.distance_fade
+        }
+        LeverId::ShadowPenumbraScale => quality.shadows.mode == ShadowMode::SoftDistanceField,
+        _ => true,
+    }
+}
+
+/// One lever's control, shaped by its value kind and [`LeverRange`], with its
+/// measured verdict as hover text (per-option verdicts for mode levers).
+fn draw_lever(ui: &mut egui::Ui, quality: &mut RenderQuality, lever: &Lever) {
+    match lever.id.read(quality) {
+        LeverValue::Flag(current) => {
+            let mut flag = current;
+            if ui
+                .checkbox(&mut flag, lever.label)
+                .on_hover_text(lever.verdict)
+                .changed()
+            {
+                lever.id.apply(quality, LeverValue::Flag(flag));
+            }
+        }
+        LeverValue::Mode(current) => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(lever.label).on_hover_text(lever.verdict);
+                for option in lever.mode_options {
+                    if ui
+                        .radio(current == option.value, option.label)
+                        .on_hover_text(option.verdict)
+                        .clicked()
+                    {
+                        lever.id.apply(quality, LeverValue::Mode(option.value));
+                    }
+                }
+            });
+        }
+        LeverValue::Count(current) => {
+            draw_rung_row(ui, quality, lever, current, LeverValue::Count);
+        }
+        LeverValue::VoxelDistance(current) => match lever.range {
+            LeverRange::Rungs(_) => {
+                draw_rung_row(ui, quality, lever, current, LeverValue::VoxelDistance);
+            }
+            LeverRange::Meters { minimum, maximum } => {
+                let mut meters = current as f32 / VOXELS_PER_METER;
+                if ui
+                    .add(egui::Slider::new(&mut meters, minimum..=maximum).text(lever.label))
+                    .on_hover_text(lever.verdict)
+                    .changed()
+                {
+                    let voxels = (meters * VOXELS_PER_METER).round() as u32;
+                    lever.id.apply(quality, LeverValue::VoxelDistance(voxels));
+                }
+            }
+            _ => panic!("{:?} needs Rungs or Meters bounds", lever.id),
+        },
+        LeverValue::Scalar(current) => {
+            let LeverRange::Continuous {
+                minimum,
+                maximum,
+                logarithmic,
+            } = lever.range
+            else {
+                panic!("{:?} needs Continuous bounds", lever.id);
+            };
+            let mut value = current;
+            if ui
+                .add(
+                    egui::Slider::new(&mut value, minimum..=maximum)
+                        .logarithmic(logarithmic)
+                        .text(lever.label),
+                )
+                .on_hover_text(lever.verdict)
+                .changed()
+            {
+                lever.id.apply(quality, LeverValue::Scalar(value));
+            }
+        }
+    }
+}
+
+/// A radio row over a lever's fixed integer rungs.
+fn draw_rung_row(
+    ui: &mut egui::Ui,
+    quality: &mut RenderQuality,
+    lever: &Lever,
+    current: u32,
+    wrap: fn(u32) -> LeverValue,
+) {
+    let LeverRange::Rungs(rungs) = lever.range else {
+        panic!("{:?} needs Rungs bounds", lever.id);
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(lever.label).on_hover_text(lever.verdict);
+        for rung in rungs {
+            if ui
+                .radio(current == *rung, rung.to_string())
+                .on_hover_text(lever.verdict)
+                .clicked()
+            {
+                lever.id.apply(quality, wrap(*rung));
+            }
+        }
+    });
 }
 
 fn format_pass_milliseconds(milliseconds: Option<f32>) -> String {

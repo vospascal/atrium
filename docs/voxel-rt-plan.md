@@ -88,47 +88,99 @@ measured as losses → off-levers. Permanent bench harness + GPU pass timers.
 
 ### E1 — Ray-traced ambient occlusion ✅ (gate passed 2026-07-30)
 Short occlusion rays from primary hits (reuse `trace` with a `max_distance`
-argument — no forked DDA). Implemented: `ENABLE_AO` + 4 variant levers in
+argument — no forked DDA). Implemented: an AO master lever (`ENABLE_AO`, since
+replaced by E1b's `AO_MODE`) + 4 variant levers in
 `dda.wgsl`, `src/ao.rs` (Rust mirror + shader-const patching), overlay "AO"
 section, 10-variant bench section. **Verdict (bench doc, E1 section):
 2 rays / 8 voxels / cosine-weighted / distance falloff, strength 0.8** —
-+5.8 to +8.1 ms at 2560x1440 (11.9–14.8 ms total DDA pass), so the default
-may need re-tiering against the ~8 ms target. Half-res AO rejected (not
++4.2 to +8.2 ms at 2560x1440 (8.6–14.6 ms total DDA pass; the originally
+recorded +5.8–8.1 overstated the ground-level views, corrected during E1b),
+so the default needs re-tiering against the ~8 ms target — E1b found the
+cheaper technique. Half-res AO rejected (not
 separable without a G-buffer + bilateral pass); bent-up kept as a cheap
-off-lever for Quest. **Secondary-ray budget for E4: ≈3.4–4.3 ms per marginal
-full-res short ray** → per-pixel GI gathering is unaffordable, which is the
+off-lever for Quest. **Secondary-ray budget for E4: ≈2.25–3.55 ms per marginal
+full-res short ray** (corrected in E1b's clean re-run from the recorded 3.4–4.3) → per-pixel GI gathering is unaffordable, which is the
 quantitative case for the CA light volume; composition contract is
 `indirect = CAGI_sample * AO`. **Gate (Pascal, in-app):** crevices/overhangs
 ground the scene without shimmer or over-darkening.
 
-### E1b — Cheap occlusion + soft shadows shootout ⬜
-Triggered by E1's verdict: ray-traced AO costs +5.8–8.1 ms (11.9–14.8 ms total),
-over the ~8 ms target, so the *technique* — not just the ray count — needs
-options. Contenders (technique bank T1/T7/T8), all as levers with bench numbers
-and PNG comparisons against E1's `ao-2ray-d8` reference:
-(A) **Analytic AO** from the 3×3×3 occupancy neighbourhood already resident in
-the brick — no rays; expected orders of magnitude cheaper, contact-only.
-(B) ~~SSAO~~ **deferred to backlog B12** (approved 2026-07-30): building a
-G-buffer + bilateral pass now would solve occlusion that CAGI may largely solve
-at E4 — revisit once CAGI's contribution is measured. See the dossier's AO
-inference note.
-(C) **RT-AO** (E1's winner) as the top-tier lever.
-(D) **Soft shadows from the chebyshev distance field** — IQ's single-ray
-penumbra trick (`min(distance/t)`, smoothstepped) reusing the distance data
-traversal already fetches; A/B against hard shadows for look and ms.
-**Gate:** pick per-tier winners; full stack back under ~8 ms at render scale 1.0
-with the mid tier; grounding still reads.
+### E1b — Cheap occlusion + soft shadows shootout ✅ (measured 2026-07-30; soft-shadow negative confirmed in-app by Pascal; **analytic corner AO promoted to the shipped default**; AO look gate still open)
+Triggered by E1's verdict: ray-traced AO costs +4.2–8.2 ms (E1's C/D numbers
+were inflated by a harness artifact, corrected in the bench doc), over the ~8 ms
+target, so the *technique* — not just the ray count — needed options. Everything
+below is a lever with bench numbers and PNG comparisons against E1's
+`ao-2ray-d8` reference; full tables, per-tier recommendation and PNG findings in
+the bench doc's **E1b** section.
 
-### E1c — Quality presets & settings panel ⬜ (Pascal's request, 2026-07-30)
-Formalize every lever into a `RenderQuality` struct with named presets —
-**Potato / Quest / Balanced / Beautiful** — plus a custom mode exposing
-individual knobs, mirroring the P-overlay pattern from voxel-sandbox. Presets
-differ by *technique*, not only by counts: e.g. Potato = analytic AO + hard
-shadows + fake bounce light (technique bank T4) + render scale 0.7; Beautiful =
-RT-AO + soft shadows + CAGI + full scale. This is also the **Quest tier
-mechanism** for E9 and makes every future experiment a preset field the bench
-can sweep. **Gate:** switching presets in-app visibly changes look and frame
-time; each preset's harness numbers recorded.
+- (A) **Analytic AO — WINNER.** Classic voxel *corner* occlusion (8 occupancy
+  bits around the hit face, bilinearly interpolated across it with the DDA's
+  exact face-local UV): **+0.25–0.31 ms vs RT-AO's +4.2–8.2**, at 82% of its
+  frame coverage, and *noiseless* where 2-ray RT-AO still crosshatches large
+  near surfaces. Falls short only in reach (contact-only — recessed-but-not-
+  touching areas read a step flatter), which is precisely the band CAGI owns at
+  E4. The wider 3×3×3/26-neighbour variant lost: 5× the cost for a broad
+  over-darkening (68–82% coverage) and per-voxel flat facets.
+- (B) ~~SSAO~~ **deferred to backlog B12** (approved 2026-07-30).
+- (C) **RT-AO** kept as the Beautiful-tier lever, on the strength of its reach.
+- (D) **Soft shadows from the chebyshev distance field — DOCUMENTED NEGATIVE.**
+  Free as promised (+0.10–0.35 ms, no extra rays) but the per-BRICK field
+  stamps a visible **1 m lattice plus sun-aligned streaks** into flat surfaces
+  at *every* penumbra scale (swept k = 4/16/64/115; 115 = the sun's true
+  angular radius). Both cheap refinements were implemented and measured —
+  cube-boundary clearance instead of the per-brick floor, and midpoint instead
+  of face sampling (mandatory: a face point reads clearance 0 and blacked out
+  55% of the frame) — and the artifact survives both, because every ray that
+  could form a penumbra grazes distance-1 bricks whose clearance is bounded by
+  half a brick. Needs voxel-level clearance data (≈37 MB, an E2/E3 decision).
+  Hard shadows stay the default; the Stage 2 pixel gate still reads 19/0.
+- **Pascal's addendum (3 extra cost-cutting ideas), all measured, all off:**
+  brick-neighbourhood early-out **fires 0% of the time** on terrain (byte-
+  identical output; the distance field structurally cannot drive it and the
+  bricks under/beside a surface are solid ground); distance LOD saves only
+  0.6–2.9% at ground level because AO cost is dominated by *near* pixels, and
+  its large aerial saving is the effect itself being removed; sun-aware ray
+  budget saves ≤7.5% by putting the known 1-ray crosshatch on exactly the
+  bright flat ground that shows it.
+
+**Result: analytic corner AO + hard shadows puts the whole DDA pass at
+5.0–7.2 ms across all four scenarios at render scale 1.0** — under the ~8 ms
+target, which no RT-AO configuration reaches (11.8–14.6 ms). Per-tier picks
+(Potato/Quest/Balanced = analytic corner + hard; Beautiful = RT-AO + hard) are
+tabulated in the bench doc, ready for E1c to install.
+**Gate (Pascal, in-app):** does analytic corner AO ground the scene as well as
+E1's rays did — and is losing the medium-scale dimming acceptable before CAGI?
+
+### E1c — Variant registry, quality presets & settings panel ✅ (gate passed 2026-07-30: presets 2.68 / 3.46 / 5.01 / 11.69 ms scenario A; 54 tests)
+Pascal's requirement — keep the measured losers *runnable* (an M3 Max loss can
+be a Quest win) without dead code or hot-loop clutter — is met with **one lever
+registry** (`src/variants.rs::REGISTRY`): a row per lever carrying kind
+(compile-time const / runtime uniform), default, range, the measured verdict
+with its numbers, and the bench points that sweep it. The **bench derives its
+variant tables from it** (adding a row adds a bench column forever), the
+**overlay generates the Quality panel from it** (verdict as hover text — "why is
+this off?" answered in-app), and **pinning tests close the drift gate in both
+directions** (registry ↔ `dda.wgsl` ↔ typed `Default`s; a settings field without
+a row stops the test compiling). 20 levers, 4 subsystems.
+- **Presets are a table, not if/else:** sparse override lists over the shipped
+  baseline, so a future field (E4 CAGI iterations, E6 reflection depth, E7 post
+  effects) needs a registry row and only the tiers that differ grow a line.
+  **Potato 2.5–3.8 ms · Quest 3.1–4.8 · Balanced 5.0–6.8 · Beautiful 8.5–14.6**
+  (each dispatched at its own render scale; headline table in the bench doc).
+  Balanced is byte-for-byte the unpatched shader.
+- **Compile-time vs runtime, measured:** traversal levers and both mode
+  selectors stay consts (that folding IS the S2 win); the AO fade ramp moved to
+  the lighting uniform and measured **free** (−0.17% to +0.17%, byte-identical
+  output). Instant preset switching comes from **precompiling the permutations**
+  instead: 4 tiers = 3 distinct pipelines, ≈4.0 ms total at startup, 67 µs to
+  re-prewarm.
+- **Hot-loop extraction was free:** the column fast-forwards, the global-max
+  sky-out and the T1 penumbra term moved out of both coarse loops into named
+  functions (`coarse_height_levers`, `soft_penumbra_update`, `ao_distance_fade`);
+  AO-off reads 4.723 / 6.530 / 4.379 / 4.918 vs the recorded
+  4.723 / 6.509 / 4.391 / 4.943 and the pixel gate still reads 19 / 0. Nothing
+  reverted. 54 tests green (was 30).
+**Gate (Pascal, in-app):** switching presets visibly changes look and frame time,
+and the Quality panel's verdicts read usefully.
 
 ### E2 — World authority, threading & edit pipeline (ARCHITECTURE) ⬜
 The hard-to-reverse one, done early on purpose. Variants to build + measure:

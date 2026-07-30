@@ -1,22 +1,75 @@
-//! E1 — ray-traced ambient occlusion settings: pure data + shader-source
-//! patching, no wgpu, no windowing (plan architecture rule).
+//! E1/E1b — ambient-occlusion settings: pure data + shader-source patching,
+//! no wgpu, no windowing (plan architecture rule).
 //!
-//! The AO variant knobs (ray count, max distance, direction strategy,
-//! falloff) are COMPILE-TIME consts in `shaders/dda.wgsl` so naga folds every
-//! disabled path away — the "E1 AO levers" block there is the source of
-//! truth for the defaults. [`AoSettings`] mirrors those knobs on the Rust
-//! side: the overlay mutates it, and when a compile-time field changes the
-//! platform layer rebuilds the DDA pipeline from
-//! [`AoSettings::shader_source`]. `strength` is the one RUNTIME knob — it
-//! rides in the lighting uniform (`ao_params.x`) and never needs a rebuild.
+//! The AO variant knobs that live INSIDE the estimator (technique, ray count,
+//! max distance, direction strategy, falloff, and E1b's brick early-out /
+//! sun-aware budget) are COMPILE-TIME consts in `shaders/dda.wgsl` so naga
+//! folds every disabled path away — the "E1/E1b: ambient occlusion levers"
+//! block there is the source of truth for the defaults. [`AoSettings`] mirrors
+//! those knobs on the Rust side: the overlay mutates it, and when a
+//! compile-time field changes the platform layer rebuilds the DDA pipeline from
+//! [`crate::passes::dda::build_shader_source`].
 //!
-//! The headless benchmark builds its AO contenders through the same
-//! [`AoSettings::shader_source`] path, so the bench measures exactly the
-//! pipelines the app can ship.
+//! The RUNTIME knobs — `strength` and the two `fade_*_voxels` distances — ride
+//! in the lighting uniform (`shading_params.x`, `.z`, `.w`) and never need a
+//! rebuild; E1c measured the fade distances as free to move out of the shader
+//! consts (verdict in the bench doc's E1c section).
+//!
+//! The headless benchmark builds its AO contenders through the same patching
+//! path, so the bench measures exactly the pipelines the app can ship, and
+//! [`crate::variants::REGISTRY`] carries one row per knob (kind, default,
+//! measured verdict) that the bench sweep, the overlay and the pinning tests
+//! all read.
 
-use crate::passes::dda::SHADER_SOURCE;
+/// AO technique — mirrors `AO_MODE` in `dda.wgsl`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AoMode {
+    /// E1's estimator: `ray_count` short occlusion rays through the shared
+    /// `trace` core.
+    RayTraced,
+    /// E1b analytic corner occlusion: zero rays, the 8 occupancy bits around
+    /// the hit face, bilinearly interpolated across it (technique bank T7).
+    AnalyticCorner,
+    /// E1b analytic 3x3x3: zero rays, hemisphere-weighted occupancy of the 26
+    /// voxels around the face-front voxel.
+    AnalyticNeighborhood,
+    /// No occlusion at all — the shader folds AO away and renders
+    /// bit-identically to the pre-E1 renderer.
+    Off,
+}
+
+impl AoMode {
+    /// The `AO_MODE` u32 this technique compiles to — the one place the
+    /// Rust↔WGSL numbering lives (the registry's mode options and the overlay
+    /// radio buttons both go through it).
+    pub fn shader_value(self) -> u32 {
+        match self {
+            AoMode::RayTraced => 0,
+            AoMode::AnalyticCorner => 1,
+            AoMode::AnalyticNeighborhood => 2,
+            AoMode::Off => 3,
+        }
+    }
+
+    /// Inverse of [`AoMode::shader_value`]; panics on a value the shader has no
+    /// branch for.
+    pub fn from_shader_value(shader_value: u32) -> AoMode {
+        match shader_value {
+            0 => AoMode::RayTraced,
+            1 => AoMode::AnalyticCorner,
+            2 => AoMode::AnalyticNeighborhood,
+            3 => AoMode::Off,
+            other => panic!("no AO_MODE {other} in dda.wgsl"),
+        }
+    }
+
+    fn wgsl_literal(self) -> String {
+        format!("{}u", self.shader_value())
+    }
+}
 
 /// AO ray direction strategy — mirrors `AO_DIRECTION_MODE` in `dda.wgsl`.
+/// Only read by [`AoMode::RayTraced`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AoDirectionMode {
     /// Cosine-weighted hemisphere around the surface normal (matches the
@@ -30,24 +83,40 @@ pub enum AoDirectionMode {
 }
 
 impl AoDirectionMode {
-    fn wgsl_literal(self) -> &'static str {
+    /// The `AO_DIRECTION_MODE` u32 this strategy compiles to.
+    pub fn shader_value(self) -> u32 {
         match self {
-            AoDirectionMode::CosineHemisphere => "0u",
-            AoDirectionMode::UniformHemisphere => "1u",
-            AoDirectionMode::BentUp => "2u",
+            AoDirectionMode::CosineHemisphere => 0,
+            AoDirectionMode::UniformHemisphere => 1,
+            AoDirectionMode::BentUp => 2,
         }
+    }
+
+    /// Inverse of [`AoDirectionMode::shader_value`]; panics on a value the
+    /// shader has no branch for.
+    pub fn from_shader_value(shader_value: u32) -> AoDirectionMode {
+        match shader_value {
+            0 => AoDirectionMode::CosineHemisphere,
+            1 => AoDirectionMode::UniformHemisphere,
+            2 => AoDirectionMode::BentUp,
+            other => panic!("no AO_DIRECTION_MODE {other} in dda.wgsl"),
+        }
+    }
+
+    fn wgsl_literal(self) -> String {
+        format!("{}u", self.shader_value())
     }
 }
 
-/// User-facing AO configuration. All fields except `strength` are
-/// compile-time shader consts — changing them requires a pipeline rebuild
-/// (see [`AoSettings::requires_pipeline_rebuild`]).
+/// User-facing AO configuration. `strength` and the two `fade_*_voxels`
+/// distances are runtime uniform fields; every other field is a compile-time
+/// shader const and changing it requires a pipeline rebuild (see
+/// [`AoSettings::requires_pipeline_rebuild`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AoSettings {
-    /// Master lever (`ENABLE_AO`). Off = the shader folds AO away entirely
-    /// and renders bit-identically to the pre-E1 renderer.
-    pub enabled: bool,
-    /// Runtime attenuation scale in [0, 1] (`lighting.ao_params.x`): the
+    /// Which estimator to run (`AO_MODE`), [`AoMode::Off`] included.
+    pub mode: AoMode,
+    /// Runtime attenuation scale in [0, 1] (`lighting.shading_params.x`): the
     /// ambient term is multiplied by `1 - strength * occlusion`.
     pub strength: f32,
     /// Occlusion rays per primary hit (`AO_RAY_COUNT`): 1, 2 or 4.
@@ -58,68 +127,102 @@ pub struct AoSettings {
     pub direction_mode: AoDirectionMode,
     /// Distance-weighted occlusion (`AO_DISTANCE_FALLOFF`); false = binary.
     pub distance_falloff: bool,
+    /// E1b lever 1 (`AO_BRICK_EARLY_OUT`): fall back to the analytic corner
+    /// estimate on pixels whose 3x3x3 brick neighbourhood is empty, so no ray
+    /// can find an occluder outside the hit's own brick.
+    pub brick_early_out: bool,
+    /// E1b lever 2 (`AO_DISTANCE_FADE`): fade occlusion out with primary-hit
+    /// distance and skip the rays entirely past `fade_end_voxels`.
+    pub distance_fade: bool,
+    /// Start of the fade ramp, voxels (RUNTIME, `shading_params.z`; 8 voxels =
+    /// 1 m). Only read when `distance_fade` is compiled in.
+    pub fade_start_voxels: u32,
+    /// End of the fade ramp, voxels (RUNTIME, `shading_params.w`) — beyond it
+    /// no AO work happens at all.
+    pub fade_end_voxels: u32,
+    /// E1b lever 3 (`AO_SUN_AWARE_RAY_BUDGET`): halve the ray count on pixels
+    /// where the direct sun term dominates.
+    pub sun_aware_ray_budget: bool,
 }
 
 impl Default for AoSettings {
-    /// The recommended E1 variant — MUST match the "E1 AO levers" defaults in
+    /// E1b's measured winner: analytic corner AO — ~20x cheaper than the
+    /// ray-traced mode, noiseless, and it keeps the full stack under the
+    /// plan's frame-time target. MUST match the AO lever defaults in
     /// `dda.wgsl` (guarded by the `default_settings_match_shader_source`
     /// test), so the app's default pipeline is the unpatched shipped shader.
     fn default() -> AoSettings {
         AoSettings {
-            enabled: true,
+            mode: AoMode::AnalyticCorner,
             strength: 0.8,
             ray_count: 2,
             max_distance_voxels: 8,
             direction_mode: AoDirectionMode::CosineHemisphere,
             distance_falloff: true,
+            brick_early_out: false,
+            distance_fade: false,
+            fade_start_voxels: 240,
+            fade_end_voxels: 480,
+            sun_aware_ray_budget: false,
         }
     }
 }
 
 impl AoSettings {
-    /// The DDA shader source with this configuration's compile-time consts
-    /// patched in. Equal to [`SHADER_SOURCE`] for the default settings.
-    pub fn shader_source(&self) -> String {
-        let mut shader_source = patch_shader_const(
-            SHADER_SOURCE,
-            "ENABLE_AO",
-            if self.enabled { "true" } else { "false" },
-        );
-        shader_source = patch_shader_const(
-            &shader_source,
-            "AO_RAY_COUNT",
-            &format!("{}u", self.ray_count),
-        );
-        shader_source = patch_shader_const(
-            &shader_source,
+    /// `shader_source` with this configuration's compile-time consts patched
+    /// in. Identity for the default settings.
+    pub fn patch_shader_source(&self, shader_source: &str) -> String {
+        let mut patched = patch_shader_const(shader_source, "AO_MODE", &self.mode.wgsl_literal());
+        patched = patch_shader_const(&patched, "AO_RAY_COUNT", &format!("{}u", self.ray_count));
+        patched = patch_shader_const(
+            &patched,
             "AO_MAX_DISTANCE",
             &format!("{}.0", self.max_distance_voxels),
         );
-        shader_source = patch_shader_const(
-            &shader_source,
+        patched = patch_shader_const(
+            &patched,
             "AO_DIRECTION_MODE",
-            self.direction_mode.wgsl_literal(),
+            &self.direction_mode.wgsl_literal(),
+        );
+        patched = patch_shader_const(
+            &patched,
+            "AO_DISTANCE_FALLOFF",
+            boolean_literal(self.distance_falloff),
+        );
+        patched = patch_shader_const(
+            &patched,
+            "AO_BRICK_EARLY_OUT",
+            boolean_literal(self.brick_early_out),
+        );
+        patched = patch_shader_const(
+            &patched,
+            "AO_DISTANCE_FADE",
+            boolean_literal(self.distance_fade),
         );
         patch_shader_const(
-            &shader_source,
-            "AO_DISTANCE_FALLOFF",
-            if self.distance_falloff {
-                "true"
-            } else {
-                "false"
-            },
+            &patched,
+            "AO_SUN_AWARE_RAY_BUDGET",
+            boolean_literal(self.sun_aware_ray_budget),
         )
     }
 
     /// Whether switching from `applied` to `self` changes a compile-time
-    /// const (everything except `strength`, which lives in the lighting
-    /// uniform).
+    /// const — i.e. everything except the runtime uniform fields (`strength`
+    /// and the two fade distances).
     pub fn requires_pipeline_rebuild(&self, applied: &AoSettings) -> bool {
-        self.enabled != applied.enabled
-            || self.ray_count != applied.ray_count
-            || self.max_distance_voxels != applied.max_distance_voxels
-            || self.direction_mode != applied.direction_mode
-            || self.distance_falloff != applied.distance_falloff
+        let mut compile_time_only = *self;
+        compile_time_only.strength = applied.strength;
+        compile_time_only.fade_start_voxels = applied.fade_start_voxels;
+        compile_time_only.fade_end_voxels = applied.fade_end_voxels;
+        compile_time_only != *applied
+    }
+}
+
+fn boolean_literal(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
     }
 }
 
@@ -153,6 +256,7 @@ pub fn patch_shader_const(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::passes::dda::SHADER_SOURCE;
 
     /// The Rust-side defaults and the shader's lever block must be the same
     /// configuration: the app's default pipeline is built from the UNPATCHED
@@ -160,28 +264,57 @@ mod tests {
     #[test]
     fn default_settings_match_shader_source() {
         assert_eq!(
-            AoSettings::default().shader_source(),
+            AoSettings::default().patch_shader_source(SHADER_SOURCE),
             SHADER_SOURCE,
-            "AoSettings::default() drifted from the E1 lever defaults in dda.wgsl"
+            "AoSettings::default() drifted from the AO lever defaults in dda.wgsl"
         );
     }
 
     #[test]
     fn patched_source_carries_every_knob() {
         let settings = AoSettings {
-            enabled: false,
+            mode: AoMode::AnalyticNeighborhood,
             strength: 1.0,
             ray_count: 4,
             max_distance_voxels: 32,
             direction_mode: AoDirectionMode::BentUp,
             distance_falloff: false,
+            brick_early_out: true,
+            distance_fade: true,
+            fade_start_voxels: 120,
+            fade_end_voxels: 240,
+            sun_aware_ray_budget: true,
         };
-        let shader_source = settings.shader_source();
-        assert!(shader_source.contains("const ENABLE_AO: bool = false;"));
+        let shader_source = settings.patch_shader_source(SHADER_SOURCE);
+        assert!(shader_source.contains("const AO_MODE: u32 = 2u;"));
         assert!(shader_source.contains("const AO_RAY_COUNT: u32 = 4u;"));
         assert!(shader_source.contains("const AO_MAX_DISTANCE: f32 = 32.0;"));
         assert!(shader_source.contains("const AO_DIRECTION_MODE: u32 = 2u;"));
         assert!(shader_source.contains("const AO_DISTANCE_FALLOFF: bool = false;"));
+        assert!(shader_source.contains("const AO_BRICK_EARLY_OUT: bool = true;"));
+        assert!(shader_source.contains("const AO_DISTANCE_FADE: bool = true;"));
+        assert!(shader_source.contains("const AO_SUN_AWARE_RAY_BUDGET: bool = true;"));
+        // The fade DISTANCES are runtime uniform fields (E1c) — they must not
+        // leave a const behind in the shader for the patcher to hit.
+        assert!(!shader_source.contains("const AO_FADE_START_VOXELS"));
+        assert!(!shader_source.contains("const AO_FADE_END_VOXELS"));
+    }
+
+    /// `AO_MODE` must not be confused with the `AO_MODE_*` name constants
+    /// sitting right above it — patching the mode may only touch its own
+    /// declaration.
+    #[test]
+    fn patching_the_mode_leaves_the_mode_name_constants_alone() {
+        let shader_source = AoSettings {
+            mode: AoMode::Off,
+            ..AoSettings::default()
+        }
+        .patch_shader_source(SHADER_SOURCE);
+        assert!(shader_source.contains("const AO_MODE: u32 = 3u;"));
+        assert!(shader_source.contains("const AO_MODE_RAY_TRACED: u32 = 0u;"));
+        assert!(shader_source.contains("const AO_MODE_ANALYTIC_CORNER: u32 = 1u;"));
+        assert!(shader_source.contains("const AO_MODE_ANALYTIC_NEIGHBORHOOD: u32 = 2u;"));
+        assert!(shader_source.contains("const AO_MODE_OFF: u32 = 3u;"));
     }
 
     #[test]
@@ -191,14 +324,54 @@ mod tests {
     }
 
     #[test]
-    fn strength_alone_never_forces_a_rebuild() {
+    fn runtime_knobs_alone_never_force_a_rebuild() {
         let applied = AoSettings::default();
-        let mut runtime_only_change = applied;
-        runtime_only_change.strength = 0.25;
-        assert!(!runtime_only_change.requires_pipeline_rebuild(&applied));
+        for runtime_only_change in [
+            AoSettings {
+                strength: 0.25,
+                ..applied
+            },
+            AoSettings {
+                fade_start_voxels: 120,
+                ..applied
+            },
+            AoSettings {
+                fade_end_voxels: 240,
+                ..applied
+            },
+        ] {
+            assert!(
+                !runtime_only_change.requires_pipeline_rebuild(&applied),
+                "{runtime_only_change:?} rides in the lighting uniform — no rebuild"
+            );
+        }
 
-        let mut compile_time_change = applied;
-        compile_time_change.ray_count = 4;
-        assert!(compile_time_change.requires_pipeline_rebuild(&applied));
+        for compile_time_change in [
+            AoSettings {
+                ray_count: 4,
+                ..applied
+            },
+            AoSettings {
+                mode: AoMode::RayTraced,
+                ..applied
+            },
+            AoSettings {
+                brick_early_out: true,
+                ..applied
+            },
+            AoSettings {
+                distance_fade: true,
+                ..applied
+            },
+            AoSettings {
+                sun_aware_ray_budget: true,
+                ..applied
+            },
+        ] {
+            assert!(
+                compile_time_change.requires_pipeline_rebuild(&applied),
+                "{compile_time_change:?} must force a pipeline rebuild"
+            );
+        }
     }
 }

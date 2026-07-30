@@ -15,14 +15,15 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use voxel_rt::ao::AoSettings;
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, FlyCamera};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::lighting::SunSettings;
 use voxel_rt::overlay::{Overlay, OverlayFrameData};
+use voxel_rt::passes::dda::build_shader_source;
 use voxel_rt::render::Renderer;
+use voxel_rt::variants::{QualityPreset, RenderQuality, QUALITY_PRESETS};
 
 /// World generation parameters, matching voxel-sandbox's defaults
 /// (`WorldSeed(1)`, season 0.0 = high summer) so both renderers show the
@@ -80,18 +81,17 @@ struct AppState {
     frame_timers: Option<GpuFrameTimers>,
     fly_camera: FlyCamera,
     sun_settings: SunSettings,
-    /// Overlay-mutated AO levers (E1).
-    ao_settings: AoSettings,
-    /// The AO configuration the current DDA pipeline was compiled with; when
-    /// a compile-time field drifts from `ao_settings`, the pipeline is
-    /// rebuilt after the overlay pass.
-    applied_ao_settings: AoSettings,
+    /// Overlay-mutated quality levers + preset (E1c): traversal, AO, shadows
+    /// and the render scale in one struct.
+    quality: RenderQuality,
+    /// The quality the current DDA pipeline was compiled with and the render
+    /// scale was sized for; when a compile-time lever drifts from the live
+    /// settings the pipeline is switched (from the prewarmed cache) after the
+    /// overlay pass.
+    applied_quality: RenderQuality,
     input_state: InputState,
     cursor_grabbed: bool,
     vsync_enabled: bool,
-    /// Overlay-mutated render-scale lever; applied to the renderer after the
-    /// overlay pass whenever it drifts from the renderer's current scale.
-    render_scale: f32,
     previous_frame_time: Instant,
     /// Terminal FPS diagnostic: frames counted since the last 2-second log
     /// line (fps + present mode + host monitor and its refresh rate). The
@@ -127,19 +127,36 @@ impl AppState {
         );
 
         let gpu_context = GpuContext::new(window.clone());
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             &gpu_context.device,
             gpu_context.surface_format(),
             gpu_context.surface_config.width,
             gpu_context.surface_config.height,
             &brickmap,
         );
+        // Precompile every preset's pipeline permutation (E1c): switching
+        // preset in-app must never compile a shader mid-frame. Duplicate
+        // sources collapse in the cache — Quest and Balanced differ only by
+        // render scale, which is not a shader const.
+        let prewarm_start = Instant::now();
+        let preset_shader_sources: Vec<String> = QUALITY_PRESETS
+            .iter()
+            .filter(|spec| spec.preset != QualityPreset::Custom)
+            .map(|spec| build_shader_source(&spec.resolve()))
+            .collect();
+        let cached_pipeline_count =
+            renderer.prewarm_dda_pipelines(&gpu_context.device, &preset_shader_sources);
+        println!(
+            "{cached_pipeline_count} DDA pipeline permutations cached for {} presets in {:.2?}",
+            preset_shader_sources.len(),
+            prewarm_start.elapsed()
+        );
         let overlay = Overlay::new(&window, &gpu_context.device, gpu_context.surface_format());
         let frame_timers = GpuFrameTimers::new(&gpu_context.device, &gpu_context.queue);
         if frame_timers.is_none() {
             println!("GPU timestamp queries unsupported — per-pass timings disabled");
         }
-        let render_scale = renderer.render_scale();
+        let quality = RenderQuality::default();
 
         Self {
             window,
@@ -149,12 +166,11 @@ impl AppState {
             frame_timers,
             fly_camera: FlyCamera::default(),
             sun_settings: SunSettings::default(),
-            ao_settings: AoSettings::default(),
-            applied_ao_settings: AoSettings::default(),
+            quality,
+            applied_quality: quality,
             input_state: InputState::default(),
             cursor_grabbed: false,
             vsync_enabled: true,
-            render_scale,
             previous_frame_time: Instant::now(),
             fps_log_timer: Instant::now(),
             fps_log_frame_count: 0,
@@ -252,11 +268,12 @@ impl AppState {
         let camera_input = self.input_state.drain_camera_input();
         self.fly_camera.update(&camera_input, frame_time_seconds);
         let camera_uniform = self.fly_camera.gpu_uniform(self.renderer.resolution());
-        // Sun/AO sliders were mutated during LAST frame's overlay pass; a
-        // change shows up one frame later, which is imperceptible.
+        // Sun sliders and the runtime quality knobs were mutated during LAST
+        // frame's overlay pass; a change shows up one frame later, which is
+        // imperceptible.
         let lighting_uniform = self
             .sun_settings
-            .lighting_uniform(self.ao_settings.strength);
+            .lighting_uniform(self.quality.shading_params());
 
         let surface_frame = match self.gpu_context.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_frame)
@@ -310,9 +327,8 @@ impl AppState {
                 .as_ref()
                 .map(|frame_timers| frame_timers.render_span_end_writes(SPAN_POST)),
             &mut self.vsync_enabled,
-            &mut self.render_scale,
             &mut self.sun_settings,
-            &mut self.ao_settings,
+            &mut self.quality,
         );
         let readback_slot = self
             .frame_timers
@@ -330,20 +346,24 @@ impl AppState {
         if self.vsync_enabled != previous_vsync_enabled {
             self.gpu_context.set_vsync(self.vsync_enabled);
         }
-        if self.render_scale != self.renderer.render_scale() {
+        if self.quality.render_scale != self.renderer.render_scale() {
             self.renderer
-                .set_render_scale(&self.gpu_context.device, self.render_scale);
-            // set_render_scale clamps — keep the slider value in sync.
-            self.render_scale = self.renderer.render_scale();
+                .set_render_scale(&self.gpu_context.device, self.quality.render_scale);
+            // set_render_scale clamps — keep the lever value in sync.
+            self.quality.render_scale = self.renderer.render_scale();
         }
         if self
-            .ao_settings
-            .requires_pipeline_rebuild(&self.applied_ao_settings)
+            .quality
+            .requires_pipeline_rebuild(&self.applied_quality)
         {
-            self.renderer
-                .rebuild_dda_pipeline(&self.gpu_context.device, &self.ao_settings.shader_source());
-            self.applied_ao_settings = self.ao_settings;
+            // A prewarmed permutation (every preset) is a hash lookup here; an
+            // arbitrary Custom combination compiles once and stays cached.
+            self.renderer.set_dda_shader_source(
+                &self.gpu_context.device,
+                &build_shader_source(&self.quality),
+            );
         }
+        self.applied_quality = self.quality;
     }
 }
 

@@ -1,0 +1,1578 @@
+//! E1c — the LEVER REGISTRY and the quality presets: one table that every
+//! consumer reads, so a lever cannot exist in the shader, the settings structs,
+//! the benchmark or the overlay without existing in all of them.
+//!
+//! Why a registry at all (Pascal, 2026-07-30): the measured losers of S2/E1/E1b
+//! must stay *runnable* — an M3 Max loss can be a Quest win — without
+//! cluttering the hot loop or rotting into dead code. So every lever keeps its
+//! WGSL implementation and gets exactly one [`Lever`] row here carrying its
+//! kind, its default, its measured verdict WITH the numbers, and the benchmark
+//! points that sweep it.
+//!
+//! Who reads what:
+//!
+//! - **The benchmark** (`examples/bench_dda.rs`) derives its variant tables
+//!   from [`REGISTRY`]'s [`BenchPoint`]s and the preset table — adding a lever
+//!   row adds a bench column forever after, with no parallel list to update.
+//! - **The overlay** (`crate::overlay`) draws the Quality panel from the rows:
+//!   grouping by [`LeverSubsystem`], widget shape from [`LeverRange`], and the
+//!   verdict as the hover text that answers "why is this off?" in-app.
+//! - **The tests** pin the three copies of every default against each other:
+//!   registry ↔ `dda.wgsl` consts ↔ the typed `Default` impls, in both
+//!   directions (a shader lever with no row fails too).
+//!
+//! Seams (plan modularity rule): this module is pure data — no wgpu, no
+//! windowing, no shader source of its own. It composes
+//! [`crate::traversal::TraversalSettings`], [`crate::ao::AoSettings`] and
+//! [`crate::shadows::ShadowSettings`], each of which still owns its own WGSL
+//! patching, and `crate::passes::dda::build_shader_source` remains the single
+//! place a shader source is assembled.
+
+use crate::ao::{AoDirectionMode, AoMode, AoSettings};
+use crate::lighting::ShadingParams;
+use crate::shadows::{ShadowMode, ShadowSettings};
+use crate::traversal::TraversalSettings;
+
+/// Render-scale bounds (the resolution lever's range, also enforced by
+/// `crate::render::Renderer::set_render_scale`).
+pub const MIN_RENDER_SCALE: f32 = 0.5;
+pub const MAX_RENDER_SCALE: f32 = 1.0;
+
+/// Voxels per meter — the fade levers are voxel counts but are judged (and
+/// sliders labelled) in meters.
+pub const VOXELS_PER_METER: f32 = 8.0;
+
+// ---- Lever identity ----------------------------------------------------------
+
+/// Every lever the renderer has, as one identifier. [`LeverId::read`] and
+/// [`LeverId::apply`] match exhaustively over this enum, so a new variant
+/// cannot compile until it is wired to a [`RenderQuality`] field — and
+/// `registry_has_a_row_for_every_lever_id` fails until it also has a
+/// [`REGISTRY`] row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LeverId {
+    // Traversal (S2) — all compile-time, all inside the coarse DDA loops.
+    ColumnFastForward,
+    DescendFastForward,
+    GlobalMaxTerminate,
+    AnyHitShadow,
+    BrickBitGrid,
+    DistanceSkip,
+    // Ambient occlusion (E1 / E1b).
+    AoMode,
+    AoStrength,
+    AoRayCount,
+    AoMaxDistance,
+    AoDirectionMode,
+    AoDistanceFalloff,
+    AoBrickEarlyOut,
+    AoDistanceFade,
+    AoFadeStart,
+    AoFadeEnd,
+    AoSunAwareRayBudget,
+    // Sun shadows (E1b).
+    ShadowMode,
+    ShadowPenumbraScale,
+    // Resolution (S0).
+    RenderScale,
+}
+
+/// Overlay grouping — and the answer to "which subsystem pays for this".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeverSubsystem {
+    Traversal,
+    AmbientOcclusion,
+    Shadows,
+    Resolution,
+}
+
+impl LeverSubsystem {
+    pub fn label(self) -> &'static str {
+        match self {
+            LeverSubsystem::Traversal => "Traversal",
+            LeverSubsystem::AmbientOcclusion => "AO",
+            LeverSubsystem::Shadows => "Shadows",
+            LeverSubsystem::Resolution => "Resolution",
+        }
+    }
+
+    /// Panel order.
+    pub const ALL: [LeverSubsystem; 4] = [
+        LeverSubsystem::Traversal,
+        LeverSubsystem::AmbientOcclusion,
+        LeverSubsystem::Shadows,
+        LeverSubsystem::Resolution,
+    ];
+}
+
+/// Where a lever's value lives — the compile-time/runtime split E1c measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeverKind {
+    /// A compile-time WGSL const: naga folds the disabled branch away, which is
+    /// what the S2 optimization round bought, so anything inside the traversal
+    /// loops or the AO estimator selection stays here. Changing it compiles a
+    /// new pipeline (precompiled per preset at startup, so switching does not
+    /// stutter).
+    ShaderConst,
+    /// A field of the lighting uniform ([`ShadingParams`]) or a CPU-side render
+    /// setting: changing it needs NO pipeline rebuild.
+    Runtime,
+}
+
+/// A lever's value, in the shape the shader wants it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LeverValue {
+    /// WGSL `bool`.
+    Flag(bool),
+    /// WGSL `u32` mode selector (see [`Lever::mode_options`]).
+    Mode(u32),
+    /// WGSL `u32` count.
+    Count(u32),
+    /// A voxel distance: `u32` on the Rust side, WGSL `f32` (or a uniform
+    /// component) on the GPU side.
+    VoxelDistance(u32),
+    /// A runtime-only float.
+    Scalar(f32),
+}
+
+impl LeverValue {
+    /// The WGSL literal this value patches into a const declaration, or `None`
+    /// for runtime-only values (which have no const to patch).
+    pub fn wgsl_literal(self) -> Option<String> {
+        match self {
+            LeverValue::Flag(true) => Some("true".to_string()),
+            LeverValue::Flag(false) => Some("false".to_string()),
+            LeverValue::Mode(value) | LeverValue::Count(value) => Some(format!("{value}u")),
+            LeverValue::VoxelDistance(voxels) => Some(format!("{voxels}.0")),
+            LeverValue::Scalar(_) => None,
+        }
+    }
+
+    fn expect_flag(self, lever_id: LeverId) -> bool {
+        match self {
+            LeverValue::Flag(value) => value,
+            other => panic!("lever {lever_id:?} takes a Flag, got {other:?}"),
+        }
+    }
+
+    fn expect_mode(self, lever_id: LeverId) -> u32 {
+        match self {
+            LeverValue::Mode(value) => value,
+            other => panic!("lever {lever_id:?} takes a Mode, got {other:?}"),
+        }
+    }
+
+    fn expect_count(self, lever_id: LeverId) -> u32 {
+        match self {
+            LeverValue::Count(value) => value,
+            other => panic!("lever {lever_id:?} takes a Count, got {other:?}"),
+        }
+    }
+
+    fn expect_voxel_distance(self, lever_id: LeverId) -> u32 {
+        match self {
+            LeverValue::VoxelDistance(value) => value,
+            other => panic!("lever {lever_id:?} takes a VoxelDistance, got {other:?}"),
+        }
+    }
+
+    fn expect_scalar(self, lever_id: LeverId) -> f32 {
+        match self {
+            LeverValue::Scalar(value) => value,
+            other => panic!("lever {lever_id:?} takes a Scalar, got {other:?}"),
+        }
+    }
+}
+
+/// Widget shape / bounds for the overlay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LeverRange {
+    /// Checkbox or radio row — bounds come from the value type itself.
+    Discrete,
+    /// Continuous slider.
+    Continuous {
+        minimum: f32,
+        maximum: f32,
+        logarithmic: bool,
+    },
+    /// Fixed integer rungs, drawn as a radio row.
+    Rungs(&'static [u32]),
+    /// A voxel-distance slider whose bounds are expressed in METERS.
+    Meters { minimum: f32, maximum: f32 },
+}
+
+/// One selectable value of a mode lever, with its own verdict — "why is 3x3x3
+/// off" is a per-option answer, not a per-lever one.
+pub struct ModeOption {
+    pub value: u32,
+    pub label: &'static str,
+    pub verdict: &'static str,
+}
+
+/// One bench column: a label plus the lever overrides that build it, applied on
+/// top of the section's baseline quality. Most points override only their own
+/// lever; a point may list companions when the recorded row IS a combination
+/// (e.g. the fade ramp needs the fade flag on).
+pub struct BenchPoint {
+    pub section: BenchSection,
+    pub label: &'static str,
+    pub overrides: &'static [(LeverId, LeverValue)],
+}
+
+/// The benchmark's independent sections (isolation rule — an experiment's
+/// numbers never contaminate the gate below it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchSection {
+    /// Section 1: traversal levers with AO forced off (the S2 regression gate).
+    Traversal,
+    /// Section 2: E1's ray-traced-AO ladder around the grid center.
+    RayTracedAo,
+    /// Section 3: E1b's cheap-occlusion / soft-shadow shootout.
+    CheapOcclusion,
+}
+
+/// One registry row.
+pub struct Lever {
+    pub id: LeverId,
+    pub subsystem: LeverSubsystem,
+    pub kind: LeverKind,
+    /// The WGSL const this lever patches, or `None` when the value rides in a
+    /// uniform / lives on the CPU.
+    pub shader_const: Option<&'static str>,
+    /// Overlay label.
+    pub label: &'static str,
+    /// The shipped value. Pinned against `dda.wgsl` AND against the typed
+    /// `Default` impls by the tests below.
+    pub default_value: LeverValue,
+    pub range: LeverRange,
+    /// The measured verdict, with numbers. Shown as the overlay's hover text.
+    pub verdict: &'static str,
+    /// Selectable values, for mode levers only.
+    pub mode_options: &'static [ModeOption],
+    /// Bench columns this lever contributes.
+    pub bench: &'static [BenchPoint],
+}
+
+impl LeverId {
+    /// This lever's current value in `quality`.
+    pub fn read(self, quality: &RenderQuality) -> LeverValue {
+        let traversal = &quality.traversal;
+        let ambient_occlusion = &quality.ambient_occlusion;
+        let shadows = &quality.shadows;
+        match self {
+            LeverId::ColumnFastForward => LeverValue::Flag(traversal.column_fast_forward),
+            LeverId::DescendFastForward => LeverValue::Flag(traversal.descend_fast_forward),
+            LeverId::GlobalMaxTerminate => LeverValue::Flag(traversal.global_max_terminate),
+            LeverId::AnyHitShadow => LeverValue::Flag(traversal.any_hit_shadow),
+            LeverId::BrickBitGrid => LeverValue::Flag(traversal.brick_bit_grid),
+            LeverId::DistanceSkip => LeverValue::Flag(traversal.distance_skip),
+            LeverId::AoMode => LeverValue::Mode(ambient_occlusion.mode.shader_value()),
+            LeverId::AoStrength => LeverValue::Scalar(ambient_occlusion.strength),
+            LeverId::AoRayCount => LeverValue::Count(ambient_occlusion.ray_count),
+            LeverId::AoMaxDistance => {
+                LeverValue::VoxelDistance(ambient_occlusion.max_distance_voxels)
+            }
+            LeverId::AoDirectionMode => {
+                LeverValue::Mode(ambient_occlusion.direction_mode.shader_value())
+            }
+            LeverId::AoDistanceFalloff => LeverValue::Flag(ambient_occlusion.distance_falloff),
+            LeverId::AoBrickEarlyOut => LeverValue::Flag(ambient_occlusion.brick_early_out),
+            LeverId::AoDistanceFade => LeverValue::Flag(ambient_occlusion.distance_fade),
+            LeverId::AoFadeStart => LeverValue::VoxelDistance(ambient_occlusion.fade_start_voxels),
+            LeverId::AoFadeEnd => LeverValue::VoxelDistance(ambient_occlusion.fade_end_voxels),
+            LeverId::AoSunAwareRayBudget => {
+                LeverValue::Flag(ambient_occlusion.sun_aware_ray_budget)
+            }
+            LeverId::ShadowMode => LeverValue::Mode(shadows.mode.shader_value()),
+            LeverId::ShadowPenumbraScale => LeverValue::Scalar(shadows.penumbra_scale),
+            LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
+        }
+    }
+
+    /// Write `value` into `quality`. Panics when the value's shape does not
+    /// match the lever — the registry, the presets and the bench all go through
+    /// here, so a mismatch is a programming error, not user input.
+    pub fn apply(self, quality: &mut RenderQuality, value: LeverValue) {
+        let traversal = &mut quality.traversal;
+        let ambient_occlusion = &mut quality.ambient_occlusion;
+        let shadows = &mut quality.shadows;
+        match self {
+            LeverId::ColumnFastForward => traversal.column_fast_forward = value.expect_flag(self),
+            LeverId::DescendFastForward => traversal.descend_fast_forward = value.expect_flag(self),
+            LeverId::GlobalMaxTerminate => traversal.global_max_terminate = value.expect_flag(self),
+            LeverId::AnyHitShadow => traversal.any_hit_shadow = value.expect_flag(self),
+            LeverId::BrickBitGrid => traversal.brick_bit_grid = value.expect_flag(self),
+            LeverId::DistanceSkip => traversal.distance_skip = value.expect_flag(self),
+            LeverId::AoMode => {
+                ambient_occlusion.mode = AoMode::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::AoStrength => ambient_occlusion.strength = value.expect_scalar(self),
+            LeverId::AoRayCount => ambient_occlusion.ray_count = value.expect_count(self),
+            LeverId::AoMaxDistance => {
+                ambient_occlusion.max_distance_voxels = value.expect_voxel_distance(self);
+            }
+            LeverId::AoDirectionMode => {
+                ambient_occlusion.direction_mode =
+                    AoDirectionMode::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::AoDistanceFalloff => {
+                ambient_occlusion.distance_falloff = value.expect_flag(self);
+            }
+            LeverId::AoBrickEarlyOut => ambient_occlusion.brick_early_out = value.expect_flag(self),
+            LeverId::AoDistanceFade => ambient_occlusion.distance_fade = value.expect_flag(self),
+            LeverId::AoFadeStart => {
+                ambient_occlusion.fade_start_voxels = value.expect_voxel_distance(self);
+            }
+            LeverId::AoFadeEnd => {
+                ambient_occlusion.fade_end_voxels = value.expect_voxel_distance(self);
+            }
+            LeverId::AoSunAwareRayBudget => {
+                ambient_occlusion.sun_aware_ray_budget = value.expect_flag(self);
+            }
+            LeverId::ShadowMode => {
+                shadows.mode = ShadowMode::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::ShadowPenumbraScale => shadows.penumbra_scale = value.expect_scalar(self),
+            LeverId::RenderScale => {
+                quality.render_scale = value
+                    .expect_scalar(self)
+                    .clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE);
+            }
+        }
+    }
+}
+
+/// This lever's registry row. Panics when the id has no row — the pinning tests
+/// make that unreachable.
+pub fn lever(lever_id: LeverId) -> &'static Lever {
+    REGISTRY
+        .iter()
+        .find(|lever| lever.id == lever_id)
+        .unwrap_or_else(|| panic!("lever {lever_id:?} has no REGISTRY row"))
+}
+
+/// The rows of one subsystem, in registry order.
+pub fn levers_of(subsystem: LeverSubsystem) -> impl Iterator<Item = &'static Lever> {
+    REGISTRY
+        .iter()
+        .filter(move |lever| lever.subsystem == subsystem)
+}
+
+/// Every bench column of one section, in registry order.
+pub fn bench_points_of(section: BenchSection) -> impl Iterator<Item = &'static BenchPoint> {
+    REGISTRY
+        .iter()
+        .flat_map(|lever| lever.bench.iter())
+        .filter(move |point| point.section == section)
+}
+
+// ---- The registry ------------------------------------------------------------
+
+/// THE table. Verdict lines quote the measured numbers from
+/// `docs/voxel-rt-bench.md` (Apple M3 Max, 2560x1440) — they are the answer the
+/// overlay shows when someone asks why a lever is off.
+pub const REGISTRY: &[Lever] = &[
+    // ---- Traversal (S2) ----
+    Lever {
+        id: LeverId::DistanceSkip,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_DISTANCE_SKIP"),
+        label: "chebyshev distance skip",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "WINNER, on. The engine of the current numbers: 17-27% under the \
+                  Stage 2 baseline, and its distance byte doubles as the occupancy \
+                  test (500 KB grid instead of the 2 MB pointer grid).",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "no-dist-skip",
+            overrides: &[(LeverId::DistanceSkip, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::GlobalMaxTerminate,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_GLOBAL_MAX_TERMINATE"),
+        label: "global-max terminate",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "WINNER, on. Exact sky-out for upward rays above the world's \
+                  tallest brick — kills sky pixels without walking the grid, for a \
+                  single compare.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "no-global-max",
+            overrides: &[(LeverId::GlobalMaxTerminate, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::ColumnFastForward,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_COLUMN_FAST_FORWARD"),
+        label: "column fast-forward (up)",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "LOSER on M3 Max, off: +9-17% when re-enabled. Shadow rays cross \
+                  columns about once per step, so the lateral jump saves few steps \
+                  while its resync math and scattered column reads cost more. \
+                  Re-measure on Quest's Adreno.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "with-column-ff",
+            overrides: &[(LeverId::ColumnFastForward, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::DescendFastForward,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_DESCEND_FAST_FORWARD"),
+        label: "descend fast-forward (down)",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "LOSER on M3 Max, off: was the Stage 2 top-down win, but the \
+                  distance field now covers the same empty air in ALL directions; \
+                  switching the column machinery off saved 8-14% on every scenario.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "with-descend-ff",
+            overrides: &[(LeverId::DescendFastForward, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::AnyHitShadow,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_ANY_HIT_SHADOW"),
+        label: "any-hit shadow loop",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "LOSER on M3 Max, off: the specialized any-hit coarse loop lost \
+                  1-3% to plain trace() in three separate rounds — the second loop \
+                  costs more than the material/face bookkeeping it skips.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "with-anyhit-shadow",
+            overrides: &[(LeverId::AnyHitShadow, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::BrickBitGrid,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_BRICK_BIT_GRID"),
+        label: "brick bit-grid occupancy",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "LOSER on M3 Max, off: no measurable win — the skip-distance byte \
+                  already answers occupancy, so the bit read is a second redundant \
+                  load. Retry where caches are small (Quest). Its data is still \
+                  read by the AO brick early-out.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "with-bit-grid",
+            overrides: &[(LeverId::BrickBitGrid, LeverValue::Flag(true))],
+        }],
+    },
+    // ---- Ambient occlusion (E1 / E1b) ----
+    Lever {
+        id: LeverId::AoMode,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_MODE"),
+        label: "technique",
+        default_value: LeverValue::Mode(1),
+        range: LeverRange::Discrete,
+        verdict: "The E1b shootout's subject: analytic corner AO is the shipped \
+                  default (+0.25-0.31 ms) and ray-traced AO is the Beautiful tier \
+                  (+4.2-8.2 ms).",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "rays",
+                verdict: "RT-AO (E1's winner, 2 rays / 8 voxels / cosine / falloff): the only \
+                          estimator with reach past contact — it dims recessed-but-not-touching \
+                          geometry — but +4.2-8.2 ms (11.8-14.6 ms total pass), over the ~8 ms \
+                          target, and 2 rays still crosshatch large near surfaces. Beautiful tier \
+                          until CAGI (E4) takes over the medium-scale band.",
+            },
+            ModeOption {
+                value: 1,
+                label: "corner",
+                verdict: "Analytic corner AO — WINNER, the shipped default: 8 occupancy bits \
+                          around the hit face, bilinearly interpolated with the DDA's face-local \
+                          UV. +0.25-0.31 ms (20x cheaper than rays) at 82% of their frame \
+                          coverage, and noiseless. Contact-only: misses recessed-but-not-touching \
+                          areas by ~1.1/255 mean luminance.",
+            },
+            ModeOption {
+                value: 2,
+                label: "3x3x3",
+                verdict: "Analytic 26-neighbour — LOSER, off: 5x corner AO's cost (+1.3-1.6 ms) \
+                          for a broad low-amplitude over-darkening (68-82% coverage, max delta 43) \
+                          and per-voxel flat facets where corner AO is smooth.",
+            },
+            ModeOption {
+                value: 3,
+                label: "off",
+                verdict: "No occlusion — the pre-E1 renderer bit for bit. The bench floor: \
+                          4.74 / 6.52 / 4.40 / 4.96 ms (A/B/C/D).",
+            },
+        ],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-off",
+                overrides: &[(LeverId::AoMode, LeverValue::Mode(3))],
+            },
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "ao-off",
+                overrides: &[(LeverId::AoMode, LeverValue::Mode(3))],
+            },
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "ao-corner",
+                overrides: &[(LeverId::AoMode, LeverValue::Mode(1))],
+            },
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "ao-neighborhood",
+                overrides: &[(LeverId::AoMode, LeverValue::Mode(2))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::AoStrength,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "strength",
+        default_value: LeverValue::Scalar(0.8),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime (shading_params.x), free: it scales the estimator's result, \
+                  never the work. 0.8 is the shipped look.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::AoRayCount,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_RAY_COUNT"),
+        label: "rays",
+        default_value: LeverValue::Count(2),
+        range: LeverRange::Rungs(&[1, 2, 4]),
+        verdict: "RT-AO only. 2 is the knee: 1 ray leaves a stable crosshatch on \
+                  large flat ground, 4 costs ~7 ms more for no visible gain. Each \
+                  marginal full-res short ray is 2.25-3.55 ms.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-1ray-d16",
+                overrides: &[(LeverId::AoRayCount, LeverValue::Count(1))],
+            },
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-4ray-d16",
+                overrides: &[(LeverId::AoRayCount, LeverValue::Count(4))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::AoMaxDistance,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_MAX_DISTANCE"),
+        label: "ray length (voxels)",
+        default_value: LeverValue::VoxelDistance(8),
+        range: LeverRange::Rungs(&[8, 16, 32]),
+        verdict: "RT-AO only. 8 voxels (1 m) is 10-17% cheaper than 16 with \
+                  visually equivalent grounding (the falloff already discounts far \
+                  occluders); 32 costs +30-60% and only adds scene-wide dimming.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-2ray-d8",
+                overrides: &[(LeverId::AoMaxDistance, LeverValue::VoxelDistance(8))],
+            },
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-2ray-d32",
+                overrides: &[(LeverId::AoMaxDistance, LeverValue::VoxelDistance(32))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::AoDirectionMode,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_DIRECTION_MODE"),
+        label: "ray directions",
+        default_value: LeverValue::Mode(0),
+        range: LeverRange::Discrete,
+        verdict: "RT-AO only. Cosine-weighted is the default — it matches the \
+                  Lambert weighting of the ambient term it multiplies.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "cosine",
+                verdict: "Cosine-weighted hemisphere — default: binary hits average to the \
+                          correct visibility integral, and it is the cheapest of the three at \
+                          equal ray count.",
+            },
+            ModeOption {
+                value: 1,
+                label: "uniform",
+                verdict: "Uniform hemisphere — LOSER, off: +4.7% (A) to +14.7% (C) over cosine \
+                          (its grazing rays hit sooner) AND it over-darkens: 51% coverage vs 39%, \
+                          greying open flat ground.",
+            },
+            ModeOption {
+                value: 2,
+                label: "bent-up",
+                verdict: "Bent-up cone — cheapest RT-AO variant (12.16 ms on A) and noise-free, \
+                          but it is a sky-visibility proxy, not occlusion: 21%/14.5% coverage \
+                          means it misses most lateral contact darkening. Kept for a Quest \
+                          re-measure.",
+            },
+        ],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-uniform-d16",
+                overrides: &[(LeverId::AoDirectionMode, LeverValue::Mode(1))],
+            },
+            BenchPoint {
+                section: BenchSection::RayTracedAo,
+                label: "ao-bent-d16",
+                overrides: &[(LeverId::AoDirectionMode, LeverValue::Mode(2))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::AoDistanceFalloff,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_DISTANCE_FALLOFF"),
+        label: "distance falloff",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "RT-AO only, on. Binary occlusion costs MORE at equal distance \
+                  (16.28 vs 14.77 ms on B against falloff at d8) and looks worse: \
+                  uniform mid-grey patches instead of a contact gradient.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::RayTracedAo,
+            label: "ao-binary-d16",
+            overrides: &[(LeverId::AoDistanceFalloff, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::AoBrickEarlyOut,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_BRICK_EARLY_OUT"),
+        label: "brick early-out",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "NEGATIVE, off: measured 0% firing rate on terrain (byte-identical \
+                  output, -0.6 to -1.4% = noise). The bricks under and beside a \
+                  surface brick are solid ground, so the 3x3x3 test never passes; it \
+                  needs voxel-level clearance data to ever fire.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::CheapOcclusion,
+            label: "ao-2ray-brickskip",
+            overrides: &[(LeverId::AoBrickEarlyOut, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::AoDistanceFade,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_DISTANCE_FADE"),
+        label: "distance fade",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "WEAK, off by default: only 0.6-2.9% at ground level, because AO \
+                  cost is dominated by NEAR pixels. Its 12-49% aerial saving is the \
+                  effect itself being removed (coverage 37.6% -> 0%). A legitimate \
+                  aerial-camera / Potato knob, not a free win — Potato ships it at \
+                  15->30 m.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::CheapOcclusion,
+            label: "ao-2ray-fade30-60",
+            overrides: &[(LeverId::AoDistanceFade, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::AoFadeStart,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "fade start (m)",
+        default_value: LeverValue::VoxelDistance(240),
+        range: LeverRange::Meters {
+            minimum: 2.0,
+            maximum: 125.0,
+        },
+        verdict: "Runtime since E1c (shading_params.z) — moving it out of the shader \
+                  consts measured free, so the fade range is dialable without a \
+                  pipeline rebuild. 240 voxels = 30 m, the conservative rung.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::CheapOcclusion,
+            label: "ao-2ray-fade15-30",
+            overrides: &[
+                (LeverId::AoDistanceFade, LeverValue::Flag(true)),
+                (LeverId::AoFadeStart, LeverValue::VoxelDistance(120)),
+                (LeverId::AoFadeEnd, LeverValue::VoxelDistance(240)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::AoFadeEnd,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "fade end (m)",
+        default_value: LeverValue::VoxelDistance(480),
+        range: LeverRange::Meters {
+            minimum: 2.0,
+            maximum: 125.0,
+        },
+        verdict: "Runtime since E1c (shading_params.w). Past this distance the \
+                  estimator is skipped entirely. 480 voxels = 60 m.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::AoSunAwareRayBudget,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_SUN_AWARE_RAY_BUDGET"),
+        label: "sun-aware ray budget",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "REJECTED, off: 0-7.5% saving (A -7.5%, B +0.1%) for halving rays \
+                  on exactly the bright flat sunlit ground where the 1-ray \
+                  crosshatch is visible. Coverage drops 37.6% -> 29.6%.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::CheapOcclusion,
+            label: "ao-2ray-sunbudget",
+            overrides: &[(LeverId::AoSunAwareRayBudget, LeverValue::Flag(true))],
+        }],
+    },
+    // ---- Shadows (E1b) ----
+    Lever {
+        id: LeverId::ShadowMode,
+        subsystem: LeverSubsystem::Shadows,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("SHADOW_MODE"),
+        label: "technique",
+        default_value: LeverValue::Mode(0),
+        range: LeverRange::Discrete,
+        verdict: "Hard shadows in every tier — soft-from-distance-field is free but \
+                  broken (see the soft option's verdict).",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "hard",
+                verdict: "One binary any-hit shadow ray — the default. Crisp voxel shadows also \
+                          suit the art direction, and this is the Stage 2 correctness reference \
+                          (19 differing pixels on B, 0 on D).",
+            },
+            ModeOption {
+                value: 1,
+                label: "soft (distance field)",
+                verdict: "DOCUMENTED NEGATIVE, off: free as promised (+0.10-0.35 ms, no extra \
+                          rays) but the per-BRICK chebyshev field stamps a visible 1 m lattice \
+                          plus sun-aligned streaks into flat surfaces at EVERY penumbra scale \
+                          (k = 4/16/64/115 swept), with no penumbra ramp to trade against it. \
+                          Confirmed broken in-app. Needs voxel-level clearance (~37 MB).",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::CheapOcclusion,
+            label: "corner+soft-k115",
+            overrides: &[
+                (LeverId::AoMode, LeverValue::Mode(1)),
+                (LeverId::ShadowMode, LeverValue::Mode(1)),
+                (LeverId::ShadowPenumbraScale, LeverValue::Scalar(115.0)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::ShadowPenumbraScale,
+        subsystem: LeverSubsystem::Shadows,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "penumbra scale",
+        default_value: LeverValue::Scalar(115.0),
+        range: LeverRange::Continuous {
+            minimum: 4.0,
+            maximum: 256.0,
+            logarithmic: true,
+        },
+        verdict: "Runtime (shading_params.y), soft mode only. It is the reciprocal \
+                  of the light's angular radius, so 115 = the sun's true 0.5-degree \
+                  disc and 4 would model a 14-degree source. The whole sweep prints \
+                  the brick lattice.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "soft-k4",
+                overrides: &[
+                    (LeverId::AoMode, LeverValue::Mode(3)),
+                    (LeverId::ShadowMode, LeverValue::Mode(1)),
+                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(4.0)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "soft-k16",
+                overrides: &[
+                    (LeverId::AoMode, LeverValue::Mode(3)),
+                    (LeverId::ShadowMode, LeverValue::Mode(1)),
+                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(16.0)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "soft-k64",
+                overrides: &[
+                    (LeverId::AoMode, LeverValue::Mode(3)),
+                    (LeverId::ShadowMode, LeverValue::Mode(1)),
+                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(64.0)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::CheapOcclusion,
+                label: "soft-k115",
+                overrides: &[
+                    (LeverId::AoMode, LeverValue::Mode(3)),
+                    (LeverId::ShadowMode, LeverValue::Mode(1)),
+                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(115.0)),
+                ],
+            },
+        ],
+    },
+    // ---- Resolution (S0) ----
+    Lever {
+        id: LeverId::RenderScale,
+        subsystem: LeverSubsystem::Resolution,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "render scale",
+        default_value: LeverValue::Scalar(MAX_RENDER_SCALE),
+        range: LeverRange::Continuous {
+            minimum: MIN_RENDER_SCALE,
+            maximum: MAX_RENDER_SCALE,
+            logarithmic: false,
+        },
+        verdict: "The tier knob: DDA cost is per-pixel, so cost scales with the \
+                  square of the scale. 1.0 on desktop (5.0-7.2 ms full stack); \
+                  Potato ships 0.7 and Quest ~0.8 (E9 tunes it on device). Swept by \
+                  the preset section, which dispatches at each preset's real size.",
+        mode_options: &[],
+        bench: &[],
+    },
+];
+
+// ---- Quality settings + presets ----------------------------------------------
+
+/// The named tiers. Presets differ by TECHNIQUE, not only by counts (plan E1c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualityPreset {
+    Potato,
+    Quest,
+    Balanced,
+    Beautiful,
+    /// Whatever the user dialed: touching any knob switches here, and selecting
+    /// a named preset overwrites the knobs again.
+    Custom,
+}
+
+/// One preset row: a SPARSE override list over [`RenderQuality::baseline`].
+/// Sparse on purpose — a future experiment (E4 CAGI iterations, E6 reflection
+/// depth, E7 post effects) adds its lever to the registry with a default, and
+/// only the presets that want something else grow a line. No preset needs
+/// rewriting.
+pub struct QualityPresetSpec {
+    pub preset: QualityPreset,
+    pub label: &'static str,
+    pub summary: &'static str,
+    pub overrides: &'static [(LeverId, LeverValue)],
+}
+
+impl QualityPresetSpec {
+    /// The full settings this preset means.
+    pub fn resolve(&self) -> RenderQuality {
+        let mut quality = RenderQuality::baseline();
+        quality.preset = self.preset;
+        for (lever_id, value) in self.overrides {
+            lever_id.apply(&mut quality, *value);
+        }
+        quality
+    }
+}
+
+/// The preset table (E1b's per-tier recommendation, installed).
+pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
+    QualityPresetSpec {
+        preset: QualityPreset::Potato,
+        label: "Potato",
+        summary: "corner AO + hard shadows, render scale 0.7, AO fade 15->30 m",
+        overrides: &[
+            (LeverId::AoMode, LeverValue::Mode(1)),
+            (LeverId::ShadowMode, LeverValue::Mode(0)),
+            (LeverId::AoDistanceFade, LeverValue::Flag(true)),
+            (LeverId::AoFadeStart, LeverValue::VoxelDistance(120)),
+            (LeverId::AoFadeEnd, LeverValue::VoxelDistance(240)),
+            (LeverId::RenderScale, LeverValue::Scalar(0.7)),
+        ],
+    },
+    QualityPresetSpec {
+        preset: QualityPreset::Quest,
+        label: "Quest",
+        summary: "corner AO + hard shadows, render scale 0.8 — E9 tunes this tier on device",
+        overrides: &[
+            (LeverId::AoMode, LeverValue::Mode(1)),
+            (LeverId::ShadowMode, LeverValue::Mode(0)),
+            (LeverId::RenderScale, LeverValue::Scalar(0.8)),
+        ],
+    },
+    QualityPresetSpec {
+        preset: QualityPreset::Balanced,
+        label: "Balanced",
+        summary: "corner AO + hard shadows at full resolution — the shipped default, \
+                  5.0-7.2 ms",
+        overrides: &[
+            (LeverId::AoMode, LeverValue::Mode(1)),
+            (LeverId::ShadowMode, LeverValue::Mode(0)),
+            (LeverId::RenderScale, LeverValue::Scalar(MAX_RENDER_SCALE)),
+        ],
+    },
+    QualityPresetSpec {
+        preset: QualityPreset::Beautiful,
+        label: "Beautiful",
+        summary: "ray-traced AO (2 rays / 8 voxels / cosine / falloff) + hard shadows, \
+                  full resolution — 8.6-11.8 ms, bought for RT-AO's reach",
+        overrides: &[
+            (LeverId::AoMode, LeverValue::Mode(0)),
+            (LeverId::AoRayCount, LeverValue::Count(2)),
+            (LeverId::AoMaxDistance, LeverValue::VoxelDistance(8)),
+            (LeverId::AoDirectionMode, LeverValue::Mode(0)),
+            (LeverId::AoDistanceFalloff, LeverValue::Flag(true)),
+            (LeverId::ShadowMode, LeverValue::Mode(0)),
+            (LeverId::RenderScale, LeverValue::Scalar(MAX_RENDER_SCALE)),
+        ],
+    },
+    QualityPresetSpec {
+        preset: QualityPreset::Custom,
+        label: "Custom",
+        summary: "the knobs as dialed — selecting this preset changes nothing",
+        overrides: &[],
+    },
+];
+
+/// The preset table row of `preset`.
+pub fn preset_spec(preset: QualityPreset) -> &'static QualityPresetSpec {
+    QUALITY_PRESETS
+        .iter()
+        .find(|spec| spec.preset == preset)
+        .unwrap_or_else(|| panic!("preset {preset:?} has no QUALITY_PRESETS row"))
+}
+
+/// Everything the renderer's quality is: the three lever groups plus the
+/// resolution knob and the preset tag. The overlay mutates it, the passes read
+/// it, and `crate::passes::dda::build_shader_source` compiles it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderQuality {
+    /// Which named tier these knobs came from ([`QualityPreset::Custom`] once
+    /// the user touches anything).
+    pub preset: QualityPreset,
+    pub traversal: TraversalSettings,
+    pub ambient_occlusion: AoSettings,
+    pub shadows: ShadowSettings,
+    /// Storage-texture size / surface size (1.0 = native).
+    pub render_scale: f32,
+}
+
+impl Default for RenderQuality {
+    /// The Balanced tier — and, by `balanced_preset_is_the_shipped_baseline`,
+    /// exactly [`RenderQuality::baseline`], i.e. the unpatched `dda.wgsl`.
+    fn default() -> RenderQuality {
+        preset_spec(QualityPreset::Balanced).resolve()
+    }
+}
+
+impl RenderQuality {
+    /// The typed `Default` of every lever group — the configuration the shipped
+    /// shader source already contains, and the base every preset overrides.
+    /// Deliberately built from the settings structs, NOT from the registry, so
+    /// the registry-vs-defaults test has two independent sources to compare.
+    pub fn baseline() -> RenderQuality {
+        RenderQuality {
+            preset: QualityPreset::Balanced,
+            traversal: TraversalSettings::default(),
+            ambient_occlusion: AoSettings::default(),
+            shadows: ShadowSettings::default(),
+            render_scale: MAX_RENDER_SCALE,
+        }
+    }
+
+    /// Overwrite every knob with `preset`'s table row. [`QualityPreset::Custom`]
+    /// only re-tags — it means "the knobs as dialed".
+    pub fn apply_preset(&mut self, preset: QualityPreset) {
+        if preset == QualityPreset::Custom {
+            self.preset = QualityPreset::Custom;
+            return;
+        }
+        *self = preset_spec(preset).resolve();
+    }
+
+    /// Whether any KNOB differs (the preset tag ignored) — how the overlay
+    /// notices that the user dialed something and flips to
+    /// [`QualityPreset::Custom`].
+    pub fn knobs_differ(&self, other: &RenderQuality) -> bool {
+        let mut tag_matched = *self;
+        tag_matched.preset = other.preset;
+        tag_matched != *other
+    }
+
+    /// Whether switching from `applied` to `self` needs a new compute pipeline
+    /// (a compile-time const changed). Runtime knobs and the render scale never
+    /// do.
+    pub fn requires_pipeline_rebuild(&self, applied: &RenderQuality) -> bool {
+        self.traversal.requires_pipeline_rebuild(&applied.traversal)
+            || self
+                .ambient_occlusion
+                .requires_pipeline_rebuild(&applied.ambient_occlusion)
+            || self.shadows.requires_pipeline_rebuild(&applied.shadows)
+    }
+
+    /// The runtime knobs, for this frame's lighting uniform.
+    pub fn shading_params(&self) -> ShadingParams {
+        ShadingParams {
+            ambient_occlusion_strength: self.ambient_occlusion.strength,
+            shadow_penumbra_scale: self.shadows.penumbra_scale,
+            ambient_occlusion_fade_start_voxels: self.ambient_occlusion.fade_start_voxels as f32,
+            ambient_occlusion_fade_end_voxels: self.ambient_occlusion.fade_end_voxels as f32,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ao::patch_shader_const;
+    use crate::passes::dda::{build_shader_source, SHADER_SOURCE};
+
+    /// Shader consts in the lever blocks that are NOT levers: the mode NAME
+    /// constants and two fixed tuning thresholds. Anything else the shader
+    /// declares with a lever-ish name must have a registry row.
+    const NON_LEVER_SHADER_CONSTANTS: &[&str] = &[
+        "AO_MODE_RAY_TRACED",
+        "AO_MODE_ANALYTIC_CORNER",
+        "AO_MODE_ANALYTIC_NEIGHBORHOOD",
+        "AO_MODE_OFF",
+        "AO_SUN_BUDGET_THRESHOLD",
+        "SHADOW_MODE_HARD",
+        "SHADOW_MODE_SOFT_DISTANCE_FIELD",
+        "SHADOW_PENUMBRA_MIN_DISTANCE",
+        "SHADOW_BIAS",
+        "USE_COLUMN_HEIGHTS",
+    ];
+
+    fn registry_ids() -> Vec<LeverId> {
+        REGISTRY.iter().map(|lever| lever.id).collect()
+    }
+
+    /// REGISTRY -> shader: every compile-time row's default must already BE the
+    /// shipped shader's value (patching it in is the identity), which also
+    /// proves the const exists — `patch_shader_const` panics otherwise.
+    #[test]
+    fn registry_defaults_match_shader_source() {
+        for lever in REGISTRY {
+            let Some(constant_name) = lever.shader_const else {
+                assert_eq!(
+                    lever.kind,
+                    LeverKind::Runtime,
+                    "{:?} has no shader const, so it must be a runtime lever",
+                    lever.id
+                );
+                continue;
+            };
+            assert_eq!(
+                lever.kind,
+                LeverKind::ShaderConst,
+                "{:?} names a shader const, so it must be a compile-time lever",
+                lever.id
+            );
+            let literal = lever
+                .default_value
+                .wgsl_literal()
+                .unwrap_or_else(|| panic!("{:?} has no WGSL literal", lever.id));
+            assert_eq!(
+                patch_shader_const(SHADER_SOURCE, constant_name, &literal),
+                SHADER_SOURCE,
+                "registry default for {:?} ({literal}) drifted from `{constant_name}` \
+                 in dda.wgsl",
+                lever.id
+            );
+        }
+    }
+
+    /// REGISTRY -> typed defaults: the registry's default column and the
+    /// `Default` impls of the settings structs must agree.
+    #[test]
+    fn registry_defaults_match_typed_settings_defaults() {
+        let baseline = RenderQuality::baseline();
+        for lever in REGISTRY {
+            assert_eq!(
+                lever.id.read(&baseline),
+                lever.default_value,
+                "registry default for {:?} drifted from the typed Default impl",
+                lever.id
+            );
+        }
+    }
+
+    /// shader -> REGISTRY: a lever added to `dda.wgsl` without a registry row
+    /// fails here, so the drift gate closes in BOTH directions.
+    #[test]
+    fn every_lever_shaped_shader_const_has_a_registry_row() {
+        let registered: Vec<&str> = REGISTRY
+            .iter()
+            .filter_map(|lever| lever.shader_const)
+            .collect();
+        for line in SHADER_SOURCE.lines() {
+            let Some(declaration) = line.strip_prefix("const ") else {
+                continue;
+            };
+            let Some(constant_name) = declaration.split(':').next() else {
+                continue;
+            };
+            let lever_shaped = constant_name.starts_with("ENABLE_")
+                || constant_name.starts_with("AO_")
+                || constant_name.starts_with("SHADOW_");
+            if !lever_shaped || NON_LEVER_SHADER_CONSTANTS.contains(&constant_name) {
+                continue;
+            }
+            assert!(
+                registered.contains(&constant_name),
+                "shader const `{constant_name}` is lever-shaped but has no REGISTRY row \
+                 (add one, or list it in NON_LEVER_SHADER_CONSTANTS if it is a fixed \
+                 tuning constant)"
+            );
+        }
+    }
+
+    /// The settings structs cannot grow an unregistered field: this
+    /// destructuring stops compiling until the new field is added here, and the
+    /// assertions then force it to have a registry row.
+    #[test]
+    fn every_settings_field_has_a_registry_lever() {
+        let baseline = RenderQuality::baseline();
+        let RenderQuality {
+            preset: _,
+            traversal,
+            ambient_occlusion,
+            shadows,
+            render_scale,
+        } = baseline;
+        let TraversalSettings {
+            column_fast_forward,
+            descend_fast_forward,
+            global_max_terminate,
+            any_hit_shadow,
+            brick_bit_grid,
+            distance_skip,
+        } = traversal;
+        let AoSettings {
+            mode,
+            strength,
+            ray_count,
+            max_distance_voxels,
+            direction_mode,
+            distance_falloff,
+            brick_early_out,
+            distance_fade,
+            fade_start_voxels,
+            fade_end_voxels,
+            sun_aware_ray_budget,
+        } = ambient_occlusion;
+        let ShadowSettings {
+            mode: shadow_mode,
+            penumbra_scale,
+        } = shadows;
+
+        let expected: Vec<(LeverId, LeverValue)> = vec![
+            (
+                LeverId::ColumnFastForward,
+                LeverValue::Flag(column_fast_forward),
+            ),
+            (
+                LeverId::DescendFastForward,
+                LeverValue::Flag(descend_fast_forward),
+            ),
+            (
+                LeverId::GlobalMaxTerminate,
+                LeverValue::Flag(global_max_terminate),
+            ),
+            (LeverId::AnyHitShadow, LeverValue::Flag(any_hit_shadow)),
+            (LeverId::BrickBitGrid, LeverValue::Flag(brick_bit_grid)),
+            (LeverId::DistanceSkip, LeverValue::Flag(distance_skip)),
+            (LeverId::AoMode, LeverValue::Mode(mode.shader_value())),
+            (LeverId::AoStrength, LeverValue::Scalar(strength)),
+            (LeverId::AoRayCount, LeverValue::Count(ray_count)),
+            (
+                LeverId::AoMaxDistance,
+                LeverValue::VoxelDistance(max_distance_voxels),
+            ),
+            (
+                LeverId::AoDirectionMode,
+                LeverValue::Mode(direction_mode.shader_value()),
+            ),
+            (
+                LeverId::AoDistanceFalloff,
+                LeverValue::Flag(distance_falloff),
+            ),
+            (LeverId::AoBrickEarlyOut, LeverValue::Flag(brick_early_out)),
+            (LeverId::AoDistanceFade, LeverValue::Flag(distance_fade)),
+            (
+                LeverId::AoFadeStart,
+                LeverValue::VoxelDistance(fade_start_voxels),
+            ),
+            (
+                LeverId::AoFadeEnd,
+                LeverValue::VoxelDistance(fade_end_voxels),
+            ),
+            (
+                LeverId::AoSunAwareRayBudget,
+                LeverValue::Flag(sun_aware_ray_budget),
+            ),
+            (
+                LeverId::ShadowMode,
+                LeverValue::Mode(shadow_mode.shader_value()),
+            ),
+            (
+                LeverId::ShadowPenumbraScale,
+                LeverValue::Scalar(penumbra_scale),
+            ),
+            (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
+        ];
+
+        let ids = registry_ids();
+        assert_eq!(
+            ids.len(),
+            expected.len(),
+            "REGISTRY has {} rows for {} settings fields",
+            ids.len(),
+            expected.len()
+        );
+        for (lever_id, value) in expected {
+            assert!(
+                ids.contains(&lever_id),
+                "settings field behind {lever_id:?} has no REGISTRY row"
+            );
+            assert_eq!(
+                lever_id.read(&baseline),
+                value,
+                "{lever_id:?} reads a different field than the one it documents"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_rows_are_unique_and_findable() {
+        let ids = registry_ids();
+        for (index, lever_id) in ids.iter().enumerate() {
+            assert!(
+                !ids[..index].contains(lever_id),
+                "{lever_id:?} has two REGISTRY rows"
+            );
+            assert_eq!(lever(*lever_id).id, *lever_id);
+        }
+    }
+
+    /// Every compile-time lever is swept by the harness forever after — the
+    /// point of deriving the bench tables from this table. Runtime levers are
+    /// exempt: the preset sweep varies them (render scale, fade range) or they
+    /// are provably free (a multiply on the result).
+    #[test]
+    fn every_compile_time_lever_is_swept_by_the_bench() {
+        let swept: Vec<LeverId> = REGISTRY
+            .iter()
+            .flat_map(|lever| lever.bench.iter())
+            .flat_map(|point| point.overrides.iter().map(|(lever_id, _)| *lever_id))
+            .collect();
+        for lever in REGISTRY {
+            if lever.kind != LeverKind::ShaderConst {
+                continue;
+            }
+            assert!(
+                swept.contains(&lever.id),
+                "{:?} is compile-time but no bench point varies it — add a BenchPoint",
+                lever.id
+            );
+        }
+    }
+
+    #[test]
+    fn bench_labels_are_unique_within_a_section() {
+        for section in [
+            BenchSection::Traversal,
+            BenchSection::RayTracedAo,
+            BenchSection::CheapOcclusion,
+        ] {
+            let labels: Vec<&str> = bench_points_of(section).map(|point| point.label).collect();
+            for (index, label) in labels.iter().enumerate() {
+                assert!(
+                    !labels[..index].contains(label),
+                    "bench label `{label}` appears twice in {section:?}"
+                );
+            }
+        }
+    }
+
+    /// Every bench point must apply cleanly (right value shape for its lever).
+    #[test]
+    fn every_bench_point_applies() {
+        for point in REGISTRY.iter().flat_map(|lever| lever.bench.iter()) {
+            let mut quality = RenderQuality::baseline();
+            for (lever_id, value) in point.overrides {
+                lever_id.apply(&mut quality, *value);
+                assert_eq!(
+                    lever_id.read(&quality),
+                    *value,
+                    "bench point `{}` did not take on {lever_id:?}",
+                    point.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_lever_round_trips_through_apply_and_read() {
+        for lever in REGISTRY {
+            let mut quality = RenderQuality::baseline();
+            let probe = match lever.default_value {
+                LeverValue::Flag(value) => LeverValue::Flag(!value),
+                LeverValue::Mode(value) => {
+                    // A different option of the same lever.
+                    let other = lever
+                        .mode_options
+                        .iter()
+                        .map(|option| option.value)
+                        .find(|option_value| *option_value != value)
+                        .expect("a mode lever needs at least two options");
+                    LeverValue::Mode(other)
+                }
+                LeverValue::Count(value) => LeverValue::Count(value + 1),
+                LeverValue::VoxelDistance(value) => LeverValue::VoxelDistance(value / 2),
+                LeverValue::Scalar(value) => LeverValue::Scalar(value * 0.5),
+            };
+            lever.id.apply(&mut quality, probe);
+            assert_eq!(
+                lever.id.read(&quality),
+                probe,
+                "{:?} does not round-trip through apply/read",
+                lever.id
+            );
+        }
+    }
+
+    /// Mode levers must offer exactly the options the shader has branches for,
+    /// and every option must be selectable.
+    #[test]
+    fn mode_options_are_consistent() {
+        for lever in REGISTRY {
+            let is_mode = matches!(lever.default_value, LeverValue::Mode(_));
+            assert_eq!(
+                is_mode,
+                !lever.mode_options.is_empty(),
+                "{:?}: mode options and a Mode default must come together",
+                lever.id
+            );
+            if !is_mode {
+                continue;
+            }
+            for (index, option) in lever.mode_options.iter().enumerate() {
+                assert_eq!(
+                    option.value, index as u32,
+                    "{:?} option `{}` must sit at its own shader value",
+                    lever.id, option.label
+                );
+                assert!(
+                    !option.verdict.is_empty(),
+                    "{:?} option `{}` needs a verdict — it is the in-app answer to \
+                     \"why is this off\"",
+                    lever.id,
+                    option.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_lever_has_a_verdict() {
+        for lever in REGISTRY {
+            assert!(
+                lever.verdict.len() > 20,
+                "{:?} needs a real one-line verdict with numbers",
+                lever.id
+            );
+        }
+    }
+
+    // ---- Presets ----
+
+    /// Balanced IS the shipped configuration: the app's default pipeline is the
+    /// unpatched `dda.wgsl`, so the bench's `current` column measures what the
+    /// app ships.
+    #[test]
+    fn balanced_preset_is_the_shipped_baseline() {
+        let balanced = preset_spec(QualityPreset::Balanced).resolve();
+        assert_eq!(balanced, RenderQuality::baseline());
+        assert_eq!(RenderQuality::default(), balanced);
+        assert_eq!(build_shader_source(&balanced), SHADER_SOURCE);
+    }
+
+    #[test]
+    fn every_preset_resolves_independently_of_the_previous_state() {
+        for spec in QUALITY_PRESETS {
+            if spec.preset == QualityPreset::Custom {
+                continue;
+            }
+            let mut from_default = RenderQuality::default();
+            from_default.apply_preset(spec.preset);
+
+            let mut from_junk = RenderQuality::default();
+            from_junk.ambient_occlusion.strength = 0.1;
+            from_junk.traversal.column_fast_forward = true;
+            from_junk.render_scale = MIN_RENDER_SCALE;
+            from_junk.apply_preset(spec.preset);
+
+            assert_eq!(
+                from_default, from_junk,
+                "{:?} must fully define the knobs it ships",
+                spec.preset
+            );
+            assert_eq!(from_default.preset, spec.preset);
+        }
+    }
+
+    #[test]
+    fn custom_preset_keeps_the_dialed_knobs() {
+        let mut quality = RenderQuality::default();
+        quality.ambient_occlusion.strength = 0.33;
+        quality.traversal.brick_bit_grid = true;
+        let dialed = quality;
+        quality.apply_preset(QualityPreset::Custom);
+        assert_eq!(quality.preset, QualityPreset::Custom);
+        assert!(!quality.knobs_differ(&dialed));
+    }
+
+    #[test]
+    fn preset_table_matches_the_e1b_per_tier_recommendation() {
+        let potato = preset_spec(QualityPreset::Potato).resolve();
+        assert_eq!(potato.ambient_occlusion.mode, AoMode::AnalyticCorner);
+        assert_eq!(potato.shadows.mode, ShadowMode::Hard);
+        assert!(potato.ambient_occlusion.distance_fade);
+        assert_eq!(potato.ambient_occlusion.fade_start_voxels, 120); // 15 m
+        assert_eq!(potato.ambient_occlusion.fade_end_voxels, 240); // 30 m
+        assert_eq!(potato.render_scale, 0.7);
+
+        let quest = preset_spec(QualityPreset::Quest).resolve();
+        assert_eq!(quest.ambient_occlusion.mode, AoMode::AnalyticCorner);
+        assert_eq!(quest.shadows.mode, ShadowMode::Hard);
+        assert!(!quest.ambient_occlusion.distance_fade);
+        assert_eq!(quest.render_scale, 0.8);
+
+        let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
+        assert_eq!(beautiful.ambient_occlusion.mode, AoMode::RayTraced);
+        assert_eq!(beautiful.ambient_occlusion.ray_count, 2);
+        assert_eq!(beautiful.ambient_occlusion.max_distance_voxels, 8);
+        assert_eq!(
+            beautiful.ambient_occlusion.direction_mode,
+            AoDirectionMode::CosineHemisphere
+        );
+        assert!(beautiful.ambient_occlusion.distance_falloff);
+        assert_eq!(beautiful.shadows.mode, ShadowMode::Hard);
+        assert_eq!(beautiful.render_scale, MAX_RENDER_SCALE);
+    }
+
+    /// Only three of the five presets need their own pipeline: Quest and
+    /// Balanced differ by render scale alone, and Custom starts as Balanced.
+    /// This is what the startup pipeline cache pays for.
+    #[test]
+    fn presets_need_three_distinct_pipelines() {
+        let mut sources: Vec<String> = QUALITY_PRESETS
+            .iter()
+            .filter(|spec| spec.preset != QualityPreset::Custom)
+            .map(|spec| build_shader_source(&spec.resolve()))
+            .collect();
+        sources.sort();
+        sources.dedup();
+        assert_eq!(sources.len(), 3);
+    }
+
+    #[test]
+    fn preset_switches_that_only_move_runtime_knobs_skip_the_rebuild() {
+        let balanced = preset_spec(QualityPreset::Balanced).resolve();
+        let quest = preset_spec(QualityPreset::Quest).resolve();
+        assert!(!quest.requires_pipeline_rebuild(&balanced));
+
+        let potato = preset_spec(QualityPreset::Potato).resolve();
+        let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
+        assert!(potato.requires_pipeline_rebuild(&balanced));
+        assert!(beautiful.requires_pipeline_rebuild(&balanced));
+    }
+
+    #[test]
+    fn shading_params_carry_the_runtime_levers() {
+        let potato = preset_spec(QualityPreset::Potato).resolve();
+        let shading_params = potato.shading_params();
+        assert_eq!(shading_params.ambient_occlusion_strength, 0.8);
+        assert_eq!(shading_params.shadow_penumbra_scale, 115.0);
+        assert_eq!(shading_params.ambient_occlusion_fade_start_voxels, 120.0);
+        assert_eq!(shading_params.ambient_occlusion_fade_end_voxels, 240.0);
+    }
+
+    #[test]
+    fn render_scale_is_clamped_to_the_lever_range() {
+        let mut quality = RenderQuality::baseline();
+        LeverId::RenderScale.apply(&mut quality, LeverValue::Scalar(0.1));
+        assert_eq!(quality.render_scale, MIN_RENDER_SCALE);
+        LeverId::RenderScale.apply(&mut quality, LeverValue::Scalar(4.0));
+        assert_eq!(quality.render_scale, MAX_RENDER_SCALE);
+    }
+
+    #[test]
+    #[should_panic(expected = "takes a Flag")]
+    fn applying_the_wrong_value_shape_panics() {
+        let mut quality = RenderQuality::baseline();
+        LeverId::DistanceSkip.apply(&mut quality, LeverValue::Mode(1));
+    }
+}
