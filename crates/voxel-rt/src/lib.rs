@@ -5,9 +5,10 @@
 //!
 //! Module seams (plan architecture rule): platform/windowing (`main.rs`,
 //! `gpu`) ↔ render passes (`passes`, `render`) ↔ world data (`brickmap`) ↔
-//! camera (`camera`) ↔ lighting (`lighting`) ↔ overlay (`overlay`) ↔ GPU
-//! timing (`frame_timing`).
+//! camera (`camera`) ↔ lighting (`lighting`) ↔ ambient occlusion (`ao`, E1)
+//! ↔ overlay (`overlay`) ↔ GPU timing (`frame_timing`).
 
+pub mod ao;
 pub mod brickmap;
 pub mod camera;
 pub mod frame_timing;

@@ -1,12 +1,15 @@
 // dda.wgsl — Stage 2 renderer: two-level DDA over the brickmap, one sun
-// shadow ray per primary hit, hemisphere sky ambient, Reinhard tonemap.
+// shadow ray per primary hit, hemisphere sky ambient, ray-traced ambient
+// occlusion (E1), Reinhard tonemap.
 //
 // Fullscreen compute pass (workgroup 8x8): one thread per output pixel builds
 // a camera ray, traverses the two-level brickmap (coarse Amanatides & Woo DDA
 // over 8^3-voxel bricks, fine DDA over the voxels inside occupied bricks),
 // and writes a shaded color to an rgba8unorm storage texture. Misses get a
 // vertical sky gradient. Each primary hit fires ONE shadow ray toward the
-// sun through `trace_shadow()`.
+// sun through `trace_shadow()` plus AO_RAY_COUNT short occlusion rays
+// (`ambient_occlusion`) that attenuate the hemisphere-ambient term only —
+// the sun term keeps its own shadow ray (see the E1 lever block).
 //
 // All traversal happens in VOXEL-space units: the camera position arrives in
 // world meters and is divided by BrickmapMeta.voxel_size_meters once at ray
@@ -128,6 +131,7 @@ struct Lighting {
     sun_color_intensity: vec4<f32>, // rgb = linear sun color, w = intensity
     sky_ambient: vec4<f32>,         // rgb = linear sky ambient, w = strength
     ground_ambient: vec4<f32>,      // rgb = linear ground bounce, w unused
+    ao_params: vec4<f32>,           // x = AO strength [0, 1], yzw unused
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -177,6 +181,34 @@ const ENABLE_BRICK_BIT_GRID: bool = false;
 // brick costs one byte-load from the 500 KB grid instead of a u32 from the
 // 2 MB pointer grid — and skips whole cubes of empty air besides.
 const ENABLE_DISTANCE_SKIP: bool = true;
+
+// ---- E1: ray-traced ambient occlusion levers ---------------------------------
+// Short occlusion rays from each primary hit attenuate the hemisphere-ambient
+// term (never the direct sun term — the sun has its own shadow ray). The
+// whole experiment folds away at ENABLE_AO = false: with it off this shader
+// is bit-identical to the pre-E1 renderer. The overlay's AO section rebuilds
+// the pipeline with these consts patched (src/ao.rs), and the benchmark
+// measures every contender (bench doc, E1 section). AO strength is the one
+// RUNTIME knob (lighting.ao_params.x) — it scales the result, not the rays.
+const ENABLE_AO: bool = true;
+// Occlusion rays per primary hit (bench contenders: 1 / 2 / 4). 1 ray shows
+// a stable but visible IGN crosshatch on flat ground; 2 is clean; 4 buys
+// almost nothing more (E1 verdict).
+const AO_RAY_COUNT: u32 = 2u;
+// Max occlusion-ray length, voxel units (bench contenders: 8 / 16 / 32).
+// 8 measured ~10-17% cheaper than 16 with near-identical grounding (the
+// falloff already discounts far occluders); 32 just spreads a general
+// dimming for +30% cost. See the E1 table in docs/voxel-rt-bench.md.
+const AO_MAX_DISTANCE: f32 = 8.0;
+// Ray direction strategy: 0 = cosine-weighted hemisphere, 1 = uniform
+// hemisphere, 2 = fixed bent-up cone (normal tilted toward world up). All
+// three are deterministic per pixel — the rotation comes from interleaved
+// gradient noise over PIXEL COORDINATES only (no frame index, no temporal
+// accumulation), so a still camera shows a stable, shimmer-free image.
+const AO_DIRECTION_MODE: u32 = 0u;
+// Occlusion falloff: true = distance-weighted (a hit at t contributes
+// 1 - t / AO_MAX_DISTANCE, so close occluders darken more), false = binary.
+const AO_DISTANCE_FALLOFF: bool = true;
 
 // Either column-height fast path needs the per-column max hoisted into a
 // register (and the guaranteed-empty-brick skip that comes with it).
@@ -553,11 +585,13 @@ fn shadow_brick_occluded(origin: vec3<f32>, direction: vec3<f32>,
 
 // ---- Coarse level: the brick grid ---------------------------------------------
 
-// Trace one primary ray through the brick grid. Occupancy comes from the
+// Trace one closest-hit ray through the brick grid. Occupancy comes from the
 // bit grid; empty bricks either distance-skip their guaranteed-empty cube or
 // step once; occupied bricks run the fine DDA; cleared columns fast-forward.
 // Everything is in voxel units; `origin` must already be voxel-space.
-fn trace(origin: vec3<f32>, direction: vec3<f32>) -> Hit {
+// `max_distance` caps the traversal (primary/shadow rays pass
+// MAX_TRACE_DISTANCE; E1's short AO rays pass AO_MAX_DISTANCE).
+fn trace(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> Hit {
     var result: Hit;
     result.material = 0u;
 
@@ -578,7 +612,7 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>) -> Hit {
 
     let heading_upward = direction.y >= 0.0;
     let world_max_brick_y = i32(brickmap.max_occupied_brick_y); // -1 when empty
-    let t_limit = min(bounds.y, MAX_TRACE_DISTANCE);
+    let t_limit = min(bounds.y, max_distance);
     // Hoisted column max of the CURRENT XZ column (see column_max_of).
     var column_max_y = 0;
     if (USE_COLUMN_HEIGHTS) {
@@ -657,7 +691,7 @@ fn trace_shadow(origin: vec3<f32>, direction: vec3<f32>) -> bool {
     if (!ENABLE_ANY_HIT_SHADOW) {
         // Shipped path (see the lever comment): reusing the closest-hit
         // trace measured faster than the specialized any-hit loop below.
-        return trace(origin, direction).material != 0u;
+        return trace(origin, direction, MAX_TRACE_DISTANCE).material != 0u;
     }
     let inverse_direction = vec3<f32>(
         safe_inverse(direction.x),
@@ -797,7 +831,8 @@ fn ambient_light(normal: vec3<f32>) -> vec3<f32> {
         * lighting.sky_ambient.w;
 }
 
-// Robust shadow-ray origin. Reconstructing the hit point as
+// Robust secondary-ray origin (shadow AND AO rays). Reconstructing the hit
+// point as
 // origin + t * direction alone carries accumulated float error at large t;
 // the hit voxel's INTEGER coordinate does not. So: clamp the reconstructed
 // point strictly inside the hit voxel's footprint (a SHADOW_BIAS margin off
@@ -825,11 +860,107 @@ fn shadow_ray_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     return position + normal * SHADOW_BIAS;
 }
 
+// ---- E1: ray-traced ambient occlusion ------------------------------------------
+//
+// Isolated experiment unit (see the AO lever block): everything below folds
+// away at ENABLE_AO = false. The occlusion rays reuse the shared `trace`
+// core with a short max distance — no forked DDA math.
+
+// Interleaved gradient noise (Jimenez 2014): a fixed per-pixel dither in
+// [0, 1) from pixel coordinates ONLY. Deterministic across frames — a still
+// camera shows an identical image every frame, matching the engine's
+// noiseless identity (no temporal accumulation, no per-frame randomness).
+fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Branchless orthonormal basis around `axis` (Duff et al. 2017). Columns:
+// tangent, bitangent, axis.
+fn orthonormal_basis(axis: vec3<f32>) -> mat3x3<f32> {
+    let sign_z = select(-1.0, 1.0, axis.z >= 0.0);
+    let a = -1.0 / (sign_z + axis.z);
+    let b = axis.x * axis.y * a;
+    let tangent = vec3<f32>(1.0 + sign_z * axis.x * axis.x * a, sign_z * b, -sign_z * axis.x);
+    let bitangent = vec3<f32>(b, sign_z + axis.y * axis.y * a, -axis.y);
+    return mat3x3<f32>(tangent, bitangent, axis);
+}
+
+// One AO ray direction. Stratified over ray_index (elevation strata +
+// golden-ratio azimuth spacing), rotated per pixel by interleaved gradient
+// noise so neighboring pixels probe different azimuths — a fixed dither, not
+// frame-varying noise. Modes (AO_DIRECTION_MODE):
+//   0  cosine-weighted hemisphere around the normal — matches the Lambert
+//      weighting of the ambient term, so binary hits average to the correct
+//      visibility integral;
+//   1  uniform hemisphere around the normal — more grazing rays (finds
+//      lateral occluders sooner, over-weights them physically);
+//   2  fixed bent-up cone — the normal tilted toward world up (a cheap
+//      sky-visibility proxy), fixed elevation ladder inside a ~37-degree
+//      cone.
+fn ao_ray_direction(normal: vec3<f32>, pixel: vec2<f32>, ray_index: u32) -> vec3<f32> {
+    let stratum = (f32(ray_index) + 0.5) / f32(AO_RAY_COUNT);
+    // Golden-ratio conjugate spaces the azimuths; the noise rotates the whole
+    // fan per pixel.
+    let azimuth = 6.28318530718
+        * fract(f32(ray_index) * 0.61803398875 + interleaved_gradient_noise(pixel));
+    let cos_azimuth = cos(azimuth);
+    let sin_azimuth = sin(azimuth);
+
+    var axis = normal;
+    var cos_elevation = 0.0;
+    if (AO_DIRECTION_MODE == 0u) {
+        cos_elevation = sqrt(1.0 - stratum); // cosine-weighted: p ~ cos
+    } else if (AO_DIRECTION_MODE == 1u) {
+        cos_elevation = 1.0 - stratum; // uniform over the hemisphere
+    } else {
+        // Bent axis: normal + up degenerates on ceilings (normal = -Y);
+        // fall back to the plain normal there.
+        let bent = normal + vec3<f32>(0.0, 1.0, 0.0);
+        if (dot(bent, bent) > 1e-4) {
+            axis = normalize(bent);
+        }
+        // Fixed elevation ladder, 0.8..0.95 — stays inside the surface
+        // hemisphere even with the axis bent 45 degrees off the normal.
+        cos_elevation = mix(0.95, 0.8, stratum);
+    }
+    let sin_elevation = sqrt(max(1.0 - cos_elevation * cos_elevation, 0.0));
+    return orthonormal_basis(axis)
+        * vec3<f32>(cos_azimuth * sin_elevation, sin_azimuth * sin_elevation, cos_elevation);
+}
+
+// Ambient-visibility factor in [1 - strength, 1]: AO_RAY_COUNT short
+// occlusion rays from the hit face, averaged, scaled by the runtime strength
+// (lighting.ao_params.x). Rays reuse `shadow_ray_origin` (same
+// integer-reconstructed, acne-free origin as the sun ray) and the shared
+// `trace` with AO_MAX_DISTANCE — the chebyshev distance field makes short
+// rays through open space nearly free.
+fn ambient_occlusion(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                     normal: vec3<f32>, pixel: vec2<f32>) -> f32 {
+    let surface_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
+    var occlusion_sum = 0.0;
+    for (var ray_index = 0u; ray_index < AO_RAY_COUNT; ray_index = ray_index + 1u) {
+        let direction = ao_ray_direction(normal, pixel, ray_index);
+        let occluder = trace(surface_origin, direction, AO_MAX_DISTANCE);
+        if (occluder.material != 0u) {
+            if (AO_DISTANCE_FALLOFF) {
+                occlusion_sum += 1.0 - clamp(occluder.distance / AO_MAX_DISTANCE, 0.0, 1.0);
+            } else {
+                occlusion_sum += 1.0;
+            }
+        }
+    }
+    return 1.0 - lighting.ao_params.x * occlusion_sum / f32(AO_RAY_COUNT);
+}
+
 // Linear-space direct light: albedo * (sun lambert * shadow + hemisphere
-// ambient). One crisp (binary) shadow ray per hit through the any-hit
+// ambient * AO). One crisp (binary) shadow ray per hit through the any-hit
 // `trace_shadow`; faces pointing away from the sun skip the trace outright
-// (their lambert term is zero anyway).
-fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> vec3<f32> {
+// (their lambert term is zero anyway). AO attenuates ONLY the ambient
+// (indirect) term. E4 composition contract: when CAGI lands, the indirect
+// term becomes `cagi_sample * ambient_occlusion(...)` — AO stays a pure
+// multiplier on indirect light and never touches the direct sun term.
+fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+             pixel: vec2<f32>) -> vec3<f32> {
     let normal = hit_normal(hit);
     let albedo = srgb_decode(palette[hit.material].rgb);
 
@@ -843,7 +974,11 @@ fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> vec3<
     }
     let sun = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
         * max(sun_facing, 0.0) * sun_visibility;
-    return albedo * (sun + ambient_light(normal));
+    var ambient = ambient_light(normal);
+    if (ENABLE_AO) {
+        ambient = ambient * ambient_occlusion(hit, ray_origin, ray_direction, normal, pixel);
+    }
+    return albedo * (sun + ambient);
 }
 
 // ---- Entry point ------------------------------------------------------------
@@ -866,12 +1001,12 @@ fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     // Camera lives in world meters; traversal runs in voxel units.
     let origin = camera.position / brickmap.voxel_size_meters;
 
-    let hit = trace(origin, direction);
+    let hit = trace(origin, direction, MAX_TRACE_DISTANCE);
     var color = vec3<f32>(0.0, 0.0, 0.0);
     if (hit.material == 0u) {
         color = sky_color(direction);
     } else {
-        color = shade_hit(hit, origin, direction);
+        color = shade_hit(hit, origin, direction, pixel);
     }
     // Linear radiance -> tonemap -> sRGB encode: the blit contract still
     // receives sRGB-encoded bytes.

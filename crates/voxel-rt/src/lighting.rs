@@ -35,7 +35,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 
 /// Per-frame lighting data for the DDA compute shader, bindable as a uniform.
 ///
-/// `#[repr(C)]` layout (64 bytes, 16-byte aligned — matches the WGSL
+/// `#[repr(C)]` layout (80 bytes, 16-byte aligned — matches the WGSL
 /// `Lighting` struct in `shaders/dda.wgsl`; the `vec3<f32>` is padded to 16
 /// bytes with an explicit pad float):
 ///
@@ -46,6 +46,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 16     | `sun_color_intensity` | `vec4<f32>` | rgb = linear sun color, w = intensity |
 /// | 32     | `sky_ambient`         | `vec4<f32>` | rgb = linear sky ambient, w = ambient strength |
 /// | 48     | `ground_ambient`      | `vec4<f32>` | rgb = linear ground bounce, w = unused |
+/// | 64     | `ao_params`           | `vec4<f32>` | x = AO strength [0, 1] (E1), yzw = unused |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -54,6 +55,7 @@ pub struct LightingUniform {
     pub sun_color_intensity: [f32; 4],
     pub sky_ambient: [f32; 4],
     pub ground_ambient: [f32; 4],
+    pub ao_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -103,8 +105,10 @@ impl SunSettings {
         )
     }
 
-    /// This frame's GPU lighting data.
-    pub fn lighting_uniform(&self) -> LightingUniform {
+    /// This frame's GPU lighting data. `ambient_occlusion_strength` is the
+    /// E1 runtime knob (`crate::ao::AoSettings::strength`); it is ignored by
+    /// the shader when the AO lever is compiled off.
+    pub fn lighting_uniform(&self, ambient_occlusion_strength: f32) -> LightingUniform {
         let sun_direction = self.sun_direction();
         LightingUniform {
             sun_direction: sun_direction.to_array(),
@@ -122,6 +126,7 @@ impl SunSettings {
                 GROUND_AMBIENT_COLOR[2],
                 0.0,
             ],
+            ao_params: [ambient_occlusion_strength, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -132,7 +137,7 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 64);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 80);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
     }
 

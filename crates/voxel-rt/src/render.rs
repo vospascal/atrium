@@ -81,6 +81,13 @@ impl Renderer {
         self.recreate_storage(device);
     }
 
+    /// Rebuild the DDA compute pipeline from a patched shader source (the E1
+    /// overlay path: an AO compile-time lever changed). Buffers and bind
+    /// groups are untouched.
+    pub fn rebuild_dda_pipeline(&mut self, device: &wgpu::Device, shader_source: &str) {
+        self.dda_pass.rebuild_pipeline(device, shader_source);
+    }
+
     /// Apply the overlay's render-scale lever (clamped to the slider range).
     /// No-op when the scale is unchanged.
     pub fn set_render_scale(&mut self, device: &wgpu::Device, render_scale: f32) {

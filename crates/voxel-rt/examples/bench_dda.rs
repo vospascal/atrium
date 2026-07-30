@@ -24,19 +24,29 @@
 //!   C  ground-level at the spawn point looking across the island, default sun
 //!   D  same view, low sun
 //!
-//! A/B variants: extra pipelines built from patched copies of the shader
-//! source, flipping the "A/B benchmark levers" consts at the top of
-//! `shaders/dda.wgsl` — each traversal optimization measured in isolation,
-//! plus the all-off Stage 2 baseline.
+//! Two sections, each its own variant table (isolation rule):
 //!
-//! Correctness evidence: the low-sun scenarios (B, D) are rendered once per
-//! variant and compared pixel-by-pixel against the no-fast-path reference
-//! (`stage2-baseline`); PNGs land in `target/bench_dda/`. The column
-//! fast-forward must never terminate a ray that is heading toward taller
-//! terrain ahead — long low-sun shadows across water/valleys must survive.
+//! 1. **Traversal levers, AO off** — the Stage 2 regression gate: extra
+//!    pipelines built from patched copies of the shader source, flipping the
+//!    "A/B benchmark levers" consts at the top of `shaders/dda.wgsl`, ALL
+//!    with `ENABLE_AO = false` so the numbers stay comparable with the
+//!    recorded pre-E1 baseline. Correctness evidence: the low-sun scenarios
+//!    (B, D) are rendered per variant and compared pixel-by-pixel against
+//!    the no-fast-path reference (`stage2-baseline`); the `current` column
+//!    with AO off must also stay bit-identical to the pre-E1 renderer.
+//!
+//! 2. **E1 AO variants** — every A/B contender (ray count, max distance,
+//!    direction strategy, falloff) built through
+//!    [`voxel_rt::ao::AoSettings::shader_source`], the exact pipelines the
+//!    app can ship. The default-sun scenarios (A, C) are rendered per
+//!    variant for the visual verdict, and each variant's differing-pixel
+//!    count vs `ao-off` reports how much of the frame AO touches.
+//!
+//! All PNGs land in `target/bench_dda/`.
 
 use std::time::Instant;
 
+use voxel_rt::ao::{AoDirectionMode, AoSettings};
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraPose, CameraUniform, DEFAULT_VERTICAL_FOV_RADIANS};
 use voxel_rt::lighting::{LightingUniform, SunSettings};
@@ -69,8 +79,9 @@ struct Scenario {
     label: &'static str,
     camera_uniform: CameraUniform,
     lighting_uniform: LightingUniform,
-    /// Low-sun scenarios get rendered + compared for shadow correctness.
-    verify_image: bool,
+    /// Captured scenarios get rendered per variant, written as PNGs, and
+    /// pixel-compared against the section's reference variant.
+    capture_image: bool,
 }
 
 /// One shader build to measure.
@@ -78,6 +89,11 @@ struct Variant {
     label: &'static str,
     shader_source: String,
 }
+
+/// Timing table of one section: `[variant][scenario] = (median, p95)` ms.
+type TimingTable = Vec<Vec<(f32, f32)>>;
+/// Captured renders of one section: `[variant][capture_index] = RGBA bytes`.
+type CapturedImages = Vec<Vec<Vec<u8>>>;
 
 fn main() {
     let world_start = Instant::now();
@@ -107,36 +123,97 @@ fn main() {
     });
     let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let scenarios = build_scenarios();
-    let variants = build_variants();
+    // Section 1: traversal levers with AO forced off — the Stage 2
+    // regression gate. Low-sun scenarios (B, D) carry the shadow-correctness
+    // pixel compare against `stage2-baseline` (the last variant).
+    println!();
+    println!("== section 1: traversal levers (AO off) ==");
+    let traversal_scenarios = build_scenarios(&['b', 'd']);
+    let traversal_variants = build_traversal_variants();
+    let (traversal_table, traversal_images) = measure_section(
+        &device,
+        &queue,
+        &output_texture,
+        &output_view,
+        &brickmap,
+        &traversal_scenarios,
+        &traversal_variants,
+    );
+    print_table(&traversal_scenarios, &traversal_variants, &traversal_table);
+    write_variant_pngs(&traversal_scenarios, &traversal_variants, &traversal_images);
+    let stage2_baseline_index = traversal_variants.len() - 1;
+    assert_eq!(
+        traversal_variants[stage2_baseline_index].label,
+        "stage2-baseline"
+    );
+    compare_images(
+        &traversal_scenarios,
+        &traversal_variants,
+        &traversal_images,
+        stage2_baseline_index,
+        "shadow correctness",
+    );
 
+    // Section 2: the E1 AO contenders. Default-sun scenarios (A, C) carry
+    // the visual-verdict PNGs; the compare vs `ao-off` reports coverage,
+    // not correctness (the images differ by design).
+    println!();
+    println!("== section 2: E1 AO variants ==");
+    let ao_scenarios = build_scenarios(&['a', 'c']);
+    let ao_variants = build_ao_variants();
+    let (ao_table, ao_images) = measure_section(
+        &device,
+        &queue,
+        &output_texture,
+        &output_view,
+        &brickmap,
+        &ao_scenarios,
+        &ao_variants,
+    );
+    print_table(&ao_scenarios, &ao_variants, &ao_table);
+    write_variant_pngs(&ao_scenarios, &ao_variants, &ao_images);
+    assert_eq!(ao_variants[0].label, "ao-off");
+    compare_images(
+        &ao_scenarios,
+        &ao_variants,
+        &ao_images,
+        0,
+        "AO coverage (differing pixels vs ao-off — larger = more of the frame touched)",
+    );
+}
+
+/// Measure one section: every variant on every scenario, interleaved.
+/// Returns the timing table (`table[variant][scenario] = (median, p95)`) and
+/// the rendered images of the captured scenarios
+/// (`images[variant][capture_index]`).
+fn measure_section(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    output_texture: &wgpu::Texture,
+    output_view: &wgpu::TextureView,
+    brickmap: &Brickmap,
+    scenarios: &[Scenario],
+    variants: &[Variant],
+) -> (TimingTable, CapturedImages) {
     let passes: Vec<DdaPass> = variants
         .iter()
         .map(|variant| {
-            DdaPass::new_with_shader_source(
-                &device,
-                &brickmap,
-                &output_view,
-                &variant.shader_source,
-            )
+            DdaPass::new_with_shader_source(device, brickmap, output_view, &variant.shader_source)
         })
         .collect();
 
-    // Timing table: variants x scenarios, median/p95 ms.
-    let mut table: Vec<Vec<(f32, f32)>> = vec![Vec::new(); variants.len()];
-    // Rendered images of the verify scenarios, per variant, for the shadow
-    // correctness comparison: image_rows[variant][verify_index].
-    let mut image_rows: Vec<Vec<Vec<u8>>> = vec![Vec::new(); variants.len()];
+    let mut table: TimingTable = vec![Vec::new(); variants.len()];
+    let mut image_rows: CapturedImages = vec![Vec::new(); variants.len()];
 
     // Variants are INTERLEAVED round-robin within each scenario so that GPU
     // clock/thermal drift over the run hits every variant equally — timing
     // them in sequential blocks showed up to ~10% cross-run drift on
     // identical shaders, the same order as the effects being measured.
-    for scenario in &scenarios {
+    for scenario in scenarios {
         let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(BATCH_COUNT); passes.len()];
         for pass in &passes {
             for _ in 0..WARMUP_BATCHES {
-                time_one_batch(&device, &queue, pass, scenario);
+                time_one_batch(device, queue, pass, scenario);
             }
         }
         for round in 0..BATCH_COUNT {
@@ -147,8 +224,8 @@ fn main() {
             for offset in 0..passes.len() {
                 let variant_index = (round + offset) % passes.len();
                 samples[variant_index].push(time_one_batch(
-                    &device,
-                    &queue,
+                    device,
+                    queue,
                     &passes[variant_index],
                     scenario,
                 ));
@@ -164,16 +241,14 @@ fn main() {
                 p95_milliseconds
             );
             table[variant_index].push((median_milliseconds, p95_milliseconds));
-            if scenario.verify_image {
+            if scenario.capture_image {
                 // One extra dispatch so the readback sees THIS variant's frame.
-                render_once(&device, &queue, pass, scenario);
-                image_rows[variant_index].push(read_back_image(&device, &queue, &output_texture));
+                render_once(device, queue, pass, scenario);
+                image_rows[variant_index].push(read_back_image(device, queue, output_texture));
             }
         }
     }
-
-    print_table(&scenarios, &variants, &table);
-    verify_shadow_images(&scenarios, &variants, &image_rows);
+    (table, image_rows)
 }
 
 // ---- Scenarios ---------------------------------------------------------------
@@ -189,7 +264,12 @@ fn main() {
 ///   -PI/2 (facing -Z, across the island toward the center), pitch 0.
 /// - Default sun = `SunSettings::default()` (azimuth 32.5°, elevation 50.8°,
 ///   the Stage 1 constant). Low sun = same azimuth, elevation 5°.
-fn build_scenarios() -> Vec<Scenario> {
+///
+/// `capture_prefixes` selects which scenarios (by lowercase letter prefix)
+/// get per-variant renders + PNGs + the pixel compare. The AO strength baked
+/// into every lighting uniform is the shipped default — irrelevant to
+/// AO-off variants, the shipped look for AO-on ones.
+fn build_scenarios(capture_prefixes: &[char]) -> Vec<Scenario> {
     let world_x_meters = WORLD_SIZE_X as f32 * VOXEL_SIZE;
     let world_z_meters = WORLD_SIZE_Z as f32 * VOXEL_SIZE;
     let water_meters = WATER_LEVEL as f32 * VOXEL_SIZE;
@@ -215,33 +295,47 @@ fn build_scenarios() -> Vec<Scenario> {
         azimuth_degrees: default_sun.azimuth_degrees,
         elevation_degrees: 5.0,
     };
+    let ambient_occlusion_strength = AoSettings::default().strength;
 
-    vec![
+    let scenarios = vec![
         Scenario {
             label: "A top-down, default sun",
             camera_uniform: top_down_pose.gpu_uniform(DEFAULT_VERTICAL_FOV_RADIANS, resolution),
-            lighting_uniform: default_sun.lighting_uniform(),
-            verify_image: false,
+            lighting_uniform: default_sun.lighting_uniform(ambient_occlusion_strength),
+            capture_image: false,
         },
         Scenario {
             label: "B top-down, low sun 5 deg",
             camera_uniform: top_down_pose.gpu_uniform(DEFAULT_VERTICAL_FOV_RADIANS, resolution),
-            lighting_uniform: low_sun.lighting_uniform(),
-            verify_image: true,
+            lighting_uniform: low_sun.lighting_uniform(ambient_occlusion_strength),
+            capture_image: false,
         },
         Scenario {
             label: "C ground, default sun",
             camera_uniform: ground_pose.gpu_uniform(DEFAULT_VERTICAL_FOV_RADIANS, resolution),
-            lighting_uniform: default_sun.lighting_uniform(),
-            verify_image: false,
+            lighting_uniform: default_sun.lighting_uniform(ambient_occlusion_strength),
+            capture_image: false,
         },
         Scenario {
             label: "D ground, low sun 5 deg",
             camera_uniform: ground_pose.gpu_uniform(DEFAULT_VERTICAL_FOV_RADIANS, resolution),
-            lighting_uniform: low_sun.lighting_uniform(),
-            verify_image: true,
+            lighting_uniform: low_sun.lighting_uniform(ambient_occlusion_strength),
+            capture_image: false,
         },
-    ]
+    ];
+    scenarios
+        .into_iter()
+        .map(|mut scenario| {
+            let prefix = scenario
+                .label
+                .chars()
+                .next()
+                .expect("scenario label has a letter prefix")
+                .to_ascii_lowercase();
+            scenario.capture_image = capture_prefixes.contains(&prefix);
+            scenario
+        })
+        .collect()
 }
 
 // ---- Variants ----------------------------------------------------------------
@@ -260,13 +354,14 @@ fn patch_flag(shader_source: &str, flag_name: &str, value: bool) -> String {
     shader_source.replacen(&needle, &replacement, 1)
 }
 
-/// Variants around the shipped defaults (`current` = distance skip +
-/// global-max terminate only): each default-off lever flipped ON in
-/// isolation, the distance skip flipped OFF, and the all-off Stage 2
-/// baseline (which doubles as the image-compare reference — it must stay
-/// LAST).
-fn build_variants() -> Vec<Variant> {
-    let current = SHADER_SOURCE.to_string();
+/// Traversal variants around the shipped defaults (`current` = distance skip
+/// and global-max terminate only), ALL with AO forced off so the table stays
+/// comparable with the recorded pre-E1 baseline: each default-off lever
+/// flipped ON in isolation, the distance skip flipped OFF, and the all-off
+/// Stage 2 baseline (which doubles as the image-compare reference — it must
+/// stay LAST).
+fn build_traversal_variants() -> Vec<Variant> {
+    let current = patch_flag(SHADER_SOURCE, "ENABLE_AO", false);
     let with_column_fast_forward = patch_flag(&current, "ENABLE_COLUMN_FAST_FORWARD", true);
     let with_descend_fast_forward = patch_flag(&current, "ENABLE_DESCEND_FAST_FORWARD", true);
     let with_any_hit_shadow = patch_flag(&current, "ENABLE_ANY_HIT_SHADOW", true);
@@ -306,6 +401,102 @@ fn build_variants() -> Vec<Variant> {
             shader_source: stage2_baseline,
         },
     ]
+}
+
+/// E1 AO contenders, built through the app's own
+/// [`AoSettings::shader_source`] so the bench measures pipelines the app can
+/// ship. The ray-count / direction / falloff contenders vary one factor
+/// around the GRID CENTER (2 rays, 16 voxels, cosine-weighted, distance
+/// falloff); the distance ladder spans 8 / 16 / 32 at 2 rays, and
+/// `ao-2ray-d8` — the shipped default — is one of its rungs. Labels spell
+/// out ray count and distance so no column's configuration is implicit.
+/// `ao-off` must stay FIRST (it is the coverage-compare reference).
+fn build_ao_variants() -> Vec<Variant> {
+    let center = AoSettings {
+        enabled: true,
+        strength: AoSettings::default().strength,
+        ray_count: 2,
+        max_distance_voxels: 16,
+        direction_mode: AoDirectionMode::CosineHemisphere,
+        distance_falloff: true,
+    };
+    let contenders: Vec<(&'static str, AoSettings)> = vec![
+        (
+            "ao-off",
+            AoSettings {
+                enabled: false,
+                ..center
+            },
+        ),
+        (
+            "ao-1ray-d16",
+            AoSettings {
+                ray_count: 1,
+                ..center
+            },
+        ),
+        ("ao-2ray-d16", center),
+        (
+            "ao-4ray-d16",
+            AoSettings {
+                ray_count: 4,
+                ..center
+            },
+        ),
+        // The shipped default (AoSettings::default()).
+        (
+            "ao-2ray-d8",
+            AoSettings {
+                max_distance_voxels: 8,
+                ..center
+            },
+        ),
+        // The cheap-combo interaction the one-factor grid misses: fewest
+        // rays x shortest distance.
+        (
+            "ao-1ray-d8",
+            AoSettings {
+                ray_count: 1,
+                max_distance_voxels: 8,
+                ..center
+            },
+        ),
+        (
+            "ao-2ray-d32",
+            AoSettings {
+                max_distance_voxels: 32,
+                ..center
+            },
+        ),
+        (
+            "ao-uniform-d16",
+            AoSettings {
+                direction_mode: AoDirectionMode::UniformHemisphere,
+                ..center
+            },
+        ),
+        (
+            "ao-bent-d16",
+            AoSettings {
+                direction_mode: AoDirectionMode::BentUp,
+                ..center
+            },
+        ),
+        (
+            "ao-binary-d16",
+            AoSettings {
+                distance_falloff: false,
+                ..center
+            },
+        ),
+    ];
+    contenders
+        .into_iter()
+        .map(|(label, settings)| Variant {
+            label,
+            shader_source: settings.shader_source(),
+        })
+        .collect()
 }
 
 // ---- GPU plumbing ------------------------------------------------------------
@@ -484,44 +675,70 @@ fn print_table(scenarios: &[Scenario], variants: &[Variant], table: &[Vec<(f32, 
     println!();
 }
 
-/// Compare every variant's low-sun renders against the no-fast-path
-/// reference (`stage2-baseline`, the last variant) and write all PNGs to
-/// `target/bench_dda/`. The comparison is the correctness gate for the
-/// column fast-forward: rays above a column max heading toward taller
-/// terrain ahead must still occlude — long low-sun shadows must survive.
-fn verify_shadow_images(scenarios: &[Scenario], variants: &[Variant], image_rows: &[Vec<Vec<u8>>]) {
+/// Lowercase letter slugs of the captured scenarios, in capture order —
+/// index `capture_index` of every `image_rows[variant]` belongs to the
+/// matching entry.
+fn captured_scenario_slugs(scenarios: &[Scenario]) -> Vec<(String, &str)> {
+    scenarios
+        .iter()
+        .filter(|scenario| scenario.capture_image)
+        .map(|scenario| {
+            let slug = scenario
+                .label
+                .split(' ')
+                .next()
+                .expect("scenario label has a letter prefix")
+                .to_lowercase();
+            (slug, scenario.label)
+        })
+        .collect()
+}
+
+/// Write every captured render to `target/bench_dda/` as
+/// `scenario_{letter}_{variant}.png`.
+fn write_variant_pngs(scenarios: &[Scenario], variants: &[Variant], image_rows: &[Vec<Vec<u8>>]) {
     let output_directory = std::path::Path::new("target/bench_dda");
     std::fs::create_dir_all(output_directory).expect("failed to create target/bench_dda");
 
-    let verify_labels: Vec<&str> = scenarios
-        .iter()
-        .filter(|scenario| scenario.verify_image)
-        .map(|scenario| scenario.label)
-        .collect();
-    let reference_index = variants.len() - 1;
-    assert_eq!(variants[reference_index].label, "stage2-baseline");
-
-    for (verify_index, verify_label) in verify_labels.iter().enumerate() {
-        let scenario_slug = verify_label
-            .split(' ')
-            .next()
-            .expect("scenario label has a letter prefix")
-            .to_lowercase();
+    for (capture_index, (scenario_slug, _)) in captured_scenario_slugs(scenarios).iter().enumerate()
+    {
         for (variant_index, variant) in variants.iter().enumerate() {
             let path = output_directory.join(format!(
                 "scenario_{scenario_slug}_{}.png",
                 variant.label.replace('-', "_")
             ));
-            write_png(&path, &image_rows[variant_index][verify_index]);
+            write_png(&path, &image_rows[variant_index][capture_index]);
         }
+    }
+    println!("PNGs written to {}", output_directory.display());
+}
 
-        let reference_image = &image_rows[reference_index][verify_index];
-        println!("shadow correctness, {verify_label} (vs stage2-baseline):");
+/// Pixel-compare every variant's captured renders against
+/// `reference_index`'s. For the traversal section this is the
+/// shadow-correctness gate for the column fast-forward (rays above a column
+/// max heading toward taller terrain ahead must still occlude — long
+/// low-sun shadows must survive); for the AO section it reports how much of
+/// the frame the variant touches (the images differ by design).
+fn compare_images(
+    scenarios: &[Scenario],
+    variants: &[Variant],
+    image_rows: &[Vec<Vec<u8>>],
+    reference_index: usize,
+    heading: &str,
+) {
+    for (capture_index, (_, scenario_label)) in
+        captured_scenario_slugs(scenarios).iter().enumerate()
+    {
+        let reference_image = &image_rows[reference_index][capture_index];
+        println!(
+            "{heading}, {scenario_label} (vs {}):",
+            variants[reference_index].label
+        );
         for (variant_index, variant) in variants.iter().enumerate() {
             if variant_index == reference_index {
                 continue;
             }
-            let image = &image_rows[variant_index][verify_index];
+            let image = &image_rows[variant_index][capture_index];
             let mut differing_pixels = 0_u64;
             let mut max_channel_delta = 0_u8;
             for (pixel_bytes, reference_bytes) in
@@ -544,7 +761,6 @@ fn verify_shadow_images(scenarios: &[Scenario], variants: &[Variant], image_rows
             );
         }
     }
-    println!("PNGs written to {}", output_directory.display());
 }
 
 fn write_png(path: &std::path::Path, rgba_bytes: &[u8]) {

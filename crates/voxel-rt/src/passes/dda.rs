@@ -61,7 +61,8 @@ impl DdaPass {
         output_view: &wgpu::TextureView,
         shader_source: &str,
     ) -> Self {
-        let (pipeline, bind_group_layout) = create_pipeline(device, shader_source);
+        let bind_group_layout = create_bind_group_layout(device);
+        let pipeline = create_pipeline(device, shader_source, &bind_group_layout);
 
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dda camera uniform"),
@@ -151,6 +152,14 @@ impl DdaPass {
         }
     }
 
+    /// Swap in a new compute pipeline built from `shader_source` (the E1
+    /// overlay path: AO compile-time levers changed). Buffers, bind group
+    /// layout and bind group are untouched — only the shader differs, so the
+    /// existing bind group stays valid against the new pipeline.
+    pub fn rebuild_pipeline(&mut self, device: &wgpu::Device, shader_source: &str) {
+        self.pipeline = create_pipeline(device, shader_source, &self.bind_group_layout);
+    }
+
     /// Refresh the output-texture binding after the storage texture is recreated.
     pub fn rebind(&mut self, device: &wgpu::Device, output_view: &wgpu::TextureView) {
         self.bind_group = create_bind_group(
@@ -206,18 +215,10 @@ impl DdaPass {
     }
 }
 
-/// Shader module + bind group layout + compute pipeline, separated from
-/// buffer upload so the headless pipeline test can validate the shader and
-/// layout without building a world.
-fn create_pipeline(
-    device: &wgpu::Device,
-    shader_source: &str,
-) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("dda shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-    });
-
+/// Bind group layout only, separated from the pipeline so a shader-source
+/// rebuild ([`DdaPass::rebuild_pipeline`]) can reuse the ORIGINAL layout
+/// object — the existing bind group must stay valid against the new pipeline.
+fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -239,7 +240,7 @@ fn create_pipeline(
         count: None,
     };
 
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("dda bind group layout"),
         entries: &[
             uniform_entry(0), // camera
@@ -263,24 +264,36 @@ fn create_pipeline(
             storage_entry(9),  // 1-bit-per-brick occupancy grid
             storage_entry(10), // chebyshev skip-distance bytes
         ],
+    })
+}
+
+/// Shader module + compute pipeline against an existing layout, separated
+/// from buffer upload so the headless pipeline test can validate the shader
+/// and layout without building a world.
+fn create_pipeline(
+    device: &wgpu::Device,
+    shader_source: &str,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::ComputePipeline {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("dda shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("dda pipeline layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
+        bind_group_layouts: &[Some(bind_group_layout)],
         immediate_size: 0,
     });
 
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("dda pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader_module,
         entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
-    });
-
-    (pipeline, bind_group_layout)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,7 +392,8 @@ mod tests {
             .expect("adapter exists but device creation failed");
 
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let (_pipeline, _bind_group_layout) = create_pipeline(&device, SHADER_SOURCE);
+        let bind_group_layout = create_bind_group_layout(&device);
+        let _pipeline = create_pipeline(&device, SHADER_SOURCE, &bind_group_layout);
         let validation_error = pollster::block_on(error_scope.pop());
         assert!(
             validation_error.is_none(),

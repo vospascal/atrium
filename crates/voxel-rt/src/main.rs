@@ -15,6 +15,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use voxel_rt::ao::AoSettings;
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, FlyCamera};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
@@ -79,6 +80,12 @@ struct AppState {
     frame_timers: Option<GpuFrameTimers>,
     fly_camera: FlyCamera,
     sun_settings: SunSettings,
+    /// Overlay-mutated AO levers (E1).
+    ao_settings: AoSettings,
+    /// The AO configuration the current DDA pipeline was compiled with; when
+    /// a compile-time field drifts from `ao_settings`, the pipeline is
+    /// rebuilt after the overlay pass.
+    applied_ao_settings: AoSettings,
     input_state: InputState,
     cursor_grabbed: bool,
     vsync_enabled: bool,
@@ -142,6 +149,8 @@ impl AppState {
             frame_timers,
             fly_camera: FlyCamera::default(),
             sun_settings: SunSettings::default(),
+            ao_settings: AoSettings::default(),
+            applied_ao_settings: AoSettings::default(),
             input_state: InputState::default(),
             cursor_grabbed: false,
             vsync_enabled: true,
@@ -243,9 +252,11 @@ impl AppState {
         let camera_input = self.input_state.drain_camera_input();
         self.fly_camera.update(&camera_input, frame_time_seconds);
         let camera_uniform = self.fly_camera.gpu_uniform(self.renderer.resolution());
-        // Sun sliders were mutated during LAST frame's overlay pass; a change
-        // shows up one frame later, which is imperceptible.
-        let lighting_uniform = self.sun_settings.lighting_uniform();
+        // Sun/AO sliders were mutated during LAST frame's overlay pass; a
+        // change shows up one frame later, which is imperceptible.
+        let lighting_uniform = self
+            .sun_settings
+            .lighting_uniform(self.ao_settings.strength);
 
         let surface_frame = match self.gpu_context.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_frame)
@@ -301,6 +312,7 @@ impl AppState {
             &mut self.vsync_enabled,
             &mut self.render_scale,
             &mut self.sun_settings,
+            &mut self.ao_settings,
         );
         let readback_slot = self
             .frame_timers
@@ -323,6 +335,14 @@ impl AppState {
                 .set_render_scale(&self.gpu_context.device, self.render_scale);
             // set_render_scale clamps — keep the slider value in sync.
             self.render_scale = self.renderer.render_scale();
+        }
+        if self
+            .ao_settings
+            .requires_pipeline_rebuild(&self.applied_ao_settings)
+        {
+            self.renderer
+                .rebuild_dda_pipeline(&self.gpu_context.device, &self.ao_settings.shader_source());
+            self.applied_ao_settings = self.ao_settings;
         }
     }
 }

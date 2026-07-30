@@ -10,6 +10,10 @@ Stack: `winit` + `wgpu` (Metal on macOS dev, Vulkan on Quest 3 later) + `egui`.
 World data from `voxel-core` today (CPU island); GPU-side generation is an early
 experiment (E3), not an afterthought.
 
+Reference docs: `xima-engine-dossier.md` (what xima's engine does, evidence-tiered)
+· `voxel-rt-technique-bank.md` (Shadertoy/IQ cheap-beauty techniques, tagged by
+experiment slot) · `voxel-rt-bench.md` (harness protocol, baselines, verdicts).
+
 **Targets (the three axes every gate scores): FAST (desktop: full stack ≤ ~8 ms
 @ 2560×1440; Quest tier reachable via levers), LOW-MEMORY (world + light budgets
 tracked per experiment; billions-of-logical-voxels thinking, never
@@ -82,12 +86,49 @@ measured as losses → off-levers. Permanent bench harness + GPU pass timers.
 
 ## Experiment ladder (one at a time; every E = lever + bench scenario + gate)
 
-### E1 — Ray-traced ambient occlusion ⬜
-Short occlusion rays from primary hits (reuse `trace`, tight max distance;
-A/B: ray count 1/2/4, distance, cosine vs uniform hemisphere, half-res +
-upsample vs full-res). Purpose: immediate look win + measures the
-secondary-ray budget that sizes CAGI. **Gate:** crevices/overhangs ground the
-scene; ms cost per variant table.
+### E1 — Ray-traced ambient occlusion ✅ (gate passed 2026-07-30)
+Short occlusion rays from primary hits (reuse `trace` with a `max_distance`
+argument — no forked DDA). Implemented: `ENABLE_AO` + 4 variant levers in
+`dda.wgsl`, `src/ao.rs` (Rust mirror + shader-const patching), overlay "AO"
+section, 10-variant bench section. **Verdict (bench doc, E1 section):
+2 rays / 8 voxels / cosine-weighted / distance falloff, strength 0.8** —
++5.8 to +8.1 ms at 2560x1440 (11.9–14.8 ms total DDA pass), so the default
+may need re-tiering against the ~8 ms target. Half-res AO rejected (not
+separable without a G-buffer + bilateral pass); bent-up kept as a cheap
+off-lever for Quest. **Secondary-ray budget for E4: ≈3.4–4.3 ms per marginal
+full-res short ray** → per-pixel GI gathering is unaffordable, which is the
+quantitative case for the CA light volume; composition contract is
+`indirect = CAGI_sample * AO`. **Gate (Pascal, in-app):** crevices/overhangs
+ground the scene without shimmer or over-darkening.
+
+### E1b — Cheap occlusion + soft shadows shootout ⬜
+Triggered by E1's verdict: ray-traced AO costs +5.8–8.1 ms (11.9–14.8 ms total),
+over the ~8 ms target, so the *technique* — not just the ray count — needs
+options. Contenders (technique bank T1/T7/T8), all as levers with bench numbers
+and PNG comparisons against E1's `ao-2ray-d8` reference:
+(A) **Analytic AO** from the 3×3×3 occupancy neighbourhood already resident in
+the brick — no rays; expected orders of magnitude cheaper, contact-only.
+(B) ~~SSAO~~ **deferred to backlog B12** (approved 2026-07-30): building a
+G-buffer + bilateral pass now would solve occlusion that CAGI may largely solve
+at E4 — revisit once CAGI's contribution is measured. See the dossier's AO
+inference note.
+(C) **RT-AO** (E1's winner) as the top-tier lever.
+(D) **Soft shadows from the chebyshev distance field** — IQ's single-ray
+penumbra trick (`min(distance/t)`, smoothstepped) reusing the distance data
+traversal already fetches; A/B against hard shadows for look and ms.
+**Gate:** pick per-tier winners; full stack back under ~8 ms at render scale 1.0
+with the mid tier; grounding still reads.
+
+### E1c — Quality presets & settings panel ⬜ (Pascal's request, 2026-07-30)
+Formalize every lever into a `RenderQuality` struct with named presets —
+**Potato / Quest / Balanced / Beautiful** — plus a custom mode exposing
+individual knobs, mirroring the P-overlay pattern from voxel-sandbox. Presets
+differ by *technique*, not only by counts: e.g. Potato = analytic AO + hard
+shadows + fake bounce light (technique bank T4) + render scale 0.7; Beautiful =
+RT-AO + soft shadows + CAGI + full scale. This is also the **Quest tier
+mechanism** for E9 and makes every future experiment a preset field the bench
+can sweep. **Gate:** switching presets in-app visibly changes look and frame
+time; each preset's harness numbers recorded.
 
 ### E2 — World authority, threading & edit pipeline (ARCHITECTURE) ⬜
 The hard-to-reverse one, done early on purpose. Variants to build + measure:
@@ -175,6 +216,9 @@ the tier knobs. **Gate:** runs on Quest 3.
 - **B10 Procedural vegetation growth** (vines/berries as growth rules;
   VoxelChain rule-table style; needs E3).
 - **B11 Gameplay layer** (inventory/items — out of engine scope for now).
+- **B12 SSAO + G-buffer** (deferred out of E1b 2026-07-30): depth+normal
+  G-buffer, bilateral upsample — unlocks half-res effects generally. Revisit
+  after E4 once CAGI's own occlusion contribution is measured.
 
 ## Non-goals (still)
 Monte Carlo path tracing, meshes of any kind, Bevy interop in voxel-rt,

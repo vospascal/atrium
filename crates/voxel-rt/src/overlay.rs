@@ -1,16 +1,18 @@
 //! egui overlay: stats panel (window/render sizes, moving-average frame time,
 //! FPS, per-pass GPU times), the perf levers (vsync checkbox, render-scale
-//! slider), and a collapsible sun-position section, drawn on top of the
-//! rendered frame in its own render pass (LoadOp::Load). The overlay only
-//! mutates the state it is handed (`vsync_enabled`, `render_scale`,
-//! [`SunSettings`]) — reconfiguring the surface, resizing the storage
-//! texture, and writing the lighting uniform stay in the platform layer.
+//! slider), a collapsible sun-position section, and the E1 AO section, drawn
+//! on top of the rendered frame in its own render pass (LoadOp::Load). The
+//! overlay only mutates the state it is handed (`vsync_enabled`,
+//! `render_scale`, [`SunSettings`], [`AoSettings`]) — reconfiguring the
+//! surface, resizing the storage texture, writing the lighting uniform, and
+//! rebuilding the pipeline on AO lever changes stay in the platform layer.
 
 use std::collections::VecDeque;
 
 use winit::event::WindowEvent;
 use winit::window::Window;
 
+use crate::ao::{AoDirectionMode, AoSettings};
 use crate::frame_timing::FrameTimings;
 use crate::lighting::SunSettings;
 use crate::render::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
@@ -89,6 +91,7 @@ impl Overlay {
         vsync_enabled: &mut bool,
         render_scale: &mut f32,
         sun_settings: &mut SunSettings,
+        ao_settings: &mut AoSettings,
     ) {
         let average_frame_time_seconds = if self.frame_time_samples.is_empty() {
             0.0
@@ -158,6 +161,55 @@ impl Overlay {
                                 egui::Slider::new(&mut sun_settings.elevation_degrees, 2.0..=90.0)
                                     .text("elevation"),
                             );
+                        });
+                        // E1 AO levers. Everything except strength is a
+                        // compile-time shader const — the platform layer
+                        // rebuilds the DDA pipeline when one changes.
+                        ui.collapsing("AO", |ui| {
+                            ui.checkbox(&mut ao_settings.enabled, "enabled");
+                            ui.add(
+                                egui::Slider::new(&mut ao_settings.strength, 0.0..=1.0)
+                                    .text("strength"),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("rays");
+                                for ray_count in [1_u32, 2, 4] {
+                                    ui.radio_value(
+                                        &mut ao_settings.ray_count,
+                                        ray_count,
+                                        ray_count.to_string(),
+                                    );
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("distance");
+                                for max_distance_voxels in [8_u32, 16, 32] {
+                                    ui.radio_value(
+                                        &mut ao_settings.max_distance_voxels,
+                                        max_distance_voxels,
+                                        max_distance_voxels.to_string(),
+                                    );
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("directions");
+                                ui.radio_value(
+                                    &mut ao_settings.direction_mode,
+                                    AoDirectionMode::CosineHemisphere,
+                                    "cosine",
+                                );
+                                ui.radio_value(
+                                    &mut ao_settings.direction_mode,
+                                    AoDirectionMode::UniformHemisphere,
+                                    "uniform",
+                                );
+                                ui.radio_value(
+                                    &mut ao_settings.direction_mode,
+                                    AoDirectionMode::BentUp,
+                                    "bent-up",
+                                );
+                            });
+                            ui.checkbox(&mut ao_settings.distance_falloff, "distance falloff");
                         });
                     });
                 });

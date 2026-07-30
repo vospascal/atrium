@@ -101,6 +101,30 @@ grid-direction anisotropy, over-diffusion / "glowing walls", light leaks around
 thin geometry, weak long-distance transport, loss of high-frequency directional
 information. The hybrid mitigates: CA for diffuse only, rays for directional.
 
+## AO — named, never explained (our inference, 2026-07-30)
+
+"Ray-traced ambient occlusion" is listed as a feature; **no** ray count,
+distance, direction distribution, resolution or temporal strategy is disclosed,
+and his hardware/resolution are unknown, so no ms comparison is possible.
+
+Two inferences that matter for voxel-rt:
+
+1. **His AO sits on top of CAGI, not in place of it.** A flood-fill light volume
+   already darkens crevices (light does not propagate into corners), so his AO
+   rays are plausibly cheap fine-detail garnish over GI that already does the
+   heavy occlusion. Our E1 measured AO as the *only* occlusion mechanism (no GI
+   yet) — so its +5.8–8.1 ms partly reflects it doing CAGI's job. Consequence:
+   after E4, AO's remaining role is small-scale contact detail → favours the
+   cheap analytic variant (technique bank T7) over rays, and argues for keeping
+   E1b's SSAO contender on hold until CAGI's contribution is known.
+2. **Sky-occlusion field hypothesis.** His vegetation wind is driven by sky
+   occlusion, so a sky-visibility field exists for non-shading reasons. If it is
+   per-voxel/per-cell, the same field could also attenuate ambient sky light —
+   one field, two consumers, zero per-pixel rays. Our benched "bent-up" AO
+   variant is exactly this proxy (cheap, clean, misses lateral contact — correct
+   behaviour for sky visibility rather than a defect). Ties directly to backlog
+   B2 (wind by sky occlusion), where the same field would drive audio wind too.
+
 ## Entity GPU voxel splatting (future reference)
 
 Blockbench models = bone hierarchies of boxes → animated OBBs. Probable
