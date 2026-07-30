@@ -36,7 +36,7 @@
 //! the baselines and reference rows a section is judged against — are spelled
 //! out here.
 //!
-//! Four sections, each its own variant table (isolation rule):
+//! Seven sections, each its own variant table (isolation rule):
 //!
 //! 1. **Traversal levers, AO off** — the Stage 2 regression gate. Every column
 //!    has `AO_MODE = AO_MODE_OFF` so the medians stay comparable with the
@@ -59,22 +59,51 @@
 //!    headline table future gates quote. It also reports the startup cost of
 //!    the preset pipeline cache.
 //!
+//! 5. **E4 CAGI light volume** — propagation rule / resolution / sky test /
+//!    sampling contenders, the memory table, the convergence tables and the CPU
+//!    cross-check of the transport rule.
+//!
+//! 6. **E2 world authority + edit pipeline** — a *pipeline*, not a shader, so it
+//!    reports median / p99 / max per frame across four edit-storm patterns, plus
+//!    build, snapshot and GPU-readback costs and the audio-ray seam.
+//!
+//! 7. **E2b character movement + collision** — also a CPU pipeline and also a
+//!    distribution: per-step cost of the walking body across the cost axes the
+//!    sweep has (open-air cross-section scans, auto-step frequency, substep
+//!    count from the frame delta), plus the ground search that entering walk
+//!    mode runs. GPU-free, so `-- 7` finishes in seconds.
+//!
 //! All PNGs land in `target/bench_dda/`.
 
 use std::time::Instant;
 
 use voxel_rt::ao::{AoMode, AoSettings};
-use voxel_rt::brickmap::Brickmap;
-use voxel_rt::camera::{CameraPose, CameraUniform, DEFAULT_VERTICAL_FOV_RADIANS};
+use voxel_rt::brickmap::{
+    Brickmap, ClearanceUpdate, BRICK_SIZE, MATERIAL_WORDS_PER_BRICK, OCCUPANCY_WORDS_PER_BRICK,
+};
+use voxel_rt::cagi::{
+    cell_sees_sky_by_column, propagate_reference, unpack_light, CagiRule, CagiSettings, CELL_SOLID,
+    SUN_SOURCE_FLAG,
+};
+use voxel_rt::camera::{CameraInput, CameraPose, CameraUniform, DEFAULT_VERTICAL_FOV_RADIANS};
+use voxel_rt::character::{self, CharacterController, CharacterSettings};
+use voxel_rt::debug_pool::{
+    WaterPool, POOL_DEPTH_METERS, POOL_SHORE_WIDTH_METERS, POOL_WATER_RADIUS_METERS,
+};
 use voxel_rt::lighting::{LightingUniform, SunSettings};
+use voxel_rt::passes::cagi::{CagiPass, LightVolume};
 use voxel_rt::passes::dda::{build_shader_source, DdaPass, SHADER_SOURCE};
+use voxel_rt::passes::world_bindings::WorldBindings;
 use voxel_rt::variants::{
     bench_points_of, BenchSection, LeverId, LeverValue, QualityPreset, RenderQuality,
     QUALITY_PRESETS,
 };
+use voxel_rt::voxel_dda;
+use voxel_rt::world_edit::{BulkEditRequest, VoxelEdit, WorldEditSettings};
+use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
 use glam::Vec3;
-use voxel_core::world::{VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
 
 /// Output resolution at render scale 1.0: the dev machine's physical Retina
 /// size (2560x1440, reported as 1280x720 logical). All historical numbers were
@@ -114,10 +143,11 @@ impl Scenario {
     }
 
     /// This scenario's sun with `quality`'s RUNTIME knobs (AO strength,
-    /// penumbra scale, fade ramp) — the levers that need no pipeline rebuild
-    /// are swept exactly the way the app applies them.
+    /// penumbra scale, fade ramp, the E4 GI knobs) — the levers that need no
+    /// pipeline rebuild are swept exactly the way the app applies them.
     fn lighting_uniform(&self, quality: &RenderQuality) -> LightingUniform {
-        self.sun.lighting_uniform(quality.shading_params())
+        self.sun
+            .lighting_uniform(quality.shading_params(), quality.gi_params())
     }
 }
 
@@ -128,13 +158,17 @@ struct Variant {
     label: String,
     quality: RenderQuality,
     shader_source: String,
+    /// The CA pass's own source (E4) — patched from the same quality, so a
+    /// traversal lever moves in both pipelines at once.
+    cagi_shader_source: String,
 }
 
 impl Variant {
-    /// The normal case: the shader source IS what this quality compiles to.
+    /// The normal case: the shader sources ARE what this quality compiles to.
     fn new(label: String, quality: RenderQuality) -> Variant {
         Variant {
             shader_source: build_shader_source(&quality),
+            cagi_shader_source: voxel_rt::passes::cagi::build_shader_source(&quality),
             label,
             quality,
         }
@@ -157,6 +191,11 @@ struct Section {
     /// Label of the variant every other row is pixel-compared against.
     reference_label: &'static str,
     compare_heading: &'static str,
+    /// Zoomed crops written per captured scenario and variant: the
+    /// compromise-checklist evidence (E4). `(name, x, y, width, height)` in
+    /// render-target pixels, written at CROP_ZOOM. Empty for sections that judge
+    /// numbers rather than artifacts.
+    crop_regions: &'static [(&'static str, u32, u32, u32, u32)],
 }
 
 impl Section {
@@ -203,26 +242,101 @@ fn main() {
     );
 
     let (device, queue) = create_headless_device();
+    // The brickmap/lighting buffers are uploaded ONCE and shared by every
+    // variant's shading and CAGI passes (E4's WorldBindings seam) — a section
+    // with a dozen variants would otherwise upload ~30 MB a dozen times.
+    let world_bindings = WorldBindings::new(&device, &brickmap);
 
     if runs_section(1) {
-        run_section(&device, &queue, &brickmap, traversal_section());
+        run_section(
+            &device,
+            &queue,
+            &world_bindings,
+            &brickmap,
+            traversal_section(),
+        );
     }
     if runs_section(2) {
-        run_section(&device, &queue, &brickmap, ray_traced_ao_section());
+        run_section(
+            &device,
+            &queue,
+            &world_bindings,
+            &brickmap,
+            ray_traced_ao_section(),
+        );
     }
     if runs_section(3) {
-        run_section(&device, &queue, &brickmap, cheap_occlusion_section());
+        run_section(
+            &device,
+            &queue,
+            &world_bindings,
+            &brickmap,
+            cheap_occlusion_section(),
+        );
     }
     if runs_section(4) {
-        report_preset_pipeline_cache(&device, &brickmap);
-        run_section(&device, &queue, &brickmap, preset_section());
+        report_preset_pipeline_cache(&device, &world_bindings, &brickmap);
+        run_section(
+            &device,
+            &queue,
+            &world_bindings,
+            &brickmap,
+            preset_section(),
+        );
+    }
+    if runs_section(5) {
+        report_light_volume_memory(&brickmap);
+        run_section(&device, &queue, &world_bindings, &brickmap, cagi_section());
+        report_cagi_convergence(&device, &queue, &world_bindings, &brickmap);
+        report_cagi_cpu_cross_check(&device, &queue, &world_bindings, &brickmap);
+    }
+    if runs_section(6) {
+        // E2 — the ARCHITECTURE section. It measures a pipeline, not a shader, so
+        // it prints distributions (median / p99 / max) instead of medians: the
+        // whole question is whether an edit can hitch a frame.
+        report_edit_memory(&device, &brickmap);
+        report_edit_build_times(&world, &brickmap);
+        report_edit_storm(&device, &queue, &brickmap, &edit_storm_runs());
+        report_edit_reflood(&device, &queue, &brickmap);
+        report_pool_carve(&device, &queue, &brickmap);
+        report_occupancy_readback(&device, &queue, &brickmap);
+        report_audio_ray_cost(&brickmap);
+    }
+    if runs_section(7) {
+        // E2b — the walking body. Also a pipeline rather than a shader, and also
+        // reported as a distribution: what matters is the WORST movement step a
+        // frame can be handed, not the average one. GPU-free, so it runs in
+        // seconds.
+        report_character_movement_cost(&brickmap);
     }
 }
 
-fn run_section(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap, section: Section) {
+/// Section 6's variants: the shipped edit pipeline plus every registry bench point
+/// of [`BenchSection::EditStorm`] — the same derivation the shader sections use, so
+/// adding an E2 lever adds a storm variant forever after.
+fn edit_storm_runs() -> Vec<(String, RenderQuality)> {
+    let shipped = RenderQuality::default();
+    let mut runs = vec![("edit-shipped".to_string(), shipped)];
+    runs.extend(bench_points_of(BenchSection::EditStorm).map(|point| {
+        let mut quality = shipped;
+        for (lever_id, value) in point.overrides {
+            lever_id.apply(&mut quality, *value);
+        }
+        (point.label.to_string(), quality)
+    }));
+    runs
+}
+
+fn run_section(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
+    brickmap: &Brickmap,
+    section: Section,
+) {
     println!();
     println!("== {} ==", section.heading);
-    let table = measure_section(device, queue, brickmap, &section);
+    let table = measure_section(device, queue, world_bindings, brickmap, &section);
     print_table(&section, &table);
 }
 
@@ -234,7 +348,7 @@ fn run_section(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap, 
 /// shipped shader with AO off) and `stage2-baseline` (every traversal aid off),
 /// which doubles as the pixel-compare reference.
 fn traversal_section() -> Section {
-    let baseline = ao_off(RenderQuality::default());
+    let baseline = gi_off(ao_off(RenderQuality::default()));
     let mut variants = vec![Variant::new("current".to_string(), baseline)];
     variants.extend(registry_variants(BenchSection::Traversal, &baseline));
 
@@ -249,6 +363,7 @@ fn traversal_section() -> Section {
         variants,
         reference_label: "stage2-baseline",
         compare_heading: "shadow correctness",
+        crop_regions: &[],
     }
 }
 
@@ -258,14 +373,14 @@ fn traversal_section() -> Section {
 /// cheap-combo interaction the one-factor grid misses (fewest rays x shortest
 /// distance).
 fn ray_traced_ao_section() -> Section {
-    let center = RenderQuality {
+    let center = gi_off(RenderQuality {
         ambient_occlusion: AoSettings {
             mode: AoMode::RayTraced,
             max_distance_voxels: 16,
             ..AoSettings::default()
         },
         ..RenderQuality::default()
-    };
+    });
     let mut variants = registry_variants(BenchSection::RayTracedAo, &center);
     variants.push(Variant::new("ao-2ray-d16".to_string(), center));
 
@@ -281,6 +396,7 @@ fn ray_traced_ao_section() -> Section {
         reference_label: "ao-off",
         compare_heading: "AO coverage (differing pixels vs ao-off — larger = more of the \
                           frame touched)",
+        crop_regions: &[],
     }
 }
 
@@ -289,13 +405,13 @@ fn ray_traced_ao_section() -> Section {
 /// row every cheap contender is judged against. Anchors: that baseline, and
 /// E1c's const-vs-uniform A/B for the fade distances.
 fn cheap_occlusion_section() -> Section {
-    let e1_default = RenderQuality {
+    let e1_default = gi_off(RenderQuality {
         ambient_occlusion: AoSettings {
             mode: AoMode::RayTraced,
             ..AoSettings::default()
         },
         ..RenderQuality::default()
-    };
+    });
     let mut variants = registry_variants(BenchSection::CheapOcclusion, &e1_default);
     variants.push(Variant::new("ao-2ray-d8".to_string(), e1_default));
     variants.push(fade_range_as_shader_consts_variant(&e1_default));
@@ -307,6 +423,7 @@ fn cheap_occlusion_section() -> Section {
         reference_label: "ao-off",
         compare_heading: "E1b coverage (differing pixels vs ao-off/hard — AO rows = darkening \
                           reach, soft-shadow rows = penumbra reach)",
+        crop_regions: &[],
     }
 }
 
@@ -336,12 +453,42 @@ fn preset_section() -> Section {
         reference_label: "Balanced @2560x1440",
         compare_heading: "preset coverage (differing pixels vs Balanced; skipped for tiers \
                           that render at another resolution)",
+        crop_regions: &[],
+    }
+}
+
+/// Section 5: E4's CAGI contenders. Baseline = the shipped configuration (0.5 m
+/// cells, 6-neighbour diffusion, trilinear sampling, column-max sky test, pinned
+/// sun sources, 2 iterations per frame); the registry's columns vary one lever
+/// around it. The `gi-off` row is the anchor every cost is measured against, and
+/// the pixel compare against it is the frame coverage of the whole experiment.
+fn cagi_section() -> Section {
+    let shipped = RenderQuality::default();
+    let mut variants = vec![Variant::new("gi-shipped".to_string(), shipped)];
+    variants.extend(registry_variants(BenchSection::Cagi, &shipped));
+
+    Section {
+        heading: "section 5: E4 CAGI light volume",
+        scenarios: build_scenarios(&['a', 'b', 'c', 'd']),
+        variants,
+        reference_label: "gi-off",
+        compare_heading: "CAGI coverage (differing pixels vs gi-off — how much of the frame the \
+                          light volume changes)",
+        crop_regions: CAGI_CROP_REGIONS,
     }
 }
 
 /// AO forced off — spelled once, used by section 1.
 fn ao_off(mut quality: RenderQuality) -> RenderQuality {
     quality.ambient_occlusion.mode = AoMode::Off;
+    quality
+}
+
+/// CAGI forced off — sections 1-3 measure the layers BELOW E4 (isolation rule),
+/// so their numbers must stay directly comparable with the recorded pre-E4
+/// baselines instead of carrying a light-volume sample.
+fn gi_off(mut quality: RenderQuality) -> RenderQuality {
+    quality.global_illumination.enabled = false;
     quality
 }
 
@@ -382,6 +529,7 @@ fn fade_range_as_shader_consts_variant(baseline: &RenderQuality) -> Variant {
     );
     Variant {
         label: "ao-2ray-fade15-30-const".to_string(),
+        cagi_shader_source: voxel_rt::passes::cagi::build_shader_source(&quality),
         quality,
         shader_source: shader_source.replacen(uniform_read, folded_literals, 1),
     }
@@ -390,9 +538,14 @@ fn fade_range_as_shader_consts_variant(baseline: &RenderQuality) -> Variant {
 /// Startup cost of the preset pipeline cache: what the app pays in
 /// `AppState::new` so that switching preset in-app is a hash lookup instead of
 /// a shader compile.
-fn report_preset_pipeline_cache(device: &wgpu::Device, brickmap: &Brickmap) {
+fn report_preset_pipeline_cache(
+    device: &wgpu::Device,
+    world_bindings: &WorldBindings,
+    brickmap: &Brickmap,
+) {
     let target = create_render_target(device, OUTPUT_WIDTH, OUTPUT_HEIGHT);
-    let mut pass = DdaPass::new(device, brickmap, &target.view);
+    let light_volume = LightVolume::new(device, brickmap, &CagiSettings::default());
+    let mut pass = DdaPass::new(device, world_bindings, &light_volume, &target.view);
     println!();
     println!("== preset pipeline cache ==");
     let mut shader_sources = Vec::new();
@@ -420,6 +573,1642 @@ fn report_preset_pipeline_cache(device: &wgpu::Device, brickmap: &Brickmap) {
         shader_sources.len(),
         SHADER_SOURCE.len() / 1024
     );
+}
+
+// ---- E4 reports ---------------------------------------------------------------
+
+/// CA iterations run before any E4 measurement or capture — well past the point
+/// where the image stops changing (the convergence table below shows where that
+/// is), so every number describes a CONVERGED volume, i.e. the app's steady state.
+const CONVERGENCE_ITERATIONS: u32 = 160;
+
+/// The LOW-MEMORY table: what each resolution rung costs in VRAM. Printed before
+/// section 5's timings because the memory verdict is half of the resolution
+/// decision.
+fn report_light_volume_memory(brickmap: &Brickmap) {
+    println!();
+    println!("== E4 light volume memory (world 1000x256x1000 voxels) ==");
+    println!(
+        "{:<12} {:>18} {:>12} {:>14} {:>14} {:>12} {:>14}",
+        "cell voxels", "grid", "cells", "one buffer", "ping-pong", "total", "CPU attr build"
+    );
+    for cell_voxels in [2, 4, 8] {
+        let grid = voxel_rt::cagi::CagiGrid::for_world(
+            cell_voxels,
+            brickmap.metadata().max_occupied_brick_y,
+        );
+        // The static attribute buffer is rebuilt whenever the resolution lever
+        // moves, so its CPU cost is a real (one-off) hitch the app pays.
+        let build_start = Instant::now();
+        let attributes = voxel_rt::cagi::build_cell_attributes(brickmap, &grid);
+        let build_time = build_start.elapsed();
+        let absorbing_cells = attributes
+            .iter()
+            .filter(|word| *word & voxel_rt::cagi::CELL_SOLID != 0)
+            .count();
+        println!(
+            "{:<12} {:>18} {:>12} {:>11.1} MB {:>11.1} MB {:>9.1} MB {:>14.2?}   \
+             ({:.1}% absorbing)",
+            format!("{cell_voxels} ({:.2} m)", grid.cell_meters()),
+            format!("{}x{}x{}", grid.size[0], grid.size[1], grid.size[2]),
+            grid.cell_count(),
+            grid.volume_bytes() as f32 / 1e6,
+            grid.volume_bytes() as f32 * 2.0 / 1e6,
+            grid.total_bytes() as f32 / 1e6,
+            build_time,
+            absorbing_cells as f32 / grid.cell_count() as f32 * 100.0,
+        );
+    }
+    println!(
+        "  (total = 2 ping-pong buffers + the static attribute buffer; the vertical \
+         extent is clamped to the world's occupied height + 2 cells, which is the \
+         difference between {} and {} cells of height at 4 voxels)",
+        voxel_rt::cagi::CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y).size[1],
+        (voxel_rt::cagi::WORLD_SIZE_VOXELS[1]) / 4,
+    );
+}
+
+/// The CONVERGENCE table: how many iterations (and therefore frames) the flood
+/// needs before the image stops changing, cold and after a sun change. This is
+/// the number E4's gate ("sun-drag re-floods in ~1 s") is judged on.
+fn report_cagi_convergence(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
+    brickmap: &Brickmap,
+) {
+    let quality = RenderQuality::default();
+    let variant = Variant::new("gi-shipped".to_string(), quality);
+    let scenarios = build_scenarios(&[]);
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    let mut resources =
+        VariantResources::new(device, world_bindings, brickmap, &variant, &target.view);
+    let iteration_rungs = [0_u32, 1, 2, 4, 8, 16, 32, 64, 128];
+
+    for (label, scenario_index, previous_sun) in [
+        ("cold start (nothing flooded)", 2_usize, None),
+        ("sun change (default -> 5 deg)", 3_usize, Some(2_usize)),
+    ] {
+        let scenario = &scenarios[scenario_index];
+        // The converged image this scenario's flood is heading toward.
+        resources.flood_to_convergence(device, queue, world_bindings, &variant, scenario);
+        render_once(
+            device,
+            queue,
+            world_bindings,
+            &resources,
+            &variant,
+            scenario,
+        );
+        let converged_image = read_back_image(device, queue, &target);
+
+        // Cold start floods from an empty volume; the sun-change case starts from
+        // a volume converged for the PREVIOUS sun, which is what dragging the
+        // slider actually does.
+        resources.light_volume.mark_dirty();
+        if let Some(previous_index) = previous_sun {
+            resources.flood_to_convergence(
+                device,
+                queue,
+                world_bindings,
+                &variant,
+                &scenarios[previous_index],
+            );
+            resources.light_volume.mark_dirty();
+        }
+
+        println!();
+        println!("== E4 convergence: {label}, scenario {} ==", scenario.label);
+        println!(
+            "{:>10} {:>8} {:>18} {:>10} {:>22}",
+            "iterations", "frames", "differing pixels", "%", "max channel delta"
+        );
+        let mut iterations_done = 0_u32;
+        for rung in iteration_rungs {
+            let delta = rung - iterations_done;
+            if delta > 0 {
+                resources.run_iterations(
+                    device,
+                    queue,
+                    world_bindings,
+                    &scenario.lighting_uniform(&variant.quality),
+                    delta,
+                );
+                iterations_done = rung;
+            }
+            render_once(
+                device,
+                queue,
+                world_bindings,
+                &resources,
+                &variant,
+                scenario,
+            );
+            let image = read_back_image(device, queue, &target);
+            let (differing_pixels, max_channel_delta) = compare_images(&image, &converged_image);
+            let total_pixels = u64::from(width) * u64::from(height);
+            println!(
+                "{rung:>10} {:>8.1} {differing_pixels:>18} {:>9.4}% {max_channel_delta:>22}",
+                rung as f32 / variant.quality.global_illumination.iterations_per_frame as f32,
+                differing_pixels as f64 / total_pixels as f64 * 100.0,
+            );
+        }
+    }
+}
+
+/// The CPU cross-check: read the GPU volume back, run ONE more GPU iteration, and
+/// verify every purely-propagating cell against [`propagate_reference`] — the same
+/// integer arithmetic reimplemented on the CPU. Source cells are excluded the way
+/// the shader identifies them (sky by the column test, sun by the pinned flag), so
+/// what is compared is exactly the transport rule.
+///
+/// Also the DETERMINISM check: two floods from scratch must produce byte-identical
+/// volumes.
+fn report_cagi_cpu_cross_check(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
+    brickmap: &Brickmap,
+) {
+    println!();
+    println!("== E4 CPU cross-check of the propagation rule ==");
+    let scenarios = build_scenarios(&[]);
+    let scenario = &scenarios[2];
+    for rule in [
+        CagiRule::Diffusion6,
+        CagiRule::MaxDecrement,
+        CagiRule::Diffusion26,
+    ] {
+        let quality = RenderQuality {
+            global_illumination: CagiSettings {
+                rule,
+                ..CagiSettings::default()
+            },
+            ..RenderQuality::default()
+        };
+        let variant = Variant::new(format!("{rule:?}"), quality);
+        let (width, height) = variant.resolution();
+        let target = create_render_target(device, width, height);
+        let mut resources =
+            VariantResources::new(device, world_bindings, brickmap, &variant, &target.view);
+        let lighting_uniform = scenario.lighting_uniform(&variant.quality);
+
+        resources.light_volume.mark_dirty();
+        resources.run_iterations(device, queue, world_bindings, &lighting_uniform, 32);
+        let volume_before = read_back_volume(device, queue, &resources.light_volume);
+        resources.run_iterations(device, queue, world_bindings, &lighting_uniform, 1);
+        let volume_after = read_back_volume(device, queue, &resources.light_volume);
+
+        let grid = resources.light_volume.grid();
+        let attributes = voxel_rt::cagi::build_cell_attributes(brickmap, &grid);
+        let sky_light = voxel_rt::cagi::quantize_radiance(scenario_sky_radiance());
+        let mut checked = 0_u64;
+        let mut mismatches = 0_u64;
+        let mut first_mismatch = None;
+        for cell_z in 0..grid.size[2] {
+            for cell_y in 0..grid.size[1] {
+                for cell_x in 0..grid.size[0] {
+                    let cell = [cell_x, cell_y, cell_z];
+                    let index = grid.cell_index(cell);
+                    if attributes[index] & CELL_SOLID != 0 {
+                        continue; // absorber: the shader stores 0, nothing to predict
+                    }
+                    if volume_after[index] & SUN_SOURCE_FLAG != 0 {
+                        continue; // pinned sun source
+                    }
+                    if cell_sees_sky_by_column(&grid, &brickmap.column_max_brick_y, cell) {
+                        continue; // sky source
+                    }
+                    let mut neighbour_light = |neighbour: [i32; 3]| {
+                        if neighbour[1] >= grid.size[1] as i32 {
+                            return sky_light;
+                        }
+                        if neighbour.iter().any(|value| *value < 0)
+                            || (0..3).any(|axis| neighbour[axis] >= grid.size[axis] as i32)
+                        {
+                            return [0, 0, 0];
+                        }
+                        unpack_light(
+                            volume_before[grid.cell_index([
+                                neighbour[0] as u32,
+                                neighbour[1] as u32,
+                                neighbour[2] as u32,
+                            ])],
+                        )
+                    };
+                    let expected = propagate_reference(
+                        rule,
+                        &grid,
+                        [cell_x as i32, cell_y as i32, cell_z as i32],
+                        &mut neighbour_light,
+                    );
+                    let actual = unpack_light(volume_after[index]);
+                    checked += 1;
+                    if expected != actual {
+                        mismatches += 1;
+                        if first_mismatch.is_none() {
+                            first_mismatch = Some((cell, expected, actual));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Determinism: the same inputs must give the same volume, bit for bit.
+        resources.light_volume.mark_dirty();
+        resources.run_iterations(device, queue, world_bindings, &lighting_uniform, 33);
+        let repeated = read_back_volume(device, queue, &resources.light_volume);
+        let deterministic = repeated == volume_after;
+
+        println!(
+            "  {:<14} {checked} propagating cells checked, {mismatches} mismatches; \
+             deterministic re-flood: {}",
+            format!("{rule:?}"),
+            if deterministic { "yes" } else { "NO" }
+        );
+        if let Some((cell, expected, actual)) = first_mismatch {
+            println!("    first mismatch at cell {cell:?}: expected {expected:?}, got {actual:?}");
+        }
+        // Invariants that hold regardless of the rule.
+        let solid_cells_with_light = (0..grid.cell_count())
+            .filter(|index| attributes[*index] & CELL_SOLID != 0 && volume_after[*index] != 0)
+            .count();
+        let over_saturated = volume_after
+            .iter()
+            .filter(|word| unpack_light(**word).iter().any(|channel| *channel > 1023))
+            .count();
+        println!(
+            "    solid cells holding light: {solid_cells_with_light} (must be 0); \
+             channels over 1023: {over_saturated} (must be 0)"
+        );
+    }
+}
+
+// ---- E2 reports (world authority, threading, the edit pipeline) ---------------
+
+/// Edits per frame during a storm, per pattern. A hold-to-repeat human produces 8
+/// per SECOND ([`EDIT_REPEAT_HZ`](../src/main.rs)); these rates are 30-120x that,
+/// on purpose — the question is where the pipeline breaks, not whether a human can
+/// outrun it.
+const STORM_EDITS_PER_FRAME: usize = 4;
+/// The dig pattern runs hotter so it empties whole bricks inside the run.
+const DIG_EDITS_PER_FRAME: usize = 16;
+/// Frames measured for the idle anchor (no edits at all).
+const IDLE_FRAMES: usize = 64;
+/// Scattered / wall storms place this many voxels.
+const STORM_EDIT_COUNT: usize = 256;
+/// Surface bricks the dig pattern clears completely (8^3 = 512 voxels each).
+const DIG_BRICK_COUNT: usize = 4;
+/// Audio-style occlusion rays timed over the CPU mirror.
+const AUDIO_RAY_COUNT: usize = 4096;
+
+/// What an edit storm does to the world.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StormPattern {
+    /// No edits at all — the regression anchor: an edit-capable renderer with no
+    /// edits must cost exactly what E4's renderer cost.
+    Idle,
+    /// 256 stone voxels at scattered positions a few metres above the terrain:
+    /// almost every one MATERIALIZES a brick, so this is the allocation /
+    /// clearance-shrink / column-height worst case.
+    ScatterPlace,
+    /// A dense 16x16 wall built voxel by voxel — the gate's "hold-to-place blocks"
+    /// case, where most edits patch two words inside an existing brick.
+    WallPlace,
+    /// Clear four brick-aligned surface bricks completely: the only pattern that
+    /// FREES bricks, i.e. the only one the clearance-update lever can move.
+    DigBricks,
+}
+
+impl StormPattern {
+    fn label(self) -> &'static str {
+        match self {
+            StormPattern::Idle => "idle (no edits)",
+            StormPattern::ScatterPlace => "scatter-place",
+            StormPattern::WallPlace => "wall-place",
+            StormPattern::DigBricks => "dig-bricks",
+        }
+    }
+
+    fn edits_per_frame(self) -> usize {
+        match self {
+            StormPattern::Idle => 0,
+            StormPattern::DigBricks => DIG_EDITS_PER_FRAME,
+            _ => STORM_EDITS_PER_FRAME,
+        }
+    }
+
+    const ALL: [StormPattern; 4] = [
+        StormPattern::Idle,
+        StormPattern::ScatterPlace,
+        StormPattern::WallPlace,
+        StormPattern::DigBricks,
+    ];
+}
+
+/// The highest occupied voxel of a column, or `None` for water/air columns.
+fn surface_voxel_y(brickmap: &Brickmap, x: i32, z: i32) -> Option<i32> {
+    (0..voxel_core::world::WORLD_SIZE_Y as i32)
+        .rev()
+        .find(|y| brickmap.is_occupied(x, *y, z))
+}
+
+/// Build a pattern's edit list, verified against a scratch copy of the world so
+/// that EVERY entry really changes something. That 1:1 guarantee is what lets the
+/// storm match the k-th delta to the k-th request and measure per-edit latency.
+fn storm_edit_list(brickmap: &Brickmap, pattern: StormPattern) -> Vec<([i32; 3], Voxel)> {
+    let mut scratch = brickmap.clone();
+    let clearance = WorldEditSettings::default().clearance();
+    let mut edits = Vec::new();
+    /// Keep an edit only if it really changes the scratch world.
+    fn keep(
+        scratch: &mut Brickmap,
+        edits: &mut Vec<([i32; 3], Voxel)>,
+        voxel: [i32; 3],
+        material: Voxel,
+        clearance: ClearanceUpdate,
+    ) {
+        if scratch
+            .set_voxel(voxel[0], voxel[1], voxel[2], material, clearance)
+            .is_some()
+        {
+            edits.push((voxel, material));
+        }
+    }
+    match pattern {
+        StormPattern::Idle => {}
+        StormPattern::ScatterPlace => {
+            // Deterministic LCG over the island's middle, placing 3 m above the
+            // surface so the target voxel is open air.
+            let mut lcg_state = 0x5eed_1234_u32;
+            let mut next = || {
+                lcg_state = lcg_state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223);
+                lcg_state
+            };
+            while edits.len() < STORM_EDIT_COUNT {
+                let x = 250 + (next() % 500) as i32;
+                let z = 250 + (next() % 500) as i32;
+                let Some(surface_y) = surface_voxel_y(&scratch, x, z) else {
+                    continue;
+                };
+                keep(
+                    &mut scratch,
+                    &mut edits,
+                    [x, surface_y + 24, z],
+                    Voxel::Stone,
+                    clearance,
+                );
+            }
+        }
+        StormPattern::WallPlace => {
+            // A 16x16 wall in the XY plane at the island centre, on the surface.
+            let (base_x, base_z) = (492, 500);
+            let Some(surface_y) = surface_voxel_y(&scratch, base_x, base_z) else {
+                panic!("the island centre has no surface");
+            };
+            for height in 0..16 {
+                for offset in 0..16 {
+                    keep(
+                        &mut scratch,
+                        &mut edits,
+                        [base_x + offset, surface_y + 1 + height, base_z],
+                        Voxel::Stone,
+                        clearance,
+                    );
+                }
+            }
+        }
+        StormPattern::DigBricks => {
+            for brick_index in 0..DIG_BRICK_COUNT {
+                let (x, z) = (480 + brick_index as i32 * 16, 500);
+                let Some(surface_y) = surface_voxel_y(&scratch, x, z) else {
+                    panic!("dig column ({x}, {z}) has no surface");
+                };
+                let base = [
+                    x - x.rem_euclid(BRICK_SIZE as i32),
+                    surface_y - surface_y.rem_euclid(BRICK_SIZE as i32),
+                    z - z.rem_euclid(BRICK_SIZE as i32),
+                ];
+                for local_z in 0..BRICK_SIZE as i32 {
+                    for local_y in 0..BRICK_SIZE as i32 {
+                        for local_x in 0..BRICK_SIZE as i32 {
+                            keep(
+                                &mut scratch,
+                                &mut edits,
+                                [base[0] + local_x, base[1] + local_y, base[2] + local_z],
+                                Voxel::Air,
+                                clearance,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    edits
+}
+
+/// One measured distribution, in milliseconds. The E2 gate is about HITCHES, so
+/// the median is the least interesting column here.
+struct Distribution {
+    median: f32,
+    p99: f32,
+    maximum: f32,
+}
+
+fn summarize_distribution(samples: &mut [f32]) -> Distribution {
+    samples.sort_by(|a, b| a.partial_cmp(b).expect("NaN timing sample"));
+    let index = |quantile: f32| {
+        ((samples.len() as f32 * quantile) as usize).min(samples.len().saturating_sub(1))
+    };
+    Distribution {
+        median: samples[index(0.5)],
+        p99: samples[index(0.99)],
+        maximum: *samples.last().expect("at least one sample"),
+    }
+}
+
+/// What one (variant, pattern) run measured.
+struct StormResult {
+    frame_pipeline: Distribution,
+    frame_total: Distribution,
+    apply_micros: Distribution,
+    latency_milliseconds: Distribution,
+    latency_frames_max: usize,
+    edits_applied: usize,
+    upload_bytes: usize,
+    brick_allocations: usize,
+    brick_frees: usize,
+    clearance_cells: usize,
+    tail_frames: usize,
+}
+
+/// The E2 build table: what the CPU-authoritative pipeline costs ONCE, and what
+/// the plan's snapshot-swap alternative would cost per edit.
+fn report_edit_build_times(world: &VoxelWorld, brickmap: &Brickmap) {
+    println!();
+    println!("== E2 build + snapshot costs (CPU) ==");
+    let build_start = Instant::now();
+    let rebuilt = Brickmap::build(world);
+    let full_build = build_start.elapsed();
+    let clone_start = Instant::now();
+    let snapshot = rebuilt.clone();
+    let clone_time = clone_start.elapsed();
+    println!(
+        "  full brickmap build (world -> every derived structure): {:>10.2?}",
+        full_build
+    );
+    println!(
+        "  DEEP COPY of the brickmap (the plan's Arc<Brickmap> snapshot swap, PER EDIT): \
+         {:>10.2?} for {:.1} MB",
+        clone_time,
+        snapshot.cpu_bytes() as f32 / 1e6
+    );
+    // The clearance field alone: the cost the FullRebuild strategy pays per freed
+    // brick, isolated by rebuilding it through a removal on a scratch copy.
+    let mut scratch = brickmap.clone();
+    let surface_y = surface_voxel_y(&scratch, 500, 500).expect("occupied column");
+    let base = [
+        496,
+        surface_y - surface_y.rem_euclid(BRICK_SIZE as i32),
+        496,
+    ];
+    // Empty all but the last voxel of a brick with the cheap strategy, then time
+    // the two strategies on the voxel that actually frees it.
+    let mut last_voxel = None;
+    for local_z in 0..BRICK_SIZE as i32 {
+        for local_y in 0..BRICK_SIZE as i32 {
+            for local_x in 0..BRICK_SIZE as i32 {
+                let voxel = [base[0] + local_x, base[1] + local_y, base[2] + local_z];
+                if scratch.is_occupied(voxel[0], voxel[1], voxel[2]) {
+                    if last_voxel.is_none() {
+                        last_voxel = Some(voxel);
+                        continue; // keep one occupied voxel so the brick survives
+                    }
+                    scratch.set_voxel(
+                        voxel[0],
+                        voxel[1],
+                        voxel[2],
+                        Voxel::Air,
+                        ClearanceUpdate::LocalBox { radius_cells: 8 },
+                    );
+                }
+            }
+        }
+    }
+    let last_voxel = last_voxel.expect("the brick held occupied voxels");
+    for (label, clearance) in [
+        (
+            "local box r=2",
+            ClearanceUpdate::LocalBox { radius_cells: 2 },
+        ),
+        (
+            "local box r=8",
+            ClearanceUpdate::LocalBox { radius_cells: 8 },
+        ),
+        (
+            "local box r=16",
+            ClearanceUpdate::LocalBox { radius_cells: 16 },
+        ),
+        ("full rebuild", ClearanceUpdate::FullRebuild),
+    ] {
+        let mut freeing = scratch.clone();
+        let started = Instant::now();
+        let edit = freeing
+            .set_voxel(
+                last_voxel[0],
+                last_voxel[1],
+                last_voxel[2],
+                Voxel::Air,
+                clearance,
+            )
+            .expect("the last voxel of the brick frees it");
+        let elapsed = started.elapsed();
+        assert!(edit.brick_freed, "the fixture did not free a brick");
+        println!(
+            "  clearance repair on a FREED brick, {label:<14} {:>10.2?}  \
+             ({} cells written, {} bytes of delta)",
+            elapsed,
+            edit.clearance_cells_written,
+            edit.dirty_bytes(),
+        );
+    }
+}
+
+/// The headline E2 table: per-frame cost DISTRIBUTIONS under an edit storm, for
+/// every authority/threading variant, plus edit latency and upload bytes.
+fn report_edit_storm(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    brickmap: &Brickmap,
+    runs: &[(String, RenderQuality)],
+) {
+    println!();
+    println!("== E2 edit storm ==");
+    println!(
+        "  {} edits/frame (scatter, wall) and {} (dig); {} scattered placements, \
+         a 16x16 wall, {} bricks dug out",
+        STORM_EDITS_PER_FRAME, DIG_EDITS_PER_FRAME, STORM_EDIT_COUNT, DIG_BRICK_COUNT
+    );
+    let scenario = &build_scenarios(&[])[2]; // C: ground level, default sun
+
+    for (label, quality) in runs {
+        for pattern in StormPattern::ALL {
+            let edits = storm_edit_list(brickmap, pattern);
+            let result =
+                run_edit_storm(device, queue, brickmap, quality, scenario, pattern, &edits);
+            println!();
+            println!("  -- {label} / {} --", pattern.label());
+            println!(
+                "     frame pipeline (CPU: request + drain + upload)  median {:>7.3} ms  \
+                 p99 {:>7.3} ms  max {:>7.3} ms",
+                result.frame_pipeline.median,
+                result.frame_pipeline.p99,
+                result.frame_pipeline.maximum
+            );
+            println!(
+                "     whole frame  (+ CAGI + shading dispatch, blocked) median {:>7.3} ms  \
+                 p99 {:>7.3} ms  max {:>7.3} ms",
+                result.frame_total.median, result.frame_total.p99, result.frame_total.maximum
+            );
+            if result.edits_applied > 0 {
+                println!(
+                    "     CPU apply per edit                              median {:>7.1} us  \
+                     p99 {:>7.1} us  max {:>7.1} us",
+                    result.apply_micros.median * 1000.0,
+                    result.apply_micros.p99 * 1000.0,
+                    result.apply_micros.maximum * 1000.0
+                );
+                println!(
+                    "     edit -> uploaded latency                        median {:>7.3} ms  \
+                     max {:>7.3} ms  ({} frames worst case, {} tail frames)",
+                    result.latency_milliseconds.median,
+                    result.latency_milliseconds.maximum,
+                    result.latency_frames_max,
+                    result.tail_frames
+                );
+                println!(
+                    "     {} edits: {} bytes uploaded = {:.0} B/edit; {} brick allocs, \
+                     {} frees, {} clearance cells",
+                    result.edits_applied,
+                    result.upload_bytes,
+                    result.upload_bytes as f32 / result.edits_applied as f32,
+                    result.brick_allocations,
+                    result.brick_frees,
+                    result.clearance_cells
+                );
+            }
+        }
+    }
+}
+
+/// One (variant, pattern) run: its own world copy, its own GPU buffers, its own
+/// light volume — so a storm can never contaminate the next run.
+#[allow(clippy::too_many_arguments)]
+fn run_edit_storm(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    brickmap: &Brickmap,
+    quality: &RenderQuality,
+    scenario: &Scenario,
+    pattern: StormPattern,
+    edits: &[([i32; 3], Voxel)],
+) -> StormResult {
+    let mut host = WorldHost::new(brickmap.clone());
+    host.set_world_thread(quality.world_edit.world_thread);
+    let variant = Variant::new("storm".to_string(), *quality);
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    let (world_bindings, mut resources) = {
+        let world = host.read();
+        let world_bindings = WorldBindings::new(device, &world);
+        let resources =
+            VariantResources::new(device, &world_bindings, &world, &variant, &target.view);
+        (world_bindings, resources)
+    };
+    let light_grid = quality
+        .global_illumination
+        .enabled
+        .then(|| resources.light_volume.grid());
+    // Flood once so the storm starts from the app's steady state.
+    resources.flood_to_convergence(device, queue, &world_bindings, &variant, scenario);
+
+    let frames = if pattern == StormPattern::Idle {
+        IDLE_FRAMES
+    } else {
+        edits.len().div_ceil(pattern.edits_per_frame())
+    };
+    let mut pipeline_samples = Vec::with_capacity(frames);
+    let mut total_samples = Vec::with_capacity(frames);
+    let mut apply_samples = Vec::new();
+    let mut latency_samples = Vec::new();
+    let mut latency_frames_max = 0;
+    let mut request_times: Vec<(Instant, usize)> = Vec::new();
+    let mut deltas_seen = 0_usize;
+    let mut result = StormResult {
+        frame_pipeline: Distribution {
+            median: 0.0,
+            p99: 0.0,
+            maximum: 0.0,
+        },
+        frame_total: Distribution {
+            median: 0.0,
+            p99: 0.0,
+            maximum: 0.0,
+        },
+        apply_micros: Distribution {
+            median: 0.0,
+            p99: 0.0,
+            maximum: 0.0,
+        },
+        latency_milliseconds: Distribution {
+            median: 0.0,
+            p99: 0.0,
+            maximum: 0.0,
+        },
+        latency_frames_max: 0,
+        edits_applied: 0,
+        upload_bytes: 0,
+        brick_allocations: 0,
+        brick_frees: 0,
+        clearance_cells: 0,
+        tail_frames: 0,
+    };
+
+    let mut next_edit = 0_usize;
+    let mut frame = 0_usize;
+    // Keep going past the edit list until the authority has caught up, so the
+    // measured latency includes the tail (variant B's whole point is that the tail
+    // exists and does not cost the frame).
+    while frame < frames || next_edit < edits.len() || host.in_flight() > 0 {
+        let frame_start = Instant::now();
+        for _ in 0..pattern.edits_per_frame() {
+            if next_edit >= edits.len() {
+                break;
+            }
+            let (voxel, material) = edits[next_edit];
+            host.request_edit(
+                VoxelEdit {
+                    voxel,
+                    material,
+                    light_grid,
+                },
+                &quality.world_edit,
+            );
+            request_times.push((Instant::now(), frame));
+            next_edit += 1;
+        }
+
+        let mut geometry_changed = false;
+        for update in host.drain() {
+            match update {
+                WorldUpdate::Delta(delta) => {
+                    geometry_changed = true;
+                    assert!(
+                        !delta.arrays_grew,
+                        "the storm outgrew the brick headroom — raise EDIT_BRICK_HEADROOM \
+                         or shorten the storm"
+                    );
+                    for write in &delta.writes {
+                        world_bindings.apply_array_write(queue, write);
+                    }
+                    if let Some(metadata) = &delta.metadata {
+                        world_bindings.write_metadata(queue, metadata);
+                    }
+                    resources.light_volume.write_cell_attributes(
+                        queue,
+                        delta.light_grid,
+                        &delta.light_cells,
+                    );
+                    apply_samples.push(delta.apply_micros / 1000.0);
+                    result.upload_bytes += delta.upload_bytes();
+                    result.clearance_cells += delta.clearance_cells_written;
+                    if delta.metadata.is_some() {
+                        // A metadata change means a brick materialized or was freed;
+                        // which one is decided by the material.
+                        if delta.material == 0 {
+                            result.brick_frees += 1;
+                        } else {
+                            result.brick_allocations += 1;
+                        }
+                    }
+                    if let Some((requested_at, requested_frame)) =
+                        request_times.get(deltas_seen).copied()
+                    {
+                        latency_samples.push(requested_at.elapsed().as_secs_f32() * 1000.0);
+                        latency_frames_max = latency_frames_max.max(frame - requested_frame);
+                    }
+                    deltas_seen += 1;
+                }
+                WorldUpdate::LightAttributes { .. } => {}
+            }
+        }
+        if geometry_changed && quality.world_edit.gi_reflood {
+            resources.light_volume.mark_dirty();
+        }
+        pipeline_samples.push(frame_start.elapsed().as_secs_f32() * 1000.0);
+
+        // The GPU half of the frame: this frame's CA iterations plus one shading
+        // dispatch, blocked to completion so the sample is a whole frame.
+        world_bindings.write_lighting(queue, &scenario.lighting_uniform(quality));
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bench edit storm frame"),
+        });
+        resources.cagi_pass.encode(
+            &mut encoder,
+            &mut resources.light_volume,
+            quality.gi_iterations_per_frame(),
+            None,
+        );
+        resources.dda_pass.encode(
+            queue,
+            &mut encoder,
+            &scenario.camera_uniform((width, height)),
+            resources.light_volume.front(),
+            width,
+            height,
+            None,
+        );
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("device poll failed");
+        total_samples.push(frame_start.elapsed().as_secs_f32() * 1000.0);
+
+        if frame >= frames {
+            result.tail_frames += 1;
+        }
+        frame += 1;
+        assert!(
+            frame < frames + 600,
+            "the storm never drained: {} of {} edits, {} in flight",
+            deltas_seen,
+            edits.len(),
+            host.in_flight()
+        );
+    }
+
+    result.edits_applied = deltas_seen;
+    result.latency_frames_max = latency_frames_max;
+    result.frame_pipeline = summarize_distribution(&mut pipeline_samples);
+    result.frame_total = summarize_distribution(&mut total_samples);
+    if !apply_samples.is_empty() {
+        result.apply_micros = summarize_distribution(&mut apply_samples);
+        result.latency_milliseconds = summarize_distribution(&mut latency_samples);
+    }
+    assert_eq!(
+        deltas_seen,
+        edits.len(),
+        "every edit in the list was verified to change something, so every one must \
+         produce exactly one delta"
+    );
+    result
+}
+
+/// Variant C's decisive numbers: what it costs to keep a CPU occupancy mirror
+/// fresh by reading it back from the GPU, in bandwidth AND in frames of staleness.
+///
+/// Both halves matter, and the second is the one that decides: even a fast copy is
+/// only *readable* after the GPU has finished the frame that wrote it, so a
+/// GPU-authoritative world hands the audio thread a mirror that is structurally
+/// behind — where the CPU-authoritative variants hand it the authority itself.
+fn report_occupancy_readback(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap) {
+    println!();
+    println!("== E2 variant C: GPU -> CPU occupancy readback ==");
+    let cases: [(&str, usize); 4] = [
+        (
+            "one brick's occupancy words (an edit's delta)",
+            OCCUPANCY_WORDS_PER_BRICK * 4,
+        ),
+        (
+            "brick occupancy bit grid (1 bit / brick)",
+            brickmap.brick_occupancy_bit_words.len() * 4,
+        ),
+        (
+            "voxel occupancy words (1 bit / voxel, occupied bricks)",
+            brickmap.occupancy_words.len() * 4,
+        ),
+        (
+            "occupancy + materials (the level-1 mirror audio would want)",
+            (brickmap.occupancy_words.len() + brickmap.material_words.len()) * 4,
+        ),
+    ];
+    println!(
+        "  {:<58} {:>10} {:>12} {:>12}",
+        "mirror", "bytes", "blocked ms", "GB/s"
+    );
+    for (label, bytes) in cases {
+        let source = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bench readback source"),
+            size: bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bench readback staging"),
+            size: bytes as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        // Median of a few blocked round trips: copy, submit, map, wait.
+        let mut samples = Vec::new();
+        for _ in 0..8 {
+            let started = Instant::now();
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bench readback"),
+            });
+            encoder.copy_buffer_to_buffer(&source, 0, &staging, 0, bytes as u64);
+            queue.submit([encoder.finish()]);
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |result| {
+                result.expect("readback map failed")
+            });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .expect("device poll failed");
+            let mapped = slice.get_mapped_range();
+            let checksum = mapped.first().copied().unwrap_or(0);
+            drop(mapped);
+            staging.unmap();
+            std::hint::black_box(checksum);
+            samples.push(started.elapsed().as_secs_f32() * 1000.0);
+        }
+        let distribution = summarize_distribution(&mut samples);
+        println!(
+            "  {label:<58} {bytes:>10} {:>12.3} {:>12.2}",
+            distribution.median,
+            bytes as f32 / 1e9 / (distribution.median / 1000.0),
+        );
+    }
+
+    // STALENESS: how many FRAMES pass before a readback issued in frame N can be
+    // read, when the GPU keeps doing a frame's worth of work in between and the CPU
+    // never blocks — the only way a readback is usable in a real frame loop.
+    let bytes = brickmap.occupancy_words.len() * 4;
+    let storage_buffer = |label: &'static str| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
+    let source = storage_buffer("bench staleness source");
+    let frame_work = storage_buffer("bench staleness frame work");
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bench staleness staging"),
+        size: bytes as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("bench staleness copy"),
+    });
+    encoder.copy_buffer_to_buffer(&source, 0, &staging, 0, bytes as u64);
+    queue.submit([encoder.finish()]);
+    let mapped_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&mapped_flag);
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            flag.store(result.is_ok(), std::sync::atomic::Ordering::SeqCst);
+        });
+    let started = Instant::now();
+    let mut frames_waited = 0_usize;
+    while !mapped_flag.load(std::sync::atomic::Ordering::SeqCst) && frames_waited < 64 {
+        // One "frame" of unrelated GPU work, then a NON-BLOCKING poll: exactly what
+        // a render loop can afford to do.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bench staleness frame"),
+        });
+        encoder.copy_buffer_to_buffer(&source, 0, &frame_work, 0, bytes as u64);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::Poll)
+            .expect("device poll failed");
+        frames_waited += 1;
+    }
+    let mapped = mapped_flag.load(std::sync::atomic::Ordering::SeqCst);
+    if mapped {
+        staging.unmap();
+    }
+    println!(
+        "  NON-BLOCKING mapping of the {:.1} MB voxel mirror became readable after \
+         {} simulated frames ({:.2?}), mapped: {}",
+        bytes as f32 / 1e6,
+        frames_waited,
+        started.elapsed(),
+        mapped
+    );
+}
+
+/// What one audio-style occlusion query over the CPU mirror costs — the number
+/// that says whether keeping the mirror on the CPU is worth anything (E8).
+fn report_audio_ray_cost(brickmap: &Brickmap) {
+    println!();
+    println!("== E2 CPU mirror queries (the E8 seam) ==");
+    let listener = [62.5, WATER_LEVEL as f32 * VOXEL_SIZE + 1.7, 107.5];
+    let mut lcg_state = 0xa11c_e001_u32;
+    let mut next = || {
+        lcg_state = lcg_state
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        lcg_state
+    };
+    let sources: Vec<[f32; 3]> = (0..AUDIO_RAY_COUNT)
+        .map(|_| {
+            [
+                (next() % 1000) as f32 * 0.125,
+                WATER_LEVEL as f32 * VOXEL_SIZE + (next() % 160) as f32 * 0.125,
+                (next() % 1000) as f32 * 0.125,
+            ]
+        })
+        .collect();
+    let started = Instant::now();
+    let mut blocked = 0_usize;
+    for source in &sources {
+        if !voxel_dda::path_is_clear(brickmap, listener, *source) {
+            blocked += 1;
+        }
+    }
+    let elapsed = started.elapsed();
+    println!(
+        "  {AUDIO_RAY_COUNT} listener->source occlusion rays over the island: {:.2?} total, \
+         {:.2} us per ray ({} blocked)",
+        elapsed,
+        elapsed.as_secs_f32() * 1e6 / AUDIO_RAY_COUNT as f32,
+        blocked
+    );
+    let started = Instant::now();
+    let mut hits = 0_usize;
+    for source in &sources {
+        let direction = [
+            source[0] - listener[0],
+            source[1] - listener[1],
+            source[2] - listener[2],
+        ];
+        if voxel_dda::cast(brickmap, listener, direction, 160.0).is_some() {
+            hits += 1;
+        }
+    }
+    let elapsed = started.elapsed();
+    println!(
+        "  {AUDIO_RAY_COUNT} full reflection casts (hit voxel + face + material): {:.2?} total, \
+         {:.2} us per ray ({hits} hits)",
+        elapsed,
+        elapsed.as_secs_f32() * 1e6 / AUDIO_RAY_COUNT as f32
+    );
+}
+
+/// E2b — what the walking body costs the frame thread, per movement step.
+///
+/// Reported as a distribution for the same reason E2's storm is: a median tells
+/// you it is cheap, a maximum tells you whether it can hitch. The scenarios span
+/// the cost axes the sweep actually has — how much open air the body's
+/// cross-section scans (an EMPTY box test has no early-out, so open sky is the
+/// expensive case, not dense terrain), how often the auto-step fires (up to four
+/// extra sweeps per horizontal axis), and how many substeps the frame delta
+/// forces.
+fn report_character_movement_cost(brickmap: &Brickmap) {
+    println!();
+    println!("== E2b character movement + collision (CPU) ==");
+    let settings = CharacterSettings::default();
+    println!(
+        "  body {:.2} x {:.2} m ({:.1} x {:.1} voxels), eye {:.2} m, step-up {:.3} m \
+         ({:.0} voxels), jump {:.2} m/s -> {:.2} m apex",
+        settings.body_width_meters,
+        settings.body_height_meters,
+        settings.body_width_meters / VOXEL_SIZE,
+        settings.body_height_meters / VOXEL_SIZE,
+        settings.eye_height_meters,
+        settings.step_up_meters,
+        settings.step_up_meters / VOXEL_SIZE,
+        settings.jump_speed(),
+        settings.jump_apex_meters,
+    );
+
+    let walking = CameraInput {
+        forward: true,
+        ..CameraInput::default()
+    };
+    let sprinting = CameraInput {
+        forward: true,
+        speed_multiplier: 100.0, // clamped to the sprint ceiling by the controller
+        ..CameraInput::default()
+    };
+    let idle = CameraInput::default();
+    let (uphill_x, uphill_z) = steepest_uphill_column(brickmap);
+    println!(
+        "  steepest +X rise found for the auto-step row: voxel column ({uphill_x}, {uphill_z})"
+    );
+
+    // (label, start column, spawn height above the surface, input, delta, steps)
+    let scenarios: [(&str, i32, i32, f32, &CameraInput, f32, usize); 6] = [
+        (
+            "idle on terrain, 60 fps",
+            500,
+            500,
+            0.0,
+            &idle,
+            1.0 / 60.0,
+            1200,
+        ),
+        (
+            "walk over terrain, 60 fps",
+            500,
+            500,
+            0.0,
+            &walking,
+            1.0 / 60.0,
+            1200,
+        ),
+        (
+            "sprint over terrain, 60 fps",
+            420,
+            560,
+            0.0,
+            &sprinting,
+            1.0 / 60.0,
+            1200,
+        ),
+        (
+            "sprint into a rise (auto-step every frame)",
+            uphill_x,
+            uphill_z,
+            0.0,
+            &sprinting,
+            1.0 / 60.0,
+            1200,
+        ),
+        (
+            "free fall through open air (no early-out), 60 fps",
+            500,
+            500,
+            28.0,
+            &sprinting,
+            1.0 / 60.0,
+            1200,
+        ),
+        (
+            "sprint + fall through a 40 ms hitch",
+            500,
+            500,
+            28.0,
+            &sprinting,
+            0.04,
+            600,
+        ),
+    ];
+    for (label, voxel_x, voxel_z, height_above, input, delta_seconds, steps) in scenarios {
+        let mut body = spawn_character(brickmap, voxel_x, voxel_z, 0.35, height_above);
+        let mut samples = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            let started = Instant::now();
+            body.step(brickmap, input, delta_seconds);
+            samples.push(started.elapsed().as_secs_f32() * 1e6);
+        }
+        let distribution = summarize_distribution(&mut samples);
+        println!(
+            "  {label:<50} median {:>7.2} us  p99 {:>7.2} us  max {:>7.2} us",
+            distribution.median, distribution.p99, distribution.maximum
+        );
+    }
+
+    // The two pathological deltas, each measured on its own so the substep count
+    // is visible in the number.
+    for hitch_seconds in [0.25_f32, 1.0] {
+        let mut body = spawn_character(brickmap, 500, 500, 0.35, 28.0);
+        let mut samples = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let started = Instant::now();
+            body.step(brickmap, &sprinting, hitch_seconds);
+            samples.push(started.elapsed().as_secs_f32() * 1e6);
+        }
+        let distribution = summarize_distribution(&mut samples);
+        println!(
+            "  {:<50} median {:>7.2} us  p99 {:>7.2} us  max {:>7.2} us",
+            format!(
+                "sprint + fall through a {:.0} ms hitch",
+                hitch_seconds * 1000.0
+            ),
+            distribution.median,
+            distribution.p99,
+            distribution.maximum
+        );
+    }
+
+    // Entering walk mode: the one-off ground search under the fly camera.
+    let mut samples = Vec::with_capacity(200);
+    for index in 0..200 {
+        let voxel_x = 400 + (index % 100) * 2;
+        let mut body = CharacterController::from_eye(
+            Vec3::new(
+                (voxel_x as f32 + 0.5) * VOXEL_SIZE,
+                WATER_LEVEL as f32 * VOXEL_SIZE + 17.5,
+                (500.0 + 0.5) * VOXEL_SIZE,
+            ),
+            0.0,
+            0.0,
+        );
+        let started = Instant::now();
+        let found = body.snap_to_ground(brickmap, 64.0);
+        samples.push(started.elapsed().as_secs_f32() * 1e6);
+        assert!(found, "the island column ({voxel_x}, 500) has no ground");
+    }
+    let distribution = summarize_distribution(&mut samples);
+    println!(
+        "  {:<50} median {:>7.2} us  p99 {:>7.2} us  max {:>7.2} us",
+        "enter walk mode (ground search from ~17 m up)",
+        distribution.median,
+        distribution.p99,
+        distribution.maximum
+    );
+}
+
+/// A body standing on the terrain at a voxel column (or `height_above` meters
+/// over it), facing `yaw`.
+fn spawn_character(
+    brickmap: &Brickmap,
+    voxel_x: i32,
+    voxel_z: i32,
+    yaw: f32,
+    height_above: f32,
+) -> CharacterController {
+    let surface_y = surface_voxel_y(brickmap, voxel_x, voxel_z).expect("occupied column");
+    let eye = Vec3::new(
+        (voxel_x as f32 + 0.5) * VOXEL_SIZE,
+        (surface_y + 1) as f32 * VOXEL_SIZE + character::EYE_HEIGHT_METERS + height_above,
+        (voxel_z as f32 + 0.5) * VOXEL_SIZE,
+    );
+    let mut body = CharacterController::from_eye(eye, yaw, 0.0);
+    if height_above <= 0.0 {
+        body.snap_to_ground(brickmap, 8.0);
+    }
+    body
+}
+
+/// The steepest +X rise the island has over 4 m, sampled on a coarse grid — the
+/// worst case for the auto-step, which fires on every frame that walks into a
+/// rise and costs up to four extra sweeps when it does.
+fn steepest_uphill_column(brickmap: &Brickmap) -> (i32, i32) {
+    let mut best = (500, 500);
+    let mut best_rise = i32::MIN;
+    for voxel_z in (200..800).step_by(16) {
+        for voxel_x in (200..768).step_by(16) {
+            let (Some(here), Some(ahead)) = (
+                surface_voxel_y(brickmap, voxel_x, voxel_z),
+                surface_voxel_y(brickmap, voxel_x + 32, voxel_z),
+            ) else {
+                continue;
+            };
+            let rise = ahead - here;
+            if rise > best_rise {
+                best_rise = rise;
+                best = (voxel_x, voxel_z);
+            }
+        }
+    }
+    best
+}
+
+/// How the CAGI volume responds to an edit: E2's answer is a GLOBAL re-flood, so
+/// the question is how many frames it takes to converge — measured on the volume
+/// itself (bit-exact), not on the image.
+fn report_edit_reflood(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap) {
+    println!();
+    println!("== E2 CAGI re-flood after an edit ==");
+    let quality = RenderQuality::default();
+    let variant = Variant::new("edit-reflood".to_string(), quality);
+    let scenario = &build_scenarios(&[])[2];
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    let mut host = WorldHost::new(brickmap.clone());
+    let (world_bindings, mut resources) = {
+        let world = host.read();
+        let world_bindings = WorldBindings::new(device, &world);
+        let resources =
+            VariantResources::new(device, &world_bindings, &world, &variant, &target.view);
+        (world_bindings, resources)
+    };
+    let light_grid = resources.light_volume.grid();
+
+    // Converge, then build a 16x16 wall in one go and re-flood.
+    resources.flood_to_convergence(device, queue, &world_bindings, &variant, scenario);
+    let edits = storm_edit_list(brickmap, StormPattern::WallPlace);
+    for (voxel, material) in &edits {
+        host.request_edit(
+            VoxelEdit {
+                voxel: *voxel,
+                material: *material,
+                light_grid: Some(light_grid),
+            },
+            &quality.world_edit,
+        );
+    }
+    for update in host.drain() {
+        if let WorldUpdate::Delta(delta) = update {
+            for write in &delta.writes {
+                world_bindings.apply_array_write(queue, write);
+            }
+            if let Some(metadata) = &delta.metadata {
+                world_bindings.write_metadata(queue, metadata);
+            }
+            resources.light_volume.write_cell_attributes(
+                queue,
+                delta.light_grid,
+                &delta.light_cells,
+            );
+        }
+    }
+    let lighting_uniform = scenario.lighting_uniform(&quality);
+
+    // The converged volume the re-flood is heading toward.
+    resources.light_volume.mark_dirty();
+    resources.run_iterations(
+        device,
+        queue,
+        &world_bindings,
+        &lighting_uniform,
+        CONVERGENCE_ITERATIONS,
+    );
+    let converged = read_back_volume(device, queue, &resources.light_volume);
+
+    println!(
+        "  {} edits applied (a 16x16 wall), then the volume is thrown away and re-flooded",
+        edits.len()
+    );
+    println!(
+        "  {:>10} {:>8} {:>18} {:>10}",
+        "iterations", "frames", "differing cells", "%"
+    );
+    resources.light_volume.mark_dirty();
+    // Zero iterations still has to ENCODE the clear (the pass clears lazily on its
+    // next encode), or the rung-0 row would report the old converged volume.
+    resources.run_iterations(device, queue, &world_bindings, &lighting_uniform, 0);
+    let mut iterations_done = 0_u32;
+    for rung in [0_u32, 2, 4, 8, 16, 32, 64, 128] {
+        if rung > iterations_done {
+            resources.run_iterations(
+                device,
+                queue,
+                &world_bindings,
+                &lighting_uniform,
+                rung - iterations_done,
+            );
+            iterations_done = rung;
+        }
+        let volume = read_back_volume(device, queue, &resources.light_volume);
+        let differing = volume
+            .iter()
+            .zip(&converged)
+            .filter(|(current, target)| current != target)
+            .count();
+        println!(
+            "  {rung:>10} {:>8.1} {differing:>18} {:>9.4}%",
+            rung as f32 / quality.global_illumination.iterations_per_frame as f32,
+            differing as f64 / converged.len() as f64 * 100.0,
+        );
+    }
+}
+
+/// E2b's test-pool carve, measured as a BULK edit: the biggest single world
+/// change the engine can be asked for today, and therefore the honest test of
+/// whether E2's authority really keeps big work off the frame.
+///
+/// Four numbers, one per requirement: voxels touched, world-thread wall time,
+/// upload bytes (and how many `write_buffer` calls the coalescing leaves), and
+/// the WORST frame-thread cost measured while the carve is in flight — frames
+/// keep rendering throughout, exactly as in the app. Then the CAGI response,
+/// because the carve moves geometry and adds water: the same global re-flood the
+/// wall gets, reported in frames to bit-exact.
+fn report_pool_carve(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap) {
+    println!();
+    println!("== E2b test-pool carve (bulk edit) ==");
+    let quality = RenderQuality::default();
+    let variant = Variant::new("pool-carve".to_string(), quality);
+    let scenario = &build_scenarios(&[])[2];
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    let mut host = WorldHost::new(brickmap.clone());
+    let (world_bindings, mut resources) = {
+        let world = host.read();
+        let world_bindings = WorldBindings::new(device, &world);
+        let resources =
+            VariantResources::new(device, &world_bindings, &world, &variant, &target.view);
+        (world_bindings, resources)
+    };
+    let light_grid = quality
+        .global_illumination
+        .enabled
+        .then(|| resources.light_volume.grid());
+    resources.flood_to_convergence(device, queue, &world_bindings, &variant, scenario);
+    let lighting_uniform = scenario.lighting_uniform(&quality);
+
+    // The shipped configuration: the authority on its own thread, so the request
+    // is a channel send and the frame thread only drains.
+    host.set_world_thread(true);
+    let pool = WaterPool {
+        centre_voxel_x: 500,
+        centre_voxel_z: 500,
+    };
+    let requested_at = Instant::now();
+    host.request_bulk_edit(
+        BulkEditRequest {
+            shape: Box::new(pool),
+            light_grid,
+        },
+        &quality.world_edit,
+    );
+
+    // Keep rendering frames until the delta arrives, timing the frame-thread half
+    // (drain + upload) separately from the whole frame.
+    let mut pipeline_samples: Vec<f32> = Vec::new();
+    let mut frames_in_flight = 0_usize;
+    let mut delta_frame_pipeline_milliseconds = 0.0;
+    let mut voxels_written = 0_usize;
+    let mut upload_bytes = 0_usize;
+    let mut upload_calls = 0_usize;
+    let mut apply_milliseconds = 0.0;
+    let mut clearance_cells = 0_usize;
+    let mut light_cells = 0_usize;
+    let mut latency_milliseconds = 0.0;
+    while voxels_written == 0 {
+        let frame_start = Instant::now();
+        for update in host.drain() {
+            if let WorldUpdate::Delta(delta) = update {
+                latency_milliseconds = requested_at.elapsed().as_secs_f32() * 1000.0;
+                assert!(
+                    !delta.arrays_grew,
+                    "the pool outgrew the brick headroom — it should only free bricks"
+                );
+                for write in &delta.writes {
+                    world_bindings.apply_array_write(queue, write);
+                }
+                if let Some(metadata) = &delta.metadata {
+                    world_bindings.write_metadata(queue, metadata);
+                }
+                resources.light_volume.write_cell_attributes(
+                    queue,
+                    delta.light_grid,
+                    &delta.light_cells,
+                );
+                resources.light_volume.mark_dirty();
+                voxels_written = delta.voxels_written;
+                upload_bytes = delta.upload_bytes();
+                upload_calls = delta.writes.len();
+                apply_milliseconds = delta.apply_micros / 1000.0;
+                clearance_cells = delta.clearance_cells_written;
+                light_cells = delta.light_cells.len();
+                delta_frame_pipeline_milliseconds = frame_start.elapsed().as_secs_f32() * 1000.0;
+            }
+        }
+        pipeline_samples.push(frame_start.elapsed().as_secs_f32() * 1000.0);
+        if voxels_written == 0 {
+            frames_in_flight += 1;
+        }
+
+        // The GPU half, blocked to completion, so a "frame" here is a whole frame.
+        world_bindings.write_lighting(queue, &lighting_uniform);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bench pool carve frame"),
+        });
+        resources.cagi_pass.encode(
+            &mut encoder,
+            &mut resources.light_volume,
+            quality.gi_iterations_per_frame(),
+            None,
+        );
+        resources.dda_pass.encode(
+            queue,
+            &mut encoder,
+            &scenario.camera_uniform((width, height)),
+            resources.light_volume.front(),
+            width,
+            height,
+            None,
+        );
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("device poll failed");
+        assert!(
+            frames_in_flight < 600,
+            "the pool carve never came back from the world thread"
+        );
+    }
+    let worst_waiting_frame = pipeline_samples
+        .iter()
+        .take(frames_in_flight)
+        .copied()
+        .fold(0.0_f32, f32::max);
+
+    println!(
+        "  shape: {:.0} m of water across, {:.0} m deep, {:.0} m graded shore, centred on \
+         voxel ({}, {})",
+        POOL_WATER_RADIUS_METERS * 2.0,
+        POOL_DEPTH_METERS,
+        POOL_SHORE_WIDTH_METERS,
+        pool.centre_voxel_x,
+        pool.centre_voxel_z,
+    );
+    println!("  voxels written (one delta):      {voxels_written:>10}");
+    println!("  world-thread apply:              {apply_milliseconds:>10.1} ms");
+    println!("  request -> delta available:      {latency_milliseconds:>10.1} ms");
+    println!(
+        "  upload:                          {:>10.0} KB in {upload_calls} write_buffer calls",
+        upload_bytes as f32 / 1024.0,
+    );
+    println!(
+        "  ...bytes per voxel:              {:>10.1} B (a per-voxel delta would be ~64 B)",
+        upload_bytes as f32 / voxels_written as f32,
+    );
+    println!("  clearance cells rewritten:       {clearance_cells:>10}");
+    println!("  CAGI cells re-attributed:        {light_cells:>10}");
+    println!(
+        "  frame thread, {frames_in_flight} frames waiting:   {worst_waiting_frame:>10.3} ms worst"
+    );
+    println!("  frame thread, the upload frame:  {delta_frame_pipeline_milliseconds:>10.3} ms",);
+
+    // CAGI: the carve removed terrain and added water, so the volume is wrong
+    // until it re-floods. Same global re-flood as any edit — measured, not assumed.
+    let converged = {
+        resources.light_volume.mark_dirty();
+        resources.run_iterations(
+            device,
+            queue,
+            &world_bindings,
+            &lighting_uniform,
+            CONVERGENCE_ITERATIONS,
+        );
+        read_back_volume(device, queue, &resources.light_volume)
+    };
+    println!("  CAGI re-flood after the carve:");
+    println!(
+        "  {:>10} {:>8} {:>18} {:>10}",
+        "iterations", "frames", "differing cells", "%"
+    );
+    resources.light_volume.mark_dirty();
+    resources.run_iterations(device, queue, &world_bindings, &lighting_uniform, 0);
+    let mut iterations_done = 0_u32;
+    for rung in [0_u32, 2, 4, 8, 16, 32, 64, 128] {
+        if rung > iterations_done {
+            resources.run_iterations(
+                device,
+                queue,
+                &world_bindings,
+                &lighting_uniform,
+                rung - iterations_done,
+            );
+            iterations_done = rung;
+        }
+        let volume = read_back_volume(device, queue, &resources.light_volume);
+        let differing = volume
+            .iter()
+            .zip(&converged)
+            .filter(|(current, target)| current != target)
+            .count();
+        println!(
+            "  {rung:>10} {:>8.1} {differing:>18} {:>9.4}%",
+            rung as f32 / quality.global_illumination.iterations_per_frame as f32,
+            differing as f64 / converged.len() as f64 * 100.0,
+        );
+    }
+}
+
+/// The E2 memory table: CPU authority, GPU buffers, and what the edit headroom
+/// costs.
+fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
+    println!();
+    println!("== E2 memory ==");
+    let world_bindings = WorldBindings::new(device, brickmap);
+    let light_volume = LightVolume::new(device, brickmap, &CagiSettings::default());
+    let headroom_bytes = (brickmap.brick_capacity() - brickmap.occupied_brick_count()) as usize
+        * (OCCUPANCY_WORDS_PER_BRICK + MATERIAL_WORDS_PER_BRICK)
+        * 4;
+    println!(
+        "  CPU brickmap (the authority AND the audio mirror): {:>8.1} MB",
+        brickmap.cpu_bytes() as f32 / 1e6
+    );
+    println!(
+        "  GPU world buffers:                                 {:>8.1} MB",
+        world_bindings.gpu_bytes() as f32 / 1e6
+    );
+    println!(
+        "  GPU CAGI light volume:                             {:>8.1} MB",
+        light_volume.gpu_bytes() as f32 / 1e6
+    );
+    println!(
+        "  of which edit headroom ({} spare brick slots):    {:>8.1} MB (CPU and GPU each)",
+        brickmap.brick_capacity() - brickmap.occupied_brick_count(),
+        headroom_bytes as f32 / 1e6
+    );
+    println!(
+        "  {} occupied bricks, {} free slots, capacity {}",
+        brickmap.occupied_brick_count(),
+        brickmap.free_brick_slot_count(),
+        brickmap.brick_capacity()
+    );
+}
+
+/// The sky radiance the CA injects — the hemisphere constants of `lighting.rs`,
+/// mirrored here for the CPU cross-check's out-of-volume neighbour values.
+fn scenario_sky_radiance() -> [f32; 3] {
+    let uniform = SunSettings::default().lighting_uniform(
+        RenderQuality::default().shading_params(),
+        RenderQuality::default().gi_params(),
+    );
+    [
+        uniform.sky_ambient[0] * uniform.sky_ambient[3],
+        uniform.sky_ambient[1] * uniform.sky_ambient[3],
+        uniform.sky_ambient[2] * uniform.sky_ambient[3],
+    ]
+}
+
+/// Read the light volume's front buffer back to the CPU.
+fn read_back_volume(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    light_volume: &LightVolume,
+) -> Vec<u32> {
+    let size = light_volume.grid().volume_bytes() as u64;
+    let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bench volume readback"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("bench volume readback encoder"),
+    });
+    encoder.copy_buffer_to_buffer(light_volume.front_buffer(), 0, &readback_buffer, 0, size);
+    queue.submit([encoder.finish()]);
+    let slice = readback_buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |result| {
+        result.expect("volume readback map failed")
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("device poll failed");
+    let words = bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range()).to_vec();
+    readback_buffer.unmap();
+    words
 }
 
 // ---- Scenarios ---------------------------------------------------------------
@@ -554,6 +2343,7 @@ fn create_render_target(device: &wgpu::Device, width: u32, height: u32) -> Rende
 fn measure_section(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
     brickmap: &Brickmap,
     section: &Section,
 ) -> TimingTable {
@@ -573,34 +2363,57 @@ fn measure_section(
         target_of_variant.push(target_index);
     }
 
-    let passes: Vec<DdaPass> = section
+    let mut variant_resources: Vec<VariantResources> = section
         .variants
         .iter()
         .zip(&target_of_variant)
         .map(|(variant, target_index)| {
-            DdaPass::new_with_shader_source(
+            VariantResources::new(
                 device,
+                world_bindings,
                 brickmap,
+                variant,
                 &targets[*target_index].view,
-                &variant.shader_source,
             )
         })
         .collect();
 
     let mut table: TimingTable = vec![Vec::new(); section.variants.len()];
+    let measures_light_volume = section
+        .variants
+        .iter()
+        .any(|variant| variant.quality.global_illumination.enabled);
+    let mut cagi_table: TimingTable = vec![Vec::new(); section.variants.len()];
 
     // Variants are INTERLEAVED round-robin within each scenario so that GPU
     // clock/thermal drift over the run hits every variant equally — timing
     // them in sequential blocks showed up to ~10% cross-run drift on
     // identical shaders, the same order as the effects being measured.
     for scenario in &section.scenarios {
-        let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(BATCH_COUNT); passes.len()];
-        for (variant_index, pass) in passes.iter().enumerate() {
+        // E4: every scenario has its own sun, so every light volume is re-flooded
+        // to convergence for it BEFORE the shading pass is timed. Timing a
+        // half-flooded volume would measure a different (mostly empty) memory
+        // access pattern than the app's steady state.
+        for (variant_index, resources) in variant_resources.iter_mut().enumerate() {
+            resources.flood_to_convergence(
+                device,
+                queue,
+                world_bindings,
+                &section.variants[variant_index],
+                scenario,
+            );
+        }
+        let mut samples: Vec<Vec<f32>> =
+            vec![Vec::with_capacity(BATCH_COUNT); variant_resources.len()];
+        let mut cagi_samples: Vec<Vec<f32>> =
+            vec![Vec::with_capacity(BATCH_COUNT); variant_resources.len()];
+        for (variant_index, resources) in variant_resources.iter().enumerate() {
             for _ in 0..WARMUP_BATCHES {
                 time_one_batch(
                     device,
                     queue,
-                    pass,
+                    world_bindings,
+                    resources,
                     &section.variants[variant_index],
                     scenario,
                 );
@@ -611,18 +2424,29 @@ fn measure_section(
             // occupies within a round measurably biases its timing (the
             // preceding batch's duration shapes the GPU clock state it
             // inherits), so every variant must sample every slot equally.
-            for offset in 0..passes.len() {
-                let variant_index = (round + offset) % passes.len();
+            for offset in 0..variant_resources.len() {
+                let variant_index = (round + offset) % variant_resources.len();
                 samples[variant_index].push(time_one_batch(
                     device,
                     queue,
-                    &passes[variant_index],
+                    world_bindings,
+                    &variant_resources[variant_index],
                     &section.variants[variant_index],
                     scenario,
                 ));
+                if measures_light_volume {
+                    cagi_samples[variant_index].push(time_one_light_volume_frame(
+                        device,
+                        queue,
+                        world_bindings,
+                        &mut variant_resources[variant_index],
+                        &section.variants[variant_index],
+                        scenario,
+                    ));
+                }
             }
         }
-        for variant_index in 0..passes.len() {
+        for variant_index in 0..variant_resources.len() {
             let (median_milliseconds, p95_milliseconds) = summarize(&mut samples[variant_index]);
             println!(
                 "{:<24} {:<28} median {:>7.3} ms   p95 {:>7.3} ms",
@@ -632,6 +2456,9 @@ fn measure_section(
                 p95_milliseconds
             );
             table[variant_index].push((median_milliseconds, p95_milliseconds));
+            if measures_light_volume {
+                cagi_table[variant_index].push(summarize(&mut cagi_samples[variant_index]));
+            }
         }
     }
 
@@ -640,21 +2467,112 @@ fn measure_section(
         .iter()
         .filter(|scenario| scenario.capture_image)
     {
-        let scenario_images: Vec<Vec<u8>> = passes
-            .iter()
+        let scenario_images: Vec<Vec<u8>> = variant_resources
+            .iter_mut()
             .zip(&section.variants)
             .zip(&target_of_variant)
-            .map(|((pass, variant), target_index)| {
-                // One un-timed dispatch so the readback sees THIS variant's frame.
+            .map(|((resources, variant), target_index)| {
+                // Re-flood for THIS scenario's sun (the timing loop left the last
+                // scenario's flood in place), then one un-timed dispatch so the
+                // readback sees this variant's frame.
+                resources.flood_to_convergence(device, queue, world_bindings, variant, scenario);
                 let target = &targets[*target_index];
-                render_once(device, queue, pass, variant, scenario);
+                render_once(device, queue, world_bindings, resources, variant, scenario);
                 read_back_image(device, queue, target)
             })
             .collect();
         write_scenario_pngs(section, scenario, &scenario_images);
         compare_scenario_images(section, scenario, &scenario_images);
     }
+
+    if measures_light_volume {
+        print_light_volume_table(section, &cagi_table);
+    }
     table
+}
+
+/// Everything one variant needs on the GPU: the E4 light volume it samples, the
+/// CA pass that floods it, and the shading pass itself.
+struct VariantResources {
+    light_volume: LightVolume,
+    cagi_pass: CagiPass,
+    dda_pass: DdaPass,
+}
+
+impl VariantResources {
+    fn new(
+        device: &wgpu::Device,
+        world_bindings: &WorldBindings,
+        brickmap: &Brickmap,
+        variant: &Variant,
+        output_view: &wgpu::TextureView,
+    ) -> VariantResources {
+        let light_volume = LightVolume::new(device, brickmap, &variant.quality.global_illumination);
+        VariantResources {
+            cagi_pass: CagiPass::new_with_shader_source(
+                device,
+                world_bindings,
+                &light_volume,
+                &variant.cagi_shader_source,
+            ),
+            dda_pass: DdaPass::new_with_shader_source(
+                device,
+                world_bindings,
+                &light_volume,
+                output_view,
+                &variant.shader_source,
+            ),
+            light_volume,
+        }
+    }
+
+    /// Throw the volume away and flood it to convergence for `scenario`'s sun.
+    /// [`CONVERGENCE_ITERATIONS`] is well past the point where the island's image
+    /// stops changing (measured in the E4 convergence table).
+    fn flood_to_convergence(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world_bindings: &WorldBindings,
+        variant: &Variant,
+        scenario: &Scenario,
+    ) {
+        if !variant.quality.global_illumination.enabled {
+            return;
+        }
+        self.light_volume.mark_dirty();
+        self.run_iterations(
+            device,
+            queue,
+            world_bindings,
+            &scenario.lighting_uniform(&variant.quality),
+            CONVERGENCE_ITERATIONS,
+        );
+    }
+
+    /// Encode `iterations` CA steps in one submit and block until they finish.
+    fn run_iterations(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        world_bindings: &WorldBindings,
+        lighting_uniform: &LightingUniform,
+        iterations: u32,
+    ) {
+        world_bindings.write_lighting(queue, lighting_uniform);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bench cagi flood"),
+        });
+        self.cagi_pass
+            .encode(&mut encoder, &mut self.light_volume, iterations, None);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("device poll failed");
+    }
 }
 
 // ---- GPU plumbing ------------------------------------------------------------
@@ -667,11 +2585,9 @@ fn create_headless_device() -> (wgpu::Device, wgpu::Queue) {
         force_fallback_adapter: false,
     }))
     .expect("no GPU adapter — the benchmark needs real hardware");
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("bench_dda device"),
-        ..Default::default()
-    }))
-    .expect("device creation failed");
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&voxel_rt::gpu::device_descriptor(&adapter)))
+            .expect("device creation failed");
     // Surface validation/device errors — without a handler wgpu only routes
     // them through `log`, and a silent device loss shows up here as a
     // baffling "no timestamps" panic instead of the real cause.
@@ -694,26 +2610,67 @@ fn create_headless_device() -> (wgpu::Device, wgpu::Queue) {
 fn time_one_batch(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    pass: &DdaPass,
+    world_bindings: &WorldBindings,
+    resources: &VariantResources,
     variant: &Variant,
     scenario: &Scenario,
 ) -> f32 {
     let (width, height) = variant.resolution();
     let camera_uniform = scenario.camera_uniform((width, height));
-    let lighting_uniform = scenario.lighting_uniform(&variant.quality);
+    // The lighting uniform is shared by both passes now, and variants differ in
+    // their RUNTIME knobs (AO strength, fade ramp, GI strength), so it is written
+    // per batch — one batch is one (variant, scenario).
+    world_bindings.write_lighting(queue, &scenario.lighting_uniform(&variant.quality));
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("bench batch"),
     });
     for _ in 0..DISPATCHES_PER_BATCH {
-        pass.encode(
+        resources.dda_pass.encode(
             queue,
             &mut encoder,
             &camera_uniform,
-            &lighting_uniform,
+            resources.light_volume.front(),
             width,
             height,
             None,
         );
+    }
+    let started = Instant::now();
+    queue.submit([encoder.finish()]);
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("device poll failed");
+    started.elapsed().as_secs_f32() * 1000.0 / DISPATCHES_PER_BATCH as f32
+}
+
+/// One FRAME's worth of CA iterations (`iterations_per_frame`), timed the same
+/// wall-clock way — this is what the light volume adds to a frame at steady state,
+/// on top of the shading pass's own table.
+///
+/// [`DISPATCHES_PER_BATCH`] frames go into one command buffer so the measurement
+/// amortizes submit overhead exactly like the shading table does. The volume is
+/// already converged, so these iterations reproduce the app's steady state (pinned
+/// sun sources short-circuit, nothing re-traces).
+fn time_one_light_volume_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
+    resources: &mut VariantResources,
+    variant: &Variant,
+    scenario: &Scenario,
+) -> f32 {
+    world_bindings.write_lighting(queue, &scenario.lighting_uniform(&variant.quality));
+    let iterations = variant.quality.gi_iterations_per_frame();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("bench cagi batch"),
+    });
+    for _ in 0..DISPATCHES_PER_BATCH {
+        resources
+            .cagi_pass
+            .encode(&mut encoder, &mut resources.light_volume, iterations, None);
     }
     let started = Instant::now();
     queue.submit([encoder.finish()]);
@@ -731,19 +2688,21 @@ fn time_one_batch(
 fn render_once(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    pass: &DdaPass,
+    world_bindings: &WorldBindings,
+    resources: &VariantResources,
     variant: &Variant,
     scenario: &Scenario,
 ) {
+    world_bindings.write_lighting(queue, &scenario.lighting_uniform(&variant.quality));
     let (width, height) = variant.resolution();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("bench verify frame"),
     });
-    pass.encode(
+    resources.dda_pass.encode(
         queue,
         &mut encoder,
         &scenario.camera_uniform((width, height)),
-        &scenario.lighting_uniform(&variant.quality),
+        resources.light_volume.front(),
         width,
         height,
         None,
@@ -871,8 +2830,26 @@ fn variant_slug(variant: &Variant) -> String {
         .collect()
 }
 
+/// The E4 compromise-checklist crops, in 2560x1440 render pixels. Each targets one
+/// symptom from the dossier's "known compromises" list; the findings are recorded
+/// in the bench doc's E4 section.
+const CAGI_CROP_REGIONS: &[(&str, u32, u32, u32, u32)] = &[
+    // Ground straight ahead of the camera: over-diffusion / glowing surfaces and
+    // the volume's cell banding show here first.
+    ("near-ground", 1024, 1024, 320, 180),
+    // Mid-distance terrain + tree bases: anisotropy (axis-aligned fronts) and the
+    // column-max sky test's tree-column artifact.
+    ("mid-terrain", 1120, 640, 320, 180),
+    // Canopy undersides and shadowed slopes: thin-geometry leaks and how far light
+    // travels into cover (long-distance transport).
+    ("canopy-shade", 1600, 480, 320, 180),
+];
+
+/// Zoom of the crops — nearest neighbour, so nothing is smoothed away.
+const CROP_ZOOM: u32 = 3;
+
 /// Write one scenario's per-variant renders to `target/bench_dda/` as
-/// `scenario_{letter}_{variant}.png`.
+/// `scenario_{letter}_{variant}.png`, plus this section's zoomed crops.
 fn write_scenario_pngs(section: &Section, scenario: &Scenario, images: &[Vec<u8>]) {
     let output_directory = std::path::Path::new("target/bench_dda");
     std::fs::create_dir_all(output_directory).expect("failed to create target/bench_dda");
@@ -881,6 +2858,21 @@ fn write_scenario_pngs(section: &Section, scenario: &Scenario, images: &[Vec<u8>
         let path = output_directory.join(format!("scenario_{slug}_{}.png", variant_slug(variant)));
         let (width, height) = variant.resolution();
         write_png(&path, image, width, height);
+        for (crop_name, crop_x, crop_y, crop_width, crop_height) in section.crop_regions {
+            if crop_x + crop_width > width || crop_y + crop_height > height {
+                continue; // a lower-resolution tier cannot hold this crop
+            }
+            write_crop_png(
+                &output_directory.join(format!(
+                    "crop_{crop_name}_{slug}_{}.png",
+                    variant_slug(variant)
+                )),
+                image,
+                width,
+                (*crop_x, *crop_y, *crop_width, *crop_height),
+                CROP_ZOOM,
+            );
+        }
     }
     println!(
         "  PNGs for {} written to {}",
@@ -919,20 +2911,8 @@ fn compare_scenario_images(section: &Section, scenario: &Scenario, images: &[Vec
             );
             continue;
         }
-        let image = &images[variant_index];
-        let mut differing_pixels = 0_u64;
-        let mut max_channel_delta = 0_u8;
-        for (pixel_bytes, reference_bytes) in
-            image.chunks_exact(4).zip(reference_image.chunks_exact(4))
-        {
-            if pixel_bytes != reference_bytes {
-                differing_pixels += 1;
-                for channel in 0..4 {
-                    let delta = pixel_bytes[channel].abs_diff(reference_bytes[channel]);
-                    max_channel_delta = max_channel_delta.max(delta);
-                }
-            }
-        }
+        let (differing_pixels, max_channel_delta) =
+            compare_images(&images[variant_index], reference_image);
         let (width, height) = reference_resolution;
         let total_pixels = u64::from(width) * u64::from(height);
         println!(
@@ -942,6 +2922,90 @@ fn compare_scenario_images(section: &Section, scenario: &Scenario, images: &[Vec
             differing_pixels as f64 / total_pixels as f64 * 100.0,
         );
     }
+}
+
+/// Differing pixels and the largest channel delta between two RGBA images of the
+/// same size.
+fn compare_images(image: &[u8], reference_image: &[u8]) -> (u64, u8) {
+    let mut differing_pixels = 0_u64;
+    let mut max_channel_delta = 0_u8;
+    for (pixel_bytes, reference_bytes) in image.chunks_exact(4).zip(reference_image.chunks_exact(4))
+    {
+        if pixel_bytes != reference_bytes {
+            differing_pixels += 1;
+            for channel in 0..4 {
+                let delta = pixel_bytes[channel].abs_diff(reference_bytes[channel]);
+                max_channel_delta = max_channel_delta.max(delta);
+            }
+        }
+    }
+    (differing_pixels, max_channel_delta)
+}
+
+/// The E4 second table: what the light volume's own pass costs per FRAME
+/// (`iterations_per_frame` CA steps over a converged volume), next to the shading
+/// pass's numbers. Printed only for sections whose variants have CAGI on — the
+/// two passes are timed independently (isolation rule), and the frame total is
+/// their sum.
+fn print_light_volume_table(section: &Section, cagi_table: &[Vec<(f32, f32)>]) {
+    println!();
+    println!(
+        "CAGI pass, per-FRAME median / p95 ms (iterations_per_frame CA steps over a \
+         converged volume):"
+    );
+    print!("{:<28}", "scenario");
+    for variant in &section.variants {
+        print!(" | {:>23}", variant.label);
+    }
+    println!();
+    for (scenario_index, scenario) in section.scenarios.iter().enumerate() {
+        print!("{:<28}", scenario.label);
+        for variant_row in cagi_table {
+            match variant_row.get(scenario_index) {
+                Some((median, p95)) => print!(" | {median:>10.3} / {p95:>10.3}"),
+                None => print!(" | {:>23}", "-"),
+            }
+        }
+        println!();
+    }
+    print!("{:<28}", "cell voxels x iterations");
+    for variant in &section.variants {
+        let configuration = if variant.quality.global_illumination.enabled {
+            format!(
+                "{} vox x {} it",
+                variant.quality.global_illumination.cell_voxels,
+                variant.quality.gi_iterations_per_frame()
+            )
+        } else {
+            "off".to_string()
+        };
+        print!(" | {configuration:>23}");
+    }
+    println!();
+    println!();
+}
+
+/// Write a zoomed crop of an image — the compromise-checklist evidence. Nearest
+/// neighbour on purpose: the artifacts being judged (axis-aligned fronts, cell
+/// banding, leaks) must not be smoothed by the zoom.
+fn write_crop_png(
+    path: &std::path::Path,
+    rgba_bytes: &[u8],
+    image_width: u32,
+    crop: (u32, u32, u32, u32),
+    zoom: u32,
+) {
+    let (crop_x, crop_y, crop_width, crop_height) = crop;
+    let mut pixels = Vec::with_capacity((crop_width * zoom * crop_height * zoom * 4) as usize);
+    for row in 0..crop_height * zoom {
+        for column in 0..crop_width * zoom {
+            let source_x = crop_x + column / zoom;
+            let source_y = crop_y + row / zoom;
+            let offset = ((source_y * image_width + source_x) * 4) as usize;
+            pixels.extend_from_slice(&rgba_bytes[offset..offset + 4]);
+        }
+    }
+    write_png(path, &pixels, crop_width * zoom, crop_height * zoom);
 }
 
 fn write_png(path: &std::path::Path, rgba_bytes: &[u8], width: u32, height: u32) {

@@ -1,22 +1,32 @@
-//! Frame composition: owns the shared intermediate storage texture and the
-//! pass list, records one frame into a command encoder. Passes stay
-//! self-contained (see `passes/`); this module only wires them together.
-//! Camera and lighting math stay outside — the caller hands in a finished
-//! [`CameraUniform`] and [`LightingUniform`] each frame.
+//! Frame composition: owns the shared world bindings, the CAGI light volume, the
+//! intermediate storage texture and the pass list, and records one frame into a
+//! command encoder. Passes stay self-contained (see `passes/`); this module only
+//! wires them together. Camera and lighting math stay outside — the caller hands
+//! in a finished [`CameraUniform`] and [`LightingUniform`] each frame.
 //!
 //! Render scale: the storage texture is created at `surface size *
 //! render_scale` (the overlay's perf lever, default 1.0). The DDA pass then
 //! traces proportionally fewer rays and the blit upscales with linear
 //! filtering. [`Renderer::resolution`] always reports the STORAGE size —
 //! that is what the camera's ray basis and the dispatch must match.
+//!
+//! E4 pass order: the CAGI cellular automaton runs BEFORE the shading pass, and
+//! in its own command encoder ([`Renderer::encode_light_volume`]) — Metal
+//! resolves pass-boundary timestamps to zero once a command buffer holds more
+//! than one compute pass, so the two compute passes must be submitted as two
+//! command buffers for the overlay's per-pass readout to survive.
 
 use crate::brickmap::Brickmap;
+use crate::cagi::{CagiGrid, CagiSettings};
 use crate::camera::CameraUniform;
-use crate::frame_timing::{GpuFrameTimers, SPAN_DDA, SPAN_POST};
+use crate::frame_timing::{GpuFrameTimers, SPAN_CAGI, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
 use crate::passes::blit::BlitPass;
+use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
 use crate::passes::dda::DdaPass;
+use crate::passes::world_bindings::WorldBindings;
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
+use crate::world_edit::WorldDelta;
 
 /// Format of the compute-written intermediate texture. Srgb formats cannot be
 /// storage textures, so the DDA pass writes display-ready (sRGB-encoded)
@@ -31,6 +41,9 @@ pub struct Renderer {
     surface_width: u32,
     surface_height: u32,
     render_scale: f32,
+    world_bindings: WorldBindings,
+    light_volume: LightVolume,
+    cagi_pass: CagiPass,
     dda_pass: DdaPass,
     blit_pass: BlitPass,
 }
@@ -42,11 +55,15 @@ impl Renderer {
         width: u32,
         height: u32,
         brickmap: &Brickmap,
+        global_illumination: &CagiSettings,
     ) -> Self {
         let render_scale = MAX_RENDER_SCALE;
         let (storage_view, storage_width, storage_height) =
             create_storage_texture(device, width, height, render_scale);
-        let dda_pass = DdaPass::new(device, brickmap, &storage_view);
+        let world_bindings = WorldBindings::new(device, brickmap);
+        let light_volume = LightVolume::new(device, brickmap, global_illumination);
+        let cagi_pass = CagiPass::new(device, &world_bindings, &light_volume);
+        let dda_pass = DdaPass::new(device, &world_bindings, &light_volume, &storage_view);
         let blit_pass = BlitPass::new(device, surface_format, &storage_view);
 
         Self {
@@ -56,6 +73,9 @@ impl Renderer {
             surface_width: width,
             surface_height: height,
             render_scale,
+            world_bindings,
+            light_volume,
+            cagi_pass,
             dda_pass,
             blit_pass,
         }
@@ -72,6 +92,12 @@ impl Renderer {
         self.render_scale
     }
 
+    /// The CAGI light volume's grid — the GI memory footprint, reported at
+    /// startup and after a resolution change.
+    pub fn light_volume_grid(&self) -> CagiGrid {
+        self.light_volume.grid()
+    }
+
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.surface_width = width;
         self.surface_height = height;
@@ -85,15 +111,115 @@ impl Renderer {
         self.dda_pass.set_shader_source(device, shader_source);
     }
 
-    /// Precompile the DDA pipeline permutations the quality presets need, so
-    /// switching preset in-app never compiles a shader mid-frame. Returns the
-    /// number of distinct pipelines the cache holds.
-    pub fn prewarm_dda_pipelines(
+    /// The same for the CAGI pass (a propagation lever or the master switch
+    /// changed).
+    pub fn set_cagi_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
+        self.cagi_pass.set_shader_source(device, shader_source);
+    }
+
+    /// Reallocate the light volume for `global_illumination` (its resolution or
+    /// the master lever moved) and rebind both consumers. The new volume starts
+    /// dirty, so the next frame floods it from scratch.
+    ///
+    /// `attribute_source` is E2's world-thread seam: `Deferred` allocates the
+    /// static attributes zeroed and expects
+    /// [`Renderer::write_light_volume_attributes`] once the world thread has built
+    /// them, which is how a GI resolution switch stops being a ~50 ms frame hitch.
+    pub fn rebuild_light_volume(
         &mut self,
         device: &wgpu::Device,
-        shader_sources: &[String],
-    ) -> usize {
-        self.dda_pass.prewarm_pipelines(device, shader_sources)
+        brickmap: &Brickmap,
+        global_illumination: &CagiSettings,
+        attribute_source: AttributeSource,
+    ) {
+        self.light_volume = LightVolume::new_with_attributes(
+            device,
+            brickmap,
+            global_illumination,
+            attribute_source,
+        );
+        self.cagi_pass
+            .rebind(device, &self.world_bindings, &self.light_volume);
+        self.dda_pass.rebind(
+            device,
+            &self.world_bindings,
+            &self.light_volume,
+            &self.storage_view,
+        );
+    }
+
+    /// Install a CAGI attribute set built off-frame. Returns false when it was
+    /// built for a grid the renderer no longer holds (the lever moved again).
+    pub fn write_light_volume_attributes(
+        &mut self,
+        queue: &wgpu::Queue,
+        grid: &CagiGrid,
+        attributes: &[u32],
+    ) -> bool {
+        self.light_volume
+            .write_all_attributes(queue, grid, attributes)
+    }
+
+    /// Apply one edit's GPU delta (E2): the touched brickmap words, the touched
+    /// CAGI cell attributes and, if it moved, the metadata uniform. Nothing here
+    /// reads the brickmap — the payloads are owned, which is what lets the
+    /// authority live on another thread.
+    ///
+    /// Returns whether the delta was applied; `false` means the level-1 arrays
+    /// outgrew their headroom and the caller must call
+    /// [`Renderer::reupload_world`] with the brickmap instead.
+    pub fn apply_world_delta(&mut self, queue: &wgpu::Queue, delta: &WorldDelta) -> bool {
+        // The light volume is not part of the world buffers, so its cells are
+        // patched either way — a re-upload would not cover them.
+        self.light_volume
+            .write_cell_attributes(queue, delta.light_grid, &delta.light_cells);
+        if delta.arrays_grew {
+            return false;
+        }
+        for write in &delta.writes {
+            self.world_bindings.apply_array_write(queue, write);
+        }
+        if let Some(metadata) = &delta.metadata {
+            self.world_bindings.write_metadata(queue, metadata);
+        }
+        true
+    }
+
+    /// Recreate the world's GPU buffers from `brickmap` and rebind both passes —
+    /// the rare path where an edit outgrew the brick headroom. Costs a full ~41 MB
+    /// upload, which is why the headroom exists.
+    pub fn reupload_world(&mut self, device: &wgpu::Device, brickmap: &Brickmap) {
+        self.world_bindings = WorldBindings::new(device, brickmap);
+        self.cagi_pass
+            .rebind(device, &self.world_bindings, &self.light_volume);
+        self.dda_pass.rebind(
+            device,
+            &self.world_bindings,
+            &self.light_volume,
+            &self.storage_view,
+        );
+    }
+
+    /// Throw the light volume's contents away and flood again from scratch — what
+    /// a sun move (or any injection/transport change) requires.
+    pub fn mark_light_volume_dirty(&mut self) {
+        self.light_volume.mark_dirty();
+    }
+
+    /// Precompile the pipeline permutations the quality presets need, so
+    /// switching preset in-app never compiles a shader mid-frame. Returns how many
+    /// distinct pipelines each cache holds (shading pass, CAGI pass).
+    pub fn prewarm_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        dda_shader_sources: &[String],
+        cagi_shader_sources: &[String],
+    ) -> (usize, usize) {
+        (
+            self.dda_pass.prewarm_pipelines(device, dda_shader_sources),
+            self.cagi_pass
+                .prewarm_pipelines(device, cagi_shader_sources),
+        )
     }
 
     /// Apply the overlay's render-scale lever (clamped to the slider range).
@@ -117,11 +243,37 @@ impl Renderer {
         self.storage_view = storage_view;
         self.storage_width = storage_width;
         self.storage_height = storage_height;
-        self.dda_pass.rebind(device, &self.storage_view);
+        self.dda_pass.rebind(
+            device,
+            &self.world_bindings,
+            &self.light_volume,
+            &self.storage_view,
+        );
         self.blit_pass.rebind(
             device,
             &self.storage_view,
             self.render_scale < MAX_RENDER_SCALE,
+        );
+    }
+
+    /// Record this frame's CAGI iterations and upload the lighting uniform BOTH
+    /// passes read (once per frame, so the CA cannot inject a different sun than
+    /// the shading pass shades with). Must go into a separate command buffer from
+    /// [`Renderer::encode_frame`] — see the module docs on Metal's timestamps.
+    pub fn encode_light_volume(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        lighting_uniform: &LightingUniform,
+        iterations: u32,
+        frame_timers: Option<&GpuFrameTimers>,
+    ) {
+        self.world_bindings.write_lighting(queue, lighting_uniform);
+        self.cagi_pass.encode(
+            encoder,
+            &mut self.light_volume,
+            iterations,
+            frame_timers.map(|timers| timers.compute_span_writes(SPAN_CAGI)),
         );
     }
 
@@ -134,7 +286,6 @@ impl Renderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         camera_uniform: &CameraUniform,
-        lighting_uniform: &LightingUniform,
         target_view: &wgpu::TextureView,
         frame_timers: Option<&GpuFrameTimers>,
     ) {
@@ -142,7 +293,7 @@ impl Renderer {
             queue,
             encoder,
             camera_uniform,
-            lighting_uniform,
+            self.light_volume.front(),
             self.storage_width,
             self.storage_height,
             frame_timers.map(|timers| timers.compute_span_writes(SPAN_DDA)),

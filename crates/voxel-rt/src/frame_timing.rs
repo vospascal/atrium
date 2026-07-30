@@ -2,10 +2,13 @@
 //! for every render stage (the frame counter alone cannot tell which pass
 //! regressed). Pure wgpu, no winit/egui knowledge (plan architecture rule).
 //!
-//! Two measured spans per frame:
+//! Three measured spans per frame:
 //!
 //! - [`SPAN_DDA`] — the DDA compute pass (begin + end written by the pass
 //!   itself via `timestamp_writes`).
+//! - [`SPAN_CAGI`] — the E4 CAGI compute pass, i.e. all of this frame's CA
+//!   iterations. Always opened, even at zero iterations, so the readout reads
+//!   ~0.00 ms instead of going stale when the lever is off.
 //! - [`SPAN_POST`] — blit begin through overlay end (the span opens on the
 //!   blit render pass and closes on the egui overlay pass).
 //!
@@ -25,10 +28,15 @@ use std::sync::Arc;
 
 /// Span index: the DDA compute pass.
 pub const SPAN_DDA: usize = 0;
-/// Span index: blit + egui overlay (everything after the compute pass).
-pub const SPAN_POST: usize = 1;
+/// Span index: the E4 CAGI compute pass (all of the frame's CA iterations — they
+/// share one compute pass, and that pass is submitted in its OWN command buffer
+/// because Metal zeroes pass-boundary counters once a command buffer holds more
+/// than one compute pass).
+pub const SPAN_CAGI: usize = 1;
+/// Span index: blit + egui overlay (everything after the compute passes).
+pub const SPAN_POST: usize = 2;
 /// Number of measured spans (two timestamps each).
-pub const SPAN_COUNT: usize = 2;
+pub const SPAN_COUNT: usize = 3;
 
 const TIMESTAMP_COUNT: u32 = (SPAN_COUNT * 2) as u32;
 /// In-flight readback ring size: enough for a couple of frames of latency
@@ -56,6 +64,10 @@ pub struct FrameTimings {
 impl FrameTimings {
     pub fn dda_milliseconds(&self) -> Option<f32> {
         self.span_milliseconds[SPAN_DDA]
+    }
+
+    pub fn cagi_milliseconds(&self) -> Option<f32> {
+        self.span_milliseconds[SPAN_CAGI]
     }
 
     pub fn post_milliseconds(&self) -> Option<f32> {

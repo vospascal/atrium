@@ -29,9 +29,11 @@
 //! place a shader source is assembled.
 
 use crate::ao::{AoDirectionMode, AoMode, AoSettings};
-use crate::lighting::ShadingParams;
+use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
+use crate::lighting::{GiParams, ShadingParams};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
+use crate::world_edit::{ClearanceUpdateMode, WorldEditSettings};
 
 /// Render-scale bounds (the resolution lever's range, also enforced by
 /// `crate::render::Renderer::set_render_scale`).
@@ -70,9 +72,27 @@ pub enum LeverId {
     AoFadeStart,
     AoFadeEnd,
     AoSunAwareRayBudget,
+    AoMissRadiance,
     // Sun shadows (E1b).
     ShadowMode,
     ShadowPenumbraScale,
+    // CAGI global illumination (E4).
+    GiEnabled,
+    GiResolution,
+    GiRule,
+    GiSkyTest,
+    GiSunCache,
+    GiSampleMode,
+    GiIterationsPerFrame,
+    GiStrength,
+    GiAmbientFloor,
+    GiSunBounce,
+    // World edits (E2) — all runtime; an edit changes buffer contents, never a
+    // shader.
+    EditWorldThread,
+    EditClearanceUpdate,
+    EditClearanceRadius,
+    EditGiReflood,
     // Resolution (S0).
     RenderScale,
 }
@@ -83,6 +103,10 @@ pub enum LeverSubsystem {
     Traversal,
     AmbientOcclusion,
     Shadows,
+    /// E4 — the CAGI light volume.
+    GlobalIllumination,
+    /// E2 — world authority, threading and the edit pipeline.
+    WorldEdit,
     Resolution,
 }
 
@@ -92,15 +116,19 @@ impl LeverSubsystem {
             LeverSubsystem::Traversal => "Traversal",
             LeverSubsystem::AmbientOcclusion => "AO",
             LeverSubsystem::Shadows => "Shadows",
+            LeverSubsystem::GlobalIllumination => "GI (CAGI)",
+            LeverSubsystem::WorldEdit => "World edits",
             LeverSubsystem::Resolution => "Resolution",
         }
     }
 
     /// Panel order.
-    pub const ALL: [LeverSubsystem; 4] = [
+    pub const ALL: [LeverSubsystem; 6] = [
         LeverSubsystem::Traversal,
         LeverSubsystem::AmbientOcclusion,
         LeverSubsystem::Shadows,
+        LeverSubsystem::GlobalIllumination,
+        LeverSubsystem::WorldEdit,
         LeverSubsystem::Resolution,
     ];
 }
@@ -229,6 +257,16 @@ pub enum BenchSection {
     RayTracedAo,
     /// Section 3: E1b's cheap-occlusion / soft-shadow shootout.
     CheapOcclusion,
+    /// Section 5: E4's CAGI contenders (propagation rule, resolution, sky test,
+    /// sampling, the sun-source cache). Measured on TWO axes — the CA pass's own
+    /// per-iteration cost and the shading pass's sampling cost — plus the
+    /// convergence and memory tables.
+    Cagi,
+    /// Section 6: E2's edit storm — the authority/threading variants, the
+    /// clearance-update strategies and the CAGI re-flood, judged on per-frame cost
+    /// DISTRIBUTIONS (median / p99 / max) rather than medians, because the whole
+    /// question is hitches.
+    EditStorm,
 }
 
 /// One registry row.
@@ -259,6 +297,7 @@ impl LeverId {
         let traversal = &quality.traversal;
         let ambient_occlusion = &quality.ambient_occlusion;
         let shadows = &quality.shadows;
+        let global_illumination = &quality.global_illumination;
         match self {
             LeverId::ColumnFastForward => LeverValue::Flag(traversal.column_fast_forward),
             LeverId::DescendFastForward => LeverValue::Flag(traversal.descend_fast_forward),
@@ -283,8 +322,31 @@ impl LeverId {
             LeverId::AoSunAwareRayBudget => {
                 LeverValue::Flag(ambient_occlusion.sun_aware_ray_budget)
             }
+            LeverId::AoMissRadiance => LeverValue::Flag(ambient_occlusion.miss_radiance),
             LeverId::ShadowMode => LeverValue::Mode(shadows.mode.shader_value()),
             LeverId::ShadowPenumbraScale => LeverValue::Scalar(shadows.penumbra_scale),
+            LeverId::GiEnabled => LeverValue::Flag(global_illumination.enabled),
+            LeverId::GiResolution => LeverValue::Count(global_illumination.cell_voxels),
+            LeverId::GiRule => LeverValue::Mode(global_illumination.rule.shader_value()),
+            LeverId::GiSkyTest => LeverValue::Mode(global_illumination.sky_test.shader_value()),
+            LeverId::GiSunCache => LeverValue::Flag(global_illumination.sun_cache),
+            LeverId::GiSampleMode => {
+                LeverValue::Mode(global_illumination.sample_mode.shader_value())
+            }
+            LeverId::GiIterationsPerFrame => {
+                LeverValue::Count(global_illumination.iterations_per_frame)
+            }
+            LeverId::GiStrength => LeverValue::Scalar(global_illumination.strength),
+            LeverId::GiAmbientFloor => LeverValue::Scalar(global_illumination.ambient_floor),
+            LeverId::GiSunBounce => LeverValue::Scalar(global_illumination.sun_bounce),
+            LeverId::EditWorldThread => LeverValue::Flag(quality.world_edit.world_thread),
+            LeverId::EditClearanceUpdate => {
+                LeverValue::Mode(quality.world_edit.clearance_update.shader_value())
+            }
+            LeverId::EditClearanceRadius => {
+                LeverValue::Count(quality.world_edit.clearance_radius_cells)
+            }
+            LeverId::EditGiReflood => LeverValue::Flag(quality.world_edit.gi_reflood),
             LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
         }
     }
@@ -296,6 +358,7 @@ impl LeverId {
         let traversal = &mut quality.traversal;
         let ambient_occlusion = &mut quality.ambient_occlusion;
         let shadows = &mut quality.shadows;
+        let global_illumination = &mut quality.global_illumination;
         match self {
             LeverId::ColumnFastForward => traversal.column_fast_forward = value.expect_flag(self),
             LeverId::DescendFastForward => traversal.descend_fast_forward = value.expect_flag(self),
@@ -329,10 +392,48 @@ impl LeverId {
             LeverId::AoSunAwareRayBudget => {
                 ambient_occlusion.sun_aware_ray_budget = value.expect_flag(self);
             }
+            LeverId::AoMissRadiance => {
+                ambient_occlusion.miss_radiance = value.expect_flag(self);
+            }
             LeverId::ShadowMode => {
                 shadows.mode = ShadowMode::from_shader_value(value.expect_mode(self));
             }
             LeverId::ShadowPenumbraScale => shadows.penumbra_scale = value.expect_scalar(self),
+            LeverId::GiEnabled => global_illumination.enabled = value.expect_flag(self),
+            LeverId::GiResolution => {
+                global_illumination.cell_voxels = value.expect_count(self);
+            }
+            LeverId::GiRule => {
+                global_illumination.rule = CagiRule::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::GiSkyTest => {
+                global_illumination.sky_test =
+                    CagiSkyTest::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::GiSunCache => global_illumination.sun_cache = value.expect_flag(self),
+            LeverId::GiSampleMode => {
+                global_illumination.sample_mode =
+                    CagiSampleMode::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::GiIterationsPerFrame => {
+                global_illumination.iterations_per_frame = value.expect_count(self);
+            }
+            LeverId::GiStrength => global_illumination.strength = value.expect_scalar(self),
+            LeverId::GiAmbientFloor => {
+                global_illumination.ambient_floor = value.expect_scalar(self);
+            }
+            LeverId::GiSunBounce => global_illumination.sun_bounce = value.expect_scalar(self),
+            LeverId::EditWorldThread => {
+                quality.world_edit.world_thread = value.expect_flag(self);
+            }
+            LeverId::EditClearanceUpdate => {
+                quality.world_edit.clearance_update =
+                    ClearanceUpdateMode::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::EditClearanceRadius => {
+                quality.world_edit.clearance_radius_cells = value.expect_count(self);
+            }
+            LeverId::EditGiReflood => quality.world_edit.gi_reflood = value.expect_flag(self),
             LeverId::RenderScale => {
                 quality.render_scale = value
                     .expect_scalar(self)
@@ -781,6 +882,40 @@ pub const REGISTRY: &[Lever] = &[
             overrides: &[(LeverId::AoSunAwareRayBudget, LeverValue::Flag(true))],
         }],
     },
+    Lever {
+        id: LeverId::AoMissRadiance,
+        subsystem: LeverSubsystem::AmbientOcclusion,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("AO_MISS_RADIANCE"),
+        label: "directional miss radiance",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "WINNER on the Beautiful tier, gate passed 2026-07-30 (VGI I3D'11 \
+                  SS5.1). Shipped there and only there — it needs rays, and Beautiful \
+                  is the only tier that traces any. An escaping occlusion ray samples the \
+                  hemisphere term in its OWN direction, so ambient becomes a \
+                  visibility-weighted environment integral instead of a flat constant \
+                  times a scalar — one lobe mix per missed ray, no new traversal. \
+                  COST: +0.18-0.41% vs ao-2ray-d16 on the two load-stable scenarios \
+                  across two runs, inside the +-2% noise band. COVERAGE (C): 72.5% of \
+                  frame vs ao-off at max delta 116, against the baseline's 34.1% at \
+                  55 — it reaches the medium-scale band analytic corner AO gives up. \
+                  CATCH: it makes the ambient term itself Monte Carlo, so the 2-ray \
+                  crosshatch now lands in ambient COLOUR and is visible as grain in \
+                  dark foreground; wants 4 rays (+6.8 ms, ao-4ray-d16) or B12's \
+                  bilateral filter. Needs AO_MODE = rays. Sampling the raw sky \
+                  function instead was measured and REVERTED (teal shadows, purple \
+                  rock) — see the shader block.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::RayTracedAo,
+            label: "ao-2ray-missradiance",
+            overrides: &[
+                (LeverId::AoMode, LeverValue::Mode(0)),
+                (LeverId::AoMissRadiance, LeverValue::Flag(true)),
+            ],
+        }],
+    },
     // ---- Shadows (E1b) ----
     Lever {
         id: LeverId::ShadowMode,
@@ -876,6 +1011,423 @@ pub const REGISTRY: &[Lever] = &[
             },
         ],
     },
+    // ---- CAGI global illumination (E4) ----
+    Lever {
+        id: LeverId::GiEnabled,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_ENABLED"),
+        label: "CAGI light volume",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "ON since E4, measured cost +0.40-0.51 ms in the shading pass (the \
+                  volume sample) plus 0.92-1.52 ms for the CA pass itself at the \
+                  shipped 2 iterations. Off folds the whole experiment away: the \
+                  volume shrinks to a 12-byte placeholder and the shading pass is \
+                  byte-identical to E1c (4.71/6.52/4.36/4.91 ms, the recorded \
+                  baseline within 0.5%, pixel gate 19/0).",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-off",
+            overrides: &[(LeverId::GiEnabled, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiResolution,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "cell size (voxels)",
+        default_value: LeverValue::Count(4),
+        range: LeverRange::Rungs(&[2, 4, 8]),
+        verdict: "4 voxels (0.5 m cells) is the shipped knee: 2.75 M cells, 33 MB \
+                  total, 0.92-1.52 ms per frame at 2 iterations. 8 voxels is the Quest \
+                  tier — 4.3 MB and 0.26-0.42 ms (5.8x cheaper) for a visibly coarser \
+                  look (46% of the frame differs, mean 4.2/255). 2 voxels is DEAD: \
+                  258 MB and 5.8-7.9 ms per frame, 6x the cost for a 7.8/255 mean \
+                  change. Runtime: the grid dimensions ride in the volume uniform, so \
+                  changing it reallocates buffers but compiles no shader.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::Cagi,
+                label: "gi-cells8",
+                overrides: &[(LeverId::GiResolution, LeverValue::Count(8))],
+            },
+            BenchPoint {
+                section: BenchSection::Cagi,
+                label: "gi-cells2",
+                overrides: &[(LeverId::GiResolution, LeverValue::Count(2))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::GiRule,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_RULE"),
+        label: "propagation rule",
+        default_value: LeverValue::Mode(1),
+        range: LeverRange::Discrete,
+        verdict: "The E4 A/B. Cost: diffusion-6 and max-decrement are the SAME price \
+                  (0.92-1.53 ms per frame — both read 6 neighbours and the pass is \
+                  bandwidth-bound), 26-neighbour is 2.1-2.7x. Look: diffusion vs \
+                  max-decrement differs on 66% of the frame (mean 8.8/255), diffusion-6 \
+                  vs -26 on 26% at mean 0.5/255. So the rule is a free look choice and \
+                  the isotropy upgrade is not worth 2.7x.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "max-decrement",
+                verdict: "Minecraft-style flood, L = max(neighbours) - attenuation. Same measured \
+                          cost as diffusion (0.92-1.53 ms — the pass is bandwidth-bound, the \
+                          multiply is free) and its reach is exactly 12.8 m by construction, but \
+                          it reads visibly FLATTER and brighter in shade (66% of the frame, mean \
+                          8.8/255 vs diffusion) because a straight-line falloff puts many cells \
+                          at the same level, and its iso-surfaces are L1 balls, i.e. octahedra — \
+                          the anisotropy the dossier warns about, which will matter for E5's \
+                          point lights.",
+            },
+            ModeOption {
+                value: 1,
+                label: "diffusion 6",
+                verdict: "The dossier's reconstructed equation, L = sum(6 neighbours) * T / 6, \
+                          in pure u32 — the shipped rule at no extra cost over the flood. Its \
+                          equilibrium is a discrete Laplace solution, so shadowed pockets get a \
+                          smooth gradient instead of a stamped reach, and because a cell's value \
+                          can DECREASE it converges downward after a sun change (the flood can \
+                          too, since it excludes its own previous value).",
+            },
+            ModeOption {
+                value: 2,
+                label: "diffusion 26",
+                verdict: "LOSER on terrain, off: the same diffusion over all 26 neighbours \
+                          (face 4 / edge 2 / corner 1) costs 2.1-2.7x (2.64-3.27 ms per frame) and \
+                          changes the image by a mean 0.5/255 (max 9) — the isotropy fix buys \
+                          nothing here because sky light is everywhere above the terrain and \
+                          transport distances are 1-3 cells, too short for the front's shape to \
+                          show. Keep for E5, where a lantern makes transport distance large.",
+            },
+        ],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::Cagi,
+                label: "gi-max-decrement",
+                overrides: &[(LeverId::GiRule, LeverValue::Mode(0))],
+            },
+            BenchPoint {
+                section: BenchSection::Cagi,
+                label: "gi-diffusion26",
+                overrides: &[(LeverId::GiRule, LeverValue::Mode(2))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::GiSkyTest,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_SKY_TEST"),
+        label: "sky test",
+        default_value: LeverValue::Mode(0),
+        range: LeverRange::Discrete,
+        verdict: "Sky injection asks every cell whether it sees the sky; the column-max \
+                  test answers it with one load of the traversal's own column-height \
+                  buffer (binding 8) instead of a ray, for +0% cost against the exact \
+                  trace's +33-53%. The two disagree on 33% of the frame at a mean of \
+                  2.1/255 (max 59) — cheap wins, but it is an approximation, not an \
+                  identity.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "column max",
+                verdict: "SHIPPED: one load of the per-XZ-brick-column max occupied brick Y — the \
+                          traversal's own data, reused, so sky injection costs nothing. Exact for \
+                          the vertical direction but quantized to the 1 m brick column: a cell \
+                          beside a tree trunk shares the trunk's column and is treated as covered \
+                          until the CA carries light in laterally. Costs a mean 2.1/255 against \
+                          the exact test — the diffusion fills most of it back in.",
+            },
+            ModeOption {
+                value: 1,
+                label: "upward trace",
+                verdict: "A real vertical shadow ray per cell: exact per voxel, +33-53% on the CA \
+                          pass (1.47-2.07 vs 0.92-1.52 ms per frame). Worth switching on where \
+                          dense canopy sits over ground the player walks under; the shipped \
+                          default trades that 2.1/255 mean for free sky injection.",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-sky-trace",
+            overrides: &[(LeverId::GiSkyTest, LeverValue::Mode(1))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiSunCache,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_SUN_CACHE"),
+        label: "pin sun sources",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "ON, and free: a cell that found the sun sets bit 30, and that bit \
+                  stands in for the shadow RAY on later iterations while the cell keeps \
+                  propagating and recomputing its bounce colour. Saves 10% (default sun) \
+                  to 19% (low sun) of the CA pass at BYTE-IDENTICAL output (0 differing \
+                  pixels vs re-tracing, both scenarios). Caching the cell's VALUE \
+                  instead — the first implementation — froze source cells and lost their \
+                  diffusion on 26% of the frame (mean 0.6/255, max 38), which is why the \
+                  flag caches the ray result only. Static world + static sun; the sun \
+                  sliders clear the volume.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-no-sun-cache",
+            overrides: &[(LeverId::GiSunCache, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiSampleMode,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_SAMPLE_MODE"),
+        label: "sampling",
+        default_value: LeverValue::Mode(1),
+        range: LeverRange::Discrete,
+        verdict: "How the shading pass reads the volume. Trilinear is shipped at \
+                  +0.28-0.35 ms over nearest: at 0.5 m cells nearest sampling stamps flat \
+                  cell-sized patches onto surfaces (36% of the frame, mean 2.9/255, max \
+                  76). Nearest is the Quest lever if 0.15 ms matters more than banding.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "nearest",
+                verdict: "One load from the cell in front of the hit face: +0.12-0.17 ms over no \
+                          CAGI at all. It shows the volume's resolution as flat 0.5 m patches of \
+                          indirect light — visible on 36% of the frame against trilinear (max \
+                          delta 76) — the honest look of the raw data.",
+            },
+            ModeOption {
+                value: 1,
+                label: "trilinear",
+                verdict: "SHIPPED, +0.40-0.51 ms over no CAGI (i.e. +0.28-0.35 over nearest): \
+                          eight loads, weights renormalized over the NON-solid taps so a wall's \
+                          interior (always 0) cannot bleed darkness onto the surface in front of \
+                          it. It is what turns a 0.5 m grid into a smooth gradient.",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-nearest",
+            overrides: &[(LeverId::GiSampleMode, LeverValue::Mode(0))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiIterationsPerFrame,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "iterations / frame",
+        default_value: LeverValue::Count(2),
+        range: LeverRange::Rungs(&[1, 2, 4, 8]),
+        verdict: "The per-frame CA budget (a CPU-side dispatch count — no shader \
+                  const): 0.44-0.76 ms per iteration at 0.5 m cells, linear (1 it = \
+                  0.52-0.77, 2 = 0.92-1.52, 8 = 3.59-5.87 ms). Light travels one cell per \
+                  iteration, so 2 gives full convergence in 32 frames (0.53 s at 60 fps) \
+                  and visual convergence (max delta 1) in 16.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::Cagi,
+                label: "gi-iterations1",
+                overrides: &[(LeverId::GiIterationsPerFrame, LeverValue::Count(1))],
+            },
+            BenchPoint {
+                section: BenchSection::Cagi,
+                label: "gi-iterations8",
+                overrides: &[(LeverId::GiIterationsPerFrame, LeverValue::Count(8))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::GiStrength,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "strength",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 3.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime (gi_params.x), free: it scales the sampled volume, never the \
+                  transport. 1.0 means the volume IS the indirect term at the sky \
+                  radiance E1c used for its hemisphere ambient, which is why switching \
+                  CAGI on redistributes the indirect light instead of brightening the \
+                  scene (74-88% of the frame changes, max delta 52-64).",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::GiAmbientFloor,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "ambient floor",
+        default_value: LeverValue::Scalar(0.25),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime (gi_params.y): the share of E1c's hemisphere ambient that \
+                  survives under CAGI. Not a fudge factor but a readability floor — a \
+                  correct flood converges to black in a sealed pocket, and 0.25 keeps \
+                  the per-face vertical gradient that makes voxel shapes legible there.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::GiSunBounce,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "sun bounce",
+        default_value: LeverValue::Scalar(0.35),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime (gi_params.z): the share of the sun's radiance a sunlit \
+                  surface injects into the volume, times that surface's albedo. This is \
+                  the knob that decides how coloured the bounce reads — 0 leaves a \
+                  sky-only flood.",
+        mode_options: &[],
+        bench: &[],
+    },
+    // ---- World edits (E2) ----
+    Lever {
+        id: LeverId::EditWorldThread,
+        subsystem: LeverSubsystem::WorldEdit,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "world thread",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "ON — E2's verdict, and the ONLY variant that meets the gate. The \
+                  authority (the CPU brickmap) lives on its own thread; the frame \
+                  thread sends a request and drains owned deltas, so it never waits \
+                  for an edit, a clearance rebuild or a CAGI attribute rebuild. Off \
+                  (variant A, inline) is identical in output and cheap for the common \
+                  edit, but every rare-but-real cost lands INSIDE a frame: the \
+                  clearance full-rebuild strategy and E4's ~50 ms attribute rebuild on \
+                  a GI resolution switch are frame hitches there and invisible here. \
+                  Numbers in the bench doc's E2 section.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::EditStorm,
+                label: "edit-inline",
+                overrides: &[(LeverId::EditWorldThread, LeverValue::Flag(false))],
+            },
+            // The decisive row: the SAME rare cost (a full clearance rebuild) is a
+            // frame hitch inline and mere latency on the world thread.
+            BenchPoint {
+                section: BenchSection::EditStorm,
+                label: "edit-inline-clearance-rebuild",
+                overrides: &[
+                    (LeverId::EditWorldThread, LeverValue::Flag(false)),
+                    (LeverId::EditClearanceUpdate, LeverValue::Mode(1)),
+                ],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::EditClearanceUpdate,
+        subsystem: LeverSubsystem::WorldEdit,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "clearance update",
+        default_value: LeverValue::Mode(0),
+        range: LeverRange::Discrete,
+        verdict: "How the chebyshev clearance field (binding 10, S2's engine) is \
+                  repaired when a removal EMPTIES a brick — the one asymmetric part of \
+                  an edit: adding solid only shrinks clearance (exact, bounded, always \
+                  local), removing it can grow clearance arbitrarily far away. The \
+                  bounded local box ships; the full rebuild is the correctness \
+                  reference and a real hitch.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "local box",
+                verdict: "SHIPPED: recompute the exact transform inside a box around the freed \
+                          brick, seeded from the ring outside it. Never overestimates (an \
+                          overestimate would tunnel through geometry) and underestimates by at \
+                          most the freed brick's own new clearance D — so for any edit into \
+                          terrain, where D = 1, it is exact. Microseconds instead of tens of \
+                          milliseconds.",
+            },
+            ModeOption {
+                value: 1,
+                label: "full rebuild",
+                verdict: "Exact everywhere: two chamfer sweeps over all 500 000 brick cells. This \
+                          is the number the local update is judged against, and it is a frame \
+                          hitch on the inline variant — on the world thread it is merely a few \
+                          frames of latency, which is why the pairing of the two levers matters.",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::EditStorm,
+            label: "edit-clearance-rebuild",
+            overrides: &[(LeverId::EditClearanceUpdate, LeverValue::Mode(1))],
+        }],
+    },
+    Lever {
+        id: LeverId::EditClearanceRadius,
+        subsystem: LeverSubsystem::WorldEdit,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "clearance radius (bricks)",
+        default_value: LeverValue::Count(8),
+        range: LeverRange::Rungs(&[2, 4, 8, 16]),
+        verdict: "Half-width of the local box, in bricks. It buys HOW MANY cells become \
+                  exact, not safety: the deficit bound (the freed brick's own new \
+                  clearance) is radius-independent, and cost grows as the cube — a \
+                  17-brick box is ~6 900 cells of chamfer, a 33-brick one ~36 000. 8 is \
+                  the measured knee; 2 is the Quest rung.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::EditStorm,
+            label: "edit-clearance-radius16",
+            overrides: &[(LeverId::EditClearanceRadius, LeverValue::Count(16))],
+        }],
+    },
+    Lever {
+        id: LeverId::EditGiReflood,
+        subsystem: LeverSubsystem::WorldEdit,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "re-flood GI on edit",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "ON: an edit changes geometry, so the light volume must respond. E2 does \
+                  it the only way E4 offers — a GLOBAL re-flood, which costs no extra \
+                  ms per frame (a cold flood is the same 0.46-0.76 ms per iteration as \
+                  the steady state) but costs FRAMES: 32 frames / 0.53 s to bit-exact \
+                  convergence. Acceptable for a placed block, wrong for a placed lamp, \
+                  which is exactly why E5 owns dirty-region re-flooding. Off leaves the \
+                  volume stale (visibly lit air where a block now stands) and is only \
+                  there to isolate the edit pipeline's own cost in the bench.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::EditStorm,
+            label: "edit-no-reflood",
+            overrides: &[(LeverId::EditGiReflood, LeverValue::Flag(false))],
+        }],
+    },
     // ---- Resolution (S0) ----
     Lever {
         id: LeverId::RenderScale,
@@ -941,49 +1493,69 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
     QualityPresetSpec {
         preset: QualityPreset::Potato,
         label: "Potato",
-        summary: "corner AO + hard shadows, render scale 0.7, AO fade 15->30 m",
+        summary: "corner AO + hard shadows, NO light volume, render scale 0.7, \
+                  AO fade 15->30 m",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
             (LeverId::AoDistanceFade, LeverValue::Flag(true)),
             (LeverId::AoFadeStart, LeverValue::VoxelDistance(120)),
             (LeverId::AoFadeEnd, LeverValue::VoxelDistance(240)),
+            // The only tier without CAGI: it also proves the experiment is
+            // excludable, and it is the E1c renderer bit for bit.
+            (LeverId::GiEnabled, LeverValue::Flag(false)),
             (LeverId::RenderScale, LeverValue::Scalar(0.7)),
         ],
     },
     QualityPresetSpec {
         preset: QualityPreset::Quest,
         label: "Quest",
-        summary: "corner AO + hard shadows, render scale 0.8 — E9 tunes this tier on device",
+        summary: "corner AO + hard shadows, CAGI at 1 m cells x 2 iterations, \
+                  render scale 0.8 — E9 tunes this tier on device",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
+            // 8-voxel cells: 1/8 of Balanced's cells, so 1/8 of both the CA cost
+            // and the 20 MB budget.
+            (LeverId::GiResolution, LeverValue::Count(8)),
+            (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
             (LeverId::RenderScale, LeverValue::Scalar(0.8)),
         ],
     },
     QualityPresetSpec {
         preset: QualityPreset::Balanced,
         label: "Balanced",
-        summary: "corner AO + hard shadows at full resolution — the shipped default, \
-                  5.0-7.2 ms",
+        summary: "corner AO + hard shadows + CAGI at 0.5 m cells x 2 iterations, \
+                  full resolution — the shipped default",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
+            (LeverId::GiEnabled, LeverValue::Flag(true)),
+            (LeverId::GiResolution, LeverValue::Count(4)),
+            (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
             (LeverId::RenderScale, LeverValue::Scalar(MAX_RENDER_SCALE)),
         ],
     },
     QualityPresetSpec {
         preset: QualityPreset::Beautiful,
         label: "Beautiful",
-        summary: "ray-traced AO (2 rays / 8 voxels / cosine / falloff) + hard shadows, \
-                  full resolution — 8.6-11.8 ms, bought for RT-AO's reach",
+        summary: "ray-traced AO (2 rays / 8 voxels / cosine / falloff) + directional \
+                  miss radiance + hard shadows + CAGI at 0.5 m cells x 4 iterations, \
+                  full resolution",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(0)),
             (LeverId::AoRayCount, LeverValue::Count(2)),
             (LeverId::AoMaxDistance, LeverValue::VoxelDistance(8)),
             (LeverId::AoDirectionMode, LeverValue::Mode(0)),
             (LeverId::AoDistanceFalloff, LeverValue::Flag(true)),
+            // Gate passed 2026-07-30: free next to the rays it reuses, and the
+            // only tier that traces any. Cosine directions keep the estimate
+            // unbiased; the 2-ray grain in dark foreground ships with it.
+            (LeverId::AoMissRadiance, LeverValue::Flag(true)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
+            // Twice Balanced's propagation budget: the volume converges in half
+            // the frames after a sun change, at twice the CA cost.
+            (LeverId::GiIterationsPerFrame, LeverValue::Count(4)),
             (LeverId::RenderScale, LeverValue::Scalar(MAX_RENDER_SCALE)),
         ],
     },
@@ -1014,6 +1586,13 @@ pub struct RenderQuality {
     pub traversal: TraversalSettings,
     pub ambient_occlusion: AoSettings,
     pub shadows: ShadowSettings,
+    /// E4 — the CAGI light volume.
+    pub global_illumination: CagiSettings,
+    /// E2 — world authority, threading and the edit pipeline. Not a *quality*
+    /// knob: this struct is the app's whole lever surface, which is what the
+    /// registry, the presets and the overlay panel are built on, so E2's knobs
+    /// live here for the same reason every other lever does.
+    pub world_edit: WorldEditSettings,
     /// Storage-texture size / surface size (1.0 = native).
     pub render_scale: f32,
 }
@@ -1037,6 +1616,8 @@ impl RenderQuality {
             traversal: TraversalSettings::default(),
             ambient_occlusion: AoSettings::default(),
             shadows: ShadowSettings::default(),
+            global_illumination: CagiSettings::default(),
+            world_edit: WorldEditSettings::default(),
             render_scale: MAX_RENDER_SCALE,
         }
     }
@@ -1069,6 +1650,29 @@ impl RenderQuality {
                 .ambient_occlusion
                 .requires_pipeline_rebuild(&applied.ambient_occlusion)
             || self.shadows.requires_pipeline_rebuild(&applied.shadows)
+            || self
+                .global_illumination
+                .requires_pipeline_rebuild(&applied.global_illumination)
+    }
+
+    /// Whether switching from `applied` to `self` needs the CAGI light volume
+    /// reallocated (its resolution or the master lever changed) — a buffer
+    /// rebuild, not a pipeline rebuild.
+    pub fn requires_light_volume_rebuild(&self, applied: &RenderQuality) -> bool {
+        self.global_illumination
+            .requires_volume_rebuild(&applied.global_illumination)
+    }
+
+    /// Whether the light volume must be re-flooded from scratch: any change to
+    /// what the CA *injects* or how it *transports* invalidates every cell (E4's
+    /// world is static, so there is no finer invalidation until E5's edit API).
+    pub fn requires_light_volume_reflood(&self, applied: &RenderQuality) -> bool {
+        let live = &self.global_illumination;
+        let previous = &applied.global_illumination;
+        live.rule != previous.rule
+            || live.sky_test != previous.sky_test
+            || live.sun_cache != previous.sun_cache
+            || live.sun_bounce != previous.sun_bounce
     }
 
     /// The runtime knobs, for this frame's lighting uniform.
@@ -1080,17 +1684,38 @@ impl RenderQuality {
             ambient_occlusion_fade_end_voxels: self.ambient_occlusion.fade_end_voxels as f32,
         }
     }
+
+    /// The runtime CAGI knobs, for this frame's lighting uniform (E4).
+    pub fn gi_params(&self) -> GiParams {
+        GiParams {
+            strength: self.global_illumination.strength,
+            ambient_floor: self.global_illumination.ambient_floor,
+            sun_bounce: self.global_illumination.sun_bounce,
+            reserved: 0.0,
+        }
+    }
+
+    /// CA iterations to dispatch this frame — zero when the experiment is off, so
+    /// the frame composer needs no second condition.
+    pub fn gi_iterations_per_frame(&self) -> u32 {
+        if self.global_illumination.enabled {
+            self.global_illumination.iterations_per_frame
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ao::patch_shader_const;
+    use crate::passes::cagi::CAGI_SHADER_SOURCE;
     use crate::passes::dda::{build_shader_source, SHADER_SOURCE};
 
     /// Shader consts in the lever blocks that are NOT levers: the mode NAME
-    /// constants and two fixed tuning thresholds. Anything else the shader
-    /// declares with a lever-ish name must have a registry row.
+    /// constants and the fixed tuning thresholds. Anything else the shaders
+    /// declare with a lever-ish name must have a registry row.
     const NON_LEVER_SHADER_CONSTANTS: &[&str] = &[
         "AO_MODE_RAY_TRACED",
         "AO_MODE_ANALYTIC_CORNER",
@@ -1102,7 +1727,29 @@ mod tests {
         "SHADOW_PENUMBRA_MIN_DISTANCE",
         "SHADOW_BIAS",
         "USE_COLUMN_HEIGHTS",
+        // E4 CAGI: mode names, the light-word / attribute bit layout and the
+        // fixed-point shift are structure, not levers.
+        "CAGI_SAMPLE_NEAREST",
+        "CAGI_SAMPLE_TRILINEAR",
+        "CAGI_RULE_MAX_DECREMENT",
+        "CAGI_RULE_DIFFUSION_6",
+        "CAGI_RULE_DIFFUSION_26",
+        "CAGI_SKY_TEST_COLUMN_MAX",
+        "CAGI_SKY_TEST_UPWARD_TRACE",
+        "CAGI_CELL_SOLID",
+        "CAGI_CHANNEL_MASK",
+        "CAGI_CHANNEL_MAX",
+        "CAGI_SUN_SOURCE_FLAG",
+        "CAGI_RADIANCE_PER_STEP",
+        "CAGI_SAMPLE_SEARCH_STEPS",
+        "CAGI_DIFFUSION_SHIFT",
     ];
+
+    /// Both pass shader sources — a lever's const lives in exactly one of them
+    /// (the shared files appear in both, which is the point).
+    fn shader_sources() -> [&'static str; 2] {
+        [SHADER_SOURCE, CAGI_SHADER_SOURCE]
+    }
 
     fn registry_ids() -> Vec<LeverId> {
         REGISTRY.iter().map(|lever| lever.id).collect()
@@ -1133,11 +1780,23 @@ mod tests {
                 .default_value
                 .wgsl_literal()
                 .unwrap_or_else(|| panic!("{:?} has no WGSL literal", lever.id));
-            assert_eq!(
-                patch_shader_const(SHADER_SOURCE, constant_name, &literal),
-                SHADER_SOURCE,
-                "registry default for {:?} ({literal}) drifted from `{constant_name}` \
-                 in dda.wgsl",
+            let mut sources_holding_the_const = 0;
+            for shader_source in shader_sources() {
+                if !shader_source.contains(&format!("const {constant_name}:")) {
+                    continue;
+                }
+                sources_holding_the_const += 1;
+                assert_eq!(
+                    patch_shader_const(shader_source, constant_name, &literal),
+                    shader_source,
+                    "registry default for {:?} ({literal}) drifted from `{constant_name}` \
+                     in the shader source",
+                    lever.id
+                );
+            }
+            assert!(
+                sources_holding_the_const > 0,
+                "shader const `{constant_name}` for {:?} exists in neither pass shader",
                 lever.id
             );
         }
@@ -1166,25 +1825,28 @@ mod tests {
             .iter()
             .filter_map(|lever| lever.shader_const)
             .collect();
-        for line in SHADER_SOURCE.lines() {
-            let Some(declaration) = line.strip_prefix("const ") else {
-                continue;
-            };
-            let Some(constant_name) = declaration.split(':').next() else {
-                continue;
-            };
-            let lever_shaped = constant_name.starts_with("ENABLE_")
-                || constant_name.starts_with("AO_")
-                || constant_name.starts_with("SHADOW_");
-            if !lever_shaped || NON_LEVER_SHADER_CONSTANTS.contains(&constant_name) {
-                continue;
+        for shader_source in shader_sources() {
+            for line in shader_source.lines() {
+                let Some(declaration) = line.strip_prefix("const ") else {
+                    continue;
+                };
+                let Some(constant_name) = declaration.split(':').next() else {
+                    continue;
+                };
+                let lever_shaped = constant_name.starts_with("ENABLE_")
+                    || constant_name.starts_with("AO_")
+                    || constant_name.starts_with("SHADOW_")
+                    || constant_name.starts_with("CAGI_");
+                if !lever_shaped || NON_LEVER_SHADER_CONSTANTS.contains(&constant_name) {
+                    continue;
+                }
+                assert!(
+                    registered.contains(&constant_name),
+                    "shader const `{constant_name}` is lever-shaped but has no REGISTRY row \
+                     (add one, or list it in NON_LEVER_SHADER_CONSTANTS if it is a fixed \
+                     tuning constant)"
+                );
             }
-            assert!(
-                registered.contains(&constant_name),
-                "shader const `{constant_name}` is lever-shaped but has no REGISTRY row \
-                 (add one, or list it in NON_LEVER_SHADER_CONSTANTS if it is a fixed \
-                 tuning constant)"
-            );
         }
     }
 
@@ -1199,6 +1861,8 @@ mod tests {
             traversal,
             ambient_occlusion,
             shadows,
+            global_illumination,
+            world_edit,
             render_scale,
         } = baseline;
         let TraversalSettings {
@@ -1221,11 +1885,30 @@ mod tests {
             fade_start_voxels,
             fade_end_voxels,
             sun_aware_ray_budget,
+            miss_radiance,
         } = ambient_occlusion;
         let ShadowSettings {
             mode: shadow_mode,
             penumbra_scale,
         } = shadows;
+        let CagiSettings {
+            enabled: gi_enabled,
+            cell_voxels,
+            rule,
+            sample_mode,
+            sky_test,
+            sun_cache,
+            iterations_per_frame,
+            strength: gi_strength,
+            ambient_floor,
+            sun_bounce,
+        } = global_illumination;
+        let WorldEditSettings {
+            world_thread,
+            clearance_update,
+            clearance_radius_cells,
+            gi_reflood,
+        } = world_edit;
 
         let expected: Vec<(LeverId, LeverValue)> = vec![
             (
@@ -1272,6 +1955,7 @@ mod tests {
                 LeverId::AoSunAwareRayBudget,
                 LeverValue::Flag(sun_aware_ray_budget),
             ),
+            (LeverId::AoMissRadiance, LeverValue::Flag(miss_radiance)),
             (
                 LeverId::ShadowMode,
                 LeverValue::Mode(shadow_mode.shader_value()),
@@ -1280,6 +1964,35 @@ mod tests {
                 LeverId::ShadowPenumbraScale,
                 LeverValue::Scalar(penumbra_scale),
             ),
+            (LeverId::GiEnabled, LeverValue::Flag(gi_enabled)),
+            (LeverId::GiResolution, LeverValue::Count(cell_voxels)),
+            (LeverId::GiRule, LeverValue::Mode(rule.shader_value())),
+            (
+                LeverId::GiSkyTest,
+                LeverValue::Mode(sky_test.shader_value()),
+            ),
+            (LeverId::GiSunCache, LeverValue::Flag(sun_cache)),
+            (
+                LeverId::GiSampleMode,
+                LeverValue::Mode(sample_mode.shader_value()),
+            ),
+            (
+                LeverId::GiIterationsPerFrame,
+                LeverValue::Count(iterations_per_frame),
+            ),
+            (LeverId::GiStrength, LeverValue::Scalar(gi_strength)),
+            (LeverId::GiAmbientFloor, LeverValue::Scalar(ambient_floor)),
+            (LeverId::GiSunBounce, LeverValue::Scalar(sun_bounce)),
+            (LeverId::EditWorldThread, LeverValue::Flag(world_thread)),
+            (
+                LeverId::EditClearanceUpdate,
+                LeverValue::Mode(clearance_update.shader_value()),
+            ),
+            (
+                LeverId::EditClearanceRadius,
+                LeverValue::Count(clearance_radius_cells),
+            ),
+            (LeverId::EditGiReflood, LeverValue::Flag(gi_reflood)),
             (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
         ];
 
@@ -1345,6 +2058,8 @@ mod tests {
             BenchSection::Traversal,
             BenchSection::RayTracedAo,
             BenchSection::CheapOcclusion,
+            BenchSection::Cagi,
+            BenchSection::EditStorm,
         ] {
             let labels: Vec<&str> = bench_points_of(section).map(|point| point.label).collect();
             for (index, label) in labels.iter().enumerate() {
@@ -1510,7 +2225,19 @@ mod tests {
         assert!(!quest.ambient_occlusion.distance_fade);
         assert_eq!(quest.render_scale, 0.8);
 
+        // E4: the GI tiering. Potato is the only tier without a light volume, so
+        // it stays the "CAGI is excludable" proof; Quest trades cell size for
+        // memory and cost; Beautiful buys convergence speed with iterations.
+        assert!(!potato.global_illumination.enabled);
+        assert_eq!(potato.gi_iterations_per_frame(), 0);
+        assert!(quest.global_illumination.enabled);
+        assert_eq!(quest.global_illumination.cell_voxels, 8);
+        assert_eq!(quest.global_illumination.iterations_per_frame, 2);
+
         let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
+        assert!(beautiful.global_illumination.enabled);
+        assert_eq!(beautiful.global_illumination.cell_voxels, 4);
+        assert_eq!(beautiful.global_illumination.iterations_per_frame, 4);
         assert_eq!(beautiful.ambient_occlusion.mode, AoMode::RayTraced);
         assert_eq!(beautiful.ambient_occlusion.ray_count, 2);
         assert_eq!(beautiful.ambient_occlusion.max_distance_voxels, 8);
@@ -1558,6 +2285,53 @@ mod tests {
         assert_eq!(shading_params.shadow_penumbra_scale, 115.0);
         assert_eq!(shading_params.ambient_occlusion_fade_start_voxels, 120.0);
         assert_eq!(shading_params.ambient_occlusion_fade_end_voxels, 240.0);
+    }
+
+    /// E4: which kind of rebuild each CAGI lever forces. Getting this wrong means
+    /// either a stale volume after a lever change or a pointless 20 MB
+    /// reallocation every frame.
+    #[test]
+    fn cagi_levers_force_the_right_kind_of_rebuild() {
+        let applied = RenderQuality::baseline();
+
+        let coarser = {
+            let mut quality = applied;
+            LeverId::GiResolution.apply(&mut quality, LeverValue::Count(8));
+            quality
+        };
+        assert!(!coarser.requires_pipeline_rebuild(&applied));
+        assert!(coarser.requires_light_volume_rebuild(&applied));
+
+        let other_rule = {
+            let mut quality = applied;
+            LeverId::GiRule.apply(&mut quality, LeverValue::Mode(0));
+            quality
+        };
+        assert!(other_rule.requires_pipeline_rebuild(&applied));
+        assert!(!other_rule.requires_light_volume_rebuild(&applied));
+        assert!(other_rule.requires_light_volume_reflood(&applied));
+
+        // The sun bounce changes what the CA injects, so it needs a re-flood even
+        // though it is a free runtime uniform for the shading pass.
+        let dimmer_bounce = {
+            let mut quality = applied;
+            LeverId::GiSunBounce.apply(&mut quality, LeverValue::Scalar(0.1));
+            quality
+        };
+        assert!(!dimmer_bounce.requires_pipeline_rebuild(&applied));
+        assert!(dimmer_bounce.requires_light_volume_reflood(&applied));
+
+        // Pure look knobs touch nothing.
+        let stronger = {
+            let mut quality = applied;
+            LeverId::GiStrength.apply(&mut quality, LeverValue::Scalar(2.0));
+            LeverId::GiAmbientFloor.apply(&mut quality, LeverValue::Scalar(0.5));
+            LeverId::GiIterationsPerFrame.apply(&mut quality, LeverValue::Count(8));
+            quality
+        };
+        assert!(!stronger.requires_pipeline_rebuild(&applied));
+        assert!(!stronger.requires_light_volume_rebuild(&applied));
+        assert!(!stronger.requires_light_volume_reflood(&applied));
     }
 
     #[test]

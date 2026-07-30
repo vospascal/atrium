@@ -143,6 +143,13 @@ pub struct AoSettings {
     /// E1b lever 3 (`AO_SUN_AWARE_RAY_BUDGET`): halve the ray count on pixels
     /// where the direct sun term dominates.
     pub sun_aware_ray_budget: bool,
+    /// Directional miss radiance (`AO_MISS_RADIANCE`, VGI I3D'11 §5.1): an
+    /// occlusion ray that escapes reads the sky dome in its OWN direction, so
+    /// the hemisphere term becomes a visibility-weighted sky integral instead
+    /// of a flat constant times a scalar. Needs [`AoMode::RayTraced`] — the
+    /// analytic estimators trace no rays, so there is no miss direction to
+    /// sample.
+    pub miss_radiance: bool,
 }
 
 impl Default for AoSettings {
@@ -164,6 +171,7 @@ impl Default for AoSettings {
             fade_start_voxels: 240,
             fade_end_voxels: 480,
             sun_aware_ray_budget: false,
+            miss_radiance: false,
         }
     }
 }
@@ -199,10 +207,15 @@ impl AoSettings {
             "AO_DISTANCE_FADE",
             boolean_literal(self.distance_fade),
         );
-        patch_shader_const(
+        patched = patch_shader_const(
             &patched,
             "AO_SUN_AWARE_RAY_BUDGET",
             boolean_literal(self.sun_aware_ray_budget),
+        );
+        patch_shader_const(
+            &patched,
+            "AO_MISS_RADIANCE",
+            boolean_literal(self.miss_radiance),
         )
     }
 
@@ -284,6 +297,7 @@ mod tests {
             fade_start_voxels: 120,
             fade_end_voxels: 240,
             sun_aware_ray_budget: true,
+            miss_radiance: true,
         };
         let shader_source = settings.patch_shader_source(SHADER_SOURCE);
         assert!(shader_source.contains("const AO_MODE: u32 = 2u;"));
@@ -294,6 +308,7 @@ mod tests {
         assert!(shader_source.contains("const AO_BRICK_EARLY_OUT: bool = true;"));
         assert!(shader_source.contains("const AO_DISTANCE_FADE: bool = true;"));
         assert!(shader_source.contains("const AO_SUN_AWARE_RAY_BUDGET: bool = true;"));
+        assert!(shader_source.contains("const AO_MISS_RADIANCE: bool = true;"));
         // The fade DISTANCES are runtime uniform fields (E1c) — they must not
         // leave a const behind in the shader for the patcher to hit.
         assert!(!shader_source.contains("const AO_FADE_START_VOXELS"));

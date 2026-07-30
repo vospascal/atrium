@@ -202,15 +202,171 @@ buffers; GPU work queues/free lists; per-entity local voxel grids; shared world
 occupancy for rendering + collision; acoustic rays aggregated into environment
 parameters; layered terrain→caves→biome→vegetation.
 
-**Unknown:** world acceleration structure; memory layout; traversal variant;
-cave/biome/tree math; CA GI stencil + attenuation + bit depth; temporal
-filtering; entity AI; particle neighbour structure; collision solver; acoustic
-material model; fluid equations; confirmed API; hardware/frame-time breakdown.
+**Medium confidence (second-hand only, see the intel-drop section):** 2-level
+DDA traversal; ray-direction skew for grass; directional propagating CA for
+sun/sky; separate LPV-like macrovoxel CA for point lights; voxel-face blurring
+filter as the AO/reflection denoiser; per-frame entity voxelization into a
+player-centric microvoxel grid; diamond-square + CA (BWerness) terrain with
+CA-grown trees; no open world yet; survival/underwater gameplay direction;
+multiplayer planned.
+
+**Unknown:** memory layout; cave/biome/tree math; CA GI stencil + attenuation +
+bit depth; temporal filtering; entity AI; particle neighbour structure;
+collision solver; acoustic material model; fluid equations; confirmed API;
+hardware/frame-time breakdown.
 
 **Do NOT attribute without evidence:** greedy meshing, marching cubes, surface
 nets, mesh shaders, SVO/DAG, NanoVDB, hardware RTX, ReSTIR, NeRF, Gaussian
 splatting, L-systems, Perlin/Simplex/Worley caves, erosion, WFC biomes,
 navmeshes, wave-based acoustics.
+
+## Author comment threads (primary-source quotes — dated, possibly stale)
+
+Direct statements from xima in YouTube replies, kept because they are primary
+source rather than inference. **All from the early-CAGI video, ~2 years before
+this dossier**, so they describe an older generation than the screenshots in
+this file's other sections. Nothing here is a recommendation; treat each as a
+dated data point to re-check if it ever becomes relevant.
+
+- **"For the shadows I use regular shadow mapping."** So at that time the crisp
+  sub-voxel shadow edges were a *separate high-frequency term* composited over
+  low-frequency CA GI — not produced by the CA. He was ray tracing primaries
+  while still rasterizing a shadow map. Whether that is still true is unknown;
+  it is the kind of thing an engine drops once traversal is cheap.
+  *Our position, measured independently:* shadow rays through the shared DDA
+  core (`trace_shadow_visibility`), no shadow map — exact at pixel precision,
+  and cheaper for us because traversal is already paid for. Same
+  low-frequency-GI + high-frequency-visibility split, different mechanism.
+- **"The CAGI is only ran at voxel scale, not sub-voxel scale (at least for
+  now)."** Note the hedge. Ours is coarser still: 0.5 m cells = 4 voxels
+  (33 MB, ~1.2 ms; 0.25 m measured at 258 MB and 6× cost). Suggests he hit a
+  comparable memory wall. Current Voxile may be multi-resolution or cascaded —
+  unknown.
+- **Rasterization rejected:** *"even with LODs, greedy meshing etc I quickly
+  reached too many fundamental performance limits for the amount of detail I was
+  planning for. Compared to raster, ray tracing also simplifies a lot of things
+  — it doesn't really need techniques like frustum or occlusion culling, as it's
+  naturally built inside the algorithm."* The culling argument is the part worth
+  remembering: it is a structural property of traversal, not a tuning result.
+
+### Direction-free injection (the one architectural item here)
+
+A commenter assumed CA sun/sky lighting would need "a massive amount of CA
+instances" for directional light. It does not, and this is version-independent:
+
+**The CA carries direction-free RGB irradiance. Direction dies at the injection
+boundary and lives only in the ray-traced terms.** A candidate air cell fires
+one shadow ray to answer a boolean "lit / not lit", then deposits only the
+resulting diffuse bounce into the grid. So **cost scales per cell, not per
+light** — sun, sky and emissives all deposit into the same volume, and adding a
+light type is an injection rule, not another instance. Our `cagi.wgsl` already
+works exactly this way (albedo-tinted, Lambert-weighted by solid neighbours),
+which is why this is recorded as a confirmation rather than a finding.
+
+Corollary worth remembering when emissives come up: the sun is injected almost
+everywhere above terrain, so transport distances stay 1–3 cells and anisotropy
+stays invisible. A *local* emitter in an enclosed space is the opposite case and
+would be the first real test of transport reach and stencil isotropy.
+
+### Gaps noticed while comparing against the screenshots
+
+Neither is a plan item; listed so they are not re-discovered from scratch.
+
+- **Volumetric light shafts / god rays** appear in his newer footage and are not
+  described anywhere in this dossier. Mechanism unknown; a view-ray scatter term
+  is the obvious guess and would share machinery with fog.
+- **"Ray tracing subsumes frustum + occlusion culling"** is not written down as
+  a rationale anywhere in our own docs, though voxel-rt has the property.
+
+## Second-hand intel drop (2026-07-30, provenance unstated)
+
+Relayed to Pascal as a summary of the current engine, not quoted from a video or
+post. Treat as **medium confidence**: more specific than anything published, but
+unverifiable. Where it collides with the reconstructions above, it is noted.
+It resolves — or claims to resolve — five of the "Unknown" items.
+
+- **Traversal: "most likely just 2-level DDA by the last iteration."** Matches
+  voxel-rt's own brickmap DDA (brick grid + intra-brick), and matches the "no
+  LODs" stress-test claim: two levels is an acceleration structure, not a detail
+  hierarchy. Notably *not* SVO/DAG. If true, our structure and his are the same
+  family, which makes his frame-time claims a fair (if unmeasured) yardstick.
+- **Grass animation by skewing the ray direction on entering a grass block.**
+  A pure shading-time trick: no geometry moves, no per-frame voxel writes, no
+  simulation state — the ray bends, so the blade *appears* to bend, and the cost
+  is a few ALU ops inside the traversal loop. Combines with the sky-occlusion
+  wind driver (video 6): occlusion sets amplitude, the skew applies it.
+  **Directly portable to voxel-rt** and far cheaper than our mesh-era
+  vertex-displacement grass; it also has no equivalent in a rasterizer, so it is
+  one of the clearer "ray tracing buys you something structural" cases.
+- **Sunlight and skylight: *directional propagating* cellular automata.** This
+  sharpens (and partly contradicts) the direction-free-injection note above:
+  the CA itself carries a propagation direction for sun/sky rather than only
+  isotropic irradiance. Ours injects direction at the boundary and diffuses
+  isotropically. Both reach "sky lights the open areas"; his should hold
+  long-distance sun transport better (a directional sweep marches, a diffusion
+  stencil decays), ours is cheaper per cell. Worth a bench once CAGI is in.
+- **Individual lights: a separate CA "similar to light propagation volumes", at
+  the *macrovoxel* level.** So point/emissive lights are a second, coarser CA —
+  a different resolution and probably a different (SH-ish / directional) payload
+  than sun/sky. Confirms the multi-resolution guess in the author-comments
+  section, and answers the local-emitter question raised there: he does not push
+  emissives through the same grid as the sun.
+- **Reflections and AO: normal ray tracing, plus a *voxel-face blurring
+  filter*.** The denoiser is the news. Filtering per voxel face — rather than
+  per screen-space pixel neighbourhood — keeps the blur inside one flat, coplanar
+  surface, so it cannot bleed across a silhouette or a corner and needs no
+  depth/normal edge-stopping weights. It is the voxel-native equivalent of a
+  surfel/texel-space denoiser, and it means his AO ray count per pixel can be
+  very low. **This is the missing piece from the "AO — named, never explained"
+  section**: cheap AO is achieved by denoising in voxel-face space, not by
+  tracing few rays and living with noise. Relevant to E1's cost verdict — we
+  measured un-denoised per-pixel AO.
+- **Entities: voxelized *per frame* into a microvoxel grid centred on the
+  player, then ray traced.** Adjusts the video-8 reconstruction above: rather
+  than per-entity local voxel fields intersected via OBB/SDF, entities are
+  rasterized/scattered into one shared player-centric microvoxel volume each
+  frame, and the normal traversal then just hits them. That explains "no separate
+  entity depth merge" and why 65k butterflies were affordable — cost scales with
+  the volume, not the entity count. The two accounts may both be true across
+  versions; the OBB/SDF path is the older teaser.
+- **Terrain: diamond-square fractal + CA**, explicitly
+  <https://bitbucket.org/BWerness/voxel-automata-terrain>. This **confirms** the
+  VoxelChain-era generator described above is still the lineage: BWerness's
+  voxel automata terrain is exactly "diamond-square subdivision where the
+  averaging step is replaced by random CA rule tables". Trees and props are then
+  grown by a further CA. Moves "diamond-square + CA lookup rules" from
+  *historical evidence* to *current method*, and keeps Perlin/Simplex/Worley
+  firmly on the do-not-attribute list.
+- **Open world: does not exist yet.** So the "experimental infinite-world
+  support" in video 3 is experimental in the literal sense. Our streaming work
+  is not behind on this axis.
+- **Gameplay: probably survival-like, likely significant underwater gameplay,
+  mostly undecided. Multiplayer: yes, future.** Explains the ordering — fluids
+  and transparency/underwater before world scale.
+
+Supplied references (not yet read into this dossier):
+
+- Voraldo paper — <https://jbaker.graphics/resources/voraldo_paper/Voraldo.pdf>
+- WebGPU voxel path tracing thread —
+  <https://www.reddit.com/r/proceduralgeneration/comments/15r6lqz/webgpu_voxel_path_tracing/>
+
+### What this changes for voxel-rt
+
+Nothing in the staged plan moves without approval; these are the candidate
+deltas this drop creates.
+
+1. **Ray-skew grass** (new technique-bank entry): shading-time animation inside
+   the DDA loop, driven by the sky-occlusion field of backlog B2. Cheapest
+   plausible foliage motion we have on the table.
+2. **Voxel-face-space denoise** for AO/reflections: re-opens E1's verdict. If
+   AO can be filtered per face, the analytic-vs-ray choice was decided against a
+   handicapped ray variant.
+3. **Directional sun/sky CA** vs our isotropic diffusion: a CAGI variant to
+   bench once E4 lands, specifically for long-distance sun transport.
+4. **Two-tier lighting CA** (fine sun/sky, macrovoxel emissives) instead of one
+   grid for everything — matches our own 0.5 m memory wall finding.
+5. **Player-centric microvoxel entity volume** instead of per-entity OBB/SDF —
+   simpler, and the right shape for dynamic audio occluders too.
 
 ## Closest reproducible architecture (the blueprint)
 

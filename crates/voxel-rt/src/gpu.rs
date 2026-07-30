@@ -6,6 +6,33 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
+/// Storage buffers one compute pass may bind. WebGPU's default cap is 8, and E4's
+/// CAGI pass needs 10: the seven brickmap/world buffers plus the light volume's
+/// front buffer, back buffer and cell attributes (the shading pass needs 9 of the
+/// same). Every device this renderer creates — app, tests, benchmark — must be
+/// requested with this limit through [`device_descriptor`], or a bind group layout
+/// fails validation at startup.
+///
+/// Portability note for E9: Metal allows 31 buffers per stage and Adreno 6xx/7xx
+/// Vulkan drivers report 24+ storage buffers per stage, so 10 is comfortably
+/// inside the Quest target too.
+pub const REQUIRED_STORAGE_BUFFERS_PER_STAGE: u32 = 10;
+
+/// The device descriptor every consumer must use: the raised storage-buffer limit
+/// plus whatever timestamp support the adapter offers (GPU pass timing degrades to
+/// "unavailable" rather than failing on adapters without it).
+pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    wgpu::DeviceDescriptor {
+        label: Some("voxel-rt device"),
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        required_limits: wgpu::Limits {
+            max_storage_buffers_per_shader_stage: REQUIRED_STORAGE_BUFFERS_PER_STAGE,
+            ..wgpu::Limits::default()
+        },
+        ..Default::default()
+    }
+}
+
 pub struct GpuContext {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
@@ -31,16 +58,9 @@ impl GpuContext {
         }))
         .expect("no compatible GPU adapter found");
 
-        // GPU pass timing (frame_timing.rs) wants timestamp queries; request
-        // the feature only where the adapter offers it so devices without it
-        // still come up (the perf readout then degrades to "unavailable").
-        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("voxel-rt device"),
-            required_features,
-            ..Default::default()
-        }))
-        .expect("failed to create wgpu device");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
+                .expect("failed to create wgpu device");
 
         let surface_capabilities = surface.get_capabilities(&adapter);
         let surface_format = surface_capabilities

@@ -5,10 +5,15 @@
 //!
 //! Module seams (plan architecture rule): platform/windowing (`main.rs`,
 //! `gpu`) ↔ render passes (`passes`, `render`) ↔ world data (`brickmap`) ↔
-//! camera (`camera`) ↔ lighting (`lighting`) ↔ traversal levers (`traversal`,
-//! S2) ↔ ambient occlusion (`ao`, E1) ↔ sun shadows (`shadows`, E1b) ↔ lever
-//! registry + quality presets (`variants`, E1c) ↔ overlay (`overlay`) ↔ GPU
-//! timing (`frame_timing`).
+//! world authority + edit threading (`world_edit`, `world_host`, E2) ↔ CPU
+//! traversal for picking and audio (`voxel_dda`, E2/E8) ↔
+//! camera (`camera`) ↔ character body + voxel collision (`character`, E2b — the
+//! audio listener at E8 and the VR player at E9) ↔ the swim-test pool carve
+//! (`debug_pool`, an E2b test tool riding the E2 bulk-edit path) ↔
+//! lighting (`lighting`) ↔ traversal levers (`traversal`,
+//! S2) ↔ ambient occlusion (`ao`, E1) ↔ sun shadows (`shadows`, E1b) ↔ CAGI light
+//! volume (`cagi`, E4) ↔ lever registry + quality presets (`variants`, E1c) ↔
+//! overlay (`overlay`) ↔ GPU timing (`frame_timing`).
 //!
 //! `variants` is the single source of truth for what levers exist: the overlay,
 //! the benchmark and the pinning tests all read its registry, so a lever cannot
@@ -16,13 +21,20 @@
 
 pub mod ao;
 pub mod brickmap;
+pub mod cagi;
 pub mod camera;
+pub mod character;
+pub mod debug_pool;
 pub mod frame_timing;
 pub mod gpu;
 pub mod lighting;
+pub mod material;
 pub mod overlay;
 pub mod passes;
 pub mod render;
 pub mod shadows;
 pub mod traversal;
 pub mod variants;
+pub mod voxel_dda;
+pub mod world_edit;
+pub mod world_host;

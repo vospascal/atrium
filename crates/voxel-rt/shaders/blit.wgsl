@@ -3,7 +3,7 @@
 //
 // Color contract: the rgba8unorm storage texture holds DISPLAY-READY
 // (sRGB-encoded) values — the DDA pass shades voxel-sandbox's sRGB-authored
-// palette as-is (see shaders/dda.wgsl). The swapchain format is sRGB, so the
+// material albedos as-is (see shaders/dda.wgsl). The swapchain format is sRGB, so the
 // hardware re-encodes fragment output on store; decoding here makes that a
 // round trip (presented bytes == storage-texture bytes, no double encode).
 // At render scale 1.0 the sampler is nearest, so decoding after the sample

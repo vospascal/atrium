@@ -176,6 +176,12 @@ pub struct FlyCamera {
     pub vertical_fov_radians: f32,
 }
 
+/// Movement-speed band the mouse wheel can reach, meters per second. The floor
+/// is slow enough to line up a single 0.125 m voxel; the ceiling crosses the
+/// 125 m island in about two seconds.
+pub const MIN_MOVEMENT_SPEED: f32 = 0.25;
+pub const MAX_MOVEMENT_SPEED: f32 = 64.0;
+
 impl Default for FlyCamera {
     /// Spawn above the island's southern rim looking north-and-down at the
     /// island center.
@@ -200,7 +206,7 @@ impl Default for FlyCamera {
             ),
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: -0.33,
-            movement_speed: 12.0,
+            movement_speed: 4.0,
             mouse_sensitivity: 0.0025,
             vertical_fov_radians: DEFAULT_VERTICAL_FOV_RADIANS,
         }
@@ -208,6 +214,15 @@ impl Default for FlyCamera {
 }
 
 impl FlyCamera {
+    /// Scale [`FlyCamera::movement_speed`] by `notches` of mouse wheel.
+    /// Multiplicative, so one notch feels like the same change whether you are
+    /// inching along a wall or crossing the island, and clamped to
+    /// [`MIN_MOVEMENT_SPEED`]..=[`MAX_MOVEMENT_SPEED`].
+    pub fn adjust_movement_speed(&mut self, notches: f32) {
+        self.movement_speed = (self.movement_speed * 1.2f32.powf(notches))
+            .clamp(MIN_MOVEMENT_SPEED, MAX_MOVEMENT_SPEED);
+    }
+
     /// Advance the camera one frame: mouse delta -> yaw/pitch (pitch
     /// clamped), then movement keys -> position. Horizontal movement is
     /// relative to yaw only (looking down does not slow forward flight);

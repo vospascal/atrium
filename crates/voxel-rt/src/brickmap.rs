@@ -6,16 +6,28 @@
 //! cache-resident occupancy test) and a chebyshev skip-distance byte per
 //! brick (empty-cube jumps). Level 1 stores, per *occupied* brick, a 512-bit
 //! occupancy mask plus one material byte per voxel. All the arrays
-//! (`brick_indices`, `occupancy_words`, `material_words`, palette, column
+//! (`brick_indices`, `occupancy_words`, `material_words`, column
 //! heights, bit grid, skip distances) upload straight into GPU storage
 //! buffers; [`BrickmapMetadata`] is the matching uniform.
 //!
 //! Renderer-independence note: this same occupancy grid is the planned
-//! acoustic-ray structure (the atrium `VoxelDdaResolver`, Stage 5 of
+//! acoustic-ray structure (the atrium `VoxelDdaResolver`, E8 of
 //! `docs/voxel-rt-plan.md`). Nothing in this module may grow a dependency on
 //! wgpu, winit, or any renderer type — keep it pure data + CPU logic.
+//!
+//! E2 added the EDIT half ([`Brickmap::set_voxel`]): one call patches the
+//! occupancy bits, the material bytes, the level-0 pointer (allocating or
+//! freeing a brick slot), the 1-bit brick grid, the chebyshev clearance field,
+//! the per-column and global brick heights, and reports every touched word
+//! range as a [`BrickmapEdit`] so the caller can upload deltas instead of the
+//! whole 41 MB. The edit path knows nothing about the GPU either — it names its
+//! own arrays ([`BrickmapArray`]) and lets the uploader map those to bindings.
+
+use std::ops::Range;
 
 use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
+
+use crate::material::material_id;
 
 /// Edge length of one brick in voxels.
 pub const BRICK_SIZE: usize = 8;
@@ -42,10 +54,25 @@ pub const EMPTY_BRICK: u32 = u32::MAX;
 /// (u32 -> i32 conversion is modular) and every brick Y counts as "above".
 pub const EMPTY_COLUMN: u32 = u32::MAX;
 
-/// Number of material ids (== number of `Voxel` variants, Air included).
-/// Exercised by the palette test; no renderer code needs the count directly.
-#[cfg_attr(not(test), allow(dead_code))]
-pub const MATERIAL_COUNT: usize = 24;
+/// Spare brick slots the level-1 arrays (and therefore the GPU buffers) carry
+/// past the built world, so an edit that materializes a brick patches words
+/// that already exist instead of reallocating 41 MB of buffers.
+///
+/// 4096 slots = 4096 x (16 + 128) words = **2.36 MB** of headroom, and 4096
+/// newly materialized bricks is 2 M voxels of construction in one session — the
+/// growth path exists ([`BrickmapEdit::arrays_grew`]) and is measured, but it is
+/// not the common case. Freed slots are reused first, so a build/dig loop in one
+/// place never consumes headroom at all.
+pub const EDIT_BRICK_HEADROOM: usize = 4096;
+
+/// Gap (in words) that two dirty word ranges may leave between them and still be
+/// uploaded as ONE range. The clearance field's dirty region is a box in the
+/// brick grid, i.e. one short range per (y, z) row; 64 words of slack collapses
+/// all rows of one z slice into a single upload (the y stride is
+/// `BRICK_GRID_X / 4` = 31 words) while keeping the z slices apart (the z stride
+/// is `BRICK_GRID_X * BRICK_GRID_Y / 4` = 1000 words). Trading a few unchanged
+/// words for an order of magnitude fewer `write_buffer` calls.
+pub const DIRTY_RANGE_GAP_WORDS: usize = 64;
 
 /// Dimension metadata for the GPU, bindable as a uniform buffer.
 ///
@@ -85,6 +112,14 @@ unsafe impl bytemuck::Zeroable for BrickmapMetadata {}
 unsafe impl bytemuck::Pod for BrickmapMetadata {}
 
 /// Two-level sparse voxel brickmap, GPU-upload-ready.
+///
+/// `Clone` is a DEEP copy of ~45 MB of arrays and exists for two reasons, both
+/// E2: the bench needs an independent world per variant without regenerating it,
+/// and the cost of this clone IS the measured price of the plan's original
+/// "publish an `Arc<Brickmap>` snapshot per edit" sketch — which is why the
+/// shipped authority publishes 576-byte deltas instead (see
+/// [`crate::world_host`]).
+#[derive(Clone)]
 pub struct Brickmap {
     /// Dense level-0 grid of brick pointers, one per brick cell.
     ///
@@ -128,98 +163,134 @@ pub struct Brickmap {
     /// d - 1 bricks, which the traversal jumps in one step (`distance_skip`
     /// in dda.wgsl).
     pub brick_skip_distance_words: Vec<u32>,
-    occupied_brick_count: u32,
+    /// Level-1 slots ever handed out (the high-water mark): the prefix of the
+    /// level-1 arrays that has held real data. Live bricks =
+    /// `allocated_brick_slots - free_brick_slots.len()`.
+    allocated_brick_slots: u32,
+    /// Slots the level-1 arrays have room for (`allocated_brick_slots` plus the
+    /// remaining [`EDIT_BRICK_HEADROOM`]).
+    brick_capacity: u32,
+    /// Allocated-but-unused slots, from freed bricks, popped LIFO.
+    ///
+    /// FRAGMENTATION: there is none to manage. Every slot is exactly
+    /// [`OCCUPANCY_WORDS_PER_BRICK`] + [`MATERIAL_WORDS_PER_BRICK`] words, so a
+    /// freed slot fits any future brick exactly and no compaction, coalescing or
+    /// best-fit search can ever help. The only waste is slack at the END of the
+    /// arrays (freed slots that are never reused), bounded by the number of
+    /// bricks that were ever occupied simultaneously — i.e. a session that digs a
+    /// hill away and rebuilds it elsewhere reuses every slot.
+    free_brick_slots: Vec<u32>,
     max_occupied_brick_y: u32,
 }
 
-/// `Voxel` -> material id, in enum declaration order with `Air = 0`
-/// (crates/voxel-core/src/world.rs, the 24-variant `Voxel` enum).
-pub fn material_id(voxel: Voxel) -> u8 {
-    match voxel {
-        Voxel::Air => 0,
-        Voxel::Grass => 1,
-        Voxel::TallGrass => 2,
-        Voxel::Dirt => 3,
-        Voxel::Sand => 4,
-        Voxel::Sediment => 5,
-        Voxel::Stone => 6,
-        Voxel::Water => 7,
-        Voxel::Trunk => 8,
-        Voxel::TrunkBirch => 9,
-        Voxel::Leaves => 10,
-        Voxel::LeavesDark => 11,
-        Voxel::LeavesBirch => 12,
-        Voxel::LeavesPine => 13,
-        Voxel::FlowerPink => 14,
-        Voxel::FlowerWhite => 15,
-        Voxel::FlowerYellow => 16,
-        Voxel::FlowerBlue => 17,
-        Voxel::WaterWeed => 18,
-        Voxel::LilyPad => 19,
-        Voxel::LilyBloom => 20,
-        Voxel::Reed => 21,
-        Voxel::CattailHead => 22,
-        Voxel::Snow => 23,
+/// One of the brickmap's own upload-ready arrays, by name. The brickmap must not
+/// know what a GPU buffer is (module invariant), so a [`DirtyWords`] range names
+/// an array and the uploader maps that to a binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrickmapArray {
+    BrickIndices,
+    OccupancyWords,
+    MaterialWords,
+    ColumnMaxBrickY,
+    BrickOccupancyBits,
+    BrickSkipDistances,
+}
+
+impl BrickmapArray {
+    /// Every array, for the uploader's exhaustive mapping and the tests.
+    pub const ALL: [BrickmapArray; 6] = [
+        BrickmapArray::BrickIndices,
+        BrickmapArray::OccupancyWords,
+        BrickmapArray::MaterialWords,
+        BrickmapArray::ColumnMaxBrickY,
+        BrickmapArray::BrickOccupancyBits,
+        BrickmapArray::BrickSkipDistances,
+    ];
+}
+
+/// A contiguous run of `u32` words of one array that an edit changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirtyWords {
+    pub array: BrickmapArray,
+    pub first_word: usize,
+    pub word_count: usize,
+}
+
+impl DirtyWords {
+    pub fn bytes(&self) -> usize {
+        self.word_count * 4
     }
 }
 
-/// One representative sRGB color per material id, GPU-upload-ready as an
-/// `array<vec4<f32>>` storage buffer ([r, g, b, a], a = 1.0 except water).
+/// How a removal that EMPTIES a brick updates the chebyshev clearance field.
 ///
-/// Colors are lifted from the `voxel_color` match in
-/// `crates/voxel-sandbox/src/mesh.rs` (lines ~1253-1358). That function
-/// blends per-position (dryness/lushness/season/tree-tone/depth); Stage 1
-/// takes ONE representative value per type — positional variation comes
-/// later. The exact picks:
-///
-/// - Grass: the grassy patch endpoint `[0.41, 0.52, 0.29]` of the
-///   dirt->grass patchiness lerp (summer, mid-biome).
-/// - TallGrass: base blade `[0.28, 0.45, 0.23]`.
-/// - Leaves: midpoint of the summer oak tone lerp
-///   `[0.30,0.47,0.22]..[0.46,0.54,0.25]` -> `[0.38, 0.505, 0.235]`.
-/// - LeavesDark: Leaves * 0.74 (mesh.rs darkening factor).
-/// - LeavesBirch: midpoint of `[0.47,0.56,0.26]..[0.55,0.60,0.30]`.
-/// - LeavesPine: midpoint of `[0.18,0.32,0.23]..[0.24,0.37,0.25]`.
-/// - Sand: dry above-water sand `[0.86, 0.77, 0.55]`.
-/// - TrunkBirch: the dominant paper-bark branch `[0.80, 0.78, 0.72]`
-///   (dark flecks are per-voxel jitter, skipped here).
-/// - Reed: summer stalk `[0.55, 0.56, 0.31]`.
-/// - Water: midpoint of the shallow->deep lerp
-///   `[0.30,0.72,0.82]..[0.08,0.32,0.60]` -> `[0.19, 0.52, 0.71]`,
-///   alpha 0.7 (mid-depth opacity; Stage 1 may render it opaque).
-/// - Dirt/Sediment/Stone/Trunk/flowers/WaterWeed/LilyPad/LilyBloom/
-///   CattailHead/Snow: taken verbatim from their single-value arms.
-///
-/// Values are sRGB-encoded, exactly as authored in mesh.rs. The Stage 1
-/// shader writes them (shaded) to an `rgba8unorm` target without extra
-/// gamma encoding.
-pub fn palette() -> Vec<[f32; 4]> {
-    vec![
-        [0.0, 0.0, 0.0, 0.0],       // 0  Air (never sampled on a hit)
-        [0.41, 0.52, 0.29, 1.0],    // 1  Grass
-        [0.28, 0.45, 0.23, 1.0],    // 2  TallGrass
-        [0.44, 0.32, 0.22, 1.0],    // 3  Dirt
-        [0.86, 0.77, 0.55, 1.0],    // 4  Sand
-        [0.17, 0.16, 0.11, 1.0],    // 5  Sediment
-        [0.52, 0.52, 0.55, 1.0],    // 6  Stone
-        [0.19, 0.52, 0.71, 0.7],    // 7  Water
-        [0.45, 0.31, 0.19, 1.0],    // 8  Trunk
-        [0.80, 0.78, 0.72, 1.0],    // 9  TrunkBirch
-        [0.38, 0.505, 0.235, 1.0],  // 10 Leaves
-        [0.281, 0.374, 0.174, 1.0], // 11 LeavesDark
-        [0.51, 0.58, 0.28, 1.0],    // 12 LeavesBirch
-        [0.21, 0.345, 0.24, 1.0],   // 13 LeavesPine
-        [0.93, 0.55, 0.75, 1.0],    // 14 FlowerPink
-        [0.96, 0.95, 0.90, 1.0],    // 15 FlowerWhite
-        [0.95, 0.83, 0.35, 1.0],    // 16 FlowerYellow
-        [0.45, 0.52, 0.92, 1.0],    // 17 FlowerBlue
-        [0.15, 0.30, 0.19, 1.0],    // 18 WaterWeed
-        [0.26, 0.50, 0.24, 1.0],    // 19 LilyPad
-        [0.95, 0.92, 0.85, 1.0],    // 20 LilyBloom
-        [0.55, 0.56, 0.31, 1.0],    // 21 Reed
-        [0.32, 0.18, 0.08, 1.0],    // 22 CattailHead
-        [0.92, 0.93, 0.96, 1.0],    // 23 Snow
-    ]
+/// The asymmetry this enum exists for: adding solid can only *shrink* clearance,
+/// and the new field is exactly `min(old, chebyshev_to_the_new_brick)` — a
+/// bounded, exact, cheap local update with no strategy choice to make. Removing
+/// solid can *grow* clearance arbitrarily far away (a lone brick in open air is
+/// the nearest occupied brick for a huge region), so the update is either
+/// bounded-and-conservative or a full rebuild. Measured in the bench doc's E2
+/// section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClearanceUpdate {
+    /// Recompute the exact transform inside a box of `radius_cells` bricks
+    /// around the freed brick, seeded from the ring just outside it.
+    ///
+    /// WHY THIS IS SAFE AT ANY RADIUS: the seeds are the *old* distances, which
+    /// after a removal are ≤ the new exact distances, and the chamfer sweep can
+    /// only produce `min(seed + path, distance to occupied inside the box)`. So
+    /// every value written is ≤ the exact new value — an UNDERESTIMATE, which
+    /// the traversal tolerates by construction (a cell at distance d claims a
+    /// guaranteed-empty cube of half-width d-1; a smaller d claims less and only
+    /// costs steps). An overestimate would tunnel through geometry and is
+    /// impossible here. Outside the box the field simply stays stale-low.
+    ///
+    /// AND HOW WRONG IT CAN BE, exactly: writing `D` for the freed brick's own
+    /// new clearance (its chebyshev distance to the nearest SURVIVING brick),
+    /// every cell satisfies `old ≤ local ≤ exact_new ≤ old + D`, so the deficit
+    /// is at most `D` everywhere — *independent of the radius*. Proof sketch: a
+    /// cell whose nearest brick was not the freed one is unchanged; for any other
+    /// cell p, `exact_new(p) ≤ cheb(p, freed) + D = old(p) + D`, and the chamfer's
+    /// candidates are all ≥ `old(p)`. Consequence for the lever: `D = 1` for any
+    /// edit into terrain (the freed brick still has neighbours), so the bounded
+    /// update is exact there; a large `D` only happens for an isolated brick in
+    /// open air, where a one-cell-too-small clearance costs one extra DDA step.
+    /// The radius therefore buys *how many cells become exact*, not safety.
+    LocalBox { radius_cells: u32 },
+    /// Recompute the whole field. Exact everywhere, and the honest baseline the
+    /// local update is judged against.
+    FullRebuild,
+}
+
+/// What one [`Brickmap::set_voxel`] changed — the delta the GPU uploader
+/// consumes and the numbers the bench reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrickmapEdit {
+    pub voxel: [i32; 3],
+    pub previous_material: u8,
+    pub material: u8,
+    /// The edit materialized a brick (level-0 pointer allocated).
+    pub brick_allocated: bool,
+    /// The edit emptied a brick (level-0 pointer freed to the slot list).
+    pub brick_freed: bool,
+    /// The level-1 arrays outgrew their headroom: the GPU buffers must be
+    /// REALLOCATED and re-uploaded whole, not patched.
+    pub arrays_grew: bool,
+    /// The brick count or the global max brick Y moved, so the metadata uniform
+    /// is stale.
+    pub metadata_changed: bool,
+    /// Brick cells whose clearance byte was written — the cost of the
+    /// distance-field half of this edit.
+    pub clearance_cells_written: usize,
+    /// Word ranges to upload, coalesced (see [`DIRTY_RANGE_GAP_WORDS`]).
+    pub dirty: Vec<DirtyWords>,
+}
+
+impl BrickmapEdit {
+    /// Bytes an uploader has to move for this edit.
+    pub fn dirty_bytes(&self) -> usize {
+        self.dirty.iter().map(DirtyWords::bytes).sum()
+    }
 }
 
 impl Brickmap {
@@ -297,7 +368,13 @@ impl Brickmap {
             }
         }
 
-        let occupied_brick_count = (occupancy_words.len() / OCCUPANCY_WORDS_PER_BRICK) as u32;
+        let allocated_brick_slots = (occupancy_words.len() / OCCUPANCY_WORDS_PER_BRICK) as u32;
+        // Edit headroom (E2): the arrays — and therefore the GPU buffers created
+        // from them — carry EDIT_BRICK_HEADROOM spare slots, so materializing a
+        // brick is a word patch instead of a buffer reallocation.
+        let brick_capacity = allocated_brick_slots + EDIT_BRICK_HEADROOM as u32;
+        occupancy_words.resize(brick_capacity as usize * OCCUPANCY_WORDS_PER_BRICK, 0);
+        material_words.resize(brick_capacity as usize * MATERIAL_WORDS_PER_BRICK, 0);
         let brick_occupancy_bit_words = pack_occupancy_bits(&brick_indices);
         let brick_skip_distance_words = pack_bytes_little_endian(&chebyshev_skip_distances(
             &brick_indices,
@@ -312,7 +389,9 @@ impl Brickmap {
             column_max_brick_y,
             brick_occupancy_bit_words,
             brick_skip_distance_words,
-            occupied_brick_count,
+            allocated_brick_slots,
+            brick_capacity,
+            free_brick_slots: Vec::new(),
             max_occupied_brick_y,
         }
     }
@@ -320,8 +399,7 @@ impl Brickmap {
     /// CPU-side material lookup: the material id at a world voxel coordinate,
     /// 0 for air and for anything out of bounds. Material bytes are only ever
     /// non-zero where the occupancy bit is set, so this is exactly the
-    /// GPU-visible value. Only the round-trip test calls this today.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// GPU-visible value.
     pub fn get(&self, x: i32, y: i32, z: i32) -> u8 {
         if x < 0
             || y < 0
@@ -347,9 +425,9 @@ impl Brickmap {
     }
 
     /// Whether the occupancy bit is set at a world voxel coordinate (false
-    /// out of bounds). Equivalent to `get(...) != 0` by construction; kept as
-    /// the future entry point for the acoustic DDA resolver (Stage 5).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// out of bounds). Equivalent to `get(...) != 0` by construction; this is the
+    /// entry point [`crate::voxel_dda`] traverses on, i.e. the one the acoustic
+    /// resolver (E8) will reuse.
     pub fn is_occupied(&self, x: i32, y: i32, z: i32) -> bool {
         if x < 0
             || y < 0
@@ -374,6 +452,27 @@ impl Brickmap {
         (word >> (bit & 31)) & 1 == 1
     }
 
+    /// Highest occupied voxel of one XZ column, or `None` for an empty column.
+    ///
+    /// Starts from the column's cached max brick Y (GPU binding 8) instead of the
+    /// world ceiling, so a scan touches the handful of voxels above the surface
+    /// rather than all 256 layers. Note the cache is per BRICK column (an 8x8
+    /// footprint), so it is an upper bound for this voxel column, not its answer.
+    pub fn column_top_occupied_voxel(&self, x: i32, z: i32) -> Option<i32> {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return None;
+        }
+        let column = x as usize / BRICK_SIZE + (z as usize / BRICK_SIZE) * BRICK_GRID_X;
+        let max_brick_y = self.column_max_brick_y[column];
+        if max_brick_y == EMPTY_COLUMN {
+            return None;
+        }
+        let highest_voxel_y = (max_brick_y as i32 + 1) * BRICK_SIZE as i32 - 1;
+        (0..=highest_voxel_y)
+            .rev()
+            .find(|y| self.is_occupied(x, *y, z))
+    }
+
     /// The GPU uniform describing this brickmap's dimensions.
     pub fn metadata(&self) -> BrickmapMetadata {
         BrickmapMetadata {
@@ -382,7 +481,7 @@ impl Brickmap {
                 BRICK_GRID_Y as u32,
                 BRICK_GRID_Z as u32,
             ],
-            occupied_brick_count: self.occupied_brick_count,
+            occupied_brick_count: self.occupied_brick_count(),
             world_size_voxels: [
                 WORLD_SIZE_X as u32,
                 WORLD_SIZE_Y as u32,
@@ -396,8 +495,513 @@ impl Brickmap {
 
     /// Number of occupied bricks (bricks with at least one non-air voxel).
     pub fn occupied_brick_count(&self) -> u32 {
-        self.occupied_brick_count
+        self.allocated_brick_slots - self.free_brick_slots.len() as u32
     }
+
+    /// Level-1 slots the arrays have room for — what the GPU buffers are sized
+    /// for, i.e. occupied bricks plus the remaining [`EDIT_BRICK_HEADROOM`].
+    pub fn brick_capacity(&self) -> u32 {
+        self.brick_capacity
+    }
+
+    /// Freed-but-not-yet-reused level-1 slots (the free list's length).
+    pub fn free_brick_slot_count(&self) -> usize {
+        self.free_brick_slots.len()
+    }
+
+    /// Total bytes of the CPU-side arrays — the "CPU memory" column of the E2
+    /// verdict, and the size of the mirror a GPU-authoritative world would have
+    /// to keep fresh for audio.
+    pub fn cpu_bytes(&self) -> usize {
+        (self.brick_indices.len()
+            + self.occupancy_words.len()
+            + self.material_words.len()
+            + self.column_max_brick_y.len()
+            + self.brick_occupancy_bit_words.len()
+            + self.brick_skip_distance_words.len())
+            * 4
+    }
+
+    /// Chebyshev clearance of a brick cell, in bricks: 0 = the brick is occupied,
+    /// otherwise the brick sits centered in a guaranteed-empty cube of half-width
+    /// `clearance - 1`. The CPU mirror of `skip_distance_of` in `world.wgsl` —
+    /// [`crate::voxel_dda`] uses it as its skip stride, so the CPU and GPU
+    /// traversals accelerate on the same data. Out-of-grid bricks read 0 (the
+    /// conservative answer: "do not skip").
+    pub fn brick_clearance_cells(&self, brick: [i32; 3]) -> u8 {
+        if brick[0] < 0
+            || brick[1] < 0
+            || brick[2] < 0
+            || brick[0] >= BRICK_GRID_X as i32
+            || brick[1] >= BRICK_GRID_Y as i32
+            || brick[2] >= BRICK_GRID_Z as i32
+        {
+            return 0;
+        }
+        let cell = brick[0] as usize
+            + brick[1] as usize * BRICK_GRID_X
+            + brick[2] as usize * BRICK_GRID_X * BRICK_GRID_Y;
+        self.skip_distance_at(cell)
+    }
+
+    /// One of the upload-ready arrays, by name — how the GPU uploader turns a
+    /// [`DirtyWords`] range into bytes without this module knowing about buffers.
+    pub fn array_words(&self, array: BrickmapArray) -> &[u32] {
+        match array {
+            BrickmapArray::BrickIndices => &self.brick_indices,
+            BrickmapArray::OccupancyWords => &self.occupancy_words,
+            BrickmapArray::MaterialWords => &self.material_words,
+            BrickmapArray::ColumnMaxBrickY => &self.column_max_brick_y,
+            BrickmapArray::BrickOccupancyBits => &self.brick_occupancy_bit_words,
+            BrickmapArray::BrickSkipDistances => &self.brick_skip_distance_words,
+        }
+    }
+
+    // ---- Editing (E2) --------------------------------------------------------
+
+    /// Set one voxel and repair EVERY derived structure, returning the word
+    /// ranges that changed (`None` when the voxel already held this material, so
+    /// a hold-to-repeat click on the same target costs nothing downstream).
+    ///
+    /// What gets repaired, in the order the code does it:
+    ///
+    /// 1. the level-1 occupancy bit and material byte;
+    /// 2. the level-0 pointer — a brick MATERIALIZES on the first non-air voxel
+    ///    (slot from the free list, else the headroom, else the arrays grow) and
+    ///    is FREED on the last one (words zeroed, slot pushed back);
+    /// 3. the 1-bit brick occupancy grid (binding 9);
+    /// 4. the chebyshev clearance field (binding 10) — see [`ClearanceUpdate`]
+    ///    for the add/remove asymmetry;
+    /// 5. the per-XZ-column max brick Y (binding 8) and the global max in the
+    ///    metadata uniform.
+    ///
+    /// Steps 2-5 only run when the brick's *occupancy* flipped, which is the
+    /// reason a typical edit is 576 bytes: carving another voxel out of solid
+    /// ground touches two words and nothing else.
+    pub fn set_voxel(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        voxel: Voxel,
+        clearance: ClearanceUpdate,
+    ) -> Option<BrickmapEdit> {
+        if x < 0
+            || y < 0
+            || z < 0
+            || x >= WORLD_SIZE_X as i32
+            || y >= WORLD_SIZE_Y as i32
+            || z >= WORLD_SIZE_Z as i32
+        {
+            return None;
+        }
+        let material = material_id(voxel);
+        let previous_material = self.get(x, y, z);
+        if material == previous_material {
+            return None;
+        }
+
+        let brick = [
+            x as usize / BRICK_SIZE,
+            y as usize / BRICK_SIZE,
+            z as usize / BRICK_SIZE,
+        ];
+        let cell = brick[0] + brick[1] * BRICK_GRID_X + brick[2] * BRICK_GRID_X * BRICK_GRID_Y;
+        let bit = x as usize % BRICK_SIZE
+            + (y as usize % BRICK_SIZE) * 8
+            + (z as usize % BRICK_SIZE) * 64;
+        let column = brick[0] + brick[2] * BRICK_GRID_X;
+
+        let mut edit = BrickmapEdit {
+            voxel: [x, y, z],
+            previous_material,
+            material,
+            brick_allocated: false,
+            brick_freed: false,
+            arrays_grew: false,
+            metadata_changed: false,
+            clearance_cells_written: 0,
+            dirty: Vec::new(),
+        };
+        let mut ranges = DirtyRanges::default();
+
+        if material != 0 {
+            if self.brick_indices[cell] == EMPTY_BRICK {
+                let (slot, arrays_grew) = self.allocate_brick_slot();
+                self.brick_indices[cell] = slot;
+                edit.brick_allocated = true;
+                edit.arrays_grew = arrays_grew;
+                edit.metadata_changed = true;
+                ranges.push(BrickmapArray::BrickIndices, cell);
+                self.brick_occupancy_bit_words[cell >> 5] |= 1 << (cell & 31);
+                ranges.push(BrickmapArray::BrickOccupancyBits, cell >> 5);
+                edit.clearance_cells_written += self.shrink_clearance_around(brick, &mut ranges);
+                self.raise_column_and_world_max(column, brick[1] as u32, &mut ranges);
+            }
+            let pointer = self.brick_indices[cell] as usize;
+            let occupancy_word = pointer * OCCUPANCY_WORDS_PER_BRICK + (bit >> 5);
+            self.occupancy_words[occupancy_word] |= 1 << (bit & 31);
+            ranges.push(BrickmapArray::OccupancyWords, occupancy_word);
+            let material_word = pointer * MATERIAL_WORDS_PER_BRICK + (bit >> 2);
+            let shift = (bit & 3) * 8;
+            self.material_words[material_word] &= !(0xff << shift);
+            self.material_words[material_word] |= u32::from(material) << shift;
+            ranges.push(BrickmapArray::MaterialWords, material_word);
+        } else {
+            let pointer = self.brick_indices[cell] as usize;
+            let occupancy_word = pointer * OCCUPANCY_WORDS_PER_BRICK + (bit >> 5);
+            self.occupancy_words[occupancy_word] &= !(1 << (bit & 31));
+            ranges.push(BrickmapArray::OccupancyWords, occupancy_word);
+            let material_word = pointer * MATERIAL_WORDS_PER_BRICK + (bit >> 2);
+            self.material_words[material_word] &= !(0xff << ((bit & 3) * 8));
+            ranges.push(BrickmapArray::MaterialWords, material_word);
+
+            let brick_words = &self.occupancy_words
+                [pointer * OCCUPANCY_WORDS_PER_BRICK..(pointer + 1) * OCCUPANCY_WORDS_PER_BRICK];
+            if brick_words.iter().all(|word| *word == 0) {
+                self.free_brick_slot(pointer as u32, &mut ranges);
+                self.brick_indices[cell] = EMPTY_BRICK;
+                edit.brick_freed = true;
+                edit.metadata_changed = true;
+                ranges.push(BrickmapArray::BrickIndices, cell);
+                self.brick_occupancy_bit_words[cell >> 5] &= !(1 << (cell & 31));
+                ranges.push(BrickmapArray::BrickOccupancyBits, cell >> 5);
+                edit.clearance_cells_written +=
+                    self.grow_clearance_around(brick, clearance, &mut ranges);
+                self.lower_column_and_world_max(column, brick[1] as u32, &mut ranges);
+            }
+        }
+
+        edit.dirty = ranges.finish();
+        Some(edit)
+    }
+
+    /// A free level-1 slot: reused first, then the headroom, and only then do the
+    /// arrays grow (which forces a whole-buffer reallocation upstream).
+    fn allocate_brick_slot(&mut self) -> (u32, bool) {
+        if let Some(slot) = self.free_brick_slots.pop() {
+            return (slot, false);
+        }
+        let slot = self.allocated_brick_slots;
+        let mut arrays_grew = false;
+        if slot >= self.brick_capacity {
+            self.brick_capacity += EDIT_BRICK_HEADROOM as u32;
+            self.occupancy_words
+                .resize(self.brick_capacity as usize * OCCUPANCY_WORDS_PER_BRICK, 0);
+            self.material_words
+                .resize(self.brick_capacity as usize * MATERIAL_WORDS_PER_BRICK, 0);
+            arrays_grew = true;
+        }
+        self.allocated_brick_slots += 1;
+        (slot, arrays_grew)
+    }
+
+    /// Return a slot to the free list, ZEROING its words (and marking them dirty)
+    /// so the GPU copy stays identical to the CPU copy: a later reuse only
+    /// uploads the one word it touches, which would otherwise expose the dead
+    /// brick's leftovers.
+    fn free_brick_slot(&mut self, slot: u32, ranges: &mut DirtyRanges) {
+        let occupancy_base = slot as usize * OCCUPANCY_WORDS_PER_BRICK;
+        for word in occupancy_base..occupancy_base + OCCUPANCY_WORDS_PER_BRICK {
+            self.occupancy_words[word] = 0;
+            ranges.push(BrickmapArray::OccupancyWords, word);
+        }
+        let material_base = slot as usize * MATERIAL_WORDS_PER_BRICK;
+        for word in material_base..material_base + MATERIAL_WORDS_PER_BRICK {
+            self.material_words[word] = 0;
+            ranges.push(BrickmapArray::MaterialWords, word);
+        }
+        self.free_brick_slots.push(slot);
+    }
+
+    /// Clearance byte of a brick cell (the packed chebyshev distance field).
+    fn skip_distance_at(&self, cell: usize) -> u8 {
+        ((self.brick_skip_distance_words[cell >> 2] >> ((cell & 3) * 8)) & 0xff) as u8
+    }
+
+    fn set_skip_distance(&mut self, cell: usize, distance: u8, ranges: &mut DirtyRanges) {
+        let shift = (cell & 3) * 8;
+        let word = &mut self.brick_skip_distance_words[cell >> 2];
+        *word &= !(0xff << shift);
+        *word |= u32::from(distance) << shift;
+        ranges.push(BrickmapArray::BrickSkipDistances, cell >> 2);
+    }
+
+    /// A brick MATERIALIZED at `brick`: the new field is exactly
+    /// `min(old, chebyshev distance to brick)`, so walk outward in chebyshev
+    /// shells and stop at the first shell that improves nothing.
+    ///
+    /// The early-out is exact, not a heuristic: a cell q at shell k+1 can only
+    /// improve if `d(q) > k + 1`, and then its neighbour toward `brick` (which
+    /// sits at shell k and is in-grid, being between q and the brick) has
+    /// `d ≥ d(q) - 1 > k` and would have improved too. No improvement at k
+    /// therefore means none beyond it.
+    fn shrink_clearance_around(&mut self, brick: [usize; 3], ranges: &mut DirtyRanges) -> usize {
+        let center = [brick[0] as i32, brick[1] as i32, brick[2] as i32];
+        let cell_of = |x: i32, y: i32, z: i32| {
+            x as usize + y as usize * BRICK_GRID_X + z as usize * BRICK_GRID_X * BRICK_GRID_Y
+        };
+        let mut written = 1;
+        self.set_skip_distance(cell_of(center[0], center[1], center[2]), 0, ranges);
+        for radius in 1..=u8::MAX as i32 {
+            let mut improved = false;
+            for z in (center[2] - radius).max(0)..=(center[2] + radius).min(BRICK_GRID_Z as i32 - 1)
+            {
+                for y in
+                    (center[1] - radius).max(0)..=(center[1] + radius).min(BRICK_GRID_Y as i32 - 1)
+                {
+                    for x in (center[0] - radius).max(0)
+                        ..=(center[0] + radius).min(BRICK_GRID_X as i32 - 1)
+                    {
+                        let chebyshev = (x - center[0])
+                            .abs()
+                            .max((y - center[1]).abs())
+                            .max((z - center[2]).abs());
+                        if chebyshev != radius {
+                            continue;
+                        }
+                        let cell = cell_of(x, y, z);
+                        if i32::from(self.skip_distance_at(cell)) > radius {
+                            self.set_skip_distance(cell, radius as u8, ranges);
+                            written += 1;
+                            improved = true;
+                        }
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        written
+    }
+
+    /// A brick was FREED at `brick`: clearance can grow, so either recompute a
+    /// bounded box (conservative outside it — see [`ClearanceUpdate::LocalBox`])
+    /// or rebuild the whole field.
+    fn grow_clearance_around(
+        &mut self,
+        brick: [usize; 3],
+        clearance: ClearanceUpdate,
+        ranges: &mut DirtyRanges,
+    ) -> usize {
+        match clearance {
+            ClearanceUpdate::FullRebuild => {
+                self.brick_skip_distance_words =
+                    pack_bytes_little_endian(&chebyshev_skip_distances(
+                        &self.brick_indices,
+                        BRICK_GRID_X,
+                        BRICK_GRID_Y,
+                        BRICK_GRID_Z,
+                    ));
+                ranges.push_range(
+                    BrickmapArray::BrickSkipDistances,
+                    0..self.brick_skip_distance_words.len(),
+                );
+                BRICK_GRID_X * BRICK_GRID_Y * BRICK_GRID_Z
+            }
+            ClearanceUpdate::LocalBox { radius_cells } => {
+                self.recompute_clearance_box(brick, radius_cells as i32, ranges)
+            }
+        }
+    }
+
+    /// The bounded local recompute: an exact chamfer transform over the box of
+    /// half-width `radius` around `brick`, seeded with the surviving distances of
+    /// the ring one cell outside it.
+    fn recompute_clearance_box(
+        &mut self,
+        brick: [usize; 3],
+        radius: i32,
+        ranges: &mut DirtyRanges,
+    ) -> usize {
+        let center = [brick[0] as i32, brick[1] as i32, brick[2] as i32];
+        let grid = [
+            BRICK_GRID_X as i32,
+            BRICK_GRID_Y as i32,
+            BRICK_GRID_Z as i32,
+        ];
+        // The sub-grid spans the interior box plus one seed ring; the ring is
+        // clipped away at the world bounds, where there is nothing to seed from.
+        let low: Vec<i32> = (0..3)
+            .map(|axis| (center[axis] - radius - 1).max(0))
+            .collect();
+        let high: Vec<i32> = (0..3)
+            .map(|axis| (center[axis] + radius + 1).min(grid[axis] - 1))
+            .collect();
+        let size: Vec<i32> = (0..3).map(|axis| high[axis] - low[axis] + 1).collect();
+        let sub_index = |x: i32, y: i32, z: i32| {
+            ((x - low[0]) + (y - low[1]) * size[0] + (z - low[2]) * size[0] * size[1]) as usize
+        };
+        let interior = |x: i32, y: i32, z: i32| {
+            (x - center[0])
+                .abs()
+                .max((y - center[1]).abs())
+                .max((z - center[2]).abs())
+                <= radius
+        };
+
+        let mut distances = vec![u8::MAX; (size[0] * size[1] * size[2]) as usize];
+        for z in low[2]..=high[2] {
+            for y in low[1]..=high[1] {
+                for x in low[0]..=high[0] {
+                    let cell = x as usize
+                        + y as usize * BRICK_GRID_X
+                        + z as usize * BRICK_GRID_X * BRICK_GRID_Y;
+                    distances[sub_index(x, y, z)] = if self.brick_indices[cell] != EMPTY_BRICK {
+                        0
+                    } else if interior(x, y, z) {
+                        u8::MAX
+                    } else {
+                        // Seed ring: the old value, which after a removal is at
+                        // most the new exact value.
+                        self.skip_distance_at(cell)
+                    };
+                }
+            }
+        }
+        chamfer_sweeps(&mut distances, size[0], size[1], size[2]);
+
+        let mut written = 0;
+        for z in low[2]..=high[2] {
+            for y in low[1]..=high[1] {
+                for x in low[0]..=high[0] {
+                    if !interior(x, y, z) {
+                        continue;
+                    }
+                    let cell = x as usize
+                        + y as usize * BRICK_GRID_X
+                        + z as usize * BRICK_GRID_X * BRICK_GRID_Y;
+                    let distance = distances[sub_index(x, y, z)];
+                    if distance != self.skip_distance_at(cell) {
+                        self.set_skip_distance(cell, distance, ranges);
+                        written += 1;
+                    }
+                }
+            }
+        }
+        written
+    }
+
+    /// A brick materialized at `brick_y`: both maxima can only rise, so this is
+    /// two compares.
+    fn raise_column_and_world_max(
+        &mut self,
+        column: usize,
+        brick_y: u32,
+        ranges: &mut DirtyRanges,
+    ) {
+        if self.column_max_brick_y[column] == EMPTY_COLUMN
+            || self.column_max_brick_y[column] < brick_y
+        {
+            self.column_max_brick_y[column] = brick_y;
+            ranges.push(BrickmapArray::ColumnMaxBrickY, column);
+        }
+        if self.max_occupied_brick_y == EMPTY_COLUMN || self.max_occupied_brick_y < brick_y {
+            self.max_occupied_brick_y = brick_y;
+        }
+    }
+
+    /// A brick was freed at `brick_y`: the column's max may drop (rescan its 32
+    /// cells), and if that was the world's tallest brick the global max is
+    /// rescanned from the column grid (15 625 reads — microseconds, and only when
+    /// the very top of the world comes off).
+    fn lower_column_and_world_max(
+        &mut self,
+        column: usize,
+        brick_y: u32,
+        ranges: &mut DirtyRanges,
+    ) {
+        if self.column_max_brick_y[column] != brick_y {
+            return;
+        }
+        let brick_x = column % BRICK_GRID_X;
+        let brick_z = column / BRICK_GRID_X;
+        let mut column_max = EMPTY_COLUMN;
+        for candidate_y in 0..BRICK_GRID_Y {
+            let cell = brick_x + candidate_y * BRICK_GRID_X + brick_z * BRICK_GRID_X * BRICK_GRID_Y;
+            if self.brick_indices[cell] != EMPTY_BRICK {
+                column_max = candidate_y as u32;
+            }
+        }
+        self.column_max_brick_y[column] = column_max;
+        ranges.push(BrickmapArray::ColumnMaxBrickY, column);
+        if self.max_occupied_brick_y == brick_y {
+            self.max_occupied_brick_y = self
+                .column_max_brick_y
+                .iter()
+                .filter(|max| **max != EMPTY_COLUMN)
+                .max()
+                .copied()
+                .unwrap_or(EMPTY_COLUMN);
+        }
+    }
+}
+
+/// Dirty word ranges being accumulated by one edit, coalesced on [`Self::finish`].
+#[derive(Default)]
+struct DirtyRanges {
+    ranges: Vec<(BrickmapArray, Range<usize>)>,
+}
+
+impl DirtyRanges {
+    fn push(&mut self, array: BrickmapArray, word: usize) {
+        self.push_range(array, word..word + 1);
+    }
+
+    fn push_range(&mut self, array: BrickmapArray, words: Range<usize>) {
+        self.ranges.push((array, words));
+    }
+
+    /// Sort per array and merge ranges separated by at most
+    /// [`DIRTY_RANGE_GAP_WORDS`] unchanged words.
+    fn finish(self) -> Vec<DirtyWords> {
+        coalesce_dirty_words(
+            self.ranges
+                .into_iter()
+                .map(|(array, words)| DirtyWords {
+                    array,
+                    first_word: words.start,
+                    word_count: words.len(),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Sort word ranges per array and merge the ones separated by at most
+/// [`DIRTY_RANGE_GAP_WORDS`] unchanged words — one `write_buffer` per survivor.
+///
+/// Public because a BULK edit
+/// ([`crate::world_edit::apply_bulk`]) coalesces ACROSS thousands of
+/// [`Brickmap::set_voxel`] calls: without that, a pool carve would publish tens
+/// of thousands of one-word uploads for words that are mostly neighbours.
+pub fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
+    ranges.sort_by_key(|range| {
+        (
+            BrickmapArray::ALL
+                .iter()
+                .position(|candidate| *candidate == range.array)
+                .expect("every array is in BrickmapArray::ALL"),
+            range.first_word,
+        )
+    });
+    let mut merged: Vec<DirtyWords> = Vec::new();
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last)
+                if last.array == range.array
+                    && range.first_word
+                        <= last.first_word + last.word_count + DIRTY_RANGE_GAP_WORDS =>
+            {
+                let end =
+                    (last.first_word + last.word_count).max(range.first_word + range.word_count);
+                last.word_count = end - last.first_word;
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
 }
 
 /// One bit per brick cell (bit `cell & 31` of word `cell >> 5`), set when
@@ -442,6 +1046,25 @@ fn chebyshev_skip_distances(
         .iter()
         .map(|&pointer| if pointer == EMPTY_BRICK { u8::MAX } else { 0 })
         .collect();
+    chamfer_sweeps(
+        &mut distances,
+        grid_size_x as i32,
+        grid_size_y as i32,
+        grid_size_z as i32,
+    );
+    distances
+}
+
+/// The two chamfer sweeps themselves, over an arbitrary dense grid of distance
+/// bytes — seeds (0 for occupied, a boundary value, `u8::MAX` for unknown) in,
+/// exact chebyshev distances out. Shared by the full transform above and by E2's
+/// bounded local recompute, so the edit path and the build path cannot disagree
+/// about the metric.
+fn chamfer_sweeps(distances: &mut [u8], grid_size_x: i32, grid_size_y: i32, grid_size_z: i32) {
+    assert_eq!(
+        distances.len(),
+        (grid_size_x * grid_size_y * grid_size_z) as usize
+    );
 
     // Relax one cell from the half-space of neighbors the current sweep has
     // already finalized: lexicographically (dz, dy, dx) < 0 on the forward
@@ -490,22 +1113,21 @@ fn chebyshev_skip_distances(
         distances[cell] = best;
     }
 
-    let grid_size = (grid_size_x as i32, grid_size_y as i32, grid_size_z as i32);
+    let grid_size = (grid_size_x, grid_size_y, grid_size_z);
     for z in 0..grid_size.2 {
         for y in 0..grid_size.1 {
             for x in 0..grid_size.0 {
-                relax_cell(&mut distances, grid_size, x, y, z, true);
+                relax_cell(distances, grid_size, x, y, z, true);
             }
         }
     }
     for z in (0..grid_size.2).rev() {
         for y in (0..grid_size.1).rev() {
             for x in (0..grid_size.0).rev() {
-                relax_cell(&mut distances, grid_size, x, y, z, false);
+                relax_cell(distances, grid_size, x, y, z, false);
             }
         }
     }
-    distances
 }
 
 #[cfg(test)]
@@ -584,13 +1206,6 @@ mod tests {
             );
             assert!(!brickmap.is_occupied(x, y, z));
         }
-    }
-
-    #[test]
-    fn palette_covers_every_material_id() {
-        assert_eq!(palette().len(), MATERIAL_COUNT);
-        // Air is the miss sentinel: fully transparent black.
-        assert_eq!(palette()[0], [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -705,6 +1320,432 @@ mod tests {
                 "chebyshev distance mismatch at ({x}, {y}, {z})"
             );
         }
+    }
+
+    // ---- E2: the edit API ----
+
+    /// Brute-force reference for every derived structure, recomputed from the
+    /// level-0 pointer grid — the same shape the build path uses, so an edit is
+    /// judged against "what a rebuild would have produced".
+    fn assert_derived_structures_are_consistent(brickmap: &Brickmap, exact_clearance: bool) {
+        let cell_count = BRICK_GRID_X * BRICK_GRID_Y * BRICK_GRID_Z;
+        for cell in 0..cell_count {
+            let occupied = brickmap.brick_indices[cell] != EMPTY_BRICK;
+            let bit = (brickmap.brick_occupancy_bit_words[cell >> 5] >> (cell & 31)) & 1 == 1;
+            assert_eq!(bit, occupied, "occupancy bit mismatch at cell {cell}");
+            assert_eq!(
+                brickmap.skip_distance_at(cell) == 0,
+                occupied,
+                "clearance 0 must mean occupied at cell {cell}"
+            );
+        }
+
+        let mut expected_global_max = EMPTY_COLUMN;
+        for brick_z in 0..BRICK_GRID_Z {
+            for brick_x in 0..BRICK_GRID_X {
+                let mut expected_column_max = EMPTY_COLUMN;
+                for brick_y in 0..BRICK_GRID_Y {
+                    let cell =
+                        brick_x + brick_y * BRICK_GRID_X + brick_z * BRICK_GRID_X * BRICK_GRID_Y;
+                    if brickmap.brick_indices[cell] != EMPTY_BRICK {
+                        expected_column_max = brick_y as u32;
+                    }
+                }
+                assert_eq!(
+                    brickmap.column_max_brick_y[brick_x + brick_z * BRICK_GRID_X],
+                    expected_column_max,
+                    "column max mismatch at ({brick_x}, {brick_z})"
+                );
+                if expected_column_max != EMPTY_COLUMN
+                    && (expected_global_max == EMPTY_COLUMN
+                        || expected_global_max < expected_column_max)
+                {
+                    expected_global_max = expected_column_max;
+                }
+            }
+        }
+        assert_eq!(
+            brickmap.metadata().max_occupied_brick_y,
+            expected_global_max,
+            "global max brick Y mismatch"
+        );
+
+        // The clearance field: exact for adds and for FullRebuild removals,
+        // never an OVERESTIMATE (the safety invariant) for local removals.
+        let exact = chebyshev_skip_distances(
+            &brickmap.brick_indices,
+            BRICK_GRID_X,
+            BRICK_GRID_Y,
+            BRICK_GRID_Z,
+        );
+        let mut underestimates = 0_usize;
+        for (cell, exact_distance) in exact.iter().enumerate().take(cell_count) {
+            let actual = brickmap.skip_distance_at(cell);
+            assert!(
+                actual <= *exact_distance,
+                "clearance OVERESTIMATE at cell {cell}: {actual} > exact {exact_distance}"
+            );
+            if actual < *exact_distance {
+                underestimates += 1;
+            }
+        }
+        if exact_clearance {
+            assert_eq!(
+                underestimates, 0,
+                "{underestimates} cells carry a stale-low clearance where the update \
+                 should have been exact"
+            );
+        }
+    }
+
+    /// Editing the real island: carve voxels out of the terrain, place voxels in
+    /// open air, and empty whole bricks — then check every derived structure
+    /// against a brute-force recompute. Dense-terrain edits must leave the
+    /// clearance field EXACT even with the bounded local update.
+    /// NOTE: generates the full world — run with `--release`.
+    #[test]
+    fn edits_keep_every_derived_structure_consistent() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+        let clearance = ClearanceUpdate::LocalBox { radius_cells: 8 };
+
+        // Find a surface column near the island center: the highest occupied
+        // voxel of a few columns gives us real terrain to dig into.
+        let mut edits_applied = 0_usize;
+        let mut bricks_freed = 0_usize;
+        for (x, z) in [(500, 500), (496, 504), (512, 488), (480, 520)] {
+            let surface_y = (0..WORLD_SIZE_Y as i32)
+                .rev()
+                .find(|y| brickmap.is_occupied(x, *y, z))
+                .expect("island column has occupied voxels");
+            // Carve a whole 8x8x8 brick away — the only removal that touches the
+            // level-0 pointer, the bit grid and the clearance field.
+            let brick_base = [
+                x - x % BRICK_SIZE as i32,
+                surface_y - surface_y % BRICK_SIZE as i32,
+                z - z % BRICK_SIZE as i32,
+            ];
+            for local_z in 0..BRICK_SIZE as i32 {
+                for local_y in 0..BRICK_SIZE as i32 {
+                    for local_x in 0..BRICK_SIZE as i32 {
+                        let edit = brickmap.set_voxel(
+                            brick_base[0] + local_x,
+                            brick_base[1] + local_y,
+                            brick_base[2] + local_z,
+                            Voxel::Air,
+                            clearance,
+                        );
+                        if let Some(edit) = edit {
+                            edits_applied += 1;
+                            if edit.brick_freed {
+                                bricks_freed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            // ...and place a stone block back on the surface.
+            for offset in 0..4 {
+                brickmap.set_voxel(x, surface_y + 1 + offset, z, Voxel::Stone, clearance);
+                edits_applied += 1;
+            }
+        }
+        assert!(
+            edits_applied > 100 && bricks_freed == 4,
+            "{edits_applied} edits, {bricks_freed} bricks freed — the test lost its grip \
+             on the world"
+        );
+        assert_derived_structures_are_consistent(&brickmap, true);
+
+        // Material round-trip through the edited words.
+        assert_eq!(
+            brickmap.get(500, 0, 500),
+            material_id(world.get(500, 0, 500))
+        );
+    }
+
+    /// A brick materialized in open air and then removed again: the slot must be
+    /// recycled (no fragmentation to manage — every slot is the same size), its
+    /// words must be zeroed, and the clearance field must stay SAFE even though
+    /// the freed brick was isolated, which is exactly the case the bounded box
+    /// cannot cover exactly.
+    /// NOTE: generates the full world — run with `--release`.
+    #[test]
+    fn an_isolated_brick_recycles_its_slot_and_leaves_a_safe_clearance_field() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+        let radius_cells = 4;
+        let clearance = ClearanceUpdate::LocalBox { radius_cells };
+        let before_capacity = brickmap.brick_capacity();
+        let before_count = brickmap.occupied_brick_count();
+
+        // High above the island, guaranteed empty air.
+        let voxel = [200, 250, 200];
+        assert!(!brickmap.is_occupied(voxel[0], voxel[1], voxel[2]));
+        let placed = brickmap
+            .set_voxel(voxel[0], voxel[1], voxel[2], Voxel::Stone, clearance)
+            .expect("placing into air changes something");
+        assert!(placed.brick_allocated && !placed.arrays_grew);
+        assert_eq!(brickmap.occupied_brick_count(), before_count + 1);
+        assert_eq!(brickmap.brick_capacity(), before_capacity);
+        assert_eq!(brickmap.metadata().max_occupied_brick_y, 250 / 8);
+        assert_derived_structures_are_consistent(&brickmap, true);
+
+        let removed = brickmap
+            .set_voxel(voxel[0], voxel[1], voxel[2], Voxel::Air, clearance)
+            .expect("removing it changes something");
+        assert!(removed.brick_freed);
+        assert_eq!(brickmap.free_brick_slot_count(), 1);
+        assert_eq!(brickmap.occupied_brick_count(), before_count);
+        // Safety only: an isolated removal grows clearance far beyond the box, so
+        // the field outside it stays stale-low ON PURPOSE.
+        assert_derived_structures_are_consistent(&brickmap, false);
+        let stale_cells = {
+            let exact = chebyshev_skip_distances(
+                &brickmap.brick_indices,
+                BRICK_GRID_X,
+                BRICK_GRID_Y,
+                BRICK_GRID_Z,
+            );
+            (0..exact.len())
+                .filter(|cell| brickmap.skip_distance_at(*cell) < exact[*cell])
+                .collect::<Vec<usize>>()
+        };
+        assert!(
+            !stale_cells.is_empty(),
+            "an isolated brick removal must leave stale-low cells — otherwise this test \
+             proves nothing about the bound"
+        );
+        // ...and the deficit must respect the documented bound: at most the freed
+        // brick's own new clearance D, everywhere, independent of the radius.
+        let freed_cell = voxel[0] as usize / BRICK_SIZE
+            + (voxel[1] as usize / BRICK_SIZE) * BRICK_GRID_X
+            + (voxel[2] as usize / BRICK_SIZE) * BRICK_GRID_X * BRICK_GRID_Y;
+        let freed_clearance = brickmap.skip_distance_at(freed_cell);
+        let exact = chebyshev_skip_distances(
+            &brickmap.brick_indices,
+            BRICK_GRID_X,
+            BRICK_GRID_Y,
+            BRICK_GRID_Z,
+        );
+        let worst_deficit = stale_cells
+            .iter()
+            .map(|cell| exact[*cell] - brickmap.skip_distance_at(*cell))
+            .max()
+            .expect("stale_cells is non-empty");
+        assert!(
+            worst_deficit <= freed_clearance,
+            "deficit {worst_deficit} exceeds the freed brick's own clearance \
+             {freed_clearance} over {} stale cells",
+            stale_cells.len()
+        );
+
+        // The slot comes back, and the recycled words must be clean.
+        let replaced = brickmap
+            .set_voxel(voxel[0] + 1, voxel[1], voxel[2], Voxel::Sand, clearance)
+            .expect("placing again changes something");
+        assert!(replaced.brick_allocated && !replaced.arrays_grew);
+        assert_eq!(brickmap.free_brick_slot_count(), 0);
+        assert_eq!(brickmap.brick_capacity(), before_capacity);
+        assert_eq!(
+            brickmap.get(voxel[0] + 1, voxel[1], voxel[2]),
+            material_id(Voxel::Sand)
+        );
+        assert!(!brickmap.is_occupied(voxel[0], voxel[1], voxel[2]));
+        // The FullRebuild strategy repairs everything the bounded box left stale.
+        brickmap.set_voxel(
+            voxel[0] + 1,
+            voxel[1],
+            voxel[2],
+            Voxel::Air,
+            ClearanceUpdate::FullRebuild,
+        );
+        assert_derived_structures_are_consistent(&brickmap, true);
+    }
+
+    /// THE delta-upload gate: every word an edit changes must be inside one of
+    /// the reported dirty ranges, or the GPU copy silently diverges from the CPU
+    /// copy. Compares full array snapshots around each edit.
+    /// NOTE: generates the full world — run with `--release`.
+    #[test]
+    fn dirty_ranges_cover_every_changed_word() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+        let clearance = ClearanceUpdate::LocalBox { radius_cells: 6 };
+
+        let surface_y = (0..WORLD_SIZE_Y as i32)
+            .rev()
+            .find(|y| brickmap.is_occupied(500, *y, 500))
+            .expect("island column has occupied voxels");
+        let mut edits: Vec<(i32, i32, i32, Voxel)> = vec![
+            // Carve into solid ground (no brick flip: the cheap common case).
+            (500, surface_y, 500, Voxel::Air),
+            (501, surface_y, 500, Voxel::Air),
+            // Overwrite a material in place.
+            (502, surface_y, 500, Voxel::Snow),
+            // Place into open air far away (brick materializes).
+            (300, 200, 300, Voxel::Stone),
+            (301, 200, 300, Voxel::Stone),
+            // ...and empty it again (brick freed, clearance grows).
+            (300, 200, 300, Voxel::Air),
+            (301, 200, 300, Voxel::Air),
+        ];
+        // Empty one whole surface brick, so a free + column-max drop is covered.
+        let brick_base = [496, surface_y - surface_y % BRICK_SIZE as i32, 496];
+        for local_z in 0..BRICK_SIZE as i32 {
+            for local_y in 0..BRICK_SIZE as i32 {
+                for local_x in 0..BRICK_SIZE as i32 {
+                    edits.push((
+                        brick_base[0] + local_x,
+                        brick_base[1] + local_y,
+                        brick_base[2] + local_z,
+                        Voxel::Air,
+                    ));
+                }
+            }
+        }
+
+        let mut edits_checked = 0_usize;
+        let mut bricks_flipped = 0_usize;
+        for (x, y, z, voxel) in edits {
+            let before: Vec<Vec<u32>> = BrickmapArray::ALL
+                .iter()
+                .map(|array| brickmap.array_words(*array).to_vec())
+                .collect();
+            let Some(edit) = brickmap.set_voxel(x, y, z, voxel, clearance) else {
+                continue;
+            };
+            edits_checked += 1;
+            if edit.brick_allocated || edit.brick_freed {
+                bricks_flipped += 1;
+            }
+            for (array_index, array) in BrickmapArray::ALL.iter().enumerate() {
+                let after = brickmap.array_words(*array);
+                assert_eq!(
+                    after.len(),
+                    before[array_index].len(),
+                    "{array:?} changed length without arrays_grew"
+                );
+                for word in 0..after.len() {
+                    if after[word] == before[array_index][word] {
+                        continue;
+                    }
+                    assert!(
+                        edit.dirty.iter().any(|range| range.array == *array
+                            && word >= range.first_word
+                            && word < range.first_word + range.word_count),
+                        "edit at ({x}, {y}, {z}) changed {array:?} word {word} but did not \
+                         report it dirty"
+                    );
+                }
+            }
+        }
+        assert!(
+            edits_checked > 300 && bricks_flipped >= 3,
+            "{edits_checked} edits / {bricks_flipped} brick flips checked — the fixture drifted"
+        );
+    }
+
+    /// A no-op edit reports nothing: hold-to-repeat aims at the same voxel for
+    /// several frames, and the pipeline must not pay for that.
+    /// NOTE: generates the full world — run with `--release`.
+    #[test]
+    fn a_no_op_edit_returns_none() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+        let clearance = ClearanceUpdate::LocalBox { radius_cells: 8 };
+        // Air over air, and the material already in place.
+        assert!(brickmap
+            .set_voxel(200, 250, 200, Voxel::Air, clearance)
+            .is_none());
+        let surface_y = (0..WORLD_SIZE_Y as i32)
+            .rev()
+            .find(|y| brickmap.is_occupied(500, *y, 500))
+            .expect("island column has occupied voxels");
+        let existing = brickmap.get(500, surface_y, 500);
+        let same_voxel = (0..crate::material::MATERIAL_COUNT as u8)
+            .find(|id| *id == existing)
+            .expect("the material id exists");
+        assert_eq!(same_voxel, existing);
+        assert!(brickmap
+            .set_voxel(500, surface_y, 500, voxel_of_material(existing), clearance)
+            .is_none());
+        // Out of bounds is silently ignored, never a panic.
+        for (x, y, z) in [(-1, 0, 0), (0, -1, 0), (WORLD_SIZE_X as i32, 5, 5)] {
+            assert!(brickmap
+                .set_voxel(x, y, z, Voxel::Stone, clearance)
+                .is_none());
+        }
+    }
+
+    /// Test-only inverse of [`material_id`].
+    fn voxel_of_material(material: u8) -> Voxel {
+        [
+            Voxel::Air,
+            Voxel::Grass,
+            Voxel::TallGrass,
+            Voxel::Dirt,
+            Voxel::Sand,
+            Voxel::Sediment,
+            Voxel::Stone,
+            Voxel::Water,
+            Voxel::Trunk,
+            Voxel::TrunkBirch,
+            Voxel::Leaves,
+            Voxel::LeavesDark,
+            Voxel::LeavesBirch,
+            Voxel::LeavesPine,
+            Voxel::FlowerPink,
+            Voxel::FlowerWhite,
+            Voxel::FlowerYellow,
+            Voxel::FlowerBlue,
+            Voxel::WaterWeed,
+            Voxel::LilyPad,
+            Voxel::LilyBloom,
+            Voxel::Reed,
+            Voxel::CattailHead,
+            Voxel::Snow,
+        ][material as usize]
+    }
+
+    /// Range coalescing: adjacent and near-adjacent words merge, distant ones do
+    /// not, and arrays never mix.
+    #[test]
+    fn dirty_ranges_coalesce_within_the_gap_tolerance() {
+        let mut ranges = DirtyRanges::default();
+        ranges.push(BrickmapArray::OccupancyWords, 10);
+        ranges.push(BrickmapArray::OccupancyWords, 11);
+        ranges.push(BrickmapArray::OccupancyWords, 11 + DIRTY_RANGE_GAP_WORDS);
+        ranges.push(
+            BrickmapArray::OccupancyWords,
+            200 + 2 * DIRTY_RANGE_GAP_WORDS,
+        );
+        ranges.push(BrickmapArray::MaterialWords, 5);
+        let merged = ranges.finish();
+        assert_eq!(
+            merged,
+            vec![
+                DirtyWords {
+                    array: BrickmapArray::OccupancyWords,
+                    first_word: 10,
+                    word_count: 2 + DIRTY_RANGE_GAP_WORDS,
+                },
+                DirtyWords {
+                    array: BrickmapArray::OccupancyWords,
+                    first_word: 200 + 2 * DIRTY_RANGE_GAP_WORDS,
+                    word_count: 1,
+                },
+                DirtyWords {
+                    array: BrickmapArray::MaterialWords,
+                    first_word: 5,
+                    word_count: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            merged.iter().map(DirtyWords::bytes).sum::<usize>(),
+            (3 + DIRTY_RANGE_GAP_WORDS) * 4 + 4
+        );
     }
 
     /// An all-empty grid must saturate everywhere (the shader then skips at

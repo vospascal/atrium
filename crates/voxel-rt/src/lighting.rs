@@ -47,6 +47,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 32     | `sky_ambient`         | `vec4<f32>` | rgb = linear sky ambient, w = ambient strength |
 /// | 48     | `ground_ambient`      | `vec4<f32>` | rgb = linear ground bounce, w = unused |
 /// | 64     | `shading_params`      | `vec4<f32>` | the runtime quality knobs — see [`ShadingParams`] |
+/// | 80     | `gi_params`           | `vec4<f32>` | the runtime CAGI knobs — see [`GiParams`] |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -56,6 +57,7 @@ pub struct LightingUniform {
     pub sky_ambient: [f32; 4],
     pub ground_ambient: [f32; 4],
     pub shading_params: [f32; 4],
+    pub gi_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -92,6 +94,35 @@ impl ShadingParams {
             self.shadow_penumbra_scale,
             self.ambient_occlusion_fade_start_voxels,
             self.ambient_occlusion_fade_end_voxels,
+        ]
+    }
+}
+
+/// The RUNTIME CAGI knobs (E4), packed into `Lighting.gi_params`. Both passes
+/// read this vector: the CA pass injects with `sun_bounce`, the shading pass
+/// composes with `strength` and `ambient_floor`. Compile-time CAGI levers (the
+/// master switch, the propagation rule, the sky test, the sampling mode, the
+/// sun-source cache) are shader consts instead — see [`crate::cagi`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GiParams {
+    /// `x` — multiplier on the sampled light volume.
+    pub strength: f32,
+    /// `y` — share of the hemisphere ambient kept under CAGI (0 = the volume is
+    /// the only indirect light).
+    pub ambient_floor: f32,
+    /// `z` — share of the sun's radiance a sunlit surface injects into the volume.
+    pub sun_bounce: f32,
+    /// `w` — unused, reserved for E5's emissive scale.
+    pub reserved: f32,
+}
+
+impl GiParams {
+    fn to_array(self) -> [f32; 4] {
+        [
+            self.strength,
+            self.ambient_floor,
+            self.sun_bounce,
+            self.reserved,
         ]
     }
 }
@@ -142,7 +173,11 @@ impl SunSettings {
     /// `crate::variants::RenderQuality::shading_params` produces it from the
     /// live quality settings, and each field is ignored by the shader when its
     /// lever is compiled off.
-    pub fn lighting_uniform(&self, shading_params: ShadingParams) -> LightingUniform {
+    pub fn lighting_uniform(
+        &self,
+        shading_params: ShadingParams,
+        gi_params: GiParams,
+    ) -> LightingUniform {
         let sun_direction = self.sun_direction();
         LightingUniform {
             sun_direction: sun_direction.to_array(),
@@ -161,6 +196,7 @@ impl SunSettings {
                 0.0,
             ],
             shading_params: shading_params.to_array(),
+            gi_params: gi_params.to_array(),
         }
     }
 }
@@ -171,8 +207,31 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 80);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 96);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
+    }
+
+    /// The E4 knobs must land in their own slots of `gi_params` — swapping two
+    /// would make the GI strength slider control the sun bounce fraction.
+    #[test]
+    fn gi_params_keep_their_vector_components() {
+        let uniform = SunSettings::default().lighting_uniform(
+            ShadingParams {
+                ambient_occlusion_strength: 0.8,
+                shadow_penumbra_scale: 115.0,
+                ambient_occlusion_fade_start_voxels: 240.0,
+                ambient_occlusion_fade_end_voxels: 480.0,
+            },
+            GiParams {
+                strength: 1.0,
+                ambient_floor: 0.25,
+                sun_bounce: 0.35,
+                reserved: 0.0,
+            },
+        );
+        assert_eq!(uniform.gi_params, [1.0, 0.25, 0.35, 0.0]);
+        // ...and the E1 knobs must be untouched by the new vector.
+        assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
     }
 
     /// The runtime knobs must land in their own slots of the shared
@@ -180,12 +239,20 @@ mod tests {
     /// control the penumbra width.
     #[test]
     fn shading_params_keep_their_vector_components() {
-        let uniform = SunSettings::default().lighting_uniform(ShadingParams {
-            ambient_occlusion_strength: 0.8,
-            shadow_penumbra_scale: 4.0,
-            ambient_occlusion_fade_start_voxels: 240.0,
-            ambient_occlusion_fade_end_voxels: 480.0,
-        });
+        let uniform = SunSettings::default().lighting_uniform(
+            ShadingParams {
+                ambient_occlusion_strength: 0.8,
+                shadow_penumbra_scale: 4.0,
+                ambient_occlusion_fade_start_voxels: 240.0,
+                ambient_occlusion_fade_end_voxels: 480.0,
+            },
+            GiParams {
+                strength: 1.0,
+                ambient_floor: 0.25,
+                sun_bounce: 0.35,
+                reserved: 0.0,
+            },
+        );
         assert_eq!(uniform.shading_params, [0.8, 4.0, 240.0, 480.0]);
     }
 

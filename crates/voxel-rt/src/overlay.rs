@@ -1,9 +1,10 @@
 //! egui overlay: stats panel (window/render sizes, moving-average frame time,
 //! FPS, per-pass GPU times), the vsync lever, a collapsible sun-position
-//! section, and the E1c **Quality** section — preset selector plus every lever
+//! section, the E1c **Quality** section — preset selector plus every lever
 //! grouped by subsystem, each carrying its measured verdict as hover text so
-//! "why is this off?" is answerable in-app. Drawn on top of the rendered frame
-//! in its own render pass (LoadOp::Load).
+//! "why is this off?" is answerable in-app — and a **Debug tools** section for
+//! the actions that change the WORLD rather than how it is drawn. Drawn on top
+//! of the rendered frame in its own render pass (LoadOp::Load).
 //!
 //! The Quality section is generated from [`crate::variants::REGISTRY`]: the
 //! widget shape comes from each lever's [`LeverRange`], the hover text from its
@@ -21,6 +22,8 @@ use winit::event::WindowEvent;
 use winit::window::Window;
 
 use crate::ao::AoMode;
+use crate::character::Submersion;
+use crate::debug_pool::{POOL_DEPTH_METERS, POOL_DISTANCE_AHEAD_METERS, POOL_WATER_RADIUS_METERS};
 use crate::frame_timing::FrameTimings;
 use crate::lighting::SunSettings;
 use crate::shadows::ShadowMode;
@@ -28,6 +31,8 @@ use crate::variants::{
     levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
     RenderQuality, QUALITY_PRESETS, VOXELS_PER_METER,
 };
+use crate::world_edit::ClearanceUpdateMode;
+use crate::world_host::WorldEditStats;
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
 
@@ -38,6 +43,38 @@ pub struct OverlayFrameData {
     /// Latest completed GPU pass timings; `None` when the device has no
     /// timestamp-query support (the panel says so instead of showing numbers).
     pub gpu_timings: Option<FrameTimings>,
+    /// E2 — the edit pipeline's live numbers, so the "zero frame hitches" gate is
+    /// judgeable in-app and not only in the harness.
+    pub world_edit: WorldEditReadout,
+    /// E2b — which movement model is driving the view, and what the body is
+    /// doing.
+    pub movement: MovementReadout,
+}
+
+/// What the overlay shows about movement (E2b). Flat and pre-read so the panel
+/// never borrows the controller itself.
+pub struct MovementReadout {
+    /// False = the fly camera, true = the character body.
+    pub walking: bool,
+    /// The mouse-wheel-tuned base speed of whichever mode is active, m/s.
+    pub speed_meters_per_second: f32,
+    /// Walk mode: resting on solid ground.
+    pub grounded: bool,
+    /// Walk mode: how wet the body is.
+    pub submersion: Submersion,
+    /// Walk mode: the eye is under a liquid (E6's underwater flag).
+    pub head_submerged: bool,
+    /// Walk mode: CPU cost of the last movement + collision step, microseconds.
+    pub step_micros: f32,
+}
+
+/// What the overlay shows about the world authority (E2).
+pub struct WorldEditReadout {
+    /// Whether edits are applied on the world thread (variant B) or inline.
+    pub threaded: bool,
+    /// Requests handed to the world thread that have not come back yet.
+    pub in_flight: usize,
+    pub stats: WorldEditStats,
 }
 
 pub struct Overlay {
@@ -103,6 +140,7 @@ impl Overlay {
         vsync_enabled: &mut bool,
         sun_settings: &mut SunSettings,
         quality: &mut RenderQuality,
+        carve_test_pool_requested: &mut bool,
     ) {
         let average_frame_time_seconds = if self.frame_time_samples.is_empty() {
             0.0
@@ -150,6 +188,10 @@ impl Overlay {
                                     format_pass_milliseconds(timings.dda_milliseconds())
                                 ));
                                 ui.label(format!(
+                                    "CAGI: {}",
+                                    format_pass_milliseconds(timings.cagi_milliseconds())
+                                ));
+                                ui.label(format!(
                                     "blit+ui: {}",
                                     format_pass_milliseconds(timings.post_milliseconds())
                                 ));
@@ -158,8 +200,32 @@ impl Overlay {
                                 ui.label("GPU pass timers unavailable");
                             }
                         }
+                        let world_edit = &frame_data.world_edit;
+                        ui.label(format!(
+                            "edits {} ({} voxels, {} ignored) | apply {:.0} us | delta {} B",
+                            world_edit.stats.edits_applied,
+                            world_edit.stats.voxels_written,
+                            world_edit.stats.edits_ignored,
+                            world_edit.stats.last_apply_micros,
+                            world_edit.stats.last_upload_bytes,
+                        ))
+                        .on_hover_text(
+                            "E2: voxel edits applied by the world authority — one per click, and \
+                             one coalesced delta per bulk edit (hence the separate voxel count). \
+                             `apply` is the CPU cost of patching the brickmap and every derived \
+                             structure; `delta` is what the last edit uploaded to the GPU. On the \
+                             world thread neither is paid inside a frame.",
+                        );
+                        ui.label(format!(
+                            "world thread: {} | {} in flight | {:.1} KB uploaded",
+                            if world_edit.threaded { "on" } else { "off" },
+                            world_edit.in_flight,
+                            world_edit.stats.total_upload_bytes as f32 / 1024.0,
+                        ));
+                        draw_movement_readout(ui, &frame_data.movement);
                         ui.checkbox(vsync_enabled, "VSync");
                         draw_quality_section(ui, quality);
+                        draw_debug_section(ui, carve_test_pool_requested);
                         ui.collapsing("Sun", |ui| {
                             ui.add(
                                 egui::Slider::new(&mut sun_settings.azimuth_degrees, 0.0..=360.0)
@@ -225,6 +291,79 @@ impl Overlay {
     }
 }
 
+/// E2b — the movement readout: which model is driving the view, the key that
+/// switches it, and (in walk mode) the body's state plus what its collision step
+/// costs the frame thread.
+fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
+    let mode_line = if movement.walking {
+        format!(
+            "mode: WALK (F = fly) | {:.1} m/s",
+            movement.speed_meters_per_second
+        )
+    } else {
+        format!(
+            "mode: FLY (F = walk) | {:.1} m/s",
+            movement.speed_meters_per_second
+        )
+    };
+    ui.label(mode_line).on_hover_text(
+        "E2b: F toggles the fly camera and the walking body. Mouse-look, the \
+         mouse-wheel speed knob and click-to-dig/place work in both. Walk mode \
+         snaps the body to the ground under the camera on entry; fly mode keeps \
+         the eye where the body's head was.",
+    );
+    if movement.walking {
+        ui.label(format!(
+            "body: {} | {}{} | {:.0} us",
+            if movement.grounded {
+                "grounded"
+            } else {
+                "airborne"
+            },
+            movement.submersion.label(),
+            if movement.head_submerged {
+                ", head under"
+            } else {
+                ""
+            },
+            movement.step_micros,
+        ))
+        .on_hover_text(
+            "The body is a 0.6 x 1.8 m box swept against the voxel grid, resolved \
+             per axis, with a 0.375 m (3-voxel) auto-step. The microseconds are \
+             the whole movement + collision step on the frame thread.",
+        );
+    }
+}
+
+/// Test tools that CHANGE THE WORLD, kept in their own section and worded so
+/// that is unmistakable.
+///
+/// Deliberately not registry levers: [`crate::variants::REGISTRY`] rows carry
+/// measured frame-time verdicts and drive shader permutations, and a one-shot
+/// world edit has neither. The overlay only *asks* — the platform layer owns the
+/// edit, exactly as with every other control here.
+fn draw_debug_section(ui: &mut egui::Ui, carve_test_pool_requested: &mut bool) {
+    ui.collapsing("Debug tools", |ui| {
+        if ui
+            .button(format!(
+                "Carve {POOL_DEPTH_METERS:.0} m water pool ahead (P)"
+            ))
+            .on_hover_text(format!(
+                "MODIFIES THE WORLD. Carves a {:.0} m wide, {POOL_DEPTH_METERS:.0} m deep pool \
+                 with a walk-in shore, centred {POOL_DISTANCE_AHEAD_METERS:.0} m in front of the \
+                 eye, and fills it with water — the island's own water is at most 1.75 m deep, \
+                 under the 1.44 m the body needs to swim. Applied through E2's edit pipeline on \
+                 the world thread; the light volume re-floods afterwards.",
+                POOL_WATER_RADIUS_METERS * 2.0,
+            ))
+            .clicked()
+        {
+            *carve_test_pool_requested = true;
+        }
+    });
+}
+
 /// The E1c Quality section: preset selector on top, then every registry lever
 /// grouped by subsystem. Selecting a preset overwrites the knobs; touching any
 /// knob switches the tag to [`QualityPreset::Custom`] — detected by comparing
@@ -283,6 +422,22 @@ fn lever_is_relevant(quality: &RenderQuality, lever_id: LeverId) -> bool {
             ambient_occlusion.mode != AoMode::Off && ambient_occlusion.distance_fade
         }
         LeverId::ShadowPenumbraScale => quality.shadows.mode == ShadowMode::SoftDistanceField,
+        // Every CAGI knob is meaningless without the light volume (E4).
+        LeverId::GiResolution
+        | LeverId::GiRule
+        | LeverId::GiSkyTest
+        | LeverId::GiSunCache
+        | LeverId::GiSampleMode
+        | LeverId::GiIterationsPerFrame
+        | LeverId::GiStrength
+        | LeverId::GiAmbientFloor
+        | LeverId::GiSunBounce => quality.global_illumination.enabled,
+        // E2: the box radius only means something for the bounded strategy, and
+        // re-flooding needs a light volume to flood.
+        LeverId::EditClearanceRadius => {
+            quality.world_edit.clearance_update == ClearanceUpdateMode::LocalBox
+        }
+        LeverId::EditGiReflood => quality.global_illumination.enabled,
         _ => true,
     }
 }
