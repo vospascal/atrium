@@ -372,3 +372,31 @@ worldgen, and would make generation *slower* per column, not faster.
 Only worth revisiting if we want visually distinct, high-contrast biome
 regions in the voxel world. Filed here because it came up in the same batch,
 not because it's a perf lever.
+
+## Interior-voxel culling ("removing occluded voxels from the world buffer")
+
+Suggested by a devlog comment (2026-07-30). Strip voxels that are fully
+enclosed by opaque neighbors from the brickmap; bricks that become entirely
+empty free their level-1 storage.
+
+**What it buys: memory only, zero traversal speed.** Rays always terminate on
+the shell, so interior bricks are never visited — the DDA never reads them.
+Current level-1 footprint (seed-1 island, 71,941 occupied bricks): 4.6 MB
+occupancy masks + 36.8 MB material bytes ≈ 41.4 MB. A solid island likely has
+half or more of its occupied bricks fully underground, so expect ~20-30 MB
+back.
+
+**Why NOT now:**
+- 41 MB is nothing on the desktop target; no memory pressure exists.
+- The brickmap doubles as the acoustic occupancy structure (Stage 5) and the
+  CPU `is_occupied` query — culling changes their semantics from "solid
+  matter" to "visible shell". Audio occlusion through a hill must still see
+  the hill.
+- Stage 3.5 transparency needs real volumes: refraction path lengths and
+  absorption through water require the water interior intact. Culling must be
+  opaque-enclosed-by-opaque only.
+- A future dynamic world (digging) needs interiors re-derivable on edit.
+
+**When to revisit:** streaming worlds or Quest 3 (Stage 6), where GPU memory
+is genuinely scarce. Then cull opaque interiors only, keep transparent
+volumes, and keep the acoustic resolver reading the *unculled* CPU-side data.

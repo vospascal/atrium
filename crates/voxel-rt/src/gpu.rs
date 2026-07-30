@@ -31,8 +31,13 @@ impl GpuContext {
         }))
         .expect("no compatible GPU adapter found");
 
+        // GPU pass timing (frame_timing.rs) wants timestamp queries; request
+        // the feature only where the adapter offers it so devices without it
+        // still come up (the perf readout then degrades to "unavailable").
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("voxel-rt device"),
+            required_features,
             ..Default::default()
         }))
         .expect("failed to create wgpu device");
@@ -57,6 +62,10 @@ impl GpuContext {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
+        println!(
+            "surface present modes: {:?} (starting with {:?})",
+            surface_capabilities.present_modes, surface_config.present_mode
+        );
 
         Self {
             surface,
@@ -81,6 +90,10 @@ impl GpuContext {
         } else {
             wgpu::PresentMode::AutoNoVsync
         };
+        println!(
+            "vsync toggled: present mode {:?}",
+            self.surface_config.present_mode
+        );
         self.surface.configure(&self.device, &self.surface_config);
     }
 

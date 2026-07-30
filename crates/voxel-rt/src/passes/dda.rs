@@ -1,20 +1,30 @@
-//! DDA compute pass: primary rays traced through the two-level brickmap
-//! (`shaders/dda.wgsl`), one thread per pixel, writing shaded colors into the
-//! frame's storage texture. Owns the brickmap GPU buffers (uploaded once at
-//! startup — the world is static in Stage 1) and the per-frame camera
-//! uniform.
+//! DDA compute pass: primary rays plus one sun shadow ray per hit, traced
+//! through the two-level brickmap (`shaders/dda.wgsl`), one thread per pixel,
+//! writing shaded colors into the frame's storage texture. Owns the brickmap
+//! GPU buffers (uploaded once at startup — the world is static in Stage 1)
+//! and the per-frame camera + lighting uniforms.
 //!
 //! Bind group 0 layout mirrors the table at the top of `dda.wgsl`:
 //! camera uniform, brickmap metadata uniform, three read-only storage buffers
 //! (brick pointers, occupancy bits, material bytes), the palette storage
-//! buffer, and the write-only rgba8unorm output texture.
+//! buffer, the write-only rgba8unorm output texture, the lighting uniform,
+//! the per-XZ-column max-brick-Y storage buffer (the traversal's
+//! column-height early exit), and the two empty-space acceleration grids
+//! (1-bit-per-brick occupancy, chebyshev skip distances).
 
 use wgpu::util::DeviceExt;
 
 use crate::brickmap::Brickmap;
 use crate::camera::CameraUniform;
+use crate::lighting::LightingUniform;
 
 const WORKGROUP_SIZE: u32 = 8;
+
+/// The DDA shader source, exposed so the headless benchmark
+/// (`examples/bench_dda.rs`) can build A/B pipeline variants by patching the
+/// compile-time flags at the top of the file (see "A/B benchmark levers" in
+/// `shaders/dda.wgsl`).
+pub const SHADER_SOURCE: &str = include_str!("../../shaders/dda.wgsl");
 
 pub struct DdaPass {
     pipeline: wgpu::ComputePipeline,
@@ -26,6 +36,10 @@ pub struct DdaPass {
     occupancy_words_buffer: wgpu::Buffer,
     material_words_buffer: wgpu::Buffer,
     palette_buffer: wgpu::Buffer,
+    lighting_uniform_buffer: wgpu::Buffer,
+    column_max_buffer: wgpu::Buffer,
+    brick_occupancy_bits_buffer: wgpu::Buffer,
+    skip_distance_buffer: wgpu::Buffer,
 }
 
 impl DdaPass {
@@ -34,11 +48,30 @@ impl DdaPass {
         brickmap: &Brickmap,
         output_view: &wgpu::TextureView,
     ) -> Self {
-        let (pipeline, bind_group_layout) = create_pipeline(device);
+        Self::new_with_shader_source(device, brickmap, output_view, SHADER_SOURCE)
+    }
+
+    /// Build the pass from an explicit shader source string — the benchmark's
+    /// entry point for A/B variants (patched copies of [`SHADER_SOURCE`]).
+    /// Everything else (buffers, layout, bind group) is identical to
+    /// [`DdaPass::new`].
+    pub fn new_with_shader_source(
+        device: &wgpu::Device,
+        brickmap: &Brickmap,
+        output_view: &wgpu::TextureView,
+        shader_source: &str,
+    ) -> Self {
+        let (pipeline, bind_group_layout) = create_pipeline(device, shader_source);
 
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dda camera uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lighting_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dda lighting uniform"),
+            size: std::mem::size_of::<LightingUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -68,6 +101,22 @@ impl DdaPass {
             contents: bytemuck::cast_slice(&crate::brickmap::palette()),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let column_max_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dda column max brick y"),
+            contents: bytemuck::cast_slice(&brickmap.column_max_brick_y),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let brick_occupancy_bits_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dda brick occupancy bits"),
+                contents: bytemuck::cast_slice(&brickmap.brick_occupancy_bit_words),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let skip_distance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("dda brick skip distances"),
+            contents: bytemuck::cast_slice(&brickmap.brick_skip_distance_words),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
         let bind_group = create_bind_group(
             device,
@@ -79,6 +128,10 @@ impl DdaPass {
             &material_words_buffer,
             &palette_buffer,
             output_view,
+            &lighting_uniform_buffer,
+            &column_max_buffer,
+            &brick_occupancy_bits_buffer,
+            &skip_distance_buffer,
         );
 
         Self {
@@ -91,6 +144,10 @@ impl DdaPass {
             occupancy_words_buffer,
             material_words_buffer,
             palette_buffer,
+            lighting_uniform_buffer,
+            column_max_buffer,
+            brick_occupancy_bits_buffer,
+            skip_distance_buffer,
         }
     }
 
@@ -106,26 +163,38 @@ impl DdaPass {
             &self.material_words_buffer,
             &self.palette_buffer,
             output_view,
+            &self.lighting_uniform_buffer,
+            &self.column_max_buffer,
+            &self.brick_occupancy_bits_buffer,
+            &self.skip_distance_buffer,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn encode(
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         camera_uniform: &CameraUniform,
+        lighting_uniform: &LightingUniform,
         output_width: u32,
         output_height: u32,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         queue.write_buffer(
             &self.camera_uniform_buffer,
             0,
             bytemuck::bytes_of(camera_uniform),
         );
+        queue.write_buffer(
+            &self.lighting_uniform_buffer,
+            0,
+            bytemuck::bytes_of(lighting_uniform),
+        );
 
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("dda pass"),
-            timestamp_writes: None,
+            timestamp_writes,
         });
         compute_pass.set_pipeline(&self.pipeline);
         compute_pass.set_bind_group(0, &self.bind_group, &[]);
@@ -140,10 +209,13 @@ impl DdaPass {
 /// Shader module + bind group layout + compute pipeline, separated from
 /// buffer upload so the headless pipeline test can validate the shader and
 /// layout without building a world.
-fn create_pipeline(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+fn create_pipeline(
+    device: &wgpu::Device,
+    shader_source: &str,
+) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("dda shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/dda.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
     });
 
     let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
@@ -186,6 +258,10 @@ fn create_pipeline(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindG
                 },
                 count: None,
             },
+            uniform_entry(7),  // lighting
+            storage_entry(8),  // per-XZ-column max occupied brick Y
+            storage_entry(9),  // 1-bit-per-brick occupancy grid
+            storage_entry(10), // chebyshev skip-distance bytes
         ],
     });
 
@@ -218,6 +294,10 @@ fn create_bind_group(
     material_words_buffer: &wgpu::Buffer,
     palette_buffer: &wgpu::Buffer,
     output_view: &wgpu::TextureView,
+    lighting_uniform_buffer: &wgpu::Buffer,
+    column_max_buffer: &wgpu::Buffer,
+    brick_occupancy_bits_buffer: &wgpu::Buffer,
+    skip_distance_buffer: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("dda bind group"),
@@ -251,6 +331,22 @@ fn create_bind_group(
                 binding: 6,
                 resource: wgpu::BindingResource::TextureView(output_view),
             },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: lighting_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: column_max_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: brick_occupancy_bits_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: skip_distance_buffer.as_entire_binding(),
+            },
         ],
     })
 }
@@ -283,7 +379,7 @@ mod tests {
             .expect("adapter exists but device creation failed");
 
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let (_pipeline, _bind_group_layout) = create_pipeline(&device);
+        let (_pipeline, _bind_group_layout) = create_pipeline(&device, SHADER_SOURCE);
         let validation_error = pollster::block_on(error_scope.pop());
         assert!(
             validation_error.is_none(),

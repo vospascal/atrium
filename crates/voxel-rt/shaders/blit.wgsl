@@ -6,7 +6,10 @@
 // palette as-is (see shaders/dda.wgsl). The swapchain format is sRGB, so the
 // hardware re-encodes fragment output on store; decoding here makes that a
 // round trip (presented bytes == storage-texture bytes, no double encode).
-// The sampler is nearest at 1:1 scale, so decoding after the sample is exact.
+// At render scale 1.0 the sampler is nearest, so decoding after the sample
+// is exact. Below 1.0 (render-scale lever) the sampler is linear: the
+// upscale interpolates sRGB-encoded values before the decode — technically
+// a gamma-space blend, visually fine for a perf lever and standard practice.
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,

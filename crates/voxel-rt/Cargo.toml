@@ -14,3 +14,7 @@ pollster = "0.4"
 voxel-core = { version = "0.1.0", path = "../voxel-core" }
 wgpu = "29"
 winit = "0.30"
+
+[dev-dependencies]
+# examples/bench_dda.rs: correctness PNGs from the low-sun shadow scenario.
+png = "0.18"

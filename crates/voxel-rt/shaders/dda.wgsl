@@ -1,28 +1,80 @@
-// dda.wgsl — Stage 1 primary-ray renderer: two-level DDA over the brickmap.
+// dda.wgsl — Stage 2 renderer: two-level DDA over the brickmap, one sun
+// shadow ray per primary hit, hemisphere sky ambient, Reinhard tonemap.
 //
 // Fullscreen compute pass (workgroup 8x8): one thread per output pixel builds
 // a camera ray, traverses the two-level brickmap (coarse Amanatides & Woo DDA
 // over 8^3-voxel bricks, fine DDA over the voxels inside occupied bricks),
 // and writes a shaded color to an rgba8unorm storage texture. Misses get a
-// vertical sky gradient.
+// vertical sky gradient. Each primary hit fires ONE shadow ray toward the
+// sun through `trace_shadow()`.
 //
 // All traversal happens in VOXEL-space units: the camera position arrives in
 // world meters and is divided by BrickmapMeta.voxel_size_meters once at ray
-// setup; directions are unit-length either way (uniform scale). Palette
-// colors are sRGB-encoded (as authored in voxel-sandbox's mesh.rs); this
-// shader writes them shaded-as-is — the blit to the swapchain must not
-// re-encode.
+// setup; directions are unit-length either way (uniform scale).
 //
-// Modularity (plan architecture rule): the trace pipeline is split into small
-// named functions — ray_setup / intersect_world_bounds / trace (coarse brick
-// DDA) / trace_brick (fine voxel DDA) / shade_hit / sky_color — so later
-// stages (sun shadow ray, CAGI volume sampling) plug in as additional
-// functions reusing `trace` without rewriting traversal.
+// Traversal fast paths (Stage 2 optimization round, reworked after the
+// bench_dda regression hunt — see examples/bench_dda.rs). NOTE: the shipped
+// defaults are set by the lever block below; the column-height paths and the
+// any-hit shadow loop are default-OFF (the chebyshev distance skip covers
+// the same empty space better on M3 Max) but stay levered for per-GPU
+// re-evaluation.
+//
+// - Column-height skip: binding 8 holds, per XZ brick column, the max
+//   occupied brick Y (u32::MAX sentinel = empty column, which reads as -1
+//   after i32 conversion so everything counts as "above" it). The coarse
+//   loops HOIST the current column's max into a register and refresh it only
+//   when a step crosses into a new XZ column (`face_axis != 1`), so vertical
+//   stepping never touches the storage buffer. A ray above its column's max
+//   can hit nothing in that column:
+//     * heading UP — fast-forward straight to the next x/z column boundary
+//       in one step (`column_fast_forward`) instead of climbing brick by
+//       brick;
+//     * heading DOWN — jump straight to the top plane of the column's
+//       highest occupied brick (`descend_fast_forward`), which is what makes
+//       top-down primary rays cheap (the empty air between the world ceiling
+//       and the terrain collapses into one jump per column), or to the
+//       lateral column exit when that comes first.
+//   The next column's max is re-checked on entry either way, so geometry
+//   taller than the ray farther along (a mountain behind a lake, a tree
+//   crown one column over) still occludes correctly — fast-forward, NEVER
+//   terminate: terminating at the first cleared column would drop long
+//   low-sun shadows across water and valleys.
+// - Global-height early exit: `BrickmapMeta.max_occupied_brick_y` — an
+//   upward ray above the tallest brick in the WORLD can never hit; both
+//   coarse loops break to a miss immediately. This also kills sky-pixel
+//   primary rays above the island without walking the grid.
+// - Empty-space acceleration (bindings 9/10): every brick carries a
+//   chebyshev distance to the nearest occupied brick (byte-packed, binding
+//   10). The coarse loops use it as BOTH the occupancy test (0 = occupied —
+//   the 2 MB pointer grid is only read for occupied bricks) and the skip
+//   stride: a brick at distance d sits centered in a guaranteed-empty cube
+//   of half-width d-1 bricks, so the ray jumps to that cube's exit in ONE
+//   re-seeded step (`distance_skip`) instead of crossing it brick by brick.
+//   Binding 9 is an optional 1-bit-per-brick occupancy grid (default-off
+//   lever — no win on M3 Max).
+//
+// Color pipeline: palette colors are sRGB-encoded (as authored in
+// voxel-sandbox's mesh.rs). This shader decodes them to linear (pow-2.2
+// approximation — cheap and self-consistent with the encode below; the exact
+// piecewise curve buys nothing at 8 bits), does ALL lighting math in linear
+// (sun term + hemisphere ambient), applies a one-line Reinhard tonemap
+// (Stage 4 refines the curve), then re-encodes to sRGB before textureStore.
+// The storage-texture/blit contract is unchanged: the blit still receives
+// sRGB-encoded bytes and undoes the swapchain's re-encode.
+//
+// Modularity (plan architecture rule): BOTH trace loops (primary + shadow)
+// and BOTH cell levels (brick + voxel) share one stepping core — `DdaState` +
+// `dda_setup` + `dda_step` — so the DDA math exists exactly once. The
+// variants differ only in what they do at an occupied cell: `trace` /
+// `trace_brick` build a full `Hit` (material, face, distance, voxel);
+// `trace_shadow` / `shadow_brick_occluded` return a bool at the first set
+// occupancy bit. Later stages (CAGI volume sampling, audio-ray port) reuse
+// the same helpers.
 //
 // Bindings (group 0), matching the Rust-side layouts:
 //   0  uniform  Camera        — camera.rs CameraUniform (80 bytes; position
 //                               in world meters, ray basis vectors, resolution)
-//   1  uniform  BrickmapMeta  — brickmap.rs BrickmapMetadata (32 bytes)
+//   1  uniform  BrickmapMeta  — brickmap.rs BrickmapMetadata (48 bytes)
 //   2  storage  brick_indices — dense brick-pointer grid, x-major then y then
 //                               z; 0xffffffff = empty brick
 //   3  storage  occupancy_words — 16 u32 words per occupied brick; bit index
@@ -32,6 +84,19 @@
 //                               (byte 0 = bits 0..8)
 //   5  storage  palette       — array<vec4<f32>>, indexed by material id
 //   6  texture  output        — rgba8unorm storage texture, write-only
+//   7  uniform  Lighting      — lighting.rs LightingUniform (64 bytes; sun
+//                               direction/color/intensity, hemisphere ambient)
+//   8  storage  column_max_brick_y — per-XZ-brick-column max occupied brick
+//                               Y (125 x 125 u32, x-major then z:
+//                               column = x + z * grid_size.x); u32::MAX =
+//                               empty column
+//   9  storage  brick_occupancy_bits — one bit per brick cell (same x-major
+//                               cell index as brick_indices; bit cell & 31 of
+//                               word cell >> 5); set = brick occupied
+//  10  storage  brick_skip_distances — one byte per brick cell, little-endian
+//                               packed like material_words: chebyshev
+//                               distance in bricks to the nearest occupied
+//                               brick (0 = occupied, saturated at 255)
 
 struct Camera {
     position: vec3<f32>,      // eye, world METERS
@@ -51,6 +116,18 @@ struct BrickmapMeta {
     occupied_brick_count: u32,
     world_size_voxels: vec3<u32>, // (1000, 256, 1000)
     voxel_size_meters: f32,       // 0.125
+    max_occupied_brick_y: u32,    // tallest occupied brick Y in the world
+    _pad5: u32,
+    _pad6: u32,
+    _pad7: u32,
+}
+
+struct Lighting {
+    sun_direction: vec3<f32>,       // unit vector, surface -> sun
+    _pad0: f32,
+    sun_color_intensity: vec4<f32>, // rgb = linear sun color, w = intensity
+    sky_ambient: vec4<f32>,         // rgb = linear sky ambient, w = strength
+    ground_ambient: vec4<f32>,      // rgb = linear ground bounce, w unused
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -60,6 +137,50 @@ struct BrickmapMeta {
 @group(0) @binding(4) var<storage, read> material_words: array<u32>;
 @group(0) @binding(5) var<storage, read> palette: array<vec4<f32>>;
 @group(0) @binding(6) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(7) var<uniform> lighting: Lighting;
+@group(0) @binding(8) var<storage, read> column_max_brick_y: array<u32>;
+@group(0) @binding(9) var<storage, read> brick_occupancy_bits: array<u32>;
+@group(0) @binding(10) var<storage, read> brick_skip_distances: array<u32>;
+
+// ---- A/B benchmark levers ----------------------------------------------------
+// Compile-time flags (naga folds them; disabled paths cost nothing). The
+// headless benchmark (`examples/bench_dda.rs`) string-patches individual
+// flags to measure each traversal optimization in isolation and to
+// reconstruct the unoptimized Stage 2 baseline. Defaults = the fastest
+// combination measured on Apple M3 Max (see the bench table in the plan
+// notes); re-run the bench before changing them, and re-evaluate on Quest 3
+// hardware (Stage 6) — the trade-offs are architecture-specific.
+//
+// BOTH column-height fast paths default OFF: measured SLOWER in every
+// scenario on M3 Max once the chebyshev distance skip landed. The upward
+// lateral jump (COLUMN_FAST_FORWARD) already lost before that — shadow rays
+// cross columns about once per step at typical elevations, so the jump saves
+// few steps while its per-column resync math and scattered column reads cost
+// more than a plain step. The downward plane jump (DESCEND_FAST_FORWARD) was
+// the Stage 2 top-down win, but the distance field now covers the same empty
+// air in ALL directions and turning the column machinery off besides saves
+// its storage reads and branches (bench: -8% to -14% on every scenario).
+const ENABLE_COLUMN_FAST_FORWARD: bool = false;
+const ENABLE_DESCEND_FAST_FORWARD: bool = false;
+const ENABLE_GLOBAL_MAX_TERMINATE: bool = true;
+// Any-hit shadow rays measured a consistent 1-3% SLOWER than reusing the
+// closest-hit trace on M3 Max (three bench rounds) — the second specialized
+// coarse loop costs more than the material/face bookkeeping it skips.
+const ENABLE_ANY_HIT_SHADOW: bool = false;
+// 1-bit-per-brick occupancy grid: no measurable win on M3 Max — the skip
+// distance byte already doubles as the occupancy test, making the bit read
+// a second redundant load, and even standalone (no distance skip) it only
+// matched the plain pointer read. Candidate to re-try on small-cache GPUs.
+const ENABLE_BRICK_BIT_GRID: bool = false;
+// Chebyshev empty-space skip: jump guaranteed-empty cubes in one step. The
+// distance byte doubles as the occupancy test (0 = occupied), so an empty
+// brick costs one byte-load from the 500 KB grid instead of a u32 from the
+// 2 MB pointer grid — and skips whole cubes of empty air besides.
+const ENABLE_DISTANCE_SKIP: bool = true;
+
+// Either column-height fast path needs the per-column max hoisted into a
+// register (and the guaranteed-empty-brick skip that comes with it).
+const USE_COLUMN_HEIGHTS: bool = ENABLE_COLUMN_FAST_FORWARD || ENABLE_DESCEND_FAST_FORWARD;
 
 const EMPTY_BRICK: u32 = 0xffffffffu;
 const BRICK_SIZE: f32 = 8.0;
@@ -70,14 +191,17 @@ const MAX_VOXEL_STEPS: u32 = 24u;
 // Max trace distance, voxel units (world diagonal is ~1437).
 const MAX_TRACE_DISTANCE: f32 = 2048.0;
 const RAY_EPSILON: f32 = 1e-4;
-// normalize(vec3(0.55, 0.8, 0.35)), precomputed.
-const SUN_DIRECTION: vec3<f32> = vec3<f32>(0.53295, 0.77520, 0.33915);
+// Shadow-ray offset from the hit face, voxel units (1e-3 voxel = 0.125 mm
+// world). Must stay above RAY_EPSILON so the traversal's entry nudge cannot
+// step the shadow origin back through the face it was lifted from.
+const SHADOW_BIAS: f32 = 1e-3;
 
 struct Hit {
-    material: u32,   // 0 = miss (Air is never occupied)
-    axis: u32,       // face axis last stepped: 0 = x, 1 = y, 2 = z
-    axis_sign: f32,  // sign of the ray direction along that axis
-    distance: f32,   // ray parameter t, voxel units
+    material: u32,     // 0 = miss (Air is never occupied)
+    axis: u32,         // face axis last stepped: 0 = x, 1 = y, 2 = z
+    axis_sign: f32,    // sign of the ray direction along that axis
+    distance: f32,     // ray parameter t, voxel units
+    voxel: vec3<i32>,  // world-voxel coordinate of the hit voxel
 }
 
 // ---- Ray setup --------------------------------------------------------------
@@ -129,87 +253,310 @@ fn intersect_world_bounds(origin: vec3<f32>, inverse_direction: vec3<f32>) -> ve
     return vec3<f32>(max(t_enter, 0.0), t_exit, f32(entry_axis));
 }
 
-// ---- Fine DDA: voxels inside one occupied brick -----------------------------
+// ---- Shared DDA core ---------------------------------------------------------
 
-// Amanatides & Woo over the 8^3 voxels of the brick at `brick_cell`, using
-// the occupancy bitmask. `t_enter`/`t_exit` bracket the ray's overlap with
-// this brick (global t, voxel units); `entry_axis` is the axis whose face the
-// ray crossed to arrive here (it becomes the hit normal if the first voxel
-// tested is already occupied).
+// One Amanatides & Woo traversal state, used at BOTH levels: coarse (cell =
+// brick coordinate, cell size 8) and fine (cell = world-voxel coordinate,
+// cell size 1). `t`/`t_max` are global ray parameters in voxel units either
+// way, so a fine traversal can be seeded directly from the coarse `t`.
+struct DdaState {
+    cell: vec3<i32>,
+    face_axis: u32,        // axis of the boundary last crossed (entry face)
+    t: f32,                // ray parameter at entry into `cell`
+    t_max: vec3<f32>,      // ray parameter of the NEXT boundary per axis
+    t_delta: vec3<f32>,    // ray parameter width of one cell per axis
+    step_direction: vec3<i32>,
+}
+
+// Initialize a traversal at ray parameter `t_start` on a grid of
+// `cell_size`-sized cells, clamping the start cell into [clamp_min, clamp_max].
+fn dda_setup(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<f32>,
+             t_start: f32, cell_size: f32, clamp_min: vec3<i32>,
+             clamp_max: vec3<i32>) -> DdaState {
+    var state: DdaState;
+    let start_point = origin + direction * (t_start + RAY_EPSILON);
+    state.cell = clamp(vec3<i32>(floor(start_point / cell_size)), clamp_min, clamp_max);
+    state.step_direction = vec3<i32>(
+        select(-1, 1, direction.x >= 0.0),
+        select(-1, 1, direction.y >= 0.0),
+        select(-1, 1, direction.z >= 0.0),
+    );
+    state.t_max = vec3<f32>(
+        boundary_t(origin.x, inverse_direction.x, f32(state.cell.x) * cell_size,
+                   cell_size, state.step_direction.x),
+        boundary_t(origin.y, inverse_direction.y, f32(state.cell.y) * cell_size,
+                   cell_size, state.step_direction.y),
+        boundary_t(origin.z, inverse_direction.z, f32(state.cell.z) * cell_size,
+                   cell_size, state.step_direction.z),
+    );
+    state.t_delta = abs(inverse_direction) * cell_size;
+    state.t = t_start;
+    state.face_axis = 0u; // callers with a known entry face override this
+    return state;
+}
+
+// Advance the state across the current cell's boundary along `axis`.
+fn step_along_axis(state: ptr<function, DdaState>, axis: u32) {
+    if (axis == 0u) {
+        (*state).t = (*state).t_max.x;
+        (*state).cell.x = (*state).cell.x + (*state).step_direction.x;
+        (*state).t_max.x = (*state).t_max.x + (*state).t_delta.x;
+    } else if (axis == 1u) {
+        (*state).t = (*state).t_max.y;
+        (*state).cell.y = (*state).cell.y + (*state).step_direction.y;
+        (*state).t_max.y = (*state).t_max.y + (*state).t_delta.y;
+    } else {
+        (*state).t = (*state).t_max.z;
+        (*state).cell.z = (*state).cell.z + (*state).step_direction.z;
+        (*state).t_max.z = (*state).t_max.z + (*state).t_delta.z;
+    }
+    (*state).face_axis = axis;
+}
+
+// One standard DDA step: cross the nearest boundary. Branchless: the mask
+// selects every axis whose boundary is nearest (bench: -1% to -5.4% vs the
+// if/else chain on M3 Max), so an exact float tie steps diagonally through
+// the shared edge in one go — the intermediate cells a two-step crossing
+// would test are grazed with measure-zero overlap anyway. face_axis keeps
+// the branchy version's x > y > z tie priority.
+fn dda_step(state: ptr<function, DdaState>) {
+    let t_max = (*state).t_max;
+    let mask = t_max <= min(t_max.yzx, t_max.zxy);
+    (*state).t = min(t_max.x, min(t_max.y, t_max.z));
+    (*state).cell = (*state).cell + vec3<i32>(mask) * (*state).step_direction;
+    (*state).t_max = t_max + vec3<f32>(mask) * (*state).t_delta;
+    var axis = 2u;
+    if (mask.x) {
+        axis = 0u;
+    } else if (mask.y) {
+        axis = 1u;
+    }
+    (*state).face_axis = axis;
+}
+
+// ---- Column-height early exit (coarse level only) ----------------------------
+
+// Max occupied brick Y of the XZ column holding `cell`. Empty columns store
+// u32::MAX, which converts to -1 (modular u32 -> i32), so every brick Y
+// counts as above. The coarse loops HOIST this value into a register and
+// refresh it only when a step changes the XZ column (`face_axis != 1`) — a
+// ray climbing or descending inside one column pays zero storage reads.
+// Callers must pass an in-grid cell.
+fn column_max_of(cell: vec3<i32>) -> i32 {
+    let column = u32(cell.x) + u32(cell.z) * brickmap.brick_grid_size.x;
+    return i32(column_max_brick_y[column]);
+}
+
+// Fast-forward an UPWARD ray that cleared its current column: nothing in
+// this column can be hit anymore, so jump straight to the next x/z column
+// boundary (skipping every brick-Y crossing in between) and resynchronize
+// the vertical component to the jump target. The caller re-checks the NEW
+// column's max on the next iteration, which keeps taller geometry farther
+// along the ray occluding correctly — fast-forward, never terminate.
+fn column_fast_forward(state: ptr<function, DdaState>, origin: vec3<f32>,
+                       direction: vec3<f32>, inverse_direction: vec3<f32>) {
+    if ((*state).t_max.x <= (*state).t_max.z) {
+        step_along_axis(state, 0u);
+    } else {
+        step_along_axis(state, 2u);
+    }
+    // max() guards against float undershoot in the reconstruction re-testing
+    // a brick row the incremental traversal already cleared.
+    let jumped_y = i32(floor((origin.y + direction.y * ((*state).t + RAY_EPSILON)) / BRICK_SIZE));
+    (*state).cell.y = max((*state).cell.y, jumped_y);
+    (*state).t_max.y = boundary_t(origin.y, inverse_direction.y,
+                                  f32((*state).cell.y) * BRICK_SIZE, BRICK_SIZE,
+                                  (*state).step_direction.y);
+}
+
+// Fast-forward a DOWNWARD ray that is above every occupied brick of its
+// column: nothing can be hit until the ray reaches the top plane of the
+// column's highest occupied brick row, so jump straight to that plane in one
+// step (this is what makes top-down primary rays cheap — the ~20 empty brick
+// rows between the world ceiling and the terrain collapse into one jump; the
+// plane crossing is exact integer-derived math, no float reconstruction).
+// When a lateral column exit comes FIRST, jump there instead, exactly like
+// `column_fast_forward`, and let the caller re-check the new column.
+fn descend_fast_forward(state: ptr<function, DdaState>, origin: vec3<f32>,
+                        direction: vec3<f32>, inverse_direction: vec3<f32>,
+                        column_max_y: i32) {
+    let plane_y = f32(column_max_y + 1) * BRICK_SIZE;
+    let t_plane = (plane_y - origin.y) * inverse_direction.y;
+    if (t_plane <= (*state).t_max.x && t_plane <= (*state).t_max.z) {
+        (*state).cell.y = column_max_y;
+        (*state).t = max(t_plane, (*state).t);
+        (*state).t_max.y = boundary_t(origin.y, inverse_direction.y,
+                                      f32(column_max_y) * BRICK_SIZE, BRICK_SIZE,
+                                      (*state).step_direction.y);
+        (*state).face_axis = 1u;
+        return;
+    }
+    if ((*state).t_max.x <= (*state).t_max.z) {
+        step_along_axis(state, 0u);
+    } else {
+        step_along_axis(state, 2u);
+    }
+    // min() mirrors the upward variant's max(): reconstruction undershoot
+    // may only re-test a row, never re-ascend past the incremental state.
+    let jumped_y = i32(floor((origin.y + direction.y * ((*state).t + RAY_EPSILON)) / BRICK_SIZE));
+    (*state).cell.y = min((*state).cell.y, jumped_y);
+    (*state).t_max.y = boundary_t(origin.y, inverse_direction.y,
+                                  f32((*state).cell.y) * BRICK_SIZE, BRICK_SIZE,
+                                  (*state).step_direction.y);
+}
+
+// ---- Empty-space acceleration (coarse level only) -----------------------------
+
+// Flat cell index of an in-grid brick coordinate (x-major, then y, then z —
+// the shared layout of brick_indices / brick_occupancy_bits /
+// brick_skip_distances).
+fn brick_cell_index(cell: vec3<i32>) -> u32 {
+    return u32(cell.x)
+        + u32(cell.y) * brickmap.brick_grid_size.x
+        + u32(cell.z) * brickmap.brick_grid_size.x * brickmap.brick_grid_size.y;
+}
+
+// Whether the brick at `cell_index` holds any voxels. The bit grid is the
+// fast path (62.5 KB stays cache-resident); the skip-distance byte doubles
+// as an occupancy test when the bit grid is levered off; the pointer grid is
+// the lever-everything-off fallback.
+fn brick_occupied(cell_index: u32) -> bool {
+    if (ENABLE_BRICK_BIT_GRID) {
+        return ((brick_occupancy_bits[cell_index >> 5u] >> (cell_index & 31u)) & 1u) == 1u;
+    }
+    if (ENABLE_DISTANCE_SKIP) {
+        return skip_distance_of(cell_index) == 0u;
+    }
+    return brick_indices[cell_index] != EMPTY_BRICK;
+}
+
+// Chebyshev distance (in bricks) from `cell_index` to the nearest occupied
+// brick: 0 = occupied, byte-packed little-endian like the material bytes.
+fn skip_distance_of(cell_index: u32) -> u32 {
+    return (brick_skip_distances[cell_index >> 2u] >> ((cell_index & 3u) * 8u)) & 0xffu;
+}
+
+// Jump a ray standing in an empty brick with chebyshev distance
+// `skip_cells` >= 2 to the exit of its guaranteed-empty cube (half-width
+// skip_cells - 1 bricks, so every brick strictly inside is empty) and
+// re-seed the coarse DDA there with the existing verified setup math —
+// no hand-patched state. The first potentially occupied brick lies exactly
+// ON the cube boundary, and the re-seed lands at most RAY_EPSILON past it,
+// so the jump can never tunnel. face_axis = the cube's exit axis, keeping
+// the entry normal correct if the very next brick scores a hit.
+fn distance_skip(state: ptr<function, DdaState>, origin: vec3<f32>, direction: vec3<f32>,
+                 inverse_direction: vec3<f32>, skip_cells: i32,
+                 clamp_min: vec3<i32>, clamp_max: vec3<i32>) {
+    let box_min = vec3<f32>((*state).cell - vec3<i32>(skip_cells - 1)) * BRICK_SIZE;
+    let box_max = vec3<f32>((*state).cell + vec3<i32>(skip_cells)) * BRICK_SIZE;
+    let t_far = max((box_min - origin) * inverse_direction,
+                    (box_max - origin) * inverse_direction);
+    var exit_axis = 2u;
+    if (t_far.x <= t_far.y && t_far.x <= t_far.z) {
+        exit_axis = 0u;
+    } else if (t_far.y <= t_far.z) {
+        exit_axis = 1u;
+    }
+    let t_exit = max(min(min(t_far.x, t_far.y), t_far.z), (*state).t);
+    let previous_cell = (*state).cell;
+    *state = dda_setup(origin, direction, inverse_direction, t_exit, BRICK_SIZE,
+                       clamp_min, clamp_max);
+    (*state).face_axis = exit_axis;
+    if (all((*state).cell == previous_cell)) {
+        // Float undershoot re-derived the same cell — force progress so the
+        // skip can never spin in place.
+        dda_step(state);
+    }
+}
+
+// ---- Fine level: voxels inside one occupied brick -----------------------------
+
+// Occupancy bit index of a world-voxel cell inside the brick at `brick_cell`.
+fn local_bit_index(cell: vec3<i32>, brick_cell: vec3<i32>) -> u32 {
+    let local = cell - brick_cell * 8;
+    return u32(local.x) + u32(local.y) * 8u + u32(local.z) * 64u;
+}
+
+fn occupancy_bit_set(pointer: u32, bit: u32) -> bool {
+    return ((occupancy_words[pointer * 16u + (bit >> 5u)] >> (bit & 31u)) & 1u) == 1u;
+}
+
+// Full fine traversal for primary rays: first occupied voxel wins and the
+// complete hit record (material, entry face, distance, voxel coordinate) is
+// reconstructed. `t_enter`/`t_exit` bracket the ray's overlap with this
+// brick; `entry_axis` is the axis whose face the ray crossed to arrive (it
+// becomes the hit normal if the first voxel tested is already occupied).
 fn trace_brick(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<f32>,
                pointer: u32, brick_cell: vec3<i32>, t_enter: f32, t_exit: f32,
                entry_axis: u32) -> Hit {
     var result: Hit;
     result.material = 0u;
 
-    let brick_min = vec3<f32>(brick_cell) * BRICK_SIZE;
-    let entry_point = origin + direction * (t_enter + RAY_EPSILON);
-    var cell = clamp(vec3<i32>(floor(entry_point - brick_min)),
-                     vec3<i32>(0, 0, 0), vec3<i32>(7, 7, 7));
-    let step_direction = vec3<i32>(
-        select(-1, 1, direction.x >= 0.0),
-        select(-1, 1, direction.y >= 0.0),
-        select(-1, 1, direction.z >= 0.0),
-    );
-    var t_max = vec3<f32>(
-        boundary_t(origin.x, inverse_direction.x, brick_min.x + f32(cell.x), 1.0, step_direction.x),
-        boundary_t(origin.y, inverse_direction.y, brick_min.y + f32(cell.y), 1.0, step_direction.y),
-        boundary_t(origin.z, inverse_direction.z, brick_min.z + f32(cell.z), 1.0, step_direction.z),
-    );
-    let t_delta = abs(inverse_direction);
+    let brick_min_cell = brick_cell * 8;
+    let brick_max_cell = brick_min_cell + vec3<i32>(7, 7, 7);
+    var state = dda_setup(origin, direction, inverse_direction, t_enter, 1.0,
+                          brick_min_cell, brick_max_cell);
+    state.face_axis = entry_axis;
 
-    var face_axis = entry_axis;
-    var t = t_enter;
     for (var step_index = 0u; step_index < MAX_VOXEL_STEPS; step_index = step_index + 1u) {
-        let bit = u32(cell.x) + u32(cell.y) * 8u + u32(cell.z) * 64u;
-        let occupancy = occupancy_words[pointer * 16u + (bit >> 5u)];
-        if (((occupancy >> (bit & 31u)) & 1u) == 1u) {
+        let bit = local_bit_index(state.cell, brick_cell);
+        if (occupancy_bit_set(pointer, bit)) {
             let packed = material_words[pointer * 128u + (bit >> 2u)];
             result.material = (packed >> ((bit & 3u) * 8u)) & 0xffu;
-            result.axis = face_axis;
+            result.axis = state.face_axis;
             var direction_component = direction.x;
-            if (face_axis == 1u) {
+            if (state.face_axis == 1u) {
                 direction_component = direction.y;
-            } else if (face_axis == 2u) {
+            } else if (state.face_axis == 2u) {
                 direction_component = direction.z;
             }
             result.axis_sign = sign(direction_component);
-            result.distance = t;
+            result.distance = state.t;
+            result.voxel = state.cell;
             return result;
         }
-
-        // Step to the neighboring voxel across the nearest boundary.
-        if (t_max.x <= t_max.y && t_max.x <= t_max.z) {
-            t = t_max.x;
-            cell.x = cell.x + step_direction.x;
-            t_max.x = t_max.x + t_delta.x;
-            face_axis = 0u;
-        } else if (t_max.y <= t_max.z) {
-            t = t_max.y;
-            cell.y = cell.y + step_direction.y;
-            t_max.y = t_max.y + t_delta.y;
-            face_axis = 1u;
-        } else {
-            t = t_max.z;
-            cell.z = cell.z + step_direction.z;
-            t_max.z = t_max.z + t_delta.z;
-            face_axis = 2u;
-        }
-        if (cell.x < 0 || cell.y < 0 || cell.z < 0 || cell.x > 7 || cell.y > 7 || cell.z > 7) {
+        dda_step(&state);
+        if (any(state.cell < brick_min_cell) || any(state.cell > brick_max_cell)) {
             break; // left the brick — hand back to the coarse level
         }
-        if (t > t_exit + RAY_EPSILON) {
+        if (state.t > t_exit + RAY_EPSILON) {
             break;
         }
     }
     return result;
 }
 
-// ---- Coarse DDA: the brick grid ---------------------------------------------
+// Any-hit fine traversal for shadow rays: the first set occupancy bit
+// occludes — no material fetch, no face/distance bookkeeping.
+fn shadow_brick_occluded(origin: vec3<f32>, direction: vec3<f32>,
+                         inverse_direction: vec3<f32>, pointer: u32,
+                         brick_cell: vec3<i32>, t_enter: f32, t_exit: f32) -> bool {
+    let brick_min_cell = brick_cell * 8;
+    let brick_max_cell = brick_min_cell + vec3<i32>(7, 7, 7);
+    var state = dda_setup(origin, direction, inverse_direction, t_enter, 1.0,
+                          brick_min_cell, brick_max_cell);
 
-// Trace one ray through the brick grid. Empty bricks (sentinel pointer) are
-// skipped in a single step; occupied bricks run the fine DDA. Everything is
-// in voxel units; `origin` must already be voxel-space.
+    for (var step_index = 0u; step_index < MAX_VOXEL_STEPS; step_index = step_index + 1u) {
+        if (occupancy_bit_set(pointer, local_bit_index(state.cell, brick_cell))) {
+            return true;
+        }
+        dda_step(&state);
+        if (any(state.cell < brick_min_cell) || any(state.cell > brick_max_cell)) {
+            return false;
+        }
+        if (state.t > t_exit + RAY_EPSILON) {
+            return false;
+        }
+    }
+    return false;
+}
+
+// ---- Coarse level: the brick grid ---------------------------------------------
+
+// Trace one primary ray through the brick grid. Occupancy comes from the
+// bit grid; empty bricks either distance-skip their guaranteed-empty cube or
+// step once; occupied bricks run the fine DDA; cleared columns fast-forward.
+// Everything is in voxel units; `origin` must already be voxel-space.
 fn trace(origin: vec3<f32>, direction: vec3<f32>) -> Hit {
     var result: Hit;
     result.material = 0u;
@@ -220,105 +567,214 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>) -> Hit {
         safe_inverse(direction.z),
     );
     let bounds = intersect_world_bounds(origin, inverse_direction);
-    let t_enter = bounds.x;
-    let t_exit = bounds.y;
-    if (t_enter > t_exit) {
+    if (bounds.x > bounds.y) {
         return result; // ray misses the world entirely
     }
 
-    var t = t_enter + RAY_EPSILON;
-    let start = origin + direction * t;
     let grid_size = vec3<i32>(brickmap.brick_grid_size);
-    var brick = clamp(vec3<i32>(floor(start / BRICK_SIZE)),
-                      vec3<i32>(0, 0, 0), grid_size - vec3<i32>(1, 1, 1));
-    let step_direction = vec3<i32>(
-        select(-1, 1, direction.x >= 0.0),
-        select(-1, 1, direction.y >= 0.0),
-        select(-1, 1, direction.z >= 0.0),
-    );
-    var t_max = vec3<f32>(
-        boundary_t(origin.x, inverse_direction.x, f32(brick.x) * BRICK_SIZE, BRICK_SIZE, step_direction.x),
-        boundary_t(origin.y, inverse_direction.y, f32(brick.y) * BRICK_SIZE, BRICK_SIZE, step_direction.y),
-        boundary_t(origin.z, inverse_direction.z, f32(brick.z) * BRICK_SIZE, BRICK_SIZE, step_direction.z),
-    );
-    let t_delta = abs(inverse_direction) * BRICK_SIZE;
+    var state = dda_setup(origin, direction, inverse_direction, bounds.x, BRICK_SIZE,
+                          vec3<i32>(0, 0, 0), grid_size - vec3<i32>(1, 1, 1));
+    state.face_axis = u32(bounds.z); // world-entry face seeds the first normal
 
-    var face_axis = u32(bounds.z); // world-entry face seeds the first normal
-    let t_limit = min(t_exit, MAX_TRACE_DISTANCE);
+    let heading_upward = direction.y >= 0.0;
+    let world_max_brick_y = i32(brickmap.max_occupied_brick_y); // -1 when empty
+    let t_limit = min(bounds.y, MAX_TRACE_DISTANCE);
+    // Hoisted column max of the CURRENT XZ column (see column_max_of).
+    var column_max_y = 0;
+    if (USE_COLUMN_HEIGHTS) {
+        column_max_y = column_max_of(state.cell);
+    }
+    // A distance skip can change the XZ column even when it exits through a
+    // Y face, so it forces a refresh instead of relying on face_axis.
+    var column_stale = false;
+
     for (var step_index = 0u; step_index < MAX_BRICK_STEPS; step_index = step_index + 1u) {
-        if (brick.x < 0 || brick.y < 0 || brick.z < 0 ||
-            brick.x >= grid_size.x || brick.y >= grid_size.y || brick.z >= grid_size.z) {
+        if (any(state.cell < vec3<i32>(0, 0, 0)) || any(state.cell >= grid_size)) {
             break; // exited the grid → sky
         }
-        if (t > t_limit) {
+        if (state.t > t_limit) {
             break; // beyond the world or the trace-distance guard → sky
         }
+        if (USE_COLUMN_HEIGHTS && (state.face_axis != 1u || column_stale)) {
+            // The last step changed the XZ column — refresh the hoisted max.
+            // Vertical steps skip this entirely: no storage read per climb.
+            column_max_y = column_max_of(state.cell);
+            column_stale = false;
+        }
+        if (USE_COLUMN_HEIGHTS && state.cell.y > column_max_y) {
+            // Above every occupied brick of this column: fast-forward, never
+            // terminate — taller terrain in columns farther along the ray
+            // must still be reachable.
+            if (heading_upward) {
+                if (ENABLE_GLOBAL_MAX_TERMINATE && state.cell.y > world_max_brick_y) {
+                    break; // above everything in the world → sky
+                }
+                if (ENABLE_COLUMN_FAST_FORWARD) {
+                    column_fast_forward(&state, origin, direction, inverse_direction);
+                    continue;
+                }
+            } else if (ENABLE_DESCEND_FAST_FORWARD) {
+                descend_fast_forward(&state, origin, direction, inverse_direction,
+                                     column_max_y);
+                continue;
+            }
+        }
+        if (!USE_COLUMN_HEIGHTS && ENABLE_GLOBAL_MAX_TERMINATE
+            && heading_upward && state.cell.y > world_max_brick_y) {
+            break; // above everything in the world → sky
+        }
 
-        let brick_cell = u32(brick.x)
-            + u32(brick.y) * brickmap.brick_grid_size.x
-            + u32(brick.z) * brickmap.brick_grid_size.x * brickmap.brick_grid_size.y;
-        let pointer = brick_indices[brick_cell];
-        if (pointer != EMPTY_BRICK) {
-            let brick_exit = min(min(t_max.x, t_max.y), t_max.z);
+        let cell_index = brick_cell_index(state.cell);
+        if (brick_occupied(cell_index)) {
+            let pointer = brick_indices[cell_index];
+            let brick_exit = min(min(state.t_max.x, state.t_max.y), state.t_max.z);
             let fine = trace_brick(origin, direction, inverse_direction, pointer,
-                                   brick, t, brick_exit, face_axis);
+                                   state.cell, state.t, brick_exit, state.face_axis);
             if (fine.material != 0u) {
                 return fine;
             }
+        } else if (ENABLE_DISTANCE_SKIP) {
+            let skip_cells = skip_distance_of(cell_index);
+            if (skip_cells >= 2u) {
+                distance_skip(&state, origin, direction, inverse_direction,
+                              i32(skip_cells), vec3<i32>(0, 0, 0),
+                              grid_size - vec3<i32>(1, 1, 1));
+                column_stale = true;
+                continue;
+            }
         }
-
-        // Step to the neighboring brick across the nearest boundary.
-        if (t_max.x <= t_max.y && t_max.x <= t_max.z) {
-            t = t_max.x;
-            brick.x = brick.x + step_direction.x;
-            t_max.x = t_max.x + t_delta.x;
-            face_axis = 0u;
-        } else if (t_max.y <= t_max.z) {
-            t = t_max.y;
-            brick.y = brick.y + step_direction.y;
-            t_max.y = t_max.y + t_delta.y;
-            face_axis = 1u;
-        } else {
-            t = t_max.z;
-            brick.z = brick.z + step_direction.z;
-            t_max.z = t_max.z + t_delta.z;
-            face_axis = 2u;
-        }
+        dda_step(&state);
     }
     return result;
 }
 
+// Any-hit shadow trace: same coarse traversal (including the column-height
+// fast path, which is where shadow rays win big — they clear the local
+// canopy and then skip whole columns instead of fine-stepping through
+// occupied-but-missed bricks), but occupied bricks run the occupancy-only
+// fine variant and the first occlusion ends the ray.
+fn trace_shadow(origin: vec3<f32>, direction: vec3<f32>) -> bool {
+    if (!ENABLE_ANY_HIT_SHADOW) {
+        // Shipped path (see the lever comment): reusing the closest-hit
+        // trace measured faster than the specialized any-hit loop below.
+        return trace(origin, direction).material != 0u;
+    }
+    let inverse_direction = vec3<f32>(
+        safe_inverse(direction.x),
+        safe_inverse(direction.y),
+        safe_inverse(direction.z),
+    );
+    let bounds = intersect_world_bounds(origin, inverse_direction);
+    if (bounds.x > bounds.y) {
+        return false;
+    }
+
+    let grid_size = vec3<i32>(brickmap.brick_grid_size);
+    var state = dda_setup(origin, direction, inverse_direction, bounds.x, BRICK_SIZE,
+                          vec3<i32>(0, 0, 0), grid_size - vec3<i32>(1, 1, 1));
+
+    let heading_upward = direction.y >= 0.0;
+    let world_max_brick_y = i32(brickmap.max_occupied_brick_y); // -1 when empty
+    let t_limit = min(bounds.y, MAX_TRACE_DISTANCE);
+    // Hoisted column max of the CURRENT XZ column (see column_max_of).
+    var column_max_y = 0;
+    if (USE_COLUMN_HEIGHTS) {
+        column_max_y = column_max_of(state.cell);
+    }
+    // Set by distance_skip, which can change the XZ column via a Y-face exit.
+    var column_stale = false;
+
+    for (var step_index = 0u; step_index < MAX_BRICK_STEPS; step_index = step_index + 1u) {
+        if (any(state.cell < vec3<i32>(0, 0, 0)) || any(state.cell >= grid_size)) {
+            return false;
+        }
+        if (state.t > t_limit) {
+            return false;
+        }
+        if (USE_COLUMN_HEIGHTS && (state.face_axis != 1u || column_stale)) {
+            column_max_y = column_max_of(state.cell);
+            column_stale = false;
+        }
+        if (USE_COLUMN_HEIGHTS && state.cell.y > column_max_y) {
+            // Fast-forward, never terminate (see `trace`) — long low-sun
+            // shadows across water/valleys depend on it.
+            if (heading_upward) {
+                if (ENABLE_GLOBAL_MAX_TERMINATE && state.cell.y > world_max_brick_y) {
+                    return false; // above everything in the world → unoccluded
+                }
+                if (ENABLE_COLUMN_FAST_FORWARD) {
+                    column_fast_forward(&state, origin, direction, inverse_direction);
+                    continue;
+                }
+            } else if (ENABLE_DESCEND_FAST_FORWARD) {
+                descend_fast_forward(&state, origin, direction, inverse_direction,
+                                     column_max_y);
+                continue;
+            }
+        }
+        if (!USE_COLUMN_HEIGHTS && ENABLE_GLOBAL_MAX_TERMINATE
+            && heading_upward && state.cell.y > world_max_brick_y) {
+            return false; // above everything in the world → unoccluded
+        }
+
+        let cell_index = brick_cell_index(state.cell);
+        if (brick_occupied(cell_index)) {
+            let pointer = brick_indices[cell_index];
+            let brick_exit = min(min(state.t_max.x, state.t_max.y), state.t_max.z);
+            if (shadow_brick_occluded(origin, direction, inverse_direction, pointer,
+                                      state.cell, state.t, brick_exit)) {
+                return true;
+            }
+        } else if (ENABLE_DISTANCE_SKIP) {
+            let skip_cells = skip_distance_of(cell_index);
+            if (skip_cells >= 2u) {
+                distance_skip(&state, origin, direction, inverse_direction,
+                              i32(skip_cells), vec3<i32>(0, 0, 0),
+                              grid_size - vec3<i32>(1, 1, 1));
+                column_stale = true;
+                continue;
+            }
+        }
+        dda_step(&state);
+    }
+    return false;
+}
+
+// ---- Color pipeline ----------------------------------------------------------
+
+// sRGB <-> linear via the pow-2.2 approximation: a self-consistent pair, one
+// pow each way, indistinguishable from the exact piecewise curve at 8 bits.
+fn srgb_decode(color: vec3<f32>) -> vec3<f32> {
+    return pow(color, vec3<f32>(2.2, 2.2, 2.2));
+}
+
+fn srgb_encode(color: vec3<f32>) -> vec3<f32> {
+    return pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+}
+
+// Simple Reinhard: maps [0, inf) radiance into [0, 1). Stage 4 refines this.
+fn tonemap_reinhard(color: vec3<f32>) -> vec3<f32> {
+    return color / (vec3<f32>(1.0, 1.0, 1.0) + color);
+}
+
 // ---- Shading ----------------------------------------------------------------
 
-// Warm horizon fading into a blue zenith, with a soft sun glow.
+// Warm horizon fading into a blue zenith, with a sun glow. Linear radiance:
+// the constants are the Stage 1 sRGB sky pushed through decode + inverse
+// Reinhard (x^2.2 / (1 - x^2.2)) so the sky looks unchanged after the new
+// tonemap + encode.
 fn sky_color(direction: vec3<f32>) -> vec3<f32> {
-    let horizon = vec3<f32>(0.86, 0.78, 0.65);
-    let zenith = vec3<f32>(0.30, 0.52, 0.86);
+    let horizon = vec3<f32>(2.55, 1.37, 0.63);
+    let zenith = vec3<f32>(0.08, 0.31, 2.55);
     let elevation = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
     var sky = mix(horizon, zenith, smoothstep(0.42, 0.78, elevation));
-    let sun_amount = pow(max(dot(direction, SUN_DIRECTION), 0.0), 64.0);
-    sky = sky + vec3<f32>(1.0, 0.9, 0.7) * sun_amount * 0.5;
+    let sun_amount = pow(max(dot(direction, lighting.sun_direction), 0.0), 64.0);
+    sky = sky + lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w * sun_amount;
     return sky;
 }
 
-// Slight distinct tint per face axis so cube geometry reads even where the
-// sun term is flat: tops full, bottoms dark, x faces warm-dim, z faces
-// cool-dim.
-fn face_tint(normal: vec3<f32>) -> vec3<f32> {
-    if (normal.y > 0.5) {
-        return vec3<f32>(1.0, 1.0, 1.0);
-    }
-    if (normal.y < -0.5) {
-        return vec3<f32>(0.62, 0.62, 0.66);
-    }
-    if (abs(normal.x) > 0.5) {
-        return vec3<f32>(0.93, 0.90, 0.86);
-    }
-    return vec3<f32>(0.84, 0.86, 0.93);
-}
-
-// Flat palette color, fixed-sun lambert lifted by a floor, per-axis tint.
-fn shade_hit(hit: Hit) -> vec3<f32> {
+// Face normal from the DDA hit record (axis-aligned, opposing the ray).
+fn hit_normal(hit: Hit) -> vec3<f32> {
     var normal = vec3<f32>(0.0, 0.0, 0.0);
     if (hit.axis == 0u) {
         normal.x = -hit.axis_sign;
@@ -327,9 +783,67 @@ fn shade_hit(hit: Hit) -> vec3<f32> {
     } else {
         normal.z = -hit.axis_sign;
     }
-    let base = palette[hit.material].rgb;
-    let diffuse = 0.55 + 0.45 * max(dot(normal, SUN_DIRECTION), 0.0);
-    return base * diffuse * face_tint(normal);
+    return normal;
+}
+
+// Hemisphere ambient: sky color from above, warm ground bounce from below,
+// mixed by normal.y. This is what lights shadowed pixels (they must stay
+// readable, never black) and it replaces Stage 1's per-face tint — the
+// vertical gradient comes from the hemisphere, the horizontal differentiation
+// from the sun angle.
+fn ambient_light(normal: vec3<f32>) -> vec3<f32> {
+    let sky_weight = normal.y * 0.5 + 0.5;
+    return mix(lighting.ground_ambient.rgb, lighting.sky_ambient.rgb, sky_weight)
+        * lighting.sky_ambient.w;
+}
+
+// Robust shadow-ray origin. Reconstructing the hit point as
+// origin + t * direction alone carries accumulated float error at large t;
+// the hit voxel's INTEGER coordinate does not. So: clamp the reconstructed
+// point strictly inside the hit voxel's footprint (a SHADOW_BIAS margin off
+// every voxel edge, so the origin can never land in a neighboring solid
+// column at shared edges/corners — no light leaks), snap the normal-axis
+// component exactly onto the hit-face plane, then lift the point off the
+// face by SHADOW_BIAS along the normal (never inside the solid — no acne).
+fn shadow_ray_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                     normal: vec3<f32>) -> vec3<f32> {
+    let voxel_min = vec3<f32>(hit.voxel);
+    let voxel_max = voxel_min + vec3<f32>(1.0, 1.0, 1.0);
+    var position = ray_origin + ray_direction * hit.distance;
+    position = clamp(position,
+                     voxel_min + vec3<f32>(SHADOW_BIAS, SHADOW_BIAS, SHADOW_BIAS),
+                     voxel_max - vec3<f32>(SHADOW_BIAS, SHADOW_BIAS, SHADOW_BIAS));
+    // A positive ray direction along the hit axis entered through the LOW
+    // face of the voxel; a negative one through the HIGH face.
+    if (hit.axis == 0u) {
+        position.x = select(voxel_max.x, voxel_min.x, hit.axis_sign > 0.0);
+    } else if (hit.axis == 1u) {
+        position.y = select(voxel_max.y, voxel_min.y, hit.axis_sign > 0.0);
+    } else {
+        position.z = select(voxel_max.z, voxel_min.z, hit.axis_sign > 0.0);
+    }
+    return position + normal * SHADOW_BIAS;
+}
+
+// Linear-space direct light: albedo * (sun lambert * shadow + hemisphere
+// ambient). One crisp (binary) shadow ray per hit through the any-hit
+// `trace_shadow`; faces pointing away from the sun skip the trace outright
+// (their lambert term is zero anyway).
+fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> vec3<f32> {
+    let normal = hit_normal(hit);
+    let albedo = srgb_decode(palette[hit.material].rgb);
+
+    var sun_visibility = 0.0;
+    let sun_facing = dot(normal, lighting.sun_direction);
+    if (sun_facing > 0.0) {
+        let shadow_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
+        if (!trace_shadow(shadow_origin, lighting.sun_direction)) {
+            sun_visibility = 1.0;
+        }
+    }
+    let sun = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
+        * max(sun_facing, 0.0) * sun_visibility;
+    return albedo * (sun + ambient_light(normal));
 }
 
 // ---- Entry point ------------------------------------------------------------
@@ -357,8 +871,11 @@ fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if (hit.material == 0u) {
         color = sky_color(direction);
     } else {
-        color = shade_hit(hit);
+        color = shade_hit(hit, origin, direction);
     }
+    // Linear radiance -> tonemap -> sRGB encode: the blit contract still
+    // receives sRGB-encoded bytes.
+    color = srgb_encode(tonemap_reinhard(color));
     textureStore(output, vec2<i32>(i32(invocation.x), i32(invocation.y)),
                  vec4<f32>(color, 1.0));
 }

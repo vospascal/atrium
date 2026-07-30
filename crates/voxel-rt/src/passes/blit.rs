@@ -1,11 +1,18 @@
 //! Fullscreen-triangle blit pass: samples the compute-written storage texture
 //! onto the swapchain image.
+//!
+//! Filtering follows the render scale: at 1:1 the sampler is NEAREST so the
+//! presented bytes are exactly the storage-texture bytes (see the color
+//! contract in `shaders/blit.wgsl`); when the storage texture is smaller
+//! than the swapchain (render-scale lever < 1.0) the sampler switches to
+//! LINEAR so the upscale is smooth instead of blocky.
 
 pub struct BlitPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
-    sampler: wgpu::Sampler,
+    nearest_sampler: wgpu::Sampler,
+    linear_sampler: wgpu::Sampler,
 }
 
 impl BlitPass {
@@ -19,10 +26,16 @@ impl BlitPass {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/blit.wgsl").into()),
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("blit sampler"),
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit sampler (nearest, 1:1)"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit sampler (linear, scaled)"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
@@ -80,23 +93,42 @@ impl BlitPass {
             cache: None,
         });
 
-        let bind_group = Self::create_bind_group(device, &bind_group_layout, source_view, &sampler);
+        let bind_group =
+            Self::create_bind_group(device, &bind_group_layout, source_view, &nearest_sampler);
 
         Self {
             pipeline,
             bind_group_layout,
             bind_group,
-            sampler,
+            nearest_sampler,
+            linear_sampler,
         }
     }
 
-    /// Refresh the source-texture binding after the storage texture is recreated.
-    pub fn rebind(&mut self, device: &wgpu::Device, source_view: &wgpu::TextureView) {
+    /// Refresh the source-texture binding after the storage texture is
+    /// recreated. `linear_filtering` = true when the source is smaller than
+    /// the swapchain (render scale < 1.0) and needs a smooth upscale.
+    pub fn rebind(
+        &mut self,
+        device: &wgpu::Device,
+        source_view: &wgpu::TextureView,
+        linear_filtering: bool,
+    ) {
+        let sampler = if linear_filtering {
+            &self.linear_sampler
+        } else {
+            &self.nearest_sampler
+        };
         self.bind_group =
-            Self::create_bind_group(device, &self.bind_group_layout, source_view, &self.sampler);
+            Self::create_bind_group(device, &self.bind_group_layout, source_view, sampler);
     }
 
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+    pub fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("blit pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -109,7 +141,7 @@ impl BlitPass {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });

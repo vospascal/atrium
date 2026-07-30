@@ -4,13 +4,6 @@
 //! OpenXR entry point later without touching the renderer. All winit types
 //! stay in this file; camera.rs is pure math.
 
-mod brickmap;
-mod camera;
-mod gpu;
-mod overlay;
-mod passes;
-mod render;
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,11 +15,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use brickmap::Brickmap;
-use camera::{CameraInput, FlyCamera};
-use gpu::GpuContext;
-use overlay::Overlay;
-use render::Renderer;
+use voxel_rt::brickmap::Brickmap;
+use voxel_rt::camera::{CameraInput, FlyCamera};
+use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
+use voxel_rt::gpu::GpuContext;
+use voxel_rt::lighting::SunSettings;
+use voxel_rt::overlay::{Overlay, OverlayFrameData};
+use voxel_rt::render::Renderer;
 
 /// World generation parameters, matching voxel-sandbox's defaults
 /// (`WorldSeed(1)`, season 0.0 = high summer) so both renderers show the
@@ -79,11 +74,24 @@ struct AppState {
     gpu_context: GpuContext,
     renderer: Renderer,
     overlay: Overlay,
+    /// GPU pass timers; `None` when the adapter lacks TIMESTAMP_QUERY (the
+    /// overlay then reports the readout as unavailable).
+    frame_timers: Option<GpuFrameTimers>,
     fly_camera: FlyCamera,
+    sun_settings: SunSettings,
     input_state: InputState,
     cursor_grabbed: bool,
     vsync_enabled: bool,
+    /// Overlay-mutated render-scale lever; applied to the renderer after the
+    /// overlay pass whenever it drifts from the renderer's current scale.
+    render_scale: f32,
     previous_frame_time: Instant,
+    /// Terminal FPS diagnostic: frames counted since the last 2-second log
+    /// line (fps + present mode + host monitor and its refresh rate). The
+    /// on-screen FPS can only be judged against the monitor actually pacing
+    /// the window — this makes that pairing visible.
+    fps_log_timer: Instant,
+    fps_log_frame_count: u32,
 }
 
 impl AppState {
@@ -120,17 +128,27 @@ impl AppState {
             &brickmap,
         );
         let overlay = Overlay::new(&window, &gpu_context.device, gpu_context.surface_format());
+        let frame_timers = GpuFrameTimers::new(&gpu_context.device, &gpu_context.queue);
+        if frame_timers.is_none() {
+            println!("GPU timestamp queries unsupported — per-pass timings disabled");
+        }
+        let render_scale = renderer.render_scale();
 
         Self {
             window,
             gpu_context,
             renderer,
             overlay,
+            frame_timers,
             fly_camera: FlyCamera::default(),
+            sun_settings: SunSettings::default(),
             input_state: InputState::default(),
             cursor_grabbed: false,
             vsync_enabled: true,
+            render_scale,
             previous_frame_time: Instant::now(),
+            fps_log_timer: Instant::now(),
+            fps_log_frame_count: 0,
         }
     }
 
@@ -180,9 +198,54 @@ impl AppState {
         self.previous_frame_time = now;
         self.overlay.record_frame_time(frame_time_seconds);
 
+        // Counted at present time (bottom of this function), so frames that
+        // bail early on an outdated surface never inflate the number — the
+        // reconfigure transient after a vsync toggle read 248k "fps" when
+        // skipped frames were counted here.
+        let seconds_since_fps_log = (now - self.fps_log_timer).as_secs_f32();
+        if seconds_since_fps_log >= 2.0 {
+            let monitor_description = self
+                .window
+                .current_monitor()
+                .map(|monitor| {
+                    format!(
+                        "{} @ {:.0} Hz",
+                        monitor.name().unwrap_or_else(|| "unknown".to_string()),
+                        monitor.refresh_rate_millihertz().unwrap_or(0) as f32 / 1000.0
+                    )
+                })
+                .unwrap_or_else(|| "unknown monitor".to_string());
+            println!(
+                "{:.1} fps | {:?} | {}",
+                self.fps_log_frame_count as f32 / seconds_since_fps_log,
+                self.gpu_context.surface_config.present_mode,
+                monitor_description
+            );
+            self.fps_log_timer = now;
+            self.fps_log_frame_count = 0;
+        }
+
+        // A monitor change (dragging between a 1x and a 2x display) updates
+        // the window's physical size BEFORE the Resized event reaches us, and
+        // macOS delivers this redraw inside draw_rect where a panic aborts.
+        // The frame must be internally consistent: sync the surface to the
+        // window here, or the egui scissor (built from the window size) can
+        // exceed the still-old surface texture — a wgpu validation panic.
+        let window_size = self.window.inner_size();
+        if window_size.width > 0
+            && window_size.height > 0
+            && (window_size.width != self.gpu_context.surface_config.width
+                || window_size.height != self.gpu_context.surface_config.height)
+        {
+            self.resize(window_size);
+        }
+
         let camera_input = self.input_state.drain_camera_input();
         self.fly_camera.update(&camera_input, frame_time_seconds);
         let camera_uniform = self.fly_camera.gpu_uniform(self.renderer.resolution());
+        // Sun sliders were mutated during LAST frame's overlay pass; a change
+        // shows up one frame later, which is imperceptible.
+        let lighting_uniform = self.sun_settings.lighting_uniform();
 
         let surface_frame = match self.gpu_context.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_frame)
@@ -205,29 +268,61 @@ impl AppState {
                     label: Some("frame encoder"),
                 });
 
+        // Harvest GPU timings from earlier frames (non-blocking; a value a
+        // few frames old is fine for the readout).
+        let gpu_timings = self
+            .frame_timers
+            .as_mut()
+            .map(|frame_timers| frame_timers.collect(&self.gpu_context.device));
+
         self.renderer.encode_frame(
             &self.gpu_context.queue,
             &mut encoder,
             &camera_uniform,
+            &lighting_uniform,
             &target_view,
+            self.frame_timers.as_ref(),
         );
         let previous_vsync_enabled = self.vsync_enabled;
+        let frame_data = OverlayFrameData {
+            render_resolution: self.renderer.resolution(),
+            gpu_timings,
+        };
         self.overlay.render(
             &self.window,
             &self.gpu_context.device,
             &self.gpu_context.queue,
             &mut encoder,
             &target_view,
-            self.renderer.resolution(),
+            &frame_data,
+            self.frame_timers
+                .as_ref()
+                .map(|frame_timers| frame_timers.render_span_end_writes(SPAN_POST)),
             &mut self.vsync_enabled,
+            &mut self.render_scale,
+            &mut self.sun_settings,
         );
+        let readback_slot = self
+            .frame_timers
+            .as_ref()
+            .and_then(|frame_timers| frame_timers.encode_resolve(&mut encoder));
 
         self.gpu_context.queue.submit([encoder.finish()]);
+        if let (Some(frame_timers), Some(slot_index)) = (&self.frame_timers, readback_slot) {
+            frame_timers.after_submit(slot_index);
+        }
         self.window.pre_present_notify();
         surface_frame.present();
+        self.fps_log_frame_count += 1;
 
         if self.vsync_enabled != previous_vsync_enabled {
             self.gpu_context.set_vsync(self.vsync_enabled);
+        }
+        if self.render_scale != self.renderer.render_scale() {
+            self.renderer
+                .set_render_scale(&self.gpu_context.device, self.render_scale);
+            // set_render_scale clamps — keep the slider value in sync.
+            self.render_scale = self.renderer.render_scale();
         }
     }
 }
@@ -297,8 +392,22 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
-            state.window.request_redraw();
+        if let Some(state) = &mut self.state {
+            if state.vsync_enabled {
+                state.window.request_redraw();
+            } else {
+                // macOS delivers RedrawRequested through the display link, so
+                // a request_redraw-driven loop can never exceed the monitor's
+                // refresh rate regardless of present mode. With vsync off,
+                // drive the frame directly from the event loop instead. NOTE
+                // (measured): even then macOS pins windowed apps near the
+                // refresh rate — the compositor recycles drawables at display
+                // cadence — so vsync-off is about latency, not throughput,
+                // here. On platforms without that pacing this path uncaps for
+                // real; for throughput numbers on macOS use bench_dda (it
+                // renders offscreen, no swapchain).
+                state.redraw();
+            }
         }
     }
 }
