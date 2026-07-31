@@ -37,7 +37,36 @@ const LAND_RADIUS_FRACTION: f32 = 0.72;
 
 /// Edge length of one voxel in meters. Fine voxels: gentle slopes terrace
 /// into contour-line steps and trees get enough cells for detailed canopies.
+///
+/// Eight of these make one metre, which is deliberately the brick edge
+/// (`voxel_rt::brickmap::BRICK_SIZE`): a 1 m brick IS the build block, and its
+/// 8^3 contents are the sub-block detail. Keeping the grid fine is what lets a
+/// brick be either — a blocky UNIFORM metre or a sculpted one. A 1 m grid was
+/// tried and reverted; at that size there is no sub-grid left to be smooth
+/// with, and the brickmap has nothing to accelerate.
+///
+/// Anything authored in voxels rather than metres silently breaks when this
+/// changes — use [`voxels_spanning`], [`voxel_offset`] and [`voxel_span`].
 pub const VOXEL_SIZE: f32 = 0.125;
+
+/// Whole voxels spanning `meters`, never fewer than one — for lengths that
+/// must not vanish (a trunk is always at least one voxel tall).
+fn voxels_spanning(meters: f32) -> i32 {
+    (meters / VOXEL_SIZE).round().max(1.0) as i32
+}
+
+/// Whole voxels for an offset or half-extent, allowed to reach zero — a
+/// 0.375 m thick trunk is 3 voxels across at 0.125 m (half-extent 1) and a
+/// single voxel at 1 m (half-extent 0).
+fn voxel_offset(meters: f32) -> i32 {
+    (meters / VOXEL_SIZE).round() as i32
+}
+
+/// Fractional voxels spanning `meters`, for jitter ranges scaled before they
+/// are truncated to integers.
+fn voxel_span(meters: f32) -> f32 {
+    meters / VOXEL_SIZE
+}
 
 /// Marks a column with no land at all (open sky beyond the rim).
 const NO_LAND: i32 = -1;
@@ -101,6 +130,16 @@ pub enum Voxel {
     /// The brown seed head topping a cattail (Typha) stalk.
     CattailHead,
     Snow,
+    /// A plain block of light: the first EMISSIVE voxel type (M1b). No object
+    /// semantics — it is a full voxel that emits. Solid, so it also occludes,
+    /// which is the point: a glow block in a niche lights the niche, not the
+    /// wall behind it.
+    GlowBlock,
+    /// Glowing berries clustered on a branch — a dim, cool second emitter, and
+    /// thin cover rather than a solid block, so it neither blocks movement nor
+    /// occludes light. Named after the "conditional glowing berries" recorded in
+    /// `docs/xima-engine-dossier.md`.
+    GlowBerry,
 }
 
 impl Voxel {
@@ -123,6 +162,7 @@ impl Voxel {
                 | Voxel::LilyBloom
                 | Voxel::Reed
                 | Voxel::CattailHead
+                | Voxel::GlowBerry
         )
     }
 }
@@ -968,10 +1008,12 @@ impl WorldBuilder {
     /// Scatter blob-canopy trees on grassland with a minimum spacing.
     fn plant_trees(&mut self, heights: &[i32], seed: u32) {
         let mut placed_trees: Vec<(i32, i32)> = Vec::new();
-        let minimum_spacing_squared = 46 * 46;
+        let minimum_spacing = voxels_spanning(5.75);
+        let minimum_spacing_squared = minimum_spacing * minimum_spacing;
+        let border = voxels_spanning(2.0);
 
-        for z in 16..(WORLD_SIZE_Z as i32 - 16) {
-            for x in 16..(WORLD_SIZE_X as i32 - 16) {
+        for z in border..(WORLD_SIZE_Z as i32 - border) {
+            for x in border..(WORLD_SIZE_X as i32 - border) {
                 let column_height = heights[(z as usize) * WORLD_SIZE_X + x as usize];
                 if column_height <= WATER_LEVEL + 1 {
                     continue;
@@ -984,8 +1026,16 @@ impl WorldBuilder {
                 // Dense stands on the lush side, lone trees near the desert,
                 // and a bonus along the waterline so shores get willows.
                 let shore_bonus = 1.0 + 1.5 * smoothstep(6.0, 2.0, self.water_distance_at(x, z));
-                let tree_probability =
-                    0.0035 * (0.15 + 0.85 * (1.0 - self.dryness_at(x, z))) * shore_bonus;
+                // Density is authored per SQUARE METER, not per column: a
+                // column covers VOXEL_SIZE^2 of ground, so the per-column roll
+                // has to scale with the cell's footprint or the forest thins
+                // out by 64x the moment the voxel grid coarsens.
+                const TREES_PER_SQUARE_METER: f32 = 0.224;
+                let tree_probability = TREES_PER_SQUARE_METER
+                    * VOXEL_SIZE
+                    * VOXEL_SIZE
+                    * (0.15 + 0.85 * (1.0 - self.dryness_at(x, z)))
+                    * shore_bonus;
                 if hash_to_unit(hash_3d(x, 700, z, seed.wrapping_add(31))) >= tree_probability {
                     continue;
                 }
@@ -1015,19 +1065,19 @@ impl WorldBuilder {
         let dryness = self.dryness_at(x, z);
 
         if water_distance <= 4.0 && species_roll < 0.70 {
-            self.stamp_tree_tone(x, z, 18, tone);
+            self.stamp_tree_tone(x, z, voxels_spanning(2.25), tone);
             self.grow_willow(x, ground_height, z, tree_hash);
         } else if altitude_meters > 6.5
             || (dryness > 0.55 && species_roll < 0.45)
             || species_roll > 0.90
         {
-            self.stamp_tree_tone(x, z, 13, tone);
+            self.stamp_tree_tone(x, z, voxels_spanning(1.625), tone);
             self.grow_pine(x, ground_height, z, tree_hash);
         } else if species_roll < 0.30 {
-            self.stamp_tree_tone(x, z, 10, tone);
+            self.stamp_tree_tone(x, z, voxels_spanning(1.25), tone);
             self.grow_birch(x, ground_height, z, tree_hash);
         } else {
-            self.stamp_tree_tone(x, z, 22, tone);
+            self.stamp_tree_tone(x, z, voxels_spanning(2.75), tone);
             self.grow_oak(x, ground_height, z, tree_hash);
         }
     }
@@ -1037,17 +1087,18 @@ impl WorldBuilder {
     /// a smooth ellipsoid blob. Tall — real trees tower over the 1.7 m
     /// first-person eye, they don't sit at shoulder height.
     fn grow_oak(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
-        let trunk_height = 34 + (tree_hash % 18) as i32;
+        let trunk_height = voxels_spanning(4.25 + (tree_hash % 18) as f32 * 0.125);
+        let trunk_reach = voxel_offset(0.125);
 
         for y in 1..=trunk_height {
-            for offset_x in -1..=1 {
-                for offset_z in -1..=1 {
+            for offset_x in -trunk_reach..=trunk_reach {
+                for offset_z in -trunk_reach..=trunk_reach {
                     self.set(x + offset_x, ground_height + y, z + offset_z, Voxel::Trunk);
                 }
             }
         }
 
-        let crown_center_y = ground_height + trunk_height + 5;
+        let crown_center_y = ground_height + trunk_height + voxel_offset(0.625);
         // Many small overlapping slabs beat a few huge ones: the crown
         // silhouette turns puffy and irregular instead of flat-topped.
         let slab_count = 12 + (tree_hash >> 8) % 5;
@@ -1068,14 +1119,14 @@ impl WorldBuilder {
                 (x, crown_center_y, z)
             } else {
                 (
-                    x + ((unit_a - 0.5) * 20.0) as i32,
-                    crown_center_y + ((unit_b - 0.5) * 13.0) as i32,
-                    z + ((unit_c - 0.5) * 20.0) as i32,
+                    x + ((unit_a - 0.5) * voxel_span(2.5)) as i32,
+                    crown_center_y + ((unit_b - 0.5) * voxel_span(1.625)) as i32,
+                    z + ((unit_c - 0.5) * voxel_span(2.5)) as i32,
                 )
             };
-            let half_extent_x = 3 + (unit_d * 5.0) as i32;
-            let half_extent_y = 2 + (unit_a * 2.0) as i32;
-            let half_extent_z = 3 + (unit_b * 5.0) as i32;
+            let half_extent_x = voxel_offset(0.375) + (unit_d * voxel_span(0.625)) as i32;
+            let half_extent_y = voxel_offset(0.25) + (unit_a * voxel_span(0.25)) as i32;
+            let half_extent_z = voxel_offset(0.375) + (unit_b * voxel_span(0.625)) as i32;
             let leaf_tone = if slab_hash & 1 == 0 {
                 Voxel::Leaves
             } else {
@@ -1100,10 +1151,11 @@ impl WorldBuilder {
     /// Slender white-barked tree: thin 2×2 trunk, a narrow stack of small
     /// leaf blobs high up. Reads as a lighter accent between the oaks.
     fn grow_birch(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
-        let trunk_height = 42 + (tree_hash % 16) as i32;
+        let trunk_height = voxels_spanning(5.25 + (tree_hash % 16) as f32 * 0.125);
+        let trunk_reach = voxel_offset(0.125);
         for y in 1..=trunk_height {
-            for offset_x in 0..=1 {
-                for offset_z in 0..=1 {
+            for offset_x in 0..=trunk_reach {
+                for offset_z in 0..=trunk_reach {
                     self.set(
                         x + offset_x,
                         ground_height + y,
@@ -1114,7 +1166,7 @@ impl WorldBuilder {
             }
         }
 
-        let crown_base = ground_height + trunk_height - 12;
+        let crown_base = ground_height + trunk_height - voxel_offset(1.5);
         let blob_count = 5 + (tree_hash >> 7) % 3;
         for blob_index in 0..blob_count as i32 {
             let blob_hash = hash_3d(
@@ -1127,11 +1179,13 @@ impl WorldBuilder {
             let unit_b = hash_to_unit(blob_hash.wrapping_mul(0x9E37_79B9));
             let unit_c = hash_to_unit(blob_hash.wrapping_mul(0x85EB_CA6B));
 
-            let center_x = x + ((unit_a - 0.5) * 9.0) as i32;
-            let center_y = crown_base + blob_index * 4 + ((unit_b - 0.5) * 4.0) as i32;
-            let center_z = z + ((unit_c - 0.5) * 9.0) as i32;
-            let half_extent = 3 + (unit_a * 3.0) as i32;
-            let half_extent_y = 2 + (unit_b * 2.0) as i32;
+            let center_x = x + ((unit_a - 0.5) * voxel_span(1.125)) as i32;
+            let center_y = crown_base
+                + blob_index * voxels_spanning(0.5)
+                + ((unit_b - 0.5) * voxel_span(0.5)) as i32;
+            let center_z = z + ((unit_c - 0.5) * voxel_span(1.125)) as i32;
+            let half_extent = voxel_offset(0.375) + (unit_a * voxel_span(0.375)) as i32;
+            let half_extent_y = voxel_offset(0.25) + (unit_b * voxel_span(0.25)) as i32;
 
             for offset_y in -half_extent_y..=half_extent_y {
                 for offset_z in -half_extent..=half_extent {
@@ -1151,23 +1205,27 @@ impl WorldBuilder {
     /// Conifer: stacked shrinking discs with one-voxel gaps between them —
     /// the pagoda silhouette MagicaVoxel pines are known for.
     fn grow_pine(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
-        let total_height = 46 + (tree_hash % 22) as i32;
+        let total_height = voxels_spanning(5.75 + (tree_hash % 22) as f32 * 0.125);
+        let trunk_reach = voxel_offset(0.125);
         for y in 1..=total_height {
-            for offset_x in 0..=1 {
-                for offset_z in 0..=1 {
+            for offset_x in 0..=trunk_reach {
+                for offset_z in 0..=trunk_reach {
                     self.set(x + offset_x, ground_height + y, z + offset_z, Voxel::Trunk);
                 }
             }
         }
 
-        let canopy_bottom = 8 + ((tree_hash >> 5) % 6) as i32;
-        let base_extent = 8.0 + hash_to_unit(tree_hash.wrapping_mul(0xC2B2_AE35)) * 4.0;
-        let layer_count = (total_height - canopy_bottom) / 4;
+        let canopy_bottom = voxels_spanning(1.0 + ((tree_hash >> 5) % 6) as f32 * 0.125);
+        let base_extent =
+            voxel_span(1.0) + hash_to_unit(tree_hash.wrapping_mul(0xC2B2_AE35)) * voxel_span(0.5);
+        let layer_step = voxels_spanning(0.5);
+        let layer_count = (total_height - canopy_bottom) / layer_step;
+        let layer_thickness = voxels_spanning(0.375);
         for layer_index in 0..=layer_count {
             let progress = layer_index as f32 / layer_count.max(1) as f32;
             let extent = ((1.0 - progress) * base_extent) as i32 + 1;
-            let layer_y = ground_height + canopy_bottom + layer_index * 4;
-            for offset_y in 0..3 {
+            let layer_y = ground_height + canopy_bottom + layer_index * layer_step;
+            for offset_y in 0..layer_thickness {
                 for offset_z in -extent..=extent {
                     for offset_x in -extent..=extent {
                         if offset_x * offset_x + offset_z * offset_z > extent * extent {
@@ -1189,18 +1247,20 @@ impl WorldBuilder {
     /// hanging from the dome's rim — they drape until they meet ground or
     /// water, like a willow trailing in a pond.
     fn grow_willow(&mut self, x: i32, ground_height: i32, z: i32, tree_hash: u32) {
-        let trunk_height = 18 + (tree_hash % 8) as i32;
+        let trunk_height = voxels_spanning(2.25 + (tree_hash % 8) as f32 * 0.125);
+        let trunk_reach = voxel_offset(0.125);
         for y in 1..=trunk_height {
-            for offset_x in -1..=1 {
-                for offset_z in -1..=1 {
+            for offset_x in -trunk_reach..=trunk_reach {
+                for offset_z in -trunk_reach..=trunk_reach {
                     self.set(x + offset_x, ground_height + y, z + offset_z, Voxel::Trunk);
                 }
             }
         }
 
-        let dome_center_y = ground_height + trunk_height + 3;
-        let dome_radius = 10 + (hash_to_unit(tree_hash.wrapping_mul(0x9E37_79B9)) * 4.0) as i32;
-        let dome_height = 4 + ((tree_hash >> 9) % 3) as i32;
+        let dome_center_y = ground_height + trunk_height + voxel_offset(0.375);
+        let dome_radius = voxels_spanning(1.25)
+            + (hash_to_unit(tree_hash.wrapping_mul(0x9E37_79B9)) * voxel_span(0.5)) as i32;
+        let dome_height = voxels_spanning(0.5 + ((tree_hash >> 9) % 3) as f32 * 0.125);
         for offset_y in -1..=dome_height {
             for offset_z in -dome_radius..=dome_radius {
                 for offset_x in -dome_radius..=dome_radius {
@@ -1244,7 +1304,7 @@ impl WorldBuilder {
             let angle = TAU * strand_index as f32 / strand_count as f32;
             let strand_x = x + (angle.cos() * (dome_radius as f32 - 0.5)).round() as i32;
             let strand_z = z + (angle.sin() * (dome_radius as f32 - 0.5)).round() as i32;
-            let length = 8 + (strand_hash % 14) as i32;
+            let length = voxels_spanning(1.0 + (strand_hash % 14) as f32 * 0.125);
             let strand_leaf = if strand_hash.is_multiple_of(3) {
                 Voxel::LeavesDark
             } else {
@@ -1409,7 +1469,10 @@ impl WorldBuilder {
 /// (1.0 = 45°). Windowed rather than nearest-neighbor so single voxel
 /// terrace steps on gentle slopes don't read as cliffs.
 fn compute_slope_map(heights: &[i32]) -> Vec<f32> {
-    const WINDOW_RADIUS: i32 = 2;
+    // Authored in METERS. As a raw voxel count this window silently grew from
+    // 0.25 m to 2 m when the grid coarsened, so it straddled whole summits and
+    // read them as sheer — which cost the cone its entire snow cap.
+    let window_radius = voxels_spanning(0.25);
     let mut slope_map = vec![0.0_f32; WORLD_SIZE_X * WORLD_SIZE_Z];
     for z in 0..WORLD_SIZE_Z as i32 {
         for x in 0..WORLD_SIZE_X as i32 {
@@ -1419,8 +1482,8 @@ fn compute_slope_map(heights: &[i32]) -> Vec<f32> {
             }
             let mut lowest = center;
             let mut highest = center;
-            for offset_z in -WINDOW_RADIUS..=WINDOW_RADIUS {
-                for offset_x in -WINDOW_RADIUS..=WINDOW_RADIUS {
+            for offset_z in -window_radius..=window_radius {
+                for offset_x in -window_radius..=window_radius {
                     let sample_x = x + offset_x;
                     let sample_z = z + offset_z;
                     if sample_x < 0
@@ -1439,7 +1502,7 @@ fn compute_slope_map(heights: &[i32]) -> Vec<f32> {
                 }
             }
             slope_map[(z as usize) * WORLD_SIZE_X + x as usize] =
-                (highest - lowest) as f32 / (2 * WINDOW_RADIUS) as f32;
+                (highest - lowest) as f32 / (2 * window_radius) as f32;
         }
     }
     slope_map
@@ -1514,8 +1577,12 @@ fn compute_water_distance_map(heights: &[i32]) -> Vec<f32> {
 /// and there is no hard seam at the threshold. Sky rim and underwater beds are
 /// left untouched.
 fn quantize_cliffs(heights: &mut [i32]) {
-    /// Voxels per chunky terrace (~0.375 m at VOXEL_SIZE 0.125).
-    const CLIFF_STEP: f32 = 3.0;
+    /// Height of one chunky terrace. Authored in METERS: as a raw voxel count
+    /// this silently became a 3 m cliff when the grid coarsened to 1 m, which
+    /// pushed every mountain column past the rock/snow slope limits and wiped
+    /// the snow cap out entirely.
+    const CLIFF_STEP_METERS: f32 = 0.375;
+    let cliff_step = voxels_spanning(CLIFF_STEP_METERS) as f32;
     let slope = compute_slope_map(heights);
     let original: Vec<i32> = heights.to_vec();
     for index in 0..heights.len() {
@@ -1527,7 +1594,7 @@ fn quantize_cliffs(heights: &mut [i32]) {
         if cliff_strength <= 0.0 {
             continue;
         }
-        let snapped = (height as f32 / CLIFF_STEP).round() * CLIFF_STEP;
+        let snapped = (height as f32 / cliff_step).round() * cliff_step;
         let blended = height as f32 + (snapped - height as f32) * cliff_strength;
         heights[index] = blended.round() as i32;
     }
@@ -2019,7 +2086,11 @@ mod tests {
 
         // Runs must reconstruct exactly what get() reports, and every
         // column must span the full world height.
-        for z in [0, 250, 500, 750, WORLD_SIZE_Z as i32 - 1] {
+        // Sample columns as FRACTIONS of the world, never absolute coordinates
+        // — the grid resolution is a tunable and hardcoded slices silently fall
+        // outside it (they did, when the world went from 1000 to 125 wide).
+        let depth = WORLD_SIZE_Z as i32;
+        for z in [0, depth / 4, depth / 2, depth * 3 / 4, depth - 1] {
             for x in 0..WORLD_SIZE_X as i32 {
                 let mut spanned = 0;
                 for (voxel, y_start, length) in world.column_runs(x, z) {
@@ -2034,20 +2105,31 @@ mod tests {
         }
 
         // A scratch window must agree with get() everywhere inside it.
-        let scratch = world.unpack_chunk(448, 512, 448, 512);
-        for z in 447..513 {
-            for x in 447..513 {
+        let window_min = WORLD_SIZE_X as i32 / 2 - 8;
+        let window_max = WORLD_SIZE_X as i32 / 2 + 8;
+        let scratch = world.unpack_chunk(window_min, window_max, window_min, window_max);
+        for z in (window_min + 1)..window_max {
+            for x in (window_min + 1)..window_max {
                 for y in (WATER_LEVEL - 20)..(WATER_LEVEL + 60) {
                     assert_eq!(scratch.get(x, y, z), world.get(x, y, z));
                 }
             }
         }
 
+        // Bounds are RELATIVE to the grid, not absolute: a real terrain column
+        // is never a single run, and the encoding must stay well under the
+        // dense array it replaces. Absolute byte counts rot the moment the
+        // voxel size changes.
+        let columns = WORLD_SIZE_X * WORLD_SIZE_Z;
+        let dense_bytes = columns * WORLD_SIZE_Y;
         let (run_count, rle_bytes) = world.memory_stats();
-        assert!(run_count > 1_000_000, "suspiciously few runs: {run_count}");
         assert!(
-            rle_bytes < 64_000_000,
-            "RLE failed to compress: {rle_bytes} bytes"
+            run_count > columns,
+            "suspiciously few runs: {run_count} for {columns} columns"
+        );
+        assert!(
+            rle_bytes < dense_bytes / 4,
+            "RLE failed to compress: {rle_bytes} bytes vs {dense_bytes} dense"
         );
     }
 }

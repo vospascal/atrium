@@ -20,7 +20,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
-use voxel_rt::debug_pool::WaterPool;
+use voxel_rt::debug_pool::{WaterBlob, WaterPool};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::lighting::SunSettings;
@@ -30,6 +30,7 @@ use voxel_rt::passes::{cagi, dda};
 use voxel_rt::render::Renderer;
 use voxel_rt::variants::{QualityPreset, RenderQuality, QUALITY_PRESETS};
 use voxel_rt::voxel_dda;
+use voxel_rt::water;
 use voxel_rt::world_edit::{BulkEdit, BulkEditRequest, VoxelEdit};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
@@ -53,8 +54,16 @@ const EDIT_REACH_METERS: f32 = 24.0;
 /// what the pipeline's COST depends on).
 const EDIT_REPEAT_HZ: f32 = 8.0;
 
-/// What a right click places. Emissive materials are E5 and out of scope here.
+/// What a right click places — the default building block.
 const PLACE_MATERIAL: Voxel = Voxel::Stone;
+
+/// What the L key places (M1b): a plain light-emitting block, so the emissive
+/// table rows are reachable in the app and not only from tests.
+///
+/// It does NOT glow yet — the CA has no emissive injection rule (E5), so this
+/// currently builds a pale solid block. Placing one is what gives E5 something
+/// to light the world with.
+const GLOW_BLOCK_MATERIAL: Voxel = Voxel::GlowBlock;
 
 /// E2b — how far below the camera entering walk mode looks for ground, world
 /// meters. The world is only 32 m tall, so this always reaches the terrain (or
@@ -325,12 +334,26 @@ impl AppState {
                     self.toggle_control_mode();
                 }
             }
-            // E2b test tool: P carves a swimmable pool ahead of the eye. Free
-            // (WASD / Space / Shift / Ctrl / Escape / F are the taken keys) and it
-            // reads as "pool".
+            // Water test tools, both acting ON THE CROSSHAIR like every other
+            // edit: P carves a swimmable pool (E2b), Shift+P spawns a
+            // free-standing body of the same size (E6's isolated optics target).
+            // Shift is already tracked as `down_held`, so this needs no modifier
+            // plumbing of its own.
             KeyCode::KeyP => {
                 if pressed {
-                    self.carve_test_pool();
+                    match self.input_state.down_held {
+                        true => self.spawn_test_water_body(),
+                        false => self.carve_test_pool(),
+                    }
+                }
+            }
+            // M1b: L places a glow block against the aimed face — the same edit
+            // a right click makes, with the emissive material instead of stone.
+            // Deliberately NOT hold-to-repeat: a light source is placed one at a
+            // time, and repeating would stack a column of them on one hold.
+            KeyCode::KeyL => {
+                if pressed {
+                    self.edit_at_crosshair(Some(GLOW_BLOCK_MATERIAL));
                 }
             }
             _ => {}
@@ -390,7 +413,14 @@ impl AppState {
     /// ([`voxel_dda::cast`], the same traversal atrium's audio rays will use), then
     /// hand the change to the authority. Never touches the GPU and never blocks:
     /// the read lock is held only for the ray.
-    fn edit_at_crosshair(&mut self, place: bool) {
+    ///
+    /// **To the editor, water IS air** (the plan's rule, E6): the ray is
+    /// [`voxel_dda::CastTarget::EditableVoxel`] in BOTH directions — one predicate,
+    /// no per-direction liquid handling. A click into a pond therefore lands on the
+    /// bed rather than on the skin: removing takes the bed voxel, placing puts the
+    /// new block in the water cell against it and displaces the water. Placing a
+    /// lantern in a submerged niche is the same click as placing one in a cave.
+    fn edit_at_crosshair(&mut self, placed_material: Option<Voxel>) {
         let pose = self.active_pose();
         let hit = {
             let brickmap = self.world_host.read();
@@ -399,16 +429,17 @@ impl AppState {
                 pose.position.to_array(),
                 pose.forward.to_array(),
                 EDIT_REACH_METERS,
+                voxel_dda::CastTarget::EditableVoxel,
             )
         };
         let Some(hit) = hit else {
             return;
         };
-        let (voxel, material) = if place {
+        let (voxel, material) = if let Some(placed_material) = placed_material {
             if hit.face_normal == [0, 0, 0] {
                 return; // the eye is inside geometry: there is no face to build on
             }
-            (hit.face_voxel, PLACE_MATERIAL)
+            (hit.face_voxel, placed_material)
         } else {
             (hit.voxel, Voxel::Air)
         };
@@ -436,12 +467,11 @@ impl AppState {
     /// hundreds of thousands of `set_voxel` calls happen on the world thread.
     fn carve_test_pool(&mut self) {
         let pose = self.active_pose();
-        let pool = WaterPool::in_front_of(pose.position, pose.forward);
-        let light_grid = self
-            .quality
-            .global_illumination
-            .enabled
-            .then(|| self.renderer.light_volume_grid());
+        let pool = match self.crosshair_voxel() {
+            Some(voxel) => WaterPool::at_voxel(voxel),
+            None => WaterPool::in_front_of(pose.position, pose.forward),
+        };
+        let light_grid = self.bulk_edit_light_grid();
         println!(
             "carving the {} at voxel ({}, {}), water surface {:.2?}",
             pool.label(),
@@ -456,6 +486,63 @@ impl AppState {
             },
             &self.quality.world_edit,
         );
+    }
+
+    /// Shift+P — a free-standing body of water at the crosshair
+    /// ([`voxel_rt::debug_pool::WaterBlob`]): the E6 optics target, with sky
+    /// behind it instead of a lit pool bed.
+    ///
+    /// Aiming at open sky is not a failure here, it is the interesting case: the
+    /// miss path hangs the body in mid-air, which is what makes it a clean
+    /// refraction test.
+    fn spawn_test_water_body(&mut self) {
+        let pose = self.active_pose();
+        let blob = match self.crosshair_voxel() {
+            Some(voxel) => WaterBlob::at_voxel(voxel),
+            None => WaterBlob::in_front_of(pose.position, pose.forward),
+        };
+        let light_grid = self.bulk_edit_light_grid();
+        println!(
+            "spawning the {} centred on voxel ({}, {}, {}), world {:.2?}",
+            blob.label(),
+            blob.centre_voxel_x,
+            blob.centre_voxel_y,
+            blob.centre_voxel_z,
+            blob.centre(),
+        );
+        self.world_host.request_bulk_edit(
+            BulkEditRequest {
+                shape: Box::new(blob),
+                light_grid,
+            },
+            &self.quality.world_edit,
+        );
+    }
+
+    /// The voxel the crosshair is on, or `None` past [`EDIT_REACH_METERS`] — so a
+    /// bulk tool lands exactly where a click would. Uses the same
+    /// [`voxel_dda::CastTarget::EditableVoxel`] as the click path, which means it
+    /// sees through water like air (the plan's "to the EDITOR, water IS air"): aim
+    /// into a pond and the tool targets the bed, not the skin.
+    fn crosshair_voxel(&self) -> Option<[i32; 3]> {
+        let pose = self.active_pose();
+        let brickmap = self.world_host.read();
+        voxel_dda::cast(
+            &brickmap,
+            pose.position.to_array(),
+            pose.forward.to_array(),
+            EDIT_REACH_METERS,
+            voxel_dda::CastTarget::EditableVoxel,
+        )
+        .map(|hit| hit.voxel)
+    }
+
+    /// The light volume a bulk edit must repair, or `None` when GI is off.
+    fn bulk_edit_light_grid(&self) -> Option<voxel_rt::cagi::CagiGrid> {
+        self.quality
+            .global_illumination
+            .enabled
+            .then(|| self.renderer.light_volume_grid())
     }
 
     /// A mouse button changed: enter mouse-look, or start/stop a hold-to-repeat
@@ -491,7 +578,7 @@ impl AppState {
             true => self.input_state.place_held = true,
             false => self.input_state.remove_held = true,
         }
-        self.edit_at_crosshair(place);
+        self.edit_at_crosshair(place.then_some(PLACE_MATERIAL));
         self.input_state.next_repeat_edit =
             Some(Instant::now() + Duration::from_secs_f32(1.0 / EDIT_REPEAT_HZ));
     }
@@ -508,7 +595,7 @@ impl AppState {
         if now < due {
             return;
         }
-        self.edit_at_crosshair(self.input_state.place_held);
+        self.edit_at_crosshair(self.input_state.place_held.then_some(PLACE_MATERIAL));
         self.input_state.next_repeat_edit =
             Some(now + Duration::from_secs_f32(1.0 / EDIT_REPEAT_HZ));
     }
@@ -660,9 +747,11 @@ impl AppState {
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
         // imperceptible.
-        let lighting_uniform = self
-            .sun_settings
-            .lighting_uniform(self.quality.shading_params(), self.quality.gi_params());
+        let lighting_uniform = self.sun_settings.lighting_uniform(
+            self.quality.shading_params(),
+            self.quality.gi_params(),
+            self.quality.water_params(),
+        );
         // A moved sun invalidates the whole light volume (E4: the world is
         // static, the sun is not). Dragging the slider therefore re-floods every
         // frame of the drag, which is what makes the GI follow the drag instead of
@@ -726,6 +815,13 @@ impl AppState {
         );
         let previous_vsync_enabled = self.vsync_enabled;
         let mut carve_test_pool_requested = false;
+        // E6 — is the view underwater? Asked of the ACTIVE eye against the
+        // authority, so it is the same question the shading pass asks of the
+        // primary ray's origin, and it holds in fly mode too.
+        let eye_submerged = {
+            let brickmap = self.world_host.read();
+            water::eye_is_submerged(&brickmap, self.active_pose().position)
+        };
         let frame_data = OverlayFrameData {
             render_resolution: self.renderer.resolution(),
             gpu_timings,
@@ -743,6 +839,7 @@ impl AppState {
                 grounded: self.character.grounded(),
                 submersion: self.character.submersion(),
                 head_submerged: self.character.head_submerged(),
+                eye_submerged,
                 step_micros: self.character_step_micros,
             },
         };
@@ -882,6 +979,7 @@ impl ApplicationHandler for App {
             }
             // Left click enters mouse-look, then REMOVES the aimed voxel; right
             // click PLACES one against the aimed face (E2). Both hold-to-repeat.
+            // L places a glow block the same way, single-shot (M1b).
             WindowEvent::MouseInput {
                 state: button_state,
                 button,

@@ -34,6 +34,7 @@
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 use crate::brickmap::{Brickmap, BRICK_SIZE};
+use crate::material::material_is_empty_for_edits;
 
 /// Nudge past a cell boundary before re-deriving an integer cell from a float
 /// position (mirrors `RAY_EPSILON` in `world.wgsl`), in voxel units.
@@ -68,7 +69,37 @@ pub struct VoxelHit {
     pub material: u8,
 }
 
-/// First occupied voxel along a ray, or `None` for a miss inside
+/// What counts as a hit — the query's own question, not a property of the world.
+///
+/// Two consumers ask different questions of the same world, and the difference
+/// belongs at the call site rather than in the traversal: an **audio** ray wants
+/// every occupied voxel (a body of water is very much an obstruction to airborne
+/// sound, and its surface is very nearly a perfect acoustic mirror —
+/// `material::ACOUSTIC_WATER`), while an **edit** ray treats water as air, per the
+/// plan's "to the editor, water IS air" rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CastTarget {
+    /// Any occupied voxel, liquids included — the occlusion / audio query.
+    AnyVoxel,
+    /// The first voxel an EDIT can act on: everything
+    /// [`material_is_empty_for_edits`] calls empty is passed through, in BOTH edit
+    /// directions. That single predicate is the whole rule — placing and removing
+    /// share it, so a click into a pond lands on the bed either way and the
+    /// placement cell in front of it is the water the solid displaces.
+    EditableVoxel,
+}
+
+impl CastTarget {
+    /// Whether a material id ends the ray.
+    fn stops_the_ray(self, material: u8) -> bool {
+        match self {
+            CastTarget::AnyVoxel => true,
+            CastTarget::EditableVoxel => !material_is_empty_for_edits(material),
+        }
+    }
+}
+
+/// First voxel along a ray that `target` accepts, or `None` for a miss inside
 /// `max_distance_meters`.
 ///
 /// `origin_meters` may sit outside the world (the ray is clipped to the world
@@ -79,6 +110,7 @@ pub fn cast(
     origin_meters: [f32; 3],
     direction: [f32; 3],
     max_distance_meters: f32,
+    target: CastTarget,
 ) -> Option<VoxelHit> {
     let world_size = [
         WORLD_SIZE_X as f32,
@@ -217,19 +249,26 @@ pub fn cast(
         }
 
         if brickmap.is_occupied(cell[0], cell[1], cell[2]) {
-            let mut face_normal = [0_i32; 3];
-            let mut face_voxel = cell;
-            if let Some(axis) = face_axis {
-                face_normal[axis] = -step[axis];
-                face_voxel[axis] = cell[axis] - step[axis];
+            let material = brickmap.get(cell[0], cell[1], cell[2]);
+            if target.stops_the_ray(material) {
+                let mut face_normal = [0_i32; 3];
+                let mut face_voxel = cell;
+                if let Some(axis) = face_axis {
+                    face_normal[axis] = -step[axis];
+                    face_voxel[axis] = cell[axis] - step[axis];
+                }
+                return Some(VoxelHit {
+                    voxel: cell,
+                    face_voxel,
+                    face_normal,
+                    distance_meters: t.max(0.0) * VOXEL_SIZE,
+                    material,
+                });
             }
-            return Some(VoxelHit {
-                voxel: cell,
-                face_voxel,
-                face_normal,
-                distance_meters: t.max(0.0) * VOXEL_SIZE,
-                material: brickmap.get(cell[0], cell[1], cell[2]),
-            });
+            // Empty to the editor (a liquid): keep stepping, exactly as through
+            // air. The face voxel of whatever the ray eventually stops on is then
+            // the liquid cell against it — which IS the placement target, because
+            // a placed solid displaces the water.
         }
 
         let axis = argmin(&next_boundary);
@@ -241,9 +280,13 @@ pub fn cast(
     None
 }
 
-/// Whether the straight segment between two world points is free of solid voxels
-/// — the occlusion query an audio direct path asks for (E8), and the reason this
-/// module exists outside the renderer.
+/// Whether the straight segment between two world points is free of occupied
+/// voxels — the occlusion query an audio direct path asks for (E8), and the reason
+/// this module exists outside the renderer.
+///
+/// Water occludes here ([`CastTarget::AnyVoxel`]): the acoustic question is
+/// whether the path is unobstructed, and a body of water is very much an
+/// obstruction to airborne sound.
 pub fn path_is_clear(brickmap: &Brickmap, from_meters: [f32; 3], to_meters: [f32; 3]) -> bool {
     let direction = [
         to_meters[0] - from_meters[0],
@@ -260,7 +303,14 @@ pub fn path_is_clear(brickmap: &Brickmap, from_meters: [f32; 3], to_meters: [f32
             (from_meters[2] / VOXEL_SIZE).floor() as i32,
         );
     }
-    cast(brickmap, from_meters, direction, distance).is_none()
+    cast(
+        brickmap,
+        from_meters,
+        direction,
+        distance,
+        CastTarget::AnyVoxel,
+    )
+    .is_none()
 }
 
 fn argmin(values: &[f32; 3]) -> usize {
@@ -277,8 +327,11 @@ fn argmin(values: &[f32; 3]) -> usize {
 mod tests {
     use super::*;
     use crate::brickmap::ClearanceUpdate;
-    use crate::material::material_id;
+    use crate::material::{material_id, material_is_liquid};
     use voxel_core::world::{Voxel, VoxelWorld, WATER_LEVEL};
+
+    /// The default query — spelled once so the miss assertions stay one-liners.
+    const ANY: CastTarget = CastTarget::AnyVoxel;
 
     /// Brute-force reference: step the segment in fine increments and report the
     /// first voxel whose occupancy bit is set.
@@ -348,7 +401,13 @@ mod tests {
                     yaw.sin() * pitch.cos(),
                 ];
                 let expected = brute_force_first_hit(&brickmap, origin, direction, max_distance);
-                let actual = cast(&brickmap, origin, direction, max_distance);
+                let actual = cast(
+                    &brickmap,
+                    origin,
+                    direction,
+                    max_distance,
+                    CastTarget::AnyVoxel,
+                );
                 match (expected, actual) {
                     (Some(expected_voxel), Some(hit)) => {
                         // Nothing may be occupied strictly BEFORE the reported hit
@@ -386,13 +445,18 @@ mod tests {
                             brickmap.get(hit.voxel[0], hit.voxel[1], hit.voxel[2])
                         );
                         assert!(hit.distance_meters >= 0.0 && hit.distance_meters <= max_distance);
-                        // The face voxel is the placement target: it must be free
-                        // and adjacent along exactly one axis.
-                        assert!(!brickmap.is_occupied(
+                        // The face voxel is the placement target, so it must be
+                        // FREE — and since E6 "free" means empty to the EDITOR:
+                        // air, or a liquid the placed block displaces. (This fan
+                        // uses `AnyVoxel`, so here it is always air; the predicate
+                        // is asserted rather than `!is_occupied` so the invariant
+                        // stays true when the same reconstruction is reached
+                        // through an edit ray.)
+                        assert!(material_is_empty_for_edits(brickmap.get(
                             hit.face_voxel[0],
                             hit.face_voxel[1],
                             hit.face_voxel[2]
-                        ));
+                        )));
                         let axis_deltas: i32 = (0..3)
                             .map(|axis| (hit.face_voxel[axis] - hit.voxel[axis]).abs())
                             .sum();
@@ -437,8 +501,14 @@ mod tests {
     fn a_downward_ray_lands_on_the_surface_with_an_upward_normal() {
         let world = VoxelWorld::generate(1234, 0.0);
         let brickmap = Brickmap::build(&world);
-        let hit = cast(&brickmap, [62.5, 40.0, 62.5], [0.0, -1.0, 0.0], 60.0)
-            .expect("straight down over the island center hits terrain");
+        let hit = cast(
+            &brickmap,
+            [62.5, 40.0, 62.5],
+            [0.0, -1.0, 0.0],
+            60.0,
+            CastTarget::AnyVoxel,
+        )
+        .expect("straight down over the island center hits terrain");
         assert_eq!(hit.face_normal, [0, 1, 0]);
         assert_eq!(
             hit.face_voxel,
@@ -464,12 +534,12 @@ mod tests {
     fn misses_are_reported_as_misses() {
         let world = VoxelWorld::generate(1234, 0.0);
         let brickmap = Brickmap::build(&world);
-        assert!(cast(&brickmap, [62.5, 40.0, 62.5], [0.0, 1.0, 0.0], 100.0).is_none());
-        assert!(cast(&brickmap, [62.5, 40.0, 62.5], [0.0, -1.0, 0.0], 0.0).is_none());
-        assert!(cast(&brickmap, [-50.0, 40.0, 62.5], [-1.0, 0.0, 0.0], 100.0).is_none());
-        assert!(cast(&brickmap, [62.5, 40.0, 62.5], [0.0, 0.0, 0.0], 100.0).is_none());
+        assert!(cast(&brickmap, [62.5, 40.0, 62.5], [0.0, 1.0, 0.0], 100.0, ANY).is_none());
+        assert!(cast(&brickmap, [62.5, 40.0, 62.5], [0.0, -1.0, 0.0], 0.0, ANY).is_none());
+        assert!(cast(&brickmap, [-50.0, 40.0, 62.5], [-1.0, 0.0, 0.0], 100.0, ANY).is_none());
+        assert!(cast(&brickmap, [62.5, 40.0, 62.5], [0.0, 0.0, 0.0], 100.0, ANY).is_none());
         // ...and one that must hit from OUTSIDE the world box (the audio case).
-        assert!(cast(&brickmap, [-20.0, 12.0, 62.5], [1.0, 0.0, 0.0], 200.0).is_some());
+        assert!(cast(&brickmap, [-20.0, 12.0, 62.5], [1.0, 0.0, 0.0], 200.0, ANY).is_some());
     }
 
     /// The occlusion query: a segment through a hill is blocked, the same segment
@@ -519,6 +589,7 @@ mod tests {
                 above_right[2] - above_left[2],
             ],
             100.0,
+            ANY,
         )
         .expect("the placed voxel is hit");
         assert_eq!(hit.voxel, blocker);
@@ -543,10 +614,195 @@ mod tests {
             (surface_y as f32 + 0.5) * VOXEL_SIZE,
             500.5 * VOXEL_SIZE,
         ];
-        let hit = cast(&brickmap, inside, [0.0, -1.0, 0.0], 10.0).expect("inside solid = hit");
+        let hit = cast(&brickmap, inside, [0.0, -1.0, 0.0], 10.0, ANY).expect("inside solid = hit");
         assert_eq!(hit.voxel, [500, surface_y, 500]);
         assert_eq!(hit.face_normal, [0, 0, 0]);
         assert_eq!(hit.face_voxel, hit.voxel);
         assert_eq!(hit.distance_meters, 0.0);
+    }
+
+    /// **To the editor, water IS air** (E6, the plan's rule). One edit ray, both
+    /// directions: through 1.5 m of water it must report the BED, so removing takes
+    /// the bed voxel and placing lands in the water cell against it — which is how
+    /// a lantern gets into a submerged niche. The audio query over the same column
+    /// must still see the water as an obstruction.
+    /// NOTE: generates the full world — run with `--release`.
+    #[test]
+    fn an_edit_ray_treats_water_as_air_in_both_directions() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+        // A column of water standing on the terrain. Both the column position and
+        // its depth are DISCOVERED rather than hardcoded — `set_voxel` refuses an
+        // out-of-world write, so the loop simply stops at the world ceiling — which
+        // keeps this test independent of the world's dimensions.
+        let (voxel_x, voxel_z) = (WORLD_SIZE_X as i32 / 2, WORLD_SIZE_Z as i32 / 2);
+        let surface_y = (0..WORLD_SIZE_Y as i32)
+            .rev()
+            .find(|y| brickmap.is_occupied(voxel_x, *y, voxel_z))
+            .expect("the column is occupied");
+        let mut water_voxels = 0;
+        for offset in 1..=12 {
+            if brickmap
+                .set_voxel(
+                    voxel_x,
+                    surface_y + offset,
+                    voxel_z,
+                    Voxel::Water,
+                    ClearanceUpdate::LocalBox { radius_cells: 8 },
+                )
+                .is_none()
+            {
+                break;
+            }
+            water_voxels = offset;
+        }
+        assert!(
+            water_voxels >= 4,
+            "only {water_voxels} voxels of water fit above the surface — the column is \
+             too shallow for this test to prove anything"
+        );
+
+        // The eye sits two voxels above the topmost water voxel, looking straight
+        // down, with just enough reach to pass through the column and reach the bed.
+        let eye_voxel_y = surface_y + water_voxels + 2;
+        let above = [
+            (voxel_x as f32 + 0.5) * VOXEL_SIZE,
+            (eye_voxel_y as f32 + 0.5) * VOXEL_SIZE,
+            (voxel_z as f32 + 0.5) * VOXEL_SIZE,
+        ];
+        let reach_meters = (eye_voxel_y - surface_y + 2) as f32 * VOXEL_SIZE;
+
+        let edit = cast(
+            &brickmap,
+            above,
+            [0.0, -1.0, 0.0],
+            reach_meters,
+            CastTarget::EditableVoxel,
+        )
+        .expect("an edit ray must reach the bed under the water");
+        assert_eq!(
+            edit.voxel,
+            [voxel_x, surface_y, voxel_z],
+            "the edit ray must pass through every water voxel and land on the bed"
+        );
+        assert!(
+            !material_is_liquid(edit.material),
+            "the edit ray stopped on water — water is not a block"
+        );
+        assert_eq!(edit.face_normal, [0, 1, 0]);
+        // The placement cell: the water directly above the bed, NOT the surface and
+        // NOT inside the bed. A solid placed here displaces the water.
+        assert_eq!(
+            edit.face_voxel,
+            [voxel_x, surface_y + 1, voxel_z],
+            "the placement cell must be the water cell against the bed"
+        );
+        assert_eq!(
+            brickmap.get(edit.face_voxel[0], edit.face_voxel[1], edit.face_voxel[2]),
+            material_id(Voxel::Water),
+            "the placement cell should still be water before the edit"
+        );
+        assert!(material_is_empty_for_edits(brickmap.get(
+            edit.face_voxel[0],
+            edit.face_voxel[1],
+            edit.face_voxel[2]
+        )));
+
+        // ...and placing there really does displace the water, with a SOLID
+        // EMISSIVE of all things — the "put a light in a submerged niche" case
+        // that made Pascal ask for this rule, and an E5/CAGI test case.
+        brickmap.set_voxel(
+            edit.face_voxel[0],
+            edit.face_voxel[1],
+            edit.face_voxel[2],
+            Voxel::GlowBlock,
+            ClearanceUpdate::LocalBox { radius_cells: 8 },
+        );
+        assert_eq!(
+            brickmap.get(edit.face_voxel[0], edit.face_voxel[1], edit.face_voxel[2]),
+            material_id(Voxel::GlowBlock),
+            "a placed solid must displace the water it lands in"
+        );
+        // The next edit ray now stops on the lantern, one cell higher.
+        let onto_lantern = cast(
+            &brickmap,
+            above,
+            [0.0, -1.0, 0.0],
+            reach_meters,
+            CastTarget::EditableVoxel,
+        )
+        .expect("the submerged light is the new target");
+        assert_eq!(onto_lantern.voxel, [voxel_x, surface_y + 1, voxel_z]);
+        assert_eq!(onto_lantern.material, material_id(Voxel::GlowBlock));
+
+        // The water above is untouched by all of this: it is not a block, so no
+        // edit ray ever selected it.
+        for offset in 2..=water_voxels {
+            assert_eq!(
+                brickmap.get(voxel_x, surface_y + offset, voxel_z),
+                material_id(Voxel::Water),
+                "the water at +{offset} was disturbed by an edit"
+            );
+        }
+
+        // The audio query asks a different question of the same column and must
+        // still be occluded by the water.
+        assert!(
+            cast(
+                &brickmap,
+                above,
+                [0.0, -1.0, 0.0],
+                10.0,
+                CastTarget::AnyVoxel
+            )
+            .is_some_and(|hit| material_is_liquid(hit.material)),
+            "an occlusion ray must still be stopped by the water surface"
+        );
+
+        // Water and nothing else on the ray: an edit ray reports a miss rather than
+        // offering the water as a target. One water voxel in mid-air, and a reach
+        // short enough that nothing below it is in range.
+        let mut floating = Brickmap::build(&world);
+        let air_y = surface_y + water_voxels + 1;
+        assert!(
+            floating
+                .set_voxel(
+                    voxel_x,
+                    air_y,
+                    voxel_z,
+                    Voxel::Water,
+                    ClearanceUpdate::LocalBox { radius_cells: 8 },
+                )
+                .is_some(),
+            "the mid-air water voxel must be inside the world"
+        );
+        let from_above = [
+            (voxel_x as f32 + 0.5) * VOXEL_SIZE,
+            (air_y as f32 + 1.5) * VOXEL_SIZE,
+            (voxel_z as f32 + 0.5) * VOXEL_SIZE,
+        ];
+        assert!(
+            cast(
+                &floating,
+                from_above,
+                [0.0, -1.0, 0.0],
+                VOXEL_SIZE * 2.0,
+                CastTarget::EditableVoxel
+            )
+            .is_none(),
+            "an edit ray whose only obstruction is water must report a miss — clicking a \
+             pond's surface selects nothing, because there is nothing there"
+        );
+        assert!(
+            cast(
+                &floating,
+                from_above,
+                [0.0, -1.0, 0.0],
+                VOXEL_SIZE * 2.0,
+                CastTarget::AnyVoxel
+            )
+            .is_some(),
+            "the same ray must still occlude for audio"
+        );
     }
 }

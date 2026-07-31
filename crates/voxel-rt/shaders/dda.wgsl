@@ -1,9 +1,11 @@
 // dda.wgsl — the SHADING pass: primary rays, one sun shadow ray per hit,
 // ambient occlusion (E1 ray-traced / E1b analytic), E4 CAGI indirect light,
-// Reinhard tonemap. Concatenated AFTER `world.wgsl` (the shared traversal
-// core, which owns the brickmap bindings and the traversal/shadow levers) and
-// `cagi_volume.wgsl` (the shared light-volume bindings + sampler), so this file
-// holds only what is specific to turning a camera ray into a pixel.
+// E6 water reflection/refraction/extinction, Reinhard tonemap. Concatenated
+// AFTER `world.wgsl` (the shared traversal core, which owns the brickmap
+// bindings and the traversal/shadow levers), `cagi_volume.wgsl` (the shared
+// light-volume bindings + sampler) and `water.wgsl` (E6's optics: Fresnel,
+// Snell, Beer-Lambert and the medium march), so this file holds only what is
+// specific to turning a camera ray into a pixel.
 //
 // Fullscreen compute pass (workgroup 8x8): one thread per output pixel builds
 // a camera ray, traverses the two-level brickmap through the shared `trace`,
@@ -327,7 +329,7 @@ fn ray_traced_occlusion(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32
     var sky_sum = vec3<f32>(0.0, 0.0, 0.0);
     for (var ray_index = 0u; ray_index < ray_count; ray_index = ray_index + 1u) {
         let direction = ao_ray_direction(normal, pixel, ray_index, ray_count);
-        let occluder = trace(surface_origin, direction, AO_MAX_DISTANCE);
+        let occluder = trace(surface_origin, direction, AO_MAX_DISTANCE, false);
         if (occluder.material != 0u) {
             if (AO_DISTANCE_FALLOFF) {
                 occlusion_sum += 1.0 - clamp(occluder.distance / AO_MAX_DISTANCE, 0.0, 1.0);
@@ -588,18 +590,25 @@ fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     return directional * lighting.gi_params.y + volume * ambient.factor;
 }
 
-// Linear-space shading: albedo * (sun lambert * visibility + indirect * AO).
-// One shadow ray per hit through `trace_shadow_visibility` (binary in hard mode,
-// a penumbra factor in soft mode); faces pointing away from the sun skip the
-// trace outright (their lambert term is zero anyway).
+// Linear-space shading of an ORDINARY surface: albedo * (sun lambert *
+// visibility + indirect * AO). One shadow ray per hit through
+// `trace_shadow_visibility` (binary in hard mode, a penumbra factor in soft
+// mode); faces pointing away from the sun skip the trace outright (their lambert
+// term is zero anyway).
 //
 // E4 composition contract, as documented since E1: occlusion multiplies the
 // INDIRECT term only — never the direct sun term or its shadow ray. The
 // multiply itself now lives inside `indirect_light` (see AO_MISS_RADIANCE),
 // which is why this function passes the estimate down instead of scaling the
 // result.
-fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
-             pixel: vec2<f32>) -> vec3<f32> {
+//
+// E6 renamed this from `shade_hit`, which is now the dispatch that sends liquid
+// hits to the water model and everything else here. A water hit shaded through
+// THIS function is the "water is an opaque diffuse surface" fallback — what
+// WATER_MODE_OPAQUE ships and what the two half-modes use for the half they do
+// not trace.
+fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                 pixel: vec2<f32>, sun_transmission: vec3<f32>) -> vec3<f32> {
     let normal = hit_normal(hit);
     let albedo = srgb_decode(materials[hit.material].albedo);
 
@@ -609,8 +618,13 @@ fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
         let shadow_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
         sun_visibility = trace_shadow_visibility(shadow_origin, lighting.sun_direction);
     }
+    // `sun_transmission` is the transmittance of the sun's own path through any
+    // medium in front of it (E6): exactly vec3(1.0) for every ray in air, so the
+    // multiply is the float identity and this stays bit-identical off the water
+    // path, and the per-channel attenuation of the water above a submerged surface
+    // when there is one.
     let sun = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
-        * max(sun_facing, 0.0) * sun_visibility;
+        * max(sun_facing, 0.0) * sun_visibility * sun_transmission;
     var ambient: AmbientEstimate;
     ambient.factor = 1.0;
     ambient.sky_radiance = vec3<f32>(0.0, 0.0, 0.0);
@@ -620,7 +634,315 @@ fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                                    max(sun_facing, 0.0) * sun_visibility);
     }
     let indirect = indirect_light(hit, ray_origin, ray_direction, normal, ambient);
-    return albedo * (sun + indirect);
+    // E5: an emitter's own radiance is ADDED, not modulated by albedo or by any
+    // occlusion term — the surface is a source, so it looks the same lit or
+    // shadowed. gi_params.w scales it in step with what the CA injects, so the
+    // block and the light it casts stay consistent when the scale moves.
+    let emission = materials[hit.material].emission * lighting.gi_params.w;
+    return albedo * (sun + indirect) + emission;
+}
+
+// ---- E6: the water model, composed ------------------------------------------
+//
+// The optics themselves (Fresnel, Snell, Beer-Lambert, the medium march) live in
+// `water.wgsl`; this section is how they become a pixel. It folds away entirely
+// at WATER_MODE = WATER_MODE_OPAQUE, which is the isolation rule's requirement:
+// with water off the shading pass is the E4 renderer.
+//
+// Structure, and why there is no recursion (WGSL has none): three levels, each
+// strictly calling the one below it.
+//
+//   shade_hit              dispatch: liquid -> the water model, else shade_surface
+//   water_surface_radiance the first interface, from above: one mirror ray + the
+//                          refracted march, mixed by Fresnel
+//   water_medium_radiance  inside the liquid: a LOOP of marches (never recursion)
+//                          — extinction, in-scatter, the bed, Snell's window
+//   shade_secondary        the terminal for every secondary hit: full shading,
+//                          except that water hit AGAIN gets the zero-ray
+//                          Fresnel-tint approximation instead of splitting
+//
+// So the ray budget is bounded by construction: one mirror ray per water surface
+// seen directly, WATER_BOUNCES marches through the body, and at most one escape
+// ray per interface crossed. Nothing a secondary ray finds can start a new split.
+
+// The DOWNWELLING irradiance on a horizontal surface: the sun's radiance times its
+// elevation cosine, plus the sky hemisphere. This is the light that enters a body
+// of water from above, and it is the only light source the medium model has.
+//
+// Two documented simplifications: it is uniform inside the body (no attenuation
+// with depth below the surface, which would need the local surface height) and
+// unshadowed (one evaluation per pixel, not per point along the ray).
+fn water_downwelling_radiance() -> vec3<f32> {
+    return lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
+        * max(lighting.sun_direction.y, 0.0)
+        + ambient_light(vec3<f32>(0.0, 1.0, 0.0));
+}
+
+// The radiance a ray picks UP over a path through the medium — the in-scattered
+// term, and the reason deep water is blue where no bottom is visible at all.
+//
+// **Derived, not painted** (Pascal, 2026-07-31: *"water shouldn't have a colour
+// really .. water blocks light coming in"*). The closed form of single scattering
+// through a uniform medium with constant source radiance J is
+//
+//     L_in = (sigma_s / sigma_t) * J * (1 - exp(-sigma_t * d))
+//
+// i.e. the single-scattering ALBEDO times the source times the same
+// `1 - transmittance` the absorption already gives us. The colour is therefore
+// `scattering / extinction` — for water ~(0.009, 0.25, 0.75), deeply blue with
+// almost no red — which comes out of the material's two coefficients rather than
+// out of anything anyone chose. The previous implementation used the water row's
+// diffuse ALBEDO here, which is a surface-reflectance quantity standing in for a
+// volume colour: paint, and the reason the medium read teal no matter what the
+// light was doing.
+fn water_in_scattered_radiance(water_material: u32, transmittance: vec3<f32>) -> vec3<f32> {
+    return water_single_scattering_albedo(water_material) * water_downwelling_radiance()
+        * (vec3<f32>(1.0, 1.0, 1.0) - transmittance);
+}
+
+// Transmittance of the SUN's OWN path through the liquid down to a submerged
+// point — so the bed darkens, and reddens away, with depth for the right reason.
+//
+// Pascal asked for exactly this (*"the distance it travels the less light comes
+// down so ... the block at the bottom become darker"*). `WATER_SUN_THROUGH_LIQUID`
+// lets the sun REACH a submerged surface at all; this is what makes it arrive
+// dimmer and bluer the deeper the surface is. One bounded march per submerged
+// shaded point, and the march runs from the surface point toward the sun, so its
+// length is the depth divided by the sun's elevation sine.
+fn water_sun_transmission(surface_point: vec3<f32>, water_material: u32) -> vec3<f32> {
+    if (!WATER_SUN_THROUGH_LIQUID) {
+        return vec3<f32>(1.0, 1.0, 1.0);
+    }
+    let medium = water_medium_march(surface_point, lighting.sun_direction);
+    return water_transmittance(water_material, medium.distance_voxels);
+}
+
+// Terminal radiance of a SECONDARY ray's hit. Ordinary surfaces get the full
+// shading path (sun, shadow ray, AO, CAGI) — the E6 requirement that reflections
+// and refractions see GI-lit terrain. A liquid gets the zero-ray Fresnel-tint
+// approximation: this is the recursion budget's hard stop, and it is why a
+// reflection that lands on another pool costs nothing extra.
+fn shade_secondary(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                   pixel: vec2<f32>, sun_transmission: vec3<f32>) -> vec3<f32> {
+    let surface = shade_surface(hit, ray_origin, ray_direction, pixel, sun_transmission);
+    if (WATER_MODE == WATER_MODE_OPAQUE || !material_is_liquid(hit.material)) {
+        return surface;
+    }
+    let normal = hit_normal(hit);
+    let fresnel = fresnel_schlick(max(-dot(ray_direction, normal), 0.0),
+                                  material_index_of_refraction(hit.material));
+    return mix(surface, sky_color(reflect(ray_direction, normal)), fresnel);
+}
+
+// A point just INSIDE the liquid behind a water hit's face — the refracted ray's
+// origin. Built from `shadow_ray_origin` (whose integer-anchored reconstruction is
+// what keeps secondary rays acne-free at large t) by stepping back through the
+// face instead of off it, so the two origins are the same point plus or minus one
+// SHADOW_BIAS and the existing function stays untouched.
+fn water_interior_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                         normal: vec3<f32>) -> vec3<f32> {
+    return shadow_ray_origin(hit, ray_origin, ray_direction, normal)
+        - normal * (2.0 * SHADOW_BIAS);
+}
+
+// The CHEAP shading of a submerged surface: albedo x downwelling x the face's own
+// share of it, with NO shadow ray, NO ambient occlusion and NO light-volume sample.
+//
+// This is the stand-in half of `WATER_TIR_STANDIN`. It exists because the
+// expensive part of a second water bounce is not the march, it is shading what the
+// march finds through the full path — and the full path's dominant cost underwater
+// is precisely the sun shadow ray, which has to walk metres of water
+// (`WATER_SUN_THROUGH_LIQUID`, +77% measured). Dropping it keeps the GEOMETRY,
+// which is the whole point: structure instead of a constant.
+fn water_cheap_surface_radiance(hit: Hit, water_material: u32) -> vec3<f32> {
+    let normal = hit_normal(hit);
+    let albedo = srgb_decode(materials[hit.material].albedo);
+    // Downwelling light arrives from above, so a face's share of it is its own
+    // up-facing cosine — floored at a quarter so a vertical pool wall is dim rather
+    // than black, which is what the real multiply-scattered field does.
+    let up_facing = max(normal.y, 0.0) * 0.75 + 0.25;
+    return albedo * water_downwelling_radiance() * up_facing;
+}
+
+// The stand-in for the mirrored view OUTSIDE Snell's window: one more medium march,
+// shaded cheaply. Never recurses — a TIR inside the stand-in is where it stops.
+fn water_mirror_standin(origin: vec3<f32>, direction: vec3<f32>,
+                        water_material: u32) -> vec3<f32> {
+    let medium = water_medium_march(origin, direction);
+    let transmittance = water_transmittance(water_material, medium.distance_voxels);
+    var radiance = water_in_scattered_radiance(water_material, transmittance);
+    if (medium.kind == WATER_MEDIUM_SOLID) {
+        radiance = radiance
+            + transmittance * water_cheap_surface_radiance(medium.hit, water_material);
+    }
+    return radiance;
+}
+
+// What a ray leaving the medium into AIR sees, looking along `escape_direction`
+// from the exit point. Shared by both underwater interface modes, which differ only
+// in the DIRECTION they hand it (bent by Snell, or the ray's own).
+//
+// Only the modes that own transmission trace it; the others take the analytic sky,
+// which is what keeps WATER_MODE_FRESNEL_TINT at zero secondary rays even
+// underwater, where the primary ray has no choice but to march.
+fn water_escaped_radiance(medium: WaterMedium, escape_direction: vec3<f32>,
+                          pixel: vec2<f32>) -> vec3<f32> {
+    if (!WATER_TRACES_REFRACTION) {
+        return sky_color(escape_direction);
+    }
+    let escape_origin = medium.exit_point - medium.exit_normal * SHADOW_BIAS;
+    let above = trace(escape_origin, escape_direction, MAX_TRACE_DISTANCE, false);
+    if (above.material == 0u) {
+        return sky_color(escape_direction);
+    }
+    return shade_secondary(above, escape_origin, escape_direction, pixel, WATER_NO_MEDIUM);
+}
+
+// Radiance arriving from inside a body of liquid, entered at `entry_origin`
+// travelling along `entry_direction` (both voxel units). Serves BOTH callers: the
+// refracted ray of a surface seen from above, and the primary ray of a camera
+// that is itself underwater.
+//
+// A loop over up to WATER_BOUNCES marches, carrying a running `throughput`:
+//
+//   - every march contributes the in-scattered radiance over that segment at the
+//     current throughput and then multiplies the throughput by the transmittance;
+//   - a march that ends on terrain shades it — with the sun attenuated by ITS own
+//     path through the water, so the bed darkens and reddens away with depth — and
+//     stops;
+//   - a march that ends at the surface from below is the interface, and what
+//     happens there is `WATER_UNDERWATER_INTERFACE`. Under the shipped
+//     `transparent` mode the ray passes straight out and the function RETURNS; under
+//     `fresnel` it is Snell's window — inside the critical angle the ray refracts
+//     out and sees the sky or the shore, outside it `refract_at` reports total
+//     internal reflection and the whole throughput mirrors back down;
+//   - when the bounce budget runs out while still wet, `WATER_TIR_FALLBACK` decides
+//     what the remaining throughput buys. This was the E6 gate failure: with a flat
+//     constant there, tilting the head underwater filled most of the screen with ONE
+//     COLOUR, because the window is only a ~97-degree cone.
+//
+// **Inert under the shipped `transparent` interface:** every branch above returns
+// inside the FIRST iteration (solid, murk limit, or straight out through the
+// surface), so `WATER_BOUNCES` and `WATER_TIR_FALLBACK` have no effect from below —
+// there is no mirror to bounce and no region outside a window. Both stay levered
+// because they are exactly what the `fresnel` interface needs, and the overlay greys
+// them out rather than offering dead dials.
+fn water_medium_radiance(entry_origin: vec3<f32>, entry_direction: vec3<f32>,
+                         water_material: u32, pixel: vec2<f32>) -> vec3<f32> {
+    // The medium's OWN index (material.rs's authored column) pulled toward 1.0 by
+    // the runtime window-width dial, so oil or honey would bend differently through
+    // the same code.
+    let bending_index = water_bending_index(water_material);
+    var radiance = vec3<f32>(0.0, 0.0, 0.0);
+    var throughput = vec3<f32>(1.0, 1.0, 1.0);
+    var origin = entry_origin;
+    var direction = entry_direction;
+
+    for (var bounce = 0u; bounce < WATER_BOUNCES; bounce = bounce + 1u) {
+        let medium = water_medium_march(origin, direction);
+        let transmittance = water_transmittance(water_material, medium.distance_voxels);
+        radiance = radiance
+            + throughput * water_in_scattered_radiance(water_material, transmittance);
+        throughput = throughput * transmittance;
+
+        if (medium.kind == WATER_MEDIUM_SOLID) {
+            let normal = hit_normal(medium.hit);
+            let surface_point = shadow_ray_origin(medium.hit, origin, direction, normal);
+            let sun_transmission = water_sun_transmission(surface_point, water_material);
+            return radiance
+                + throughput * shade_secondary(medium.hit, origin, direction, pixel,
+                                               sun_transmission);
+        }
+        if (medium.kind == WATER_MEDIUM_LIMIT) {
+            return radiance; // murk horizon or the world's edge: nothing beyond
+        }
+
+        // The surface, from below.
+        if (WATER_UNDERWATER_INTERFACE == WATER_INTERFACE_TRANSPARENT) {
+            // Fully transmissive and UNBENT (E6 step 3): the ray keeps its own
+            // direction, so there is no critical angle, no mirror and no window —
+            // just the world above, dimmed and tinted by the water it already
+            // travelled. Returns here, which is why the bounce loop cannot iterate
+            // a second time from below under this mode.
+            return radiance + throughput * water_escaped_radiance(medium, direction, pixel);
+        }
+        let refraction = refract_at(direction, medium.exit_normal,
+                                    bending_index / WATER_AIR_INDEX);
+        var fresnel = 1.0; // total internal reflection mirrors everything
+        if (!refraction.total_internal_reflection) {
+            fresnel = fresnel_schlick(refraction.cos_incidence,
+                                      material_index_of_refraction(water_material));
+            // Inside Snell's window.
+            let escaped = water_escaped_radiance(medium, refraction.direction, pixel);
+            radiance = radiance + throughput * (1.0 - fresnel) * escaped;
+        }
+        throughput = throughput * fresnel;
+        if (fresnel <= 0.0) {
+            return radiance; // nothing mirrored back down — no budget to spend
+        }
+        // Mirror back down and keep marching (the exit normal points into the
+        // liquid, so `reflect` turns the ray around and the bias re-enters it).
+        direction = reflect(direction, medium.exit_normal);
+        origin = medium.exit_point + medium.exit_normal * (2.0 * SHADOW_BIAS);
+    }
+    // The budget is spent and the ray is still inside the medium — which for a view
+    // from below is almost the whole screen outside Snell's window.
+    if (WATER_TIR_FALLBACK == WATER_TIR_STANDIN) {
+        return radiance + throughput * water_mirror_standin(origin, direction, water_material);
+    }
+    // WATER_TIR_FLAT: the documented negative. Kept selectable so the bench can
+    // measure what the fix is worth, and so the failure it caused stays visible.
+    return radiance
+        + throughput * water_in_scattered_radiance(water_material, vec3<f32>(0.0, 0.0, 0.0));
+}
+
+// A water surface hit by a ray travelling through AIR: split into a mirror ray
+// and a refracted march, weighted by Fresnel. Grazing angles land near F = 1 and
+// read as a mirror; steep angles land near F = 0.02 and read as glass.
+//
+// The un-traced halves are not left black — each has a cheap stand-in, which is
+// what makes the four modes a clean cost ladder rather than four different looks:
+// the mirror term falls back to the analytic sky function (which already carries
+// the sun glint, so a grazing water surface still glares), and the transmitted
+// term falls back to the surface's own diffuse shading.
+fn water_surface_radiance(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                          pixel: vec2<f32>) -> vec3<f32> {
+    let normal = hit_normal(hit);
+    let medium_index = material_index_of_refraction(hit.material);
+    let fresnel = fresnel_schlick(max(-dot(ray_direction, normal), 0.0), medium_index);
+    let reflected_direction = reflect(ray_direction, normal);
+
+    var mirrored = sky_color(reflected_direction);
+    if (WATER_TRACES_REFLECTION && water_ray_is_worth_tracing(fresnel)) {
+        let mirror_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
+        let mirror = trace(mirror_origin, reflected_direction, MAX_TRACE_DISTANCE, false);
+        if (mirror.material != 0u) {
+            mirrored = shade_secondary(mirror, mirror_origin, reflected_direction, pixel,
+                                       WATER_NO_MEDIUM);
+        }
+    }
+
+    var transmitted = shade_surface(hit, ray_origin, ray_direction, pixel, WATER_NO_MEDIUM);
+    if (WATER_TRACES_REFRACTION && water_ray_is_worth_tracing(1.0 - fresnel)) {
+        // Entering the denser medium can never totally reflect, so the
+        // `total_internal_reflection` branch of `refract_at` is unreachable here.
+        let refraction = refract_at(ray_direction, normal,
+                                    WATER_AIR_INDEX / medium_index);
+        let interior_origin = water_interior_origin(hit, ray_origin, ray_direction, normal);
+        transmitted = water_medium_radiance(interior_origin, refraction.direction,
+                                            hit.material, pixel);
+    }
+    return mix(transmitted, mirrored, fresnel);
+}
+
+// The shading dispatch: a liquid is a medium boundary, everything else is a
+// surface. One compare, folded away when water is off.
+fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+             pixel: vec2<f32>) -> vec3<f32> {
+    if (WATER_MODE != WATER_MODE_OPAQUE && material_is_liquid(hit.material)) {
+        return water_surface_radiance(hit, ray_origin, ray_direction, pixel);
+    }
+    return shade_surface(hit, ray_origin, ray_direction, pixel, WATER_NO_MEDIUM);
 }
 
 // ---- Entry point ------------------------------------------------------------
@@ -643,12 +965,23 @@ fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     // Camera lives in world meters; traversal runs in voxel units.
     let origin = camera.position / brickmap.voxel_size_meters;
 
-    let hit = trace(origin, direction, MAX_TRACE_DISTANCE);
     var color = vec3<f32>(0.0, 0.0, 0.0);
-    if (hit.material == 0u) {
-        color = sky_color(direction);
+    // E6 — the underwater camera. Tested on the primary ray's OWN origin, which
+    // is why it is true both for the walking body's submerged head (E2b's
+    // `head_submerged`) and for a fly camera that flew into a pool: there is one
+    // condition, not two, and it cannot disagree with the geometry the ray then
+    // marches. `trace` would answer "the water voxel you are standing in", so the
+    // submerged case takes the medium march instead of the two-level traversal.
+    if (WATER_MODE != WATER_MODE_OPAQUE && point_is_submerged(origin)) {
+        let eye_material = voxel_material_at(vec3<i32>(floor(origin)));
+        color = water_medium_radiance(origin, direction, eye_material, pixel);
     } else {
-        color = shade_hit(hit, origin, direction, pixel);
+        let hit = trace(origin, direction, MAX_TRACE_DISTANCE, false);
+        if (hit.material == 0u) {
+            color = sky_color(direction);
+        } else {
+            color = shade_hit(hit, origin, direction, pixel);
+        }
     }
     // Linear radiance -> tonemap -> sRGB encode: the blit contract still
     // receives sRGB-encoded bytes.

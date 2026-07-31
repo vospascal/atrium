@@ -34,7 +34,12 @@ primary source states it outright.
    algorithm disclosed.
 2. **GPU-Driven Voxel Engine: Transparency and Underwater** — transparent-block
    rendering completed before integrating the CA fluid simulation; transparent
-   materials use ray-traced reflection and refraction.
+   materials use ray-traced reflection and refraction. The description names the
+   target materials: **water, oil, clouds and honey** — so transparency is a
+   per-material CLASS (its own extinction, tint and index of refraction), not a
+   water special case, and water is merely its first row. Our `material.rs`
+   `opacity` / `transmittance` columns are the equivalent seam; IOR is the field
+   still missing from that table.
 3. **GPU-Driven Voxel Engine: Random Exploration and New Features** — fully
    shader-based engine; inventory/items; ray-traced ambient occlusion; fully
    CA-based GI; environment-sensitive cave-horror sound; experimental
@@ -170,6 +175,50 @@ CA fluid simulation: ~2 years of work, upcoming at video 3 — cells likely carr
 mass/pressure/density, not a water bit. VoxelChain material CA: parallel
 neighbour updates, double-buffered, programmable behaviours (circuits, falling
 material, water) — Noita-adjacent but generalized.
+
+## Voxel scale and the two-tier grid (screenshot-measured, 2026-07-31)
+
+Measured off two gameplay frames, not from any statement by the author.
+
+A zoomed single block face (an ice/water block) resolves into a clean **8 x 8**
+grid of independently shaded cells. The inventory is a Minecraft-style hotbar
+with stack counts, i.e. the *placement* unit is the familiar 1 m block. So:
+
+- **Build/edit grid: 1 m.** What the player places and breaks.
+- **Render/sim grid: ~0.125 m.** 8 subdivisions per block edge.
+
+That makes his voxel the same size as ours (`voxel_core::world::VOXEL_SIZE` =
+0.125), and — more usefully — his 1 m build block is *exactly* our 8-voxel
+brick (`voxel_rt::brickmap::BRICK_SIZE` = 8). The two engines agree on both
+lattice constants. Any perf difference is therefore NOT a voxel-scale
+difference; see the "no ms comparison is possible" caveat above, which stands.
+
+**Everything is a voxel; some are transparent.** Foliage is not billboards,
+alpha-tested quads, or a separate mesh path — grass blades are ~1 voxel wide
+and several blocks tall, occupying cells in the same lattice as the stone, and
+water/leaves are cells that transmit. This is the architecture
+`docs/transparent-voxels-plan.md` (T1-T3) is already aimed at, and it raises
+that plan's payoff: transparency classes are what collapse foliage from a
+special case into ordinary voxels.
+
+**Variant instancing (inference, unconfirmed).** A small set of grass/plant
+variants appears to be held once in memory and *referenced* per placement,
+rather than each block owning unique voxel data. The visible repetition across
+the grass field is consistent with a palette of prefab 8^3 templates.
+
+### What this changes for voxel-rt
+
+Our level-0 array is already a `u32` brick pointer per 1 m cell
+(`brick_indices`, 125 x 32 x 125 = 500k entries) — the indirection that
+instancing needs **already exists**. What we do not do is *share* level-1 data:
+every occupied brick gets its own unique 576 bytes (16 occupancy words + 128
+material words). A fully-solid stone brick underground costs the same 576 bytes
+as a hand-carved one, and a thousand identical ones cost it a thousand times.
+
+Brick deduplication — many pointers into one shared slot, copy-on-write on
+`set_voxel` — is the direct consequence of this observation. NOT started, not
+scheduled, and it needs a measurement first (what fraction of occupied bricks
+are byte-identical in a generated world) before it earns a stage.
 
 ## Historical voxel format (VoxelChain, public)
 

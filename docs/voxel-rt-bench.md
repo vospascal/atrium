@@ -9,23 +9,25 @@ the recorded baseline below.
 cargo run -p voxel-rt --example bench_dda --release
 ```
 
-Runtime ≈ 25–35 min (world gen ~0.5 s, then seven sections: 8 traversal
+Runtime ≈ 30–40 min (world gen ~0.5 s, then eight sections: 8 traversal
 variants, 10 ray-traced-AO variants, 14 E1b/E1c variants, 4 quality presets,
 11 E4 CAGI variants — each × 4 camera/sun scenarios × 12 timed batches — E2's
-edit storm, 6 variants × 4 patterns, ~2 min, and E2b's movement rows, ~5 s).
+edit storm, 6 variants × 4 patterns, ~2 min, E2b's movement rows, ~5 s, and E6's
+8 water variants × 4 water scenarios, ~3 min).
 No window; needs a real GPU (except section 7, which is CPU-only).
 Trailing section numbers run a subset — `... --release -- 3` measures only the E1b
 section, `-- 4` only the preset table, `-- 5` only the CAGI section, `-- 6` only
-E2's edit pipeline, `-- 7` only E2b's movement rows — and because sections are
-independent (isolation rule) a subset run yields exactly the rows a full run
-would print for it.
+E2's edit pipeline, `-- 7` only E2b's movement rows, `-- 8` only E6's water
+section — and because sections are independent (isolation rule) a subset run
+yields exactly the rows a full run would print for it.
 
 ## What it measures
 
-Seven independent sections, each with its own variant table and pixel compare
+Eight independent sections, each with its own variant table and pixel compare
 (isolation rule — an experiment's numbers never contaminate the gate for the
-layer below it). **Sections 1–3 force CAGI off** as well as pinning AO, so every
-number recorded before E4 stays directly comparable:
+layer below it). **Sections 1–3 force CAGI off and E6's water optics off** as
+well as pinning AO, so every number recorded before E4/E6 stays directly
+comparable:
 
 1. **Traversal levers, AO forced off** — the Stage 2 regression gate. Every
    column here has `AO_MODE = AO_MODE_OFF`, so the medians stay directly
@@ -61,6 +63,14 @@ number recorded before E4 stays directly comparable:
    No GPU at all, so `-- 7` finishes in ~5 seconds — which is why it is a section
    rather than a number quoted from a test: it is a permanent gate that costs
    nothing to re-run.
+8. **E6 water optics** — the four cost tiers (opaque / zero-ray Fresnel tint /
+   reflection only / refraction only / both), the bounce budget, the Fresnel ray
+   cutoff and the sun-through-liquid lever. It is the one section with its OWN
+   world and its OWN scenarios: the island plus a carved debug pool (the natural
+   water is 0.6–1.75 m deep, too shallow for extinction or an underwater camera
+   to mean anything), and four poses of which two put the camera INSIDE the
+   water. Its numbers therefore do not compare with sections 1–5 by
+   construction, and the carve leaves those sections untouched.
 
 **The variant tables are DERIVED from the lever registry (E1c).** Every lever
 has one row in `crates/voxel-rt/src/variants.rs::REGISTRY` carrying its kind
@@ -232,6 +242,25 @@ E4 CAGI levers (details in the E4 section):
   otherwise stamps flat 0.5 m patches over 36% of the frame.
 - **2 iterations/frame** — 0.44–0.76 ms each; 32 frames (0.53 s) to bit-exact
   convergence after a sun change.
+E6 water levers (details in the E6 section):
+
+- `WATER_MODE` **4 = full** (Fresnel reflection + refracted march) — +2.4 ms
+  grazing / +4.6 ms on the aerial view with the most water. `1 = fresnel tint`
+  (zero secondary rays, analytic sky over the diffuse surface) is the
+  Potato/Quest tier at **+0.36–0.74 ms**; the two half-modes exist to attribute
+  the cost and stay as documented off-levers.
+- `WATER_BOUNCES` **1** — the second interface is FREE above water and **2.35×**
+  from inside it looking up, which is also the only place it changes the picture
+  (the bed mirrored outside Snell's window). Beautiful ships 2.
+- `WATER_SUN_THROUGH_LIQUID` **on** — not optional for the look: off, every
+  submerged surface is in shadow and shallow water reads DARKER than the opaque
+  water it replaced. Costs +77% on a horizontal underwater view, +8% aerial, ~0
+  elsewhere. Off on the zero-ray tiers.
+- **Fresnel ray cutoff 0.04** (runtime, `water_params.z`) — −7.1% on the steep
+  aerial view for a term worth ≤4% of the pixel; noise elsewhere.
+- **Extinction (0.45, 0.12, 0.06) per metre, `F0` = 0.0204, critical angle
+  48.607°** — all derived, all pinned against hand computations by test.
+
 E2 world-edit levers (details in the E2 section, all RUNTIME — an edit changes
 buffer contents, never a shader):
 
@@ -1704,3 +1733,516 @@ second** with the eye above water) and
 more). Re-checked with the old constant model patched back in, the second test
 fails at *0.449 m of lift per second* — the regression it exists for is real.
 Section 1 after both changes: **B 19, D 0, `with-descend-ff` 12**, unchanged.
+
+---
+
+## E6 — Water: reflection, refraction, extinction and the underwater view (M3 Max, 2560x1440, 2026-07-31)
+
+Fresnel-weighted reflection + Snell refraction on water voxels, Beer-Lambert
+extinction along the path travelled *inside* the water, and a camera that can be
+inside it. Levers: the "E6: water levers" block in `shaders/water.wgsl` (the
+optics mode and the bounce budget) plus `WATER_SUN_THROUGH_LIQUID` in the shared
+`shaders/world.wgsl`; Rust mirror + patching in `src/water.rs`; composition in
+`shaders/dda.wgsl`; five registry rows under the new `Water` subsystem.
+**Section 8** of the harness measures it.
+
+### The world this section runs on, and why it is its own
+
+Section 8 builds its **own brickmap**: the seed-1 island plus ONE debug pool
+carved through E2's bulk-edit path (`WaterPool::in_front_of` at the ground
+scenario's pose — voxel (500, 780), 82 376 voxels written, 8 m across, 5 m deep,
+water surface at 10.62 m). The island's natural water is **0.6-1.75 m** deep,
+which is too shallow for extinction to say anything and leaves an underwater
+camera nowhere to stand. Sections 1-7 still measure the untouched island, so
+**this is a carve, not a generation change, and no baseline above had to move for
+it** (the plan's baseline-versioning rule is satisfied without a re-record).
+
+### Scenarios (section 8 only)
+
+Two look AT water from the air — the two ends of the Fresnel curve — and two look
+at it from inside:
+
+- `E` **shore -> pool, grazing**: eye 1.7 m above the waterline, pitched 0.16 rad
+  down at the pool 10 m ahead. The surface is met ~10 degrees off grazing, where
+  Fresnel is ~0.4 and the mirror term dominates. The "mirror at grazing angles"
+  half of the gate.
+- `F` **top-down over the lakes, steep**: the section-1 pose A. The natural lakes
+  are met almost head-on, Fresnel ~0.02 — the "see-through when steep" half, and
+  the scenario with the most water pixels in frame (14.4% of it).
+- `G` **underwater, looking up**: inside the pool, 2 m under the surface, looking
+  straight up. Snell's window.
+- `H` **underwater, looking sideways**: the same eye, horizontal. Pure extinction.
+
+### Variant table — per-dispatch median ms (clean run, p95 within 1% of every median)
+
+| variant | E grazing | F steep | G under, up | H under, sideways |
+|---|---|---|---|---|
+| `water-off` (opaque — the anchor) | 5.249 | 5.521 | 1.213¹ | 3.797¹ |
+| `water-tint` (zero secondary rays) | 5.606 | 6.264 | 4.150 | 8.385 |
+| `water-reflect` (mirror ray only) | 7.308 | 8.388 | 4.160 | 10.433 |
+| `water-refract` (medium march only) | 7.256 | 10.019 | 7.508 | 11.112 |
+| **`water-full` (shipped)** | **7.649** | **10.156** | **7.509** | **11.055** |
+| `water-full-2bounce` (Beautiful) | 7.689 | 10.184 | **17.672** | 11.392 |
+| `water-full-nocutoff` | 7.663 | 10.931 | 7.506 | 11.067 |
+| `water-full-sunblocked` | 7.506 | 9.393 | 7.498 | 6.240 |
+
+¹ **The underwater `water-off` rows are not a cost baseline, they are a degenerate
+image.** With water opaque the eye sits *inside* an opaque voxel, so the primary
+ray terminates at t = 0 and the whole frame is one voxel face. The delta against
+them is "the cost of having a view at all", not "the cost of water". The
+meaningful underwater comparison is tint vs full.
+
+Cost over the opaque anchor on the two above-water scenarios (E / F ms):
+tint **+0.36 / +0.74** · reflection-only +2.06 / +2.87 · refraction-only
++2.01 / +4.50 · **full +2.40 / +4.64**.
+
+Coverage (differing pixels vs `water-off`): E **2.34%** (max channel delta 169),
+F **14.36%** (172), G and H **100%** (213 / 148). Note that the coverage number
+is the water's *screen share*, not a mode-vs-mode difference: every mode changes
+every water pixel, which is why the four rows report the same count and differ
+only in max delta.
+
+### Verdict A — the model, and its constants
+
+- **Fresnel: Schlick, with `F0` DERIVED from the two indices of refraction**,
+  `((n1 - n2) / (n1 + n2))^2` = **0.0204** for air/water. Straight down water
+  reflects 2% and transmits 98%; at grazing angles the term goes to 1.0 and the
+  surface is a mirror. Not a tuned constant — `fresnel_f0_is_derived_from_the_indices_of_refraction`
+  pins it.
+- **Snell: the vector form, with total internal reflection as the failure case.**
+  Critical angle `asin(1 / 1.333)` = **48.607 degrees**, checked against a hand
+  computation, with 48 deg inside the window and 49 deg outside it.
+- **Beer-Lambert, per channel, per METER: (0.45, 0.12, 0.06).** Inside the
+  measured range for natural water (red 0.35-0.5, green 0.05-0.15, blue
+  0.01-0.07 /m), at the turbid end for green/blue so the pool's 5 m reads as a
+  legible gradient: transmittance at 5 m is **(0.105, 0.549, 0.741)**. The
+  conversion from voxel units goes through the brickmap's own voxel size, so the
+  physics cannot drift if the world resolution changes.
+- **Index of refraction is a per-MATERIAL column** (`material.rs`), not a water
+  constant, because the dossier records xima's own transparency target as *"water,
+  oil, clouds and honey"* — a material class, each member with its own index
+  (water 1.333, oil ~1.47, honey ~1.50). It cost **zero bytes**: the value took
+  the GPU row's former pad word, so the row is still 48 bytes.
+- **In-scatter, and the correction it needed.** The absorbed share is replaced by
+  the liquid's albedo lit by the **downwelling irradiance** (sun radiance times
+  its elevation cosine, plus the sky hemisphere). The first implementation used
+  the sky term alone and measured a body radiance of (0.003, 0.044, 0.134)
+  against a sunlit surface's ~2.2 — the horizontal underwater view came out
+  **near-black** rather than blue-green. With the sun included it is
+  (0.036, 0.32, 0.64), a legible blue-green fog. Two documented simplifications:
+  the downwelling term is uniform inside the body (no attenuation with depth) and
+  unshadowed (one evaluation per pixel).
+
+### Verdict B — `WATER_SUN_THROUGH_LIQUID`: the correctness fix that costs the most
+
+**The finding that changed the design.** With water drawn as a medium but shadow
+rays still stopping on it, every submerged surface is in shadow — so the top-down
+lakes came out **dark navy where opaque water had been bright cyan**, i.e.
+refraction made shallow water *worse*. A pool bed one metre down is sunlit, and
+the fix is to let the sun's ray pass through liquids. It applies to the CA pass's
+per-cell sun test through the same shared `trace_shadow_visibility`, so the light
+volume lights under water too — one flag, both passes.
+
+The cost is real and **concentrated in one view**: sideways underwater
+**6.240 -> 11.055 ms (+77%)**, because a shadow ray that no longer stops at the
+surface walks metres of water voxel by voxel (water bricks are occupied, so the
+chebyshev skip cannot help). The steep aerial view pays **+8%** (9.393 ->
+10.156); grazing and looking-up are inside noise (+1.9%, +0.1%). It therefore
+ships as a lever, ON where water is drawn properly and OFF on the zero-ray tiers,
+which cannot see under the surface anyway.
+
+Ships with a documented simplification: the SUN's own path through the water is
+not attenuated, so a deep bed is lit as brightly as a shallow one. Correcting it
+needs a second medium march per shaded point.
+
+### Verdict C — the bounce budget is not a global dial
+
+**1 interface ships on Balanced, 2 on Beautiful, and the asymmetry is the whole
+verdict.** Above water the second interface is **free** (7.649 -> 7.689 grazing,
+10.156 -> 10.184 steep — inside noise), because a refracted ray that reaches the
+bed never asks for another. From inside the water looking up it costs
+**7.509 -> 17.672 ms, 2.35x**, because that is exactly where it fires: every ray
+past the critical angle mirrors off the underside of the surface and marches the
+body a second time. What it buys there is the bed *mirrored* outside Snell's
+window instead of the flat body colour. Sideways underwater: +3%.
+
+So the budget is free until the player dives and looks up — which is the one place
+it also changes the picture.
+
+### Verdict D — the Fresnel ray cutoff (`water_params.z` = 0.04)
+
+Fresnel already says how much each half of a water pixel is worth, so a term below
+the threshold takes its analytic stand-in (the sky function for the mirror, the
+diffuse surface for the transmission) instead of a secondary ray. **-7.1% on the
+steep aerial view** (10.156 vs 10.931 with it disabled) and inside noise on the
+other three — exactly where the reasoning put it: a steep view is where the mirror
+carries 2% and gets cut on almost every water pixel, so `full` costs the same as
+`refraction-only` there (10.156 vs 10.019). It does not help underwater, where the
+expensive term (the march) is the one carrying the weight. Runtime, so it needs no
+rebuild; 0 restores "always trace".
+
+### Verdict E — the two half-modes, and which half is expensive where
+
+**Reflection is the expensive half at grazing angles, refraction at steep ones**,
+and both follow the screen share of what they have to shade:
+
+- the mirror ray is a full-length trace through the open scene plus a full
+  shading of whatever it finds (sun ray, AO, CAGI), so it costs +2.06 / +2.87 ms;
+- the refracted march is short in shallow water but the *bed* it finds gets the
+  same full shading, and on the top-down view nearly every water pixel refracts
+  (Fresnel 0.02), so it costs +2.01 / **+4.50** ms.
+
+`water-tint` — zero secondary rays, the analytic sky in the mirror direction over
+the diffuse surface, mixed by the same Fresnel curve — is **0.36-0.74 ms** and
+reads as a recognisable water surface with a sun glint but no scene reflection and
+no visible depth. That is the Potato/Quest pick, and it is the row that proves the
+Fresnel weighting alone carries most of the "this is water" impression.
+
+### PNG evidence (`target/bench_dda/`)
+
+`scenario_{e,f,g,h}_water_{off,tint,reflect,refract,full,full_2bounce}.png`, plus
+three crops per pair at 3x nearest zoom (`snells-window`, `water-near`,
+`water-far`).
+
+- **Snell's window reads correctly** (`scenario_g_water_full.png`): the entire
+  180-degree hemisphere above the water — sky, sun glow, the shore's trees — is
+  compressed into a cone, with the trees crowding the cone's elliptical rim and
+  the frame's corners falling outside it. That IS the physics: the whole upper
+  hemisphere squeezed into 97.2 degrees.
+- **The grazing mirror reads correctly** (`scenario_e_water_full.png`): the pool
+  returns a sharp mirror of the trees, the rocks and the sky, and the water goes
+  see-through toward its far edge where the angle steepens. The reflection is
+  perfectly sharp because a voxel water surface is a flat plane — there is no
+  wave normal yet, which is E7/B6 work, not a defect here.
+- **Extinction reads correctly** (`scenario_h_water_full.png`): a blue-green fog
+  that thickens with distance, the bright surface overhead, and the bed faintly
+  legible through it.
+- **The tint tier reads as water, not as glass** (`scenario_e_water_tint.png`):
+  a flat sky-coloured pool. Clearly cheaper, not broken.
+- **Known flatness, and its cause**: the bed under water is dimmer than it should
+  be even with the sun reaching it, because E4 marks a cell absorbing at a
+  quarter fill — so cells inside a body of water hold zero light and a submerged
+  surface receives only the 25% GI ambient floor. The in-scatter term is what
+  keeps it readable. Fixing it properly is a CAGI-transport question (E5/B6), not
+  an E6 one.
+
+### Re-recorded baselines, and why
+
+Balanced now ships water optics, so **section 4's preset table moved and is
+re-recorded below**. Nothing else did:
+
+- **Section 1 (the Stage 2 traversal gate) is UNCHANGED and re-verified.**
+  `trace` and `trace_brick` grew a `skip_liquids` parameter for the sun ray, and
+  threading it through measured **free**, exactly as E1's `max_distance` did:
+  **4.709 / 6.609 / 4.385 / 4.937 ms** against the recorded
+  4.723 / 6.530 / 4.379 / 4.918 (-0.3% / +1.2% / +0.1% / +0.4%, all inside the
+  +-2% band), and the **pixel gate still reads 19 differing pixels on B, 0 on D,
+  `with-descend-ff` 12** — the same known float-tie set. Sections 1-3 force water
+  to `opaque` AND `sun_through_liquid` off (the `water_off` helper), so the layers
+  below E6 still describe the renderer every baseline above was recorded against.
+- **Sections 6 and 7** (the CPU pipelines) are untouched by water.
+
+#### Section 4 — the quality presets, re-recorded with E6
+
+Per-dispatch median ms, each preset at ITS OWN render scale (base 2560x1440):
+
+| preset | render size | A top-down | B top-down low sun | C ground | D ground low sun |
+|---|---|---|---|---|---|
+| **Potato** (tint water, no GI, no sun-through) | 1792x1008 | **2.943** | **4.151** | **2.564** | **2.889** |
+| **Quest** (tint water, 1 m GI cells) | 2048x1152 | **4.296** | **5.766** | **3.536** | **3.950** |
+| **Balanced** (full water, 1 interface, sun-through) | 2560x1440 | **10.150** | **13.278** | **6.617** | **7.500** |
+| **Beautiful** (full water, 2 interfaces, RT-AO) | 2560x1440 | **16.355** | **19.502** | **10.057** | **10.972** |
+
+Frame totals (shading pass + CAGI pass, the CAGI column unchanged at
+0.06 / 0.27 / 0.97 / 1.88 ms per tier):
+
+| preset | A | B | C | D | vs E4 |
+|---|---|---|---|---|---|
+| Potato | 3.01 | 4.21 | 2.63 | 2.95 | 2.75 / 3.86 / 2.50 / 2.85 |
+| Quest | 4.56 | 6.19 | 3.80 | 4.37 | 4.06 / 5.53 / 3.60 / 4.13 |
+| **Balanced** | **11.12** | **14.85** | **7.59** | **9.06** | 6.42 / 8.81 / 5.96 / 7.09 |
+| Beautiful | 18.23 | 22.54 | 11.94 | 14.01 | 14.07 / 18.11 / 10.83 / 12.81 |
+
+Read honestly:
+
+- **Potato and Quest barely move** (+0.1-0.7 ms): the zero-ray water mode is what
+  it says it is, and those tiers stay comfortably inside budget.
+- **Balanced holds the ~8 ms target on the ground default-sun view (7.59 ms) and
+  is 13% over on the low-sun one (9.06)** — but the two AERIAL views are now
+  11.1 and 14.9 ms, i.e. E6 is the first experiment to put Balanced clearly over
+  target from 60 m. The cause is screen share, not inefficiency: 14.4% of that
+  frame is water, and every one of those pixels buys a refracted march plus a full
+  shading of the bed. The levers to close it are all measured above — the tint mode
+  (-3.9 ms on the steep view), the cutoff (already on, -7%), and
+  `sun_through_liquid` off (-8% aerial, -77% underwater).
+- **Beautiful is 11.9-22.5 ms**, unchanged in character: RT-AO still dominates it,
+  and the second water interface is free except underwater.
+- Balanced remains byte-for-byte the unpatched shader
+  (`balanced_preset_is_the_shipped_baseline`), and the preset set now needs
+  **four** distinct pipelines rather than three, because Quest's water mode differs
+  from Balanced's — ~2 ms more of startup compile.
+
+### Chosen defaults
+
+`WATER_MODE = 4` (full), `WATER_BOUNCES = 1`, `WATER_SUN_THROUGH_LIQUID = true`,
+extinction scale 1.0, in-scatter 0.7, ray cutoff 0.04. Per tier: **Potato
+tint + no sun-through · Quest tint + no sun-through · Balanced full x 1 interface
++ sun-through · Beautiful full x 2 interfaces + sun-through.**
+
+### Machine caveat
+
+Section 8's recorded table and the section 4 re-record are from runs on an idle
+machine (the `water-off` grazing row reproduced to 0.2% across two independent
+runs). Two intermediate runs during development read 10-40% high across every
+column with a VM at ~80% CPU and load average 5-7; every *verdict* above rests on
+**within-run** comparisons, which the round-robin interleaving makes load-neutral,
+and never on a cross-run absolute.
+
+---
+
+## E6 step 1 — the flat field outside Snell's window (M3 Max, 2026-07-31)
+
+Pascal's look gate on E6: **"the looking up out of the water part is completely
+broken :)"**, plus *"snells is too strong for me personally"*. This section is the
+diagnosis, the fix and its price. It supersedes the E6 section's `WATER_BOUNCES`
+verdict and its underwater PNG claims.
+
+### Correction to the E6 section's evidence — read this first
+
+The E6 section's underwater visual claims were **written from crops that do not
+contain what they are named for**, and one of them was wrong as a result. The
+facts, verified by md5 and by opening the files:
+
+- All **eight** `crop_snells-window_f_water_*.png` are **byte-identical** across
+  variants, `water_off` included. That rectangle contains no water at all, so the
+  entire `f` crop set is non-evidence — while `f`'s *timings* differ by 5.5 → 10.9
+  ms, i.e. the water is in the frame, just outside the crop.
+- `crop_snells-window_g_*` is identical across six of the eight variants, because
+  the rectangle sits in the middle of the window where every mode renders the same
+  sky. It shows nothing about the modes it was supposed to compare.
+- The **full frames** (`scenario_g_water_full.png` and friends) do exist and DO
+  show the cone — that part of the E6 report was read off a real frame — but the
+  crop paths quoted alongside it were not opened. **A crop is only evidence once
+  it is confirmed to contain the thing being judged.** Fixing the rectangles and
+  adding a bench guard that fails when a variant crop set is all-identical is
+  step 4.
+
+### The scenario error that hid the bug
+
+E6's two underwater poses **structurally cannot show the region outside Snell's
+window**, which is exactly the region that was broken:
+
+| | half-angle from the view axis |
+|---|---|
+| vertical half-FOV (68° vertical FOV) | 34.0° |
+| horizontal half-FOV at 16:9 | 50.2° |
+| diagonal (corners) | 54.0° |
+| **Snell's window half-angle** | **48.61°** |
+
+Looking straight **up** (`G`), the frame reaches 34° vertically — the whole
+vertical extent is *inside* the window, and only the extreme left/right edges fall
+outside. Looking **sideways** (`H`), every ray that reaches the surface does so at
+56–90° from its normal, so that half of the frame is *entirely* outside. Neither
+pose puts the rim in frame, which is why `full x1` and `full x2` looked identical
+and why the failure was invisible in the harness while being unmissable in the
+app, where the head tilts to any angle.
+
+**Added: scenario `I` — underwater, up 45°.** At that pitch the rim crosses the
+middle of the frame, so the cone, its edge and the mirrored world beyond it are all
+in one picture. This is the view the gate was failed on.
+
+### Cause — confirmed, and it is the prime suspect
+
+Past the critical angle `refract_at` reports total internal reflection, so Fresnel
+is 1 and **no radiance term is added**; with `WATER_BOUNCES = 1` the loop then
+broke immediately and paid the whole remaining throughput out as the in-scatter
+constant. The region outside the window was therefore **one flat colour**, over
+most of the screen at any tilted upward view.
+
+It also explains both taste complaints, which is why they were not tuned first:
+the flat field *is* the in-scatter colour, so the view read as uniformly tinted;
+and a bright cone against a featureless surround has nothing to sit against, so
+its rim reads as harsh.
+
+### Fix — the cheap mirrored stand-in
+
+`WATER_TIR_FALLBACK`, in the same spirit as the above-water half-modes (substitute
+a cheap analytic stand-in for a term you cannot afford to trace properly, **never a
+constant**):
+
+- `0 = flat` — the in-scatter constant. Documented negative, kept selectable only
+  so the bench can price the fix and the failure stays reproducible.
+- `1 = cheap mirror` (**shipped**) — one more medium march, shaded *cheaply*:
+  albedo × downwelling × the face's own up-facing share, with **no shadow ray, no
+  ambient occlusion and no light-volume sample**. That keeps the geometry, which is
+  the entire point, and drops the term that actually costs — underwater the
+  dominant cost of a full bounce is the sun shadow ray, which has to walk metres of
+  water.
+
+### Measured — per-dispatch median ms
+
+| scenario | `tir-flat` | **cheap mirror (shipped)** | full 2nd interface |
+|---|---|---|---|
+| E shore → pool, grazing | 8.55 | **8.18** | 8.29 |
+| F top-down over the lakes | 10.69 | **10.86** | 10.90 |
+| G underwater, up | 7.92 | **13.96** | 23.82 |
+| H underwater, sideways | 14.15 | **18.57** | 18.43 |
+| **I underwater, up 45° (the rim)** | **10.33** | **14.46** | **20.60** |
+
+- **Free above water** (E, F inside noise): the fallback cannot fire there, which
+  is the isolation property the lever needed.
+- On the rim view the stand-in costs **+4.13 ms** over the flat constant; a second
+  full interface costs **+10.27 ms**. The stand-in is therefore **40% of the price**
+  — and the two frames are near-identical, the full bounce adding only a little
+  extra shading detail inside the mirrored region.
+- **Consequence: Beautiful dropped from 2 interfaces to 1.** The second interface
+  was only ever compensating for the missing fallback; with the stand-in in place it
+  buys a near-identical frame for 2.5×. No tier ships `flat`
+  (`preset_table_tiers_the_water_optics_by_ray_budget` asserts it).
+
+### Full frames — the artifact, since the failure is about what fills the screen
+
+`target/bench_dda/scenario_{g,h,i}_water_{tir_flat,full,full_2bounce}.png`, at
+2560×1440. Crops are deliberately **not** the evidence here.
+
+- `scenario_i_water_tir_flat.png` — the failure: beyond the window arc, a smooth
+  featureless wash. The rim is a hard edge against nothing.
+- `scenario_i_water_full.png` — the fix: the same region now shows the **mirrored
+  pool bank and bed** with full voxel structure and a depth gradient, and the rim
+  reads as a boundary between sky and a mirrored world, which is what Snell's
+  window actually looks like.
+- `scenario_i_water_full_2bounce.png` — near-identical to the above; this is the
+  comparison that demoted the second interface.
+- `scenario_g_water_full.png` — unchanged by the fix, and that is the point: at 34°
+  of vertical reach the frame is almost entirely *inside* the window.
+
+### Machine caveat
+
+Load average ~4.7 with a VM resident, so absolute numbers are a few percent high
+and scenario E's p95 is polluted (20–25 ms) by the first-row warmup on top of it.
+Every verdict rests on **within-run** comparisons, which the round-robin
+interleaving makes load-neutral; the flat-vs-standin-vs-2bounce ordering reproduced
+across two independent runs.
+
+---
+
+## E6 step 3 — the surface seen from below becomes plainly transparent (M3 Max, 2026-07-31)
+
+Pascal, after gating steps 1–2: *"lets disable the fesel like camera looking up out
+of water for now should be just transparent looking out and in .. only top should
+have the relfextion"*, and separately *"snells is too strong for me personally"*.
+
+### What changed
+
+A new lever, `WATER_UNDERWATER_INTERFACE`, shipped at `transparent`:
+
+- **`transparent` (shipped)** — from inside the medium the surface is fully
+  transmissive and the ray continues **straight through, unbent**. No Fresnel
+  weighting, no mirror, no total internal reflection. Only the absorption and
+  scattering along the path still apply.
+- **`fresnel` (off-lever)** — the physical interface E6 shipped through step 1:
+  Snell's bend, a Fresnel-weighted split, and TIR past the critical angle whose
+  mirrored region `WATER_TIR_FALLBACK` fills.
+
+The **above-water** side is untouched — it keeps its Fresnel-weighted mirror
+("only top should have the reflection") and its refracted march inward.
+
+### Why "just transparent" has to mean UNBENT
+
+Total internal reflection is **not a separable effect that can be switched off on
+its own — it *is* what Snell's law yields when `sin(theta_transmitted) > 1`**. Past
+the 48.607-degree critical angle there is no transmitted direction to bend toward,
+so a build that kept the bend and dropped the mirror would have nothing to draw
+beyond the window. Dropping the bend removes the critical angle along with it and
+the interface becomes a plain window. There is no coherent middle option, and the
+request picked the consistent one.
+
+Accepted consequences, deliberately not treated as defects: **Snell's window
+disappears from below, and with it every cue that the surface is there at all.** No
+substitute rim or edge hint was added.
+
+### Kept as a lever, not deleted
+
+Per the variant/lever hygiene rule the `fresnel` interface remains selectable with
+its step-1 numbers intact, because (a) it is the correct physics, (b) Snell's window
+is a genuinely striking effect and the objection was to it *dominating* the
+underwater view rather than to it existing, and (c) it is the mode that will want
+re-judging once wave normals exist and on Quest.
+
+**Why a separate lever rather than a third rung of `WATER_TIR_FALLBACK`:** that
+lever answers "what fills the region outside Snell's window". Transparency removes
+the *existence* of that region, so it is a different question and would have made
+the fallback's name a lie for one of its values. As a separate lever it *gates* the
+other two instead, which is the honest relationship.
+
+### Two levers are now inert from below — documented, not left dead
+
+Under `transparent` every branch of the medium loop returns inside its **first**
+iteration (solid, murk limit, or straight out through the surface), so:
+
+- **`WATER_BOUNCES` has no effect** — there is no mirror to bounce off. It is not
+  merely a no-op from below: since the above-water refracted ray enters the same
+  loop, the bounce budget is inert **everywhere** under this default.
+- **`WATER_TIR_FALLBACK` has no effect** — there is no region outside a window.
+
+Both stay levered because they are exactly what the `fresnel` interface needs, and
+`lever_is_relevant` greys them out in the Quality panel rather than offering dead
+dials (`the_transparent_interface_makes_the_bounce_levers_inert` pins the predicate).
+
+### Measured — it is cheaper, as predicted
+
+Per-dispatch median ms, within one run. The shipped `transparent` against the
+`fresnel` interface it replaces:
+
+| scenario | `fresnel` (was shipped) | **`transparent` (shipped)** | delta |
+|---|---|---|---|
+| E shore → pool, grazing | 7.684 | **7.723** | +0.5% (noise) |
+| F top-down over the lakes | 8.359 | **5.082** | **−39%** |
+| G underwater, looking up | 4.712 | **2.587** | **−45%** |
+| H underwater, sideways | 7.004 | **6.866** | −2% |
+| I underwater, up 45° (rim) | 5.141 | **4.551** | **−11%** |
+
+**Cheaper on every scenario where the mirrored stand-in march used to fire, and
+noise where it did not** — which is the expected shape: the +4.13 ms rim-view cost
+that step 1 paid for the stand-in is gone, because there is no longer a mirrored
+region to fill. E and H barely move because their frames are dominated by rays that
+end on geometry rather than at the interface. F moves a lot despite being an
+above-water view, because the island's water is shallow: many refracted rays reach
+the far surface from below and used to TIR there.
+
+### Numbers caveat — a clean re-record is owed
+
+**These absolute figures are NOT comparable with the E6 or step-1 tables.** The
+world's dimensions changed underneath this run (a concurrent generation workstream;
+`WORLD_SIZE_*` currently reads 125/32/125 where the recorded baselines were taken
+against a 1000-voxel axis), so section 8 is measuring a much smaller world — hence
+G falling from 13.96 ms to 2.59. The run was also contended (p95 up to 2x median on
+E and F). **Only the within-run column-to-column comparison above is load- and
+world-neutral**, and it is the comparison the verdict rests on. Section 8 wants a
+full re-record once the generator settles, under the baseline-versioning rule.
+
+The same caveat means the `water-tir-flat` column cannot be used to confirm
+inertness by timing (it wanders by more than the effect). Inertness is established
+from the code path instead — every branch of the loop returns in the first
+iteration — and by the greying-out predicate's test.
+
+### Full frames — the artifact (crops are not evidence for this)
+
+`target/bench_dda/scenario_{g,i}_water_{full,fresnel_from_below}.png`, same world
+and same pose, so the pair is directly comparable:
+
+- **`scenario_i_water_fresnel_from_below.png`** — the effect Pascal found too
+  strong: the sky compressed into a circular window with the shoreline crowded
+  around its rim, and everything outside it the mirrored underwater world. A strong
+  fisheye.
+- **`scenario_i_water_full.png`** — the shipped result: the sky is a plain,
+  undistorted expanse, the shoreline sits where it actually is, and there is no rim
+  and no mirror. Looking out through a window, tinted and dimmed by the water the
+  ray travelled. The surface is invisible from below, as intended.
+
+### Presets
+
+**Every tier ships `transparent`**, and the preset table asserts it
+(`preset_table_tiers_the_water_optics_by_ray_budget`). It is a look decision, so it
+should not vary by tier — and since it is also the cheaper option, no tier has a
+cost reason to differ either. Nothing else in the preset table moved.

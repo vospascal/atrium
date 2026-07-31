@@ -49,6 +49,87 @@ pub const BRICK_GRID_Z: usize = WORLD_SIZE_Z.div_ceil(BRICK_SIZE);
 /// Sentinel pointer marking a brick with no non-air voxels.
 pub const EMPTY_BRICK: u32 = u32::MAX;
 
+// ---- Level-0 pointer tagging -------------------------------------------------
+//
+// A `brick_indices` word is TAGGED in its top two bits, so the coarse grid can
+// answer "what is in this metre" without ever fetching level-1 data. The idea
+// (and the measured case for it) comes from NAADF — Ulschmid et al., *Globally
+// Illuminated Voxel Worlds Accelerated with Nested Axis-Aligned Distance
+// Fields*, Computer Graphics Forum 2026, MIT-licensed at
+// <https://github.com/cg-tuwien/NAADF> — whose node word carries the same
+// EMPTY / UNIFORM / has-children distinction in its top bits.
+//
+// The bit ASSIGNMENT below is deliberately not theirs. NAADF spends tag 0 on
+// EMPTY; we spend it on UNIQUE and leave the `u32::MAX` empty sentinel intact,
+// so every pointer that exists today keeps its exact current value and meaning.
+// A bare slot index IS a valid tagged word, which is what makes this change
+// additive rather than a re-encoding of the whole grid.
+//
+// Measured on the shipped island (`cargo run --example brick_census -p
+// voxel-core`): of 71,966 occupied bricks, 58.6% are a single material filling
+// all 512 cells. Those are the ones this tag collapses.
+
+/// Bit position of the two-bit level-0 tag.
+pub const BRICK_TAG_SHIFT: u32 = 30;
+
+/// Payload mask — the 30 bits below the tag. 2^30 slots is ~1000x more level-1
+/// bricks than a full world can hold, so nothing is lost by spending two bits.
+pub const BRICK_PAYLOAD_MASK: u32 = (1 << BRICK_TAG_SHIFT) - 1;
+
+/// Tag `0b00`: the payload is a level-1 slot index. This is the untagged
+/// encoding every pointer used before tagging existed.
+pub const BRICK_TAG_UNIQUE: u32 = 0;
+
+/// Tag `0b01`: the payload is a material id, and the brick is that material in
+/// all 512 cells. No level-1 storage, and a ray hits it at the brick face.
+pub const BRICK_TAG_UNIFORM: u32 = 1;
+
+/// Tag `0b10`: RESERVED for a shared template — the payload will be an index
+/// into a deduplicated brick palette. Nothing emits this yet; it is spelled out
+/// so the tag space is allocated before the shaders learn to branch on it.
+pub const BRICK_TAG_TEMPLATE: u32 = 2;
+
+/// Tag `0b11`: no non-air voxels. [`EMPTY_BRICK`] is `u32::MAX`, which carries
+/// this tag already — the sentinel and the tag agree by construction.
+pub const BRICK_TAG_EMPTY: u32 = 3;
+
+/// The tag of a level-0 pointer.
+#[inline]
+pub const fn brick_tag(pointer: u32) -> u32 {
+    pointer >> BRICK_TAG_SHIFT
+}
+
+/// The level-1 slot a UNIQUE pointer addresses. Masking is a no-op for a
+/// genuinely untagged pointer, so call sites can use it unconditionally.
+#[inline]
+pub const fn brick_slot(pointer: u32) -> u32 {
+    pointer & BRICK_PAYLOAD_MASK
+}
+
+/// Whether this brick is one material through and through.
+#[inline]
+pub const fn brick_is_uniform(pointer: u32) -> bool {
+    brick_tag(pointer) == BRICK_TAG_UNIFORM
+}
+
+/// Whether this brick has level-1 data of its own to descend into.
+#[inline]
+pub const fn brick_is_unique(pointer: u32) -> bool {
+    brick_tag(pointer) == BRICK_TAG_UNIQUE
+}
+
+/// The material filling a UNIFORM brick. Meaningless for any other tag.
+#[inline]
+pub const fn brick_uniform_material(pointer: u32) -> u8 {
+    (pointer & 0xff) as u8
+}
+
+/// A UNIFORM pointer for `material`, which must be non-air.
+#[inline]
+pub const fn uniform_brick(material: u8) -> u32 {
+    (BRICK_TAG_UNIFORM << BRICK_TAG_SHIFT) | material as u32
+}
+
 /// Sentinel for an XZ brick column (or a whole world) with no occupied
 /// bricks. Chosen so the WGSL comparison `brick_y > i32(max)` reads it as -1
 /// (u32 -> i32 conversion is modular) and every brick Y counts as "above".
@@ -368,6 +449,12 @@ impl Brickmap {
             }
         }
 
+        collapse_uniform_bricks(
+            &mut brick_indices,
+            &mut occupancy_words,
+            &mut material_words,
+        );
+
         let allocated_brick_slots = (occupancy_words.len() / OCCUPANCY_WORDS_PER_BRICK) as u32;
         // Edit headroom (E2): the arrays — and therefore the GPU buffers created
         // from them — carry EDIT_BRICK_HEADROOM spare slots, so materializing a
@@ -417,10 +504,14 @@ impl Brickmap {
         if pointer == EMPTY_BRICK {
             return 0;
         }
+        if brick_is_uniform(pointer) {
+            return brick_uniform_material(pointer);
+        }
         let bit = x as usize % BRICK_SIZE
             + (y as usize % BRICK_SIZE) * 8
             + (z as usize % BRICK_SIZE) * 64;
-        let word = self.material_words[pointer as usize * MATERIAL_WORDS_PER_BRICK + (bit >> 2)];
+        let word = self.material_words
+            [brick_slot(pointer) as usize * MATERIAL_WORDS_PER_BRICK + (bit >> 2)];
         ((word >> ((bit & 3) * 8)) & 0xff) as u8
     }
 
@@ -445,10 +536,14 @@ impl Brickmap {
         if pointer == EMPTY_BRICK {
             return false;
         }
+        if brick_is_uniform(pointer) {
+            return true;
+        }
         let bit = x as usize % BRICK_SIZE
             + (y as usize % BRICK_SIZE) * 8
             + (z as usize % BRICK_SIZE) * 64;
-        let word = self.occupancy_words[pointer as usize * OCCUPANCY_WORDS_PER_BRICK + (bit >> 5)];
+        let word = self.occupancy_words
+            [brick_slot(pointer) as usize * OCCUPANCY_WORDS_PER_BRICK + (bit >> 5)];
         (word >> (bit & 31)) & 1 == 1
     }
 
@@ -625,6 +720,15 @@ impl Brickmap {
         };
         let mut ranges = DirtyRanges::default();
 
+        // COPY-ON-WRITE. A uniform brick has no level-1 data to patch, so any
+        // edit inside one has to give it private storage first — including a
+        // dig, which is the common case (carving a tunnel through solid stone
+        // hits nothing but uniform bricks). After this the cell is UNIQUE and
+        // the code below is the original untagged path unchanged.
+        if brick_is_uniform(self.brick_indices[cell]) {
+            self.materialize_uniform_brick(cell, &mut edit, &mut ranges);
+        }
+
         if material != 0 {
             if self.brick_indices[cell] == EMPTY_BRICK {
                 let (slot, arrays_grew) = self.allocate_brick_slot();
@@ -638,7 +742,7 @@ impl Brickmap {
                 edit.clearance_cells_written += self.shrink_clearance_around(brick, &mut ranges);
                 self.raise_column_and_world_max(column, brick[1] as u32, &mut ranges);
             }
-            let pointer = self.brick_indices[cell] as usize;
+            let pointer = brick_slot(self.brick_indices[cell]) as usize;
             let occupancy_word = pointer * OCCUPANCY_WORDS_PER_BRICK + (bit >> 5);
             self.occupancy_words[occupancy_word] |= 1 << (bit & 31);
             ranges.push(BrickmapArray::OccupancyWords, occupancy_word);
@@ -648,7 +752,7 @@ impl Brickmap {
             self.material_words[material_word] |= u32::from(material) << shift;
             ranges.push(BrickmapArray::MaterialWords, material_word);
         } else {
-            let pointer = self.brick_indices[cell] as usize;
+            let pointer = brick_slot(self.brick_indices[cell]) as usize;
             let occupancy_word = pointer * OCCUPANCY_WORDS_PER_BRICK + (bit >> 5);
             self.occupancy_words[occupancy_word] &= !(1 << (bit & 31));
             ranges.push(BrickmapArray::OccupancyWords, occupancy_word);
@@ -674,6 +778,45 @@ impl Brickmap {
 
         edit.dirty = ranges.finish();
         Some(edit)
+    }
+
+    /// Give a UNIFORM cell private level-1 storage, expanding the tag back into
+    /// 512 set occupancy bits and 512 copies of its material — the copy half of
+    /// copy-on-write.
+    ///
+    /// The whole brick is marked dirty (16 + 128 words), which is the honest
+    /// cost: the GPU has never seen these words. That makes the FIRST edit
+    /// inside a uniform brick ~576 bytes instead of the usual ~8, and every
+    /// edit after it cheap again, because the cell is UNIQUE from then on.
+    fn materialize_uniform_brick(
+        &mut self,
+        cell: usize,
+        edit: &mut BrickmapEdit,
+        ranges: &mut DirtyRanges,
+    ) {
+        let material = brick_uniform_material(self.brick_indices[cell]);
+        let (slot, arrays_grew) = self.allocate_brick_slot();
+        self.brick_indices[cell] = slot;
+        edit.brick_allocated = true;
+        edit.arrays_grew |= arrays_grew;
+        edit.metadata_changed = true;
+        ranges.push(BrickmapArray::BrickIndices, cell);
+
+        let slot = slot as usize;
+        let splatted = u32::from_le_bytes([material; 4]);
+        for word in 0..OCCUPANCY_WORDS_PER_BRICK {
+            let index = slot * OCCUPANCY_WORDS_PER_BRICK + word;
+            self.occupancy_words[index] = u32::MAX;
+            ranges.push(BrickmapArray::OccupancyWords, index);
+        }
+        for word in 0..MATERIAL_WORDS_PER_BRICK {
+            let index = slot * MATERIAL_WORDS_PER_BRICK + word;
+            self.material_words[index] = splatted;
+            ranges.push(BrickmapArray::MaterialWords, index);
+        }
+        // Occupancy of the CELL is unchanged — it was solid as a uniform tag and
+        // it is solid as a brick — so the bit grid, the clearance field and the
+        // column maxima all stay exactly as they were.
     }
 
     /// A free level-1 slot: reused first, then the headroom, and only then do the
@@ -1002,6 +1145,111 @@ pub fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
         }
     }
     merged
+}
+
+/// Retag every fully-solid single-material brick as [`BRICK_TAG_UNIFORM`] and
+/// compact the level-1 arrays so the collapsed bricks cost nothing at all.
+///
+/// "Uniform" is strict: all 512 occupancy bits set AND all 512 material bytes
+/// equal. A half-air brick does not qualify — a ray through it must still find
+/// the surface, so there is nothing to skip.
+///
+/// MEASURED on the shipped island: 40,531 of 69,977 occupied bricks collapse
+/// (57.9%), taking the whole brickmap from 45.2 MB to 21.9 MB. The traversal
+/// also stops descending into them (`ENABLE_UNIFORM_BRICKS` has no lever — see
+/// below), but that half is UNMEASURED: the shader fast path and this collapse
+/// are the same change, so A/B-ing the frame time needs a second brickmap built
+/// with the collapse off, and `bench_dda` shares ONE brickmap across variants.
+/// Do not claim a ms win for this until that exists.
+///
+/// WHY THERE IS NO LEVER: a collapsed brick has no level-1 slot at all, so a
+/// shader compiled without the fast path would read its material id as a slot
+/// index and fetch an unrelated brick. The tag and the fast path are one
+/// format, not a toggle. (A first attempt did ship them as a lever; the bench's
+/// "no-uniform-bricks" column was measuring garbage.)
+///
+/// Adapted from NAADF — Ulschmid et al., CGF 2026, MIT-licensed at
+/// <https://github.com/cg-tuwien/NAADF> — which tags nodes UNIFORM the same way.
+///
+/// Runs once at build time. Edits go the other way, through
+/// [`Brickmap::materialize_uniform_brick`].
+fn collapse_uniform_bricks(
+    brick_indices: &mut [u32],
+    occupancy_words: &mut Vec<u32>,
+    material_words: &mut Vec<u32>,
+) {
+    let slot_count = occupancy_words.len() / OCCUPANCY_WORDS_PER_BRICK;
+
+    // Pass 1: classify every allocated slot. `None` = stays a real brick,
+    // `Some(material)` = collapses to a uniform tag.
+    let mut collapse_to: Vec<Option<u8>> = Vec::with_capacity(slot_count);
+    for slot in 0..slot_count {
+        let occupancy = &occupancy_words
+            [slot * OCCUPANCY_WORDS_PER_BRICK..(slot + 1) * OCCUPANCY_WORDS_PER_BRICK];
+        if occupancy.iter().any(|word| *word != u32::MAX) {
+            collapse_to.push(None);
+            continue;
+        }
+        let materials =
+            &material_words[slot * MATERIAL_WORDS_PER_BRICK..(slot + 1) * MATERIAL_WORDS_PER_BRICK];
+        // Every byte of every word equal is the same as every word equal to
+        // the first AND that word's four bytes equal to each other.
+        let first = materials[0];
+        let byte = (first & 0xff) as u8;
+        let splatted = u32::from_le_bytes([byte, byte, byte, byte]);
+        if first == splatted && materials.iter().all(|word| *word == splatted) {
+            collapse_to.push(Some(byte));
+        } else {
+            collapse_to.push(None);
+        }
+    }
+
+    // Pass 2: assign surviving slots their new, compacted index.
+    let mut remap: Vec<u32> = Vec::with_capacity(slot_count);
+    let mut surviving = 0_u32;
+    for verdict in &collapse_to {
+        if verdict.is_some() {
+            remap.push(u32::MAX); // never dereferenced — the cell gets a tag
+        } else {
+            remap.push(surviving);
+            surviving += 1;
+        }
+    }
+
+    // Pass 3: repoint the grid. Empty cells are untouched; uniform cells lose
+    // their pointer entirely; the rest slide down to their compacted slot.
+    for pointer in brick_indices.iter_mut() {
+        if *pointer == EMPTY_BRICK {
+            continue;
+        }
+        let slot = brick_slot(*pointer) as usize;
+        *pointer = match collapse_to[slot] {
+            Some(material) => uniform_brick(material),
+            None => remap[slot],
+        };
+    }
+
+    // Pass 4: slide the level-1 payload down. Sources are always at or ahead of
+    // destinations, so a single forward sweep over the same buffers is safe.
+    for slot in 0..slot_count {
+        if collapse_to[slot].is_some() {
+            continue;
+        }
+        let destination = remap[slot] as usize;
+        if destination == slot {
+            continue;
+        }
+        occupancy_words.copy_within(
+            slot * OCCUPANCY_WORDS_PER_BRICK..(slot + 1) * OCCUPANCY_WORDS_PER_BRICK,
+            destination * OCCUPANCY_WORDS_PER_BRICK,
+        );
+        material_words.copy_within(
+            slot * MATERIAL_WORDS_PER_BRICK..(slot + 1) * MATERIAL_WORDS_PER_BRICK,
+            destination * MATERIAL_WORDS_PER_BRICK,
+        );
+    }
+    occupancy_words.truncate(surviving as usize * OCCUPANCY_WORDS_PER_BRICK);
+    material_words.truncate(surviving as usize * MATERIAL_WORDS_PER_BRICK);
 }
 
 /// One bit per brick cell (bit `cell & 31` of word `cell >> 5`), set when
@@ -1828,5 +2076,133 @@ mod tests {
             cubes_checked > 1000,
             "skip-safety sweep barely sampled any skippable cells ({cubes_checked})"
         );
+    }
+
+    /// The uniform collapse must actually fire on the shipped island, and every
+    /// surviving level-1 brick must genuinely NOT be uniform — otherwise the
+    /// pass is leaving payload on the table (or, worse, has collapsed something
+    /// with internal structure).
+    #[test]
+    fn uniform_bricks_collapse_and_the_survivors_are_all_sculpted() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let brickmap = Brickmap::build(&world);
+
+        let mut uniform = 0_usize;
+        let mut unique = 0_usize;
+        for &pointer in &brickmap.brick_indices {
+            if pointer == EMPTY_BRICK {
+                continue;
+            }
+            if brick_is_uniform(pointer) {
+                uniform += 1;
+                assert_ne!(
+                    brick_uniform_material(pointer),
+                    0,
+                    "a uniform brick of AIR should have stayed EMPTY_BRICK"
+                );
+            } else {
+                assert!(
+                    brick_is_unique(pointer),
+                    "unexpected tag on {pointer:#010x}"
+                );
+                unique += 1;
+            }
+        }
+        // Measured at 58.6% of occupied bricks; assert the ORDER, not the exact
+        // figure, so terrain tuning does not fail the build.
+        assert!(
+            uniform > unique / 2,
+            "collapse barely fired: {uniform} uniform vs {unique} unique"
+        );
+
+        // No survivor may be fully solid AND single-material — that is the exact
+        // predicate the collapse claims to have removed.
+        for slot in 0..brickmap.allocated_brick_slots as usize {
+            let occupancy = &brickmap.occupancy_words
+                [slot * OCCUPANCY_WORDS_PER_BRICK..(slot + 1) * OCCUPANCY_WORDS_PER_BRICK];
+            if occupancy.iter().any(|word| *word != u32::MAX) {
+                continue;
+            }
+            let materials = &brickmap.material_words
+                [slot * MATERIAL_WORDS_PER_BRICK..(slot + 1) * MATERIAL_WORDS_PER_BRICK];
+            let first = materials[0];
+            let byte = (first & 0xff) as u8;
+            let splatted = u32::from_le_bytes([byte; 4]);
+            assert!(
+                !(first == splatted && materials.iter().all(|word| *word == splatted)),
+                "slot {slot} is fully solid and single-material but survived the collapse"
+            );
+        }
+    }
+
+    /// Copy-on-write: editing one voxel of a uniform brick must materialize it
+    /// WITHOUT disturbing the other 511. This is the failure mode that a
+    /// coordinate round-trip on a freshly built map cannot catch, because the
+    /// map under test has to be edited first.
+    #[test]
+    fn editing_a_uniform_brick_preserves_its_other_voxels() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+
+        // Find a uniform brick — deep ground, so one is guaranteed nearby.
+        let (cell, brick) = brickmap
+            .brick_indices
+            .iter()
+            .enumerate()
+            .find(|(_, &pointer)| brick_is_uniform(pointer))
+            .map(|(cell, _)| {
+                let brick_x = cell % BRICK_GRID_X;
+                let brick_y = (cell / BRICK_GRID_X) % BRICK_GRID_Y;
+                let brick_z = cell / (BRICK_GRID_X * BRICK_GRID_Y);
+                (cell, [brick_x, brick_y, brick_z])
+            })
+            .expect("the island must contain at least one uniform brick");
+        let filling = brick_uniform_material(brickmap.brick_indices[cell]);
+
+        let base = [
+            (brick[0] * BRICK_SIZE) as i32,
+            (brick[1] * BRICK_SIZE) as i32,
+            (brick[2] * BRICK_SIZE) as i32,
+        ];
+        // Carve one voxel out of the middle, where it touches no brick face.
+        let target = [base[0] + 3, base[1] + 4, base[2] + 5];
+        let edit = brickmap
+            .set_voxel(
+                target[0],
+                target[1],
+                target[2],
+                Voxel::Air,
+                ClearanceUpdate::FullRebuild,
+            )
+            .expect("carving a solid voxel must produce an edit");
+        assert!(
+            edit.brick_allocated,
+            "the uniform brick must have materialized"
+        );
+
+        assert!(
+            brick_is_unique(brickmap.brick_indices[cell]),
+            "the edited cell must be UNIQUE afterwards"
+        );
+        assert_eq!(
+            brickmap.get(target[0], target[1], target[2]),
+            0,
+            "the carve"
+        );
+        for local_z in 0..BRICK_SIZE as i32 {
+            for local_y in 0..BRICK_SIZE as i32 {
+                for local_x in 0..BRICK_SIZE as i32 {
+                    let at = [base[0] + local_x, base[1] + local_y, base[2] + local_z];
+                    if at == target {
+                        continue;
+                    }
+                    assert_eq!(
+                        brickmap.get(at[0], at[1], at[2]),
+                        filling,
+                        "expanding the uniform tag lost the voxel at {at:?}"
+                    );
+                }
+            }
+        }
     }
 }

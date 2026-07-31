@@ -11,7 +11,8 @@ Primary source: **Inigo Quilez, "Painting a Landscape with Maths"** —
 Others: [7XsGDM](https://www.shadertoy.com/view/7XsGDM) (voxel DDA + bit-packed
 data + triplanar + SDF instancing), [Ms33WB](https://www.shadertoy.com/view/Ms33WB)
 (post-process SSAO from depth+normal), [Xl3XzS](https://www.shadertoy.com/view/Xl3XzS)
-(rounded voxel edges, AA, volumetric clouds, semitransparent water),
+(rounded voxel edges, AA, volumetric clouds, semitransparent water — the water
+half landed at E6, physically rather than as a blend),
 [WtSfWK](https://www.shadertoy.com/view/WtSfWK) (analytic AO).
 
 ---
@@ -117,9 +118,20 @@ that E1 said half-res AO would need anyway. Screen-space artifacts are the cost.
   faded by a vertical ramp — makes voxel forms read against the sky.
 - **Distance-faded local tweaks**: undo an effect smoothly with distance
   (IQ mutes distracting dark tree patches far away).
-- **Specular with grazing boost** (Fresnel-ish `sqrt` term) — water at E6.
+- **Specular with grazing boost** (Fresnel-ish `sqrt` term) → ✅ **SUPERSEDED by
+  the real thing at E6.** We did not need the `sqrt` fake: Schlick's Fresnel with
+  `F0` derived from the indices of refraction (0.0204 for air/water) is the same
+  handful of ALU and is *correct*, so grazing angles mirror and steep angles see
+  through without a tuning constant. The grazing "glare" comes for free with it,
+  because the mirror term evaluates the analytic sky function — which already
+  carries the sun glow — so even the ZERO-RAY water tier glints. Numbers in the
+  bench doc's E6 section.
 - **Rounded voxel edges + silhouette AA** ([Xl3XzS](https://www.shadertoy.com/view/Xl3XzS)):
   soften the box intersection; big perceived-quality win for little cost.
+  **Now also the top candidate for making water look wet:** E6's reflections are
+  perfectly sharp because a voxel water surface is an exactly flat plane, and the
+  cheapest way to break that up is a normal perturbation at the surface — the same
+  machinery, and the natural place to couple `voxel_core::wind` to the water (B2).
 
 ## Clouds (E7 / B-slot)
 

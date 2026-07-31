@@ -12,8 +12,9 @@
 //! (`debug_pool`, an E2b test tool riding the E2 bulk-edit path) ↔
 //! lighting (`lighting`) ↔ traversal levers (`traversal`,
 //! S2) ↔ ambient occlusion (`ao`, E1) ↔ sun shadows (`shadows`, E1b) ↔ CAGI light
-//! volume (`cagi`, E4) ↔ lever registry + quality presets (`variants`, E1c) ↔
-//! overlay (`overlay`) ↔ GPU timing (`frame_timing`).
+//! volume (`cagi`, E4) ↔ water optics (`water`, E6) ↔ lever registry + quality
+//! presets (`variants`, E1c) ↔ overlay (`overlay`) ↔ GPU timing
+//! (`frame_timing`).
 //!
 //! `variants` is the single source of truth for what levers exist: the overlay,
 //! the benchmark and the pinning tests all read its registry, so a lever cannot
@@ -36,5 +37,6 @@ pub mod shadows;
 pub mod traversal;
 pub mod variants;
 pub mod voxel_dda;
+pub mod water;
 pub mod world_edit;
 pub mod world_host;

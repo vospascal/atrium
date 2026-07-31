@@ -26,14 +26,102 @@
 
 use crate::ao::patch_shader_const;
 use crate::brickmap::{
-    Brickmap, BRICK_GRID_X, BRICK_GRID_Y, BRICK_GRID_Z, BRICK_SIZE, EMPTY_BRICK, EMPTY_COLUMN,
-    MATERIAL_WORDS_PER_BRICK, OCCUPANCY_WORDS_PER_BRICK,
+    brick_is_uniform, brick_slot, brick_uniform_material, Brickmap, BRICK_GRID_X, BRICK_GRID_Y,
+    BRICK_GRID_Z, BRICK_SIZE, EMPTY_BRICK, EMPTY_COLUMN, MATERIAL_WORDS_PER_BRICK,
+    OCCUPANCY_WORDS_PER_BRICK,
 };
-use crate::material::materials;
+use crate::material::{materials, MaterialFlags};
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 /// Cell attribute bit 24: the cell absorbs light (see [`SOLID_FILL_DIVISOR`]).
 pub const CELL_SOLID: u32 = 0x0100_0000;
+
+/// Cell attribute bits 25-28 (M2): the cell's TRANSMITTANCE, quantized to 4
+/// bits, `0 = opaque .. 15 = fully transparent`.
+///
+/// Only meaningful on a solid cell — that is the whole point: before M2 a solid
+/// cell absorbed everything ([`CELL_SOLID`] alone), so a leaf canopy was a wall
+/// and CA GI painted the ground under a tree black. The transmitting fraction is
+/// what lets light seep through foliage without making the canopy non-solid
+/// (which would also stop it casting any shadow at all).
+///
+/// Four bits because the value is a coarse material property multiplying an
+/// already-quantized 10-bit channel: the finest step it can express (1/15) is
+/// well under the visible difference between two adjacent light levels, and it
+/// leaves bits 29-31 free.
+pub const CELL_TRANSMITTANCE_SHIFT: u32 = 25;
+pub const CELL_TRANSMITTANCE_LEVELS: u32 = 15;
+pub const CELL_TRANSMITTANCE_MASK: u32 = 0xf << CELL_TRANSMITTANCE_SHIFT;
+
+/// Cell attribute bits 29-31 (E5): which EMITTER the cell is, or 0 for "not an
+/// emitter".
+///
+/// An index rather than a colour, because emission is a MATERIAL constant, not a
+/// per-cell value — the cell only has to say which of the few emissive materials
+/// it holds, and the CA looks the radiance up in [`emitter_palette`]. That fits
+/// the three bits left over after albedo, solidity and transmittance, so E5 costs
+/// the attribute volume nothing at all: no second array, no wider word.
+///
+/// Three bits means [`MAX_EMITTERS`] distinct emissive materials. The table has
+/// two; [`emitter_palette`] panics rather than silently truncating if that is
+/// ever exceeded.
+pub const CELL_EMITTER_SHIFT: u32 = 29;
+pub const CELL_EMITTER_MASK: u32 = 0x7 << CELL_EMITTER_SHIFT;
+
+/// Distinct emissive materials the 3-bit field can name (index 0 means "none").
+pub const MAX_EMITTERS: usize = 7;
+
+/// Palette slots uploaded to the GPU: [`MAX_EMITTERS`] plus the black slot 0.
+pub const EMITTER_PALETTE_SLOTS: usize = MAX_EMITTERS + 1;
+
+/// Emitter index per material id: 0 for everything that does not emit, and
+/// 1.. for each [`MaterialFlags::EMISSIVE`] row in table order.
+fn emitter_indices() -> Vec<u32> {
+    let mut next_index = 0_u32;
+    materials()
+        .iter()
+        .map(|material| {
+            if !material.flags.contains(MaterialFlags::EMISSIVE) {
+                return 0;
+            }
+            next_index += 1;
+            next_index
+        })
+        .collect()
+}
+
+/// The emitter radiances the CA looks up, indexed by the attribute field.
+///
+/// Slot 0 is black and is what every non-emissive cell reads, so the CA needs no
+/// branch: it can always look up, and a non-emitter simply injects nothing.
+pub fn emitter_palette() -> Vec<[f32; 4]> {
+    let table = materials();
+    let mut palette = vec![[0.0_f32; 4]; EMITTER_PALETTE_SLOTS];
+    for (material, index) in table.iter().zip(emitter_indices()) {
+        if index == 0 {
+            continue;
+        }
+        assert!(
+            (index as usize) <= MAX_EMITTERS,
+            "the material table has more than {MAX_EMITTERS} emissive rows, which \
+             no longer fit the 3-bit cell emitter field (widen it or share slots)"
+        );
+        palette[index as usize] = [
+            material.emission[0],
+            material.emission[1],
+            material.emission[2],
+            0.0,
+        ];
+    }
+    palette
+}
+
+/// A material's transmittance in the 4-bit attribute form, rounded to nearest.
+pub fn quantize_transmittance(transmittance: f32) -> u32 {
+    let levels = CELL_TRANSMITTANCE_LEVELS as f32;
+    let quantized = (transmittance.clamp(0.0, 1.0) * levels + 0.5) as u32;
+    quantized.min(CELL_TRANSMITTANCE_LEVELS) << CELL_TRANSMITTANCE_SHIFT
+}
 /// Light word bit 30: this cell's value was injected from a sunlit surface and is
 /// pinned (the `CAGI_SUN_CACHE` amortization).
 pub const SUN_SOURCE_FLAG: u32 = 0x4000_0000;
@@ -187,6 +275,12 @@ pub struct CagiSettings {
     /// `CAGI_SUN_CACHE`: pin sun-injected cells so their shadow ray is traced
     /// once per re-flood instead of once per iteration.
     pub sun_cache: bool,
+    /// `CAGI_EMISSIVE` (E5): let emissive materials inject their radiance.
+    pub emissive: bool,
+    /// `CAGI_TRANSMISSION` (M2): let a solid cell pass its material's
+    /// transmitted fraction on instead of absorbing everything. Off reproduces
+    /// E4's binary absorption bit for bit.
+    pub transmission: bool,
     /// CA iterations per frame (CPU-side dispatch count — no shader const).
     pub iterations_per_frame: u32,
     /// Multiplier on the sampled volume (`gi_params.x`).
@@ -195,6 +289,8 @@ pub struct CagiSettings {
     pub ambient_floor: f32,
     /// Share of the sun's radiance a sunlit surface injects (`gi_params.z`).
     pub sun_bounce: f32,
+    /// Multiplier on every emitter's authored radiance (`gi_params.w`, E5).
+    pub emissive_scale: f32,
 }
 
 impl Default for CagiSettings {
@@ -209,10 +305,13 @@ impl Default for CagiSettings {
             sample_mode: CagiSampleMode::Trilinear,
             sky_test: CagiSkyTest::ColumnMax,
             sun_cache: true,
+            emissive: true,
+            transmission: false,
             iterations_per_frame: 2,
             strength: 1.0,
             ambient_floor: 0.25,
             sun_bounce: 0.35,
+            emissive_scale: 1.0,
         }
     }
 }
@@ -234,7 +333,13 @@ impl CagiSettings {
     pub fn patch_propagation_consts(&self, shader_source: &str) -> String {
         let mut patched = patch_shader_const(shader_source, "CAGI_RULE", &self.rule.wgsl_literal());
         patched = patch_shader_const(&patched, "CAGI_SKY_TEST", &self.sky_test.wgsl_literal());
-        patch_shader_const(&patched, "CAGI_SUN_CACHE", boolean_literal(self.sun_cache))
+        patched = patch_shader_const(&patched, "CAGI_SUN_CACHE", boolean_literal(self.sun_cache));
+        patched = patch_shader_const(
+            &patched,
+            "CAGI_TRANSMISSION",
+            boolean_literal(self.transmission),
+        );
+        patch_shader_const(&patched, "CAGI_EMISSIVE", boolean_literal(self.emissive))
     }
 
     /// Whether switching from `applied` to `self` changes a compile-time const.
@@ -244,6 +349,8 @@ impl CagiSettings {
             || self.rule != applied.rule
             || self.sky_test != applied.sky_test
             || self.sun_cache != applied.sun_cache
+            || self.transmission != applied.transmission
+            || self.emissive != applied.emissive
     }
 
     /// Whether switching from `applied` to `self` needs the GPU volume rebuilt
@@ -375,6 +482,9 @@ impl CagiGrid {
             attenuation: self.attenuation(),
             diffusion_numerator: self.diffusion_numerator(),
             diffusion_26_numerator: self.diffusion_26_numerator(),
+            emitters: emitter_palette()
+                .try_into()
+                .expect("emitter_palette always returns EMITTER_PALETTE_SLOTS slots"),
         }
     }
 }
@@ -392,6 +502,7 @@ impl CagiGrid {
 /// | 20     | `attenuation`            | `u32`       |
 /// | 24     | `diffusion_numerator`    | `u32`       |
 /// | 28     | `diffusion_26_numerator` | `u32`       |
+/// | 32     | `emitters`               | `array<vec4<f32>, 8>` (E5) |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CagiVolumeUniform {
@@ -401,6 +512,11 @@ pub struct CagiVolumeUniform {
     pub attenuation: u32,
     pub diffusion_numerator: u32,
     pub diffusion_26_numerator: u32,
+    /// E5 emitter radiances, indexed by a cell's 3-bit emitter field. Slot 0 is
+    /// black — the value every non-emissive cell reads. Rides in this uniform
+    /// rather than a new binding: 128 bytes does not deserve one, and it keeps
+    /// the CAGI pass's binding list unchanged.
+    pub emitters: [[f32; 4]; EMITTER_PALETTE_SLOTS],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -441,14 +557,39 @@ pub fn quantize_radiance(radiance: [f32; 3]) -> [u32; 3] {
 /// An sRGB albedo packed 8:8:8 into the low 24 bits of a cell attribute word,
 /// the form both attribute builders below store and `cagi_cell_albedo` in
 /// `shaders/cagi_volume.wgsl` decodes. Bits 24+ stay clear for the flags the
-/// CA adds ([`CELL_SOLID`] today, a quantized transmittance at M2).
+/// CA adds ([`CELL_SOLID`] at bit 24 and the M2 transmittance at bits 25-28).
 fn packed_albedo(albedo: [f32; 3]) -> u32 {
     let channel = |value: f32| ((value.clamp(0.0, 1.0) * 255.0) as u32) & 0xff;
     channel(albedo[0]) | (channel(albedo[1]) << 8) | (channel(albedo[2]) << 16)
 }
 
-/// One `u32` per cell: the cell's bounce albedo (sRGB 8:8:8 in the low 24 bits)
-/// plus [`CELL_SOLID`] at bit 24.
+/// The static half of the attribute word for EVERY material, indexed by material
+/// id: albedo in the low 24 bits, transmittance in 25-28, emitter index in
+/// 29-31. [`CELL_SOLID`] is added later, by the fill-count sweep.
+///
+/// Built once per sweep and indexed per voxel — the E2 single-cell path walks up
+/// to 512 voxels, so recomputing this per voxel would rebuild the whole material
+/// table half a thousand times for one edit.
+///
+/// Every field is taken from the SAME voxel — the cell's highest occupied one —
+/// so a cell's transmittance and emitter always describe the same surface its
+/// bounce colour does. Coarse (one voxel stands for up to 512), and deliberately
+/// the same coarseness the albedo has had since E4.
+fn material_attribute_table() -> Vec<u32> {
+    let emitters = emitter_indices();
+    materials()
+        .iter()
+        .zip(emitters)
+        .map(|(material, emitter)| {
+            packed_albedo(material.albedo)
+                | quantize_transmittance(material.transmittance)
+                | (emitter << CELL_EMITTER_SHIFT)
+        })
+        .collect()
+}
+
+/// One `u32` per cell: the cell's bounce albedo (sRGB 8:8:8 in the low 24 bits),
+/// [`CELL_SOLID`] at bit 24, and its 4-bit transmittance at bits 25-28 (M2).
 ///
 /// The albedo is the table color of the cell's HIGHEST occupied voxel — the
 /// surface the sun is most likely to be hitting, which is what the bounce tint
@@ -461,24 +602,35 @@ fn packed_albedo(albedo: [f32; 3]) -> u32 {
 pub fn build_cell_attributes(brickmap: &Brickmap, grid: &CagiGrid) -> Vec<u32> {
     let mut attributes = vec![0_u32; grid.cell_count()];
     let mut fill_counts = vec![0_u16; grid.cell_count()];
-    let albedo_bytes: Vec<u32> = materials()
-        .iter()
-        .map(|material| packed_albedo(material.albedo))
-        .collect();
+    let material_attributes = material_attribute_table();
 
     for brick_z in 0..BRICK_GRID_Z {
         for brick_y in 0..BRICK_GRID_Y {
             for brick_x in 0..BRICK_GRID_X {
                 let brick_cell =
                     brick_x + brick_y * BRICK_GRID_X + brick_z * BRICK_GRID_X * BRICK_GRID_Y;
-                let pointer = brickmap.brick_indices[brick_cell] as usize;
-                if pointer as u32 == EMPTY_BRICK {
+                let pointer = brickmap.brick_indices[brick_cell];
+                if pointer == EMPTY_BRICK {
                     continue;
                 }
-                let occupancy = &brickmap.occupancy_words[pointer * OCCUPANCY_WORDS_PER_BRICK
-                    ..(pointer + 1) * OCCUPANCY_WORDS_PER_BRICK];
-                let materials = &brickmap.material_words
-                    [pointer * MATERIAL_WORDS_PER_BRICK..(pointer + 1) * MATERIAL_WORDS_PER_BRICK];
+                // A UNIFORM brick keeps no level-1 words, so expand its tag into
+                // the shape the voxel loop below expects — all 512 bits set, the
+                // material splatted across every byte. One code path beats a
+                // second copy of the accumulation loop.
+                let uniform_occupancy = [u32::MAX; OCCUPANCY_WORDS_PER_BRICK];
+                let uniform_materials = [u32::from_le_bytes([brick_uniform_material(pointer); 4]);
+                    MATERIAL_WORDS_PER_BRICK];
+                let (occupancy, materials): (&[u32], &[u32]) = if brick_is_uniform(pointer) {
+                    (&uniform_occupancy, &uniform_materials)
+                } else {
+                    let slot = brick_slot(pointer) as usize;
+                    (
+                        &brickmap.occupancy_words[slot * OCCUPANCY_WORDS_PER_BRICK
+                            ..(slot + 1) * OCCUPANCY_WORDS_PER_BRICK],
+                        &brickmap.material_words[slot * MATERIAL_WORDS_PER_BRICK
+                            ..(slot + 1) * MATERIAL_WORDS_PER_BRICK],
+                    )
+                };
                 // Ascending local Y on the OUTSIDE so the last albedo written
                 // into a cell comes from its highest occupied voxel.
                 for local_y in 0..BRICK_SIZE {
@@ -502,7 +654,7 @@ pub fn build_cell_attributes(brickmap: &Brickmap, grid: &CagiGrid) -> Vec<u32> {
                             let index = grid.cell_index(cell);
                             fill_counts[index] = fill_counts[index].saturating_add(1);
                             let material = (materials[bit >> 2] >> ((bit & 3) * 8)) & 0xff;
-                            attributes[index] = albedo_bytes[material as usize];
+                            attributes[index] = material_attributes[material as usize];
                         }
                     }
                 }
@@ -529,7 +681,7 @@ pub fn build_cell_attributes(brickmap: &Brickmap, grid: &CagiGrid) -> Vec<u32> {
 /// y-then-z-then-x order as the full build, so "the albedo of the highest
 /// occupied voxel" resolves ties identically (pinned by a test).
 pub fn cell_attribute(brickmap: &Brickmap, grid: &CagiGrid, cell: [u32; 3]) -> u32 {
-    let material_table = materials();
+    let material_attributes = material_attribute_table();
     let cell_voxels = grid.cell_voxels as i32;
     let base = [
         cell[0] as i32 * cell_voxels,
@@ -547,7 +699,7 @@ pub fn cell_attribute(brickmap: &Brickmap, grid: &CagiGrid, cell: [u32; 3]) -> u
                     continue;
                 }
                 fill_count += 1;
-                albedo = packed_albedo(material_table[material as usize].albedo);
+                albedo = material_attributes[material as usize];
             }
         }
     }
@@ -687,6 +839,7 @@ mod tests {
     use super::*;
     use crate::passes::cagi::CAGI_SHADER_SOURCE;
     use crate::passes::dda::SHADER_SOURCE;
+    use voxel_core::world::Voxel;
 
     /// The Rust defaults and the two shader files' lever blocks must be the same
     /// configuration: the app's default pipelines are built from the UNPATCHED
@@ -978,6 +1131,173 @@ mod tests {
                 "only {non_empty_checked} non-empty cells sampled at {cell_voxels} voxels"
             );
         }
+    }
+
+    /// The 4-bit transmittance quantizer must hit both endpoints exactly:
+    /// stone at 0 is what keeps opaque geometry bit-identical with the lever on,
+    /// and a hypothetical 1.0 must not wrap into a neighbouring bit field.
+    #[test]
+    fn transmittance_quantizes_within_its_four_bits() {
+        assert_eq!(quantize_transmittance(0.0), 0);
+        assert_eq!(
+            quantize_transmittance(1.0) >> CELL_TRANSMITTANCE_SHIFT,
+            CELL_TRANSMITTANCE_LEVELS
+        );
+        // Out-of-range input must clamp, never overflow into bit 29+.
+        for value in [-1.0, 1.5, f32::INFINITY] {
+            assert_eq!(
+                quantize_transmittance(value) & !CELL_TRANSMITTANCE_MASK,
+                0,
+                "{value} escaped the transmittance field"
+            );
+        }
+        // Monotonic, and round-to-nearest rather than truncating.
+        let level = |value: f32| quantize_transmittance(value) >> CELL_TRANSMITTANCE_SHIFT;
+        assert!(level(0.25) < level(0.5) && level(0.5) < level(0.85));
+        assert_eq!(level(1.0 / CELL_TRANSMITTANCE_LEVELS as f32), 1);
+    }
+
+    /// The attribute word's three fields must not collide: albedo owns 0-23,
+    /// solidity bit 24, transmittance 25-28. A shift error here would tint the
+    /// world or silently mark cells solid.
+    #[test]
+    fn attribute_fields_do_not_overlap() {
+        assert_eq!(CELL_TRANSMITTANCE_MASK & 0x00ff_ffff, 0, "albedo collision");
+        assert_eq!(
+            CELL_TRANSMITTANCE_MASK & CELL_SOLID,
+            0,
+            "solid-flag collision"
+        );
+        assert_eq!(CELL_TRANSMITTANCE_MASK, 0x1e00_0000);
+    }
+
+    /// Opaque materials must carry transmittance 0 through the whole pipeline,
+    /// because that is what makes `CAGI_TRANSMISSION` a no-op on stone — the
+    /// claim the lever's verdict rests on ("any delta outside vegetation is a
+    /// bug"). Foliage must carry a non-zero one, or M2 fixes nothing.
+    #[test]
+    fn opaque_materials_transmit_nothing_and_foliage_transmits_something() {
+        let table = material_attribute_table();
+        let field =
+            |voxel| table[crate::material::material_id(voxel) as usize] & CELL_TRANSMITTANCE_MASK;
+        for opaque in [Voxel::Stone, Voxel::Dirt, Voxel::Sand, Voxel::Trunk] {
+            assert_eq!(field(opaque), 0, "{opaque:?} must not transmit");
+        }
+        for foliage in [Voxel::Leaves, Voxel::LeavesPine, Voxel::TallGrass] {
+            assert!(field(foliage) > 0, "{foliage:?} must transmit");
+        }
+    }
+
+    /// The attribute builders must agree on transmittance exactly as they
+    /// already do on albedo — the E2 incremental path recomputing one cell must
+    /// never disagree with a full rebuild.
+    #[test]
+    fn both_attribute_builders_pack_transmittance_identically() {
+        let materials = materials();
+        let table = material_attribute_table();
+        for (id, material) in materials.iter().enumerate() {
+            let packed = table[id];
+            assert_eq!(
+                packed & CELL_TRANSMITTANCE_MASK,
+                quantize_transmittance(material.transmittance),
+                "material {id} transmittance drifted"
+            );
+            assert_eq!(
+                packed & !(CELL_TRANSMITTANCE_MASK | CELL_EMITTER_MASK),
+                packed_albedo(material.albedo),
+                "material {id} albedo drifted"
+            );
+        }
+    }
+
+    /// The emitter field must name exactly the EMISSIVE rows, and must not
+    /// collide with albedo, solidity or transmittance. A shift error here would
+    /// turn ordinary terrain into light sources.
+    #[test]
+    fn the_emitter_field_names_exactly_the_emissive_rows() {
+        assert_eq!(CELL_EMITTER_MASK, 0xe000_0000);
+        assert_eq!(CELL_EMITTER_MASK & CELL_TRANSMITTANCE_MASK, 0);
+        assert_eq!(CELL_EMITTER_MASK & CELL_SOLID, 0);
+        assert_eq!(CELL_EMITTER_MASK & 0x00ff_ffff, 0);
+
+        let table = material_attribute_table();
+        for (id, material) in materials().iter().enumerate() {
+            let slot = (table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT;
+            assert_eq!(
+                slot != 0,
+                material.flags.contains(MaterialFlags::EMISSIVE),
+                "{} emitter slot disagrees with its EMISSIVE flag",
+                material.name
+            );
+        }
+    }
+
+    /// Every emissive material must reach the CA with its authored radiance
+    /// intact: the index the cell stores has to select that material's row in
+    /// the palette the shader reads.
+    #[test]
+    fn every_emitter_round_trips_through_the_palette() {
+        let palette = emitter_palette();
+        assert_eq!(palette.len(), EMITTER_PALETTE_SLOTS);
+        assert_eq!(palette[0], [0.0; 4], "slot 0 is what non-emitters read");
+
+        let table = material_attribute_table();
+        let mut emitters_seen = 0;
+        for (id, material) in materials().iter().enumerate() {
+            let slot = ((table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT) as usize;
+            if slot == 0 {
+                continue;
+            }
+            emitters_seen += 1;
+            assert_eq!(
+                &palette[slot][..3],
+                &material.emission[..],
+                "{} radiance did not survive the palette",
+                material.name
+            );
+        }
+        assert_eq!(emitters_seen, 2, "M1b authored two emitters");
+    }
+
+    /// Distinct emitters must not share a slot — two lights that differ in the
+    /// table have to differ in the volume.
+    #[test]
+    fn emitters_get_distinct_slots() {
+        let table = material_attribute_table();
+        let slots: Vec<u32> = materials()
+            .iter()
+            .enumerate()
+            .filter(|(_, material)| material.flags.contains(MaterialFlags::EMISSIVE))
+            .map(|(id, _)| (table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT)
+            .collect();
+        let mut unique = slots.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            slots.len(),
+            "two emitters share a palette slot"
+        );
+        assert!(
+            slots.iter().all(|slot| (*slot as usize) <= MAX_EMITTERS),
+            "an emitter slot escaped the 3-bit field"
+        );
+    }
+
+    /// A placed glow block must actually become an emissive cell — the E2
+    /// single-cell recompute is what the L key ultimately drives, so if it
+    /// dropped the emitter bits the light would never appear.
+    #[test]
+    fn an_edited_cell_carries_its_emitter() {
+        let table = material_attribute_table();
+        let glow_block = table[crate::material::material_id(Voxel::GlowBlock) as usize];
+        assert_ne!(
+            glow_block & CELL_EMITTER_MASK,
+            0,
+            "the glow block must emit"
+        );
+        let stone = table[crate::material::material_id(Voxel::Stone) as usize];
+        assert_eq!(stone & CELL_EMITTER_MASK, 0, "stone must not emit");
     }
 
     #[test]

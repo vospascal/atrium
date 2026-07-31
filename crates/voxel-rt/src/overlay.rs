@@ -31,6 +31,7 @@ use crate::variants::{
     levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
     RenderQuality, QUALITY_PRESETS, VOXELS_PER_METER,
 };
+use crate::water::WaterMode;
 use crate::world_edit::ClearanceUpdateMode;
 use crate::world_host::WorldEditStats;
 
@@ -64,6 +65,12 @@ pub struct MovementReadout {
     pub submersion: Submersion,
     /// Walk mode: the eye is under a liquid (E6's underwater flag).
     pub head_submerged: bool,
+    /// E6 — whether the ACTIVE eye (fly camera or body head) sits in a liquid, so
+    /// the shading pass took its underwater path. Read from the world with
+    /// [`crate::water::eye_is_submerged`], which is why it is true in fly mode as
+    /// well: E6 owns "the view is underwater", E2b's `head_submerged` owns "the
+    /// body's head is wet", and they agree wherever both apply.
+    pub eye_submerged: bool,
     /// Walk mode: CPU cost of the last movement + collision step, microseconds.
     pub step_micros: f32,
 }
@@ -312,6 +319,15 @@ fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
          snaps the body to the ground under the camera on entry; fly mode keeps \
          the eye where the body's head was.",
     );
+    if movement.eye_submerged {
+        ui.label("view: UNDERWATER").on_hover_text(
+            "E6: the primary rays start inside a liquid, so the frame is rendered \
+             from inside the medium — extinction accumulates from the eye and \
+             looking up gives Snell's window (the sky compressed into a 48.6-degree \
+             cone, a mirror outside it). Tested on the eye's own voxel, so it holds \
+             for a fly camera under the surface as well as for a swimming body.",
+        );
+    }
     if movement.walking {
         ui.label(format!(
             "body: {} | {}{} | {:.0} us",
@@ -432,6 +448,22 @@ fn lever_is_relevant(quality: &RenderQuality, lever_id: LeverId) -> bool {
         | LeverId::GiStrength
         | LeverId::GiAmbientFloor
         | LeverId::GiSunBounce => quality.global_illumination.enabled,
+        // E6: every water knob is meaningless while water is drawn opaque, and the
+        // two ray budgets only mean something for a mode that traces rays.
+        LeverId::WaterAbsorption | LeverId::WaterScattering | LeverId::WaterSunThroughLiquid => {
+            quality.water.mode != WaterMode::Opaque
+        }
+        LeverId::WaterRayCutoff => {
+            quality.water.mode.traces_reflection() || quality.water.mode.traces_refraction()
+        }
+        // E6 step 3: both of these describe what happens after a ray mirrors off the
+        // underside of the surface, and the shipped transparent interface never
+        // mirrors.
+        LeverId::WaterBounces | LeverId::WaterTirFallback => {
+            (quality.water.mode.traces_reflection() || quality.water.mode.traces_refraction())
+                && quality.water.bounce_levers_have_an_effect()
+        }
+        LeverId::WaterUnderwaterInterface => quality.water.mode != WaterMode::Opaque,
         // E2: the box radius only means something for the bounded strategy, and
         // re-flooding needs a light volume to flood.
         LeverId::EditClearanceRadius => {

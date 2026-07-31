@@ -58,6 +58,8 @@ struct CagiVolumeMeta {
     // Diffusion rule, 26-neighbour variant: the weighted sum (face 4, edge 2,
     // corner 1) times this, >> 12.
     diffusion_26_numerator: u32,
+    // E5: emitter radiance per 3-bit emitter index; slot 0 is black.
+    emitters: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(11) var<storage, read> light_volume: array<u32>;
@@ -83,8 +85,12 @@ const CAGI_SAMPLE_NEAREST: u32 = 0u;
 const CAGI_SAMPLE_TRILINEAR: u32 = 1u;
 const CAGI_SAMPLE_MODE: u32 = 1u;
 
-// Cell attribute bits (see the header): albedo in the low 24, solid flag at 24.
+// Cell attribute bits (see the header): albedo in the low 24, solid flag at 24,
+// and the M2 transmittance in bits 25-28.
 const CAGI_CELL_SOLID: u32 = 0x01000000u;
+const CAGI_TRANSMITTANCE_SHIFT: u32 = 25u;
+const CAGI_TRANSMITTANCE_LEVELS: f32 = 15.0;
+const CAGI_EMITTER_SHIFT: u32 = 29u;
 // Light word bits.
 const CAGI_CHANNEL_MASK: u32 = 0x3ffu;
 const CAGI_CHANNEL_MAX: u32 = 1023u;
@@ -149,6 +155,23 @@ fn cagi_attributes_of(cell: vec3<i32>) -> u32 {
 
 fn cagi_cell_is_solid(cell: vec3<i32>) -> bool {
     return (cagi_attributes_of(cell) & CAGI_CELL_SOLID) != 0u;
+}
+
+// The fraction of light a SOLID cell passes on instead of absorbing (M2), from
+// the 4 bits above the solid flag. 0 for stone, ~0.25 for a leaf canopy. Read
+// only when CAGI_TRANSMISSION is compiled in; without it a solid cell absorbs
+// everything, which is E4's original behaviour.
+fn cagi_cell_transmittance(attributes: u32) -> f32 {
+    let quantized = (attributes >> CAGI_TRANSMITTANCE_SHIFT) & 0xfu;
+    return f32(quantized) * (1.0 / CAGI_TRANSMITTANCE_LEVELS);
+}
+
+// The radiance a cell EMITS (E5), from its 3-bit emitter index. Non-emissive
+// cells index slot 0, which is black, so this needs no branch — every cell can
+// look up and a non-emitter simply injects nothing.
+fn cagi_cell_emission(attributes: u32) -> vec3<f32> {
+    let slot = (attributes >> CAGI_EMITTER_SHIFT) & 0x7u;
+    return cagi_volume_meta.emitters[slot].rgb * lighting.gi_params.w;
 }
 
 // The cell's bounce albedo, decoded to linear. Zero for cells with no occupied

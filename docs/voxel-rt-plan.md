@@ -58,6 +58,34 @@ noiseless, readable shadows).**
   water; the E2b pool tool *writing* water voxels is an acknowledged stopgap
   until backlog B6's fluid CA gives water mass and flow. Until then, treat any
   edit that paints or removes water as debug-only.
+- **To the EDITOR, water IS air (Pascal, 2026-07-31):** *"we need to treat water
+  as air basically when adding and removing blocks"* — and *"not on the surface,
+  under water"*: a click into a pond belongs on the bed, not floating on the
+  skin. This is ONE predicate, not a pile of liquid special cases: the edit path
+  has a single notion of "empty" in which every liquid is empty, and both edit
+  directions use it. Consequences fall out rather than being decided one by one —
+  an edit ray passes through water like air; the placement cell may be a water
+  cell (the placed solid *displaces* the water, overwritten today, B6's CA owning
+  displacement properly later); and clicking a pond's surface places nothing
+  there, because there is nothing there to click. Water still cannot be
+  *removed* — it is not a block. Implement it as one shared emptiness test, so
+  the next transparent fluid (oil, honey) inherits the behaviour instead of
+  needing its own branch; an `is air` check anywhere on the edit path is a bug.
+
+- **A medium has no colour of its own (Pascal, 2026-07-31):** *"water shouldnt
+  have ehh an color realy .. water blocks light coming in .. so if a ray comes in
+  water the distance it travels the less light comes down."* A participating
+  medium is described by **per-channel absorption and scattering coefficients**;
+  its colour is a CONSEQUENCE of those and the light, never a painted value. Using
+  a material's `albedo` (a surface quantity) as a volume colour is the specific
+  bug this rule forbids — it was why E6's water read teal regardless of the
+  lighting, and why the flat field outside Snell's window was a flat *teal* field.
+  Absorption alone is equally wrong: it sends the depths black, and scattering is
+  why deep clear water is blue with no bottom in sight. The coefficient PAIR is
+  also the only form that reaches the dossier's target set — clouds are
+  scattering-dominated with almost no absorption, honey and oil the reverse — so
+  a paint-based model cannot express clouds at all. Expose the coefficients as
+  levers, never a tint multiplier.
 
 **Modularity rule (Pascal, 2026-07-29):** hard seams between platform/windowing ↔
 GPU device ↔ render passes ↔ world data ↔ camera ↔ overlay. Pass convention:
@@ -528,7 +556,37 @@ buffers both passes bind.
 **Gate (Pascal, in-app):** are shadowed areas lit by directional, colour-bled bounce
 light — noiselessly — and does a sun drag re-flood cleanly inside a second?
 
-### E5 — CAGI v1: emissives + live editing ⬜
+### E5 — CAGI v1: emissives + live editing 🟡 (injection DONE, flood PARKED)
+
+**Landed 2026-07-31:** the emission table (M1/M1b — `material.rs`, with
+`GlowBlock` + `GlowBerry`), placement (**L** places a glow block through E2's
+existing edit path), and the CA injection itself. Emission is stored as a **3-bit
+emitter INDEX** in cell-attribute bits 29-31, not a colour — emission is a
+material constant, so a cell only says *which* emitter it is and the CA looks the
+radiance up in an 8-slot palette riding in the CAGI uniform. It therefore cost
+the attribute volume nothing: no second array, no wider word, no new binding.
+Slot 0 is black, so a non-emitter needs no branch. An emissive SOLID pins its own
+radiance each iteration (so neighbours diffuse it outward); emissive THIN COVER
+injects on the air path like the sky term. `gi_params.w` became `emissive_scale`
+(runtime, 0-16, linear so 0 can mean lights-off), scaling the palette and the
+surface's own emission together. Levers: `CAGI_EMISSIVE` (default ON without a
+measured verdict — worldgen places no emitter, so it changes nothing until one
+is placed) and the scale.
+
+**PARKED 2026-07-31 at Pascal's request — on the list, not scheduled:** the
+dirty-region flood below. Edit→light latency is still E4's ~32-frame global
+re-flood; Pascal ran it and was **not bothered** by the lag, so the perf half
+waits for a reason to exist. Everything in the paragraph that follows is the
+still-valid measured design for when it does. Note the stage gate is only half
+met: "light bleeds around corners, zero noise" ✅, "edit→light latency number" ⬜.
+
+**Also found while tuning it:** a bright emitter **clips to flat white** rather
+than blooming, because the tonemap is Reinhard straight to an 8-bit sRGB target.
+Raising `emissive_scale` makes a light flatter, not brighter. This is a concrete
+new driver for **E7b's HDR intermediate** — the emissive scale cannot mean
+anything physical until it lands.
+
+
 Emission table per material; lantern place/remove (**E2's edit API + input are
 done** — `Brickmap::set_voxel`, the world thread, delta uploads, left/right click
 with hold-to-repeat, and the incremental distance-field update; E5 only adds the
@@ -548,11 +606,167 @@ sun slider and not for a placed lamp.
 **Gate:** place a lantern → warm light bleeds around corners, zero noise;
 edit→light latency number.
 
-### E6 — Water: reflections + refraction ⬜
-Fresnel-weighted reflect + Snell refract continuation rays on water voxels
-(reuse `trace`), absorption tint by traveled distance, underwater camera +
-Snell's window (sandbox reference look). After CAGI so secondary rays see GI.
-**Gate:** mirror at grazing angles, see-through steep, Snell's window from below.
+### E6 — Water: reflections + refraction 🔶 (implemented 2026-07-31, PULLED AHEAD of E5; **look gate FAILED, steps 1-3 landed**; being taken one step at a time at Pascal's request)
+
+**Gate result and the step plan.** Pascal's verdict on the first build: *"the
+looking up out of the water part is completely broken :)"*, plus *"snells is too
+strong for me personally"*, *"water shouldn't have a colour really"* and *"lets do
+one step at the time.. so i can test it and stop after every step"*. E6 is
+therefore being finished in numbered steps, each gated on its own:
+
+- **Step 1 — the flat field outside Snell's window. ✅ DONE, awaiting gate.** Past
+  the critical angle the ray totally internally reflects and nothing was added, so
+  with one interface of budget the whole mirrored region was ONE FLAT COLOUR — most
+  of the screen at any tilted upward view. Fixed with a cheap mirrored stand-in
+  (one march, cheap shading, no shadow ray / AO / light volume) at **40% of the
+  cost of a second full interface for a near-identical frame** — which also
+  demoted Beautiful from 2 interfaces to 1. Full tables and frames in the bench
+  doc's **E6 step 1** section. It also explains both taste complaints: the flat
+  field *is* the in-scatter colour, so the view read as uniformly tinted, and a
+  bright cone against a featureless surround reads as harsh.
+- **Step 2 — the medium model** (*"water blocks light coming in ... it self should
+  probably have a color it self really"*): replace albedo-as-volume-colour with a
+  per-material absorption/scattering PAIR so the colour is derived. **Already in
+  the tree** (it was written before the step split arrived) — see below.
+- **Step 3 — the surface from below becomes plainly transparent. ✅ DONE, awaiting
+  gate.** *"lets disable the fesel like camera looking up out of water for now
+  should be just transparent looking out and in .. only top should have the
+  reflection"*. New lever `WATER_UNDERWATER_INTERFACE`, shipped at `transparent`:
+  from inside the medium the interface is fully transmissive and **unbent**, with
+  only the path's absorption and scattering applied. The above-water side is
+  untouched. **Unbent is the only coherent reading**: total internal reflection is
+  not a separable effect, it *is* what Snell's law yields when
+  `sin(theta_transmitted) > 1`, so past the 48.607-degree critical angle there is no
+  transmitted direction to bend toward — keep the bend and there is nothing to draw
+  beyond the window. Accepted consequences: Snell's window disappears from below and
+  the surface becomes invisible from underneath; no substitute rim was added. It is
+  **cheaper as well as simpler** (−39% / −45% / −11% on the three views where the
+  mirrored stand-in used to fire, noise on the other two), and it makes
+  `WATER_BOUNCES` and `WATER_TIR_FALLBACK` inert — documented and greyed out rather
+  than left as dead dials. The physical `fresnel` interface stays a documented
+  off-lever, because the objection was to Snell's window *dominating* the view, not
+  to it existing, and wave normals or Quest may flip the verdict.
+- **Step 4 — the look levers** Pascal cannot dial today: the index of refraction
+  (the window-width dial, half-angle `asin(1/n)`) and the coefficient scales. Not
+  started as levers; the uniform slot exists and is pinned at the physical value.
+- **Step 5 — bench evidence hygiene**: fix the crop rectangles and add a guard that
+  fails the bench when a variant crop set is byte-identical. Not started.
+- **Owed regardless: a section-8 re-record.** A concurrent generation workstream
+  changed the world's dimensions mid-flight (`WORLD_SIZE_*` now reads 125/32/125
+  where every recorded baseline was taken against a 1000-voxel axis), so section 8's
+  absolute numbers no longer compare with the E6 or step-1 tables. Every step-3
+  verdict rests on within-run comparisons, which are unaffected; the tables want
+  re-recording once the generator settles, per the baseline-versioning rule.
+
+**A process failure worth recording, because it is the reason the gate failed on
+something the harness said was fine.** E6's underwater PNG claims were written from
+crop rectangles that do not contain what they are named for — all eight `f` crops
+are byte-identical across variants including `water_off`, and the `g` crop is
+identical across six of eight. Worse, the two underwater poses (straight up, dead
+sideways) **structurally cannot show the region that was broken**: at a 68° vertical
+FOV the frame reaches 34° off-axis vertically against a 48.6° critical angle, so
+looking up is almost entirely *inside* the window and looking sideways entirely
+outside it. Neither puts the rim in frame. A scenario at 45° of pitch (`I`) now
+does. **A crop is not evidence until it is confirmed to contain the thing being
+judged, and a scenario is not coverage until it is confirmed to contain the failure
+mode.**
+
+---
+
+#### E6 as first built (superseded in part by step 1 above)
+
+**Why it jumped the queue** (Pascal): *"until we have actual opacity in water I
+can't really debug and swim"* — E2b shipped walk/swim and the 5 m debug pool, and
+opaque water made both unjudgeable. Full tables, every verdict and the PNG
+findings in the bench doc's **E6** section; five registry rows under the new
+`Water` subsystem; new code `src/water.rs` + `shaders/water.wgsl`, with the
+composition in `dda.wgsl` and one new shared helper each in `world.wgsl`.
+
+- **The model, and every constant derived rather than tuned.** Fresnel via
+  Schlick with **`F0` = 0.0204 computed from the two indices of refraction**;
+  Snell in vector form with total internal reflection as the failure case
+  (**critical angle 48.607°**); Beer–Lambert extinction **per channel, per metre
+  (0.45, 0.12, 0.06)**, integrated over the path travelled *inside* the water, so
+  transmittance at the pool's 5 m is (0.105, 0.549, 0.741) — red gone, blue
+  intact, i.e. depth reads as colour. Each is checked on the CPU against a hand
+  computation (`src/water.rs` tests) rather than by eye.
+- **Index of refraction became a per-MATERIAL column, for zero bytes.** The
+  dossier records xima's own transparency target as *"water, oil, clouds and
+  honey"* — a material class, not a water special case — so `material.rs` grew
+  `index_of_refraction` in the GPU row's former pad word. Retrofitting it after
+  the Snell code was written would have been far more work.
+- **Cost (bench section 8, over the island + the debug pool):** full optics is
+  **+2.40 ms** on a grazing shore view and **+4.64 ms** on the aerial view with
+  the most water (14.4% of the frame). The **zero-ray Fresnel tint** tier is
+  **+0.36–0.74 ms** and still reads as water with a sun glint, which is what
+  Potato and Quest ship. Reflection is the expensive half at grazing angles,
+  refraction at steep ones — both track the screen share of what they have to
+  *shade*, since every secondary hit goes through the full path (sun, shadow ray,
+  AO, CAGI) as the experiment required.
+- **The finding that changed the design: liquids must not shadow the sun.** With
+  water drawn as a medium but shadow rays still stopping on it, every submerged
+  surface is in shadow, so the top-down lakes came out **dark navy where opaque
+  water had been bright cyan** — refraction made shallow water *worse*.
+  `WATER_SUN_THROUGH_LIQUID` fixes it in the shared `trace_shadow_visibility`, so
+  **E4's CA pass inherits it too** and the light volume lights under water. It is
+  the most expensive thing in E6 and the cost is concentrated in one view:
+  **+77% on a horizontal underwater view** (a shadow ray that no longer stops at
+  the surface walks metres of water voxel by voxel), +8% aerial, noise elsewhere.
+  Hence a lever, on where water is drawn properly.
+- **Recursion budget: 1 interface.** Above water a second interface is **free**
+  (inside noise, because a refracted ray that reaches the bed never asks for one);
+  from inside the water it is expensive. **Step 1 corrected the conclusion drawn
+  from that:** the second interface only looked necessary because the region outside
+  Snell's window had nothing but a flat constant in it, and the cheap stand-in puts
+  geometry there for 40% of the price — so Beautiful dropped back to 1 too.
+- **One optimization worth its row: the Fresnel ray cutoff** (runtime,
+  `water_params.z` = 0.04). Fresnel already says what each half of a water pixel
+  is worth, so a term below the threshold takes its analytic stand-in instead of a
+  ray: **−7.1%** on the steep aerial view, where `full` then costs the same as
+  `refraction-only`.
+- **In-scatter needed a correction, recorded because it is the difference between
+  water and a black hole.** The absorbed share is replaced by the liquid's albedo
+  lit by the **downwelling irradiance** (sun × elevation cosine + sky). With the
+  sky term alone the body radiance was (0.003, 0.044, 0.134) against a sunlit
+  surface's 2.2 and a horizontal underwater view rendered near-black.
+- **Underwater is one condition, not two.** The shader tests the primary ray's own
+  origin, so it is true for E2b's submerged head *and* for a fly camera under the
+  surface; `water::eye_is_submerged` is the CPU mirror, and
+  `the_two_underwater_predicates_agree` pins it against
+  `CharacterController::head_submerged` through a dive. That test **found a real
+  one-substep lag** in E2b's published flag (each substep sampled at its start,
+  so the flag described the pose the last substep began at) — fixed by
+  re-sampling after the substep loop, three voxel reads per frame.
+- **What the PNGs show:** Snell's window reads correctly (the whole upper
+  hemisphere — sky, sun glow, the shore's trees — compressed into a cone with the
+  trees crowding its rim); a grazing pool returns a sharp mirror of trees, rocks
+  and sky and goes see-through toward its far edge; the horizontal underwater view
+  is a blue-green fog thickening with distance. **Known flatness with a known
+  cause:** E4 marks a cell absorbing at a quarter fill, so cells inside a body of
+  water hold zero light and a submerged surface gets only the 25% GI ambient
+  floor — the in-scatter is what keeps it readable, and fixing it properly is a
+  CAGI-transport question (E5/B6).
+- **Balanced's cost, stated plainly:** the ground views hold (7.59 ms default sun,
+  9.06 low sun) but the two AERIAL views are now **11.1 / 14.9 ms**, so E6 is the
+  first experiment to put Balanced clearly over the ~8 ms target from 60 m. It is
+  screen share, not inefficiency, and all three levers to close it are measured.
+- **No baseline below E6 moved.** `trace`/`trace_brick` grew a `skip_liquids`
+  parameter and it measured **free** (section 1: 4.709 / 6.609 / 4.385 / 4.937 vs
+  the recorded 4.723 / 6.530 / 4.379 / 4.918, pixel gate still **19 / 0**), and
+  section 8 runs over its own carved brickmap so the island every other section
+  measures is untouched. Section 4 *did* move (Balanced ships water) and is
+  re-recorded.
+- **Also shipped here, at Pascal's direction — "to the EDITOR, water IS air".**
+  One shared predicate (`material::material_is_empty_for_edits`) that the whole
+  edit path routes through, so a click into a pond lands on the bed either way:
+  removing takes the bed voxel, placing puts the block in the water cell against
+  it and displaces the water. That is what makes *"place a light in a submerged
+  niche"* the same click as placing one in a cave. Water itself is still never
+  removable — it is not a block.
+**Gate (Pascal, in-app):** mirror at grazing angles, see-through when steep,
+Snell's window from below — and does the pool now read as something you can judge
+a swim in? *(First build: FAILED on the upward view — see the step plan at the top
+of this entry.)*
 
 ### E7 — Look pass ⬜ (Pascal's wishlist, 2026-07-30, after the E4 gate)
 His words: *"things that are missing to judge better are for sure things like
@@ -588,6 +802,138 @@ existing shading path; each a registry row. Biggest look-per-ms in the plan.
 
 **Gate:** screenshot-worthy still — the Voxile mood; day/night cycle runs
 without hitching CAGI.
+
+### E10 — Specular reflections + temporal reprojection ⬜ (Pascal, 2026-07-31)
+*Ladder position: after E7, before E8/E9. Numbered 10 because 8 and 9 were
+scheduled first and are referenced elsewhere (same convention as B3 → E2b).*
+
+Pascal's ask, in his own comparison order: **roughness 0% / roughness 20% /
+roughness 80% / reflections disabled**, with *stable* temporal reprojection.
+Today none of that exists: `roughness` and `specular` are authored on all 26
+material rows and read by nothing (`material.rs`'s table calls this slot F2),
+the only mirror in the engine is E6's water branch, and there is **zero**
+temporal machinery — no history texture, no previous-frame camera, no jitter.
+`dda.wgsl`'s "noiseless identity (no temporal accumulation, no per-frame
+randomness)" is a deliberate property of the shading pass, and this stage is the
+first thing that spends it. It also **reverses a Non-goal** (see below).
+
+**What E6 already gives us, for free.** `shade_secondary` is the terminal for
+every secondary hit — full sun + shadow ray + AO + CAGI — with the recursion
+stop for liquids, and `shadow_ray_origin`'s integer-anchored reconstruction is
+what keeps a secondary ray acne-free at large `t`. A general specular ray reuses
+both verbatim. The ray half of this stage is therefore nearly written; what E10
+actually adds is **which direction to trace** and **how one sample per pixel
+becomes a readable image**.
+
+**Ordering: this stage wants E7b's HDR intermediate first.** The storage texture
+is `Rgba8Unorm` holding *tonemapped, sRGB-encoded* bytes, and accumulating a
+history in that space bands the tail of the exponential filter and clamps
+exactly the blown sun glint that makes a mirror read as a mirror. Two ways out:
+land E10 after E7b (recommended), or have E10 carry its own linear
+`rgba16float` reflection + history pair, which is a slice of E7b done early.
+**E10b (mirror) is exempt** — it composites inside the shading pass before the
+tonemap and needs neither HDR nor history, so it can be pulled forward next to
+E6 if the look is wanted sooner.
+
+**E10a — G-buffer + reprojection infrastructure (pulls backlog B12 in).**
+The DDA pass writes a second storage texture: hit world position (or view
+depth), packed normal, material id. Reprojection is **matrix-free in our camera
+model** — with the previous frame's `CameraUniform` (position, `forward`,
+`right_scaled`, `up_scaled`) a world point `p` maps to the previous NDC by
+solving `p - position = forward + x*right_scaled + y*up_scaled`, i.e. one 3x3
+inverse of the basis `[right_scaled, up_scaled, forward]` uploaded per frame. No
+projection matrices need to be introduced and the camera stays
+windowing-independent (VR: one inverse per eye). **No motion vectors**: the
+world is static between edits, so camera motion IS the reprojection, and an edit
+invalidates history in its region through the seam `WorldDelta` already
+provides (the same touched-cell list E5's regional flood uses). Unlocks E7b's
+depth of field and E1's rejected half-res AO as a side effect.
+Estimate: +0.1–0.3 ms for the extra store; measured as its own bench row before
+anything reads it.
+
+**E10b — mirror (roughness 0), inside the shading pass, no history.**
+One `trace` along `reflect(direction, normal)` per pixel whose material passes
+the specular mask, terminal `shade_secondary`, composited with a Schlick Fresnel
+built from the material's own `specular`/F0 — the identical weight water already
+computes. Deterministic and noiseless, so the 0% row of Pascal's comparison
+needs no reprojection at all. **E6's `water_surface_radiance` mirror branch
+becomes a call into this shared `specular_radiance`**, so there is one specular
+path in the engine rather than two that drift.
+Cost anchor: E1's clean ladder measured **2.25–3.55 ms per marginal full-res
+*short* (16-voxel) secondary ray**; a reflection ray is unbounded, so budget
+worse per traced pixel and buy it back with (i) the **specular mask** — on
+today's authored table that is water alone (roughness 0.05 / specular 0.02),
+every solid row being a placeholder 0.60 / 0.03–0.04 — and (ii) a
+`ReflectionMaxDistance` lever, with the chebyshev distance-skip doing the rest.
+Bench rows: full-res masked, half-res masked, and **unmasked (the ceiling)**.
+
+**E10c — the roughness lobe + temporal accumulation (the actual ask).**
+One sample per pixel from a GGX/cosine-power lobe around the mirror direction,
+widened by `materials[hit].roughness`, drawn from a low-discrepancy sequence
+(R2/Halton) offset by frame index and hashed per pixel. One spp of a 20% lobe is
+noise; the history is what makes it an image:
+- exponential accumulation into the reprojected history, alpha as a lever
+  (start ~0.1, a ~10-frame window = ~80 ms at 120 fps);
+- **rejection** on: reprojected pixel off-screen; world-position mismatch beyond
+  a depth-relative threshold (disocclusion); normal dot below threshold;
+  material id changed; a world edit touching the region; a camera cut
+  (teleport, walk/fly switch);
+- **neighborhood clamp** to the current frame's 3x3 mean ± k·sigma, which is what
+  kills the ghosting the rejection tests miss;
+- accumulation lives **in the reflection buffer only**, never over the whole
+  frame. The primary shading path keeps its noiseless identity, a still camera
+  stays bit-stable outside reflective pixels, and the S2/E1 pixel-diff gates keep
+  working.
+- **`ReflectionRoughness` override lever with exactly Pascal's four rungs —
+  0% / 20% / 80% / off** — forcing one roughness globally so the A/B compares the
+  *technique* and not the authored table; the shipped path reads the material.
+
+**E10d — spatial filter + half-res.** Roughness-scaled cross-bilateral blur
+guided by the E10a G-buffer, so 80% resolves without a 100-frame window; plus a
+half-res reflection buffer with bilateral upsample (the machinery B12 wanted).
+Both levers, both with numbers.
+
+**E10e — the honesty pass.** Amend `dda.wgsl`'s noiseless-identity comment, the
+Non-goals line, and `material.rs`'s table (`roughness`/`specular`: "authored,
+unread" → live). Then **re-author the roughness column**: a uniform 0.60 across
+every solid was a placeholder written when nothing read it, and E10 is the first
+stage that can see it is wrong.
+
+**Levers** (new `LeverSubsystem::Reflections`, one registry row each):
+`ReflectionMode` (off / mirror / glossy), `ReflectionRoughnessOverride`
+(0 / 20 / 80 / material), `ReflectionMaxDistance`, `ReflectionSpecularThreshold`
+(the mask), `ReflectionHalfRes`, `ReflectionSpatialFilter` — all `ShaderConst`;
+`ReflectionHistoryAlpha`, `ReflectionRejectNormal`, `ReflectionRejectPosition`,
+`ReflectionNeighborhoodClamp` — all `Runtime`, riding a new `reflection_params`
+vec4 on `LightingUniform`, same shape as `water_params`.
+
+**Bench section 9** (own scenario: the E2b debug pool plus a placed reflective
+block set, so its numbers deliberately do not compare with sections 1–8). The
+four roughness rows x {full-res, half-res} x {temporal on, off}, the
+reprojection pass measured on its own, and **two metrics that are not
+milliseconds**, because "stable" is the requirement and the overlay cannot judge
+it: frame-to-frame mean absolute pixel delta over a *scripted* camera orbit
+(crawl/shimmer), and frames-to-converge after a forced disocclusion.
+
+**Gate:** (1) the four rows switched in-app in Pascal's order; (2) scripted
+orbit: temporal MAD under threshold with no visible crawl, and ghosting behind
+the walking body's silhouette gone within N frames; (3) `ReflectionMode::Off`
+**pixel-identical** to E7's output (isolation rule); (4) Balanced stays ≤ ~8 ms
+at render scale 1.0 with the shipped reflection tier — or the shipped tier is
+half-res and that is what gets recorded.
+
+**Risks, written down now:**
+- **Quest (E9).** Reprojection is per-eye at head motion rates; ghosting is far
+  more visible in an HMD and a 10-frame window at 72 Hz is 140 ms. Expect the
+  Quest verdict to be *mirror only, history off* — which is why E10b is built to
+  stand without E10c.
+- **Budget.** Balanced is 5.0–7.2 ms today. A masked full-res mirror is
+  affordable; an unmasked one is not, and the bench must show both.
+- **Water double-count.** E6's Fresnel mix and E10's specular weight must be ONE
+  weight, resolved in E10b, or water reflects twice.
+- **Every later look judgement** is made against a renderer that now has a
+  temporal component — E7's gate should land first for exactly the reason E7
+  itself gives.
 
 ### E8 — Audio bridge (can be pulled earlier on request) ⬜
 `VoxelDdaResolver` in atrium: CPU DDA over the occupancy mirror → direct +
@@ -643,10 +989,48 @@ fly camera fills today. **Gate:** runs on Quest 3.
 - **B10 Procedural vegetation growth** (vines/berries as growth rules;
   VoxelChain rule-table style; needs E3).
 - **B11 Gameplay layer** (inventory/items — out of engine scope for now).
-- **B12 SSAO + G-buffer** (deferred out of E1b 2026-07-30): depth+normal
-  G-buffer, bilateral upsample — unlocks half-res effects generally. Revisit
-  after E4 once CAGI's own occlusion contribution is measured.
+- ~~**B12 SSAO + G-buffer**~~ (deferred out of E1b 2026-07-30) → **pulled into
+  E10a** (2026-07-31): the depth+normal G-buffer and the bilateral upsample are
+  E10's reprojection infrastructure, so they get built there and the SSAO
+  question is what remains of this slot once E10 has paid for the buffer.
+- **B13 Voxel-face filtering / face cache** (parked 2026-07-31 at Pascal's
+  request — on the list, deliberately not scheduled). From the dossier's
+  second-hand intel: xima denoises AO and reflections with a **voxel-face
+  blurring filter**, i.e. filtering in face space rather than screen space, so
+  the blur cannot cross a silhouette and needs no depth/normal edge-stopping
+  weights. Two sizes:
+  - **F0 — face-id edge-stopping.** A screen-space blur whose taps are rejected
+    unless they share the hit's `(voxel, face)`. Exact integer edge-stopping
+    instead of heuristics. The key is already free: `dda.wgsl`'s integer face
+    frame (built for analytic corner AO) IS the id.
+  - **F1/F2 — persistent `(voxel, face)` cache.** The real prize, and NOT an AO
+    feature: it is an *amortization substrate*. Every stochastic term in
+    voxel-rt is currently forced to be noise-free per pixel per frame because
+    there is no history — which is why analytic AO won E1 and why shadows are
+    one hard ray. Best consumers, in order: **soft shadows** (the sun is static
+    between re-floods, so accumulation converges and stays valid, and the
+    `CAGI_SUN_CACHE` invariant is the same trick one level coarser);
+    **CAGI sub-voxel gather** (surfaces scale N², volumes N³ — the right way
+    past the 0.5 m / 33 MB vs 0.25 m / 258 MB wall, and probably what xima's
+    "voxel scale, not sub-voxel — at least for now" hedge is dancing around);
+    then **glossy reflections**.
+  - **Scheduling note:** F0's stated blocker was that the DDA pass writes final
+    sRGB with no G-buffer and no history — but **E10a builds exactly that**, so
+    this rides E10a rather than paying for its own frame-graph change. Do not
+    schedule it before E10a.
+  - **Honest caveat:** AO is the *weakest* consumer despite being the headline.
+    Analytic corner AO is ~20x cheaper and noiseless, and now that E4 CAGI does
+    the medium-scale occlusion, ray AO's remaining job keeps shrinking. The
+    filter buys quality on terms we have not built yet, not cost on the one we
+    have.
 
 ## Non-goals (still)
 Monte Carlo path tracing, meshes of any kind, Bevy interop in voxel-rt,
-hardware RTX, temporal denoisers. voxel-sandbox stays untouched.
+hardware RTX. voxel-sandbox stays untouched.
+
+**Amended 2026-07-31 (Pascal):** *temporal denoisers* left this list. E10 asks
+for glossy reflections with stable temporal reprojection, and a roughness lobe
+at one sample per pixel is unreadable without a history. The amendment is
+narrow: temporal accumulation is confined to E10's reflection buffer, and the
+primary shading path keeps the noiseless, per-frame-deterministic identity that
+made the rule worth having.

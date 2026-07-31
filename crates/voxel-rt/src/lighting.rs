@@ -48,6 +48,8 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 48     | `ground_ambient`      | `vec4<f32>` | rgb = linear ground bounce, w = unused |
 /// | 64     | `shading_params`      | `vec4<f32>` | the runtime quality knobs — see [`ShadingParams`] |
 /// | 80     | `gi_params`           | `vec4<f32>` | the runtime CAGI knobs — see [`GiParams`] |
+/// | 96     | `water_params`        | `vec4<f32>` | the runtime E6 water knobs — see [`WaterParams`] |
+/// | 112    | `water_optics`        | `vec4<f32>` | the E6 water look knobs — see [`WaterParams`] |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -58,6 +60,8 @@ pub struct LightingUniform {
     pub ground_ambient: [f32; 4],
     pub shading_params: [f32; 4],
     pub gi_params: [f32; 4],
+    pub water_params: [f32; 4],
+    pub water_optics: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -112,8 +116,10 @@ pub struct GiParams {
     pub ambient_floor: f32,
     /// `z` — share of the sun's radiance a sunlit surface injects into the volume.
     pub sun_bounce: f32,
-    /// `w` — unused, reserved for E5's emissive scale.
-    pub reserved: f32,
+    /// `w` — E5's emissive scale: a multiplier on every emitter's authored
+    /// radiance, so a placed light can be dimmed without re-authoring the
+    /// material table.
+    pub emissive_scale: f32,
 }
 
 impl GiParams {
@@ -122,8 +128,51 @@ impl GiParams {
             self.strength,
             self.ambient_floor,
             self.sun_bounce,
-            self.reserved,
+            self.emissive_scale,
         ]
+    }
+}
+
+/// The RUNTIME water knobs (E6), packed into `Lighting.water_params`. The
+/// compile-time water levers (the optics mode and the bounce budget) are shader
+/// consts instead — see [`crate::water`], which also owns the physical constants
+/// these two knobs scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterParams {
+    /// `water_params.x` — multiplier on the medium's per-metre **absorption**
+    /// coefficients: light the water destroys. The clarity/darkening axis.
+    /// 1.0 = the authored coefficients.
+    pub absorption_scale: f32,
+    /// `water_params.y` — multiplier on the medium's per-metre **scattering**
+    /// coefficients: light the water redirects, and therefore the light a ray picks
+    /// up along its path. The brightness axis, and (with absorption) what the
+    /// medium's colour is derived FROM. 0 makes the depths go black.
+    pub scattering_scale: f32,
+    /// `water_params.z` — the E6 ray cutoff: the smallest Fresnel weight worth a
+    /// secondary ray. Below it the cheap analytic stand-in is substituted, so a
+    /// head-on water pixel does not pay a full traced mirror for 2% of its colour.
+    pub ray_cutoff: f32,
+    /// `water_params.w` — unused, reserved for B6's fluid flow.
+    pub reserved_flow: f32,
+    /// `water_optics.x` — how far the medium's authored index of refraction is
+    /// pulled toward 1.0, i.e. how WIDE Snell's window is (half-angle
+    /// `asin(1 / n)`). 1.0 is the physical index and the shipped value; E6 step 3
+    /// exposes it as a registry lever so it can be dialled in-app.
+    pub refraction_strength: f32,
+}
+
+impl WaterParams {
+    fn to_array(self) -> [f32; 4] {
+        [
+            self.absorption_scale,
+            self.scattering_scale,
+            self.ray_cutoff,
+            self.reserved_flow,
+        ]
+    }
+
+    fn optics_to_array(self) -> [f32; 4] {
+        [self.refraction_strength, 0.0, 0.0, 0.0]
     }
 }
 
@@ -177,6 +226,7 @@ impl SunSettings {
         &self,
         shading_params: ShadingParams,
         gi_params: GiParams,
+        water_params: WaterParams,
     ) -> LightingUniform {
         let sun_direction = self.sun_direction();
         LightingUniform {
@@ -197,6 +247,8 @@ impl SunSettings {
             ],
             shading_params: shading_params.to_array(),
             gi_params: gi_params.to_array(),
+            water_params: water_params.to_array(),
+            water_optics: water_params.optics_to_array(),
         }
     }
 }
@@ -205,20 +257,13 @@ impl SunSettings {
 mod tests {
     use super::*;
 
-    #[test]
-    fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 96);
-        assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
-    }
-
-    /// The E4 knobs must land in their own slots of `gi_params` — swapping two
-    /// would make the GI strength slider control the sun bounce fraction.
-    #[test]
-    fn gi_params_keep_their_vector_components() {
-        let uniform = SunSettings::default().lighting_uniform(
+    /// Every runtime knob vector, in one uniform, so the component-order tests
+    /// below all read the same construction.
+    fn probe_uniform(shadow_penumbra_scale: f32) -> LightingUniform {
+        SunSettings::default().lighting_uniform(
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
-                shadow_penumbra_scale: 115.0,
+                shadow_penumbra_scale,
                 ambient_occlusion_fade_start_voxels: 240.0,
                 ambient_occlusion_fade_end_voxels: 480.0,
             },
@@ -226,11 +271,42 @@ mod tests {
                 strength: 1.0,
                 ambient_floor: 0.25,
                 sun_bounce: 0.35,
-                reserved: 0.0,
+                emissive_scale: 0.0,
             },
-        );
+            WaterParams {
+                absorption_scale: 1.0,
+                scattering_scale: 1.0,
+                ray_cutoff: 0.04,
+                reserved_flow: 0.0,
+                refraction_strength: 1.0,
+            },
+        )
+    }
+
+    #[test]
+    fn uniform_layout_is_gpu_ready() {
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 128);
+        assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
+    }
+
+    /// The E4 knobs must land in their own slots of `gi_params` — swapping two
+    /// would make the GI strength slider control the sun bounce fraction.
+    #[test]
+    fn gi_params_keep_their_vector_components() {
+        let uniform = probe_uniform(115.0);
         assert_eq!(uniform.gi_params, [1.0, 0.25, 0.35, 0.0]);
         // ...and the E1 knobs must be untouched by the new vector.
+        assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
+    }
+
+    /// E6: the water knobs must land in their own slots too, and must not
+    /// disturb the two vectors that were already there.
+    #[test]
+    fn water_params_keep_their_vector_components() {
+        let uniform = probe_uniform(115.0);
+        assert_eq!(uniform.water_params, [1.0, 1.0, 0.04, 0.0]);
+        assert_eq!(uniform.water_optics, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(uniform.gi_params, [1.0, 0.25, 0.35, 0.0]);
         assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
     }
 
@@ -239,21 +315,7 @@ mod tests {
     /// control the penumbra width.
     #[test]
     fn shading_params_keep_their_vector_components() {
-        let uniform = SunSettings::default().lighting_uniform(
-            ShadingParams {
-                ambient_occlusion_strength: 0.8,
-                shadow_penumbra_scale: 4.0,
-                ambient_occlusion_fade_start_voxels: 240.0,
-                ambient_occlusion_fade_end_voxels: 480.0,
-            },
-            GiParams {
-                strength: 1.0,
-                ambient_floor: 0.25,
-                sun_bounce: 0.35,
-                reserved: 0.0,
-            },
-        );
-        assert_eq!(uniform.shading_params, [0.8, 4.0, 240.0, 480.0]);
+        assert_eq!(probe_uniform(4.0).shading_params, [0.8, 4.0, 240.0, 480.0]);
     }
 
     #[test]

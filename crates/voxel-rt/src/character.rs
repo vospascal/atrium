@@ -400,6 +400,15 @@ impl CharacterController {
         for _ in 0..substeps {
             self.integrate_substep(brickmap, input, substep_seconds);
         }
+        // Re-sample AFTER the last substep (E6, 2026-07-31). Each substep samples
+        // at its START — it has to, because the submersion state drives that
+        // substep's speed and buoyancy — which left the PUBLISHED flags describing
+        // the pose the last substep began at rather than the pose the frame is
+        // rendered from. E6 tests the primary ray's own origin, so a one-substep
+        // lag makes `head_submerged` disagree with the picture at the surface
+        // crossing; `the_two_underwater_predicates_agree` catches it. Three voxel
+        // reads per frame.
+        self.update_submersion(brickmap);
     }
 
     /// Mouse delta -> yaw/pitch. Identical convention to the fly camera, so a
@@ -1360,6 +1369,72 @@ mod tests {
             "a resting swimmer's eye must be clear of the water: eye {:.3} m, surface {:.3} m",
             body.eye_position().y,
             water_surface
+        );
+    }
+
+    /// E6 — the two underwater predicates must agree wherever both apply.
+    ///
+    /// [`CharacterController::head_submerged`] is E2b's body-state flag (sampled
+    /// from the body's own eye height during the movement step);
+    /// [`crate::water::eye_is_submerged`] is E6's view-state test, asked of an
+    /// arbitrary eye position so it also answers for the fly camera. They are
+    /// different code reading the same world, and the underwater view would be
+    /// wrong in walk mode if they disagreed — so: dive in the test pool and assert
+    /// they track each other frame by frame, through the surface crossing in both
+    /// directions.
+    /// NOTE: generates the full world — run with `--release`.
+    #[test]
+    fn the_two_underwater_predicates_agree() {
+        let mut brickmap = island();
+        let pool = carve_test_pool(&mut brickmap);
+        let mut body = standing_body(&brickmap, pool.centre_voxel_x + 28, pool.centre_voxel_z, PI);
+
+        let diving = CameraInput {
+            forward: true,
+            down: true,
+            ..CameraInput::default()
+        };
+        let mut saw_submerged = false;
+        let mut saw_dry = false;
+        for step in 0..600 {
+            // Walk in and dive for the first half, swim back up for the second, so
+            // the surface is crossed in both directions.
+            let input = if step < 400 {
+                diving
+            } else {
+                CameraInput {
+                    up: true,
+                    ..CameraInput::default()
+                }
+            };
+            body.step(&brickmap, &input, 1.0 / 60.0);
+            let by_body = body.head_submerged();
+            let by_view = crate::water::eye_is_submerged(&brickmap, body.eye_position());
+            assert_eq!(
+                by_body,
+                by_view,
+                "step {step}: the body says head_submerged = {by_body} but the view says \
+                 {by_view}, eye at {:?}",
+                body.eye_position()
+            );
+            saw_submerged |= by_body;
+            saw_dry |= !by_body;
+        }
+        assert!(
+            saw_submerged && saw_dry,
+            "the dive never crossed the surface: submerged {saw_submerged}, dry {saw_dry}"
+        );
+
+        // The view predicate must also answer for an eye the body could never have
+        // — the fly-mode case, which is the whole reason it takes a position.
+        let deep = pool.surface_centre() - Vec3::Y * 2.0;
+        assert!(
+            crate::water::eye_is_submerged(&brickmap, deep),
+            "a fly camera 2 m under the pool's surface must read as underwater"
+        );
+        assert!(
+            !crate::water::eye_is_submerged(&brickmap, pool.surface_centre() + Vec3::Y * 2.0),
+            "a fly camera 2 m above the pool must not"
         );
     }
 

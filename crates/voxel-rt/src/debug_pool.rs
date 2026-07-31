@@ -1,4 +1,6 @@
-//! E2b **test tool** — a swimmable pool carved into the world at runtime.
+//! **Test tools** that write water into the world at runtime: [`WaterPool`], a
+//! swimmable bowl carved into terrain (E2b), and [`WaterBlob`], a free-standing
+//! body hanging in open air (E6's isolated optics target).
 //!
 //! Not a stage and not a lever: a debug affordance. The generated island's water
 //! is 0.6–1.75 m deep, all of it under the 1.44 m the body needs before it
@@ -17,7 +19,7 @@
 //!   would leave a dry pit. The carve therefore *writes water* up to
 //!   [`WATER_LEVEL`] rather than removing bed voxels and hoping.
 //!
-//! ## The shape
+//! ## The pool's shape
 //!
 //! A round bowl with a graded shore, so you can WALK in and cross the
 //! wade → swim threshold on foot instead of falling off a ledge:
@@ -42,9 +44,10 @@
 //! stroll back out is not.)
 
 use glam::Vec3;
-use voxel_core::world::{Voxel, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::{Voxel, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 use crate::brickmap::Brickmap;
+use crate::material::material_is_empty_for_edits;
 use crate::world_edit::{BulkEdit, VoxelSpan};
 
 /// Water depth at the pool's centre, meters — 3.5x the 1.44 m swim threshold, so
@@ -81,6 +84,17 @@ impl WaterPool {
             direction = Vec3::X;
         }
         WaterPool::at_position(eye_position + direction * POOL_DISTANCE_AHEAD_METERS)
+    }
+
+    /// Centre the pool on the COLUMN of the voxel the crosshair is on — the same
+    /// place a click edits. The voxel's height is discarded on purpose: the bowl's
+    /// depth is measured from [`WATER_LEVEL`], so only its column matters.
+    pub fn at_voxel(voxel: [i32; 3]) -> WaterPool {
+        let margin = (POOL_RADIUS_METERS / VOXEL_SIZE).ceil() as i32 + 1;
+        WaterPool {
+            centre_voxel_x: voxel[0].clamp(margin, WORLD_SIZE_X as i32 - 1 - margin),
+            centre_voxel_z: voxel[2].clamp(margin, WORLD_SIZE_Z as i32 - 1 - margin),
+        }
     }
 
     /// Centre the pool on a world position, clamped so the whole bowl stays
@@ -209,6 +223,140 @@ impl BulkEdit for WaterPool {
     }
 }
 
+/// Radius of the free-standing body, meters — the pool's own water radius, so
+/// `Shift+P` spawns *the same size water* `P` carves.
+pub const BLOB_RADIUS_METERS: f32 = POOL_WATER_RADIUS_METERS;
+/// Height, meters — the pool's depth, for the same reason.
+pub const BLOB_HEIGHT_METERS: f32 = POOL_DEPTH_METERS;
+/// Where a blob lands when the crosshair hits nothing (aimed at open sky). Three
+/// radii out: far enough to see the whole body against the sky, near enough to
+/// walk to.
+pub const BLOB_DISTANCE_AHEAD_METERS: f32 = BLOB_RADIUS_METERS * 3.0;
+
+/// A free-standing body of water, centred on a voxel — the isolated test object
+/// for the E6 water optics.
+///
+/// The pool is the wrong instrument for judging refraction: it is a bowl sunk
+/// into terrain, so every ray that crosses its surface lands on a lit bed a few
+/// metres below, and the bed's own shading is mixed into every judgement about
+/// the water. A body hanging in open air has *sky* behind it instead, which is
+/// the clean read — and you can walk straight through it, because water does not
+/// block movement.
+///
+/// Two rules make it safe to fire anywhere:
+///
+/// - **It only fills what is already empty.** Air and liquid are overwritten,
+///   terrain never is (the plan's "you expect to dig the earth but not the water"
+///   rule, applied to a tool that *writes*). Aim at a hillside and the water
+///   wraps the hill instead of eating it.
+/// - **Nothing makes water flow yet** (backlog B6), so a blob spawned in mid-air
+///   simply hangs there. That is the point rather than a defect: a cube of water
+///   in the sky is the cheapest possible refraction test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaterBlob {
+    pub centre_voxel_x: i32,
+    pub centre_voxel_y: i32,
+    pub centre_voxel_z: i32,
+}
+
+impl WaterBlob {
+    /// Centre the body on the voxel the crosshair is on — the same place a click
+    /// edits, which is the whole point of the trigger.
+    pub fn at_voxel(voxel: [i32; 3]) -> WaterBlob {
+        let horizontal_margin = (BLOB_RADIUS_METERS / VOXEL_SIZE).ceil() as i32 + 1;
+        let vertical_margin = (BLOB_HEIGHT_METERS / VOXEL_SIZE).ceil() as i32 + 1;
+        WaterBlob {
+            centre_voxel_x: voxel[0].clamp(
+                horizontal_margin,
+                WORLD_SIZE_X as i32 - 1 - horizontal_margin,
+            ),
+            centre_voxel_y: voxel[1]
+                .clamp(vertical_margin, WORLD_SIZE_Y as i32 - 1 - vertical_margin),
+            centre_voxel_z: voxel[2].clamp(
+                horizontal_margin,
+                WORLD_SIZE_Z as i32 - 1 - horizontal_margin,
+            ),
+        }
+    }
+
+    /// Where the body goes when the crosshair hit nothing. Unlike the pool this
+    /// keeps PITCH: looking up at open sky is exactly how you ask for a body of
+    /// water hanging in the air, so throwing the pitch away would defeat the tool.
+    pub fn in_front_of(eye_position: Vec3, forward: Vec3) -> WaterBlob {
+        let direction = forward.normalize_or_zero();
+        let centre = eye_position + direction * BLOB_DISTANCE_AHEAD_METERS;
+        WaterBlob::at_voxel([
+            (centre.x / VOXEL_SIZE).floor() as i32,
+            (centre.y / VOXEL_SIZE).floor() as i32,
+            (centre.z / VOXEL_SIZE).floor() as i32,
+        ])
+    }
+
+    /// World position of the body's centre — what the trigger logs.
+    pub fn centre(&self) -> Vec3 {
+        Vec3::new(
+            (self.centre_voxel_x as f32 + 0.5) * VOXEL_SIZE,
+            (self.centre_voxel_y as f32 + 0.5) * VOXEL_SIZE,
+            (self.centre_voxel_z as f32 + 0.5) * VOXEL_SIZE,
+        )
+    }
+}
+
+impl BulkEdit for WaterBlob {
+    /// One span per unobstructed RUN in each column of the disc, so terrain
+    /// inside the body's volume survives and the water closes around it.
+    ///
+    /// Runs rather than one span per column because a column may be interrupted
+    /// more than once — a branch, an overhang, a boulder — and a single span
+    /// would have to either stop at the first obstruction or write straight
+    /// through it.
+    fn spans(&self, brickmap: &Brickmap) -> Vec<VoxelSpan> {
+        let radius_voxels = (BLOB_RADIUS_METERS / VOXEL_SIZE).ceil() as i32;
+        let half_height_voxels = (BLOB_HEIGHT_METERS / VOXEL_SIZE * 0.5).round() as i32;
+        let lowest_voxel_y = (self.centre_voxel_y - half_height_voxels).max(0);
+        let highest_voxel_y =
+            (self.centre_voxel_y + half_height_voxels).min(WORLD_SIZE_Y as i32 - 1);
+        let mut spans = Vec::new();
+        for z in self.centre_voxel_z - radius_voxels..=self.centre_voxel_z + radius_voxels {
+            for x in self.centre_voxel_x - radius_voxels..=self.centre_voxel_x + radius_voxels {
+                let offset_x = (x - self.centre_voxel_x) as f32 * VOXEL_SIZE;
+                let offset_z = (z - self.centre_voxel_z) as f32 * VOXEL_SIZE;
+                if (offset_x * offset_x + offset_z * offset_z).sqrt() > BLOB_RADIUS_METERS {
+                    continue;
+                }
+                let mut run_start: Option<i32> = None;
+                for y in lowest_voxel_y..=highest_voxel_y {
+                    if material_is_empty_for_edits(brickmap.get(x, y, z)) {
+                        run_start.get_or_insert(y);
+                    } else if let Some(y_from) = run_start.take() {
+                        spans.push(VoxelSpan {
+                            x,
+                            z,
+                            y_from,
+                            y_to: y - 1,
+                            material: Voxel::Water,
+                        });
+                    }
+                }
+                if let Some(y_from) = run_start {
+                    spans.push(VoxelSpan {
+                        x,
+                        z,
+                        y_from,
+                        y_to: highest_voxel_y,
+                        material: Voxel::Water,
+                    });
+                }
+            }
+        }
+        spans
+    }
+
+    fn label(&self) -> &'static str {
+        "free-standing water body"
+    }
+}
+
 /// Hermite ramp, flat at both ends — the reason the bowl has no lip to trip over
 /// and no cliff at the waterline.
 fn smoothstep(fraction: f32) -> f32 {
@@ -240,6 +388,95 @@ mod tests {
             &WorldEditSettings::default(),
         )
         .expect("carving a pool into the island changes something")
+    }
+
+    /// The blob's one safety rule: it FILLS, it never excavates. Every voxel it
+    /// writes must have been empty-for-edits (air or liquid) beforehand, so
+    /// firing it into a hillside wraps the hill instead of eating it.
+    ///
+    /// Checked against a centre buried in terrain, which is the case that would
+    /// fail if the spans were one-per-column instead of one-per-run.
+    #[test]
+    fn a_water_body_never_replaces_terrain() {
+        let brickmap = island();
+        let ground_voxel_y = brickmap
+            .column_top_occupied_voxel(420, 560)
+            .expect("the test column is on the island");
+        // Centre it ON the ground, so half the volume is inside terrain.
+        let blob = WaterBlob::at_voxel([420, ground_voxel_y, 560]);
+        let spans = blob.spans(&brickmap);
+        assert!(
+            !spans.is_empty(),
+            "a body on the ground must write something"
+        );
+        let mut written = 0_usize;
+        for span in &spans {
+            assert_eq!(span.material, Voxel::Water);
+            assert!(span.y_from <= span.y_to, "empty span {span:?}");
+            for y in span.y_from..=span.y_to {
+                assert!(
+                    material_is_empty_for_edits(brickmap.get(span.x, y, span.z)),
+                    "the body would overwrite terrain at ({}, {y}, {})",
+                    span.x,
+                    span.z,
+                );
+                written += 1;
+            }
+        }
+        // And it must be a real body, not a handful of stragglers above the rim.
+        assert!(written > 10_000, "only {written} voxels of water");
+    }
+
+    /// Hanging in open air — the refraction test object. With nothing to interrupt
+    /// any column, every column inside the disc becomes ONE full-height span, and
+    /// applying it leaves swimmable water with sky on every side.
+    #[test]
+    fn a_water_body_in_open_air_is_one_unbroken_span_per_column() {
+        let mut brickmap = island();
+        let high_voxel_y = WORLD_SIZE_Y as i32 - 40;
+        let blob = WaterBlob::at_voxel([420, high_voxel_y, 560]);
+        let spans = blob.spans(&brickmap);
+        let half_height_voxels = (BLOB_HEIGHT_METERS / VOXEL_SIZE * 0.5).round() as i32;
+        let expected_height = half_height_voxels * 2 + 1;
+        for span in &spans {
+            assert_eq!(
+                span.y_to - span.y_from + 1,
+                expected_height,
+                "column ({}, {}) is interrupted in open air",
+                span.x,
+                span.z,
+            );
+        }
+        apply_bulk(
+            &mut brickmap,
+            &BulkEditRequest {
+                shape: Box::new(blob),
+                light_grid: None,
+            },
+            &WorldEditSettings::default(),
+        )
+        .expect("spawning a body in open air changes something");
+        assert!(material_is_liquid(brickmap.get(420, high_voxel_y, 560)));
+        // Deep enough to swim in, measured the same way the pool's test measures.
+        let swim_depth_voxels =
+            (BODY_HEIGHT_METERS * SWIM_SUBMERSION_FRACTION / VOXEL_SIZE).ceil() as i32;
+        assert!(
+            half_height_voxels * 2 >= swim_depth_voxels,
+            "a {BLOB_HEIGHT_METERS} m body is too shallow to swim in"
+        );
+        // Firing the identical body again must find nothing left to do.
+        assert!(
+            apply_bulk(
+                &mut brickmap,
+                &BulkEditRequest {
+                    shape: Box::new(blob),
+                    light_grid: None,
+                },
+                &WorldEditSettings::default(),
+            )
+            .is_none(),
+            "the body is not idempotent"
+        );
     }
 
     /// The whole point of the tool: the water at the centre must be deep enough

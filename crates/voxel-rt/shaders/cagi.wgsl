@@ -78,12 +78,33 @@ const CAGI_SKY_TEST: u32 = 0u;
 // is exactly E4's scope; the Rust side clears both buffers — and therefore every
 // flag — whenever the sun moves.
 const CAGI_SUN_CACHE: bool = true;
+// CAGI_TRANSMISSION (M2) — whether a SOLID cell passes its material's
+// transmitted fraction on instead of absorbing everything.
+//
+// E4 v0 wrote 0 into every solid cell, which is right for stone and wrong for
+// every leaf: a canopy became a light-proof wall and the ground under a tree
+// went black. With this on, a solid cell still receives no emission (it cannot
+// see the sky) but forwards `propagate(neighbours) * transmittance`, so light
+// seeps through foliage while the canopy keeps casting a real shadow. Stone has
+// transmittance 0, so opaque geometry is bit-identical either way.
+//
+// Off by default: the fix is UNMEASURED, and this repo's rule is that a lever's
+// default follows a verdict. Flipping it is the point of the M2 app run.
+const CAGI_TRANSMISSION: bool = false;
+// CAGI_EMISSIVE (E5) — whether emissive materials inject their radiance into the
+// volume. ON by default and, unusually for this registry, without a measured
+// verdict first: the generated world contains no emissive voxel, so until one is
+// PLACED this costs a shift, a mask and an indexed uniform load per cell and
+// changes nothing. The bench measures a world with no emitters, which is exactly
+// why its number cannot justify the default either way.
+const CAGI_EMISSIVE: bool = true;
 // Fixed-point shift of both diffusion numerators (see CagiVolumeMeta).
 const CAGI_DIFFUSION_SHIFT: u32 = 12u;
 
-// Light in a neighbour cell as an integer level. Solid cells always hold 0 (this
-// pass writes it every iteration), so no attribute read is needed — one load per
-// neighbour is the whole cost of the stencil.
+// Light in a neighbour cell as an integer level. One load per neighbour is the
+// whole cost of the stencil: no attribute read is needed, because a solid cell's
+// own light word already encodes what it contributes — 0 without
+// CAGI_TRANSMISSION, and its transmitted fraction with it.
 fn cagi_neighbour_light(cell: vec3<i32>) -> vec3<u32> {
     let grid = vec3<i32>(cagi_volume_meta.grid_size);
     if (cell.y >= grid.y) {
@@ -145,6 +166,17 @@ fn cagi_propagate_diffusion_26(cell: vec3<i32>) -> vec3<u32> {
         }
     }
     return (sum * cagi_volume_meta.diffusion_26_numerator) >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+}
+
+// The configured propagation rule (CAGI_RULE). Shared by the air path and the
+// M2 transmitting-solid path so both always agree on the stencil.
+fn cagi_propagate(cell: vec3<i32>) -> vec3<u32> {
+    if (CAGI_RULE == CAGI_RULE_MAX_DECREMENT) {
+        return cagi_propagate_max_decrement(cell);
+    } else if (CAGI_RULE == CAGI_RULE_DIFFUSION_6) {
+        return cagi_propagate_diffusion_6(cell);
+    }
+    return cagi_propagate_diffusion_26(cell);
 }
 
 // The center of a cell, in voxel units — the origin of its sun / sky rays.
@@ -229,7 +261,32 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
 
     let attributes = cagi_cell_attributes[index];
     if ((attributes & CAGI_CELL_SOLID) != 0u) {
-        light_volume_out[index] = 0u; // absorbed (v0: binary, total)
+        // An emissive solid is a SOURCE, not an absorber: it pins its own
+        // radiance every iteration so the air cells around it read it as a
+        // neighbour and diffuse it outward. Without this a glow block would be
+        // lit-looking but light nothing, because the CA only ever reads
+        // neighbours' light words.
+        if (CAGI_EMISSIVE) {
+            let emission = cagi_cell_emission(attributes);
+            if (any(emission > vec3<f32>(0.0))) {
+                light_volume_out[index] = cagi_pack(cagi_quantize(emission));
+                return;
+            }
+        }
+        if (!CAGI_TRANSMISSION) {
+            light_volume_out[index] = 0u; // absorbed (v0: binary, total)
+            return;
+        }
+        // M2: pass the transmitted fraction on. No emission term — a solid cell
+        // sees neither sky nor sun — so a transmitting cell can only ever be
+        // DIMMER than what reaches it, and the flood still converges.
+        let transmittance = cagi_cell_transmittance(attributes);
+        if (transmittance <= 0.0) {
+            light_volume_out[index] = 0u;
+            return;
+        }
+        let through = vec3<f32>(cagi_propagate(cell)) * transmittance;
+        light_volume_out[index] = cagi_pack(vec3<u32>(through + vec3<f32>(0.5)));
         return;
     }
     // The cached shadow-ray result of this cell (CAGI_SUN_CACHE): "this cell has
@@ -237,18 +294,17 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let sun_already_found =
         CAGI_SUN_CACHE && (light_volume[index] & CAGI_SUN_SOURCE_FLAG) != 0u;
 
-    var propagated = vec3<u32>(0u, 0u, 0u);
-    if (CAGI_RULE == CAGI_RULE_MAX_DECREMENT) {
-        propagated = cagi_propagate_max_decrement(cell);
-    } else if (CAGI_RULE == CAGI_RULE_DIFFUSION_6) {
-        propagated = cagi_propagate_diffusion_6(cell);
-    } else {
-        propagated = cagi_propagate_diffusion_26(cell);
-    }
+    let propagated = cagi_propagate(cell);
 
     var emission = vec3<u32>(0u, 0u, 0u);
     if (cagi_cell_sees_sky(cell)) {
         emission = cagi_sky_light();
+    }
+    // A thin-cover emitter (berries) rarely reaches the quarter-fill solid
+    // threshold, so it lands here instead: same injection, clamped from below
+    // exactly like the sky term.
+    if (CAGI_EMISSIVE) {
+        emission = max(emission, cagi_quantize(cagi_cell_emission(attributes)));
     }
     var is_sun_source = false;
     let bounce = cagi_sun_bounce(cell, sun_already_found);

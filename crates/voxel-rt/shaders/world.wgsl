@@ -128,6 +128,20 @@ struct Lighting {
     //       surface injects into the volume
     //   w = unused
     gi_params: vec4<f32>,
+    // The E6 water runtime levers (lighting.rs WaterParams):
+    //   x = extinction scale — multiplier on the per-meter absorption
+    //       coefficients, i.e. how clear the water is
+    //   y = scatter strength — what the absorbed light is replaced by
+    //   z = ray cutoff — the smallest Fresnel weight worth a secondary ray
+    //   w = reserved (B6's flow)
+    water_params: vec4<f32>,
+    // The E6 water LOOK levers, the two Pascal asked to be able to drag
+    // (lighting.rs WaterParams again — a second vector because the first is full):
+    //   x = refraction strength — how far the material's authored index of
+    //       refraction is pulled toward 1.0, i.e. how WIDE Snell's window is
+    //   y = tint — how coloured the water is (0 = neutral, 1 = physical)
+    //   z, w = reserved (E7's water look pass)
+    water_optics: vec4<f32>,
 }
 
 @group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;
@@ -145,7 +159,20 @@ struct Material {
     opacity: f32,           // < 1.0 => traversal must continue through
     specular: f32,
     flags: u32,             // MATERIAL_FLAG_* below
-    _pad: u32,
+    // E6: how hard this material bends a ray that ENTERS it, and (through
+    // ((n-1)/(n+1))^2) how much it mirrors head-on. 1.0 = does not refract, the
+    // honest value for every opaque row. Per-material because transparency is a
+    // material CLASS — water 1.333, oil ~1.47, honey ~1.50.
+    index_of_refraction: f32,
+    // E6: the participating-medium PAIR, per metre, per channel. Absorption
+    // destroys light; scattering redirects it, and is therefore the light a ray
+    // picks up along its path. Extinction is their sum, and the medium's apparent
+    // COLOUR is the derived single-scattering albedo scattering/extinction — so
+    // nothing here paints the water. All-zero for anything a ray cannot enter.
+    absorption_per_meter: vec3<f32>,
+    _pad_absorption: f32,
+    scattering_per_meter: vec3<f32>,
+    _pad_scattering: f32,
 }
 
 // Mirrors `MaterialFlags` in src/material.rs.
@@ -226,7 +253,43 @@ const SHADOW_PENUMBRA_MIN_DISTANCE: f32 = 8.0;
 // register (and the guaranteed-empty-brick skip that comes with it).
 const USE_COLUMN_HEIGHTS: bool = ENABLE_COLUMN_FAST_FORWARD || ENABLE_DESCEND_FAST_FORWARD;
 
+// ---- E6: the sun and liquids (lever) ------------------------------------------
+// Whether the SUN's rays pass THROUGH liquids instead of stopping on them.
+//
+// Why it matters: with it off, every submerged surface is in shadow, so a pool
+// bed one metre down is lit by ambient alone and shallow water reads DARKER than
+// the opaque water it replaced (measured 2026-07-31 on the top-down lakes
+// scenario: the refracted bed came out dark navy against opaque water's bright
+// cyan). With it on, a sunlit pool bed is sunlit and the whole point of refraction
+// — seeing the ground under the water — survives.
+//
+// Why it is a lever and not simply on: it is the single most expensive thing in
+// E6, because a shadow ray that no longer stops at the water surface walks the
+// whole body voxel by voxel (water bricks are occupied, so the coarse skip cannot
+// help). Numbers and the per-tier verdict are in the registry row
+// (`src/variants.rs`, `WaterSunThroughLiquid`) and the bench doc's E6 section.
+//
+// Why it lives HERE rather than in `water.wgsl`: the CA pass's per-cell sun test
+// goes through the same `trace_shadow_visibility`, and it must agree — otherwise
+// the light volume would shadow the bed the shading pass now lights. `world.wgsl`
+// is the half both passes concatenate, so `WaterSettings::patch_shader_source`
+// writes this const into whichever source it is handed.
+//
+// The simplification that ships with it: the sun's own path through the water is
+// NOT attenuated by Beer-Lambert (only the camera's is), so a deep bed is lit as
+// brightly as a shallow one. Correcting it needs the wet path length of the SUN
+// ray, i.e. a second medium march per shaded point.
+const WATER_SUN_THROUGH_LIQUID: bool = true;
+
 const EMPTY_BRICK: u32 = 0xffffffffu;
+// Level-0 pointer tagging — the GPU half of the scheme documented in
+// src/brickmap.rs. Top two bits: 0b00 UNIQUE (payload = level-1 slot), 0b01
+// UNIFORM (payload = material id, brick is that material in all 512 cells),
+// 0b10 TEMPLATE (reserved, not emitted yet), 0b11 EMPTY (EMPTY_BRICK carries it
+// already). UNIQUE is tag 0 so an untagged slot index stays a valid pointer.
+const BRICK_TAG_SHIFT: u32 = 30u;
+const BRICK_PAYLOAD_MASK: u32 = 0x3fffffffu;
+const BRICK_TAG_UNIFORM: u32 = 1u;
 const BRICK_SIZE: f32 = 8.0;
 // Worst-case bricks crossed: 125 + 32 + 125 axis crossings plus slack.
 const MAX_BRICK_STEPS: u32 = 512u;
@@ -644,8 +707,28 @@ fn local_bit_index(cell: vec3<i32>, brick_cell: vec3<i32>) -> u32 {
     return u32(local.x) + u32(local.y) * 8u + u32(local.z) * 64u;
 }
 
+// ---- Level-0 pointer tag accessors -------------------------------------------
+
+// The level-1 slot a UNIQUE pointer addresses. A no-op mask on an untagged
+// pointer, so call sites can apply it unconditionally.
+fn brick_slot(pointer: u32) -> u32 {
+    return pointer & BRICK_PAYLOAD_MASK;
+}
+
+// Whether the brick is one material through and through — solid in all 512
+// cells, so a ray hits it at the face it entered and never descends.
+fn brick_is_uniform(pointer: u32) -> bool {
+    return (pointer >> BRICK_TAG_SHIFT) == BRICK_TAG_UNIFORM;
+}
+
+// The material filling a UNIFORM brick. Meaningless for any other tag.
+fn brick_uniform_material(pointer: u32) -> u32 {
+    return pointer & 0xffu;
+}
+
 fn occupancy_bit_set(pointer: u32, bit: u32) -> bool {
-    return ((occupancy_words[pointer * 16u + (bit >> 5u)] >> (bit & 31u)) & 1u) == 1u;
+    let slot = brick_slot(pointer);
+    return ((occupancy_words[slot * 16u + (bit >> 5u)] >> (bit & 31u)) & 1u) == 1u;
 }
 
 // Random-access occupancy test at a world-voxel coordinate (out of world =
@@ -664,7 +747,59 @@ fn voxel_occupied(cell: vec3<i32>) -> bool {
     if (pointer == EMPTY_BRICK) {
         return false;
     }
+    if (brick_is_uniform(pointer)) {
+        return true;
+    }
     return occupancy_bit_set(pointer, local_bit_index(cell, brick_cell));
+}
+
+// Random-access MATERIAL read at a world-voxel coordinate: the material byte, or
+// 0 (air — the miss sentinel) for an empty voxel, an empty brick or a cell
+// outside the world. The occupancy-only twin of `voxel_occupied`, sharing the
+// same index math, so the packing knowledge stays in one place.
+//
+// The two-level traversal never needs this (it has the brick pointer hoisted and
+// reads the material byte on the hit it already found); E6's water-medium march
+// does, because "is the voxel I am standing in still the same liquid" is a
+// question about a voxel rather than about a hit.
+fn voxel_material_at(cell: vec3<i32>) -> u32 {
+    if (any(cell < vec3<i32>(0, 0, 0))
+        || any(cell >= vec3<i32>(brickmap.world_size_voxels))) {
+        return 0u;
+    }
+    let brick_cell = cell / vec3<i32>(8, 8, 8);
+    let pointer = brick_indices[brick_cell_index(brick_cell)];
+    if (pointer == EMPTY_BRICK) {
+        return 0u;
+    }
+    if (brick_is_uniform(pointer)) {
+        return brick_uniform_material(pointer);
+    }
+    let bit = local_bit_index(cell, brick_cell);
+    if (!occupancy_bit_set(pointer, bit)) {
+        return 0u;
+    }
+    let packed = material_words[brick_slot(pointer) * 128u + (bit >> 2u)];
+    return (packed >> ((bit & 3u) * 8u)) & 0xffu;
+}
+
+// Whether a material id is a fluid, from the material table's LIQUID flag
+// (src/material.rs) rather than from a hardcoded row — so a second liquid at B6
+// needs no shader change. Air (row 0) is not a liquid.
+fn material_is_liquid(material: u32) -> bool {
+    return (materials[material].flags & MATERIAL_FLAG_LIQUID) != 0u;
+}
+
+// One vector component by axis index (0 = x, 1 = y, 2 = z) — the DDA reports a
+// `face_axis`, and several callers need the ray's component along it.
+fn component_of(vector: vec3<f32>, axis: u32) -> f32 {
+    if (axis == 0u) {
+        return vector.x;
+    }
+    if (axis == 1u) {
+        return vector.y;
+    }
+    return vector.z;
 }
 
 // Full fine traversal for primary rays: first occupied voxel wins and the
@@ -674,12 +809,38 @@ fn voxel_occupied(cell: vec3<i32>) -> bool {
 // becomes the hit normal if the first voxel tested is already occupied).
 fn trace_brick(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<f32>,
                pointer: u32, brick_cell: vec3<i32>, t_enter: f32, t_exit: f32,
-               entry_axis: u32) -> Hit {
+               entry_axis: u32, skip_liquids: bool) -> Hit {
     var result: Hit;
     result.material = 0u;
 
     let brick_min_cell = brick_cell * 8;
     let brick_max_cell = brick_min_cell + vec3<i32>(7, 7, 7);
+
+    // UNIFORM fast path: the brick is one material in all 512 cells, so the
+    // first voxel the ray meets is the one it entered through. The hit is the
+    // brick's entry face — no dda_setup, no descent, no level-1 fetch at all.
+    // 58.6% of the island's occupied bricks qualify (see the brick_census
+    // probe in voxel-core), which is most of the ground under most rays.
+    if (brick_is_uniform(pointer)) {
+        let material = brick_uniform_material(pointer);
+        // E6 again: a liquid does not stop a ray told to ignore liquids. Leaving
+        // material at 0 reports a miss, and the coarse level steps past the
+        // whole brick — which is the correct behaviour AND cheaper than the
+        // per-voxel walk it replaces.
+        if (skip_liquids && material_is_liquid(material)) {
+            return result;
+        }
+        result.material = material;
+        result.axis = entry_axis;
+        result.axis_sign = sign(component_of(direction, entry_axis));
+        result.distance = t_enter;
+        // The voxel the ray is standing in one epsilon past the face, clamped
+        // into the brick so a face-exact intersection cannot name a neighbour.
+        result.voxel = clamp(vec3<i32>(floor(origin + direction * (t_enter + RAY_EPSILON))),
+                             brick_min_cell, brick_max_cell);
+        return result;
+    }
+
     var state = dda_setup(origin, direction, inverse_direction, t_enter, 1.0,
                           brick_min_cell, brick_max_cell);
     state.face_axis = entry_axis;
@@ -687,19 +848,26 @@ fn trace_brick(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<
     for (var step_index = 0u; step_index < MAX_VOXEL_STEPS; step_index = step_index + 1u) {
         let bit = local_bit_index(state.cell, brick_cell);
         if (occupancy_bit_set(pointer, bit)) {
-            let packed = material_words[pointer * 128u + (bit >> 2u)];
-            result.material = (packed >> ((bit & 3u) * 8u)) & 0xffu;
-            result.axis = state.face_axis;
-            var direction_component = direction.x;
-            if (state.face_axis == 1u) {
-                direction_component = direction.y;
-            } else if (state.face_axis == 2u) {
-                direction_component = direction.z;
+            let packed = material_words[brick_slot(pointer) * 128u + (bit >> 2u)];
+            let material = (packed >> ((bit & 3u) * 8u)) & 0xffu;
+            // E6: a ray that has been told liquids do not block it walks through
+            // them. The test costs one material-table load on a HIT, i.e. once per
+            // ray rather than once per step, and short-circuits away entirely for
+            // the callers that pass false (every ray but the sun's).
+            if (!(skip_liquids && material_is_liquid(material))) {
+                result.material = material;
+                result.axis = state.face_axis;
+                var direction_component = direction.x;
+                if (state.face_axis == 1u) {
+                    direction_component = direction.y;
+                } else if (state.face_axis == 2u) {
+                    direction_component = direction.z;
+                }
+                result.axis_sign = sign(direction_component);
+                result.distance = state.t;
+                result.voxel = state.cell;
+                return result;
             }
-            result.axis_sign = sign(direction_component);
-            result.distance = state.t;
-            result.voxel = state.cell;
-            return result;
         }
         dda_step(&state);
         if (any(state.cell < brick_min_cell) || any(state.cell > brick_max_cell)) {
@@ -716,15 +884,34 @@ fn trace_brick(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<
 // occludes — no material fetch, no face/distance bookkeeping.
 fn shadow_brick_occluded(origin: vec3<f32>, direction: vec3<f32>,
                          inverse_direction: vec3<f32>, pointer: u32,
-                         brick_cell: vec3<i32>, t_enter: f32, t_exit: f32) -> bool {
+                         brick_cell: vec3<i32>, t_enter: f32, t_exit: f32,
+                         skip_liquids: bool) -> bool {
+    // UNIFORM fast path, the any-hit twin of `trace_brick`'s: a solid brick
+    // occludes, full stop — unless it is a liquid this ray ignores. Shadow rays
+    // graze terrain at shallow angles and cross many ground bricks, so this is
+    // the case that walks the most voxels for the least information.
+    if (brick_is_uniform(pointer)) {
+        return !(skip_liquids && material_is_liquid(brick_uniform_material(pointer)));
+    }
+
     let brick_min_cell = brick_cell * 8;
     let brick_max_cell = brick_min_cell + vec3<i32>(7, 7, 7);
     var state = dda_setup(origin, direction, inverse_direction, t_enter, 1.0,
                           brick_min_cell, brick_max_cell);
 
     for (var step_index = 0u; step_index < MAX_VOXEL_STEPS; step_index = step_index + 1u) {
-        if (occupancy_bit_set(pointer, local_bit_index(state.cell, brick_cell))) {
-            return true;
+        let bit = local_bit_index(state.cell, brick_cell);
+        if (occupancy_bit_set(pointer, bit)) {
+            // Same E6 rule as `trace_brick`: a liquid does not occlude a ray that
+            // was told liquids are transparent to it.
+            if (!skip_liquids) {
+                return true;
+            }
+            let packed = material_words[brick_slot(pointer) * 128u + (bit >> 2u)];
+            let material = (packed >> ((bit & 3u) * 8u)) & 0xffu;
+            if (!material_is_liquid(material)) {
+                return true;
+            }
         }
         dda_step(&state);
         if (any(state.cell < brick_min_cell) || any(state.cell > brick_max_cell)) {
@@ -745,7 +932,8 @@ fn shadow_brick_occluded(origin: vec3<f32>, direction: vec3<f32>,
 // Everything is in voxel units; `origin` must already be voxel-space.
 // `max_distance` caps the traversal (primary/shadow rays pass
 // MAX_TRACE_DISTANCE; E1's short AO rays pass AO_MAX_DISTANCE).
-fn trace(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> Hit {
+fn trace(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32,
+         skip_liquids: bool) -> Hit {
     var result: Hit;
     result.material = 0u;
 
@@ -798,7 +986,8 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> Hit {
             let pointer = brick_indices[cell_index];
             let brick_exit = min(min(state.t_max.x, state.t_max.y), state.t_max.z);
             let fine = trace_brick(origin, direction, inverse_direction, pointer,
-                                   state.cell, state.t, brick_exit, state.face_axis);
+                                   state.cell, state.t, brick_exit, state.face_axis,
+                                   skip_liquids);
             if (fine.material != 0u) {
                 return fine;
             }
@@ -856,7 +1045,8 @@ fn soft_penumbra_update(visibility: f32, state: ptr<function, DdaState>,
 fn trace_shadow_visibility(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
     if (SHADOW_MODE == SHADOW_MODE_HARD && !ENABLE_ANY_HIT_SHADOW) {
         return select(1.0, 0.0,
-                      trace(origin, direction, MAX_TRACE_DISTANCE).material != 0u);
+                      trace(origin, direction, MAX_TRACE_DISTANCE,
+                            WATER_SUN_THROUGH_LIQUID).material != 0u);
     }
     var visibility = 1.0;
     let inverse_direction = vec3<f32>(
@@ -906,7 +1096,8 @@ fn trace_shadow_visibility(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
             let pointer = brick_indices[cell_index];
             let brick_exit = min(min(state.t_max.x, state.t_max.y), state.t_max.z);
             if (shadow_brick_occluded(origin, direction, inverse_direction, pointer,
-                                      state.cell, state.t, brick_exit)) {
+                                      state.cell, state.t, brick_exit,
+                                      WATER_SUN_THROUGH_LIQUID)) {
                 return 0.0;
             }
         } else {

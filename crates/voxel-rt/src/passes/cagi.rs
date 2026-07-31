@@ -55,9 +55,14 @@ pub const CAGI_SHADER_SOURCE: &str = concat!(
 pub fn build_shader_source(quality: &RenderQuality) -> String {
     let traversal_patched = quality.traversal.patch_shader_source(CAGI_SHADER_SOURCE);
     let shadows_patched = quality.shadows.patch_shader_source(&traversal_patched);
+    // E6: `LIQUIDS_CAST_NO_SHADOW` lives in the shared `world.wgsl`, so the CA
+    // pass's per-cell sun ray must follow the water mode too — otherwise the
+    // volume would still shadow the bed under water that the shading pass now
+    // lights.
+    let water_patched = quality.water.patch_shader_source(&shadows_patched);
     let volume_patched = quality
         .global_illumination
-        .patch_volume_consts(&shadows_patched);
+        .patch_volume_consts(&water_patched);
     quality
         .global_illumination
         .patch_propagation_consts(&volume_patched)

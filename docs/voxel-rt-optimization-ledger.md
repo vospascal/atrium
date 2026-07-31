@@ -174,7 +174,15 @@ re-prewarm) instead of branching at runtime.
 | 6.6 | Domain-tiled SDF instancing (`floor(p/tile)` + hash) | 🔜 OPEN — B5 / B10 |
 | 6.7 | Triplanar mapping | 🔜 OPEN — only if we ever want surface detail on voxel faces |
 | 6.8 | HDR accumulation + auto exposure | 🔜 OPEN — **E7, and first in that experiment**: emissives + dark caves = huge luminance range |
-| 6.9 | Fresnel reflect / Snell refract on water, absorption by path length | 🔜 OPEN — E6 |
+| 6.9 | Fresnel reflect / Snell refract on water, absorption by path length | ✅ USED — E6. `F0` = 0.0204 and the 48.6° critical angle both *derived* from the indices, not tuned; extinction (0.45, 0.12, 0.06) /m per channel. **+2.4 ms** grazing / **+4.6 ms** on the aerial view with 14.4% water in frame |
+| 6.12 | **Zero-ray Fresnel-tinted water** (analytic sky in the mirror direction over the diffuse surface) | ✅ USED — E6, the Potato/Quest tier: **+0.36–0.74 ms** for a surface that still reads as water with a sun glint. The row that shows the Fresnel *weighting* carries most of the impression, not the rays |
+| 6.13 | **Fresnel ray cutoff** — skip the secondary ray for a term Fresnel says is worth <4% of the pixel | ✅ USED — E6, runtime (`water_params.z` = 0.04): **−7.1%** on the steep aerial view, where `full` then costs the same as `refraction-only`. Noise elsewhere. The cheapest idea in E6 |
+| 6.14 | **Liquids do not shadow the sun** | ✅ USED — E6, and it is a correctness fix, not an optimization: without it every submerged surface is in shadow and shallow water reads DARKER than the opaque water it replaced. Costs **+77%** on a horizontal underwater view (the shadow ray walks metres of water voxel by voxel), +8% aerial, ~0 elsewhere → a lever, off on the zero-ray tiers. E4's CA pass inherits it through the shared `trace_shadow_visibility` |
+| 6.15 | Second water interface (TIR mirror / far pool wall) | 🎚️ LEVER — E6, **off on every tier since step 1**. Free above water; expensive from inside it. It only ever looked necessary because the region outside Snell's window held a flat constant; 6.18 puts geometry there for 40% of the price and the two frames are near-identical, so Beautiful dropped from 2 interfaces to 1 |
+| 6.19 | **Fully transparent, UNBENT surface interface seen from below** | ✅ USED — E6 step 3, shipped on every tier at Pascal's request (*"should be just transparent looking out and in .. only top should have the reflection"*). **Cheaper as well as simpler: −39% / −45% / −11%** on the three views where the mirrored stand-in used to fire, because there is no longer a mirrored region to fill. Unbent is not a shortcut — TIR *is* Snell's law past the critical angle, so keeping the bend would leave nothing to draw beyond the window. Makes 6.15 and 6.18 inert from below (documented + greyed out, not deleted) |
+| 6.18 | **Cheap mirrored stand-in outside Snell's window** (one march, cheap shading — no shadow ray, no AO, no light volume) | ✅ USED — E6 step 1, and it is the fix a FAILED look gate demanded. Past the critical angle nothing was being added, so most of a tilted upward view was ONE FLAT COLOUR. **+4.1 ms on the window-rim view against +10.3 for a second full interface**, free above water. The general lesson, now twice-proven in E6: substitute a cheap stand-in for a term you cannot afford to trace — never a constant |
+| 6.16 | Per-material index of refraction instead of a water constant | ✅ USED — E6, for **zero bytes** (it took the GPU material row's former pad word). Transparency is a material *class* — the dossier names water, oil, clouds and honey — so the column was cheaper to author now than to retrofit around finished Snell code |
+| 6.17 | Sample the CAGI volume for the water body's in-scatter colour | ❌ DEAD — E4 marks a cell absorbing at a quarter fill, so cells inside a body of water hold **zero** light by construction and every pool would render black. E6 uses the downwelling irradiance (sun × elevation cosine + sky) instead; the same cause is why a submerged surface receives only the 25% GI ambient floor, which is an E5/B6 transport question |
 | 6.10 | Isometric projection | ❌ DEAD — we target VR perspective |
 | 6.11 | Full SDF-raymarched terrain as the *renderer* | ❌ DEAD — we are voxel-authoritative. SDF/noise math is welcome as a *generator* (4.5) |
 
@@ -197,22 +205,28 @@ re-prewarm) instead of branching at runtime.
 
 ## Scoreboard
 
-- ✅ **USED: 44** — traversal core, analytic AO, memory packing, the E4 CAGI
+- ✅ **USED: 51** — traversal core, analytic AO, memory packing, the E4 CAGI
   volume and its five sub-decisions, **E2's whole edit pipeline (the world thread,
   `set_voxel` and its five sub-decisions, the CPU DDA)**, **E2b's swept-box
-  character collision and its early-out finding**, and the measurement/lever
-  discipline. (Two more are *also* used but live in section 5 under their
+  character collision and its early-out finding**, **E6's water optics (derived
+  Fresnel/Snell/Beer–Lambert, the zero-ray tint tier, the Fresnel ray cutoff, the
+  no-shadow-from-liquids fix, the per-material index column, step 1's cheap
+  mirrored stand-in and step 3's transparent underwater interface)**, and the
+  measurement/lever discipline. (Two more are *also* used but live in section 5 under their
   mesh-era names, 5.4 and 5.5.)
-- 🎚️ **LEVER: 10** — all measured, all with numbers, all re-run on Quest at E9;
+- 🎚️ **LEVER: 11** — all measured, all with numbers, all re-run on Quest at E9;
   E4 added the 26-neighbour stencil (worth 2.7× only once a point light exists)
-  and nearest volume sampling. E2's inline-authority and full-clearance-rebuild
+  and nearest volume sampling, E6 the second water interface (free above water,
+  2.35× from below it). E2's inline-authority and full-clearance-rebuild
   levers live in the registry with the same discipline.
 - 🔜 **OPEN: 22** — dominated by E3 (GPU generation) and E7 (the look pass, which
   is cheap and almost entirely unbuilt).
-- ❌ **DEAD: 24** — 13 mesh-era techniques with no ray-tracer analogue, plus 11
+- ❌ **DEAD: 25** — 13 mesh-era techniques with no ray-tracer analogue, plus 12
   measured or scope closures (E4 closed 0.25 m cells; **E2 closed GPU authority,
   snapshot swapping and per-frame data readback**; **E2b closed the sandbox's
-  heightfield terrain-follower** — it cannot see an edited world).
+  heightfield terrain-follower** — it cannot see an edited world; **E6 closed
+  sampling the light volume for water's in-scatter** — absorbing cells hold zero
+  light, so every pool would be black).
 
 **Biggest open value, in order:** 4.4 (GPU world generation — E2 settled the
 authority question *around* it: generation may run on the GPU, but its output has

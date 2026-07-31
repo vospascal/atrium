@@ -30,9 +30,10 @@
 
 use crate::ao::{AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
-use crate::lighting::{GiParams, ShadingParams};
+use crate::lighting::{GiParams, ShadingParams, WaterParams};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
+use crate::water::{WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface};
 use crate::world_edit::{ClearanceUpdateMode, WorldEditSettings};
 
 /// Render-scale bounds (the resolution lever's range, also enforced by
@@ -82,11 +83,23 @@ pub enum LeverId {
     GiRule,
     GiSkyTest,
     GiSunCache,
+    GiTransmission,
+    GiEmissive,
+    GiEmissiveScale,
     GiSampleMode,
     GiIterationsPerFrame,
     GiStrength,
     GiAmbientFloor,
     GiSunBounce,
+    // Water optics (E6).
+    WaterMode,
+    WaterBounces,
+    WaterTirFallback,
+    WaterUnderwaterInterface,
+    WaterAbsorption,
+    WaterScattering,
+    WaterRayCutoff,
+    WaterSunThroughLiquid,
     // World edits (E2) — all runtime; an edit changes buffer contents, never a
     // shader.
     EditWorldThread,
@@ -105,6 +118,8 @@ pub enum LeverSubsystem {
     Shadows,
     /// E4 — the CAGI light volume.
     GlobalIllumination,
+    /// E6 — water reflection, refraction and extinction.
+    Water,
     /// E2 — world authority, threading and the edit pipeline.
     WorldEdit,
     Resolution,
@@ -117,17 +132,19 @@ impl LeverSubsystem {
             LeverSubsystem::AmbientOcclusion => "AO",
             LeverSubsystem::Shadows => "Shadows",
             LeverSubsystem::GlobalIllumination => "GI (CAGI)",
+            LeverSubsystem::Water => "Water",
             LeverSubsystem::WorldEdit => "World edits",
             LeverSubsystem::Resolution => "Resolution",
         }
     }
 
     /// Panel order.
-    pub const ALL: [LeverSubsystem; 6] = [
+    pub const ALL: [LeverSubsystem; 7] = [
         LeverSubsystem::Traversal,
         LeverSubsystem::AmbientOcclusion,
         LeverSubsystem::Shadows,
         LeverSubsystem::GlobalIllumination,
+        LeverSubsystem::Water,
         LeverSubsystem::WorldEdit,
         LeverSubsystem::Resolution,
     ];
@@ -267,6 +284,12 @@ pub enum BenchSection {
     /// DISTRIBUTIONS (median / p99 / max) rather than medians, because the whole
     /// question is hitches.
     EditStorm,
+    /// Section 8: E6's water optics — the four cost tiers (no secondary rays /
+    /// reflection only / refraction only / both) and the bounce budget, measured
+    /// on scenes that actually contain water, including an UNDERWATER camera.
+    /// Runs over its own brickmap (the island plus a carved debug pool), so its
+    /// numbers deliberately do not compare with sections 1-5.
+    Water,
 }
 
 /// One registry row.
@@ -330,6 +353,9 @@ impl LeverId {
             LeverId::GiRule => LeverValue::Mode(global_illumination.rule.shader_value()),
             LeverId::GiSkyTest => LeverValue::Mode(global_illumination.sky_test.shader_value()),
             LeverId::GiSunCache => LeverValue::Flag(global_illumination.sun_cache),
+            LeverId::GiTransmission => LeverValue::Flag(global_illumination.transmission),
+            LeverId::GiEmissive => LeverValue::Flag(global_illumination.emissive),
+            LeverId::GiEmissiveScale => LeverValue::Scalar(global_illumination.emissive_scale),
             LeverId::GiSampleMode => {
                 LeverValue::Mode(global_illumination.sample_mode.shader_value())
             }
@@ -339,6 +365,18 @@ impl LeverId {
             LeverId::GiStrength => LeverValue::Scalar(global_illumination.strength),
             LeverId::GiAmbientFloor => LeverValue::Scalar(global_illumination.ambient_floor),
             LeverId::GiSunBounce => LeverValue::Scalar(global_illumination.sun_bounce),
+            LeverId::WaterMode => LeverValue::Mode(quality.water.mode.shader_value()),
+            LeverId::WaterBounces => LeverValue::Count(quality.water.bounces),
+            LeverId::WaterTirFallback => {
+                LeverValue::Mode(quality.water.tir_fallback.shader_value())
+            }
+            LeverId::WaterUnderwaterInterface => {
+                LeverValue::Mode(quality.water.underwater_interface.shader_value())
+            }
+            LeverId::WaterAbsorption => LeverValue::Scalar(quality.water.absorption_scale),
+            LeverId::WaterScattering => LeverValue::Scalar(quality.water.scattering_scale),
+            LeverId::WaterRayCutoff => LeverValue::Scalar(quality.water.ray_cutoff),
+            LeverId::WaterSunThroughLiquid => LeverValue::Flag(quality.water.sun_through_liquid),
             LeverId::EditWorldThread => LeverValue::Flag(quality.world_edit.world_thread),
             LeverId::EditClearanceUpdate => {
                 LeverValue::Mode(quality.world_edit.clearance_update.shader_value())
@@ -411,6 +449,13 @@ impl LeverId {
                     CagiSkyTest::from_shader_value(value.expect_mode(self));
             }
             LeverId::GiSunCache => global_illumination.sun_cache = value.expect_flag(self),
+            LeverId::GiTransmission => {
+                global_illumination.transmission = value.expect_flag(self);
+            }
+            LeverId::GiEmissive => global_illumination.emissive = value.expect_flag(self),
+            LeverId::GiEmissiveScale => {
+                global_illumination.emissive_scale = value.expect_scalar(self);
+            }
             LeverId::GiSampleMode => {
                 global_illumination.sample_mode =
                     CagiSampleMode::from_shader_value(value.expect_mode(self));
@@ -423,6 +468,30 @@ impl LeverId {
                 global_illumination.ambient_floor = value.expect_scalar(self);
             }
             LeverId::GiSunBounce => global_illumination.sun_bounce = value.expect_scalar(self),
+            LeverId::WaterMode => {
+                quality.water.mode = WaterMode::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::WaterBounces => quality.water.bounces = value.expect_count(self),
+            LeverId::WaterTirFallback => {
+                quality.water.tir_fallback =
+                    WaterTirFallback::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::WaterUnderwaterInterface => {
+                quality.water.underwater_interface =
+                    WaterUnderwaterInterface::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::WaterAbsorption => {
+                quality.water.absorption_scale = value.expect_scalar(self);
+            }
+            LeverId::WaterScattering => {
+                quality.water.scattering_scale = value.expect_scalar(self);
+            }
+            LeverId::WaterRayCutoff => {
+                quality.water.ray_cutoff = value.expect_scalar(self);
+            }
+            LeverId::WaterSunThroughLiquid => {
+                quality.water.sun_through_liquid = value.expect_flag(self);
+            }
             LeverId::EditWorldThread => {
                 quality.world_edit.world_thread = value.expect_flag(self);
             }
@@ -1188,6 +1257,78 @@ pub const REGISTRY: &[Lever] = &[
         }],
     },
     Lever {
+        id: LeverId::GiTransmission,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_TRANSMISSION"),
+        label: "transmit through solids",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "M2, UNMEASURED — the default is off until an app run gives it a verdict. \
+                  E4 v0 wrote 0 into every solid cell, so a leaf canopy absorbed like \
+                  stone and the ground under a tree went black; with this on a solid cell \
+                  forwards propagate(neighbours) * transmittance (bits 25-28 of its \
+                  attribute word, from the M1 material table) while still receiving no \
+                  emission, so foliage passes light without losing its shadow. Costs one \
+                  extra propagate on solid cells, which is why it needs measuring rather \
+                  than assuming. Stone transmits 0, so opaque geometry is bit-identical \
+                  either way — any delta outside vegetation is a bug.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-transmission",
+            overrides: &[(LeverId::GiTransmission, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiEmissive,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_EMISSIVE"),
+        label: "emissive materials",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "E5, ON by default WITHOUT a measured verdict, deliberately: world \
+                  generation places no emissive voxel, so until one is placed by hand this \
+                  is a shift, a mask and an indexed uniform load per cell and changes not \
+                  one pixel. The bench measures an emitter-free world, so its number \
+                  cannot argue the default either way — the cost only exists once the \
+                  feature is being used, and then it is the feature. An emissive SOLID \
+                  pins its own radiance so neighbours diffuse it outward; thin-cover \
+                  emitters inject on the air path like the sky term.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-no-emissive",
+            overrides: &[(LeverId::GiEmissive, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiEmissiveScale,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "emissive scale",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 16.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime multiplier on every emitter's authored radiance (gi_params.w, \
+                  the slot E4 reserved for exactly this). Free — it scales a value the CA \
+                  already reads — and it is the knob to reach for when a placed light \
+                  blows out the exposure, rather than re-authoring the material table. \
+                  Ranges to 16 rather than 4 (raised after the first app run: 4 was not \
+                  enough to make a single block read as a real light source). Kept LINEAR \
+                  even that wide, because 0 means lights-off and a log slider cannot \
+                  reach it. Note the ceiling is a symptom: the tonemap is Reinhard on an \
+                  8-bit target, so a bright emitter clips instead of blooming — E7b's HDR \
+                  intermediate is what would let the scale mean something physical.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
         id: LeverId::GiSampleMode,
         subsystem: LeverSubsystem::GlobalIllumination,
         kind: LeverKind::ShaderConst,
@@ -1307,6 +1448,347 @@ pub const REGISTRY: &[Lever] = &[
                   sky-only flood.",
         mode_options: &[],
         bench: &[],
+    },
+    // ---- Water optics (E6) ----
+    Lever {
+        id: LeverId::WaterMode,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_MODE"),
+        label: "optics",
+        default_value: LeverValue::Mode(4),
+        range: LeverRange::Discrete,
+        verdict: "MEASURED (E6, bench section 8, M3 Max 2560x1440, over the island + \
+                  the debug pool). Cost over opaque, on the two scenarios that look AT \
+                  water (grazing from the shore / steep from 60 m): tint +0.36 / +0.74, \
+                  reflection-only +2.06 / +2.87, refraction-only +2.01 / +4.50, full \
+                  +2.40 / +4.64 ms. From INSIDE the water the floor is different \
+                  because the opaque row is a degenerate image (the eye sits in an \
+                  opaque voxel): looking up 4.15 tint / 7.51 full, sideways 8.39 tint / \
+                  11.06 full. So: full costs 2.4-4.6 ms above water and is the shipped \
+                  Balanced/Beautiful pick; tint costs 0.4-0.7 ms for a recognisable \
+                  water surface with no scene reflection and no visible depth, which is \
+                  the Potato/Quest pick.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "opaque",
+                verdict: "Water is an ordinary diffuse surface — the E4 renderer bit for bit, and \
+                          the bench's no-regression anchor. Also the honest answer for a tier that \
+                          cannot afford ANY water work; it is what shipped up to E4 and what makes \
+                          swimming impossible to debug, which is why E6 exists.",
+            },
+            ModeOption {
+                value: 1,
+                label: "fresnel tint",
+                verdict: "ZERO secondary rays: the mirror term is the analytic sky function in the \
+                          reflected direction (which already carries the sun glint, so a grazing \
+                          water surface still glares) and the transmitted term is the surface's own \
+                          diffuse shading, mixed by the same Fresnel curve as the full model. The \
+                          Potato/Quest tier. It cannot show what is UNDER the water from above, but \
+                          the underwater view still gets extinction and Snell's window, because \
+                          there the march is the primary ray and not an extra one.",
+            },
+            ModeOption {
+                value: 2,
+                label: "reflection",
+                verdict: "The mirror ray is traced (and shaded through the full path, so it sees \
+                          sun, shadow, AO and CAGI); transmission stays the diffuse surface. Exists \
+                          to price the reflection ray on its own — it is the half that reads as \
+                          expensive because a grazing water plane fills the frame with a second \
+                          full shading.",
+            },
+            ModeOption {
+                value: 3,
+                label: "refraction",
+                verdict: "The refracted ray marches the water body with per-channel extinction and \
+                          shades the bed; the mirror term stays the analytic sky. Exists to price \
+                          refraction on its own. This is the half that makes DEPTH readable, which \
+                          is the whole reason E6 was pulled ahead of E5.",
+            },
+            ModeOption {
+                value: 4,
+                label: "full",
+                verdict: "Both, Fresnel-weighted: grazing angles mirror, steep angles see through. \
+                          The shipped model on Balanced and Beautiful.",
+            },
+        ],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::Water,
+                label: "water-off",
+                overrides: &[(LeverId::WaterMode, LeverValue::Mode(0))],
+            },
+            BenchPoint {
+                section: BenchSection::Water,
+                label: "water-tint",
+                overrides: &[(LeverId::WaterMode, LeverValue::Mode(1))],
+            },
+            BenchPoint {
+                section: BenchSection::Water,
+                label: "water-reflect",
+                overrides: &[(LeverId::WaterMode, LeverValue::Mode(2))],
+            },
+            BenchPoint {
+                section: BenchSection::Water,
+                label: "water-refract",
+                overrides: &[(LeverId::WaterMode, LeverValue::Mode(3))],
+            },
+        ],
+    },
+    Lever {
+        id: LeverId::WaterBounces,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_BOUNCES"),
+        label: "interfaces / ray",
+        default_value: LeverValue::Count(1),
+        range: LeverRange::Rungs(&[1, 2]),
+        verdict: "MEASURED TWICE (E6, then E6 step 1): **1 on every tier**, and the \
+                  second interface is now a documented non-purchase. It was never worth \
+                  anything above water (the frame times are inside noise, because a \
+                  refracted ray that reaches the bed never asks for another interface). \
+                  Underwater it costs a great deal — +9.9 ms on the window-rim view, \
+                  +6.6 ms looking straight up — and step 1 showed WHY it looked \
+                  necessary: the region outside Snell's window had nothing but a flat \
+                  constant, so a second full bounce was the only thing that put \
+                  geometry there. With `WATER_TIR_FALLBACK = cheap mirror` doing that \
+                  for +4.1 ms instead, the two frames are near-identical and the full \
+                  bounce buys a little extra shading detail in the mirrored region for \
+                  2.5x the price. Beautiful dropped from 2 to 1 on this evidence. Kept \
+                  as a lever because it is the only exact answer.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-full-2bounce",
+            overrides: &[(LeverId::WaterBounces, LeverValue::Count(2))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterAbsorption,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "absorption scale",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 4.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime (water_params.x), free: it scales the medium's per-metre \
+                  ABSORPTION — the light water destroys — never the work. This is the \
+                  clarity/darkening axis. 1.0 = the authored coefficients \
+                  (0.446 / 0.090 / 0.015 per metre, just above pure water's measured \
+                  0.35 / 0.056 / 0.015, which is what dissolved organics in a lake do); \
+                  with the scattering pair that puts extinction at 0.450 / 0.120 / 0.060 \
+                  and transmittance at the pool's 5 m at (0.105, 0.549, 0.741) — red \
+                  nearly gone, blue mostly intact, i.e. depth reads as colour. 0 turns \
+                  the water into clear glass, which is how to check the refraction \
+                  geometry independently of the medium.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::WaterScattering,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "scattering scale",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 4.0,
+            logarithmic: false,
+        },
+        verdict: "Runtime (water_params.y), free: it scales the medium's per-metre \
+                  SCATTERING — the light water redirects rather than destroys, and \
+                  therefore the light a ray picks up along its path. This is the \
+                  brightness axis, and together with absorption it is what the medium's \
+                  COLOUR is derived from: the single-scattering albedo \
+                  scattering/extinction comes out at (0.009, 0.250, 0.750) for water, \
+                  i.e. deeply blue with almost no red, without anything painting it \
+                  (Pascal, 2026-07-31: water must not have a colour of its own). 1.0 = \
+                  the authored 0.004 / 0.030 / 0.045 per metre; 0 makes the model \
+                  absorption-only and the depths go black, which is physically \
+                  incomplete and reads as a hole. Deliberately NOT sampled from the CAGI \
+                  volume: E4 marks a cell absorbing at a quarter fill, so cells inside a \
+                  body of water hold zero light and every pool would be black.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::WaterUnderwaterInterface,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_UNDERWATER_INTERFACE"),
+        label: "surface seen from below",
+        default_value: LeverValue::Mode(1),
+        range: LeverRange::Discrete,
+        verdict: "PENDING MEASUREMENT (E6 step 3). What the surface interface does for a \
+                  ray reaching it from BELOW. Pascal asked for the underwater side to be \
+                  plainly transparent and for the reflection to live only on top, so \
+                  `transparent` is the shipped default; `fresnel` is the physical \
+                  interface E6 shipped through step 1, kept selectable because a Quest \
+                  re-measure or wave normals may well flip the verdict back. It GATES \
+                  two other levers: with `transparent` there is no mirror to bounce and \
+                  no region outside a window, so `interfaces / ray` and `outside Snell's \
+                  window` are inert from below.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "fresnel",
+                verdict: "The physical interface: Snell's bend, a Fresnel-weighted split, and total \
+                          internal reflection past the 48.607-degree critical angle, whose mirrored \
+                          region the `outside Snell's window` lever then fills. This is what E6 \
+                          shipped through step 1 and what the step-1 numbers describe. Kept as the \
+                          off-lever because it is the CORRECT physics and because Snell's window is \
+                          a genuinely striking effect — the objection was to it dominating the \
+                          underwater view, not to it existing.",
+            },
+            ModeOption {
+                value: 1,
+                label: "transparent (unbent)",
+                verdict: "SHIPPED: fully transmissive, and UNBENT. The ray continues straight \
+                          through the surface with only the path's absorption and scattering \
+                          applied. Unbent is not a shortcut, it is the only coherent version of \
+                          \"just transparent\": total internal reflection is not a separable \
+                          effect, it IS what Snell's law yields when sin(theta_transmitted) > 1, so \
+                          past the critical angle there is no transmitted direction to bend toward \
+                          — keep the bend and there is nothing to draw beyond the window. \
+                          ACCEPTED CONSEQUENCES, not defects: Snell's window disappears from below \
+                          and the surface becomes invisible from underneath, with no boundary cue \
+                          at all. Cheaper as well as simpler, because the mirrored stand-in march \
+                          never runs.",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-fresnel-from-below",
+            overrides: &[(LeverId::WaterUnderwaterInterface, LeverValue::Mode(0))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterTirFallback,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_TIR_FALLBACK"),
+        label: "outside Snell's window",
+        default_value: LeverValue::Mode(1),
+        range: LeverRange::Discrete,
+        verdict: "MEASURED (E6 step 1) and it is the fix the look gate demanded. Cost \
+                  of the cheap mirror over the flat constant: **free above water** \
+                  (grazing and steep views inside noise — the fallback never fires \
+                  there), **+4.1 ms on the window-rim view** (10.3 -> 14.5), +6.0 \
+                  looking straight up, +4.4 sideways. Against the alternative — a \
+                  second FULL interface — it is **40% of the cost for a near-identical \
+                  frame** (+4.1 vs +9.9 ms on the rim view), which is why Beautiful \
+                  dropped back to one interface.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "flat",
+                verdict: "DOCUMENTED NEGATIVE — the E6 gate failure (Pascal: \"the looking up out \
+                          of the water part is completely broken\"). Past the critical angle the \
+                          refraction totally internally reflects, Fresnel is 1, and with one \
+                          interface of budget there was nothing left to add — so the whole \
+                          mirrored region was ONE FLAT COLOUR. Since the window is only a \
+                          ~97-degree cone, tilting the head underwater fills most of the screen \
+                          with it. It is also why the view read as uniformly tinted and why the \
+                          cone's rim read as harsh: a bright cone against a featureless surround \
+                          has nothing to sit against. Kept selectable ONLY so the bench can price \
+                          the fix and so the failure stays reproducible.",
+            },
+            ModeOption {
+                value: 1,
+                label: "cheap mirror",
+                verdict: "SHIPPED: one more medium march, shaded CHEAPLY — albedo x downwelling x \
+                          the face's own up-facing share, with NO shadow ray, NO ambient occlusion \
+                          and NO light-volume sample. That keeps the GEOMETRY (the bed and the \
+                          pool walls, mirrored) which is the whole point, while dropping the term \
+                          that actually costs: underwater the dominant cost of a full bounce is \
+                          the sun shadow ray, which has to walk metres of water. Same principle \
+                          as the above-water half-modes — substitute a cheap stand-in for a term \
+                          you cannot afford to trace properly, never a constant.",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-tir-flat",
+            overrides: &[(LeverId::WaterTirFallback, LeverValue::Mode(0))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterRayCutoff,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "ray cutoff (Fresnel weight)",
+        default_value: LeverValue::Scalar(0.04),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 0.5,
+            logarithmic: false,
+        },
+        verdict: "MEASURED (E6): -7.1% on the steep aerial view (10.156 vs 10.931 ms \
+                  with the cutoff disabled) and inside noise on the other three, which \
+                  is exactly where the reasoning said it would land — a steep view is \
+                  where the mirror term is worth 2% and gets cut on almost every water \
+                  pixel, so `full` costs the same as `refraction-only` there (10.156 vs \
+                  10.019). It does not help the underwater views, where the expensive \
+                  term (the medium march) is the one carrying the weight. Runtime \
+                  (water_params.z), and the one \
+                  optimization in E6 that costs nothing to look at: Fresnel already \
+                  says how much each half of a water pixel is WORTH, so a term below \
+                  the threshold takes its cheap analytic stand-in instead of a \
+                  secondary ray. Head-on, the mirror carries F0 = 2% of the pixel and \
+                  was being paid for with a full traced reflection AND a full \
+                  shading; at grazing angles the transmitted term is the negligible \
+                  one. 0.04 cuts the reflection ray for incidences steeper than ~57 \
+                  degrees off the normal, which is most of an aerial view, and the \
+                  substituted sky differs from the traced mirror by at most 4% of the \
+                  pixel. 0 = always trace, which is the row this is measured against.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-full-nocutoff",
+            overrides: &[(LeverId::WaterRayCutoff, LeverValue::Scalar(0.0))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterSunThroughLiquid,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_SUN_THROUGH_LIQUID"),
+        label: "sun reaches through water",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "MEASURED (E6): the cost is concentrated in ONE view and the look is \
+                  not optional, so it ships on the tiers that can see under water. \
+                  Sideways underwater it is **6.24 -> 11.06 ms (+77%)**, because a \
+                  shadow ray from the bed walks metres of water voxel by voxel; the \
+                  steep aerial view pays +8% (9.393 -> 10.156) and the grazing and \
+                  looking-up views are inside noise (+1.9%, +0.1%). A \
+                  correctness/cost trade rather than a free win. \
+                  OFF, every submerged surface is in SHADOW, so a pool bed one metre \
+                  down is lit by ambient alone and shallow water reads DARKER than \
+                  the opaque water it replaced (measured on the top-down lakes view: \
+                  dark navy against opaque water's bright cyan) — i.e. refraction \
+                  stops paying for itself. ON, a sunlit bed is sunlit, and the CA \
+                  pass's per-cell sun test follows through the same shared \
+                  `trace_shadow_visibility`, so the light volume lights under water \
+                  too. The cost is structural: a shadow ray that no longer stops at \
+                  the surface walks the whole body VOXEL BY VOXEL, because water \
+                  bricks are occupied and the chebyshev skip cannot help. Ships on \
+                  the tiers that draw water properly; the zero-ray tiers turn it off, \
+                  where it buys little because they cannot see under the surface \
+                  anyway.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-full-sunblocked",
+            overrides: &[(LeverId::WaterSunThroughLiquid, LeverValue::Flag(false))],
+        }],
     },
     // ---- World edits (E2) ----
     Lever {
@@ -1493,8 +1975,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
     QualityPresetSpec {
         preset: QualityPreset::Potato,
         label: "Potato",
-        summary: "corner AO + hard shadows, NO light volume, render scale 0.7, \
-                  AO fade 15->30 m",
+        summary: "corner AO + hard shadows, NO light volume, zero-ray Fresnel-tinted \
+                  water, render scale 0.7, AO fade 15->30 m",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
@@ -1504,6 +1986,13 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             // The only tier without CAGI: it also proves the experiment is
             // excludable, and it is the E1c renderer bit for bit.
             (LeverId::GiEnabled, LeverValue::Flag(false)),
+            // E6: the cheapest water that is still water. No secondary rays at
+            // all, but the Fresnel curve and the underwater extinction are the
+            // same ones the full model uses.
+            (LeverId::WaterMode, LeverValue::Mode(1)),
+            // The zero-ray tiers cannot see under the surface, so paying for the
+            // sun to get there buys almost nothing.
+            (LeverId::WaterSunThroughLiquid, LeverValue::Flag(false)),
             (LeverId::RenderScale, LeverValue::Scalar(0.7)),
         ],
     },
@@ -1511,7 +2000,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
         preset: QualityPreset::Quest,
         label: "Quest",
         summary: "corner AO + hard shadows, CAGI at 1 m cells x 2 iterations, \
-                  render scale 0.8 — E9 tunes this tier on device",
+                  zero-ray Fresnel-tinted water, render scale 0.8 — E9 tunes this \
+                  tier on device",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
@@ -1519,20 +2009,26 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             // and the 20 MB budget.
             (LeverId::GiResolution, LeverValue::Count(8)),
             (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
+            (LeverId::WaterMode, LeverValue::Mode(1)),
+            (LeverId::WaterSunThroughLiquid, LeverValue::Flag(false)),
             (LeverId::RenderScale, LeverValue::Scalar(0.8)),
         ],
     },
     QualityPresetSpec {
         preset: QualityPreset::Balanced,
         label: "Balanced",
-        summary: "corner AO + hard shadows + CAGI at 0.5 m cells x 2 iterations, \
-                  full resolution — the shipped default",
+        summary: "corner AO + hard shadows + CAGI at 0.5 m cells x 2 iterations + \
+                  Fresnel reflection & refraction at 1 water interface, full \
+                  resolution — the shipped default",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
             (LeverId::GiEnabled, LeverValue::Flag(true)),
             (LeverId::GiResolution, LeverValue::Count(4)),
             (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
+            (LeverId::WaterMode, LeverValue::Mode(4)),
+            (LeverId::WaterBounces, LeverValue::Count(1)),
+            (LeverId::WaterSunThroughLiquid, LeverValue::Flag(true)),
             (LeverId::RenderScale, LeverValue::Scalar(MAX_RENDER_SCALE)),
         ],
     },
@@ -1540,8 +2036,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
         preset: QualityPreset::Beautiful,
         label: "Beautiful",
         summary: "ray-traced AO (2 rays / 8 voxels / cosine / falloff) + directional \
-                  miss radiance + hard shadows + CAGI at 0.5 m cells x 4 iterations, \
-                  full resolution",
+                  miss radiance + hard shadows + CAGI at 0.5 m cells x 4 iterations + \
+                  full water optics, full resolution",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(0)),
             (LeverId::AoRayCount, LeverValue::Count(2)),
@@ -1556,6 +2052,13 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             // Twice Balanced's propagation budget: the volume converges in half
             // the frames after a sun change, at twice the CA cost.
             (LeverId::GiIterationsPerFrame, LeverValue::Count(4)),
+            // E6: ONE interface, like Balanced. The second one was measured against
+            // the cheap mirrored stand-in on the window-rim view and the two frames
+            // are near-identical, while the full bounce costs 2.5x what the stand-in
+            // does — so Beautiful buys nothing here (step 1 verdict).
+            (LeverId::WaterMode, LeverValue::Mode(4)),
+            (LeverId::WaterBounces, LeverValue::Count(1)),
+            (LeverId::WaterSunThroughLiquid, LeverValue::Flag(true)),
             (LeverId::RenderScale, LeverValue::Scalar(MAX_RENDER_SCALE)),
         ],
     },
@@ -1588,6 +2091,8 @@ pub struct RenderQuality {
     pub shadows: ShadowSettings,
     /// E4 — the CAGI light volume.
     pub global_illumination: CagiSettings,
+    /// E6 — water reflection, refraction and extinction.
+    pub water: WaterSettings,
     /// E2 — world authority, threading and the edit pipeline. Not a *quality*
     /// knob: this struct is the app's whole lever surface, which is what the
     /// registry, the presets and the overlay panel are built on, so E2's knobs
@@ -1617,6 +2122,7 @@ impl RenderQuality {
             ambient_occlusion: AoSettings::default(),
             shadows: ShadowSettings::default(),
             global_illumination: CagiSettings::default(),
+            water: WaterSettings::default(),
             world_edit: WorldEditSettings::default(),
             render_scale: MAX_RENDER_SCALE,
         }
@@ -1653,6 +2159,7 @@ impl RenderQuality {
             || self
                 .global_illumination
                 .requires_pipeline_rebuild(&applied.global_illumination)
+            || self.water.requires_pipeline_rebuild(&applied.water)
     }
 
     /// Whether switching from `applied` to `self` needs the CAGI light volume
@@ -1691,7 +2198,20 @@ impl RenderQuality {
             strength: self.global_illumination.strength,
             ambient_floor: self.global_illumination.ambient_floor,
             sun_bounce: self.global_illumination.sun_bounce,
-            reserved: 0.0,
+            emissive_scale: self.global_illumination.emissive_scale,
+        }
+    }
+
+    /// The runtime water knobs, for this frame's lighting uniform (E6).
+    pub fn water_params(&self) -> WaterParams {
+        WaterParams {
+            absorption_scale: self.water.absorption_scale,
+            scattering_scale: self.water.scattering_scale,
+            ray_cutoff: self.water.ray_cutoff,
+            reserved_flow: 0.0,
+            // E6 step 3 turns this into a registry lever (the window-width dial);
+            // until then it stays at the physical index, so no taste is shipped.
+            refraction_strength: 1.0,
         }
     }
 
@@ -1737,12 +2257,41 @@ mod tests {
         "CAGI_SKY_TEST_COLUMN_MAX",
         "CAGI_SKY_TEST_UPWARD_TRACE",
         "CAGI_CELL_SOLID",
+        "CAGI_TRANSMITTANCE_SHIFT",
+        "CAGI_TRANSMITTANCE_LEVELS",
+        "CAGI_EMITTER_SHIFT",
         "CAGI_CHANNEL_MASK",
         "CAGI_CHANNEL_MAX",
         "CAGI_SUN_SOURCE_FLAG",
         "CAGI_RADIANCE_PER_STEP",
         "CAGI_SAMPLE_SEARCH_STEPS",
         "CAGI_DIFFUSION_SHIFT",
+        // E6 water: mode names, the derived mode predicates, the physical
+        // constants (indices of refraction, F0, the extinction coefficients) and
+        // the march's own bounds are structure and physics, not levers.
+        "WATER_MODE_OPAQUE",
+        "WATER_MODE_FRESNEL_TINT",
+        "WATER_MODE_REFLECTION",
+        "WATER_MODE_REFRACTION",
+        "WATER_MODE_FULL",
+        "WATER_TRACES_REFLECTION",
+        "WATER_TRACES_REFRACTION",
+        "WATER_AIR_INDEX",
+        "WATER_INDEX",
+        "WATER_ETA_INTO",
+        "WATER_ETA_OUT",
+        "WATER_FRESNEL_F0",
+        "WATER_EXTINCTION_PER_METER",
+        "WATER_MEDIUM_MAX_DISTANCE",
+        "WATER_MEDIUM_MAX_STEPS",
+        "WATER_MEDIUM_SOLID",
+        "WATER_MEDIUM_AIR",
+        "WATER_MEDIUM_LIMIT",
+        "WATER_NO_MEDIUM",
+        "WATER_TIR_FLAT",
+        "WATER_TIR_STANDIN",
+        "WATER_INTERFACE_FRESNEL",
+        "WATER_INTERFACE_TRANSPARENT",
     ];
 
     /// Both pass shader sources — a lever's const lives in exactly one of them
@@ -1836,7 +2385,8 @@ mod tests {
                 let lever_shaped = constant_name.starts_with("ENABLE_")
                     || constant_name.starts_with("AO_")
                     || constant_name.starts_with("SHADOW_")
-                    || constant_name.starts_with("CAGI_");
+                    || constant_name.starts_with("CAGI_")
+                    || constant_name.starts_with("WATER_");
                 if !lever_shaped || NON_LEVER_SHADER_CONSTANTS.contains(&constant_name) {
                     continue;
                 }
@@ -1862,6 +2412,7 @@ mod tests {
             ambient_occlusion,
             shadows,
             global_illumination,
+            water,
             world_edit,
             render_scale,
         } = baseline;
@@ -1898,11 +2449,24 @@ mod tests {
             sample_mode,
             sky_test,
             sun_cache,
+            transmission,
+            emissive,
             iterations_per_frame,
             strength: gi_strength,
             ambient_floor,
             sun_bounce,
+            emissive_scale,
         } = global_illumination;
+        let WaterSettings {
+            mode: water_mode,
+            bounces,
+            tir_fallback,
+            underwater_interface,
+            absorption_scale,
+            scattering_scale,
+            ray_cutoff,
+            sun_through_liquid,
+        } = water;
         let WorldEditSettings {
             world_thread,
             clearance_update,
@@ -1972,6 +2536,9 @@ mod tests {
                 LeverValue::Mode(sky_test.shader_value()),
             ),
             (LeverId::GiSunCache, LeverValue::Flag(sun_cache)),
+            (LeverId::GiTransmission, LeverValue::Flag(transmission)),
+            (LeverId::GiEmissive, LeverValue::Flag(emissive)),
+            (LeverId::GiEmissiveScale, LeverValue::Scalar(emissive_scale)),
             (
                 LeverId::GiSampleMode,
                 LeverValue::Mode(sample_mode.shader_value()),
@@ -1983,6 +2550,32 @@ mod tests {
             (LeverId::GiStrength, LeverValue::Scalar(gi_strength)),
             (LeverId::GiAmbientFloor, LeverValue::Scalar(ambient_floor)),
             (LeverId::GiSunBounce, LeverValue::Scalar(sun_bounce)),
+            (
+                LeverId::WaterMode,
+                LeverValue::Mode(water_mode.shader_value()),
+            ),
+            (LeverId::WaterBounces, LeverValue::Count(bounces)),
+            (
+                LeverId::WaterTirFallback,
+                LeverValue::Mode(tir_fallback.shader_value()),
+            ),
+            (
+                LeverId::WaterUnderwaterInterface,
+                LeverValue::Mode(underwater_interface.shader_value()),
+            ),
+            (
+                LeverId::WaterAbsorption,
+                LeverValue::Scalar(absorption_scale),
+            ),
+            (
+                LeverId::WaterScattering,
+                LeverValue::Scalar(scattering_scale),
+            ),
+            (LeverId::WaterRayCutoff, LeverValue::Scalar(ray_cutoff)),
+            (
+                LeverId::WaterSunThroughLiquid,
+                LeverValue::Flag(sun_through_liquid),
+            ),
             (LeverId::EditWorldThread, LeverValue::Flag(world_thread)),
             (
                 LeverId::EditClearanceUpdate,
@@ -2060,6 +2653,7 @@ mod tests {
             BenchSection::CheapOcclusion,
             BenchSection::Cagi,
             BenchSection::EditStorm,
+            BenchSection::Water,
         ] {
             let labels: Vec<&str> = bench_points_of(section).map(|point| point.label).collect();
             for (index, label) in labels.iter().enumerate() {
@@ -2250,11 +2844,15 @@ mod tests {
         assert_eq!(beautiful.render_scale, MAX_RENDER_SCALE);
     }
 
-    /// Only three of the five presets need their own pipeline: Quest and
-    /// Balanced differ by render scale alone, and Custom starts as Balanced.
-    /// This is what the startup pipeline cache pays for.
+    /// Four of the five presets need their own pipeline, and Custom starts as
+    /// Balanced. This is what the startup pipeline cache pays for.
+    ///
+    /// It was THREE up to E4: Quest and Balanced differed by render scale alone,
+    /// which is not a shader const. E6 gave Quest the zero-ray water mode, so the
+    /// two tiers now compile different sources — a deliberate ~2 ms more of
+    /// startup compile for the tier that most needs the cheap water.
     #[test]
-    fn presets_need_three_distinct_pipelines() {
+    fn presets_need_four_distinct_pipelines() {
         let mut sources: Vec<String> = QUALITY_PRESETS
             .iter()
             .filter(|spec| spec.preset != QualityPreset::Custom)
@@ -2262,19 +2860,90 @@ mod tests {
             .collect();
         sources.sort();
         sources.dedup();
-        assert_eq!(sources.len(), 3);
+        assert_eq!(sources.len(), 4);
     }
 
     #[test]
     fn preset_switches_that_only_move_runtime_knobs_skip_the_rebuild() {
         let balanced = preset_spec(QualityPreset::Balanced).resolve();
-        let quest = preset_spec(QualityPreset::Quest).resolve();
-        assert!(!quest.requires_pipeline_rebuild(&balanced));
+        // Quest needed no rebuild up to E4 (it differed by render scale and the
+        // GI cell size, both runtime); since E6 gave it the zero-ray water mode it
+        // does. The GI-resolution-only move is the case that must still not.
+        let coarser_gi = {
+            let mut quality = balanced;
+            LeverId::GiResolution.apply(&mut quality, LeverValue::Count(8));
+            quality
+        };
+        assert!(!coarser_gi.requires_pipeline_rebuild(&balanced));
 
         let potato = preset_spec(QualityPreset::Potato).resolve();
+        let quest = preset_spec(QualityPreset::Quest).resolve();
         let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
         assert!(potato.requires_pipeline_rebuild(&balanced));
+        assert!(quest.requires_pipeline_rebuild(&balanced));
         assert!(beautiful.requires_pipeline_rebuild(&balanced));
+    }
+
+    /// E6: the per-tier water picks, and the two properties that make the tiering
+    /// meaningful — Potato/Quest trace NO water rays, Balanced/Beautiful trace
+    /// both halves, and only Beautiful spends a second interface.
+    #[test]
+    fn preset_table_tiers_the_water_optics_by_ray_budget() {
+        let potato = preset_spec(QualityPreset::Potato).resolve();
+        let quest = preset_spec(QualityPreset::Quest).resolve();
+        let balanced = preset_spec(QualityPreset::Balanced).resolve();
+        let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
+
+        for cheap in [potato, quest] {
+            assert_eq!(cheap.water.mode, WaterMode::FresnelTint);
+            assert!(!cheap.water.mode.traces_reflection());
+            assert!(!cheap.water.mode.traces_refraction());
+        }
+        for full in [balanced, beautiful] {
+            assert_eq!(full.water.mode, WaterMode::Full);
+            assert!(full.water.mode.traces_reflection());
+            assert!(full.water.mode.traces_refraction());
+        }
+        // E6 step 1: BOTH full tiers ship one interface. The second one was
+        // measured against the cheap mirrored stand-in and buys a near-identical
+        // frame for 2.5x the cost.
+        assert_eq!(balanced.water.bounces, 1);
+        assert_eq!(beautiful.water.bounces, 1);
+        for tier in [potato, quest, balanced, beautiful] {
+            assert_eq!(
+                tier.water.tir_fallback,
+                WaterTirFallback::CheapMirror,
+                "no tier may ship the flat fallback — it is the E6 gate failure"
+            );
+            // E6 step 3: every tier shows a plainly transparent surface from below.
+            // It is a LOOK decision, so it does not differ by tier — and it is also
+            // the cheaper option, so no tier has a cost reason to differ either.
+            assert_eq!(
+                tier.water.underwater_interface,
+                WaterUnderwaterInterface::Transparent,
+                "the underwater interface is a look decision and must not vary by tier"
+            );
+        }
+        // The sun-through-water lever follows the same split: the tiers that can
+        // see under the surface pay for the sun to get there, the zero-ray tiers
+        // do not.
+        assert!(!potato.water.sun_through_liquid);
+        assert!(!quest.water.sun_through_liquid);
+        assert!(balanced.water.sun_through_liquid);
+        assert!(beautiful.water.sun_through_liquid);
+        // No tier ships opaque water: E6 exists because opaque water makes
+        // swimming impossible to judge.
+        for spec in QUALITY_PRESETS
+            .iter()
+            .filter(|spec| spec.preset != QualityPreset::Custom)
+        {
+            assert_ne!(
+                spec.resolve().water.mode,
+                WaterMode::Opaque,
+                "{:?} ships opaque water",
+                spec.preset
+            );
+        }
     }
 
     #[test]

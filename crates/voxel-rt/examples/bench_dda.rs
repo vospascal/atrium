@@ -36,11 +36,11 @@
 //! the baselines and reference rows a section is judged against — are spelled
 //! out here.
 //!
-//! Seven sections, each its own variant table (isolation rule):
+//! Eight sections, each its own variant table (isolation rule):
 //!
 //! 1. **Traversal levers, AO off** — the Stage 2 regression gate. Every column
-//!    has `AO_MODE = AO_MODE_OFF` so the medians stay comparable with the
-//!    recorded pre-E1 baseline. Correctness evidence: the low-sun scenarios
+//!    has `AO_MODE = AO_MODE_OFF`, CAGI off and E6's water optics off, so the
+//!    medians stay comparable with the recorded pre-E1 baseline. Correctness evidence: the low-sun scenarios
 //!    (B, D) are rendered per variant and compared pixel-by-pixel against the
 //!    no-fast-path reference (`stage2-baseline`).
 //!
@@ -73,6 +73,15 @@
 //!    count from the frame delta), plus the ground search that entering walk
 //!    mode runs. GPU-free, so `-- 7` finishes in seconds.
 //!
+//! 8. **E6 water optics** — the four cost tiers (no secondary rays / reflection
+//!    only / refraction only / both) and the bounce budget, on scenes that
+//!    actually contain water. It runs over its OWN brickmap — the island plus a
+//!    carved debug pool, because the island's natural water is only 0.6-1.75 m
+//!    deep and refraction needs depth to be visible — and over its own four
+//!    scenarios, two of them with the camera INSIDE the pool (Snell's window
+//!    looking up, extinction looking sideways). Its numbers therefore do not
+//!    compare with sections 1-5, by construction.
+//!
 //! All PNGs land in `target/bench_dda/`.
 
 use std::time::Instant;
@@ -99,7 +108,7 @@ use voxel_rt::variants::{
     QUALITY_PRESETS,
 };
 use voxel_rt::voxel_dda;
-use voxel_rt::world_edit::{BulkEditRequest, VoxelEdit, WorldEditSettings};
+use voxel_rt::world_edit::{BulkEdit, BulkEditRequest, VoxelEdit, WorldEditSettings};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
 use glam::Vec3;
@@ -146,8 +155,11 @@ impl Scenario {
     /// penumbra scale, fade ramp, the E4 GI knobs) — the levers that need no
     /// pipeline rebuild are swept exactly the way the app applies them.
     fn lighting_uniform(&self, quality: &RenderQuality) -> LightingUniform {
-        self.sun
-            .lighting_uniform(quality.shading_params(), quality.gi_params())
+        self.sun.lighting_uniform(
+            quality.shading_params(),
+            quality.gi_params(),
+            quality.water_params(),
+        )
     }
 }
 
@@ -309,6 +321,38 @@ fn main() {
         // seconds.
         report_character_movement_cost(&brickmap);
     }
+    if runs_section(8) {
+        // E6 — water optics. Its own world (island + one carved pool) and its own
+        // bindings, because the island's natural water is too shallow for
+        // refraction or an underwater camera to say anything. Sections 1-7 are
+        // untouched by the carve, which is why no baseline above had to move for it.
+        let pool = section_eight_pool();
+        let pooled_brickmap = water_section_world(&brickmap, pool);
+        let pooled_bindings = WorldBindings::new(&device, &pooled_brickmap);
+        run_section(
+            &device,
+            &queue,
+            &pooled_bindings,
+            &pooled_brickmap,
+            water_section(pool),
+        );
+    }
+}
+
+/// Where section 8 carves its pool: exactly where the app's `P` key would put it
+/// from the ground-level scenario pose (10 m ahead of an eye at the spawn looking
+/// across the island), so the bench's water is the water Pascal gates in-app.
+fn section_eight_pool() -> WaterPool {
+    let ground_pose = CameraPose::from_yaw_pitch(
+        Vec3::new(
+            WORLD_SIZE_X as f32 * VOXEL_SIZE * 0.5,
+            WATER_LEVEL as f32 * VOXEL_SIZE + 1.7,
+            WORLD_SIZE_Z as f32 * VOXEL_SIZE * 0.86,
+        ),
+        -std::f32::consts::FRAC_PI_2,
+        0.0,
+    );
+    WaterPool::in_front_of(ground_pose.position, ground_pose.forward)
 }
 
 /// Section 6's variants: the shipped edit pipeline plus every registry bench point
@@ -348,7 +392,7 @@ fn run_section(
 /// shipped shader with AO off) and `stage2-baseline` (every traversal aid off),
 /// which doubles as the pixel-compare reference.
 fn traversal_section() -> Section {
-    let baseline = gi_off(ao_off(RenderQuality::default()));
+    let baseline = water_off(gi_off(ao_off(RenderQuality::default())));
     let mut variants = vec![Variant::new("current".to_string(), baseline)];
     variants.extend(registry_variants(BenchSection::Traversal, &baseline));
 
@@ -373,14 +417,14 @@ fn traversal_section() -> Section {
 /// cheap-combo interaction the one-factor grid misses (fewest rays x shortest
 /// distance).
 fn ray_traced_ao_section() -> Section {
-    let center = gi_off(RenderQuality {
+    let center = water_off(gi_off(RenderQuality {
         ambient_occlusion: AoSettings {
             mode: AoMode::RayTraced,
             max_distance_voxels: 16,
             ..AoSettings::default()
         },
         ..RenderQuality::default()
-    });
+    }));
     let mut variants = registry_variants(BenchSection::RayTracedAo, &center);
     variants.push(Variant::new("ao-2ray-d16".to_string(), center));
 
@@ -405,13 +449,13 @@ fn ray_traced_ao_section() -> Section {
 /// row every cheap contender is judged against. Anchors: that baseline, and
 /// E1c's const-vs-uniform A/B for the fade distances.
 fn cheap_occlusion_section() -> Section {
-    let e1_default = gi_off(RenderQuality {
+    let e1_default = water_off(gi_off(RenderQuality {
         ambient_occlusion: AoSettings {
             mode: AoMode::RayTraced,
             ..AoSettings::default()
         },
         ..RenderQuality::default()
-    });
+    }));
     let mut variants = registry_variants(BenchSection::CheapOcclusion, &e1_default);
     variants.push(Variant::new("ao-2ray-d8".to_string(), e1_default));
     variants.push(fade_range_as_shader_consts_variant(&e1_default));
@@ -478,6 +522,157 @@ fn cagi_section() -> Section {
     }
 }
 
+/// Section 8: E6's water optics. Baseline = the shipped configuration (Fresnel
+/// reflection + refraction at one interface); the registry's columns are the cost
+/// ladder (opaque / zero-ray tint / reflection only / refraction only) plus the
+/// second bounce. `water-off` is the anchor every cost is measured against, and
+/// the pixel compare against it is the frame coverage of the whole experiment.
+///
+/// It gets its own brickmap and its own scenarios (see [`water_section_world`] and
+/// [`water_scenarios`]) because the island's natural water is 0.6-1.75 m deep —
+/// too shallow for extinction or for an underwater camera to exist at all.
+fn water_section(pool: WaterPool) -> Section {
+    let shipped = RenderQuality::default();
+    let mut variants = vec![Variant::new("water-full".to_string(), shipped)];
+    variants.extend(registry_variants(BenchSection::Water, &shipped));
+
+    Section {
+        heading: "section 8: E6 water reflection, refraction and the underwater view",
+        scenarios: water_scenarios(pool),
+        variants,
+        reference_label: "water-off",
+        compare_heading: "water coverage (differing pixels vs water-off — how much of the frame \
+                          the water model changes)",
+        crop_regions: WATER_CROP_REGIONS,
+    }
+}
+
+/// Section 8's world: the seed-1 island with ONE debug pool carved into it,
+/// through E2's bulk-edit path exactly as the app's `P` key does.
+///
+/// Why a separate brickmap rather than the shared one: the island's own water is
+/// 0.6-1.75 m deep, so refraction has almost nothing to travel through and an
+/// underwater camera has nowhere to stand. The pool is 8 m across and 5 m deep,
+/// which is the depth E2b built it for and the depth extinction becomes legible
+/// at. It is a *carve*, not a generation change, so the plan's
+/// baseline-versioning rule is satisfied without re-recording anything: sections
+/// 1-7 still measure the untouched island.
+fn water_section_world(brickmap: &Brickmap, pool: WaterPool) -> Brickmap {
+    let mut pooled = brickmap.clone();
+    let delta = voxel_rt::world_edit::apply_bulk(
+        &mut pooled,
+        &BulkEditRequest {
+            shape: Box::new(pool),
+            light_grid: None,
+        },
+        &WorldEditSettings::default(),
+    )
+    .expect("carving the section-8 pool must change the world");
+    println!();
+    println!(
+        "== section 8 world: island + one {} at voxel ({}, {}) ==",
+        pool.label(),
+        pool.centre_voxel_x,
+        pool.centre_voxel_z,
+    );
+    println!(
+        "  {} voxels written, water surface at {:.2} m, {:.0} m deep",
+        delta.voxels_written,
+        pool.surface_centre().y,
+        POOL_DEPTH_METERS,
+    );
+    pooled
+}
+
+/// Section 8's four poses. Two look AT water from the air (one grazing, one
+/// steep — the two ends of the Fresnel curve), two look at it from INSIDE.
+///
+/// - `E` from the shore, eye 1.7 m above the waterline, pitched slightly down at
+///   the pool 10 m ahead: the ray meets the surface at ~10 deg off grazing, where
+///   Fresnel is ~0.4 and the mirror term dominates. This is the "mirror at
+///   grazing angles" half of the gate.
+/// - `F` the top-down pose over the island centre, which meets the natural lakes
+///   almost head-on: Fresnel ~0.02, so it is the "see-through when steep" half,
+///   and it is the scenario with the most water pixels in frame.
+/// - `G` INSIDE the pool, 2 m under the surface, looking straight up — Snell's
+///   window: the sky compressed into a 48.6-degree cone with a mirror around it.
+/// - `H` the same eye looking horizontally: pure extinction, the depth cue the
+///   whole experiment exists for.
+/// - `I` the same eye looking up at **45 degrees** — added after the E6 look gate
+///   failed. G and H are the two poses that structurally CANNOT show the region
+///   outside Snell's window: at a 68-degree vertical FOV the frame reaches only
+///   34 degrees off-axis vertically (50 horizontally, 54 into the corners) while
+///   the critical angle is 48.6, so looking straight up puts almost the whole
+///   frame INSIDE the window and looking sideways puts all of it outside. Neither
+///   shows the rim. At 45 degrees of pitch the rim crosses the middle of the
+///   frame, so the cone, its edge and the mirrored world beyond it are all in one
+///   picture — which is the view Pascal was actually judging when he called it
+///   broken, and the one a flat fallback ruins.
+fn water_scenarios(pool: WaterPool) -> Vec<Scenario> {
+    let world_x_meters = WORLD_SIZE_X as f32 * VOXEL_SIZE;
+    let world_z_meters = WORLD_SIZE_Z as f32 * VOXEL_SIZE;
+    let water_meters = WATER_LEVEL as f32 * VOXEL_SIZE;
+    let surface = pool.surface_centre();
+    let default_sun = SunSettings::default();
+
+    vec![
+        Scenario {
+            label: "E shore -> pool, grazing",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(
+                    world_x_meters * 0.5,
+                    water_meters + 1.7,
+                    world_z_meters * 0.86,
+                ),
+                -std::f32::consts::FRAC_PI_2,
+                -0.16,
+            ),
+            sun: default_sun,
+            capture_image: true,
+        },
+        Scenario {
+            label: "F top-down over the lakes, steep",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(world_x_meters * 0.5, 60.0, world_z_meters * 0.5),
+                -std::f32::consts::FRAC_PI_2,
+                -(std::f32::consts::FRAC_PI_2 - 0.01),
+            ),
+            sun: default_sun,
+            capture_image: true,
+        },
+        Scenario {
+            label: "G underwater, looking up",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(surface.x, surface.y - 2.0, surface.z),
+                -std::f32::consts::FRAC_PI_2,
+                std::f32::consts::FRAC_PI_2 - 0.01,
+            ),
+            sun: default_sun,
+            capture_image: true,
+        },
+        Scenario {
+            label: "H underwater, looking sideways",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(surface.x, surface.y - 2.0, surface.z),
+                -std::f32::consts::FRAC_PI_2,
+                0.0,
+            ),
+            sun: default_sun,
+            capture_image: true,
+        },
+        Scenario {
+            label: "I underwater, up 45 deg (the window rim)",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(surface.x, surface.y - 2.0, surface.z),
+                -std::f32::consts::FRAC_PI_2,
+                std::f32::consts::FRAC_PI_4,
+            ),
+            sun: default_sun,
+            capture_image: true,
+        },
+    ]
+}
+
 /// AO forced off — spelled once, used by section 1.
 fn ao_off(mut quality: RenderQuality) -> RenderQuality {
     quality.ambient_occlusion.mode = AoMode::Off;
@@ -489,6 +684,20 @@ fn ao_off(mut quality: RenderQuality) -> RenderQuality {
 /// baselines instead of carrying a light-volume sample.
 fn gi_off(mut quality: RenderQuality) -> RenderQuality {
     quality.global_illumination.enabled = false;
+    quality
+}
+
+/// E6's water optics forced off — same reason as `gi_off`, one layer up: the
+/// island has lakes, so leaving reflection/refraction on would put secondary rays
+/// into the very scenarios whose medians are the pre-E6 regression gate. With this
+/// the sections below E6 render opaque water, i.e. exactly what every recorded
+/// baseline describes.
+fn water_off(mut quality: RenderQuality) -> RenderQuality {
+    quality.water.mode = voxel_rt::water::WaterMode::Opaque;
+    // Opaque water must also stop the SUN again, or the shadow rays in these
+    // sections would still walk through the island's lakes and the Stage 2 pixel
+    // gate would move. Off means off.
+    quality.water.sun_through_liquid = false;
     quality
 }
 
@@ -1598,7 +1807,15 @@ fn report_audio_ray_cost(brickmap: &Brickmap) {
             source[1] - listener[1],
             source[2] - listener[2],
         ];
-        if voxel_dda::cast(brickmap, listener, direction, 160.0).is_some() {
+        if voxel_dda::cast(
+            brickmap,
+            listener,
+            direction,
+            160.0,
+            voxel_dda::CastTarget::AnyVoxel,
+        )
+        .is_some()
+        {
             hits += 1;
         }
     }
@@ -2170,6 +2387,7 @@ fn scenario_sky_radiance() -> [f32; 3] {
     let uniform = SunSettings::default().lighting_uniform(
         RenderQuality::default().shading_params(),
         RenderQuality::default().gi_params(),
+        RenderQuality::default().water_params(),
     );
     [
         uniform.sky_ambient[0] * uniform.sky_ambient[3],
@@ -2843,6 +3061,21 @@ const CAGI_CROP_REGIONS: &[(&str, u32, u32, u32, u32)] = &[
     // Canopy undersides and shadowed slopes: thin-geometry leaks and how far light
     // travels into cover (long-distance transport).
     ("canopy-shade", 1600, 480, 320, 180),
+];
+
+/// The E6 water crops, in 2560x1440 render pixels. Each targets one claim of the
+/// E6 gate, so the PNGs are the evidence rather than an illustration.
+const WATER_CROP_REGIONS: &[(&str, u32, u32, u32, u32)] = &[
+    // Screen centre: the pool ahead on the shore scenarios, and the middle of
+    // Snell's window on the underwater ones — the bright cone and, past the
+    // critical angle, its rim.
+    ("snells-window", 1120, 630, 320, 180),
+    // The lower third: where a grazing water surface is closest to the camera, so
+    // the mirror term and the depth gradient of the bed are both largest.
+    ("water-near", 1120, 1080, 320, 180),
+    // Upper-left of the water: the far side of a body of water, where extinction
+    // has had the longest path to work over.
+    ("water-far", 640, 560, 320, 180),
 ];
 
 /// Zoom of the crops — nearest neighbour, so nothing is smoothed away.

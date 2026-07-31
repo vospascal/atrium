@@ -21,13 +21,15 @@ use super::ComputePipelineCache;
 const WORKGROUP_SIZE: u32 = 8;
 
 /// The shading pass's shader source: the shared traversal core, the shared
-/// light-volume half, then the shading pass itself. Exposed so the headless
-/// benchmark (`examples/bench_dda.rs`) can build A/B pipeline variants by
-/// patching the compile-time levers (see "A/B benchmark levers" in
-/// `shaders/world.wgsl` and the AO block in `shaders/dda.wgsl`).
+/// light-volume half, E6's water optics, then the shading pass itself. Exposed so
+/// the headless benchmark (`examples/bench_dda.rs`) can build A/B pipeline
+/// variants by patching the compile-time levers (see "A/B benchmark levers" in
+/// `shaders/world.wgsl`, the AO block in `shaders/dda.wgsl` and the water levers
+/// in `shaders/water.wgsl`).
 pub const SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/world.wgsl"),
     include_str!("../../shaders/cagi_volume.wgsl"),
+    include_str!("../../shaders/water.wgsl"),
     include_str!("../../shaders/dda.wgsl"),
 );
 
@@ -45,9 +47,10 @@ pub fn build_shader_source(quality: &RenderQuality) -> String {
         .ambient_occlusion
         .patch_shader_source(&traversal_patched);
     let shadows_patched = quality.shadows.patch_shader_source(&ao_patched);
-    quality
+    let gi_patched = quality
         .global_illumination
-        .patch_volume_consts(&shadows_patched)
+        .patch_volume_consts(&shadows_patched);
+    quality.water.patch_shader_source(&gi_patched)
 }
 
 pub struct DdaPass {
@@ -264,6 +267,7 @@ pub(crate) mod tests {
     use crate::shadows::{ShadowMode, ShadowSettings};
     use crate::traversal::TraversalSettings;
     use crate::variants::{QualityPreset, QUALITY_PRESETS};
+    use crate::water::{WaterMode, WaterSettings};
     use std::collections::HashMap;
 
     #[test]
@@ -422,6 +426,29 @@ pub(crate) mod tests {
                     global_illumination.enabled, global_illumination.sample_mode
                 ),
             );
+        }
+        // E6: every water optics mode at both bounce budgets. The medium march,
+        // the Snell branch and the two half-modes are only reachable this way, and
+        // a WGSL error on one of them would otherwise surface as a black frame in
+        // the bench rather than as a test failure.
+        for mode in [
+            WaterMode::Opaque,
+            WaterMode::FresnelTint,
+            WaterMode::Reflection,
+            WaterMode::Refraction,
+            WaterMode::Full,
+        ] {
+            for bounces in [1, 2] {
+                let quality = RenderQuality {
+                    water: WaterSettings {
+                        mode,
+                        bounces,
+                        ..WaterSettings::default()
+                    },
+                    ..RenderQuality::default()
+                };
+                compile(&quality, format!("water {mode:?} x {bounces} bounces"));
+            }
         }
     }
 
