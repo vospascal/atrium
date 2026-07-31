@@ -85,6 +85,28 @@ pub enum StudioPose {
     Wall,
     /// A [`CUBE_SIZE`]-cubed block. The corner pose.
     Cube,
+    /// The wall, with a single [`Voxel::GlowBlock`] embedded at its centre.
+    ///
+    /// A diagnostic prop rather than a material-judging pose. It exists because "one
+    /// emitting block in a wall" behaves **arbitrarily** today, and that was invisible
+    /// until someone tried it (Pascal, 2026-07-31: *"what happens if we have a wall with
+    /// one emiting light source in it?"*).
+    ///
+    /// The cause is in the CAGI attribute sweep: it writes every occupied voxel's
+    /// material into its cell unconditionally, ascending Y outermost, so **one voxel
+    /// represents all 64 of a cell** — the highest, then furthest Z, then furthest X. An
+    /// embedded emitter that is not that voxel is not in the emitter set at all and
+    /// lights *nothing*, while one that is makes the whole half-metre cell blaze at its
+    /// full radiance. Move it one voxel and it flips between the two.
+    ///
+    /// E5 never caught it because its gate placed glow blocks in open air, where the
+    /// block is its own cell's only occupant and always wins.
+    ///
+    /// See [`EmitterWall`](StudioPose::EmitterWall)'s placement in
+    /// [`StudioScene::build`]: the block is put where its cell does **not** elect it, so
+    /// this pose currently demonstrates the failure. When the sweep is fixed it will
+    /// light, which is exactly the before/after this prop is for.
+    EmitterWall,
 }
 
 impl StudioPose {
@@ -93,10 +115,16 @@ impl StudioPose {
             StudioPose::Single => "single voxel",
             StudioPose::Wall => "wall (16x16)",
             StudioPose::Cube => "cube (4x4x4)",
+            StudioPose::EmitterWall => "wall + glow block",
         }
     }
 
-    pub const ALL: [StudioPose; 3] = [StudioPose::Single, StudioPose::Wall, StudioPose::Cube];
+    pub const ALL: [StudioPose; 4] = [
+        StudioPose::Single,
+        StudioPose::Wall,
+        StudioPose::Cube,
+        StudioPose::EmitterWall,
+    ];
 
     /// The pose's extent in voxels, as `[x, y, z]`.
     ///
@@ -109,7 +137,7 @@ impl StudioPose {
             // One voxel thick: a slab is what a wall's material is seen on, and a
             // solid 16-deep block would hide 15/16 of what was built while costing
             // 4096 edit-path writes to do it.
-            StudioPose::Wall => [WALL_SIZE, WALL_SIZE, 1],
+            StudioPose::Wall | StudioPose::EmitterWall => [WALL_SIZE, WALL_SIZE, 1],
             StudioPose::Cube => [CUBE_SIZE, CUBE_SIZE, CUBE_SIZE],
         }
     }
@@ -239,6 +267,17 @@ impl StudioScene {
                         }
                     }
                 }
+                // The diagnostic prop: one emitter in the middle of the wall.
+                if self.pose == StudioPose::EmitterWall {
+                    let block = self.emitter_block_voxel();
+                    brickmap.set_voxel(
+                        block[0],
+                        block[1],
+                        block[2],
+                        Voxel::GlowBlock,
+                        PLATE_CLEARANCE,
+                    );
+                }
                 // `Single` keeps S0's exact placement (see `pose_origin`):
                 // floating at the sample voxel with air below it, so its own bottom
                 // face and its shadow stay two separate shapes. The larger poses
@@ -247,6 +286,19 @@ impl StudioScene {
             }
         }
         brickmap
+    }
+
+    /// Where [`StudioPose::EmitterWall`] puts its glow block: the wall's centre.
+    ///
+    /// The centre is not an arbitrary choice — it is the *interesting* one. The CAGI
+    /// sweep elects one voxel per cell (highest Y, then Z, then X), and the centre of a
+    /// 16-wide wall is not that voxel for its cell, so the block currently injects
+    /// nothing. Which is the point: the prop shows the failure now and will show the fix
+    /// later, with no edit to the scene.
+    pub fn emitter_block_voxel(&self) -> [i32; 3] {
+        let origin = self.pose_origin();
+        let [size_x, size_y, _] = StudioPose::EmitterWall.extent();
+        [origin[0] + size_x / 2, origin[1] + size_y / 2, origin[2]]
     }
 
     /// Lowest-corner voxel of the current pose.
@@ -454,6 +506,96 @@ mod tests {
         }
     }
 
+    /// The prop must be the wall plus exactly one glow block, at the centre.
+    #[test]
+    fn the_emitter_wall_embeds_exactly_one_glow_block() {
+        let scene = StudioScene {
+            pose: StudioPose::EmitterWall,
+            ..StudioScene::default()
+        };
+        let brickmap = scene.build();
+        let glow = material_id(Voxel::GlowBlock);
+        let block = scene.emitter_block_voxel();
+        assert_eq!(brickmap.get(block[0], block[1], block[2]), glow);
+
+        // Exactly one, and the rest of the wall is the sample material.
+        let origin = scene.pose_origin();
+        let [size_x, size_y, size_z] = StudioPose::EmitterWall.extent();
+        let mut emitters = 0;
+        for y in 0..size_y {
+            for z in 0..size_z {
+                for x in 0..size_x {
+                    let voxel = [origin[0] + x, origin[1] + y, origin[2] + z];
+                    let material = brickmap.get(voxel[0], voxel[1], voxel[2]);
+                    if material == glow {
+                        emitters += 1;
+                        assert_eq!(voxel, block, "a glow block turned up off-centre");
+                    } else {
+                        assert_eq!(material, material_id(scene.sample));
+                    }
+                }
+            }
+        }
+        assert_eq!(emitters, 1, "the prop must embed exactly one emitter");
+    }
+
+    /// The embedded glow block must claim its cell's emitter slot **even though its cell
+    /// does not elect it** as the albedo voxel.
+    ///
+    /// This started life as a characterisation test asserting the opposite — the sweep
+    /// took the last voxel visited for every field, so a light embedded in a surface was
+    /// outvoted by whichever neighbour sat higher in the cell and injected nothing. It
+    /// failed the moment `fold_voxel_attribute` made the emitter index sticky, which is
+    /// what it was written to do.
+    #[test]
+    fn the_embedded_emitter_claims_its_cell() {
+        use crate::cagi::{CagiSettings, MaterialAttributes, CELL_EMITTER_MASK};
+
+        let scene = StudioScene {
+            pose: StudioPose::EmitterWall,
+            ..StudioScene::default()
+        };
+        let brickmap = scene.build();
+        let settings = CagiSettings::default();
+        let grid = settings.grid(&brickmap);
+
+        let block = scene.emitter_block_voxel();
+        let cell = [
+            block[0] as u32 / grid.cell_voxels,
+            block[1] as u32 / grid.cell_voxels,
+            block[2] as u32 / grid.cell_voxels,
+        ];
+        let attribute =
+            crate::cagi::cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled());
+
+        // The block is NOT the voxel its cell elects for albedo — that is the whole
+        // point of where the prop puts it, and what used to make it invisible to the CA.
+        let elected = [
+            ((cell[0] + 1) * grid.cell_voxels - 1) as i32,
+            ((cell[1] + 1) * grid.cell_voxels - 1) as i32,
+            ((cell[2] + 1) * grid.cell_voxels - 1) as i32,
+        ];
+        assert_ne!(
+            elected, block,
+            "the prop must place the block where its cell does NOT elect it"
+        );
+        // ...and it claims the emitter slot regardless, because emission is sticky.
+        assert_ne!(
+            attribute & CELL_EMITTER_MASK,
+            0,
+            "the embedded emitter lost its cell — an emitter must not be outvoted by a \
+             non-emitting neighbour"
+        );
+        // The albedo still comes from the elected voxel, i.e. the wall material rather
+        // than the glow block: the two rules coexist in one word by design.
+        let wall = MaterialAttributes::compiled().word(material_id(scene.sample));
+        assert_eq!(
+            attribute & 0x00ff_ffff,
+            wall & 0x00ff_ffff,
+            "the bounce tint should still be the wall, not the one embedded block"
+        );
+    }
+
     /// S2 — each pose must build exactly the voxels its extent claims, resting on
     /// the plate, and nothing outside it. The extent is what the framing and the
     /// centring are derived from, so a pose that builds something else is framed
@@ -467,6 +609,9 @@ mod tests {
             };
             let brickmap = scene.build();
             let expected = material_id(scene.sample);
+            // The diagnostic prop replaces one voxel with an emitter; every other pose
+            // is uniformly the sample material.
+            let embedded = (pose == StudioPose::EmitterWall).then(|| scene.emitter_block_voxel());
             let origin = scene.pose_origin();
             let [size_x, size_y, size_z] = pose.extent();
 
@@ -474,9 +619,15 @@ mod tests {
             for y in 0..size_y {
                 for z in 0..size_z {
                     for x in 0..size_x {
+                        let voxel = [origin[0] + x, origin[1] + y, origin[2] + z];
+                        let want = if embedded == Some(voxel) {
+                            material_id(Voxel::GlowBlock)
+                        } else {
+                            expected
+                        };
                         assert_eq!(
-                            brickmap.get(origin[0] + x, origin[1] + y, origin[2] + z),
-                            expected,
+                            brickmap.get(voxel[0], voxel[1], voxel[2]),
+                            want,
                             "{pose:?} left a hole at {x},{y},{z}"
                         );
                         built += 1;

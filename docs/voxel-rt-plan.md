@@ -622,6 +622,89 @@ sun slider and not for a placed lamp.
 **Gate:** place a lantern → warm light bleeds around corners, zero noise;
 edit→light latency number.
 
+### E5b — Emission at every scale: per-cell mean radiance ⬜ **PROPOSED** (Pascal, 2026-07-31, from the materials arc)
+
+*Ladder position: after the materials arc, before or beside E7. Found by trying to make
+one glow block in a wall light anything.*
+
+**The finding, in Pascal's words:** *"one block is in our case 8x8x8 smaller blocks
+right.. so if we add speckles with emition its basicly a smaler block .. same as big
+one"*, and then the case that settles it — *"that will allow also to make .vox berrys in
+a plant glow .. as a material.. doesnt need to be a whole block.. the block just the
+shape, the material can be on 1x1x1 or 4x4x4 or 2x4x6 or full 8x8x8 shouldnt matter"*.
+
+That is the requirement: **the emissive region of a material is an arbitrary sub-voxel
+shape, and the light it casts should follow from that shape alone.** Glowing berries in a
+plant are not a block of light; they are a few texels of one.
+
+#### Why today's model cannot express it
+
+CAGI stores a **3-bit emitter index** per half-metre cell into an 8-slot palette of
+per-*material* radiances. Two consequences:
+
+- **Emission is a material constant, so it cannot scale with how much of the cell emits.**
+  One 12.5 cm glow block lights as though the whole 50 cm cell glowed. (Before the sticky
+  fix it was worse: the block was outvoted by a higher neighbour and lit *nothing*.)
+- **The dynamic range is 512×** between a voxel-scale and a texel-scale emitter — one
+  emissive voxel is 1/64 of a cell, one emissive texel 1/32 768. An index into eight fixed
+  radiances cannot span that, because indices point at constants.
+
+The materials arc's `Material::mean_emitted_radiance` already does the right thing for
+texel-scale emission. **It is the per-voxel path that is the outlier**, and that turned up
+three times in a row while working this out.
+
+#### The model: area, not volume
+
+Sub-voxel detail is **texture on a solid face**, not geometry — so emission is a *surface*
+property, radiance per unit area of exposed face. Scale by **exposed emitting area**, not
+by volume fraction:
+
+- A glow block in a one-voxel wall exposes **2 of 6 faces**; its cell holds a 4×4 slab
+  exposing 32 voxel-faces, so it contributes **2/32 = 1/16** of the cell's emitting area —
+  not the 1/64 a volume fraction would give. **4× brighter, for a reason.**
+- A **buried** emitter has zero exposed faces and therefore emits zero. That falls out of
+  the model rather than being hand-waved to "the transport absorbs it anyway".
+- Texel-scale emission is the same rule with a smaller area, which is the unification.
+
+#### Shape
+
+- Replace the 3-bit index + palette with a **per-cell mean radiance**, weighted by
+  `emitting exposed area / cell exposed area`. Emission becomes per-*cell*, not
+  per-material — which is what lets it scale at all.
+- Costs a wider or second attribute array (the word is exactly full: albedo 24 + solid 1 +
+  transmittance 4 + emitter 3 = 32) in a shared-exponent or packed-float form, since the
+  range is 512×.
+- Costs a slower attribute sweep: exposed area needs each occupied voxel's 6 neighbours
+  tested. The sweep walks ~37 M voxels in ~50 ms today, so plausibly 2–4× that. Off-frame
+  on the world thread, so affordable — but measure it. Within-brick neighbour tests are
+  cheap bit math on the occupancy words; brick boundaries are the awkward part.
+- **Retires the 7-emitter ceiling** as a side effect, which is worth having independently:
+  a 256-entry `.vox` palette cannot live inside seven emitter slots.
+
+#### The seam that must be right BEFORE S5
+
+The per-material question E5b should ask is **"how much light leaves one exposed face of
+this material, per unit area"** — nothing more specific. Today that is the pattern mean
+over the face. When S5's material-owned sub-voxel models land it becomes the pattern mean
+**times the mask's coverage of that face**, and E5b needs no change.
+
+Get that seam wrong — by computing emitting area from voxel face counts inside the sweep —
+and the area is computed twice, differently, once by E5b and once by S5. The shared
+`TEXEL_RUNGS` lattice is what makes one answer possible: the `.vox` mask, the pattern grid
+and the emitting area are all on the same cells.
+
+#### Gate
+
+One glow block in a wall lights its surroundings at a plausible brightness rather than as
+a half-metre cube; a buried one lights nothing; and an emissive-speckled material and a
+solid emissive block of the same authored radiance cast light in the ratio of their
+emitting areas. Bench the attribute sweep before and after.
+
+**Note this does not make lava look like lava.** Reinhard compresses `(3.0, 2.8, 2.4)` to
+`(225, 223, 219)` — a 1.25 red:blue ratio becomes 1.03 — so a bright emitter reads neutral
+white however warm it was authored. That is E7's HDR intermediate plus bloom, and it is
+independent of everything here.
+
 ### E4b — Ray-fed CAGI: trace the indirect rays at PROBE resolution ⬜ **PROPOSED, NOT APPROVED** (Pascal's own finding, 2026-07-31)
 From the research dossier's **R2** — Pascal's result from his earlier RT-GI
 experiments: *"as soon as you add indirect bounces … you can't really cheat at
@@ -1316,6 +1399,9 @@ fly camera fills today. **Gate:** runs on Quest 3.
     sRGB with no G-buffer and no history — but **E10a builds exactly that**, so
     this rides E10a rather than paying for its own frame-graph change. Do not
     schedule it before E10a.
+  - **E5b note:** E5b's per-material query (*"how much light leaves one exposed face,
+    per unit area"*) is refined by S5's masks. Design the two together — see E5b's
+    "seam that must be right BEFORE S5".
   - **Lattice note (added by the materials arc, 2026-07-31):** if F1/F2 ever wants
     resolution *below* one face — and the CAGI sub-voxel gather above is exactly
     that case — the subdivision should be a rung of S2's `TEXEL_RUNGS` rather than a

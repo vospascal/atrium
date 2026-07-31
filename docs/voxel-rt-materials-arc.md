@@ -26,21 +26,29 @@ current; leave the rest alone unless it stops being true.
 | **S2** | Layer model — generators, frames, periods, blends | ✅ landed + gated |
 | **S2b** | Texel snap + per-face variation | ✅ landed + gated |
 | **S2c** | Patterned emitters cast light (mean → GI volume) | ⏳ built, **gate not passed** |
-| **S2d** | Sun/ambient dimming + emission intensity, so S2c is judgeable | ⏳ built, awaiting the S2c gate |
+| **S2d** | Sun/ambient dimming + emission colour x intensity, so S2c is judgeable | ⏳ built, awaiting the S2c gate |
+| — | Embedded-emitter fix, **step 1**: sticky emitter index in the cell sweep | ✅ landed (CAGI, not this arc) |
+| — | Step 2 (area-weighted per-cell radiance) → became **E5b**, see the plan | ⬜ proposed, not approved |
 | **S3** | Animation — value oscillation + pattern drift | ⬜ not started |
 | **S4** | Template library | ⬜ not started |
 | **S5** | Sub-voxel models (the only stage that touches traversal) | ⬜ not started |
 | **S6** | Apply to real materials, re-author roughness/specular | ⬜ not started |
 
-**252 tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
+**256 tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
 `cargo clippy --all-targets` clean.
 
 ### Next action
 
-**Run the S2c gate.** Everything is built; nobody has yet confirmed that a patterned
-emitter visibly lights a neighbouring surface. Procedure below. If it fails, the
-suspects in order are: the `emissive scale` lever under GI (global, defaults 1.0), then
-whether the attribute re-pack ran, then the ~32-frame GI convergence.
+**Run the S2c gate.** Everything is built and nobody has yet confirmed that an emitter
+visibly lights a neighbouring surface. Procedure below.
+
+Step 1 of the embedded-emitter fix is in, so an emitter now always injects rather than
+sometimes injecting nothing — the `wall + glow block` prop should light up. Expect it to be
+**too bright and half-metre blocky**: that is E5b's job, not a gate failure.
+
+If nothing lights at all, the suspects in order are: the `emissive scale` lever under GI
+(global, defaults 1.0), whether the attribute re-pack was pressed, the ~32-frame GI
+convergence, and `ambient` sitting at 0 so there is no floor to see a change against.
 
 ---
 
@@ -63,8 +71,9 @@ All under **Materials** in the overlay:
    compiled row authors a layer and turning it on is S6's decision.
 2. **`row`** dropdown — picks the row being edited **and, in the studio, the voxel on
    screen**. Row 6 is stone, 24 is `glow_block` (already a 3.0 emitter).
-3. **Studio subject** — `single voxel` / `wall (16x16)` / `cube (4x4x4)`. The wall is for
-   continuity and any period over one voxel; the cube is for corners.
+3. **Studio subject** — `single voxel` / `wall (16x16)` / `cube (4x4x4)` /
+   `wall + glow block`. The wall is for continuity and any period over one voxel; the cube
+   is for corners; the last is a **diagnostic prop**, see below.
 4. **Pattern layers → add layer**, then dial. A new layer starts at `amount: 0`, which is
    the exact identity, so it is safe to add before configuring.
 
@@ -87,6 +96,58 @@ Then an emission layer: target `emission`, blend `add`, pick a `glow colour`, an
 The re-pack is needed exactly once, because *which cells hold an emitter* lives in the
 attribute volume. After that, dragging the colour or intensity changes the injected
 light with no re-pack — the palette re-uploads on every dirty table.
+
+### The `wall + glow block` prop, and the bug it shows
+
+One `GlowBlock` embedded at the centre of the wall. Not a pose for judging a material —
+it exists because **an emitter embedded in a surface behaves arbitrarily today**, and
+that stayed invisible until someone tried it.
+
+`build_cell_attributes` writes every occupied voxel's material into its cell
+*unconditionally*, ascending Y outermost, so the last write wins: **one voxel represents
+all 64 of a half-metre cell** (highest Y, then furthest Z, then furthest X). So an
+embedded emitter either:
+
+- **is not the elected voxel → it lights nothing at all.** Not dimly. It glows (that is
+  the per-hit material read) and injects zero. 1-in-16 for a thin wall, 1-in-64 inside
+  solid.
+- **is the elected voxel → the whole 0.5 m cell blazes** at the block's full radiance, so
+  one 12.5 cm block lights like a 50 cm cube.
+
+Move it one voxel and it flips between those. **E5 never caught it because its gate
+placed glow blocks in open air**, where the block is its cell's only occupant and always
+wins — so this is a pre-existing E5 bug the materials arc exposed, not one it caused.
+
+The prop places the block where its cell does **not** elect it as the albedo voxel, which
+is exactly the case that used to fail.
+
+**Step 1 is DONE.** `fold_voxel_attribute` now carries two rules in one word: albedo and
+transmittance still take the last voxel visited (the cell's highest — the surface the sun
+hits, which is what a bounce tint wants), while the **emitter index is sticky** — once any
+voxel in a cell is found to emit, no later non-emitting voxel can evict it. A light is a
+*source*; being outvoted by a higher neighbour meant contributing nothing. Pinned by
+`folding_a_voxel_keeps_the_last_albedo_and_any_emitter` and
+`an_emitter_is_found_wherever_it_sits_in_the_cell` (the emitter is found at all 16
+positions of a cell layer — the order-independence the fix actually buys).
+
+**Step 2 is NOT done, and the prop still overstates.** The cell injects the emitter's
+FULL radiance regardless of how much of it emits, so one 12.5 cm block lights as though a
+50 cm cell of it were glowing — deterministic and visible now, but too bright and too
+large.
+
+**That step became its own stage: `E5b` in `docs/voxel-rt-plan.md`.** It is CAGI's work,
+not this arc's — per-cell mean radiance weighted by exposed emitting area, retiring the
+3-bit emitter index and the 8-slot palette. One thing from it constrains **S5** and is
+recorded there: the per-material question must be *"how much light leaves one exposed face,
+per unit area"*, so that S5's sub-voxel masks refine the answer instead of computing a
+second one.
+
+A separate finding from the same frame, and also not a material problem: **Reinhard
+compresses an emitter's hue away.** `glow_block`'s authored `(3.0, 2.8, 2.4)` tonemaps to
+`(225, 223, 219)` — a 1.25 red:blue ratio becomes 1.03, so a bright emitter reads neutral
+white however warm it was authored. Which means **an emissive material cannot currently
+look like lava even when the transport works.** That is E7's HDR intermediate plus bloom,
+and it is the strongest concrete argument for scheduling them.
 
 ### Bench
 
@@ -115,11 +176,19 @@ These are waiting on Pascal, not on work:
 - **`CAGI_TRANSMISSION`** still ships off pending an app-run verdict (predates this arc).
 - **When to turn `per-face roles` and `pattern layers` on by default** — that is S6, with
   a re-recorded baseline, because it changes how the island looks.
+- **Approve E5b?** Emission at every scale (area-weighted per-cell mean radiance, retiring
+  the 3-bit emitter index and 8-slot palette). Written up in `docs/voxel-rt-plan.md`;
+  proposed, not approved. It is what makes glowing `.vox` berries work as a material and
+  what stops one 12.5 cm block lighting like a 50 cm cell.
 
 ## Known limits (by decision, not by accident)
 
-- **No HDR intermediate**, so emission past ~3–4 clips the *surface* to flat white while
-  the light it casts keeps growing. Judge intensity by what it lights.
+- **No HDR intermediate.** Two consequences, both E7's. Emission past ~3–4 barely changes
+  the *surface* while the light it casts keeps growing — judge intensity by what it lights.
+  And **Reinhard compresses an emitter's hue away**: `glow_block`'s authored
+  `(3.0, 2.8, 2.4)` tonemaps to `(225, 223, 219)`, so a 1.25 red:blue ratio becomes 1.03.
+  **A bright emitter reads neutral white however warm it was authored, so lava cannot look
+  like lava** until HDR + bloom land. Nothing in the material model can fix that.
 - **`opacity` is not a pattern target.** It is a traversal input, decided before shading,
   so patterning it would move the layer stack into the innermost traversal loop — the one
   cost this stage is built to avoid. A dissolve effect wants it; named follow-on.

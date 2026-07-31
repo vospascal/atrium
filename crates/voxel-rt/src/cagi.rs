@@ -618,6 +618,42 @@ impl MaterialAttributes {
     }
 }
 
+/// Fold one occupied voxel's attribute word into a cell's accumulating word.
+///
+/// **Two different rules in one word, and they differ on purpose:**
+///
+/// * `albedo` and `transmittance` take the LAST voxel visited, which the sweeps order so
+///   that it is the cell's highest — the surface the sun is most likely to be hitting,
+///   which is what a bounce tint wants. One voxel standing for up to 512 is the coarseness
+///   E4 shipped and this does not change it.
+/// * The **emitter index is STICKY**: once any voxel in the cell has been found to emit,
+///   no later non-emitting voxel can evict it.
+///
+/// Why the emitter cannot follow the albedo rule: a light is a *source*, and being
+/// outvoted by whichever neighbour happens to sit higher in the cell means it contributes
+/// nothing at all. That made an emitter embedded in a surface behave arbitrarily — a glow
+/// block in a wall had a 1-in-16 chance of being the elected voxel, and otherwise glowed
+/// while injecting zero (Pascal, 2026-07-31: *"what happens if we have a wall with one
+/// emiting block?"*). E5 never saw it because its gate placed glow blocks in open air,
+/// where the block is its cell's only occupant and always wins.
+///
+/// Among *several* emitters in one cell the last still wins, which is arbitrary but
+/// bounded — they are all sources, so the cell emits one of them rather than none.
+///
+/// **Known remaining coarseness, deliberately not fixed here:** the cell injects the
+/// emitter's FULL radiance regardless of how few of its voxels emit, so one 12.5 cm block
+/// lights as though a 50 cm cell of it were glowing. Scaling by the emissive fill fraction
+/// is the right answer — the same near-field/far-field argument as
+/// [`crate::material::Material::mean_emitted_radiance`], one level up — but the attribute
+/// word is exactly full (24 + 1 + 4 + 3 = 32 bits), so it costs either albedo at 6:6:6 or
+/// a second per-cell array. See `docs/voxel-rt-materials-arc.md`.
+fn fold_voxel_attribute(accumulated: u32, voxel_word: u32) -> u32 {
+    if voxel_word & CELL_EMITTER_MASK != 0 {
+        return voxel_word;
+    }
+    (voxel_word & !CELL_EMITTER_MASK) | (accumulated & CELL_EMITTER_MASK)
+}
+
 /// One `u32` per cell: the cell's bounce albedo (sRGB 8:8:8 in the low 24 bits),
 /// [`CELL_SOLID`] at bit 24, and its 4-bit transmittance at bits 25-28 (M2).
 ///
@@ -687,7 +723,10 @@ pub fn build_cell_attributes(
                             let index = grid.cell_index(cell);
                             fill_counts[index] = fill_counts[index].saturating_add(1);
                             let material = (materials[bit >> 2] >> ((bit & 3) * 8)) & 0xff;
-                            attributes[index] = attribute_table.word(material as u8);
+                            attributes[index] = fold_voxel_attribute(
+                                attributes[index],
+                                attribute_table.word(material as u8),
+                            );
                         }
                     }
                 }
@@ -736,7 +775,7 @@ pub fn cell_attribute(
                     continue;
                 }
                 fill_count += 1;
-                albedo = attribute_table.word(material);
+                albedo = fold_voxel_attribute(albedo, attribute_table.word(material));
             }
         }
     }
@@ -1489,6 +1528,61 @@ mod tests {
                 row.emitted_radiance(),
                 "{} drifted from its authored emission",
                 row.name
+            );
+        }
+    }
+    /// The two rules in one word, directly: albedo takes the last voxel, the emitter is
+    /// sticky. Both matter, and confusing them is how the embedded-emitter bug happened.
+    #[test]
+    fn folding_a_voxel_keeps_the_last_albedo_and_any_emitter() {
+        let table = MaterialAttributes::compiled();
+        let wall = table.word(crate::material::material_id(Voxel::Stone));
+        let glow = table.word(crate::material::material_id(Voxel::GlowBlock));
+        assert_eq!(wall & CELL_EMITTER_MASK, 0, "stone must not emit");
+        assert_ne!(glow & CELL_EMITTER_MASK, 0, "glow_block must emit");
+
+        // An emitter found after plain voxels claims the cell.
+        let after_wall = fold_voxel_attribute(wall, glow);
+        assert_eq!(after_wall, glow);
+
+        // ...and a plain voxel found AFTER the emitter cannot evict it — the bug.
+        let then_wall = fold_voxel_attribute(after_wall, wall);
+        assert_eq!(
+            then_wall & CELL_EMITTER_MASK,
+            glow & CELL_EMITTER_MASK,
+            "a non-emitting voxel evicted the cell's emitter"
+        );
+        // While the albedo/transmittance half DID follow the later voxel.
+        assert_eq!(then_wall & 0x00ff_ffff, wall & 0x00ff_ffff);
+
+        // Plain over plain is the plain word, so nothing changed for the 24 rows that
+        // do not emit.
+        let dirt = table.word(crate::material::material_id(Voxel::Dirt));
+        assert_eq!(fold_voxel_attribute(wall, dirt), dirt);
+    }
+
+    /// Order independence, which is the property the fix actually buys: an emitter in a
+    /// cell must be found whatever position it occupies.
+    ///
+    /// Before this, whether a light worked depended on where in its cell it sat — a
+    /// 1-in-16 coin toss for a one-voxel-thick wall.
+    #[test]
+    fn an_emitter_is_found_wherever_it_sits_in_the_cell() {
+        let table = MaterialAttributes::compiled();
+        let wall = table.word(crate::material::material_id(Voxel::Stone));
+        let glow = table.word(crate::material::material_id(Voxel::GlowBlock));
+
+        // Sweep a 16-voxel cell layer with the emitter at each position in turn.
+        for emitter_at in 0..16 {
+            let mut accumulated = 0_u32;
+            for position in 0..16 {
+                let word = if position == emitter_at { glow } else { wall };
+                accumulated = fold_voxel_attribute(accumulated, word);
+            }
+            assert_ne!(
+                accumulated & CELL_EMITTER_MASK,
+                0,
+                "an emitter at position {emitter_at} of the cell was lost"
             );
         }
     }

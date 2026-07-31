@@ -804,6 +804,17 @@ fn studio_pose_hint(pose: StudioPose) -> &'static str {
             "A 4x4x4 block: three faces and a corner at once. The pose for whether a \
              world-framed layer wraps an edge or shows a seam along it."
         }
+        StudioPose::EmitterWall => {
+            "The wall with ONE glow block embedded at its centre — a diagnostic prop, \
+             not a pose for judging a material.\n\n\
+             It exists because an emitter embedded in a surface behaves arbitrarily \
+             today: the GI sweep elects one voxel to represent all 64 of its half-metre \
+             cell, so an embedded block either lights NOTHING (it is not the elected \
+             voxel) or makes the whole cell blaze at full radiance (it is). The block is \
+             deliberately placed where its cell does not elect it, so right now it should \
+             glow and light nothing — and should start lighting when the sweep is fixed.\n\n\
+             Turn the sun down to see it at all."
+        }
     }
 }
 
