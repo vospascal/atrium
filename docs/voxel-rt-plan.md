@@ -838,7 +838,9 @@ a swim in? *(First build: FAILED on the upward view — see the step plan at the
 of this entry.)*
 
 ### Materials arc — the multi-scale material model 🔄 (Pascal, 2026-07-31)
-*S0, S0b, S1 and S2 landed and gated; S3-S6 open.*
+*S0, S0b, S1 and S2 landed and gated; S2c/S2d built and awaiting a gate; S3-S6 open.*
+*Working state, and how to resume it in a fresh session:*
+**`docs/voxel-rt-materials-arc.md`**.
 *Ladder position: a new arc, not an E-slot, sitting **before E7**. E7's fog,
 grading and bloom want surfaces with material detail to act on, and E10's
 roughness re-author wants an editor to do it in. Full plan at
