@@ -35,6 +35,7 @@ pub mod material_table;
 pub mod material_tune;
 pub mod overlay;
 pub mod passes;
+pub mod pattern;
 pub mod render;
 pub mod shadows;
 pub mod studio;

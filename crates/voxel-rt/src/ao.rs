@@ -231,6 +231,17 @@ impl AoSettings {
     }
 }
 
+/// A WGSL `f32` literal for `value`.
+///
+/// `{:?}` rather than `{}` on purpose: Rust's `Display` for floats prints `1` for
+/// `1.0`, which WGSL reads as an `i32` and rejects where an `f32` is expected.
+/// `Debug` always emits the decimal point, so `1.0` stays `1.0` and `0.5` stays
+/// `0.5`. The first shader const with a real-valued lever was S2's pattern strength;
+/// every earlier scalar reached the shader as a uniform instead.
+pub fn float_literal(value: f32) -> String {
+    format!("{value:?}")
+}
+
 fn boolean_literal(value: bool) -> &'static str {
     if value {
         "true"

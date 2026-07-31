@@ -74,6 +74,42 @@ const STUDIO_MAX_DISTANCE_METERS: f32 = 8.0;
 const STUDIO_MIN_PITCH_RADIANS: f32 = -1.5;
 const STUDIO_MAX_PITCH_RADIANS: f32 = 1.5;
 
+/// S2 — the voxel the studio should be showing, or `None` to leave it alone.
+///
+/// Pulled out of [`AppState::follow_selected_row_in_the_studio`] so the decision is
+/// testable without a GPU: the method it serves can only run inside a live app, and
+/// the three cases that must NOT rebuild the world are exactly the ones worth pinning.
+fn studio_sample_to_follow(
+    control_mode: ControlMode,
+    has_subject: bool,
+    selected: u8,
+    current_sample: Voxel,
+) -> Option<Voxel> {
+    // Only in the studio. In the island the selection is the PLACEMENT material, and
+    // rebuilding the world because you picked a different block to place would be
+    // absurd.
+    if control_mode != ControlMode::StudioOrbit {
+        return None;
+    }
+    // A loaded `.vox` model brings its own geometry and its own palette, so there the
+    // selection names a row of the table rather than the subject on screen.
+    if has_subject {
+        return None;
+    }
+    // Air is the miss sentinel and builds nothing. Selecting row 0 is a legitimate
+    // thing to do while inspecting the table and must not empty the studio.
+    if selected == material::AIR_MATERIAL_ID {
+        return None;
+    }
+    let sample = material::material_voxel(selected);
+    // Already showing it: the caller runs every frame, and rebuilding the world 60
+    // times a second because nothing changed would be the worst bug in the file.
+    if sample == current_sample {
+        return None;
+    }
+    Some(sample)
+}
+
 /// What a right click places — the default building block.
 const PLACE_MATERIAL: Voxel = Voxel::Stone;
 
@@ -643,6 +679,99 @@ impl AppState {
         if std::mem::take(&mut self.material_panel.import.show_in_studio_requested) {
             self.show_vox_model_in_studio();
         }
+        if let Some(pose) = self.material_panel.studio_pose_requested.take() {
+            self.set_studio_pose(pose);
+        }
+        self.follow_selected_row_in_the_studio();
+    }
+
+    /// S2 — in the studio, the row being EDITED is the voxel being LOOKED AT.
+    ///
+    /// The panel used to only seed its selection from the sample once at startup, and
+    /// after that the two drifted apart silently: picking `stone` in the dropdown
+    /// edited stone's row while the camera went on showing a grass voxel, so every
+    /// slider appeared to do nothing (Pascal, 2026-07-31: *"it doesnt re apply i only
+    /// ever see grass"*). Two things called "selected" that are not the same thing is
+    /// exactly the kind of seam this arc exists to remove.
+    ///
+    /// So the studio's subject FOLLOWS the selection. Not the reverse — the panel is
+    /// where the choice is made, and the eyedropper already covers going the other
+    /// way (click a voxel, select its row).
+    ///
+    /// Only in the studio: in the island the selection is the *placement* material,
+    /// and rebuilding the world because you picked a different block to place would be
+    /// absurd.
+    fn follow_selected_row_in_the_studio(&mut self) {
+        let Some(sample) = studio_sample_to_follow(
+            self.control_mode,
+            self.studio_scene.subject.is_some(),
+            self.material_panel.selected,
+            self.studio_scene.sample,
+        ) else {
+            return;
+        };
+        self.studio_scene.sample = sample;
+        let bricks = self.rebuild_studio_world();
+        println!(
+            "studio sample: {} ({} occupied bricks)",
+            self.material_table
+                .row(self.material_panel.selected)
+                .map(|row| row.name)
+                .unwrap_or("<none>"),
+            bricks
+        );
+    }
+
+    /// S2 — rebuild the studio into `pose`.
+    ///
+    /// Clears any loaded `.vox` subject, because the subject overrides the pose:
+    /// asking for a wall and getting the campfire you loaded ten minutes ago would
+    /// read as the button not working.
+    fn set_studio_pose(&mut self, pose: studio::StudioPose) {
+        if self.control_mode != ControlMode::StudioOrbit {
+            self.material_panel.import.status =
+                "poses need the studio — restart with --studio".to_string();
+            return;
+        }
+        self.studio_scene.pose = pose;
+        self.studio_scene.subject = None;
+        let bricks = self.rebuild_studio_world();
+        self.material_panel.import.status =
+            format!("studio pose: {} ({bricks} occupied bricks)", pose.label());
+        println!("{}", self.material_panel.import.status);
+    }
+
+    /// Replace the world with the current studio scene, re-frame the camera, and
+    /// return the occupied brick count.
+    ///
+    /// Shared by the pose buttons and by `.vox` model display. Replacing the whole
+    /// world rather than editing it is the honest shape of the operation — the
+    /// subject changed, so every derived structure changes — and it reuses
+    /// `WorldHost::new` plus [`Renderer::reupload_world`], the path that already
+    /// exists for an edit outgrowing the brick headroom. A full ~41 MB re-upload is
+    /// fine for something a human triggers by pressing a button.
+    fn rebuild_studio_world(&mut self) -> u32 {
+        let brickmap = self.studio_scene.build();
+        let bricks = brickmap.occupied_brick_count();
+        self.world_host = WorldHost::new(brickmap);
+        self.world_host
+            .set_world_thread(self.quality.world_edit.world_thread);
+        {
+            let brickmap = self.world_host.read();
+            self.renderer
+                .reupload_world(&self.gpu_context.device, &brickmap);
+        }
+        // The light volume was flooded for the old geometry; every injected value and
+        // every pinned sun-source flag now describes a world that is gone.
+        self.renderer.mark_light_volume_dirty();
+        // Re-frame: a 16-voxel wall at a 0.9 m working distance is a wall of pixels,
+        // and scrolling out by hand every time is friction that makes a tool feel
+        // broken.
+        self.studio_distance_meters = self
+            .studio_scene
+            .framing_distance_meters()
+            .clamp(STUDIO_MIN_DISTANCE_METERS, STUDIO_MAX_DISTANCE_METERS);
+        bricks
     }
 
     /// S0b — rebuild the studio around a loaded `.vox` model.
@@ -684,26 +813,7 @@ impl AppState {
         let dimensions = (subject.size_x, subject.size_y, subject.size_z);
 
         self.studio_scene.subject = Some(subject);
-        let brickmap = self.studio_scene.build();
-        let bricks = brickmap.occupied_brick_count();
-        self.world_host = WorldHost::new(brickmap);
-        self.world_host
-            .set_world_thread(self.quality.world_edit.world_thread);
-        {
-            let brickmap = self.world_host.read();
-            self.renderer
-                .reupload_world(&self.gpu_context.device, &brickmap);
-        }
-        // The light volume was flooded for the old geometry; every injected value
-        // and every pinned sun-source flag now describes a world that is gone.
-        self.renderer.mark_light_volume_dirty();
-        // Re-frame: a 20-voxel model at a 0.9 m working distance is a wall of
-        // pixels, and scrolling out by hand every load is friction that makes a
-        // tool feel broken.
-        self.studio_distance_meters = self
-            .studio_scene
-            .framing_distance_meters()
-            .clamp(STUDIO_MIN_DISTANCE_METERS, STUDIO_MAX_DISTANCE_METERS);
+        let bricks = self.rebuild_studio_world();
 
         self.material_panel.import.status = format!(
             "showing model {index}: {}x{}x{} voxels, {occupied} filled, {bricks} bricks",
@@ -1435,6 +1545,66 @@ mod tests {
             assert!(
                 pose.right.is_finite() && (pose.right.length() - 1.0).abs() < 1e-4,
                 "the camera basis degenerated at pitch {pitch}"
+            );
+        }
+    }
+
+    /// S2 — the studio subject must follow the selected row, which is the whole point
+    /// of the dropdown in the studio: two things called "selected" that were not the
+    /// same thing made every slider look broken.
+    #[test]
+    fn the_studio_subject_follows_the_selected_row() {
+        let grass = material::material_id(Voxel::Grass);
+        let stone = material::material_id(Voxel::Stone);
+        assert_eq!(
+            studio_sample_to_follow(ControlMode::StudioOrbit, false, stone, Voxel::Grass),
+            Some(Voxel::Stone)
+        );
+        // Every row the table has, so a new row cannot be one the studio refuses to
+        // show — Air excepted, which the next test owns.
+        for id in 1..material::MATERIAL_COUNT as u8 {
+            assert_eq!(
+                studio_sample_to_follow(ControlMode::StudioOrbit, false, id, Voxel::Air),
+                Some(material::material_voxel(id)),
+                "the studio would not show row {id}"
+            );
+        }
+        // Selecting the row already on screen must not rebuild: this runs every frame.
+        assert_eq!(
+            studio_sample_to_follow(ControlMode::StudioOrbit, false, grass, Voxel::Grass),
+            None
+        );
+    }
+
+    /// The three cases that must NOT rebuild the world. Each is a real hazard rather
+    /// than a hypothetical: a per-frame world rebuild, an emptied studio, and the
+    /// island rebuilding itself because you picked a block to place.
+    #[test]
+    fn following_the_selected_row_is_confined_to_the_studio() {
+        let stone = material::material_id(Voxel::Stone);
+        for mode in [ControlMode::Fly, ControlMode::Walk] {
+            assert_eq!(
+                studio_sample_to_follow(mode, false, stone, Voxel::Grass),
+                None,
+                "{mode:?} would rebuild the island from the placement material"
+            );
+        }
+        // A loaded .vox model owns the subject; the selection names a table row there.
+        assert_eq!(
+            studio_sample_to_follow(ControlMode::StudioOrbit, true, stone, Voxel::Grass),
+            None
+        );
+        // Air must not empty the studio, from any current sample.
+        for sample in [Voxel::Grass, Voxel::Stone, Voxel::Water] {
+            assert_eq!(
+                studio_sample_to_follow(
+                    ControlMode::StudioOrbit,
+                    false,
+                    material::AIR_MATERIAL_ID,
+                    sample
+                ),
+                None,
+                "selecting air emptied a studio showing {sample:?}"
             );
         }
     }

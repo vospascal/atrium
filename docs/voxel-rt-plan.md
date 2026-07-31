@@ -837,6 +837,141 @@ Snell's window from below — and does the pool now read as something you can ju
 a swim in? *(First build: FAILED on the upward view — see the step plan at the top
 of this entry.)*
 
+### Materials arc — the multi-scale material model 🔄 (Pascal, 2026-07-31)
+*Ladder position: a new arc, not an E-slot, sitting **before E7**. E7's fog,
+grading and bloom want surfaces with material detail to act on, and E10's
+roughness re-author wants an editor to do it in. Full plan at
+`.claude/plans/the-way-we-make-eventual-deer.md`.*
+
+Pascal's framing: *"the way we make materials in our voxel engine is suppar to say
+the least in any measure or way … this is our basis for getting real nice look and
+feel"*. He was right about the state of it: a voxel's entire appearance was **one
+flat sRGB triple**, every stone voxel byte-identical, every face of it identical to
+every other face — and the table buffer was created without `COPY_DST`, so a live
+material edit was not unimplemented, it was *impossible*. Half the columns were
+therefore authored blind (roughness a uniform `0.60` on every solid).
+
+**The model: materials act at four scales, and three of them are one mechanism.** A
+pattern layer carries a **sampling frame** (world / voxel / face) and a **period in
+metres**, and that pair is the whole difference between within-face grain
+(`0.02 m`), per-voxel tone (`0.125 m`) and a multi-voxel band (`1 m`). World-framed
+layers *cannot* tile per voxel, which is why cross-voxel continuity is a property of
+the default rather than a fix bolted on. Only sub-voxel **geometry** needs its own
+architecture.
+
+**Two invariants held throughout:** per-voxel storage stays ONE BYTE (nothing here
+adds per-voxel state), and the face frame was already built (E1's analytic corner AO
+computes an integer face frame at every hit, so everything above sub-voxel geometry
+needs **no traversal change at all** — pure ALU on an existing hit).
+
+Landed so far, each gated in-app before the next:
+
+- **S0** — the studio (one voxel, orbit camera, neutral plate, its own brickmap and
+  fully excludable), a **writable** material table, and the authored row turned into
+  a tagged union (`MaterialKind`: Air / Solid / Cover / Medium, with `emission` an
+  orthogonal `Option` because it composes with any kind). This killed the
+  `NOT_A_MEDIUM` sentinel on 24 of 26 rows and made `MaterialFlags` *derived* rather
+  than hand-written beside the data it describes. **The GPU row stays flat**: a
+  sentinel is correct in a wire format and wrong in an authoring format, and the
+  shading path must not branch to find out whether a column applies.
+- **S0b** — the `.vox` layer, for the tool ecosystem rather than the format (*"there
+  are lot of external tools to create .vox files.. edit them .. would be nice if we
+  can use that"*). The parser was **lifted into `voxel-core`** so voxel-sandbox and
+  voxel-rt share one, and it does the three traps once: the Z-up/Y-up swap, `IMAP`
+  index-space resolution (VoxelChain's own reader reads `IMAP` then `throw`s), and
+  `_ior` being refractive index **minus one**. Imports **seed existing rows and never
+  change kind**, and re-import is non-destructive by storing the post-import row as a
+  baseline — a field differing from it was hand-tuned and is kept, a repainted
+  palette slot is a reported *conflict* that applies nothing.
+- **S1** — face roles (top / side / bottom). Grass is the demonstration case: earth
+  sides, green top, which is what stops a cut bank reading as green rock. **+0.5–0.8%,
+  i.e. free.** All three roles are explicit overrides including the sides, because an
+  implicit-side design forces the base to become dirt and then grass renders BROWN
+  with the feature switched off — and the off state has to be the pre-S1 look.
+- **S2** — the layer model, built whole at Pascal's direction, with generators in the
+  order he asked for (grain/speckle → per-voxel tone → coursing). Three generators
+  after the gate (`Flat`, `Noise`, `Speckle`), three frames, three targets, three
+  blends, a face-role mask, four slots per row. **Coursing was built and then cut**
+  on Pascal's look judgement (*"only mortor brick like thing we dont need thats
+  meh"*) — a mortar mask plus a per-brick tone over the same tessellation, working
+  and measured, but not a look this world wants. Deliberately *not* kept as a lever:
+  variant hygiene exists because Quest may flip a measured PERFORMANCE verdict, and
+  no hardware flips a taste verdict. Recoverable from git; section 9's saturated
+  stack was re-authored and re-recorded rather than left describing dead code.
+  `src/pattern.rs`
+  carries a **full CPU reference implementation** of what `shaders/pattern.wgsl` does,
+  down to the integer hash, because the WGSL is hand-mirrored and cannot be
+  unit-tested — so the tests pin the Rust against hand-computed values and the shader
+  against the Rust. The studio gained the **wall (16×16)** and **cube (4×4×4)** poses,
+  because continuity and any period over one voxel are invisible on a single voxel.
+  Section 9 of the bench is new (S1 had registered a column and nothing ran it) and
+  uploads a **saturated** table, since a sweep over the shipped table would report
+  four layers as free.
+
+**The texel grid, and the gap it filled.** Every frame and period the model shipped
+with was **continuous**, so `Noise` gave smooth mottle and `Speckle` gave round dots —
+and neither is what a voxel surface wants. Pascal, looking at a reference frame at the
+gate: *"for most cases you want even with spekles and things to keep to the 8x8
+sizing"*. So a layer carries **texels per voxel edge**, and the sample position is
+snapped to the centre of its texel before the generator runs.
+
+A snap on the *coordinate* rather than a blocky variant of each generator, which is
+what makes it one field instead of five: noise becomes blocky noise, speckles become
+square specks, and it stays orthogonal to the period (8 texels with a 1 m period is a
+large soft field rendered in 1.5 cm squares). Default **8, on** — a default you have to
+switch on to look right is in the wrong place.
+
+**The grid is a shared engine lattice, not a pattern setting**, which is the part worth
+scheduling around (Pascal: *"if you make .vox and assign material it will nicely snap
+to one of the 8x8"*). It is anchored to the world and its size divides `VOXEL_SIZE`
+exactly, so it lines up across neighbours and a texel never straddles a voxel edge —
+and the same lattice is what a `.vox` model drawn at `n` cells per engine voxel lands
+on. **Two consequences, both scheduling rather than work.** *S5:* its "resolution per
+material" should be a rung of `TEXEL_RUNGS`, not a second independent number, so a
+hand-drawn mask and a generated field share cells and compose instead of one being
+resampled onto the other. *B13:* its persistent `(voxel, face)` cache is the dossier's
+*"voxel-native equivalent of a surfel/texel-space denoiser"*, and if it ever wants
+sub-face resolution — the plan's own CAGI sub-voxel gather does — that subdivision is
+this grid. A cache cell and a texel being the same thing is what lets an amortized term
+and a procedural term be filtered together. (Note for the record: this is B13's
+face-space filter, **not** B5's entity *voxel* splatting, which is a different
+technique about getting dynamic objects into the grid.)
+
+Two follow-on notes. Snapping is an **anti-aliasing win**, which inverts the intuition
+that hard edges alias worse: a piecewise-constant signal box-filters toward its local
+mean, where continuous noise at a sub-pixel period keeps producing new values per
+pixel. And the fade still keys off the **period**, not the texel size — fading on texel
+size would erase a 1 m band because its texels are small.
+
+**In the studio, the selected ROW is the subject on screen.** Found at the S2 gate:
+the panel seeded its selection from the sample once at startup and then the two
+drifted, so picking `stone` in the dropdown edited stone's row while the camera went
+on showing grass and every slider appeared dead (*"it doesnt re apply i only ever see
+grass"*). Two things called "selected" that were not the same thing. The subject now
+follows the selection (and the eyedropper already covers the reverse: click a voxel,
+select its row). Confined to the studio by a tested predicate — in the island the
+selection is the *placement* material, and rebuilding the world because you picked a
+different block to place would be absurd.
+
+**`opacity` is deliberately not a pattern target**, and it is the one narrowing worth
+stating: it is a *traversal* input, decided before any shading runs, so patterning it
+would mean evaluating the stack inside the innermost traversal loop — precisely the
+cost this stage avoids, since every layer here is paid once per HIT and never once per
+step. A dissolve effect wants it and is a named follow-on with its own cost argument.
+
+Still to come: **S3** animation (value oscillation + pattern drift, with `t = 0`
+pinned in the harness so the noiseless-identity pixel gates keep working), **S4**
+templates, **S5** sub-voxel models (the only stage that touches traversal, so it lands
+last, with a three-way A/B), **S6** apply to real materials and re-author roughness
+and specular.
+
+**The next blocker this arc creates and does not solve:** material ids are welded 1:1
+to `voxel-core`'s 26-variant `Voxel` enum through two hand-mirrored 26-arm matches. A
+`.vox` palette holds up to 256 entries, so the moment palettes become how materials
+arrive, the weld is the binding constraint — a 40-colour file cannot land in 26 rows.
+Out of scope here because this arc adds richness *per row*; VoxelChain budgets
+`id: 0-1024` for a reason.
+
 ### E7 — Look pass ⬜ (Pascal's wishlist, 2026-07-30, after the E4 gate)
 His words: *"things that are missing to judge better are for sure things like
 bloom and depth of field (+ bokeh / gaussian mode picker) with the better sky
@@ -1087,6 +1222,13 @@ fly camera fills today. **Gate:** runs on Quest 3.
     sRGB with no G-buffer and no history — but **E10a builds exactly that**, so
     this rides E10a rather than paying for its own frame-graph change. Do not
     schedule it before E10a.
+  - **Lattice note (added by the materials arc, 2026-07-31):** if F1/F2 ever wants
+    resolution *below* one face — and the CAGI sub-voxel gather above is exactly
+    that case — the subdivision should be a rung of S2's `TEXEL_RUNGS` rather than a
+    number of its own. The texel grid is already anchored to the world, divides
+    `VOXEL_SIZE` exactly, and is the grid `.vox` art and S5's models land on; a
+    cache cell and a texel being the same cell is what would let an amortized term
+    and a procedural term be filtered together instead of resampled onto each other.
   - **Honest caveat:** AO is the *weakest* consumer despite being the headline.
     Analytic corner AO is ~20x cheaper and noiseless, and now that E4 CAGI does
     the medium-scale occlusion, ray AO's remaining job keeps shrinking. The

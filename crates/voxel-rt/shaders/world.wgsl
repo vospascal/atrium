@@ -153,8 +153,9 @@ struct Lighting {
 @group(0) @binding(3) var<storage, read> occupancy_words: array<u32>;
 @group(0) @binding(4) var<storage, read> material_words: array<u32>;
 // One row of the material table (src/material.rs `GpuMaterial`). Laid out as
-// FIVE 16-byte rows, each a vec3 followed by the scalar filling its w slot, so
-// std430 adds no implicit padding and the Rust upload matches byte for byte.
+// SIXTEEN 16-byte rows — each a vec3 followed by the scalar filling its w slot, or
+// four scalars — so std430 adds no implicit padding and the Rust upload matches
+// byte for byte. 256 bytes per row, 6.6 KB for the table.
 //
 // This is the FLAT form on purpose. The authored row on the CPU is a tagged union
 // (`MaterialKind`: Air / Solid / Cover / Medium), because a sentinel there is
@@ -162,6 +163,33 @@ struct Lighting {
 // opposite is true: this is the hottest read in the renderer, so every field is
 // present unconditionally and the shading path never branches to find out whether
 // a column applies. `to_gpu()` expands the union and fills the sentinels in.
+// S2 — layer slots per material row. Mirrors MAX_PATTERN_LAYERS in src/pattern.rs.
+const MAX_PATTERN_LAYERS: u32 = 4u;
+
+// S2 — one uploaded pattern layer: 32 bytes, two std430 16-byte rows. Mirrors
+// `GpuPatternLayer` in src/pattern.rs.
+//
+// The LAYOUT lives here, with the rest of the row, because `struct Material` embeds
+// it and both pass shaders share this file. The BEHAVIOUR — the generators, the
+// sampling frames, the blends, and the three functions that apply a stack — lives in
+// `shaders/pattern.wgsl`, which only the shading pass includes.
+struct PatternLayer {
+    // Generator, frame, target, blend, face mask and octave count, unpacked by the
+    // accessors in pattern.wgsl.
+    packed: u32,
+    period_meters: f32,
+    amount: f32,
+    // The generator's first free parameter: speckle density today.
+    param_a: f32,
+    // The second colour, sRGB-encoded, for mix-to-colour and add. Its first channel
+    // is the target VALUE for a scalar target.
+    target_color: vec3<f32>,
+    // The second free parameter. No generator reads it today; kept because the slot is
+    // free anyway (the vec3 below needs its w filled) and the next generator with two
+    // knobs would otherwise have to grow the row.
+    param_b: f32,
+}
+
 struct Material {
     albedo: vec3<f32>,      // sRGB-encoded, as authored
     transmittance: f32,     // light passing THROUGH (transport; M2 reads it)
@@ -194,6 +222,11 @@ struct Material {
     side_roughness: f32,
     bottom_albedo: vec3<f32>,
     bottom_roughness: f32,
+    // S2: the pattern stack, always MAX_PATTERN_LAYERS slots whatever the row
+    // authored. Slots past the row's count (in the flag word, see
+    // material_pattern_count) are zeroed with amount = 0, which is the identity even
+    // if the count were ever wrong.
+    patterns: array<PatternLayer, 4>,
 }
 
 // Mirrors `MaterialFlags` in src/material.rs, where these are DERIVED from the
@@ -205,6 +238,15 @@ const MATERIAL_FLAG_TRANSPARENT: u32 = 4u;
 const MATERIAL_FLAG_LIQUID: u32 = 8u;
 // S1: this row's top and bottom differ from its sides.
 const MATERIAL_FLAG_FACE_ROLES: u32 = 16u;
+// S2: this row has at least one pattern layer.
+const MATERIAL_FLAG_PATTERNS: u32 = 32u;
+
+// S2: how many pattern slots this row's stack fills. Carried in the flag word's
+// bits 8-10 rather than in a field of its own, because a u32 count would cost a
+// whole 16-byte std430 row (three quarters of it padding) for three bits.
+fn material_pattern_count(flags: u32) -> u32 {
+    return (flags >> 8u) & 0x7u;
+}
 
 // S1 — MATERIAL_FACE_ROLES is patched in by the variant registry. Off reproduces
 // every pre-S1 frame bit-for-bit, because with it off nothing reads the per-role

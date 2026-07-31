@@ -28,9 +28,10 @@
 //! patching, and `crate::passes::dda::build_shader_source` remains the single
 //! place a shader source is assembled.
 
-use crate::ao::{patch_shader_const, AoDirectionMode, AoMode, AoSettings};
+use crate::ao::{float_literal, patch_shader_const, AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
 use crate::lighting::{GiParams, ShadingParams, WaterParams};
+use crate::pattern::MAX_PATTERN_LAYERS;
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
 use crate::water::{WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface};
@@ -107,8 +108,11 @@ pub enum LeverId {
     EditClearanceUpdate,
     EditClearanceRadius,
     EditGiReflood,
-    // Materials (S1).
+    // Materials (S1, S2).
     MaterialFaceRoles,
+    MaterialPatterns,
+    MaterialPatternStrength,
+    MaterialPatternMaxLayers,
     // Resolution (S0).
     RenderScale,
 }
@@ -196,7 +200,12 @@ impl LeverValue {
             LeverValue::Flag(false) => Some("false".to_string()),
             LeverValue::Mode(value) | LeverValue::Count(value) => Some(format!("{value}u")),
             LeverValue::VoxelDistance(voxels) => Some(format!("{voxels}.0")),
-            LeverValue::Scalar(_) => None,
+            // S2's pattern strength is the first SCALAR lever that reaches the shader
+            // as a const rather than through a uniform, so this stopped being `None`.
+            // Anything with a `shader_const` must have a literal, or
+            // `registry_defaults_match_shader_source` cannot check it against the
+            // shipped source.
+            LeverValue::Scalar(value) => Some(float_literal(value)),
         }
     }
 
@@ -398,6 +407,13 @@ impl LeverId {
             }
             LeverId::EditGiReflood => LeverValue::Flag(quality.world_edit.gi_reflood),
             LeverId::MaterialFaceRoles => LeverValue::Flag(quality.materials.face_roles),
+            LeverId::MaterialPatterns => LeverValue::Flag(quality.materials.patterns),
+            LeverId::MaterialPatternStrength => {
+                LeverValue::Scalar(quality.materials.pattern_strength)
+            }
+            LeverId::MaterialPatternMaxLayers => {
+                LeverValue::Count(quality.materials.pattern_max_layers)
+            }
             LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
         }
     }
@@ -519,6 +535,18 @@ impl LeverId {
             LeverId::EditGiReflood => quality.world_edit.gi_reflood = value.expect_flag(self),
             LeverId::MaterialFaceRoles => {
                 quality.materials.face_roles = value.expect_flag(self);
+            }
+            LeverId::MaterialPatterns => {
+                quality.materials.patterns = value.expect_flag(self);
+            }
+            LeverId::MaterialPatternStrength => {
+                quality.materials.pattern_strength = value.expect_scalar(self).clamp(0.0, 1.0);
+            }
+            LeverId::MaterialPatternMaxLayers => {
+                // Not clamped here: `apply` and `read` must round-trip, and
+                // `patch_shader_source` clamps on the way to the shader — which is the
+                // only place the bound actually matters, since it is the array length.
+                quality.materials.pattern_max_layers = value.expect_count(self);
             }
             LeverId::RenderScale => {
                 quality.render_scale = value
@@ -1980,6 +2008,109 @@ pub const REGISTRY: &[Lever] = &[
             overrides: &[(LeverId::MaterialFaceRoles, LeverValue::Flag(true))],
         }],
     },
+    // ---- Materials (S2) ----
+    Lever {
+        id: LeverId::MaterialPatterns,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERNS"),
+        label: "pattern layers",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "S2, ships OFF for the same reason S1 does: no row authors a layer \
+                  yet, so turning it on today changes nothing at all, and authoring \
+                  the island's materials is S6's step with a re-recorded baseline. \
+                  Cost is a bit test per hit on an unpatterned row, and one generator \
+                  evaluation per active layer per HIT on a patterned one — never per \
+                  traversal step, which is the whole reason detail lives on the \
+                  material rather than in the hot loop. The bench sweeps 0/1/2/4 \
+                  layers because that per-layer slope is the number that decides how \
+                  many layers a Quest tier can afford; a bit test on a row with no \
+                  layers is not a measurement of anything.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-patterns",
+            overrides: &[(LeverId::MaterialPatterns, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialPatternStrength,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_STRENGTH"),
+        label: "pattern strength",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "A global scale on every layer's amount. NOT a performance lever — \
+                  the generator still runs at strength 0, and the bench row exists to \
+                  show that rather than to find a saving. It is the taste knob, and \
+                  the honest way to answer \"is this too much\" without editing 26 \
+                  rows and losing the tuning. Use MaterialPatternMaxLayers to buy \
+                  frames; use this to buy restraint.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-patterns-half-strength",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialPatternStrength, LeverValue::Scalar(0.5)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialPatternMaxLayers,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_MAX_LAYERS"),
+        label: "max pattern layers per hit",
+        default_value: LeverValue::Count(MAX_PATTERN_LAYERS as u32),
+        // Every rung the cap can take, INCLUDING zero: the overlay renders a `Count`
+        // lever as a radio row over these, and zero is the row that proves the
+        // mechanism is free on a row that authors nothing (0 differing pixels over a
+        // fully patterned table). Listing them all rather than a range because the
+        // bench sweeps exactly these and the panel should offer exactly what was
+        // measured.
+        range: LeverRange::Rungs(&[0, 1, 2, 4]),
+        verdict: "The tier knob for S2, and the only one that buys frames: a row with \
+                  four layers costs four generator evaluations per hit, and this caps \
+                  them whatever the row authored. Drops the TAIL of the stack, so \
+                  lowering it degrades a material gracefully — the first layer is the \
+                  one carrying the base look and the fourth is the one adding a \
+                  detail nobody at Quest resolution will resolve. Swept 0/1/2/4 by \
+                  the bench, which is where the per-layer slope comes from.",
+        mode_options: &[],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "material-patterns-1-layer",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternMaxLayers, LeverValue::Count(1)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "material-patterns-2-layers",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternMaxLayers, LeverValue::Count(2)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "material-patterns-0-layers",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternMaxLayers, LeverValue::Count(0)),
+                ],
+            },
+        ],
+    },
     // ---- Resolution (S0) ----
     Lever {
         id: LeverId::RenderScale,
@@ -2153,10 +2284,20 @@ pub fn preset_spec(preset: QualityPreset) -> &'static QualityPresetSpec {
 /// Its own struct rather than loose fields on [`RenderQuality`] because this arc
 /// adds several more (pattern layers, animation, sub-voxel models), and each will
 /// want the same treatment: a shader const, a registry row, a bench column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// No `Eq`: `pattern_strength` is an `f32`. `requires_pipeline_rebuild` compares
+// with `PartialEq`, which is the right comparison anyway — two settings that differ
+// only by a float are two different shaders.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialSettings {
     /// S1 — read per-face-role albedo and roughness instead of the row's base.
     pub face_roles: bool,
+    /// S2 — run the row's pattern layer stack.
+    pub patterns: bool,
+    /// S2 — global scale on every layer's amount, `0.0..=1.0`. The taste knob.
+    pub pattern_strength: f32,
+    /// S2 — layers evaluated per hit, whatever the row authored. The tier knob, and
+    /// the only one of the three that buys frames.
+    pub pattern_max_layers: u32,
 }
 
 impl MaterialSettings {
@@ -2164,31 +2305,66 @@ impl MaterialSettings {
     /// any SHADER-CONST lever moved. Every lever in this group is a shader const
     /// today, so this is a plain inequality — but it is spelled out as a method so
     /// the first runtime lever added here does not silently start forcing rebuilds.
+    ///
+    /// Note that `pattern_strength` is in here, so dragging it recompiles. That is
+    /// the deliberate trade S2 makes: a shader const lets naga fold a
+    /// strength-of-zero layer away entirely, and the alternative — a uniform — would
+    /// put a buffer read in the shading path to serve a knob that moves a handful of
+    /// times in a session. The per-material `amount` sliders are the ones dragged
+    /// while looking, and those live in the material table, which uploads without a
+    /// rebuild.
     pub fn requires_pipeline_rebuild(&self, applied: &MaterialSettings) -> bool {
-        self.face_roles != applied.face_roles
+        self != applied
     }
 
     /// Patch this group's consts into a shader source, the same way every other
     /// lever group does — so the bench harness can A/B it by source substitution
     /// and the shipped default is literally the unpatched file.
     pub fn patch_shader_source(&self, source: &str) -> String {
-        patch_shader_const(
+        let roles = patch_shader_const(
             source,
             "MATERIAL_FACE_ROLES",
             if self.face_roles { "true" } else { "false" },
+        );
+        let patterns = patch_shader_const(
+            &roles,
+            "MATERIAL_PATTERNS",
+            if self.patterns { "true" } else { "false" },
+        );
+        let strength = patch_shader_const(
+            &patterns,
+            "MATERIAL_PATTERN_STRENGTH",
+            &float_literal(self.pattern_strength),
+        );
+        patch_shader_const(
+            &strength,
+            "MATERIAL_PATTERN_MAX_LAYERS",
+            &format!(
+                "{}u",
+                self.pattern_max_layers.min(MAX_PATTERN_LAYERS as u32)
+            ),
         )
     }
 }
 
 impl Default for MaterialSettings {
-    /// Face roles ship OFF.
+    /// Face roles and patterns both ship OFF.
     ///
-    /// Not because they are unmeasured — the cost is a flag test and a select on a
-    /// hit that already knows its face — but because turning them ON changes how the
-    /// island LOOKS, and that is S6's decision, taken deliberately with a re-recorded
-    /// baseline, rather than a side effect of building the mechanism.
+    /// Not because either is unmeasured — face roles are a flag test and a select on
+    /// a hit that already knows its face, and patterns are a flag test on a row with
+    /// no layers, which is every row today — but because turning them ON is what
+    /// changes how the island LOOKS. That is S6's decision, taken deliberately with a
+    /// re-recorded baseline, rather than a side effect of building the mechanism.
+    ///
+    /// The two scalars ship at their neutral values, so switching `patterns` on is
+    /// the only thing the author has to do to see what a row authored.
     fn default() -> MaterialSettings {
-        MaterialSettings { face_roles: false }
+        MaterialSettings {
+            face_roles: false,
+            patterns: false,
+            pattern_strength: 1.0,
+            pattern_max_layers: MAX_PATTERN_LAYERS as u32,
+        }
     }
 }
 
@@ -2518,6 +2694,106 @@ mod tests {
         }
     }
 
+    /// Every row must declare bounds the overlay can actually draw.
+    ///
+    /// `draw_lever` matches on the value SHAPE and then destructures the range,
+    /// panicking when the two disagree — so a registry row with the wrong `range`
+    /// crashes the app the first time its subsystem's panel is opened, with nothing
+    /// upstream to catch it. That is exactly what S2's max-layers row did: a `Count`
+    /// lever given `Discrete` instead of `Rungs`, which compiled, passed every other
+    /// pinning test, shipped, and panicked on the Materials panel.
+    ///
+    /// The pairing is duplicated here rather than shared with the overlay on purpose,
+    /// for the same reason `RenderQuality::baseline` is built from the settings structs
+    /// instead of the registry: two independent statements of the rule can disagree,
+    /// and one derived from the other cannot.
+    #[test]
+    fn every_lever_declares_bounds_the_overlay_can_draw() {
+        for lever in REGISTRY {
+            let value = lever.default_value;
+            match value {
+                // A checkbox needs no bounds at all.
+                LeverValue::Flag(_) => {}
+                // A radio row over `mode_options`, so the options are the bounds.
+                LeverValue::Mode(_) => {
+                    assert!(
+                        !lever.mode_options.is_empty(),
+                        "{:?} is a Mode lever with no mode_options — the overlay would \
+                         draw a label and no controls",
+                        lever.id
+                    );
+                    assert!(
+                        lever
+                            .mode_options
+                            .iter()
+                            .any(|option| LeverValue::Mode(option.value) == value),
+                        "{:?}'s default is not one of its mode_options, so the panel \
+                         would open with nothing selected",
+                        lever.id
+                    );
+                }
+                // A radio row over fixed rungs.
+                LeverValue::Count(_) => {
+                    let LeverRange::Rungs(rungs) = lever.range else {
+                        panic!(
+                            "{:?} is a Count lever, so the overlay draws a rung row and \
+                             its range MUST be Rungs (got {:?})",
+                            lever.id, lever.range
+                        );
+                    };
+                    assert!(!rungs.is_empty(), "{:?} has no rungs", lever.id);
+                    assert!(
+                        rungs.iter().any(|rung| LeverValue::Count(*rung) == value),
+                        "{:?}'s default is not one of its rungs {rungs:?}, so the panel \
+                         would open with nothing selected",
+                        lever.id
+                    );
+                }
+                // Either a rung row or a metres slider.
+                LeverValue::VoxelDistance(voxels) => match lever.range {
+                    LeverRange::Rungs(rungs) => assert!(
+                        rungs.contains(&voxels),
+                        "{:?}'s default is not one of its rungs {rungs:?}",
+                        lever.id
+                    ),
+                    LeverRange::Meters { minimum, maximum } => {
+                        let meters = voxels as f32 / VOXELS_PER_METER;
+                        assert!(
+                            (minimum..=maximum).contains(&meters),
+                            "{:?}'s default of {meters} m is outside its own \
+                             {minimum}..={maximum} slider",
+                            lever.id
+                        );
+                    }
+                    other => panic!(
+                        "{:?} is a VoxelDistance lever, so its range MUST be Rungs or \
+                         Meters (got {other:?})",
+                        lever.id
+                    ),
+                },
+                // A continuous slider.
+                LeverValue::Scalar(scalar) => {
+                    let LeverRange::Continuous {
+                        minimum, maximum, ..
+                    } = lever.range
+                    else {
+                        panic!(
+                            "{:?} is a Scalar lever, so the overlay draws a slider and \
+                             its range MUST be Continuous (got {:?})",
+                            lever.id, lever.range
+                        );
+                    };
+                    assert!(
+                        (minimum..=maximum).contains(&scalar),
+                        "{:?}'s default of {scalar} is outside its own \
+                         {minimum}..={maximum} slider",
+                        lever.id
+                    );
+                }
+            }
+        }
+    }
+
     /// The settings structs cannot grow an unregistered field: this
     /// destructuring stops compiling until the new field is added here, and the
     /// assertions then force it to have a registry row.
@@ -2535,7 +2811,12 @@ mod tests {
             materials,
             render_scale,
         } = baseline;
-        let MaterialSettings { face_roles } = materials;
+        let MaterialSettings {
+            face_roles,
+            patterns,
+            pattern_strength,
+            pattern_max_layers,
+        } = materials;
         let TraversalSettings {
             column_fast_forward,
             descend_fast_forward,
@@ -2709,6 +2990,15 @@ mod tests {
             ),
             (LeverId::EditGiReflood, LeverValue::Flag(gi_reflood)),
             (LeverId::MaterialFaceRoles, LeverValue::Flag(face_roles)),
+            (LeverId::MaterialPatterns, LeverValue::Flag(patterns)),
+            (
+                LeverId::MaterialPatternStrength,
+                LeverValue::Scalar(pattern_strength),
+            ),
+            (
+                LeverId::MaterialPatternMaxLayers,
+                LeverValue::Count(pattern_max_layers),
+            ),
             (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
         ];
 

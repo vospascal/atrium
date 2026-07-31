@@ -100,9 +100,14 @@ use voxel_rt::debug_pool::{
     WaterPool, POOL_DEPTH_METERS, POOL_SHORE_WIDTH_METERS, POOL_WATER_RADIUS_METERS,
 };
 use voxel_rt::lighting::{LightingUniform, SunSettings};
+use voxel_rt::material::{GpuMaterial, MaterialKind, MATERIALS};
 use voxel_rt::passes::cagi::{CagiPass, LightVolume};
 use voxel_rt::passes::dda::{build_shader_source, DdaPass, SHADER_SOURCE};
 use voxel_rt::passes::world_bindings::WorldBindings;
+use voxel_rt::pattern::{
+    PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
+    PatternTarget, DEFAULT_TEXELS_PER_VOXEL,
+};
 use voxel_rt::variants::{
     bench_points_of, BenchSection, LeverId, LeverValue, QualityPreset, RenderQuality,
     QUALITY_PRESETS,
@@ -350,6 +355,135 @@ fn main() {
             &pooled_brickmap,
             water_section(pool),
         );
+    }
+    if runs_section(9) {
+        // S1/S2 — the material model. Its own bindings, holding a SATURATED material
+        // table: every visible row carries four pattern layers.
+        //
+        // That is the whole reason this section needs bindings of its own, and it is
+        // not a convenience. No row in the compiled table authors a layer (that is
+        // S6's step), so a sweep over the shipped table would find the flag test
+        // short-circuiting on every hit and report four layers as free. The number
+        // this section exists to produce is the PER-LAYER SLOPE, and only a table
+        // that authors layers can produce it.
+        //
+        // Sections 1-8 are untouched: they keep the shared bindings and the compiled
+        // table, so no baseline above moves for this.
+        let material_bindings = WorldBindings::new(&device, &brickmap);
+        material_bindings.write_material_table(&queue, &saturated_material_rows());
+        run_section(
+            &device,
+            &queue,
+            &material_bindings,
+            &brickmap,
+            materials_section(),
+        );
+    }
+}
+
+/// The material table with four pattern layers on every row a ray can hit — the
+/// worst case the layer model can be asked to shade.
+///
+/// The four are ordered **cheapest-first**, which is deliberate and is what makes the
+/// sweep readable: the cap drops the tail, so `1` measures the cheapest generator and
+/// `4` adds the dearest. Reading the four deltas therefore gives a per-generator cost
+/// as well as a per-layer slope.
+///
+/// | slot | generator | period | work per hit |
+/// |---|---|---|---|
+/// | 1 | `Flat`, voxel frame | 0.125 m | one cell hash, no interpolation |
+/// | 2 | `Speckle`, 8 texels | 0.05 m | a texel snap, four cell hashes and a `length` |
+/// | 3 | `Noise` x2 octaves, 8 texels | 0.25 m | a texel snap and 16 lattice hashes |
+/// | 4 | `Noise` x3 octaves, 8 texels | 0.02 m | **24 lattice hashes** — the dearest thing S2 has |
+///
+/// Three of the four snap to the 8-texel grid, because that is what almost every real
+/// layer will do and the snap is not free (two `floor`s and a multiply-add per layer).
+/// Measuring the continuous form would price a configuration nobody ships.
+///
+/// A sweep over four copies of the cheapest generator would understate the slope,
+/// which is the one thing this section must not do. (The original stack was half
+/// brick coursing; those generators were cut at the S2 gate, so this was re-authored
+/// and section 9 re-recorded rather than left describing code that no longer exists.)
+///
+/// Air is left alone: it is the miss sentinel and is never shaded.
+fn saturated_material_rows() -> Vec<GpuMaterial> {
+    let stack = PatternStack::of(&[
+        PatternLayer {
+            generator: PatternGenerator::Flat,
+            frame: PatternFrame::Voxel,
+            period_meters: VOXEL_SIZE,
+            target: PatternTarget::Albedo,
+            blend: PatternBlend::Multiply,
+            amount: 0.3,
+            target_color: [1.0, 1.0, 1.0],
+            faces: PatternFaces::ALL,
+            // The voxel frame is one point per voxel, so a snap here would be a no-op.
+            texels_per_voxel: 0,
+        },
+        PatternLayer {
+            generator: PatternGenerator::Speckle { density: 0.3 },
+            frame: PatternFrame::World,
+            period_meters: 0.05,
+            target: PatternTarget::Albedo,
+            blend: PatternBlend::Multiply,
+            amount: 0.5,
+            ..PatternLayer::IDENTITY
+        },
+        PatternLayer {
+            generator: PatternGenerator::Noise { octaves: 2 },
+            frame: PatternFrame::World,
+            period_meters: 0.25,
+            target: PatternTarget::Albedo,
+            blend: PatternBlend::MixToColor,
+            amount: 0.4,
+            target_color: [0.55, 0.52, 0.48],
+            faces: PatternFaces::ALL,
+            texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
+        },
+        PatternLayer {
+            generator: PatternGenerator::Noise { octaves: 3 },
+            frame: PatternFrame::World,
+            period_meters: 0.02,
+            target: PatternTarget::Albedo,
+            blend: PatternBlend::Multiply,
+            amount: 0.4,
+            ..PatternLayer::IDENTITY
+        },
+    ]);
+    MATERIALS
+        .iter()
+        .map(|row| {
+            let mut patterned = *row;
+            if !matches!(row.kind, MaterialKind::Air) {
+                patterned.patterns = stack;
+            }
+            patterned.to_gpu()
+        })
+        .collect()
+}
+
+/// Section 9: the material model. Baseline = the shipped configuration, which reads
+/// neither face roles nor pattern layers; the registry's columns switch each on and
+/// then walk the per-hit layer cap 0 / 1 / 2 / 4 over the saturated table.
+///
+/// `material-flat` is the anchor: face roles off, patterns off. Everything this
+/// section costs is measured against it, and the pixel compare against it is how
+/// much of the frame the layer model actually changes — which for a grain at 2 cm
+/// should be nearly all of it up close and almost none of it at range, since the
+/// fade is derived from the period.
+fn materials_section() -> Section {
+    let shipped = RenderQuality::default();
+    let mut variants = vec![Variant::new("material-flat".to_string(), shipped)];
+    variants.extend(registry_variants(BenchSection::Materials, &shipped));
+
+    Section {
+        heading: "section 9: S1 face roles + S2 pattern layers",
+        scenarios: build_scenarios(&['a', 'b', 'c', 'd']),
+        variants,
+        reference_label: "material-flat",
+        compare_heading: "material coverage (differing pixels vs material-flat — how much of the \
+                          frame the face roles and layer stack change)",
+        crop_regions: &[],
     }
 }
 

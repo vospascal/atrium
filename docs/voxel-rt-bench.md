@@ -2272,3 +2272,181 @@ and same pose, so the pair is directly comparable:
 (`preset_table_tiers_the_water_optics_by_ray_budget`). It is a look decision, so it
 should not vary by tier — and since it is also the cheaper option, no tier has a
 cost reason to differ either. Nothing else in the preset table moved.
+
+---
+
+## Materials arc S1+S2 — face roles and pattern layers (M3 Max, 2560x1440, 2026-07-31)
+
+Section 9, and it is a **new section**: S1 registered a bench point and nothing ran
+it, so `BenchSection::Materials` had a column and no table. S2 closed that and
+brought the layer sweep with it.
+
+### The table this section runs on, and why it is its own
+
+Section 9 builds its own `WorldBindings` over the shared island brickmap and uploads
+a **saturated material table**: every non-Air row carries four pattern layers.
+
+That is not a convenience, it is the only way the sweep means anything. **No row in
+the compiled table authors a layer** — that is S6's step — so a sweep over the
+shipped table would find the `MATERIAL_FLAG_PATTERNS` bit test short-circuiting on
+every hit and would report four layers as free. The number this section exists to
+produce is the **per-layer slope**, and only a table that authors layers produces it.
+
+The four are the realistic saturated stack rather than four copies of the cheapest
+generator, because understating the slope is the one failure mode that matters here:
+
+| slot | generator | period | what it costs |
+|---|---|---|---|
+| 1 | `Coursing` (mortar mask) | 0.5 m | the tessellation walk, two divides, two eased edge masks |
+| 2 | `CoursingTone` | 0.5 m | the same walk, one cell hash |
+| 3 | `Speckle` | 0.05 m | four cell hashes and a `length` |
+| 4 | `Noise` x3 octaves | 0.02 m | **24 cell hashes** — by far the dearest of the four |
+
+Sections 1-8 keep the shared bindings and the compiled table, so no baseline above
+moves for this.
+
+### Variant table — per-dispatch median ms
+
+Re-recorded after the S2 gate cut the coursing generators and added the texel snap, so
+these describe the shipped stack. **Read C and D**: A and B were contended in this run
+(p95 6.8% and 6.5% above median across every column, including ones this arc cannot
+touch), while C sits at 1.6% and D at 0.5%.
+
+| variant | A top-down | B top-down low sun | **C ground** | **D ground low sun** |
+|---|---|---|---|---|
+| **material-flat** (the anchor: both levers off) | 10.772 | 14.387 | **6.745** | **7.608** |
+| material-face-roles | 10.873 | 14.520 | **6.805** | **7.663** |
+| material-patterns-0-layers | 10.777 | 14.433 | **6.761** | **7.627** |
+| material-patterns-1-layer | 12.256 | 15.963 | **7.616** | **8.428** |
+| material-patterns-2-layers | 12.332 | 16.006 | **7.819** | **8.617** |
+| **material-patterns** (all four) | 13.434 | 17.323 | **8.771** | **9.574** |
+| material-patterns-half-strength | 13.453 | 17.260 | **8.776** | **9.578** |
+
+The CAGI pass does not move at all (0.98 / 1.58 ms flat across all seven columns),
+which is the expected result and worth recording: the light volume bakes its own cell
+attributes and never reads the material table, so nothing in this arc can reach it.
+That is also exactly why the panel has a "re-pack GI attributes" button.
+
+### Verdict A — face roles are free, as S1 predicted
+
+**+0.9% (C), +0.7% (D).** Inside the +-2% band, and the mechanism says why: the
+DDA already records the stepped axis and the ray's sign along it for E1's analytic
+corner AO, so the face costs a flag test and a `select` on data the hit already has.
+No traversal change, no extra fetch.
+
+Coverage is **1.33% of the frame top-down, 4.66% from the ground** — and that ratio
+is the feature working rather than a weak effect. Top-down you are looking at tops,
+which keep the row's base colour; from the ground you see the SIDES, which is where
+the earth colour lives. Grass is still the only row authoring roles.
+
+### Verdict B — the flag test itself is genuinely free
+
+`material-patterns-0-layers` runs the lever ON with the cap at zero: **+0.2% (C and
+D)** and **0 differing pixels in all four scenarios**. So the cost of *having* the mechanism
+compiled in, on a row that authors nothing, is nothing — which is what makes it safe
+to ship the lever on once S6 authors the rows, instead of needing a second table.
+
+### Verdict C — **the entry cost exceeds the dearest generator**, and that is the finding
+
+The stack is ordered cheapest-first and the cap drops the tail, so the four deltas are
+a per-generator cost as well as a per-layer slope. Taking C against the 0-layer column:
+
+| layers | slot added | C ms | delta | that slot's cost |
+|---|---|---|---|---|
+| 0 | — | 6.761 | — | — |
+| 1 | `Flat`, voxel frame, **1 hash** | 7.616 | +0.855 | **+0.855** |
+| 2 | `Speckle` + snap, 4 hashes | 7.819 | +1.058 | +0.203 |
+| 4 | `Noise` x2 and x3 + snap, 16 and 24 hashes | 8.771 | +2.010 | +0.476 each |
+
+Slot 1 is the *cheapest generator the model has* — one cell hash, no interpolation, no
+snap — and it costs **+0.855 ms**, while the dearest (three octaves of value noise, 24
+lattice hashes) costs roughly **+0.55**. So almost all of slot 1 is fixed entry cost:
+building the `PatternSample` (the clamped position reconstruction, two scalings into
+metres), fetching the row, and the register pressure the block adds. **Paying to run the
+mechanism at all costs more than the most expensive thing it can run.**
+
+That is a sharper statement than the first recording could make — its stack led with
+brick coursing, which is not cheap, so the entry cost and the generator cost were mixed
+together in slot 1.
+
+Three consequences, all actionable:
+
+- **A material that wants detail should use two or three layers, not one.** The
+  authoring instinct "keep it to one layer for performance" is backwards: once you have
+  paid the entry cost, layers 2-4 are a quarter to a half its price.
+- **`MATERIAL_PATTERN_MAX_LAYERS` is a weak tier knob.** Dropping 4 to 1 recovers
+  1.16 ms of the 2.01 ms; dropping to 0 recovers all of it but removes the feature. For
+  a Quest tier the honest lever is **per-material opt-in** — pattern the surfaces you
+  stand on and look at, leave the rest flat — not a global cap.
+- **The entry cost is where an optimization would pay**, if S2 ever needs one. Sharing
+  one `PatternSample` across the albedo/roughness/emission entry points already happens;
+  the remaining candidate is hoisting it out of the per-target functions entirely.
+
+The full worst case is **+30% (C) / +26% (D)**: every visible surface in frame carrying
+the four-layer stack, three of them snapped. Nothing will ever author that, and it is
+the right number to have measured before authoring anything.
+
+### Verdict D — `MATERIAL_PATTERN_STRENGTH` costs nothing, exactly as claimed
+
+Half strength measures **0.06% slower** than full (8.776 vs 8.771 on C) and 0.04% on
+D — i.e. identical, well inside run-to-run noise, in all four scenarios. The generator runs
+regardless; strength only scales the result. The registry row says so, and this is
+the row that shows it: it is the taste knob, not a performance knob, and the bench
+column exists to prove the negative rather than to find a saving.
+
+Coverage confirms it is doing something: **86.8% of the frame differs from flat at
+half strength vs 86.6% at full, with the max channel delta halved (78 vs 145)**. Same
+pixels touched, half as hard — which is what a strength scale should mean.
+
+### Bit-identity, and what actually establishes it
+
+`MATERIAL_PATTERNS=off` reproducing pre-S2 frames is not established by a timing
+column. It is established two ways, both stronger:
+
+- **0 differing pixels** on `material-patterns-0-layers` vs `material-flat`, in all
+  four scenarios, over a table where every row authors four layers. The uploaded
+  slots are read and the result is byte-identical.
+- **`no_row_authors_a_pattern_layer_yet`** pins that the shipped table has no layers
+  at all, so on the shipped table the flag test fails and the code path is the S1
+  path. That test is also the tripwire for S6: when a row gains a layer, it fails,
+  and that is the moment to check the layer was a decision rather than a demo left
+  behind.
+
+### The GPU row doubled and it costs nothing
+
+`GpuMaterial` went 128 -> 256 bytes (four 32-byte slots), so the table is
+**6656 bytes for 26 rows**, up from 3328. Section 1 re-verified unchanged
+(see below), which is the answer to the only real question a doubled row raises:
+whether the wider stride costs a cache miss in the hottest read in the renderer. It
+does not, and it should not — 6.6 KB fits anywhere.
+
+### PNG evidence (`target/bench_dda/`)
+
+`scenario_{a,b,c,d}_material_*.png`. The pair worth looking at is
+`material_flat` against `material_patterns`: same world, same light, one flat
+palette and one where every surface has per-voxel tone, square specks and blocky grain
+on the 8-texel grid.
+
+### Section 1 re-verification — the doubled row does not cost a cache miss
+
+Re-ran the Stage 2 traversal gate against the recorded
+**4.709 / 6.609 / 4.385 / 4.937 ms**:
+
+| scenario | recorded | now | delta | p95 spread this run |
+|---|---|---|---|---|
+| A top-down | 4.709 | **4.734** | +0.5% | 0.7% |
+| B top-down low sun | 6.609 | **6.571** | -0.6% | 0.4% |
+| C ground | 4.385 | **4.412** | +0.6% | 0.4% |
+| D ground low sun | 4.937 | **5.242** | +6.2% | **5.4%** |
+
+**A, B and C are inside the +-2% band; D is not, and it is a contended
+measurement rather than a regression.** Every column of scenario D in this run shows
+a p95 5-13% above its median (`with-column-ff` 6.252 / 6.911, `with-anyhit-shadow`
+5.121 / 5.960), where A, B and C all sit under 1% — including the unrelated columns
+that this arc cannot have touched. D wants a re-check on a quiet machine; it is not
+claimed as clean here.
+
+**The pixel gate is unchanged, which is the load-independent evidence:** 19
+differing pixels on B, 0 on D, `with-descend-ff` 12 — the same known float-tie set
+recorded through E1, E2 and E6. The traversal core is bit-identical with a 256-byte
+material row.

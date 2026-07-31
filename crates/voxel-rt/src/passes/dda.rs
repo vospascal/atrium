@@ -28,6 +28,11 @@ const WORKGROUP_SIZE: u32 = 8;
 /// in `shaders/water.wgsl`).
 pub const SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/world.wgsl"),
+    // S2's pattern layers. Appended to THIS pass only, unlike `world.wgsl`, which
+    // the CAGI pass shares: the light volume bakes its own cell attributes and never
+    // reads the material table, so it needs the row's LAYOUT (which `world.wgsl`
+    // carries) and none of the behaviour below.
+    include_str!("../../shaders/pattern.wgsl"),
     include_str!("../../shaders/cagi_volume.wgsl"),
     include_str!("../../shaders/water.wgsl"),
     include_str!("../../shaders/dda.wgsl"),

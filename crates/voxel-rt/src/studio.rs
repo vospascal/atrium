@@ -13,14 +13,24 @@
 //! generate a world at all, which is also why it starts in well under the island's
 //! generation time.
 //!
-//! ## What is deliberately NOT here yet
+//! ## The poses, and why there are three
 //!
-//! A **wall pose**. Cross-voxel continuity and any pattern whose period exceeds
-//! one voxel are invisible on a single voxel, so S2 (the layer model) is where a
-//! wall and a cube earn their place — that is the first stage with something to
-//! show on them. Adding them now would be scenery with nothing to judge.
+//! S0 shipped one voxel, because flat colours are all one voxel can fail at. S2's
+//! layer model can fail at things a single voxel cannot show at all, so it brings
+//! the two poses that show them ([`StudioPose`]):
 //!
-//! The **plate** below the sample is here, though, because even S0's flat colours
+//! * **Single** — one voxel. Still the right pose for judging a colour, a face role
+//!   or a within-face grain, because nothing else is in frame to distract.
+//! * **Wall** — a 16x16 slab. What **cross-voxel continuity** and any period over
+//!   one voxel are judged on: a world-framed layer must flow across the whole slab,
+//!   and a per-voxel tile is instantly visible as a 16x16 grid. Any period over one
+//!   voxel needs it too: a 1 m band spans eight of them, so on a single voxel it is
+//!   just a flat colour.
+//! * **Cube** — 4x4x4. The pose where a pattern meets a **corner**: three faces at
+//!   once, and the only way to see whether a world-framed layer wraps an edge
+//!   convincingly or shows a seam along it.
+//!
+//! The **plate** below the subject is in every pose, because even S0's flat colours
 //! need somewhere for the shadow to land and something to bounce a little light
 //! back; a voxel floating in a void reads as a sprite, not a surface.
 
@@ -60,6 +70,59 @@ pub const PLATE_DROP: i32 = 3;
 /// still showing the plate.
 pub const CAMERA_DISTANCE_METERS: f32 = 0.9;
 
+/// S2 — the shape the sample material is built into.
+///
+/// Three poses rather than a size slider: each answers a different question, and a
+/// continuous size would mean judging continuity at whatever extent happened to be
+/// dialled instead of at a known one. See the module docs for what each is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StudioPose {
+    /// One voxel. S0's pose, and still the right one for a colour or a face role.
+    #[default]
+    Single,
+    /// A [`WALL_SIZE`]-square slab, one voxel thick, standing on the plate and
+    /// facing the camera's starting angle. The continuity and multi-voxel-period pose.
+    Wall,
+    /// A [`CUBE_SIZE`]-cubed block. The corner pose.
+    Cube,
+}
+
+impl StudioPose {
+    pub const fn label(&self) -> &'static str {
+        match self {
+            StudioPose::Single => "single voxel",
+            StudioPose::Wall => "wall (16x16)",
+            StudioPose::Cube => "cube (4x4x4)",
+        }
+    }
+
+    pub const ALL: [StudioPose; 3] = [StudioPose::Single, StudioPose::Wall, StudioPose::Cube];
+
+    /// The pose's extent in voxels, as `[x, y, z]`.
+    ///
+    /// One place rather than a match in each of `build`, the framing and the
+    /// centring — those three disagreeing is exactly how a pose ends up built
+    /// correctly and framed on its corner.
+    pub const fn extent(&self) -> [i32; 3] {
+        match self {
+            StudioPose::Single => [1, 1, 1],
+            // One voxel thick: a slab is what a wall's material is seen on, and a
+            // solid 16-deep block would hide 15/16 of what was built while costing
+            // 4096 edit-path writes to do it.
+            StudioPose::Wall => [WALL_SIZE, WALL_SIZE, 1],
+            StudioPose::Cube => [CUBE_SIZE, CUBE_SIZE, CUBE_SIZE],
+        }
+    }
+}
+
+/// Voxels on a side of the wall pose. 16 is 2 m — eight repeats of a 0.25 m period or
+/// two of a 1 m one, which is enough of either to tell a flowing field from a tiled
+/// one. Fewer repeats and a tile looks like a deliberate motif.
+pub const WALL_SIZE: i32 = 16;
+
+/// Voxels on a side of the cube pose.
+pub const CUBE_SIZE: i32 = 4;
+
 /// What the studio is showing.
 ///
 /// The plate material is part of the scene rather than fixed, because it is a
@@ -70,6 +133,9 @@ pub const CAMERA_DISTANCE_METERS: f32 = 0.9;
 pub struct StudioScene {
     /// The voxel under the microscope.
     pub sample: Voxel,
+    /// S2 — the shape [`Self::sample`] is built into. Ignored while a `.vox`
+    /// [`Self::subject`] is loaded, which brings its own geometry.
+    pub pose: StudioPose,
     /// The ground plate, or `None` for a sample floating in the void.
     pub plate: Option<Voxel>,
     /// S0b — an imported `.vox` model shown INSTEAD of the single sample.
@@ -97,6 +163,7 @@ impl Default for StudioScene {
     fn default() -> Self {
         Self {
             sample: Voxel::Grass,
+            pose: StudioPose::Single,
             plate: Some(Voxel::Snow),
             subject: None,
         }
@@ -153,21 +220,56 @@ impl StudioScene {
                     }
                 }
             }
+            // S2: the pose. `Single` is the S0 case and comes out of the same code
+            // as the others — a 1x1x1 extent — rather than being a special arm, so
+            // the pose that ships cannot drift from the poses that are tested.
             None => {
-                brickmap.set_voxel(x, y, z, self.sample, PLATE_CLEARANCE);
+                let [size_x, size_y, size_z] = self.pose.extent();
+                let origin = self.pose_origin();
+                for pose_y in 0..size_y {
+                    for pose_z in 0..size_z {
+                        for pose_x in 0..size_x {
+                            brickmap.set_voxel(
+                                origin[0] + pose_x,
+                                origin[1] + pose_y,
+                                origin[2] + pose_z,
+                                self.sample,
+                                PLATE_CLEARANCE,
+                            );
+                        }
+                    }
+                }
+                // `Single` keeps S0's exact placement (see `pose_origin`):
+                // floating at the sample voxel with air below it, so its own bottom
+                // face and its shadow stay two separate shapes. The larger poses
+                // STAND on the plate — a 16-voxel wall hovering two voxels up reads
+                // as a bug rather than as deliberate framing.
             }
         }
         brickmap
     }
 
-    /// Half-extent the plate needs to sit under the current subject, in voxels.
+    /// Lowest-corner voxel of the current pose.
+    fn pose_origin(&self) -> [i32; 3] {
+        let [x, y, z] = SAMPLE_VOXEL;
+        let [size_x, _, size_z] = self.pose.extent();
+        match self.pose {
+            StudioPose::Single => [x, y, z],
+            // Centred on the sample column, resting on the plate.
+            _ => [x - size_x / 2, y - PLATE_DROP + 1, z - size_z / 2],
+        }
+    }
+
+    /// Half-extent the plate needs to sit under whatever is being shown, in voxels.
     fn subject_footprint_half_extent(&self) -> i32 {
+        // A margin of two voxels so the subject never appears to overhang its plate,
+        // which reads as the plate being too small rather than as a deliberate frame.
         match &self.subject {
-            // A margin of two voxels so the model never appears to overhang its
-            // plate, which reads as the plate being too small rather than as a
-            // deliberate frame.
             Some(subject) => subject.size_x.max(subject.size_z) / 2 + 2,
-            None => 0,
+            None => {
+                let [size_x, _, size_z] = self.pose.extent();
+                size_x.max(size_z) / 2 + 2
+            }
         }
     }
 
@@ -184,11 +286,15 @@ impl StudioScene {
                 (y - PLATE_DROP + 1) as f32 * VOXEL_SIZE + subject.size_y as f32 * VOXEL_SIZE * 0.5,
                 (z as f32 + 0.5) * VOXEL_SIZE,
             ),
-            None => Vec3::new(
-                (x as f32 + 0.5) * VOXEL_SIZE,
-                (y as f32 + 0.5) * VOXEL_SIZE,
-                (z as f32 + 0.5) * VOXEL_SIZE,
-            ),
+            None => {
+                let origin = self.pose_origin();
+                let [size_x, size_y, size_z] = self.pose.extent();
+                Vec3::new(
+                    (origin[0] as f32 + size_x as f32 * 0.5) * VOXEL_SIZE,
+                    (origin[1] as f32 + size_y as f32 * 0.5) * VOXEL_SIZE,
+                    (origin[2] as f32 + size_z as f32 * 0.5) * VOXEL_SIZE,
+                )
+            }
         }
     }
 
@@ -203,7 +309,13 @@ impl StudioScene {
                 let largest = subject.size_x.max(subject.size_y).max(subject.size_z) as f32;
                 (largest * VOXEL_SIZE * 2.0).max(CAMERA_DISTANCE_METERS)
             }
-            None => CAMERA_DISTANCE_METERS,
+            // Same rule for a pose: two subject-widths back, floored at S0's
+            // one-voxel distance so `Single` still frames exactly as it did.
+            None => {
+                let [size_x, size_y, size_z] = self.pose.extent();
+                let largest = size_x.max(size_y).max(size_z) as f32;
+                (largest * VOXEL_SIZE * 2.0).max(CAMERA_DISTANCE_METERS)
+            }
         }
     }
 }
@@ -298,6 +410,7 @@ mod tests {
     fn a_plateless_scene_is_a_single_voxel() {
         let scene = StudioScene {
             sample: Voxel::Stone,
+            pose: StudioPose::Single,
             plate: None,
             subject: None,
         };
@@ -339,6 +452,161 @@ mod tests {
             assert!((pose.right.length() - 1.0).abs() < 1e-4);
             assert!((pose.up.length() - 1.0).abs() < 1e-4);
         }
+    }
+
+    /// S2 — each pose must build exactly the voxels its extent claims, resting on
+    /// the plate, and nothing outside it. The extent is what the framing and the
+    /// centring are derived from, so a pose that builds something else is framed
+    /// wrong in a way that reads as a camera bug.
+    #[test]
+    fn each_pose_builds_its_own_extent() {
+        for pose in StudioPose::ALL {
+            let scene = StudioScene {
+                pose,
+                ..StudioScene::default()
+            };
+            let brickmap = scene.build();
+            let expected = material_id(scene.sample);
+            let origin = scene.pose_origin();
+            let [size_x, size_y, size_z] = pose.extent();
+
+            let mut built = 0;
+            for y in 0..size_y {
+                for z in 0..size_z {
+                    for x in 0..size_x {
+                        assert_eq!(
+                            brickmap.get(origin[0] + x, origin[1] + y, origin[2] + z),
+                            expected,
+                            "{pose:?} left a hole at {x},{y},{z}"
+                        );
+                        built += 1;
+                    }
+                }
+            }
+            assert_eq!(built, size_x * size_y * size_z);
+
+            // One voxel above the top face must be air, or the pose is taller than
+            // it claims and the framing is wrong.
+            assert_eq!(
+                brickmap.get(origin[0], origin[1] + size_y, origin[2]),
+                0,
+                "{pose:?} built above its extent"
+            );
+            // And one to the side.
+            assert_eq!(
+                brickmap.get(origin[0] + size_x, origin[1], origin[2]),
+                0,
+                "{pose:?} built beside its extent"
+            );
+        }
+    }
+
+    /// The poses that exist to show cross-voxel behaviour must actually span several
+    /// voxels in the directions that matter, and the wall must stay a slab.
+    ///
+    /// Not a tautology over `extent()`: it is the property the poses were added FOR,
+    /// and a well-meaning "make the wall thicker" would break the continuity read
+    /// without breaking anything else.
+    #[test]
+    fn the_wall_spans_voxels_and_stays_one_thick() {
+        let [width, height, depth] = StudioPose::Wall.extent();
+        assert_eq!(depth, 1, "the wall must stay a slab");
+        // A 1 m period must span several voxels of it, or a multi-voxel layer has nothing to
+        // course across.
+        let span_meters = width as f32 * VOXEL_SIZE;
+        assert!(span_meters >= 2.0, "the wall is only {span_meters} m wide");
+        assert_eq!(width, height, "the wall must be square");
+
+        let [cube_x, cube_y, cube_z] = StudioPose::Cube.extent();
+        assert_eq!([cube_x, cube_y, cube_z], [CUBE_SIZE; 3]);
+        assert!(cube_x > 1, "the cube must show a multi-voxel corner");
+    }
+
+    /// Every pose must be framed on its own centre from a distance that fits it.
+    /// The failure this prevents is the one the `.vox` subject already hit: a large
+    /// subject framed on the origin voxel reads as off-centre rather than as large.
+    #[test]
+    fn every_pose_is_centred_and_framed() {
+        for pose in StudioPose::ALL {
+            let scene = StudioScene {
+                pose,
+                ..StudioScene::default()
+            };
+            let [size_x, size_y, size_z] = pose.extent();
+            let origin = scene.pose_origin();
+            let centre = scene.sample_center_meters();
+            // The centre must be the geometric middle of what was built.
+            let expected = Vec3::new(
+                (origin[0] as f32 + size_x as f32 * 0.5) * VOXEL_SIZE,
+                (origin[1] as f32 + size_y as f32 * 0.5) * VOXEL_SIZE,
+                (origin[2] as f32 + size_z as f32 * 0.5) * VOXEL_SIZE,
+            );
+            assert!(
+                (centre - expected).length() < 1e-5,
+                "{pose:?} is framed at {centre} rather than {expected}"
+            );
+            // The camera must sit outside the subject's own bounding sphere, or the
+            // eye starts inside the wall.
+            let radius = size_x.max(size_y).max(size_z) as f32 * VOXEL_SIZE * 0.5;
+            assert!(
+                scene.framing_distance_meters() > radius,
+                "{pose:?} frames from inside itself"
+            );
+            // And the plate must be wide enough to catch the whole footprint.
+            assert!(
+                scene.subject_footprint_half_extent() * 2 >= size_x.max(size_z),
+                "{pose:?} overhangs its plate"
+            );
+        }
+    }
+
+    /// `Single` must be byte-for-byte the S0/S1 scene: the pose mechanism is an
+    /// addition, and the pose that ships must not have moved under it.
+    #[test]
+    fn the_single_pose_is_unchanged_by_the_pose_mechanism() {
+        let scene = StudioScene::default();
+        assert_eq!(scene.pose, StudioPose::Single);
+        assert_eq!(scene.pose_origin(), SAMPLE_VOXEL);
+        assert_eq!(scene.framing_distance_meters(), CAMERA_DISTANCE_METERS);
+        let [x, y, z] = SAMPLE_VOXEL;
+        assert_eq!(
+            scene.sample_center_meters(),
+            Vec3::new(
+                (x as f32 + 0.5) * VOXEL_SIZE,
+                (y as f32 + 0.5) * VOXEL_SIZE,
+                (z as f32 + 0.5) * VOXEL_SIZE,
+            )
+        );
+        // Still floating clear of the plate, which is what keeps its own bottom face
+        // and its shadow legible as two shapes.
+        let brickmap = scene.build();
+        for gap in 1..PLATE_DROP {
+            assert_eq!(brickmap.get(x, y - gap, z), 0);
+        }
+    }
+
+    /// A loaded `.vox` model must win over the pose: it brings its own geometry, and
+    /// building a wall of grass around a campfire would frame neither.
+    #[test]
+    fn a_loaded_subject_overrides_the_pose() {
+        let scene = StudioScene {
+            pose: StudioPose::Wall,
+            subject: Some(VoxSubject {
+                size_x: 2,
+                size_y: 2,
+                size_z: 2,
+                cells: vec![Some(material_id(Voxel::Stone)); 8],
+            }),
+            ..StudioScene::default()
+        };
+        let brickmap = scene.build();
+        let [x, y, z] = SAMPLE_VOXEL;
+        // The wall's top voxel would be 16 up from the plate; the model is 2 tall.
+        assert_eq!(brickmap.get(x, y - PLATE_DROP + 1 + 4, z), 0);
+        assert_eq!(
+            brickmap.get(x, y - PLATE_DROP + 1, z),
+            material_id(Voxel::Stone)
+        );
     }
 
     /// The camera must never be pulled inside the sample voxel, which would put

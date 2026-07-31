@@ -37,7 +37,13 @@
 use crate::material::{Material, MaterialKind, MATERIALS};
 use crate::material_table::MaterialTable;
 use crate::material_tune::{ProvenanceTable, VoxSource};
+use crate::pattern::{
+    PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternTarget, MAX_NOISE_OCTAVES,
+    MAX_PATTERN_LAYERS, NO_PATTERNS, TEXEL_RUNGS,
+};
+use crate::studio::StudioPose;
 use crate::vox_material::VoxImportRow;
+use voxel_core::world::VOXEL_SIZE;
 
 /// The panel's own UI state — what is selected and what it has asked for.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -51,6 +57,10 @@ pub struct MaterialPanelState {
     pub repack_gi_requested: bool,
     /// S0b — the `.vox` import panel's state.
     pub import: VoxImportState,
+    /// S2 — the user picked a studio pose. A one-shot request rather than a stored
+    /// pose, because servicing it means rebuilding the world, which the platform
+    /// layer owns; the pose itself lives on [`crate::studio::StudioScene`].
+    pub studio_pose_requested: Option<StudioPose>,
 }
 
 /// S0b — the `.vox` import panel.
@@ -159,6 +169,7 @@ pub fn draw_material_section(
         draw_kind_payload(ui, &mut edited);
         draw_emission(ui, &mut edited);
         draw_face_roles(ui, &mut edited);
+        draw_pattern_layers(ui, &mut edited);
 
         if edited != row {
             if let Some(target) = table.row_mut(selected) {
@@ -166,6 +177,8 @@ pub fn draw_material_section(
             }
         }
 
+        ui.separator();
+        draw_studio_pose(ui, state);
         ui.separator();
         draw_import_section(ui, table, state, provenance, selected);
         ui.separator();
@@ -525,7 +538,16 @@ fn draw_row_selector(ui: &mut egui::Ui, table: &mut MaterialTable, state: &mut M
             for id in 0..MATERIALS.len() as u8 {
                 ui.selectable_value(&mut state.selected, id, label(table, id));
             }
-        });
+        })
+        .response
+        .on_hover_text(
+            "The row being edited — and IN THE STUDIO, the voxel being shown: the \
+             subject follows this selection, so picking a row rebuilds the studio \
+             around it. Air (row 0) is the miss sentinel and is skipped, so selecting \
+             it leaves the subject alone. A `*` marks a row edited away from what the \
+             binary compiled. In the island this is the placement material instead, \
+             and nothing is rebuilt.",
+        );
 
     ui.horizontal(|ui| {
         ui.checkbox(&mut state.eyedropper_armed, "eyedropper")
@@ -734,6 +756,405 @@ fn draw_face_roles(ui: &mut egui::Ui, row: &mut Material) {
             });
         }
     });
+}
+
+/// S2 — which shape the studio builds the sample into.
+///
+/// Lives in the material panel rather than in a studio panel of its own because it
+/// is not a scene setting, it is part of judging a material: a period under one
+/// voxel is judged on the single voxel, continuity and any multi-voxel period on the
+/// wall, and a
+/// corner on the cube. Choosing the pose IS choosing what you are looking for.
+fn draw_studio_pose(ui: &mut egui::Ui, state: &mut MaterialPanelState) {
+    ui.collapsing("Studio subject", |ui| {
+        ui.label("rebuilds the studio world; needs --studio")
+            .on_hover_text(
+                "Each pose replaces the whole studio scene, which is a full world \
+                 rebuild — fine for something a human presses, and the same path a \
+                 loaded .vox model already takes.",
+            );
+        ui.horizontal(|ui| {
+            for pose in StudioPose::ALL {
+                if ui
+                    .button(pose.label())
+                    .on_hover_text(studio_pose_hint(pose))
+                    .clicked()
+                {
+                    state.studio_pose_requested = Some(pose);
+                }
+            }
+        });
+    });
+}
+
+fn studio_pose_hint(pose: StudioPose) -> &'static str {
+    match pose {
+        StudioPose::Single => {
+            "One voxel, nothing else in frame. The pose for a colour, a face role or \
+             a within-face grain."
+        }
+        StudioPose::Wall => {
+            "A 16x16 slab — 2 m square. The pose for CROSS-VOXEL CONTINUITY and for \
+             any period over one voxel: a world-framed layer must flow across the \
+             whole slab, and a per-voxel tile shows up instantly as a 16x16 grid. \
+             Any period over one voxel is unjudgeable without it."
+        }
+        StudioPose::Cube => {
+            "A 4x4x4 block: three faces and a corner at once. The pose for whether a \
+             world-framed layer wraps an edge or shows a seam along it."
+        }
+    }
+}
+
+/// S2 — the pattern layer stack.
+///
+/// Unlike face roles, this section is offered on **every** row, because a stack has
+/// an empty state that costs nothing and "add a layer" is the authoring act. Face
+/// roles are a decision about what a material IS; a layer is tuning, which is what
+/// this panel is for.
+///
+/// The controls follow the data: pick a generator and only its own parameters
+/// appear, pick a blend and the target colour appears only if that blend reads it.
+/// Same argument as the kind-driven header — a slider that silently does nothing is
+/// worse than an absent one.
+fn draw_pattern_layers(ui: &mut egui::Ui, row: &mut Material) {
+    let active = row.patterns.active_count();
+    ui.collapsing(
+        format!("Pattern layers ({active}/{MAX_PATTERN_LAYERS})"),
+        |ui| {
+            ui.label("needs the MATERIAL_PATTERNS lever under Quality")
+                .on_hover_text(
+                    "Layers are UPLOADED but not READ until the lever is on, for the same \
+                 reason face roles ship off: no row authors one yet, so turning it on \
+                 today changes nothing, and authoring the island's materials is a \
+                 deliberate later step with a re-recorded baseline. The Quality panel \
+                 also holds the global strength and the per-hit layer cap.",
+                );
+
+            let mut remove: Option<usize> = None;
+            for slot in 0..active {
+                let Some(layer) = row.patterns.layers[slot].as_mut() else {
+                    continue;
+                };
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}.", slot + 1));
+                    ui.label(layer.generator.label());
+                    if ui
+                        .small_button("remove")
+                        .on_hover_text(
+                            "Layers apply in order, each on the previous one's output, so \
+                         removing one closes the gap rather than leaving a hole.",
+                        )
+                        .clicked()
+                    {
+                        remove = Some(slot);
+                    }
+                });
+                draw_pattern_layer(ui, slot, layer);
+            }
+            if let Some(slot) = remove {
+                row.patterns.remove(slot);
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        row.patterns.active_count() < MAX_PATTERN_LAYERS,
+                        egui::Button::new("add layer"),
+                    )
+                    .on_hover_text(
+                        "Starts at amount 0, which is the exact identity — so a new layer \
+                     is safe to leave in the row while its generator is dialled in.",
+                    )
+                    .clicked()
+                {
+                    row.patterns.push(PatternLayer::IDENTITY);
+                }
+                if ui
+                    .add_enabled(active > 0, egui::Button::new("clear all"))
+                    .clicked()
+                {
+                    row.patterns = NO_PATTERNS;
+                }
+            });
+        },
+    );
+}
+
+/// One layer's controls.
+fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) {
+    ui.push_id(slot, |ui| {
+        // Generator. Changing it keeps the parameters it shares and takes the
+        // preset's for the ones it does not, which is why `ALL` carries
+        // representative values rather than zeroes.
+        egui::ComboBox::from_label("generator")
+            .selected_text(layer.generator.label())
+            .show_ui(ui, |ui| {
+                for generator in PatternGenerator::ALL {
+                    let selected = generator.code() == layer.generator.code();
+                    if ui
+                        .selectable_label(selected, generator.label())
+                        .on_hover_text(generator_hint(generator))
+                        .clicked()
+                    {
+                        layer.generator = generator;
+                    }
+                }
+            });
+        draw_generator_params(ui, layer);
+
+        egui::ComboBox::from_label("frame")
+            .selected_text(layer.frame.label())
+            .show_ui(ui, |ui| {
+                for frame in PatternFrame::ALL {
+                    if ui
+                        .selectable_label(layer.frame == frame, frame.label())
+                        .on_hover_text(frame_hint(frame))
+                        .clicked()
+                    {
+                        layer.frame = frame;
+                    }
+                }
+            });
+
+        // The texel grid, right under the frame: the two together are "where does this
+        // pattern live", and the period below is "how big are its features".
+        ui.horizontal(|ui| {
+            ui.label("texels/voxel").on_hover_text(
+                "Quantises the sample to an n x n grid per face, so the generator is \
+                 sampled once per texel and held flat across it — square detail on a \
+                 world made of cubes, instead of a smooth field that happens to sit on \
+                 voxels. Applies to EVERY generator: noise becomes blocky noise, \
+                 speckles become square specks. Independent of the period, which keeps \
+                 its own job of setting feature size — 8 texels with a 1 m period is a \
+                 large soft field rendered in 1.5 cm squares. The grid is anchored to \
+                 the WORLD and its size divides a voxel exactly, so it lines up across \
+                 neighbours and a texel never straddles a voxel edge. It is also the \
+                 same lattice a .vox model drawn at n cells per voxel lands on, so \
+                 hand-drawn and generated detail compose. `off` is the continuous \
+                 field.",
+            );
+            for rung in TEXEL_RUNGS {
+                let label = if rung == 0 {
+                    "off".to_string()
+                } else {
+                    rung.to_string()
+                };
+                if ui
+                    .radio(layer.texels_per_voxel == rung, label)
+                    .on_hover_text(texel_rung_hint(rung))
+                    .clicked()
+                {
+                    layer.texels_per_voxel = rung;
+                }
+            }
+        });
+
+        // Logarithmic: the useful range spans grain (a centimetre) to bands
+        // (metres), and a linear slider over that spends nine tenths of its travel
+        // above one voxel.
+        ui.add(
+            egui::Slider::new(&mut layer.period_meters, 0.005..=4.0)
+                .text("period (m)")
+                .logarithmic(true)
+                .max_decimals(4),
+        )
+        .on_hover_text(
+            "The size of the generator's largest feature, in METRES — and the field \
+             that decides which scale this layer acts on. One voxel is 0.125 m: below \
+             that is within-face detail, at it is per-voxel, above it is a multi-voxel \
+             pattern. It also sets the distance fade: a layer fades out at a fixed \
+             number of PERIODS, so fine detail dies at range and coarse bands do not.",
+        );
+
+        egui::ComboBox::from_label("target")
+            .selected_text(layer.target.label())
+            .show_ui(ui, |ui| {
+                for target in PatternTarget::ALL {
+                    if ui
+                        .selectable_label(layer.target == target, target.label())
+                        .on_hover_text(target_hint(target))
+                        .clicked()
+                    {
+                        layer.target = target;
+                    }
+                }
+            });
+
+        egui::ComboBox::from_label("blend")
+            .selected_text(layer.blend.label())
+            .show_ui(ui, |ui| {
+                for blend in PatternBlend::ALL {
+                    if ui
+                        .selectable_label(layer.blend == blend, blend.label())
+                        .on_hover_text(blend_hint(blend))
+                        .clicked()
+                    {
+                        layer.blend = blend;
+                    }
+                }
+            });
+
+        // Only shown when the blend reads it.
+        if layer.blend.uses_target_color() {
+            ui.horizontal(|ui| {
+                if layer.target.is_color() {
+                    ui.color_edit_button_rgb(&mut layer.target_color);
+                    ui.label("target colour");
+                } else {
+                    ui.add(
+                        egui::DragValue::new(&mut layer.target_color[0])
+                            .speed(0.005)
+                            .range(0.0..=1.0)
+                            .max_decimals(3),
+                    );
+                    ui.label("target value").on_hover_text(
+                        "A scalar target reads only the first channel, which is why \
+                         this is one number rather than a colour picker.",
+                    );
+                }
+            });
+        }
+
+        ui.add(
+            egui::Slider::new(&mut layer.amount, 0.0..=1.0)
+                .text("amount")
+                .max_decimals(3),
+        )
+        .on_hover_text(
+            "Zero is the exact identity, so a layer at zero costs bytes and nothing else.",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("faces").on_hover_text(
+                "Which of S1's three roles this layer applies to. \"Top only\" is how \
+                 moss, snow settling and sun-bleaching are authored without a second \
+                 material.",
+            );
+            ui.checkbox(&mut layer.faces.top, "top");
+            ui.checkbox(&mut layer.faces.side, "side");
+            ui.checkbox(&mut layer.faces.bottom, "bottom");
+        });
+    });
+}
+
+/// The generator's own parameters, and only its own.
+fn draw_generator_params(ui: &mut egui::Ui, layer: &mut PatternLayer) {
+    match &mut layer.generator {
+        PatternGenerator::Flat => {}
+        PatternGenerator::Noise { octaves } => {
+            ui.add(
+                egui::Slider::new(octaves, 1..=MAX_NOISE_OCTAVES)
+                    .text("octaves")
+                    .integer(),
+            )
+            .on_hover_text(
+                "Each octave doubles the frequency and halves the amplitude, and the \
+                 sum is normalised — so this changes the texture without changing the \
+                 contrast, and the period keeps naming the largest feature. Costs one \
+                 more eight-corner lattice fetch per octave.",
+            );
+        }
+        PatternGenerator::Speckle { density } => {
+            ui.add(
+                egui::Slider::new(density, 0.0..=1.0)
+                    .text("density")
+                    .max_decimals(3),
+            )
+            .on_hover_text(
+                "The fraction of CELLS that carry a speck, not the fraction of area \
+                 covered — a speck fills a fixed share of its cell, so the period \
+                 controls how big and this controls how crowded.",
+            );
+        }
+    }
+}
+
+/// What one texel rung means in metres, since "8" is meaningless without the voxel.
+fn texel_rung_hint(rung: u32) -> String {
+    if rung == 0 {
+        return "Continuous — no snap. What a very fine grain still wants, since below \
+                a texel the grid is the only thing you would see."
+            .to_string();
+    }
+    let millimeters = VOXEL_SIZE / rung as f32 * 1000.0;
+    format!(
+        "{rung} x {rung} texels per face, {millimeters:.1} mm each. \
+         A .vox model drawn at {rung} cells per voxel lands on exactly this grid."
+    )
+}
+
+fn generator_hint(generator: PatternGenerator) -> &'static str {
+    match generator {
+        PatternGenerator::Flat => {
+            "One value per cell of the frame. In the voxel frame this is per-voxel \
+             TONE — the jitter that stops a stone wall being one flat colour."
+        }
+        PatternGenerator::Noise { .. } => {
+            "Value noise. Grain at a small period, mottle at a large one — the \
+             workhorse for making a surface stop looking like a painted cube."
+        }
+        PatternGenerator::Speckle { .. } => {
+            "Scattered round specks: pits in stone, grit in sand, lichen."
+        }
+    }
+}
+
+fn frame_hint(frame: PatternFrame) -> &'static str {
+    match frame {
+        PatternFrame::World => {
+            "World space — the pattern is a field the world sits in, so it flows \
+             across neighbouring voxels and CANNOT tile per voxel. The default, and \
+             the whole reason continuity works."
+        }
+        PatternFrame::Voxel => {
+            "Restarts at every voxel: the coordinate is the voxel's own centre, so the \
+             generator returns ONE value for the whole voxel. For deliberately \
+             per-voxel motifs — tone jitter being the point."
+        }
+        PatternFrame::Face => {
+            "Voxel-local within the hit face, so the pattern is ABOUT the face: wear \
+             toward an edge, a drip down a side. A period of 0.125 spans one face."
+        }
+    }
+}
+
+fn target_hint(target: PatternTarget) -> &'static str {
+    match target {
+        PatternTarget::Albedo => {
+            "Modulates the per-face albedo, so a layer composes with face roles rather \
+             than replacing them. The only target with a shipped consumer."
+        }
+        PatternTarget::Roughness => {
+            "AUTHORED BUT UNREAD, like the roughness slider above — no pass samples \
+             roughness until the reflection stage exists. Authoring it now is free; \
+             expecting to see it is not."
+        }
+        PatternTarget::Emission => {
+            "Patterned glow: embers in rock, a rune in a wall. Only does anything on a \
+             row that emits — on a non-emitter it modulates zero."
+        }
+    }
+}
+
+fn blend_hint(blend: PatternBlend) -> &'static str {
+    match blend {
+        PatternBlend::Multiply => {
+            "Darkens where the value is low and leaves the base alone where it is \
+             high. Never brightens, so it cannot push an albedo out of range. The \
+             workhorse: grain, mortar shadow, dirt."
+        }
+        PatternBlend::MixToColor => {
+            "Interpolates toward the target colour. What a two-colour material IS — \
+             mortar grey against brick red, lichen green on stone."
+        }
+        PatternBlend::Add => {
+            "Adds the target colour scaled by the value. For emission, and for the \
+             rare surface that gains light rather than losing it."
+        }
+    }
 }
 
 /// Resets, and the honest second tier.

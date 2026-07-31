@@ -610,10 +610,15 @@ fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                  pixel: vec2<f32>, sun_transmission: vec3<f32>) -> vec3<f32> {
     let normal = hit_normal(hit);
-    // S1: per-face albedo. Identical to the row's base albedo unless the row
-    // authored face roles AND the lever is on, so this is the pre-S1 value
-    // bit-for-bit in the shipped configuration.
-    let albedo = srgb_decode(material_face_albedo(hit.material, hit.axis, hit.axis_sign));
+    // S1 + S2: the per-face albedo with the row's albedo pattern layers applied.
+    // Identical to the row's base albedo unless the row authored roles or layers AND
+    // the matching lever is on, so this is the pre-S1 value bit-for-bit in the
+    // shipped configuration.
+    //
+    // The sample is built once and shared by albedo and emission: the frames need a
+    // world position, a voxel and a face, and none of that changes between targets.
+    let pattern = pattern_sample(hit, ray_origin, ray_direction);
+    let albedo = srgb_decode(material_pattern_albedo(hit.material, pattern));
 
     var sun_visibility = 0.0;
     let sun_facing = dot(normal, lighting.sun_direction);
@@ -641,7 +646,10 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     // occlusion term — the surface is a source, so it looks the same lit or
     // shadowed. gi_params.w scales it in step with what the CA injects, so the
     // block and the light it casts stay consistent when the scale moves.
-    let emission = materials[hit.material].emission * lighting.gi_params.w;
+    // S2: patterned emission, for a surface whose glow is not uniform — embers in
+    // rock, a rune in a wall. Identical to the row's flat emission with the lever
+    // off, and identical on every row that authors no emission layer.
+    let emission = material_pattern_emission(hit.material, pattern) * lighting.gi_params.w;
     return albedo * (sun + indirect) + emission;
 }
 
@@ -757,6 +765,14 @@ fn water_interior_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f3
 // is precisely the sun shadow ray, which has to walk metres of water
 // (`WATER_SUN_THROUGH_LIQUID`, +77% measured). Dropping it keeps the GEOMETRY,
 // which is the whole point: structure instead of a constant.
+//
+// S2 deliberately does NOT run the pattern stack here, and it is the one shading
+// site that skips it. This path has already dropped the shadow ray, the ambient
+// occlusion and the light-volume sample; a per-hit generator evaluation on top of
+// that would be the most expensive thing left in the cheapest path in the renderer,
+// to add detail to a surface being viewed through metres of water. It also has no
+// ray to build a sample from — the caller hands it a hit from its own march — so
+// keeping it on S1's per-face value is honest rather than incidental.
 fn water_cheap_surface_radiance(hit: Hit, water_material: u32) -> vec3<f32> {
     let normal = hit_normal(hit);
     let albedo = srgb_decode(material_face_albedo(hit.material, hit.axis, hit.axis_sign));

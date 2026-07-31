@@ -79,6 +79,8 @@
 
 use voxel_core::world::Voxel;
 
+use crate::pattern::{GpuPatternLayer, PatternStack, MAX_PATTERN_LAYERS, NO_PATTERNS};
+
 /// Index of refraction of air — 1.000293 in reality, and the value carried by
 /// every row that does NOT refract, which is all of them except the liquids. A
 /// ray entering an opaque voxel is not a thing, so "refracts like the air around
@@ -125,6 +127,14 @@ pub const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Number of material ids (== number of `Voxel` variants, Air included).
 pub const MATERIAL_COUNT: usize = 26;
+
+/// Air's material id, and the DDA's miss sentinel — the shading path is only ever
+/// called on an occupied voxel, so row 0 is never sampled on a hit.
+///
+/// Named rather than written as a bare `0` at the handful of places that must treat
+/// it specially: it is the one id that is a sentinel as well as a row, and `== 0`
+/// says nothing about which of the two the caller meant.
+pub const AIR_MATERIAL_ID: u8 = 0;
 
 /// Size of the uploaded material table — the whole GPU cost of this module.
 pub const MATERIAL_TABLE_BYTES: usize = MATERIAL_COUNT * std::mem::size_of::<GpuMaterial>();
@@ -282,10 +292,33 @@ impl MaterialFlags {
     /// equal to the base values" is three float compares per hit to answer a
     /// question the CPU already knows the answer to.
     pub const FACE_ROLES: MaterialFlags = MaterialFlags(1 << 4);
+    /// S2 — this row has at least one pattern layer, so the shading path must run
+    /// the layer stack. Same argument as [`Self::FACE_ROLES`]: the flag is what lets
+    /// the 24 rows with no patterns skip the whole mechanism with one bit test
+    /// instead of discovering it is pointless four slots later.
+    pub const PATTERNS: MaterialFlags = MaterialFlags(1 << 5);
 
     /// Both flag sets combined.
     pub const fn union(self, other: MaterialFlags) -> MaterialFlags {
         MaterialFlags(self.0 | other.0)
+    }
+
+    /// S2 — this word with the active pattern-layer count written into it.
+    ///
+    /// The count rides in the flag word's upper bits rather than taking a field of
+    /// its own, because a `u32` count would cost a whole 16-byte std430 row (three
+    /// quarters of it padding) to carry a number that fits in three bits. Bits 8-10,
+    /// leaving 5-7 clear so the next few flags do not have to move it.
+    pub const fn with_pattern_count(self, count: u32) -> MaterialFlags {
+        MaterialFlags(
+            (self.0 & !(PATTERN_COUNT_MASK << PATTERN_COUNT_SHIFT))
+                | ((count & PATTERN_COUNT_MASK) << PATTERN_COUNT_SHIFT),
+        )
+    }
+
+    /// How many pattern layers this row's stack holds. The shader's loop bound.
+    pub const fn pattern_count(self) -> u32 {
+        (self.0 >> PATTERN_COUNT_SHIFT) & PATTERN_COUNT_MASK
     }
 
     /// Whether every flag in `other` is set here.
@@ -298,6 +331,11 @@ impl MaterialFlags {
         self.0
     }
 }
+
+/// Where the S2 pattern-layer count sits in the flag word. Mirrored in
+/// `shaders/world.wgsl`.
+const PATTERN_COUNT_SHIFT: u32 = 8;
+const PATTERN_COUNT_MASK: u32 = 0b111;
 
 /// The phase of a participating [`Medium`] — what the volume *is*, mechanically,
 /// as opposed to how it looks.
@@ -483,6 +521,13 @@ pub struct Material {
     /// shader as a flag, instead of something the shader has to discover by
     /// comparing floats on every hit.
     pub face_roles: Option<FaceRoles>,
+    /// S2 — this row's pattern layers, or [`NO_PATTERNS`] for a flat row.
+    ///
+    /// Not an `Option<PatternStack>`, unlike [`Self::face_roles`]: a stack already
+    /// has an unambiguous empty state (no active slots) that costs nothing to
+    /// represent, so wrapping it would add a second way to spell "no patterns" and a
+    /// question about whether `Some(NO_PATTERNS)` means anything.
+    pub patterns: PatternStack,
     /// Acoustic absorption at [125, 250, 500, 1k, 2k, 4k] Hz; 0.0 fully
     /// reflective, 1.0 fully absorptive. See the module docs on the shared
     /// vocabulary with atrium's `WallMaterial::alpha`.
@@ -604,10 +649,18 @@ impl Material {
         } else {
             structural
         };
-        if self.face_roles.is_some() {
+        let with_roles = if self.face_roles.is_some() {
             with_emission.union(MaterialFlags::FACE_ROLES)
         } else {
             with_emission
+        };
+        let pattern_count = self.patterns.active_count() as u32;
+        if pattern_count == 0 {
+            with_roles
+        } else {
+            with_roles
+                .union(MaterialFlags::PATTERNS)
+                .with_pattern_count(pattern_count)
         }
     }
 
@@ -661,6 +714,7 @@ impl Material {
             side_roughness: roles.side.roughness,
             bottom_albedo: roles.bottom.albedo,
             bottom_roughness: roles.bottom.roughness,
+            patterns: self.patterns.to_gpu(),
         }
     }
 
@@ -733,6 +787,11 @@ pub struct GpuMaterial {
     /// S1 — the `-Y` face's values.
     pub bottom_albedo: [f32; 3],
     pub bottom_roughness: f32,
+    /// S2 — the pattern stack, always [`MAX_PATTERN_LAYERS`] slots. Slots past the
+    /// row's count (carried in [`MaterialFlags::pattern_count`]) are
+    /// [`GpuPatternLayer::INACTIVE`], which is the identity even if the count were
+    /// ever wrong.
+    pub patterns: [GpuPatternLayer; MAX_PATTERN_LAYERS],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -800,6 +859,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Cover { transmittance },
             emission: None,
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
         }
     }
@@ -819,6 +879,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             emission: None,
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha,
         }
     }
@@ -833,6 +894,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Air,
             emission: None,
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha: [0.0; 6],
         },
         // 1  Grass — S1's demonstration case, and the reason face roles exist.
@@ -872,6 +934,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     roughness: 0.97,
                 },
             }),
+            patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_SOFT_GROUND,
         },
         foliage("tall_grass", [0.28, 0.45, 0.23], 0.90, 0.35),
@@ -908,6 +971,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             }),
             emission: None,
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_WATER,
         },
         opaque("trunk", [0.45, 0.31, 0.19], 0.90, 0.03, ACOUSTIC_WOOD),
@@ -938,6 +1002,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             emission: Some([3.00, 2.80, 2.40]),
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
         },
         // 25  GlowBerry (M1b) — the dim cool emitter, and thin cover rather
@@ -952,6 +1017,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             },
             emission: Some([0.50, 1.10, 0.80]),
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
         },
     ]
@@ -1522,18 +1588,27 @@ mod tests {
     /// interior padding, or the WGSL `array<Material>` stride silently disagrees
     /// with the upload.
     ///
-    /// 128 bytes since S1 added the three per-face-role slots (E6's
-    /// absorption/scattering pair took it to 80). Eight std430 rows, each a `vec3`
-    /// followed by the scalar filling its `w`.
+    /// 256 bytes since S2 added the four 32-byte pattern slots (E6's
+    /// absorption/scattering pair took it to 80, S1's face roles to 128). Sixteen
+    /// std430 rows, each a `vec3` followed by the scalar filling its `w`, or four
+    /// scalars.
     #[test]
     fn gpu_row_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 128);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 256);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
         assert_eq!(std::mem::align_of::<GpuMaterial>(), 4);
-        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 128);
+        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 256);
         // Still trivially free against a ~41 MB world: material richness is not the
-        // expensive axis, per-VOXEL state is.
-        assert_eq!(MATERIAL_TABLE_BYTES, 3328);
+        // expensive axis, per-VOXEL state is. The whole S2 layer model costs 3.3 KB
+        // of table, which is the argument for putting detail on the material rather
+        // than on the voxel restated as a number.
+        assert_eq!(MATERIAL_TABLE_BYTES, 6656);
+        // The pattern slots must account for exactly half the row, or the WGSL's
+        // fixed-size array has drifted from `MAX_PATTERN_LAYERS`.
+        assert_eq!(
+            std::mem::size_of::<[GpuPatternLayer; MAX_PATTERN_LAYERS]>(),
+            128
+        );
     }
 
     #[test]
@@ -1814,6 +1889,7 @@ mod tests {
             }),
             emission: None,
             face_roles: None,
+            patterns: NO_PATTERNS,
             acoustic_alpha: [0.03; 6],
         };
         assert!(!glass.is_liquid());
@@ -1985,6 +2061,106 @@ mod tests {
 
         let grass = MATERIALS[material_id(Voxel::Grass) as usize];
         assert_eq!(grass.face_roles_or_base(), grass.face_roles.unwrap());
+    }
+
+    // ---- S2: the pattern stack ---------------------------------------------
+
+    /// The S2 half of the bit-identity guarantee. **No row authors a pattern layer
+    /// yet**, so every uploaded byte outside the new slots is what S1 left, and the
+    /// new slots are all inactive.
+    ///
+    /// Authoring the island's materials is S6's step, taken deliberately with a
+    /// re-recorded baseline. If this test ever fails because a row gained a layer,
+    /// that is the moment to check it was a decision and not a demo left behind.
+    #[test]
+    fn no_row_authors_a_pattern_layer_yet() {
+        let authored: Vec<&str> = MATERIALS
+            .iter()
+            .filter(|row| !row.patterns.is_empty())
+            .map(|row| row.name)
+            .collect();
+        assert!(
+            authored.is_empty(),
+            "S2 authored pattern layers on {authored:?} — that is S6's step"
+        );
+        for row in &MATERIALS {
+            assert!(!row.flags().contains(MaterialFlags::PATTERNS));
+            assert_eq!(row.flags().pattern_count(), 0);
+            for slot in row.to_gpu().patterns {
+                assert_eq!(slot, GpuPatternLayer::INACTIVE);
+            }
+        }
+    }
+
+    /// The PATTERNS flag and the layer count must both be derived from the stack, so
+    /// a row cannot claim patterns it does not have or hide ones it does.
+    #[test]
+    fn the_pattern_flag_and_count_are_derived() {
+        let mut row = MATERIALS[material_id(Voxel::Stone) as usize];
+        assert!(!row.flags().contains(MaterialFlags::PATTERNS));
+
+        for expected in 1..=MAX_PATTERN_LAYERS {
+            row.patterns
+                .push(crate::pattern::PatternLayer::IDENTITY)
+                .ok_or(())
+                .expect_err("the stack accepted a layer");
+            assert!(row.flags().contains(MaterialFlags::PATTERNS));
+            assert_eq!(row.flags().pattern_count() as usize, expected);
+            let uploaded = row.to_gpu();
+            // Active slots carry the layer; the tail stays inactive.
+            for (slot, layer) in uploaded.patterns.iter().enumerate() {
+                if slot < expected {
+                    assert_ne!(*layer, GpuPatternLayer::INACTIVE, "slot {slot} is inactive");
+                } else {
+                    assert_eq!(*layer, GpuPatternLayer::INACTIVE, "slot {slot} is live");
+                }
+            }
+        }
+    }
+
+    /// The count must not collide with any flag bit, in either direction — the two
+    /// share a word, and an overlap would make a four-layer row claim a flag it
+    /// never authored.
+    #[test]
+    fn the_pattern_count_does_not_collide_with_the_flags() {
+        const EVERY_FLAG: u32 = MaterialFlags::FOLIAGE.bits()
+            | MaterialFlags::EMISSIVE.bits()
+            | MaterialFlags::TRANSPARENT.bits()
+            | MaterialFlags::LIQUID.bits()
+            | MaterialFlags::FACE_ROLES.bits()
+            | MaterialFlags::PATTERNS.bits();
+        assert_eq!(MaterialFlags::PATTERNS.bits(), 32);
+        const COUNT_FIELD: u32 = PATTERN_COUNT_MASK << PATTERN_COUNT_SHIFT;
+        assert_eq!(EVERY_FLAG & COUNT_FIELD, 0);
+        // The field must hold every count the stack can produce.
+        assert!(MAX_PATTERN_LAYERS as u32 <= PATTERN_COUNT_MASK);
+
+        // Writing a count must leave the flags alone, and setting flags must leave a
+        // written count alone.
+        let flagged = MaterialFlags::LIQUID
+            .union(MaterialFlags::PATTERNS)
+            .with_pattern_count(3);
+        assert!(flagged.contains(MaterialFlags::LIQUID));
+        assert!(flagged.contains(MaterialFlags::PATTERNS));
+        assert_eq!(flagged.pattern_count(), 3);
+        assert_eq!(flagged.union(MaterialFlags::FOLIAGE).pattern_count(), 3);
+        // Re-writing the count must replace it, not OR into it.
+        assert_eq!(flagged.with_pattern_count(1).pattern_count(), 1);
+        assert_eq!(flagged.with_pattern_count(0).pattern_count(), 0);
+    }
+
+    /// The pre-S1 pin masks the flag word to `0b1111`, and that mask has to keep
+    /// excluding every bit added since — otherwise the pin starts failing for a row
+    /// whose *uploaded* pre-S1 fields never moved.
+    #[test]
+    fn the_upload_pins_flag_mask_still_excludes_the_new_bits() {
+        const PRE_S1_FLAGS: u32 = 0b1111;
+        assert_eq!(MaterialFlags::FACE_ROLES.bits() & PRE_S1_FLAGS, 0);
+        assert_eq!(MaterialFlags::PATTERNS.bits() & PRE_S1_FLAGS, 0);
+        assert_eq!(
+            (PATTERN_COUNT_MASK << PATTERN_COUNT_SHIFT) & PRE_S1_FLAGS,
+            0
+        );
     }
 
     #[test]
