@@ -32,7 +32,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::thread::JoinHandle;
 
 use crate::brickmap::Brickmap;
-use crate::cagi::{build_cell_attributes, CagiGrid};
+use crate::cagi::{build_cell_attributes, CagiGrid, MaterialAttributes};
 use crate::world_edit::{
     apply, apply_bulk, BulkEditRequest, VoxelEdit, WorldDelta, WorldEditSettings,
 };
@@ -65,7 +65,7 @@ pub struct WorldEditStats {
 enum WorkerRequest {
     Edit(VoxelEdit, WorldEditSettings),
     BulkEdit(BulkEditRequest, WorldEditSettings),
-    LightAttributes(CagiGrid),
+    LightAttributes(CagiGrid, MaterialAttributes),
     Stop,
 }
 
@@ -215,19 +215,30 @@ impl WorldHost {
     /// world thread and arrives through [`Self::drain`]; in variant A it is applied
     /// inline and the frame pays for it — which is exactly the hitch E2 set out to
     /// remove.
-    pub fn request_light_attributes(&mut self, grid: CagiGrid) {
+    /// Rebuild the light volume's cell attributes.
+    ///
+    /// Takes the material attribute table because the rebuild reads it, and since S2
+    /// those materials can be **live-edited**: the builders used to read the COMPILED
+    /// table, which made this whole call a no-op for a material edit — it recomputed the
+    /// same attributes it already had. Passing the live table in is what turns the
+    /// panel's "re-pack GI attributes" button from a lie into the thing it says it is.
+    pub fn request_light_attributes(
+        &mut self,
+        grid: CagiGrid,
+        attribute_table: MaterialAttributes,
+    ) {
         match &mut self.worker {
             Some(worker) => {
                 worker.in_flight += 1;
                 worker
                     .requests
-                    .send(WorkerRequest::LightAttributes(grid))
+                    .send(WorkerRequest::LightAttributes(grid, attribute_table))
                     .expect("the world thread outlives its sender");
             }
             None => {
                 let brickmap = self.read();
                 let started = std::time::Instant::now();
-                let attributes = build_cell_attributes(&brickmap, &grid);
+                let attributes = build_cell_attributes(&brickmap, &grid, &attribute_table);
                 let build_micros = started.elapsed().as_secs_f32() * 1e6;
                 drop(brickmap);
                 self.queued.push(WorldUpdate::LightAttributes {
@@ -304,11 +315,11 @@ fn world_thread_main(
                     }
                 }
             }
-            WorkerRequest::LightAttributes(grid) => {
+            WorkerRequest::LightAttributes(grid, attribute_table) => {
                 let started = std::time::Instant::now();
                 let attributes = {
                     let brickmap = brickmap.read().expect("the world lock is never poisoned");
-                    build_cell_attributes(&brickmap, &grid)
+                    build_cell_attributes(&brickmap, &grid, &attribute_table)
                 };
                 let update = WorldUpdate::LightAttributes {
                     grid,
@@ -358,11 +369,13 @@ mod tests {
                 voxel: [500 + index % 4, base_y - index / 4, 500],
                 material: Voxel::Air,
                 light_grid: None,
+                material_attributes: MaterialAttributes::compiled(),
             })
             .chain((0..8).map(|index| VoxelEdit {
                 voxel: [200 + index, 250, 200],
                 material: Voxel::Stone,
                 light_grid: None,
+                material_attributes: MaterialAttributes::compiled(),
             }))
             .collect();
         for edit in &edits {
@@ -427,6 +440,7 @@ mod tests {
                     voxel: [496 + index % 6, base_y - index / 6, 496],
                     material: Voxel::Air,
                     light_grid: None,
+                    material_attributes: MaterialAttributes::compiled(),
                 },
                 &settings,
             );
@@ -455,7 +469,7 @@ mod tests {
     fn light_attributes_rebuild_off_frame() {
         let mut host = island_host();
         let grid = CagiGrid::for_world(8, host.read().metadata().max_occupied_brick_y);
-        host.request_light_attributes(grid);
+        host.request_light_attributes(grid, MaterialAttributes::compiled());
         let inline = host.drain();
         let WorldUpdate::LightAttributes {
             attributes: inline_attributes,
@@ -466,7 +480,7 @@ mod tests {
         };
 
         host.set_world_thread(true);
-        host.request_light_attributes(grid);
+        host.request_light_attributes(grid, MaterialAttributes::compiled());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let updates = host.drain();
@@ -499,6 +513,7 @@ mod tests {
             voxel: [200, 250, 200],
             material: Voxel::Air,
             light_grid: None,
+            material_attributes: MaterialAttributes::compiled(),
         };
         for _ in 0..5 {
             host.request_edit(edit, &settings);

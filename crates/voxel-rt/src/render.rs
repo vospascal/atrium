@@ -21,7 +21,7 @@ use crate::cagi::{CagiGrid, CagiSettings};
 use crate::camera::CameraUniform;
 use crate::frame_timing::{GpuFrameTimers, SPAN_CAGI, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
-use crate::material::GpuMaterial;
+use crate::material::{GpuMaterial, Material};
 use crate::passes::blit::BlitPass;
 use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
 use crate::passes::dda::DdaPass;
@@ -57,12 +57,13 @@ impl Renderer {
         height: u32,
         brickmap: &Brickmap,
         global_illumination: &CagiSettings,
+        materials: &[Material],
     ) -> Self {
         let render_scale = MAX_RENDER_SCALE;
         let (storage_view, storage_width, storage_height) =
             create_storage_texture(device, width, height, render_scale);
         let world_bindings = WorldBindings::new(device, brickmap);
-        let light_volume = LightVolume::new(device, brickmap, global_illumination);
+        let light_volume = LightVolume::new(device, brickmap, global_illumination, materials);
         let cagi_pass = CagiPass::new(device, &world_bindings, &light_volume);
         let dda_pass = DdaPass::new(device, &world_bindings, &light_volume, &storage_view);
         let blit_pass = BlitPass::new(device, surface_format, &storage_view);
@@ -126,18 +127,30 @@ impl Renderer {
     /// static attributes zeroed and expects
     /// [`Renderer::write_light_volume_attributes`] once the world thread has built
     /// them, which is how a GI resolution switch stops being a ~50 ms frame hitch.
+    /// S2 — re-upload the CAGI emitter palette from the live material table.
+    ///
+    /// Pairs with [`Self::write_material_table`]: that one makes an edit visible in
+    /// direct shading, this one makes an emissive edit visible to the light volume's
+    /// injection. Neither reaches which CELLS are emitters — that is the attribute
+    /// re-pack.
+    pub fn write_cagi_emitter_palette(&self, queue: &wgpu::Queue, materials: &[Material]) {
+        self.light_volume.write_uniform(queue, materials);
+    }
+
     pub fn rebuild_light_volume(
         &mut self,
         device: &wgpu::Device,
         brickmap: &Brickmap,
         global_illumination: &CagiSettings,
         attribute_source: AttributeSource,
+        materials: &[Material],
     ) {
         self.light_volume = LightVolume::new_with_attributes(
             device,
             brickmap,
             global_illumination,
             attribute_source,
+            materials,
         );
         self.cagi_pass
             .rebind(device, &self.world_bindings, &self.light_volume);

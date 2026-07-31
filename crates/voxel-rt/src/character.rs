@@ -965,6 +965,7 @@ mod tests {
             &BulkEditRequest {
                 shape: Box::new(pool),
                 light_grid: None,
+                material_attributes: crate::cagi::MaterialAttributes::compiled(),
             },
             &WorldEditSettings::default(),
         )

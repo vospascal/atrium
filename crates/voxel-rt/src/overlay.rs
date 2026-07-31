@@ -263,6 +263,32 @@ impl Overlay {
                                 egui::Slider::new(&mut sun_settings.elevation_degrees, 2.0..=90.0)
                                     .text("elevation"),
                             );
+                            ui.add(
+                                egui::Slider::new(&mut sun_settings.intensity_scale, 0.0..=2.0)
+                                    .text("sun intensity")
+                                    .max_decimals(2),
+                            )
+                            .on_hover_text(
+                                "Scales the sun, 1.0 being the shipped look. ZERO IS \
+                                 NIGHT: the sun contributes nothing and only ambient, GI \
+                                 and emitters are left.\n\n\
+                                 Added because an emitter cannot be judged against a \
+                                 light you cannot turn down — a glowing material and the \
+                                 light it casts were both washed out by a hardcoded 2.2 \
+                                 of daylight. Turn this and the ambient below to zero to \
+                                 see what a material actually emits.",
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut sun_settings.ambient_scale, 0.0..=2.0)
+                                    .text("ambient")
+                                    .max_decimals(2),
+                            )
+                            .on_hover_text(
+                                "Scales the hemisphere ambient floor. Needed alongside \
+                                 the sun: at sun zero the ambient alone still reads every \
+                                 surface, so an emitter's own contribution stays \
+                                 invisible until this comes down too.",
+                            );
                         });
                     });
                 });

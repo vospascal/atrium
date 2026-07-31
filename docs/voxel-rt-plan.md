@@ -838,6 +838,7 @@ a swim in? *(First build: FAILED on the upward view — see the step plan at the
 of this entry.)*
 
 ### Materials arc — the multi-scale material model 🔄 (Pascal, 2026-07-31)
+*S0, S0b, S1 and S2 landed and gated; S3-S6 open.*
 *Ladder position: a new arc, not an E-slot, sitting **before E7**. E7's fog,
 grading and bloom want surfaces with material detail to act on, and E10's
 roughness re-author wants an editor to do it in. Full plan at
@@ -958,6 +959,97 @@ stating: it is a *traversal* input, decided before any shading runs, so patterni
 would mean evaluating the stack inside the innermost traversal loop — precisely the
 cost this stage avoids, since every layer here is paid once per HIT and never once per
 step. A dissolve effect wants it and is a named follow-on with its own cost argument.
+
+**S2 gate: PASSED** (Pascal, 2026-07-31, on a stone wall with a snapped 4-octave noise
+grain plus red emissive specks: *"looks SO GOOD! now i can make a stone with emission
+specles thats awesome!"*). Worth recording *what* passed, because it was not a case
+anyone designed: **emissive specks are `target: emission` x `blend: add` x the 8-texel
+snap composing into a material no code path was written for.** That is the argument for
+keeping generator, frame, texel grid, target and blend orthogonal rather than shipping a
+list of named effects — the combinations outnumber what can be anticipated.
+
+**S2c — patterned emitters cast light, and a bug in S0's tier story.** Pascal, on
+seeing the specks: *"i do think it makes sense to be able to let them emit light"*.
+Agreed, and getting there exposed something worse than the missing feature.
+
+**The correction first, because it invalidates something written during S0.** The panel
+claimed a two-tier model — albedo/transmittance/emission live in direct shading, stale in
+the GI bounce "until a re-pack". The tiers are real, but **the re-pack read the COMPILED
+material table**, so it recomputed the attributes it already had: a material edit could
+never reach the bounce at all, and the button was a no-op for exactly the case it was
+added for. That was wrong when written and is now fixed.
+
+**The fix is a seam, not a plumbing change.** Passing `&[Material]` down to the attribute
+builders does not work — the incremental per-edit path runs on the world thread and would
+need an 8 KB copy per 2.8 us edit. But the builders do not want materials, they want
+*"material id -> packed attribute word"*: `MaterialAttributes` is that, 104 bytes and
+`Copy`, so it rides in a `VoxelEdit` across the thread boundary for free. The emitter
+palette still needs the rows (it carries f32 radiances) and is rebuilt per uniform upload
+on the render thread, where the live table is at hand. The volume uniform gained
+`COPY_DST` for the same reason — a live palette had no way to reach the GPU either.
+
+**What a 0.5 m GI cell can represent, and why a mean is the right answer rather than a
+compromise.** CAGI holds a 3-bit emitter index per half-metre cell; it cannot carry
+per-texel structure and never could. It does not need to: the light arriving *somewhere
+else* from a speckled emissive surface is that surface's **average** emission times its
+area. So the two tiers are not one model approximated twice, they are the **near field
+and the far field**, and each now gets the right quantity — full detail to the pixel,
+`Material::mean_emitted_radiance` to the volume. The mean is obtained by evaluating the
+CPU reference over a grid on each of the six faces, weighted by face count so a
+top-masked layer contributes its real share; numerically rather than analytically, so a
+future generator cannot silently inherit a wrong closed form. It is the pattern
+evaluator's second real use after the WGSL cross-check.
+
+Two consequences worth knowing: `is_emissive()` widened, so **a patterned emitter claims
+one of the seven palette slots** — that is the real budget this spends. And brightness
+reaches the volume as you drag (the palette re-uploads on a dirty table), while a row
+becoming emissive for the *first* time still needs the explicit re-pack, because which
+CELLS hold an emitter lives in the attribute volume.
+
+**S2d — two reasons the emitter still could not be SEEN, both found by trying.** The
+mechanism worked and the result was invisible, and neither cause was in the material
+model (Pascal: *"i cant realy see it emiting .. might be as well that we dont have the
+right sky or light conditions .. we have pretty crude over head light … we can also not
+controll emition amount like real radiate"* — both halves correct):
+
+1. **The light could not be turned down.** `SUN_INTENSITY` was a hardcoded `2.2` and
+   `AMBIENT_STRENGTH` a hardcoded `0.4`, with `SunSettings` carrying direction only, so
+   every emitter was judged against fixed daylight. **An emitter cannot be judged against
+   a light you cannot dim** — that is a general point about this renderer, not a material
+   one. `SunSettings` gained `intensity_scale` and `ambient_scale`; both to zero is a
+   genuine night with only GI and emitters left. The uniform already carried both fields,
+   so this was exposure rather than plumbing.
+2. **A patterned emitter could not be bright.** The emission target's value was drawn
+   with an `egui` colour picker, which clamps to 0..1 — and with `amount` also ≤1 the
+   maximum authorable radiance was **1.0**, against `glow_block`'s **3.0**. So a
+   patterned emitter was structurally incapable of matching the dimmest existing one.
+   Emission is *radiance*, not a colour, and is allowed above 1 because a source may be
+   brighter than any surface can reflect. The first fix replaced the picker with three
+   raw 0..16 channels, and that was the wrong trade (*"why not the picker we had before?
+   why 3 fields?"*): **picking a hue and exceeding 1.0 are separate problems**, so they
+   are separate controls — the picker keeps the colour, and `emission_intensity` (0..16)
+   scales it. `target_value()` multiplies them into the one value everything downstream
+   reads, which is why the field **costs no bytes and reaches no shader**: `to_gpu` folds
+   it into the uploaded `target_color`, so the WGSL needed no change at all. Recorded on
+   `PatternLayer::target_color`: the field is in **whatever space its target is in** —
+   sRGB 0..1 for albedo (it mixes before `srgb_decode`), linear for emission (nothing
+   decodes it).
+
+Both are levers-in-the-panel rather than new machinery, and together they are what makes
+the S2c gate performable at all.
+
+**One hole the gate found and closed: the face frame repeated.** It is voxel-local, so
+it drew the *identical* pattern on every face in the world — a visible repeat rather
+than detail (*"the face within the face .. this part should still have a randomizer so we
+dont have a repeating patern .. doesnt have to seamless like world"*). Fixed with a
+per-`(voxel, face)` **hash salt**, on by default, and the salt-not-offset choice is the
+load-bearing part: an offset would slide the pattern within the face and break both the
+texel grid's alignment to it and any future positional generator's relationship to the
+edge it sits on, whereas a salt re-rolls the draw and moves nothing. Zero salt is
+mixed with `^`, so "variation off" is exactly the unvaried pattern — which is the
+deliberate-motif case, the classic voxel look where every face of a block type is
+identical. Confined to the face frame: the world frame must not have it (it would
+destroy the continuity that frame exists for) and the voxel frame does not need it.
 
 Still to come: **S3** animation (value oscillation + pattern drift, with `t = 0`
 pinned in the harness so the noiseless-identity pixel gates keep working), **S4**

@@ -366,10 +366,19 @@ pub struct PatternLayer {
     /// How strongly the layer applies, `0.0..=1.0`. Zero is the identity, which is
     /// what makes a layer safe to leave in a row while dialling another one.
     pub amount: f32,
-    /// The second colour, for [`PatternBlend::MixToColor`] and
-    /// [`PatternBlend::Add`]. sRGB-encoded like [`crate::material::Material::albedo`],
-    /// so the panel's picker and the row's own colour are the same kind of value.
-    /// Only the first channel is read for a scalar target.
+    /// The second value, for [`PatternBlend::MixToColor`] and [`PatternBlend::Add`].
+    ///
+    /// **In whatever space its target is in**, which is the one thing about this field
+    /// worth stating:
+    ///
+    /// * [`PatternTarget::Albedo`] — sRGB-encoded like
+    ///   [`crate::material::Material::albedo`], because the layer is applied *before*
+    ///   `srgb_decode` and so mixes in the same space the row's own colour lives in.
+    ///   Range 0..1; the panel shows a colour picker.
+    /// * [`PatternTarget::Emission`] — **linear radiance, and allowed above 1.0**, like
+    ///   [`crate::material::Material::emission`]. A source may be brighter than any
+    ///   surface can reflect (`glow_block` authors 3.0). Nothing decodes it.
+    /// * [`PatternTarget::Roughness`] — the first channel only, as a scalar 0..1.
     pub target_color: [f32; 3],
     pub faces: PatternFaces,
     /// **Texels per voxel edge**, or `0` for a continuous field.
@@ -404,7 +413,50 @@ pub struct PatternLayer {
     /// per pixel. See [`PatternLayer::fade`] for why the fade still keys off the period
     /// regardless.
     pub texels_per_voxel: u32,
+    /// Give every face its own draw of the pattern. **Only affects
+    /// [`PatternFrame::Face`]**, and defaults to on.
+    ///
+    /// The face frame is voxel-local, so without this it draws the *identical* pattern
+    /// on every face in the world — which is a visible repeat rather than detail
+    /// (Pascal, 2026-07-31: *"the face within the face .. this part should still have a
+    /// randomizer so we dont have a repeating patern"*). The other two frames do not
+    /// need it: world already varies with position, and voxel already varies per voxel.
+    ///
+    /// **Implemented as a hash SALT, not a coordinate offset**, and that distinction is
+    /// the whole reason it is safe to leave on:
+    ///
+    /// * An offset would slide the pattern within the face, which breaks the texel grid
+    ///   alignment and would break a positional generator's relationship to the edge it
+    ///   is supposed to be concentrated at.
+    /// * A salt re-rolls the random draw and moves nothing. Hash-driven generators
+    ///   (all three of today's) get a completely different pattern per face; a purely
+    ///   positional generator would be untouched, because it never hashes.
+    ///
+    /// Turn it OFF for a deliberate motif — the classic voxel look where every face of
+    /// a block type is identical. It does not have to be seamless across faces, which
+    /// is what separates this from the world frame's continuity requirement.
+    pub vary_per_face: bool,
+    /// Brightness multiplier on [`Self::target_color`], for an
+    /// [`PatternTarget::Emission`] target only. `0.0..=`[`MAX_EMISSION_INTENSITY`].
+    ///
+    /// Emission is radiance and belongs above 1.0 — a source may be brighter than any
+    /// surface can reflect, and `glow_block` authors 3.0. But a colour picker clamps to
+    /// 0..1, and replacing the picker with three raw 0..16 channels was the wrong trade
+    /// (Pascal, 2026-07-31: *"why not the picker we had before? why 3 fields?"*): picking
+    /// a HUE is what a picker is good at, and being unable to exceed 1 is a separate
+    /// problem. So they are separated — picker for the colour, this for the brightness.
+    ///
+    /// **Costs no bytes and reaches no shader.** [`PatternLayer::to_gpu`] folds it into
+    /// the uploaded `target_color`, so this is purely an authoring split: the GPU reads
+    /// one pre-multiplied value exactly as it did before the field existed, and the WGSL
+    /// needed no change at all. Which is also why it keeps full `f32` precision rather
+    /// than being quantised into a spare corner of the packed word.
+    pub emission_intensity: f32,
 }
+
+/// Ceiling on [`PatternLayer::emission_intensity`], matching the range the row's own
+/// `emission` field is authored in.
+pub const MAX_EMISSION_INTENSITY: f32 = 16.0;
 
 /// Texel-grid rungs the panel offers, and what the bench sweeps.
 ///
@@ -457,6 +509,8 @@ impl PatternLayer {
         target_color: [1.0, 1.0, 1.0],
         faces: PatternFaces::ALL,
         texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
+        vary_per_face: true,
+        emission_intensity: 1.0,
     };
 
     /// The uploaded form.
@@ -467,7 +521,9 @@ impl PatternLayer {
             period_meters: self.period_meters.max(MINIMUM_PERIOD_METERS),
             amount: self.amount,
             param_a,
-            target_color: self.target_color,
+            // The SCALED value, so the shader reads one number and needs no intensity
+            // field of its own — and so the WGSL needed no change for this at all.
+            target_color: self.target_value(),
             param_b,
         }
     }
@@ -485,6 +541,25 @@ impl PatternLayer {
             | (self.faces.bits() << 9)
             | (octaves << 12)
             | (self.texels_per_voxel.min(MAX_TEXELS_PER_VOXEL) << 15)
+            | ((self.vary_per_face as u32) << 23)
+    }
+
+    /// The blend's second operand: [`Self::target_color`], scaled by
+    /// [`Self::emission_intensity`] on an emission target and left alone otherwise.
+    ///
+    /// The one place the two authoring fields become the single value everything else
+    /// reads — the uploaded row, the CPU reference, and therefore the mean the GI
+    /// injects. Nothing downstream knows the split exists.
+    pub fn target_value(&self) -> [f32; 3] {
+        if self.target != PatternTarget::Emission {
+            return self.target_color;
+        }
+        let intensity = self.emission_intensity.clamp(0.0, MAX_EMISSION_INTENSITY);
+        [
+            self.target_color[0] * intensity,
+            self.target_color[1] * intensity,
+            self.target_color[2] * intensity,
+        ]
     }
 
     /// The two free generator parameters. Which generator reads which is the one
@@ -732,7 +807,7 @@ fn value_noise(point: [f32; 3], salt: u32) -> f32 {
 /// period always names the largest feature and the octave count changes the
 /// texture without changing the contrast, which is what makes the octave slider
 /// usable while the amount slider is set.
-fn fractal_noise(point: [f32; 3], octaves: u32) -> f32 {
+fn fractal_noise(point: [f32; 3], octaves: u32, salt_base: u32) -> f32 {
     let mut frequency = 1.0;
     let mut amplitude = 1.0;
     let mut total = 0.0;
@@ -743,7 +818,7 @@ fn fractal_noise(point: [f32; 3], octaves: u32) -> f32 {
             point[1] * frequency,
             point[2] * frequency,
         ];
-        total += amplitude * value_noise(scaled, octave);
+        total += amplitude * value_noise(scaled, salt_base ^ octave);
         normalisation += amplitude;
         frequency *= 2.0;
         amplitude *= 0.5;
@@ -752,18 +827,18 @@ fn fractal_noise(point: [f32; 3], octaves: u32) -> f32 {
 }
 
 /// Scattered round specks. See [`PatternGenerator::Speckle`].
-fn speckle(point: [f32; 3], density: f32) -> f32 {
+fn speckle(point: [f32; 3], density: f32, salt_base: u32) -> f32 {
     let base = [point[0].floor(), point[1].floor(), point[2].floor()];
     let cell = [base[0] as i32, base[1] as i32, base[2] as i32];
-    if hash_cell(cell, SPECKLE_PRESENCE_SALT) >= density {
+    if hash_cell(cell, salt_base ^ SPECKLE_PRESENCE_SALT) >= density {
         return 0.0;
     }
     // The speck sits somewhere inside its cell rather than at the centre, or the
     // specks line up on the lattice and read as a grid.
     let centre = [
-        0.25 + 0.5 * hash_cell(cell, SPECKLE_JITTER_X_SALT),
-        0.25 + 0.5 * hash_cell(cell, SPECKLE_JITTER_Y_SALT),
-        0.25 + 0.5 * hash_cell(cell, SPECKLE_JITTER_Z_SALT),
+        0.25 + 0.5 * hash_cell(cell, salt_base ^ SPECKLE_JITTER_X_SALT),
+        0.25 + 0.5 * hash_cell(cell, salt_base ^ SPECKLE_JITTER_Y_SALT),
+        0.25 + 0.5 * hash_cell(cell, salt_base ^ SPECKLE_JITTER_Z_SALT),
     ];
     let offset = [
         point[0] - base[0] - centre[0],
@@ -847,6 +922,7 @@ impl PatternLayer {
     /// face mask or blend.
     pub fn generator_value(&self, sample: &PatternSample) -> f32 {
         let point = self.coordinate(sample);
+        let salt = self.variation_salt(sample);
         match self.generator {
             PatternGenerator::Flat => hash_cell(
                 [
@@ -854,11 +930,35 @@ impl PatternLayer {
                     point[1].floor() as i32,
                     point[2].floor() as i32,
                 ],
-                FLAT_SALT,
+                salt ^ FLAT_SALT,
             ),
-            PatternGenerator::Noise { octaves } => fractal_noise(point, octaves),
-            PatternGenerator::Speckle { density } => speckle(point, density.clamp(0.0, 1.0)),
+            PatternGenerator::Noise { octaves } => fractal_noise(point, octaves, salt),
+            PatternGenerator::Speckle { density } => speckle(point, density.clamp(0.0, 1.0), salt),
         }
+    }
+
+    /// A per-face hash salt, or `0` for no variation.
+    ///
+    /// `0` is exactly the pre-variation behaviour, because every generator mixes this
+    /// with `^` — which is what makes "variation off" provably identical rather than
+    /// approximately so.
+    ///
+    /// Only the face frame gets one. The world frame must NOT (a per-face salt would
+    /// destroy the continuity that is the entire point of it), and the voxel frame does
+    /// not need one (it already returns a different value per voxel).
+    fn variation_salt(&self, sample: &PatternSample) -> u32 {
+        if !self.vary_per_face || self.frame != PatternFrame::Face {
+            return 0;
+        }
+        // The face index, so the top and bottom of one voxel differ as well as
+        // neighbouring voxels: 0..5 over (axis, sign).
+        let face = sample.axis * 2 + u32::from(sample.axis_sign >= 0.0);
+        hash_u32(
+            (sample.voxel[0] as u32).wrapping_mul(0x9e37_79b9)
+                ^ (sample.voxel[1] as u32).wrapping_mul(0x85eb_ca6b)
+                ^ (sample.voxel[2] as u32).wrapping_mul(0xc2b2_ae35)
+                ^ face.wrapping_mul(0x27d4_eb2d),
+        )
     }
 
     /// How much of this layer survives at this distance, `0.0..=1.0`.
@@ -903,6 +1003,7 @@ impl PatternLayer {
             return base;
         }
         let value = self.generator_value(sample);
+        let target = self.target_value();
         let mut out = base;
         for channel in 0..3 {
             out[channel] = match self.blend {
@@ -911,9 +1012,9 @@ impl PatternLayer {
                 // turning `amount` down converges on the base.
                 PatternBlend::Multiply => base[channel] * (1.0 - strength * (1.0 - value)),
                 PatternBlend::MixToColor => {
-                    base[channel] + (self.target_color[channel] - base[channel]) * strength * value
+                    base[channel] + (target[channel] - base[channel]) * strength * value
                 }
-                PatternBlend::Add => base[channel] + self.target_color[channel] * strength * value,
+                PatternBlend::Add => base[channel] + target[channel] * strength * value,
             };
         }
         out
@@ -928,10 +1029,11 @@ impl PatternLayer {
             return base;
         }
         let value = self.generator_value(sample);
+        let target = self.target_value();
         match self.blend {
             PatternBlend::Multiply => base * (1.0 - strength * (1.0 - value)),
-            PatternBlend::MixToColor => base + (self.target_color[0] - base) * strength * value,
-            PatternBlend::Add => base + self.target_color[0] * strength * value,
+            PatternBlend::MixToColor => base + (target[0] - base) * strength * value,
+            PatternBlend::Add => base + target[0] * strength * value,
         }
     }
 }
@@ -1165,14 +1267,17 @@ mod tests {
                 ..PatternLayer::IDENTITY
             };
             assert_eq!((layer.packed() >> 15) & 0xff, texels);
-            // It must not collide with any field below it.
-            assert_eq!(layer.packed() & 0x7fff, {
-                let continuous = PatternLayer {
-                    texels_per_voxel: 0,
-                    ..layer
-                };
-                continuous.packed()
-            });
+            // It must not disturb any other field: mask the texel bits off both sides
+            // and everything else must be identical.
+            const TEXEL_FIELD: u32 = 0xff << 15;
+            let continuous = PatternLayer {
+                texels_per_voxel: 0,
+                ..layer
+            };
+            assert_eq!(
+                layer.packed() & !TEXEL_FIELD,
+                continuous.packed() & !TEXEL_FIELD
+            );
         }
         let absurd = PatternLayer {
             texels_per_voxel: 9999,
@@ -1198,6 +1303,223 @@ mod tests {
             PatternLayer::IDENTITY.apply_color([0.4, 0.5, 0.3], &sample, PATTERN_FADE_PERIODS),
             [0.4, 0.5, 0.3]
         );
+    }
+
+    /// **The face frame must not repeat across faces.** Without per-face variation it
+    /// draws the identical pattern on every face in the world, which reads as a repeat
+    /// rather than as detail — the hole the S2 gate found.
+    #[test]
+    fn the_face_frame_varies_per_face() {
+        let layer = PatternLayer {
+            generator: PatternGenerator::Noise { octaves: 3 },
+            frame: PatternFrame::Face,
+            period_meters: VOXEL_SIZE,
+            vary_per_face: true,
+            ..PatternLayer::IDENTITY
+        };
+        // The SAME point within the face of several different voxels.
+        let at_voxel = |voxel: [i32; 3]| {
+            layer.generator_value(&PatternSample {
+                world_meters: [
+                    (voxel[0] as f32 + 0.5) * VOXEL_SIZE,
+                    (voxel[1] as f32 + 1.0) * VOXEL_SIZE,
+                    (voxel[2] as f32 + 0.5) * VOXEL_SIZE,
+                ],
+                voxel,
+                axis: 1,
+                axis_sign: -1.0,
+                distance_meters: 1.0,
+            })
+        };
+        let first = at_voxel([512, 256, 512]);
+        for neighbour in [
+            [513, 256, 512],
+            [512, 256, 513],
+            [512, 257, 512],
+            [520, 260, 530],
+        ] {
+            assert_ne!(
+                at_voxel(neighbour),
+                first,
+                "{neighbour:?} repeats voxel [512,256,512]'s face"
+            );
+        }
+
+        // The top and bottom of the SAME voxel must differ too, or a stack of blocks
+        // shows the same face twice at every joint.
+        let face_of = |axis: u32, sign: f32| {
+            layer.generator_value(&PatternSample {
+                world_meters: [64.03, 32.05, 64.07],
+                voxel: [512, 256, 512],
+                axis,
+                axis_sign: sign,
+                distance_meters: 1.0,
+            })
+        };
+        let mut seen = Vec::new();
+        for (axis, sign) in [
+            (0, -1.0),
+            (0, 1.0),
+            (1, -1.0),
+            (1, 1.0),
+            (2, -1.0),
+            (2, 1.0),
+        ] {
+            let value = face_of(axis, sign);
+            assert!(
+                !seen.contains(&value.to_bits()),
+                "axis {axis} sign {sign} repeats another face of the same voxel"
+            );
+            seen.push(value.to_bits());
+        }
+        assert_eq!(seen.len(), 6, "the six faces are not six distinct draws");
+    }
+
+    /// Variation OFF must be exactly the unvaried pattern — the deliberate-motif case,
+    /// the classic voxel look where every face of a block type is identical.
+    ///
+    /// `0` mixed with `^` is why this is exact rather than approximate.
+    #[test]
+    fn variation_off_repeats_deliberately() {
+        let layer = PatternLayer {
+            generator: PatternGenerator::Speckle { density: 0.4 },
+            frame: PatternFrame::Face,
+            period_meters: VOXEL_SIZE / 4.0,
+            vary_per_face: false,
+            ..PatternLayer::IDENTITY
+        };
+        let at_voxel = |voxel: [i32; 3]| {
+            layer.generator_value(&PatternSample {
+                world_meters: [
+                    (voxel[0] as f32 + 0.37) * VOXEL_SIZE,
+                    (voxel[1] as f32 + 1.0) * VOXEL_SIZE,
+                    (voxel[2] as f32 + 0.62) * VOXEL_SIZE,
+                ],
+                voxel,
+                axis: 1,
+                axis_sign: -1.0,
+                distance_meters: 1.0,
+            })
+        };
+        let first = at_voxel([512, 256, 512]);
+        for neighbour in [[513, 256, 512], [512, 256, 513], [700, 300, 700]] {
+            assert_eq!(
+                at_voxel(neighbour),
+                first,
+                "variation is off, so {neighbour:?} must show the same face"
+            );
+        }
+        assert_eq!(layer.variation_salt(&sample_at([0.0; 3], [0; 3])), 0);
+    }
+
+    /// The variation must NOT touch the other two frames. World continuity is the whole
+    /// point of that frame and a per-face salt would destroy it; the voxel frame already
+    /// varies per voxel.
+    #[test]
+    fn variation_leaves_the_world_and_voxel_frames_alone() {
+        for frame in [PatternFrame::World, PatternFrame::Voxel] {
+            let varied = PatternLayer {
+                generator: PatternGenerator::Noise { octaves: 2 },
+                frame,
+                period_meters: 0.5,
+                vary_per_face: true,
+                ..PatternLayer::IDENTITY
+            };
+            let unvaried = PatternLayer {
+                vary_per_face: false,
+                ..varied
+            };
+            for (axis, sign) in [(0, 1.0), (1, -1.0), (2, -1.0)] {
+                let sample = PatternSample {
+                    world_meters: [64.3, 32.7, 64.9],
+                    voxel: [514, 262, 519],
+                    axis,
+                    axis_sign: sign,
+                    distance_meters: 1.0,
+                };
+                assert_eq!(varied.variation_salt(&sample), 0, "{frame:?} got a salt");
+                assert_eq!(
+                    varied.generator_value(&sample),
+                    unvaried.generator_value(&sample),
+                    "{frame:?} changed with per-face variation"
+                );
+            }
+        }
+    }
+
+    /// The emission split: a picker-friendly 0..1 colour and a separate brightness that
+    /// can exceed 1, multiplied into the one value everything downstream reads.
+    #[test]
+    fn emission_intensity_scales_the_colour_and_nothing_else_does() {
+        let orange = [1.0, 0.45, 0.1];
+        let layer = PatternLayer {
+            target: PatternTarget::Emission,
+            blend: PatternBlend::Add,
+            target_color: orange,
+            emission_intensity: 8.0,
+            amount: 1.0,
+            ..PatternLayer::IDENTITY
+        };
+        // The product is what the row uploads and what the CPU reference reads.
+        assert_eq!(layer.target_value(), [8.0, 3.6, 0.8]);
+        assert_eq!(layer.to_gpu().target_color, [8.0, 3.6, 0.8]);
+        // Which means it CAN exceed 1 — the whole point, since a picker cannot.
+        assert!(layer.target_value()[0] > 1.0);
+        // Intensity 1 is the identity, so the field is invisible until used.
+        let plain = PatternLayer {
+            emission_intensity: 1.0,
+            ..layer
+        };
+        assert_eq!(plain.target_value(), orange);
+        // Zero intensity emits nothing at all.
+        let dark = PatternLayer {
+            emission_intensity: 0.0,
+            ..layer
+        };
+        assert_eq!(dark.target_value(), [0.0; 3]);
+        // Clamped at the ceiling rather than trusted.
+        let absurd = PatternLayer {
+            emission_intensity: 1e6,
+            ..layer
+        };
+        assert_eq!(absurd.target_value()[0], MAX_EMISSION_INTENSITY);
+    }
+
+    /// A NON-emission target must ignore the intensity entirely — an albedo above 1 is
+    /// not a thing, and silently scaling one would blow out a colour the picker says is
+    /// safe.
+    #[test]
+    fn only_an_emission_target_reads_the_intensity() {
+        for target in [PatternTarget::Albedo, PatternTarget::Roughness] {
+            let layer = PatternLayer {
+                target,
+                target_color: [0.5, 0.4, 0.3],
+                emission_intensity: 16.0,
+                ..PatternLayer::IDENTITY
+            };
+            assert_eq!(
+                layer.target_value(),
+                [0.5, 0.4, 0.3],
+                "{target:?} scaled its target by the emission intensity"
+            );
+        }
+    }
+
+    /// It must not have taken a bit of the packed word — the whole reason it is folded
+    /// into `target_color` on upload is that the shader needs no new field.
+    #[test]
+    fn the_emission_intensity_costs_no_packed_bits() {
+        let dim = PatternLayer {
+            target: PatternTarget::Emission,
+            emission_intensity: 0.0,
+            ..PatternLayer::IDENTITY
+        };
+        let bright = PatternLayer {
+            emission_intensity: MAX_EMISSION_INTENSITY,
+            ..dim
+        };
+        assert_eq!(dim.packed(), bright.packed());
+        assert_eq!(std::mem::size_of::<GpuPatternLayer>(), 32);
     }
 
     /// The face mask must name the faces S1 names, including the inverted Y sign.
@@ -1466,7 +1788,7 @@ mod tests {
         }
         // One octave of fractal noise is therefore the same value.
         assert_eq!(
-            fractal_noise([3.0, -7.0, 11.0], 1),
+            fractal_noise([3.0, -7.0, 11.0], 1, 0),
             hash_cell([3, -7, 11], 0)
         );
     }
@@ -1513,7 +1835,7 @@ mod tests {
                                 0.5,
                                 z as f32 + sub_z as f32 * 0.25 + 0.125,
                             ];
-                            if speckle(point, density) > 0.0 {
+                            if speckle(point, density, 0) > 0.0 {
                                 cell_hit = true;
                             }
                         }

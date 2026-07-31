@@ -335,6 +335,7 @@ impl AppState {
             gpu_context.surface_config.height,
             &brickmap,
             &quality.global_illumination,
+            &material::MATERIALS,
         );
         let light_volume_grid = renderer.light_volume_grid();
         println!(
@@ -641,6 +642,7 @@ impl AppState {
                 voxel,
                 material,
                 light_grid,
+                material_attributes: self.material_table.cagi_attributes(),
             },
             &self.quality.world_edit,
         );
@@ -666,12 +668,20 @@ impl AppState {
         if let Some(rows) = self.material_table.take_dirty() {
             self.renderer
                 .write_material_table(&self.gpu_context.queue, &rows);
+            // S2 — the CAGI emitter palette is derived from the same table, so an
+            // emissive edit has to reach it too. Cheap (a few hundred uniform bytes) and
+            // unconditional, unlike the per-CELL attribute re-pack, which is the ~50 ms
+            // rebuild the panel offers as an explicit button.
+            self.renderer
+                .write_cagi_emitter_palette(&self.gpu_context.queue, self.material_table.rows());
         }
         if std::mem::take(&mut self.material_panel.repack_gi_requested)
             && self.quality.global_illumination.enabled
         {
-            self.world_host
-                .request_light_attributes(self.renderer.light_volume_grid());
+            self.world_host.request_light_attributes(
+                self.renderer.light_volume_grid(),
+                self.material_table.cagi_attributes(),
+            );
         }
         if std::mem::take(&mut self.material_panel.import.load_requested) {
             self.load_vox_palette();
@@ -893,6 +903,7 @@ impl AppState {
             BulkEditRequest {
                 shape: Box::new(pool),
                 light_grid,
+                material_attributes: self.material_table.cagi_attributes(),
             },
             &self.quality.world_edit,
         );
@@ -927,6 +938,7 @@ impl AppState {
             BulkEditRequest {
                 shape: Box::new(blob),
                 light_grid,
+                material_attributes: self.material_table.cagi_attributes(),
             },
             &self.quality.world_edit,
         );
@@ -1365,13 +1377,16 @@ impl AppState {
                     &brickmap,
                     &self.quality.global_illumination,
                     attribute_source,
+                    self.material_table.rows(),
                 );
             }
             if attribute_source == AttributeSource::Deferred
                 && self.quality.global_illumination.enabled
             {
-                self.world_host
-                    .request_light_attributes(self.renderer.light_volume_grid());
+                self.world_host.request_light_attributes(
+                    self.renderer.light_volume_grid(),
+                    self.material_table.cagi_attributes(),
+                );
             }
         } else if self
             .quality

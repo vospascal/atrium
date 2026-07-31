@@ -74,6 +74,8 @@ fn pattern_octaves(layer: PatternLayer) -> u32 { return (layer.packed >> 12u) & 
 // Texels per voxel edge, 0 = continuous. Bits 15-22, so up to 255 fits even though
 // TEXEL_RUNGS stops at 32.
 fn pattern_texels(layer: PatternLayer) -> u32 { return (layer.packed >> 15u) & 0xffu; }
+// Bit 23: give every face its own draw. Face frame only — see pattern_variation_salt.
+fn pattern_varies_per_face(layer: PatternLayer) -> bool { return (layer.packed & (1u << 23u)) != 0u; }
 
 // Where a hit is, in every form the frames need. Built once per hit by
 // `pattern_sample` below, then shared by every layer in the stack — the
@@ -154,14 +156,14 @@ fn pattern_value_noise(point: vec3<f32>, salt: u32) -> f32 {
 // Fractal value noise, normalised back into 0..1 — so the octave count changes the
 // texture without changing the contrast, and the period always names the LARGEST
 // feature.
-fn pattern_fractal_noise(point: vec3<f32>, octaves: u32) -> f32 {
+fn pattern_fractal_noise(point: vec3<f32>, octaves: u32, salt_base: u32) -> f32 {
     let count = clamp(octaves, 1u, 4u);
     var frequency = 1.0;
     var amplitude = 1.0;
     var total = 0.0;
     var normalisation = 0.0;
     for (var octave = 0u; octave < count; octave = octave + 1u) {
-        total = total + amplitude * pattern_value_noise(point * frequency, octave);
+        total = total + amplitude * pattern_value_noise(point * frequency, salt_base ^ octave);
         normalisation = normalisation + amplitude;
         frequency = frequency * 2.0;
         amplitude = amplitude * 0.5;
@@ -178,18 +180,18 @@ const PATTERN_FLAT_SALT: u32 = 31u;
 
 // Scattered round specks. `density` is the fraction of CELLS that carry one, not
 // the fraction of area covered.
-fn pattern_speckle(point: vec3<f32>, density: f32) -> f32 {
+fn pattern_speckle(point: vec3<f32>, density: f32, salt_base: u32) -> f32 {
     let base = floor(point);
     let cell = vec3<i32>(base);
-    if (pattern_hash_cell(cell, PATTERN_SPECKLE_PRESENCE_SALT) >= density) {
+    if (pattern_hash_cell(cell, salt_base ^ PATTERN_SPECKLE_PRESENCE_SALT) >= density) {
         return 0.0;
     }
     // Jittered inside its cell, or the specks line up on the lattice and read as
     // a grid rather than as scatter.
     let centre = vec3<f32>(
-        0.25 + 0.5 * pattern_hash_cell(cell, PATTERN_SPECKLE_JITTER_X_SALT),
-        0.25 + 0.5 * pattern_hash_cell(cell, PATTERN_SPECKLE_JITTER_Y_SALT),
-        0.25 + 0.5 * pattern_hash_cell(cell, PATTERN_SPECKLE_JITTER_Z_SALT),
+        0.25 + 0.5 * pattern_hash_cell(cell, salt_base ^ PATTERN_SPECKLE_JITTER_X_SALT),
+        0.25 + 0.5 * pattern_hash_cell(cell, salt_base ^ PATTERN_SPECKLE_JITTER_Y_SALT),
+        0.25 + 0.5 * pattern_hash_cell(cell, salt_base ^ PATTERN_SPECKLE_JITTER_Z_SALT),
     );
     let offset = point - base - centre;
     let edge = clamp(1.0 - length(offset) / PATTERN_SPECKLE_RADIUS_CELLS, 0.0, 1.0);
@@ -240,18 +242,46 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
     return snapped / period;
 }
 
+// A per-face hash salt, or 0 for no variation.
+//
+// The face frame is voxel-local, so without this it draws the IDENTICAL pattern on
+// every face in the world — a visible repeat rather than detail. A salt re-rolls the
+// random draw and moves NOTHING, which is why it is safe to leave on: an offset would
+// slide the pattern within the face and break the texel grid's alignment to it.
+//
+// Only the face frame gets one. The world frame must not (a per-face salt would destroy
+// the continuity that is the point of it) and the voxel frame does not need one. Zero is
+// exactly the unvaried behaviour, since every generator mixes this with `^`.
+fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
+    if (!pattern_varies_per_face(layer) || pattern_frame(layer) != PATTERN_FRAME_FACE) {
+        return 0u;
+    }
+    // The face index 0..5 over (axis, sign), so a voxel's top and bottom differ too.
+    var face = sample.axis * 2u;
+    if (sample.axis_sign >= 0.0) {
+        face = face + 1u;
+    }
+    return pattern_hash_u32(
+        (bitcast<u32>(sample.voxel.x) * 0x9e3779b9u)
+        ^ (bitcast<u32>(sample.voxel.y) * 0x85ebca6bu)
+        ^ (bitcast<u32>(sample.voxel.z) * 0xc2b2ae35u)
+        ^ (face * 0x27d4eb2du)
+    );
+}
+
 // The generator's raw value, 0..1, before fade, amount, face mask or blend.
 fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
                            voxel_size_meters: f32) -> f32 {
     let point = pattern_coordinate(layer, sample, voxel_size_meters);
+    let salt = pattern_variation_salt(layer, sample);
     let generator = pattern_generator(layer);
     if (generator == PATTERN_GENERATOR_NOISE) {
-        return pattern_fractal_noise(point, pattern_octaves(layer));
+        return pattern_fractal_noise(point, pattern_octaves(layer), salt);
     }
     if (generator == PATTERN_GENERATOR_SPECKLE) {
-        return pattern_speckle(point, clamp(layer.param_a, 0.0, 1.0));
+        return pattern_speckle(point, clamp(layer.param_a, 0.0, 1.0), salt);
     }
-    return pattern_hash_cell(vec3<i32>(floor(point)), PATTERN_FLAT_SALT);
+    return pattern_hash_cell(vec3<i32>(floor(point)), salt ^ PATTERN_FLAT_SALT);
 }
 
 // ---- Fade, mask and strength ------------------------------------------------

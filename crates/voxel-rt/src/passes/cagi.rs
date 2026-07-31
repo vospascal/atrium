@@ -29,7 +29,8 @@
 use wgpu::util::DeviceExt;
 
 use crate::brickmap::Brickmap;
-use crate::cagi::{build_cell_attributes, CagiGrid, CagiSettings};
+use crate::cagi::{build_cell_attributes, material_attribute_table, CagiGrid, CagiSettings};
+use crate::material::Material;
 use crate::variants::RenderQuality;
 
 use super::world_bindings::WorldBindings;
@@ -83,8 +84,13 @@ impl LightVolume {
     /// Allocate the volume for `settings` and upload the static cell attributes
     /// built from `brickmap`. With CAGI disabled this is the 1-cell placeholder
     /// (the shading pass still declares the bindings; nothing reads them).
-    pub fn new(device: &wgpu::Device, brickmap: &Brickmap, settings: &CagiSettings) -> Self {
-        Self::new_with_attributes(device, brickmap, settings, AttributeSource::BuildNow)
+    pub fn new(
+        device: &wgpu::Device,
+        brickmap: &Brickmap,
+        settings: &CagiSettings,
+        rows: &[Material],
+    ) -> Self {
+        Self::new_with_attributes(device, brickmap, settings, AttributeSource::BuildNow, rows)
     }
 
     /// The same, with a choice about the ~50 ms CPU attribute build (E4 measured
@@ -100,10 +106,13 @@ impl LightVolume {
         brickmap: &Brickmap,
         settings: &CagiSettings,
         attribute_source: AttributeSource,
+        rows: &[Material],
     ) -> Self {
         let grid = settings.grid(brickmap);
         let attributes = match (settings.enabled, attribute_source) {
-            (true, AttributeSource::BuildNow) => build_cell_attributes(brickmap, &grid),
+            (true, AttributeSource::BuildNow) => {
+                build_cell_attributes(brickmap, &grid, &material_attribute_table(rows))
+            }
             _ => vec![0_u32; grid.cell_count()],
         };
         let volume_buffer = |label: &str| {
@@ -131,8 +140,11 @@ impl LightVolume {
             }),
             uniform_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cagi volume uniform"),
-                contents: bytemuck::bytes_of(&grid.uniform()),
-                usage: wgpu::BufferUsages::UNIFORM,
+                contents: bytemuck::bytes_of(&grid.uniform(rows)),
+                // COPY_DST since S2: the emitter palette is built from the material
+                // table, and that table is live-editable — so authoring an emissive
+                // material has to be able to reach this buffer.
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }),
             front: 0,
             // A fresh volume is uninitialized GPU memory: the first encode must
@@ -278,6 +290,26 @@ impl LightVolume {
             run.push(*attribute);
         }
         flush(&mut run, run_first_cell);
+    }
+
+    /// S2 — re-upload the volume uniform, which carries the **emitter palette**.
+    ///
+    /// The palette is derived from the material table, and since S2 that table is
+    /// live-editable: authoring emission on a row (or an emission pattern layer on one)
+    /// changes what the CA should inject. Cheap enough to be unconditional on a dirty
+    /// table — the uniform is a few hundred bytes and the rest of it is grid geometry
+    /// that simply rewrites to the same values.
+    ///
+    /// Note what this does NOT do: it does not tell any *cell* that it is an emitter.
+    /// That lives in the attribute volume, so a row that becomes emissive for the first
+    /// time also needs [`Self::write_all_attributes`] — which is the ~50 ms re-pack the
+    /// panel offers explicitly rather than running on a slider tick.
+    pub fn write_uniform(&self, queue: &wgpu::Queue, rows: &[Material]) {
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.grid.uniform(rows)),
+        );
     }
 
     /// Upload a whole attribute set built elsewhere (the world thread, after a

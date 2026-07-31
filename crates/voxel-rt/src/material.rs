@@ -77,9 +77,12 @@
 //! Note that **water is acoustically near-perfectly reflective** (alpha ~0.01),
 //! which is the opposite of the visual intuition its transparency suggests.
 
-use voxel_core::world::Voxel;
+use voxel_core::world::{Voxel, VOXEL_SIZE};
 
-use crate::pattern::{GpuPatternLayer, PatternStack, MAX_PATTERN_LAYERS, NO_PATTERNS};
+use crate::pattern::{
+    apply_stack_color, GpuPatternLayer, PatternSample, PatternStack, PatternTarget,
+    MAX_PATTERN_LAYERS, NO_PATTERNS,
+};
 
 /// Index of refraction of air — 1.000293 in reality, and the value carried by
 /// every row that does NOT refract, which is all of them except the liquids. A
@@ -623,8 +626,121 @@ impl Material {
     }
 
     /// Whether this row emits light: the CAGI injection candidate test (E5).
+    /// Whether this row emits at all — including **only** through a pattern layer.
+    ///
+    /// S2 widened this. A stone row with red emissive specks authored as an
+    /// `add`-blended emission layer has `emission: None` and still glows, so the old
+    /// `self.emission.is_some()` would have left it out of CAGI's emitter set and the
+    /// specks would light nothing (Pascal, 2026-07-31: *"i do think it makes sense to
+    /// be able to let them emit light"*).
+    ///
+    /// One consumer: [`crate::cagi`]'s emitter palette and its 3-bit per-cell index.
+    /// So a patterned emitter now **claims one of the seven palette slots**, which is
+    /// the real budget this widening spends.
     pub const fn is_emissive(&self) -> bool {
-        self.emission.is_some()
+        self.emission.is_some() || self.has_emission_layers()
+    }
+
+    /// Whether any pattern layer targets emission with a non-zero amount.
+    pub const fn has_emission_layers(&self) -> bool {
+        let mut slot = 0;
+        while slot < MAX_PATTERN_LAYERS {
+            if let Some(layer) = self.patterns.layers[slot] {
+                if matches!(layer.target, PatternTarget::Emission) && layer.amount > 0.0 {
+                    return true;
+                }
+            }
+            slot += 1;
+        }
+        false
+    }
+
+    /// The **mean** emitted radiance over this row's surface — what the GI volume
+    /// injects, as opposed to what a pixel shows.
+    ///
+    /// ## Why a mean is the right answer rather than a compromise
+    ///
+    /// CAGI is a cellular automaton on half-metre cells holding a 3-bit emitter index.
+    /// It cannot represent per-texel structure and never could. But it does not need
+    /// to: the light arriving somewhere else from a speckled emissive surface is the
+    /// surface's **average** emission times its area. Detail matters to the eye looking
+    /// at the surface; only the mean escapes it. So the two tiers are not an
+    /// approximation of one model, they are the near field and the far field, and each
+    /// gets the right quantity.
+    ///
+    /// ## How the mean is obtained
+    ///
+    /// By evaluating [`crate::pattern`]'s CPU reference over a grid on each of the six
+    /// faces and averaging, weighted by face count (four sides to one top and one
+    /// bottom) so a top-masked layer contributes its real share. Numerically rather
+    /// than analytically, deliberately: an analytic mean would need a closed form per
+    /// generator, a fifth generator would silently get the wrong one, and this is the
+    /// evaluator's second real use after the WGSL cross-check.
+    ///
+    /// Costs nothing on the rows that do not use the feature — it returns
+    /// [`Self::emitted_radiance`] immediately unless an emission layer exists, and
+    /// there are at most a handful of those.
+    pub fn mean_emitted_radiance(&self) -> [f32; 3] {
+        let base = self.emitted_radiance();
+        if !self.has_emission_layers() {
+            return base;
+        }
+        // 16 samples per axis. Enough for a mean (which converges fast) and offset by
+        // half a step so it does not land systematically on texel centres or corners,
+        // which would bias the estimate for the coarser texel rungs.
+        const SAMPLES: usize = 16;
+        let mut total = [0.0_f64; 3];
+        let mut weight_total = 0.0_f64;
+        // (axis, sign, how many faces this stands for) — the four sides are one case.
+        for (axis, axis_sign, faces) in [(1_u32, -1.0_f32, 1.0_f64), (1, 1.0, 1.0), (0, 1.0, 4.0)] {
+            let mut face_total = [0.0_f64; 3];
+            for row in 0..SAMPLES {
+                for column in 0..SAMPLES {
+                    let along = (row as f32 + 0.5) / SAMPLES as f32;
+                    let across = (column as f32 + 0.5) / SAMPLES as f32;
+                    // A representative voxel, offset off the world origin so the world
+                    // frame is sampled somewhere typical rather than at its one cell
+                    // whose hash is zero.
+                    let voxel = [301, 199, 407];
+                    let world = [
+                        (voxel[0] as f32 + along) * VOXEL_SIZE,
+                        (voxel[1] as f32 + if axis == 1 { across } else { along }) * VOXEL_SIZE,
+                        (voxel[2] as f32 + across) * VOXEL_SIZE,
+                    ];
+                    let sample = PatternSample {
+                        world_meters: world,
+                        voxel,
+                        axis,
+                        axis_sign,
+                        distance_meters: 0.0,
+                    };
+                    let emitted = apply_stack_color(
+                        &self.patterns,
+                        base,
+                        PatternTarget::Emission,
+                        &sample,
+                        // No fade: the mean is a property of the material, not of where
+                        // the camera happens to be. A layer that fades out still lights
+                        // the room it is in.
+                        0.0,
+                        MAX_PATTERN_LAYERS,
+                    );
+                    for channel in 0..3 {
+                        face_total[channel] += emitted[channel] as f64;
+                    }
+                }
+            }
+            let samples = (SAMPLES * SAMPLES) as f64;
+            for channel in 0..3 {
+                total[channel] += faces * face_total[channel] / samples;
+            }
+            weight_total += faces;
+        }
+        [
+            (total[0] / weight_total) as f32,
+            (total[1] / weight_total) as f32,
+            (total[2] / weight_total) as f32,
+        ]
     }
 
     /// This row's boolean properties, **derived** from its kind and emission

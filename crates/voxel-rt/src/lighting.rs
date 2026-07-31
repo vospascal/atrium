@@ -186,6 +186,26 @@ impl WaterParams {
 pub struct SunSettings {
     pub azimuth_degrees: f32,
     pub elevation_degrees: f32,
+    /// Sun intensity multiplier, scaling [`SUN_INTENSITY`]. 1.0 is the shipped look.
+    ///
+    /// Exposed by S2c, and it was a real gap rather than a nicety: **an emitter cannot
+    /// be judged against a light you cannot turn down.** The sun was a hardcoded
+    /// constant, so a glowing surface and the light it casts were both washed out by a
+    /// fixed 2.2 of daylight, and there was no way to tell an emitter that worked from
+    /// one that did nothing (Pascal, 2026-07-31: *"i cant realy see it emiting .. might
+    /// be as well that we dont have the right sky or light conditions .. we have pretty
+    /// crude over head light"*).
+    ///
+    /// Zero is a genuine night: the sun contributes nothing and only ambient, GI and
+    /// emitters remain. Which is exactly the condition an emissive material is for.
+    pub intensity_scale: f32,
+    /// Hemisphere-ambient multiplier, scaling [`AMBIENT_STRENGTH`]. 1.0 is the shipped
+    /// look, 0.0 removes the ambient floor entirely.
+    ///
+    /// Needed alongside the sun scale for the same reason: at sun zero the 0.4 ambient
+    /// is still enough to read every surface, so an emitter's contribution stays
+    /// invisible. Turning both down is what makes a dark room dark.
+    pub ambient_scale: f32,
 }
 
 impl Default for SunSettings {
@@ -199,6 +219,8 @@ impl Default for SunSettings {
                 .atan2(stage_one_direction.x)
                 .to_degrees(),
             elevation_degrees: stage_one_direction.y.asin().to_degrees(),
+            intensity_scale: 1.0,
+            ambient_scale: 1.0,
         }
     }
 }
@@ -232,12 +254,17 @@ impl SunSettings {
         LightingUniform {
             sun_direction: sun_direction.to_array(),
             _pad0: 0.0,
-            sun_color_intensity: [SUN_COLOR[0], SUN_COLOR[1], SUN_COLOR[2], SUN_INTENSITY],
+            sun_color_intensity: [
+                SUN_COLOR[0],
+                SUN_COLOR[1],
+                SUN_COLOR[2],
+                SUN_INTENSITY * self.intensity_scale.max(0.0),
+            ],
             sky_ambient: [
                 SKY_AMBIENT_COLOR[0],
                 SKY_AMBIENT_COLOR[1],
                 SKY_AMBIENT_COLOR[2],
-                AMBIENT_STRENGTH,
+                AMBIENT_STRENGTH * self.ambient_scale.max(0.0),
             ],
             ground_ambient: [
                 GROUND_AMBIENT_COLOR[0],
@@ -260,7 +287,13 @@ mod tests {
     /// Every runtime knob vector, in one uniform, so the component-order tests
     /// below all read the same construction.
     fn probe_uniform(shadow_penumbra_scale: f32) -> LightingUniform {
-        SunSettings::default().lighting_uniform(
+        probe_uniform_for(SunSettings::default(), shadow_penumbra_scale)
+    }
+
+    /// The same, for a chosen sun — so a test about the sun's own knobs shares this
+    /// construction rather than writing a second one that could drift from it.
+    fn probe_uniform_for(sun: SunSettings, shadow_penumbra_scale: f32) -> LightingUniform {
+        sun.lighting_uniform(
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
                 shadow_penumbra_scale,
@@ -335,6 +368,7 @@ mod tests {
                 let settings = SunSettings {
                     azimuth_degrees,
                     elevation_degrees,
+                    ..SunSettings::default()
                 };
                 let length = settings.sun_direction().length();
                 assert!(
@@ -346,11 +380,49 @@ mod tests {
         }
     }
 
+    /// S2c — the sun must be dimmable to nothing, and the ambient with it.
+    ///
+    /// The property an emissive material needs in order to be judgeable at all: a light
+    /// you cannot turn down is a light that hides every emitter behind it.
+    #[test]
+    fn the_sun_and_the_ambient_floor_can_both_reach_zero() {
+        let day = probe_uniform(1.0);
+        let night = probe_uniform_for(
+            SunSettings {
+                intensity_scale: 0.0,
+                ambient_scale: 0.0,
+                ..SunSettings::default()
+            },
+            1.0,
+        );
+
+        // Daylight is the shipped look and must not have moved.
+        assert_eq!(day.sun_color_intensity[3], SUN_INTENSITY);
+        assert_eq!(day.sky_ambient[3], AMBIENT_STRENGTH);
+        // Night is genuinely dark: nothing left but GI and emitters.
+        assert_eq!(night.sun_color_intensity[3], 0.0);
+        assert_eq!(night.sky_ambient[3], 0.0);
+        // The direction is untouched by the scales — dimming is not moving the sun.
+        assert_eq!(day.sun_direction, night.sun_direction);
+        // And a negative scale cannot invert the light.
+        let clamped = probe_uniform_for(
+            SunSettings {
+                intensity_scale: -5.0,
+                ambient_scale: -5.0,
+                ..SunSettings::default()
+            },
+            1.0,
+        );
+        assert_eq!(clamped.sun_color_intensity[3], 0.0);
+        assert_eq!(clamped.sky_ambient[3], 0.0);
+    }
+
     #[test]
     fn straight_up_elevation_points_along_y() {
         let settings = SunSettings {
             azimuth_degrees: 123.0,
             elevation_degrees: 90.0,
+            ..SunSettings::default()
         };
         let direction = settings.sun_direction();
         assert!((direction - Vec3::Y).length() < 1e-5);

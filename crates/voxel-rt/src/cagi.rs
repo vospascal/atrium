@@ -30,7 +30,7 @@ use crate::brickmap::{
     BRICK_GRID_Z, BRICK_SIZE, EMPTY_BRICK, EMPTY_COLUMN, MATERIAL_WORDS_PER_BRICK,
     OCCUPANCY_WORDS_PER_BRICK,
 };
-use crate::material::MATERIALS;
+use crate::material::{Material, MATERIALS, MATERIAL_COUNT};
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 /// Cell attribute bit 24: the cell absorbs light (see [`SOLID_FILL_DIVISOR`]).
@@ -76,10 +76,9 @@ pub const EMITTER_PALETTE_SLOTS: usize = MAX_EMITTERS + 1;
 
 /// Emitter index per material id: 0 for everything that does not emit, and
 /// 1.. for each [`MaterialFlags::EMISSIVE`] row in table order.
-fn emitter_indices() -> Vec<u32> {
+fn emitter_indices(rows: &[Material]) -> Vec<u32> {
     let mut next_index = 0_u32;
-    MATERIALS
-        .iter()
+    rows.iter()
         .map(|material| {
             if !material.is_emissive() {
                 return 0;
@@ -94,9 +93,9 @@ fn emitter_indices() -> Vec<u32> {
 ///
 /// Slot 0 is black and is what every non-emissive cell reads, so the CA needs no
 /// branch: it can always look up, and a non-emitter simply injects nothing.
-pub fn emitter_palette() -> Vec<[f32; 4]> {
+pub fn emitter_palette(rows: &[Material]) -> Vec<[f32; 4]> {
     let mut palette = vec![[0.0_f32; 4]; EMITTER_PALETTE_SLOTS];
-    for (material, index) in MATERIALS.iter().zip(emitter_indices()) {
+    for (material, index) in rows.iter().zip(emitter_indices(rows)) {
         if index == 0 {
             continue;
         }
@@ -105,7 +104,10 @@ pub fn emitter_palette() -> Vec<[f32; 4]> {
             "the material table has more than {MAX_EMITTERS} emissive rows, which \
              no longer fit the 3-bit cell emitter field (widen it or share slots)"
         );
-        let emission = material.emitted_radiance();
+        // The MEAN over the surface, not the row's base value: a patterned emitter's
+        // specks are what a pixel shows, and their average is what escapes to light
+        // anything else. See `Material::mean_emitted_radiance`.
+        let emission = material.mean_emitted_radiance();
         palette[index as usize] = [emission[0], emission[1], emission[2], 0.0];
     }
     palette
@@ -469,7 +471,11 @@ impl CagiGrid {
     }
 
     /// The GPU uniform describing this volume.
-    pub fn uniform(&self) -> CagiVolumeUniform {
+    ///
+    /// Takes the material rows because the emitter palette is built from them, and
+    /// since S2 those rows can be LIVE-EDITED — a patterned emitter authored in the
+    /// panel has to reach this palette or it lights nothing.
+    pub fn uniform(&self, rows: &[Material]) -> CagiVolumeUniform {
         CagiVolumeUniform {
             grid_size: self.size,
             cell_voxels: self.cell_voxels,
@@ -477,7 +483,7 @@ impl CagiGrid {
             attenuation: self.attenuation(),
             diffusion_numerator: self.diffusion_numerator(),
             diffusion_26_numerator: self.diffusion_26_numerator(),
-            emitters: emitter_palette()
+            emitters: emitter_palette(rows)
                 .try_into()
                 .expect("emitter_palette always returns EMITTER_PALETTE_SLOTS slots"),
         }
@@ -570,17 +576,46 @@ fn packed_albedo(albedo: [f32; 3]) -> u32 {
 /// so a cell's transmittance and emitter always describe the same surface its
 /// bounce colour does. Coarse (one voxel stands for up to 512), and deliberately
 /// the same coarseness the albedo has had since E4.
-fn material_attribute_table() -> Vec<u32> {
-    let emitters = emitter_indices();
-    MATERIALS
-        .iter()
-        .zip(emitters)
-        .map(|(material, emitter)| {
-            packed_albedo(material.albedo)
-                | quantize_transmittance(material.transmittance())
-                | (emitter << CELL_EMITTER_SHIFT)
-        })
-        .collect()
+pub fn material_attribute_table(rows: &[Material]) -> MaterialAttributes {
+    let emitters = emitter_indices(rows);
+    let mut table = MaterialAttributes([0; MATERIAL_COUNT]);
+    for (slot, (material, emitter)) in rows.iter().zip(emitters).enumerate().take(MATERIAL_COUNT) {
+        table.0[slot] = packed_albedo(material.albedo)
+            | quantize_transmittance(material.transmittance())
+            | (emitter << CELL_EMITTER_SHIFT);
+    }
+    table
+}
+
+/// The material table reduced to exactly what the attribute sweep needs: one packed
+/// word per material id.
+///
+/// This is the seam that lets a **live-edited** material reach the light volume. The
+/// builders used to read [`MATERIALS`] — the *compiled* table — so an edited albedo or
+/// emission could never reach the GI bounce no matter how many times the attributes
+/// were re-packed. Passing the whole `&[Material]` down instead would not work either:
+/// the incremental per-edit path runs on the world thread and would need an 8 KB copy
+/// per 2.8 us edit.
+///
+/// 104 bytes and `Copy`, so it rides along in a [`crate::world_edit::VoxelEdit`] and
+/// crosses the thread boundary for free. The emitter *palette* still needs the rows
+/// themselves (it carries f32 radiances), but that is built once per uniform upload on
+/// the render thread, where the live table is at hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaterialAttributes([u32; MATERIAL_COUNT]);
+
+impl MaterialAttributes {
+    /// The compiled table's attributes — what the world starts with and what every
+    /// test that does not care about live edits should use.
+    pub fn compiled() -> MaterialAttributes {
+        material_attribute_table(&MATERIALS)
+    }
+
+    /// The packed word for one material id. Ids past the table read zero, matching the
+    /// air sentinel.
+    pub fn word(&self, material: u8) -> u32 {
+        self.0.get(material as usize).copied().unwrap_or(0)
+    }
 }
 
 /// One `u32` per cell: the cell's bounce albedo (sRGB 8:8:8 in the low 24 bits),
@@ -594,10 +629,13 @@ fn material_attribute_table() -> Vec<u32> {
 /// are skipped with one pointer read, so the sweep touches
 /// `occupied_bricks * 512` voxels (~37 M on the island) rather than
 /// `cell_count * cell_voxels^3`.
-pub fn build_cell_attributes(brickmap: &Brickmap, grid: &CagiGrid) -> Vec<u32> {
+pub fn build_cell_attributes(
+    brickmap: &Brickmap,
+    grid: &CagiGrid,
+    attribute_table: &MaterialAttributes,
+) -> Vec<u32> {
     let mut attributes = vec![0_u32; grid.cell_count()];
     let mut fill_counts = vec![0_u16; grid.cell_count()];
-    let material_attributes = material_attribute_table();
 
     for brick_z in 0..BRICK_GRID_Z {
         for brick_y in 0..BRICK_GRID_Y {
@@ -649,7 +687,7 @@ pub fn build_cell_attributes(brickmap: &Brickmap, grid: &CagiGrid) -> Vec<u32> {
                             let index = grid.cell_index(cell);
                             fill_counts[index] = fill_counts[index].saturating_add(1);
                             let material = (materials[bit >> 2] >> ((bit & 3) * 8)) & 0xff;
-                            attributes[index] = material_attributes[material as usize];
+                            attributes[index] = attribute_table.word(material as u8);
                         }
                     }
                 }
@@ -675,8 +713,12 @@ pub fn build_cell_attributes(brickmap: &Brickmap, grid: &CagiGrid) -> Vec<u32> {
 /// to `cell_voxels^3` ≤ 512 occupancy-bit reads. Iterates in the same
 /// y-then-z-then-x order as the full build, so "the albedo of the highest
 /// occupied voxel" resolves ties identically (pinned by a test).
-pub fn cell_attribute(brickmap: &Brickmap, grid: &CagiGrid, cell: [u32; 3]) -> u32 {
-    let material_attributes = material_attribute_table();
+pub fn cell_attribute(
+    brickmap: &Brickmap,
+    grid: &CagiGrid,
+    cell: [u32; 3],
+    attribute_table: &MaterialAttributes,
+) -> u32 {
     let cell_voxels = grid.cell_voxels as i32;
     let base = [
         cell[0] as i32 * cell_voxels,
@@ -694,7 +736,7 @@ pub fn cell_attribute(brickmap: &Brickmap, grid: &CagiGrid, cell: [u32; 3]) -> u
                     continue;
                 }
                 fill_count += 1;
-                albedo = material_attributes[material as usize];
+                albedo = attribute_table.word(material);
             }
         }
     }
@@ -1101,7 +1143,7 @@ mod tests {
         let brickmap = Brickmap::build(&world);
         for cell_voxels in [4, 8] {
             let grid = CagiGrid::for_world(cell_voxels, brickmap.metadata().max_occupied_brick_y);
-            let built = build_cell_attributes(&brickmap, &grid);
+            let built = build_cell_attributes(&brickmap, &grid, &MaterialAttributes::compiled());
             let mut non_empty_checked = 0_usize;
             // Deterministic stride over the whole volume, prime-ish so it walks
             // every axis instead of one slab.
@@ -1113,7 +1155,7 @@ mod tests {
                 ];
                 let expected = built[grid.cell_index(cell)];
                 assert_eq!(
-                    cell_attribute(&brickmap, &grid, cell),
+                    cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled()),
                     expected,
                     "cell {cell:?} at {cell_voxels}-voxel resolution"
                 );
@@ -1172,9 +1214,9 @@ mod tests {
     /// bug"). Foliage must carry a non-zero one, or M2 fixes nothing.
     #[test]
     fn opaque_materials_transmit_nothing_and_foliage_transmits_something() {
-        let table = material_attribute_table();
+        let table = MaterialAttributes::compiled();
         let field =
-            |voxel| table[crate::material::material_id(voxel) as usize] & CELL_TRANSMITTANCE_MASK;
+            |voxel| table.word(crate::material::material_id(voxel)) & CELL_TRANSMITTANCE_MASK;
         for opaque in [Voxel::Stone, Voxel::Dirt, Voxel::Sand, Voxel::Trunk] {
             assert_eq!(field(opaque), 0, "{opaque:?} must not transmit");
         }
@@ -1189,9 +1231,9 @@ mod tests {
     #[test]
     fn both_attribute_builders_pack_transmittance_identically() {
         let materials = MATERIALS;
-        let table = material_attribute_table();
+        let table = MaterialAttributes::compiled();
         for (id, material) in materials.iter().enumerate() {
-            let packed = table[id];
+            let packed = table.word(id as u8);
             assert_eq!(
                 packed & CELL_TRANSMITTANCE_MASK,
                 quantize_transmittance(material.transmittance()),
@@ -1215,9 +1257,9 @@ mod tests {
         assert_eq!(CELL_EMITTER_MASK & CELL_SOLID, 0);
         assert_eq!(CELL_EMITTER_MASK & 0x00ff_ffff, 0);
 
-        let table = material_attribute_table();
+        let table = MaterialAttributes::compiled();
         for (id, material) in MATERIALS.iter().enumerate() {
-            let slot = (table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT;
+            let slot = (table.word(id as u8) & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT;
             assert_eq!(
                 slot != 0,
                 material.is_emissive(),
@@ -1232,14 +1274,14 @@ mod tests {
     /// the palette the shader reads.
     #[test]
     fn every_emitter_round_trips_through_the_palette() {
-        let palette = emitter_palette();
+        let palette = emitter_palette(&MATERIALS);
         assert_eq!(palette.len(), EMITTER_PALETTE_SLOTS);
         assert_eq!(palette[0], [0.0; 4], "slot 0 is what non-emitters read");
 
-        let table = material_attribute_table();
+        let table = MaterialAttributes::compiled();
         let mut emitters_seen = 0;
         for (id, material) in MATERIALS.iter().enumerate() {
-            let slot = ((table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT) as usize;
+            let slot = ((table.word(id as u8) & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT) as usize;
             if slot == 0 {
                 continue;
             }
@@ -1258,12 +1300,12 @@ mod tests {
     /// table have to differ in the volume.
     #[test]
     fn emitters_get_distinct_slots() {
-        let table = material_attribute_table();
+        let table = MaterialAttributes::compiled();
         let slots: Vec<u32> = MATERIALS
             .iter()
             .enumerate()
             .filter(|(_, material)| material.is_emissive())
-            .map(|(id, _)| (table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT)
+            .map(|(id, _)| (table.word(id as u8) & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT)
             .collect();
         let mut unique = slots.clone();
         unique.sort_unstable();
@@ -1284,14 +1326,14 @@ mod tests {
     /// dropped the emitter bits the light would never appear.
     #[test]
     fn an_edited_cell_carries_its_emitter() {
-        let table = material_attribute_table();
-        let glow_block = table[crate::material::material_id(Voxel::GlowBlock) as usize];
+        let table = MaterialAttributes::compiled();
+        let glow_block = table.word(crate::material::material_id(Voxel::GlowBlock));
         assert_ne!(
             glow_block & CELL_EMITTER_MASK,
             0,
             "the glow block must emit"
         );
-        let stone = table[crate::material::material_id(Voxel::Stone) as usize];
+        let stone = table.word(crate::material::material_id(Voxel::Stone));
         assert_eq!(stone & CELL_EMITTER_MASK, 0, "stone must not emit");
     }
 
@@ -1311,5 +1353,143 @@ mod tests {
     #[should_panic(expected = "must divide")]
     fn a_cell_size_that_straddles_bricks_panics() {
         CagiGrid::for_world(3, 24);
+    }
+    // ---- S2: a live-edited material must reach the light volume ----------------
+
+    /// **The bug this seam exists to fix.** The attribute builders used to read the
+    /// COMPILED table, so a live material edit could never reach the GI bounce no matter
+    /// how often the attributes were re-packed — the re-pack recomputed the values it
+    /// already had. The panel documented a two-tier model in which the second tier did
+    /// not work.
+    #[test]
+    fn a_live_edited_albedo_reaches_the_cell_attributes() {
+        let stone = crate::material::material_id(Voxel::Stone);
+        let compiled = MaterialAttributes::compiled();
+
+        let mut rows = MATERIALS.to_vec();
+        rows[stone as usize].albedo = [1.0, 0.0, 0.0];
+        let edited = material_attribute_table(&rows);
+
+        assert_ne!(
+            compiled.word(stone),
+            edited.word(stone),
+            "an edited albedo did not change the attribute word"
+        );
+        // Only that row moved.
+        for id in 0..MATERIAL_COUNT as u8 {
+            if id == stone {
+                continue;
+            }
+            assert_eq!(compiled.word(id), edited.word(id), "row {id} moved");
+        }
+    }
+
+    /// A patterned emitter must claim a palette slot and inject its MEAN.
+    ///
+    /// This is the whole "let them emit light" feature: a stone row with red emissive
+    /// specks has `emission: None`, so before S2 it was not in the emitter set at all
+    /// and the specks lit nothing.
+    #[test]
+    fn a_patterned_emitter_claims_a_slot_and_injects_its_mean() {
+        use crate::pattern::{PatternBlend, PatternLayer, PatternStack, PatternTarget};
+
+        let stone = crate::material::material_id(Voxel::Stone);
+        let mut rows = MATERIALS.to_vec();
+        assert!(
+            !rows[stone as usize].is_emissive(),
+            "stone must not start emissive"
+        );
+        assert_eq!(
+            MaterialAttributes::compiled().word(stone) & CELL_EMITTER_MASK,
+            0,
+            "stone must not start with an emitter slot"
+        );
+
+        let specks = PatternLayer {
+            target: PatternTarget::Emission,
+            blend: PatternBlend::Add,
+            amount: 1.0,
+            target_color: [4.0, 0.0, 0.0],
+            ..PatternLayer::IDENTITY
+        };
+        rows[stone as usize].patterns = PatternStack::of(&[specks]);
+
+        // It is now an emitter, so it takes a cell-attribute slot...
+        assert!(rows[stone as usize].is_emissive());
+        let slot =
+            (material_attribute_table(&rows).word(stone) & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT;
+        assert_ne!(slot, 0, "a patterned emitter got no emitter slot");
+
+        // ...and the palette carries the MEAN, which must sit strictly between "no
+        // light at all" and "the speck colour everywhere" — that IS the point of a mean.
+        let palette = emitter_palette(&rows);
+        let injected = palette[slot as usize];
+        assert!(
+            injected[0] > 0.0 && injected[0] < 4.0,
+            "the injected red {} is not a mean of 0 and 4",
+            injected[0]
+        );
+        // Green and blue were never emitted, so they must stay dark.
+        assert_eq!(injected[1], 0.0);
+        assert_eq!(injected[2], 0.0);
+    }
+
+    /// The mean must scale with the layer's amount, or the brightness slider does not
+    /// control how much light the surface casts.
+    #[test]
+    fn the_injected_mean_follows_the_layers_amount() {
+        use crate::pattern::{PatternBlend, PatternLayer, PatternStack, PatternTarget};
+
+        let mean_at = |amount: f32| {
+            let mut row = MATERIALS[crate::material::material_id(Voxel::Stone) as usize];
+            row.patterns = PatternStack::of(&[PatternLayer {
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount,
+                target_color: [4.0, 0.0, 0.0],
+                ..PatternLayer::IDENTITY
+            }]);
+            row.mean_emitted_radiance()[0]
+        };
+        let dim = mean_at(0.25);
+        let bright = mean_at(1.0);
+        assert!(dim > 0.0);
+        assert!(bright > dim * 2.0, "{dim} -> {bright} is not proportional");
+
+        // Amount zero is not an emitter at all: no slot spent, nothing injected.
+        let mut row = MATERIALS[crate::material::material_id(Voxel::Stone) as usize];
+        row.patterns = PatternStack::of(&[PatternLayer {
+            target: PatternTarget::Emission,
+            blend: PatternBlend::Add,
+            amount: 0.0,
+            ..PatternLayer::IDENTITY
+        }]);
+        assert!(
+            !row.is_emissive(),
+            "a zero-amount layer must not claim a slot"
+        );
+        assert_eq!(row.mean_emitted_radiance(), [0.0; 3]);
+    }
+
+    /// A row that emits WITHOUT patterns must be untouched by the mean machinery — the
+    /// two shipped emissive rows are the regression risk here.
+    #[test]
+    fn an_unpatterned_emitter_injects_exactly_its_authored_radiance() {
+        for row in &MATERIALS {
+            if !row.is_emissive() {
+                continue;
+            }
+            assert!(
+                !row.has_emission_layers(),
+                "{} authors an emission layer, which no shipped row should yet",
+                row.name
+            );
+            assert_eq!(
+                row.mean_emitted_radiance(),
+                row.emitted_radiance(),
+                "{} drifted from its authored emission",
+                row.name
+            );
+        }
     }
 }

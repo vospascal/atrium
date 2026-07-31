@@ -132,6 +132,17 @@ impl MaterialTable {
 
     /// The table in upload form. Always [`MATERIAL_COUNT`] rows — the shader
     /// indexes binding 5 by material id, so a short write would leave stale rows.
+    /// S2 — the CAGI attribute form of these rows.
+    ///
+    /// The light volume's builders take this rather than the rows themselves, so an
+    /// edit's incremental light-cell update and the full re-pack both describe the LIVE
+    /// table. Before S2 they read the compiled one, which made the re-pack a no-op for a
+    /// material edit. 104 bytes and `Copy`, so it rides in a `VoxelEdit` across the
+    /// world-thread boundary — see [`crate::cagi::MaterialAttributes`].
+    pub fn cagi_attributes(&self) -> crate::cagi::MaterialAttributes {
+        crate::cagi::material_attribute_table(&self.rows)
+    }
+
     pub fn gpu_rows(&self) -> Vec<GpuMaterial> {
         debug_assert_eq!(self.rows.len(), MATERIAL_COUNT);
         self.rows.iter().map(Material::to_gpu).collect()

@@ -419,6 +419,12 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             faces: PatternFaces::ALL,
             // The voxel frame is one point per voxel, so a snap here would be a no-op.
             texels_per_voxel: 0,
+            // Also a no-op outside the face frame, but spelled out rather than
+            // defaulted: this stack is the priced configuration, so every field of it
+            // should be visible in it.
+            vary_per_face: false,
+            // Albedo target, so the intensity is not read.
+            emission_intensity: 1.0,
         },
         PatternLayer {
             generator: PatternGenerator::Speckle { density: 0.3 },
@@ -439,6 +445,8 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             target_color: [0.55, 0.52, 0.48],
             faces: PatternFaces::ALL,
             texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
+            vary_per_face: false,
+            emission_intensity: 1.0,
         },
         PatternLayer {
             generator: PatternGenerator::Noise { octaves: 3 },
@@ -712,6 +720,7 @@ fn water_section_world(brickmap: &Brickmap, pool: WaterPool) -> Brickmap {
         &BulkEditRequest {
             shape: Box::new(pool),
             light_grid: None,
+            material_attributes: voxel_rt::cagi::MaterialAttributes::compiled(),
         },
         &WorldEditSettings::default(),
     )
@@ -901,7 +910,12 @@ fn report_preset_pipeline_cache(
     brickmap: &Brickmap,
 ) {
     let target = create_render_target(device, OUTPUT_WIDTH, OUTPUT_HEIGHT);
-    let light_volume = LightVolume::new(device, brickmap, &CagiSettings::default());
+    let light_volume = LightVolume::new(
+        device,
+        brickmap,
+        &CagiSettings::default(),
+        &voxel_rt::material::MATERIALS,
+    );
     let mut pass = DdaPass::new(device, world_bindings, &light_volume, &target.view);
     println!();
     println!("== preset pipeline cache ==");
@@ -957,7 +971,11 @@ fn report_light_volume_memory(brickmap: &Brickmap) {
         // The static attribute buffer is rebuilt whenever the resolution lever
         // moves, so its CPU cost is a real (one-off) hitch the app pays.
         let build_start = Instant::now();
-        let attributes = voxel_rt::cagi::build_cell_attributes(brickmap, &grid);
+        let attributes = voxel_rt::cagi::build_cell_attributes(
+            brickmap,
+            &grid,
+            &voxel_rt::cagi::MaterialAttributes::compiled(),
+        );
         let build_time = build_start.elapsed();
         let absorbing_cells = attributes
             .iter()
@@ -1118,7 +1136,11 @@ fn report_cagi_cpu_cross_check(
         let volume_after = read_back_volume(device, queue, &resources.light_volume);
 
         let grid = resources.light_volume.grid();
-        let attributes = voxel_rt::cagi::build_cell_attributes(brickmap, &grid);
+        let attributes = voxel_rt::cagi::build_cell_attributes(
+            brickmap,
+            &grid,
+            &voxel_rt::cagi::MaterialAttributes::compiled(),
+        );
         let sky_light = voxel_rt::cagi::quantize_radiance(scenario_sky_radiance());
         let mut checked = 0_u64;
         let mut mismatches = 0_u64;
@@ -1652,6 +1674,7 @@ fn run_edit_storm(
                     voxel,
                     material,
                     light_grid,
+                    material_attributes: voxel_rt::cagi::MaterialAttributes::compiled(),
                 },
                 &quality.world_edit,
             );
@@ -2217,6 +2240,7 @@ fn report_edit_reflood(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Br
                 voxel: *voxel,
                 material: *material,
                 light_grid: Some(light_grid),
+                material_attributes: voxel_rt::cagi::MaterialAttributes::compiled(),
             },
             &quality.world_edit,
         );
@@ -2332,6 +2356,7 @@ fn report_pool_carve(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Bric
         BulkEditRequest {
             shape: Box::new(pool),
             light_grid,
+            material_attributes: voxel_rt::cagi::MaterialAttributes::compiled(),
         },
         &quality.world_edit,
     );
@@ -2500,7 +2525,12 @@ fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
     println!();
     println!("== E2 memory ==");
     let world_bindings = WorldBindings::new(device, brickmap);
-    let light_volume = LightVolume::new(device, brickmap, &CagiSettings::default());
+    let light_volume = LightVolume::new(
+        device,
+        brickmap,
+        &CagiSettings::default(),
+        &voxel_rt::material::MATERIALS,
+    );
     let headroom_bytes = (brickmap.brick_capacity() - brickmap.occupied_brick_count()) as usize
         * (OCCUPANCY_WORDS_PER_BRICK + MATERIAL_WORDS_PER_BRICK)
         * 4;
@@ -2615,8 +2645,8 @@ fn build_scenarios(capture_prefixes: &[char]) -> Vec<Scenario> {
 
     let default_sun = SunSettings::default();
     let low_sun = SunSettings {
-        azimuth_degrees: default_sun.azimuth_degrees,
         elevation_degrees: 5.0,
+        ..default_sun
     };
 
     let scenarios = vec![
@@ -2873,7 +2903,12 @@ impl VariantResources {
         variant: &Variant,
         output_view: &wgpu::TextureView,
     ) -> VariantResources {
-        let light_volume = LightVolume::new(device, brickmap, &variant.quality.global_illumination);
+        let light_volume = LightVolume::new(
+            device,
+            brickmap,
+            &variant.quality.global_illumination,
+            &voxel_rt::material::MATERIALS,
+        );
         VariantResources {
             cagi_pass: CagiPass::new_with_shader_source(
                 device,

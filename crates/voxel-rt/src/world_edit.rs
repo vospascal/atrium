@@ -14,7 +14,7 @@
 //! synchronization that avoiding the copy would need.
 
 use crate::brickmap::{Brickmap, BrickmapArray, BrickmapEdit, ClearanceUpdate};
-use crate::cagi::{cell_attribute, CagiGrid};
+use crate::cagi::{cell_attribute, CagiGrid, MaterialAttributes};
 
 /// How a removal that empties a brick repairs the chebyshev clearance field —
 /// the registry-facing mirror of [`ClearanceUpdate`] (which carries the radius
@@ -97,6 +97,15 @@ pub struct VoxelEdit {
     pub voxel: [i32; 3],
     pub material: voxel_core::world::Voxel,
     pub light_grid: Option<CagiGrid>,
+    /// The material table's CAGI attributes, so an edit's light-cell update describes
+    /// the LIVE table rather than the compiled one (S2).
+    ///
+    /// The reduced 104-byte `Copy` form rather than the rows themselves, precisely so
+    /// it can ride in this struct across the thread boundary — see
+    /// [`crate::cagi::MaterialAttributes`]. Every edit already carries `light_grid` for
+    /// the same reason: the world thread cannot reach the renderer's state, so anything
+    /// it needs travels with the request.
+    pub material_attributes: MaterialAttributes,
 }
 
 /// A run of voxels along Y in one column, inclusive at both ends — the unit a
@@ -138,6 +147,8 @@ pub trait BulkEdit: Send {
 pub struct BulkEditRequest {
     pub shape: Box<dyn BulkEdit>,
     pub light_grid: Option<CagiGrid>,
+    /// See [`VoxelEdit::material_attributes`] — same reason, same 104 bytes.
+    pub material_attributes: MaterialAttributes,
 }
 
 /// A contiguous word payload for one of the brickmap's GPU buffers.
@@ -295,7 +306,13 @@ pub fn apply_bulk(
         }
     }
     let (voxel, material) = first_written?;
-    let light_cells = light_cells_in_voxel_box(brickmap, request.light_grid, lowest, highest);
+    let light_cells = light_cells_in_voxel_box(
+        brickmap,
+        request.light_grid,
+        lowest,
+        highest,
+        &request.material_attributes,
+    );
     let apply_micros = started.elapsed().as_secs_f32() * 1e6;
     let writes = crate::brickmap::coalesce_dirty_words(dirty)
         .into_iter()
@@ -342,7 +359,10 @@ fn light_cell_updates(
     if (0..3).any(|axis| cell[axis] >= grid.size[axis]) {
         return Vec::new(); // above the volume's clamped height: nothing to update
     }
-    vec![(grid.cell_index(cell), cell_attribute(brickmap, &grid, cell))]
+    vec![(
+        grid.cell_index(cell),
+        cell_attribute(brickmap, &grid, cell, &edit.material_attributes),
+    )]
 }
 
 /// Every CAGI cell overlapping an inclusive voxel box, with its attribute
@@ -358,6 +378,7 @@ fn light_cells_in_voxel_box(
     light_grid: Option<CagiGrid>,
     lowest_voxel: [i32; 3],
     highest_voxel: [i32; 3],
+    attribute_table: &MaterialAttributes,
 ) -> Vec<(usize, u32)> {
     let Some(grid) = light_grid else {
         return Vec::new();
@@ -374,7 +395,10 @@ fn light_cells_in_voxel_box(
         for y in cell_bounds[1].0..cell_bounds[1].1 {
             for x in cell_bounds[0].0..cell_bounds[0].1 {
                 let cell = [x, y, z];
-                cells.push((grid.cell_index(cell), cell_attribute(brickmap, &grid, cell)));
+                cells.push((
+                    grid.cell_index(cell),
+                    cell_attribute(brickmap, &grid, cell, attribute_table),
+                ));
             }
         }
     }
@@ -430,6 +454,7 @@ mod tests {
                 voxel: [500, surface_y, 500],
                 material: Voxel::Air,
                 light_grid: Some(grid),
+                material_attributes: MaterialAttributes::compiled(),
             },
             &settings,
         )
@@ -460,6 +485,7 @@ mod tests {
                 voxel: [500, surface_y, 500],
                 material: Voxel::Air,
                 light_grid: Some(grid),
+                material_attributes: MaterialAttributes::compiled(),
             },
             &settings,
         )
@@ -472,6 +498,7 @@ mod tests {
                 voxel: [200, 250, 200],
                 material: Voxel::Stone,
                 light_grid: Some(grid),
+                material_attributes: MaterialAttributes::compiled(),
             },
             &settings,
         )
@@ -501,6 +528,7 @@ mod tests {
                     voxel: [500 + offset, surface_y, 500],
                     material: Voxel::Air,
                     light_grid: Some(grid),
+                    material_attributes: MaterialAttributes::compiled(),
                 },
                 &settings,
             ) {
@@ -508,7 +536,8 @@ mod tests {
             }
         }
         assert!(!deltas.is_empty());
-        let rebuilt = crate::cagi::build_cell_attributes(&brickmap, &grid);
+        let rebuilt =
+            crate::cagi::build_cell_attributes(&brickmap, &grid, &MaterialAttributes::compiled());
         for (cell_index, attribute) in deltas {
             assert_eq!(
                 attribute, rebuilt[cell_index],

@@ -384,6 +384,7 @@ mod tests {
             &BulkEditRequest {
                 shape: Box::new(pool),
                 light_grid: None,
+                material_attributes: crate::cagi::MaterialAttributes::compiled(),
             },
             &WorldEditSettings::default(),
         )
@@ -452,6 +453,7 @@ mod tests {
             &BulkEditRequest {
                 shape: Box::new(blob),
                 light_grid: None,
+                material_attributes: crate::cagi::MaterialAttributes::compiled(),
             },
             &WorldEditSettings::default(),
         )
@@ -471,6 +473,7 @@ mod tests {
                 &BulkEditRequest {
                     shape: Box::new(blob),
                     light_grid: None,
+                    material_attributes: crate::cagi::MaterialAttributes::compiled(),
                 },
                 &WorldEditSettings::default(),
             )
@@ -610,6 +613,7 @@ mod tests {
                         centre_voxel_z: 560,
                     }),
                     light_grid: None,
+                    material_attributes: crate::cagi::MaterialAttributes::compiled(),
                 },
                 &WorldEditSettings::default(),
             )

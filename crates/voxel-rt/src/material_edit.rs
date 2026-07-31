@@ -38,8 +38,8 @@ use crate::material::{Material, MaterialKind, MATERIALS};
 use crate::material_table::MaterialTable;
 use crate::material_tune::{ProvenanceTable, VoxSource};
 use crate::pattern::{
-    PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternTarget, MAX_NOISE_OCTAVES,
-    MAX_PATTERN_LAYERS, NO_PATTERNS, TEXEL_RUNGS,
+    PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternTarget,
+    MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES, MAX_PATTERN_LAYERS, NO_PATTERNS, TEXEL_RUNGS,
 };
 use crate::studio::StudioPose;
 use crate::vox_material::VoxImportRow;
@@ -690,13 +690,14 @@ fn draw_emission(ui: &mut egui::Ui, row: &mut Material) {
     match &mut row.emission {
         Some(emission) => {
             ui.label("emission (linear, may exceed 1)").on_hover_text(
-                "Emitted radiance. In the re-pack tier AND indirect: CAGI stores a \
-                 3-bit emitter INDEX per cell and looks the radiance up in a palette \
-                 built from this table, so a change here needs the attribute re-pack \
-                 to reach the light volume. Note the scale cannot mean anything \
-                 physical until an HDR intermediate exists — today a bright emitter \
-                 clips to flat white, so raising this makes a light flatter, not \
-                 brighter.",
+                "Emitted radiance. CAGI stores a 3-bit emitter INDEX per cell and looks \
+                 the radiance up in a palette built from this table — and since S2 that \
+                 palette is re-uploaded from the LIVE table, so dragging this changes \
+                 the light the volume injects without any re-pack. Only a row becoming \
+                 emissive for the first time needs the re-pack, to tell the CELLS they \
+                 hold an emitter. Note the scale cannot mean anything physical until an \
+                 HDR intermediate exists — today a bright emitter clips to flat white, \
+                 so raising this makes a light flatter, not brighter.",
             );
             draw_channel_triple(ui, "emit", emission, 0.0..=16.0);
         }
@@ -919,6 +920,27 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
                 }
             });
 
+        // Per-face variation, offered only where it does anything. The world frame must
+        // not have it (it would destroy the continuity that frame exists for) and the
+        // voxel frame does not need it, so showing a dead checkbox there would be the
+        // silently-does-nothing control this panel is built to avoid.
+        if layer.frame == PatternFrame::Face {
+            ui.checkbox(&mut layer.vary_per_face, "vary per face")
+                .on_hover_text(
+                    "Gives every face its own draw of the pattern. ON by default: the \
+                     face frame is voxel-local, so without it the IDENTICAL pattern is \
+                     drawn on every face in the world, which reads as a repeat rather \
+                     than as detail.\n\n\
+                     It re-rolls the random draw and moves nothing — a hash salt per \
+                     (voxel, face), not a coordinate offset — so the texel grid stays \
+                     aligned to the face and a positional effect keeps its relationship \
+                     to the edge it sits on. It does NOT have to be seamless across \
+                     faces; that is the world frame's job.\n\n\
+                     Turn it off for a deliberate motif: the classic voxel look where \
+                     every face of a block type is identical.",
+                );
+        }
+
         // The texel grid, right under the frame: the two together are "where does this
         // pattern live", and the period below is "how big are its features".
         ui.horizontal(|ui| {
@@ -999,11 +1021,49 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
 
         // Only shown when the blend reads it.
         if layer.blend.uses_target_color() {
-            ui.horizontal(|ui| {
-                if layer.target.is_color() {
+            // Emission is RADIANCE, not a colour, and it is allowed above 1.0 — a source
+            // may be brighter than any surface can reflect. An `egui` colour picker
+            // clamps to 0..1, which capped a patterned emitter at a third the brightness
+            // of the dimmest authored one and made it look like the feature did not work
+            // (Pascal, 2026-07-31: *"we can also not controll emition amount like real
+            // radiate"*). So the emission target gets the same three 0..16 drags the
+            // row's own emission field uses.
+            if layer.target == PatternTarget::Emission {
+                // The picker for the HUE, a slider for the BRIGHTNESS. Emission is
+                // radiance and belongs above 1.0, but a picker clamps to 0..1 — and
+                // replacing the picker with three raw channels was the wrong trade,
+                // because picking a colour is exactly what a picker is good at. Two
+                // controls, and the row stores their product.
+                ui.horizontal(|ui| {
+                    ui.color_edit_button_rgb(&mut layer.target_color);
+                    ui.label("glow colour").on_hover_text(
+                        "The HUE of the light, 0..1 as usual. Multiplied by the intensity \
+                         below to give the radiance actually emitted — so pick the colour \
+                         here and set how bright it burns there.",
+                    );
+                });
+                ui.add(
+                    egui::Slider::new(&mut layer.emission_intensity, 0.0..=MAX_EMISSION_INTENSITY)
+                        .text("glow intensity")
+                        .max_decimals(2),
+                )
+                .on_hover_text(
+                    "Linear radiance multiplier on the colour above. Above 1.0 is normal \
+                     for a source — a light may be brighter than any surface can reflect, \
+                     and `glow_block` authors 3.0. This is also what the GI volume sees: \
+                     the mean of colour x intensity x the pattern is what gets \
+                     injected.\n\n\
+                     Note there is no HDR intermediate yet, so past roughly 3-4 the \
+                     surface itself clips to flat white and only the light it CASTS keeps \
+                     growing. Turn the sun down (Sun > sun intensity) to see that happen.",
+                );
+            } else if layer.target.is_color() {
+                ui.horizontal(|ui| {
                     ui.color_edit_button_rgb(&mut layer.target_color);
                     ui.label("target colour");
-                } else {
+                });
+            } else {
+                ui.horizontal(|ui| {
                     ui.add(
                         egui::DragValue::new(&mut layer.target_color[0])
                             .speed(0.005)
@@ -1014,8 +1074,8 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
                         "A scalar target reads only the first channel, which is why \
                          this is one number rather than a colour picker.",
                     );
-                }
-            });
+                });
+            }
         }
 
         ui.add(
@@ -1115,8 +1175,10 @@ fn frame_hint(frame: PatternFrame) -> &'static str {
              per-voxel motifs — tone jitter being the point."
         }
         PatternFrame::Face => {
-            "Voxel-local within the hit face, so the pattern is ABOUT the face: wear \
-             toward an edge, a drip down a side. A period of 0.125 spans one face."
+            "Voxel-local within the hit face, so the pattern is ABOUT the face: a \
+             period of 0.125 spans exactly one face. Leave `vary per face` on unless \
+             you want a deliberate motif — without it every face in the world draws the \
+             identical pattern."
         }
     }
 }
@@ -1133,8 +1195,19 @@ fn target_hint(target: PatternTarget) -> &'static str {
              expecting to see it is not."
         }
         PatternTarget::Emission => {
-            "Patterned glow: embers in rock, a rune in a wall. Only does anything on a \
-             row that emits — on a non-emitter it modulates zero."
+            "Patterned glow: embers in rock, emissive specks in stone, a rune in a \
+             wall. Works on a NON-emitting row too, as long as the blend is `add` — \
+             multiply and mix have nothing to scale, since the row's own emission is \
+             zero.\n\n\
+             It DOES cast light. A row with an emission layer counts as an emitter, so \
+             it claims one of CAGI's seven palette slots, and what it injects is the \
+             MEAN of the pattern over the surface. That is not a compromise: the light \
+             reaching somewhere else from a speckled surface IS its average emission, \
+             and the volume works in half-metre cells that could never carry per-texel \
+             structure. Detail for the eye, mean for the room.\n\n\
+             The brightness reaches the volume as you drag, but which CELLS are \
+             emitters does not — that lives in the attribute volume, so a row becoming \
+             emissive for the FIRST time needs one `re-pack GI attributes` below."
         }
     }
 }
@@ -1192,11 +1265,15 @@ fn draw_tier_controls(
     if ui
         .button("re-pack GI attributes")
         .on_hover_text(
-            "CAGI bakes albedo, a quantised transmittance and the emitter slot into \
-             its own cell-attribute volume, and its shaders never read the material \
-             table — so those three fields are live in direct shading and STALE in \
-             the GI bounce until this runs. A ~50 ms rebuild, so it goes to the world \
-             thread rather than into a frame.",
+            "CAGI bakes albedo, a quantised transmittance and the emitter slot into its \
+             own cell-attribute volume, and its shaders never read the material table — \
+             so those three fields are live in direct shading and STALE in the GI bounce \
+             until this runs. A ~50 ms rebuild, so it goes to the world thread rather \
+             than into a frame.\n\n\
+             This genuinely works as of S2. Until then the rebuild read the COMPILED \
+             table, so it recomputed the attributes it already had and a material edit \
+             could never reach the bounce at all — the button was a no-op for exactly \
+             the case it was added for.",
         )
         .clicked()
     {
