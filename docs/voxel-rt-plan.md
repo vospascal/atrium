@@ -14,7 +14,10 @@ Reference docs: `xima-engine-dossier.md` (what xima's engine does, evidence-tier
 · `voxel-rt-technique-bank.md` (Shadertoy/IQ cheap-beauty techniques, tagged by
 experiment slot) · `voxel-rt-bench.md` (harness protocol, baselines, verdicts)
 · `voxel-rt-optimization-ledger.md` (the scoreboard: every optimization idea
-with used / lever / open / dead status and the number that decided it).
+with used / lever / open / dead status and the number that decided it)
+· `voxel-rt-research-dossier.md` (published papers and released engines, R-numbers,
+each triaged to a verdict + ledger row — batch 1 landed the NAADF work and Pascal's
+coarse-probe finding).
 
 **Targets (the three axes every gate scores): FAST (desktop: full stack ≤ ~8 ms
 @ 2560×1440; Quest tier reachable via levers), LOW-MEMORY (world + light budgets
@@ -538,6 +541,19 @@ buffers both passes bind.
 - **Convergence: 32 frames (0.53 s) to bit-exact, 16 frames (0.27 s) to max delta 1**
   after a cold start or a sun change; the sun sliders re-flood every frame of the
   drag.
+- **Open observation, logged 2026-07-31 (ledger 7.11) — NOT fixed, not in scope
+  here.** Those figures are in *frames*, and the CA runs N iterations per frame, so
+  **light propagation speed is a function of frame rate**: 1.07 s at 30 fps, 0.53 s
+  at 60, 0.44 s at 72 Hz, 0.36 s at 90, 0.27 s at 120. A preset switch or the Quest
+  port silently changes the physics rate. E5 records Pascal running the current lag
+  and not being bothered, so this is not urgent for GI — it becomes urgent where a
+  rate reads as a **speed** (B6 falling sand would fall faster on a faster machine)
+  and it is the same class of bug E10's Quest risk note already found for the
+  reflection history (*"a 10-frame window at 72 Hz is 140 ms"*). Fix shape: an
+  iteration/alpha budget driven by elapsed time rather than frame count — which
+  touches E5's parked per-region budget and E10c's history alpha, so all three want
+  designing together. Surfaced while pricing a fixed-timestep article (dossier R9)
+  whose actual method was already dead by E2's 4.9 ms deep-copy number.
 - **Correctness: the CPU cross-check predicts every propagating cell of all three
   rules with zero mismatches, a re-flood reproduces the volume bit for bit, no
   absorber holds light, no channel saturates.** Noiseless is an integer identity
@@ -605,6 +621,59 @@ flood must be regional — E4's global re-flood takes 32 frames, which is fine f
 sun slider and not for a placed lamp.
 **Gate:** place a lantern → warm light bleeds around corners, zero noise;
 edit→light latency number.
+
+### E4b — Ray-fed CAGI: trace the indirect rays at PROBE resolution ⬜ **PROPOSED, NOT APPROVED** (Pascal's own finding, 2026-07-31)
+From the research dossier's **R2** — Pascal's result from his earlier RT-GI
+experiments: *"as soon as you add indirect bounces … you can't really cheat at
+some point and need more samples … what works relatively well is to use a much
+coarser probe resolution for indirect rays only, so you can increase the sample
+count without nuking your performance … allowing you to reach equilibrium faster
+since it's essentially less entropy."* Ledger row **2.19**.
+
+E4 made half this bet already, from the other direction — it went to a coarse
+volume because a per-pixel gather was priced out (2.25–3.55 ms *per marginal
+ray*). The untested half is that coarse resolution makes **many** rays affordable.
+Priced on E1's own ladder: E4's **181,928 propagating cells cost ~0.11–0.18 ms per
+ray, so 8–12 rays fit in ~1.4 ms** — inside the slot CAGI already occupies
+(1.4–2.0 ms all-in at Balanced).
+
+- **Scope is deliberately small: keep E4's storage, ping-pong, vertical clamp,
+  incremental attributes (4.7d), emitter index (E5) and trilinear solid-tap
+  sampling (2.13e); swap ONLY the update rule.** Traced directions instead of, or
+  alongside, the 6-neighbour integer diffusion. No new buffer, no frame-graph
+  change, no G-buffer dependency — which is why this does not need to be
+  sequenced before E3, unlike a world-data change.
+- **Two consumers already waiting.** (1) **E1d's shipped catch** — directional miss
+  radiance made ambient Monte Carlo, so E1's 2-ray crosshatch now lands in ambient
+  *colour*, and the recorded fix was *"4 rays would cost ≈ +6.8 ms"* at full res.
+  Probe-rate sampling is the affordable form of that. (2) **E10c's 1-spp lobe
+  noise**, where this is the other axis from the temporal history and the two
+  compose.
+- **Attacks all three of E4's *structural* compromises**, not its tunable ones:
+  12.8 m transport reach (which is why 25% of the E1c hemisphere ambient stays as
+  a readability floor), anisotropy (2.13b's 2.7× lever exists precisely because
+  diffusion cannot fix it), and *"directional detail intentionally absent — rays
+  own it"*. This is rays.
+- **The decision the A/B must force, stated up front:** jittered directions destroy
+  E4's integer identity (`propagate_reference`: 0 mismatches over 181,928 cells,
+  bit-identical re-floods). **Measure the fixed deterministic 8-cone set first** —
+  banding instead of noise, determinism kept, and `propagate_reference` still
+  applies. The jittered variant is now merely a decision rather than a non-goal
+  violation (the 2026-07-31 amendment), but it would extend temporal accumulation
+  from E10's reflection buffer into the light volume, which is a bigger change
+  than E10 signed up for and should be its own approval.
+- **Complement to B13's parked face cache, not a rival:** the face cache amortizes
+  over surfaces (N², face space, exact integer edge-stopping, needs E10a); this
+  amortizes over a coarse volume that already exists and needs nothing new. E4b is
+  the one buildable today.
+- **Variants to bench:** rule = diffusion (shipped) / traced / traced+diffusion
+  hybrid; 1 / 4 / 8 / 12 fixed cones; round-robin cell subsets vs every active
+  cell per frame; against E4's recorded per-scenario CA times and the
+  `propagate_reference` cross-check.
+
+**Gate (proposed):** does shaded indirect light gain reach and directionality that
+diffusion cannot produce, at ≤ E4's current CA cost — and does the deterministic
+variant still pass the CPU cross-check bit for bit?
 
 ### E6 — Water: reflections + refraction 🔶 (implemented 2026-07-31, PULLED AHEAD of E5; **look gate FAILED, steps 1-3 landed**; being taken one step at a time at Pascal's request)
 

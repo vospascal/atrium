@@ -24,11 +24,17 @@ use voxel_rt::debug_pool::{WaterBlob, WaterPool};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::lighting::SunSettings;
+use voxel_rt::material;
+use voxel_rt::material_edit::{MaterialPanelState, VoxImportState};
+use voxel_rt::material_table::MaterialTable;
+use voxel_rt::material_tune::ProvenanceTable;
 use voxel_rt::overlay::{MovementReadout, Overlay, OverlayFrameData, WorldEditReadout};
 use voxel_rt::passes::cagi::AttributeSource;
 use voxel_rt::passes::{cagi, dda};
 use voxel_rt::render::Renderer;
+use voxel_rt::studio;
 use voxel_rt::variants::{QualityPreset, RenderQuality, QUALITY_PRESETS};
+use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
 use voxel_rt::world_edit::{BulkEdit, BulkEditRequest, VoxelEdit};
@@ -54,6 +60,20 @@ const EDIT_REACH_METERS: f32 = 24.0;
 /// what the pipeline's COST depends on).
 const EDIT_REPEAT_HZ: f32 = 8.0;
 
+/// S0 — how close and how far the studio orbit can get.
+///
+/// The floor is two voxels off the sample centre, so the eye never ends up inside
+/// the subject; the ceiling still shows the whole plate and no more, because past
+/// that the sample is a few pixels and there is nothing left to judge.
+const STUDIO_MIN_DISTANCE_METERS: f32 = 0.25;
+const STUDIO_MAX_DISTANCE_METERS: f32 = 8.0;
+
+/// S0 — how far the studio orbit can tip. Just short of straight down and straight
+/// up: at exactly +/-90 degrees the forward vector is parallel to world up and the
+/// `forward x Y` basis is degenerate, which would collapse the frame.
+const STUDIO_MIN_PITCH_RADIANS: f32 = -1.5;
+const STUDIO_MAX_PITCH_RADIANS: f32 = 1.5;
+
 /// What a right click places — the default building block.
 const PLACE_MATERIAL: Voxel = Voxel::Stone;
 
@@ -77,6 +97,35 @@ const WALK_GROUND_SEARCH_METERS: f32 = 64.0;
 enum ControlMode {
     Fly,
     Walk,
+    /// S0 — the material studio's orbit camera: yaw/pitch turn the SUBJECT rather
+    /// than the eye, and the wheel pulls in and out.
+    ///
+    /// A third mode rather than a re-pointed fly camera because the two want
+    /// opposite things. A fly camera keeps its position and rotates its view, which
+    /// at the studio's 0.9 m working distance swings a 0.125 m voxel straight out of
+    /// frame; the studio has to keep the subject centred while you turn it. Reuses
+    /// the fly camera's yaw/pitch (mouse-look is identical) and derives the position
+    /// from them, so there is no second look-input path.
+    StudioOrbit,
+}
+
+impl ControlMode {
+    /// Whether this mode may change the world (Pascal, 2026-07-31: *"disable
+    /// removing editing for now in the studio"*).
+    ///
+    /// A property of the MODE rather than of the app, so it is a pure function that
+    /// can be pinned by a test — and so the answer lives next to the enum a future
+    /// mode would be added to, instead of in a method on a struct that needs a GPU
+    /// device to exist.
+    ///
+    /// The studio's scene is composed, not dug: its whole value is that the thing in
+    /// frame is *known* — one voxel of a known material on a known plate. A click
+    /// that digs the sample away or buries it under stone destroys the only subject
+    /// there is, and mouse-look shares the same button hand, so it is one mis-click
+    /// away at all times.
+    fn allows_world_edits(self) -> bool {
+        !matches!(self, ControlMode::StudioOrbit)
+    }
 }
 
 /// A body whose head is where the fly camera's eye is, looking the same way and
@@ -175,23 +224,62 @@ struct AppState {
     /// the window — this makes that pairing visible.
     fps_log_timer: Instant,
     fps_log_frame_count: u32,
+    /// S0 — the LIVE material rows. Edited by the panel, uploaded once per frame in
+    /// which anything changed; starts as the compiled table, which is what
+    /// `WorldBindings::new` already sent.
+    material_table: MaterialTable,
+    /// S0 — what the material panel has selected and asked for.
+    material_panel: MaterialPanelState,
+    /// S0 — what the studio is showing. Only meaningful in
+    /// [`ControlMode::StudioOrbit`], but held unconditionally so the orbit target is
+    /// available without an `Option` dance.
+    studio_scene: studio::StudioScene,
+    /// S0 — the studio orbit radius, world meters (wheel-tuned).
+    studio_distance_meters: f32,
+    /// S0b — the last loaded `.vox`, kept for its GEOMETRY. The panel works off the
+    /// palette side; this is what \`Show model in studio\` builds a subject from.
+    loaded_vox: Option<voxel_core::vox::VoxFile>,
+    /// S0b — which rows came from a `.vox` and what they looked like when they
+    /// arrived, so a re-import can refresh the file's values without discarding
+    /// hand tuning.
+    material_provenance: ProvenanceTable,
 }
 
 impl AppState {
     fn new(event_loop: &ActiveEventLoop) -> Self {
-        let world_start = Instant::now();
-        let world = VoxelWorld::generate(WORLD_SEED, WORLD_SEASON);
-        println!(
-            "world generated in {:.2?} (seed {WORLD_SEED}, season {WORLD_SEASON})",
-            world_start.elapsed()
-        );
-        let brickmap_start = Instant::now();
-        let brickmap = Brickmap::build(&world);
-        println!(
-            "brickmap built in {:.2?} ({} occupied bricks)",
-            brickmap_start.elapsed(),
-            brickmap.occupied_brick_count()
-        );
+        // S0 — `--studio` swaps the generated island for the material studio: one
+        // voxel on a plate, orbit camera. Excludable by construction (the plan's
+        // isolation rule): the island path is not merely skipped, no world is
+        // generated at all, which is also why the studio starts instantly.
+        let studio_mode = std::env::args().any(|argument| argument == "--studio");
+        let studio_scene = studio::StudioScene::default();
+        let brickmap = if studio_mode {
+            let brickmap_start = Instant::now();
+            let brickmap = studio_scene.build();
+            println!(
+                "material studio: {:?} on {:?}, built in {:.2?} ({} occupied bricks)",
+                studio_scene.sample,
+                studio_scene.plate,
+                brickmap_start.elapsed(),
+                brickmap.occupied_brick_count()
+            );
+            brickmap
+        } else {
+            let world_start = Instant::now();
+            let world = VoxelWorld::generate(WORLD_SEED, WORLD_SEASON);
+            println!(
+                "world generated in {:.2?} (seed {WORLD_SEED}, season {WORLD_SEASON})",
+                world_start.elapsed()
+            );
+            let brickmap_start = Instant::now();
+            let brickmap = Brickmap::build(&world);
+            println!(
+                "brickmap built in {:.2?} ({} occupied bricks)",
+                brickmap_start.elapsed(),
+                brickmap.occupied_brick_count()
+            );
+            brickmap
+        };
 
         let window_attributes = Window::default_attributes()
             .with_title("voxel-rt")
@@ -276,7 +364,11 @@ impl AppState {
             frame_timers,
             fly_camera: FlyCamera::default(),
             character: character_from_fly_camera(&FlyCamera::default()),
-            control_mode: ControlMode::Fly,
+            control_mode: if studio_mode {
+                ControlMode::StudioOrbit
+            } else {
+                ControlMode::Fly
+            },
             character_step_micros: 0.0,
             sun_settings: SunSettings::default(),
             flooded_sun_settings: SunSettings::default(),
@@ -288,6 +380,18 @@ impl AppState {
             previous_frame_time: Instant::now(),
             fps_log_timer: Instant::now(),
             fps_log_frame_count: 0,
+            // Selecting the sample's own row means the panel opens on the thing the
+            // camera is pointed at, which is the only row worth defaulting to.
+            material_panel: MaterialPanelState {
+                selected: material::material_id(studio_scene.sample),
+                import: VoxImportState::new(),
+                ..MaterialPanelState::default()
+            },
+            material_table: MaterialTable::default(),
+            studio_scene,
+            studio_distance_meters: studio::CAMERA_DISTANCE_METERS,
+            loaded_vox: None,
+            material_provenance: ProvenanceTable::default(),
         }
     }
 
@@ -397,7 +501,30 @@ impl AppState {
                 self.control_mode = ControlMode::Fly;
                 println!("fly mode: eye at {:.2?}", self.fly_camera.position);
             }
+            // The studio is a mode you LAUNCH into (`--studio`), not one you walk
+            // out of: there is one voxel on a plate and nothing to walk to, and
+            // handing the body a 3 m plate floating at world centre would be a
+            // pointless way to fall off it. Left as an explicit no-op rather than
+            // silently falling through, so the intent is readable.
+            ControlMode::StudioOrbit => {
+                println!("studio orbit: movement modes are disabled (restart without --studio)");
+            }
         }
+    }
+
+    /// Whether edits may change the world right now — [`ControlMode::allows_world_edits`]
+    /// for the active mode.
+    ///
+    /// ONE predicate that every edit entry point consults, rather than a guard bolted
+    /// onto each, for the same reason the edit path has one notion of emptiness: the
+    /// studio grows more poses in later stages (S2's wall and cube), and every one of
+    /// them wants this answer without anybody remembering to add another branch.
+    ///
+    /// Deliberately does NOT disable the eyedropper: picking a material reads the
+    /// world instead of writing it, and it is the fastest way to select the plate's
+    /// row. That distinction is why this gates the *edit*, not the *click*.
+    fn world_edits_allowed(&self) -> bool {
+        self.control_mode.allows_world_edits()
     }
 
     /// The eye pose the active movement model produces — what the frame's rays,
@@ -406,6 +533,12 @@ impl AppState {
         match self.control_mode {
             ControlMode::Fly => self.fly_camera.pose(),
             ControlMode::Walk => self.character.pose(),
+            ControlMode::StudioOrbit => studio::orbit_pose(
+                &self.studio_scene,
+                self.fly_camera.yaw,
+                self.fly_camera.pitch,
+                self.studio_distance_meters,
+            ),
         }
     }
 
@@ -435,6 +568,25 @@ impl AppState {
         let Some(hit) = hit else {
             return;
         };
+        // S0 — the eyedropper, which costs almost nothing because the cast above
+        // already carries the hit voxel's material byte. Consumes the click: while
+        // armed, picking a material is what a click MEANS, so it must not also dig a
+        // hole in the thing you were trying to inspect. One-shot, so the next click
+        // is an ordinary edit again.
+        if std::mem::take(&mut self.material_panel.eyedropper_armed) {
+            self.material_panel.selected = hit.material;
+            let name = self
+                .material_table
+                .row(hit.material)
+                .map_or("<none>", |row| row.name);
+            println!("eyedropper: material {} ({name})", hit.material);
+            return;
+        }
+        // Checked AFTER the eyedropper on purpose: a pick is a read, and it is the
+        // one click the studio still wants.
+        if !self.world_edits_allowed() {
+            return;
+        }
         let (voxel, material) = if let Some(placed_material) = placed_material {
             if hit.face_normal == [0, 0, 0] {
                 return; // the eye is inside geometry: there is no face to build on
@@ -458,6 +610,151 @@ impl AppState {
         );
     }
 
+    /// S0 — push the frame's material edits to the GPU, and service a requested
+    /// CAGI re-pack.
+    ///
+    /// Runs AFTER the overlay pass, because that is where the panel mutated the
+    /// table: an edit therefore shows up in the next frame, which is imperceptible
+    /// on a slider drag and is the same one-frame latency the sun and quality knobs
+    /// already have.
+    ///
+    /// The two tiers the panel advertises are both honoured here:
+    ///
+    /// * the material table itself is 2080 bytes and goes straight out, gated by
+    ///   [`MaterialTable::take_dirty`] so an idle panel costs nothing;
+    /// * CAGI's baked cell attributes are a ~50 ms rebuild, so a re-pack is handed
+    ///   to the world thread through the SAME seam an edit's light attributes use
+    ///   and lands via `WorldUpdate::LightAttributes`. Never automatic on a slider
+    ///   tick — that would be a hitch per pixel of mouse travel.
+    fn upload_material_edits(&mut self) {
+        if let Some(rows) = self.material_table.take_dirty() {
+            self.renderer
+                .write_material_table(&self.gpu_context.queue, &rows);
+        }
+        if std::mem::take(&mut self.material_panel.repack_gi_requested)
+            && self.quality.global_illumination.enabled
+        {
+            self.world_host
+                .request_light_attributes(self.renderer.light_volume_grid());
+        }
+        if std::mem::take(&mut self.material_panel.import.load_requested) {
+            self.load_vox_palette();
+        }
+        if std::mem::take(&mut self.material_panel.import.show_in_studio_requested) {
+            self.show_vox_model_in_studio();
+        }
+    }
+
+    /// S0b — rebuild the studio around a loaded `.vox` model.
+    ///
+    /// Only in the studio: the island is a generated world and dropping a campfire
+    /// into the middle of it is a placement feature, not a material one.
+    ///
+    /// Replaces the whole world rather than editing the existing one. That is the
+    /// honest shape of the operation — the subject changed, so every derived
+    /// structure changes — and it reuses `WorldHost::new` plus
+    /// [`Renderer::reupload_world`], the path that already exists for an edit
+    /// outgrowing the brick headroom. A full ~41 MB re-upload is fine for something
+    /// a human triggers by pressing a button.
+    fn show_vox_model_in_studio(&mut self) {
+        if self.control_mode != ControlMode::StudioOrbit {
+            self.material_panel.import.status =
+                "showing a model needs the studio — restart with --studio".to_string();
+            return;
+        }
+        let Some(file) = &self.loaded_vox else {
+            self.material_panel.import.status = "nothing loaded".to_string();
+            return;
+        };
+        let index = self
+            .material_panel
+            .import
+            .selected_model
+            .min(file.models.len().saturating_sub(1));
+        let Some(model) = file.models.get(index) else {
+            self.material_panel.import.status = "that file has no models".to_string();
+            return;
+        };
+        let subject = vox_material::VoxSubject::from_model(
+            model,
+            &file.palette,
+            &self.material_panel.import.rows,
+        );
+        let occupied = subject.occupied_count();
+        let dimensions = (subject.size_x, subject.size_y, subject.size_z);
+
+        self.studio_scene.subject = Some(subject);
+        let brickmap = self.studio_scene.build();
+        let bricks = brickmap.occupied_brick_count();
+        self.world_host = WorldHost::new(brickmap);
+        self.world_host
+            .set_world_thread(self.quality.world_edit.world_thread);
+        {
+            let brickmap = self.world_host.read();
+            self.renderer
+                .reupload_world(&self.gpu_context.device, &brickmap);
+        }
+        // The light volume was flooded for the old geometry; every injected value
+        // and every pinned sun-source flag now describes a world that is gone.
+        self.renderer.mark_light_volume_dirty();
+        // Re-frame: a 20-voxel model at a 0.9 m working distance is a wall of
+        // pixels, and scrolling out by hand every load is friction that makes a
+        // tool feel broken.
+        self.studio_distance_meters = self
+            .studio_scene
+            .framing_distance_meters()
+            .clamp(STUDIO_MIN_DISTANCE_METERS, STUDIO_MAX_DISTANCE_METERS);
+
+        self.material_panel.import.status = format!(
+            "showing model {index}: {}x{}x{} voxels, {occupied} filled, {bricks} bricks",
+            dimensions.0, dimensions.1, dimensions.2
+        );
+        println!("vox studio: {}", self.material_panel.import.status);
+    }
+
+    /// S0b — read a `.vox` and list what it offers as import sources.
+    ///
+    /// Done here rather than in the panel because it is blocking file I/O and the
+    /// overlay pass is inside the frame. Loading changes NOTHING on its own: it
+    /// populates the picker, and applying an entry to a row is a separate, explicit
+    /// click. A failure sets the status string and leaves any previous load alone,
+    /// so a typo does not throw away what you were working with.
+    fn load_vox_palette(&mut self) {
+        let import = &mut self.material_panel.import;
+        let path = std::path::PathBuf::from(import.path.trim());
+        match voxel_core::vox::VoxFile::load(&path) {
+            Ok(file) => {
+                let rows = vox_material::importable_rows(&file);
+                let described = file.described_material_count();
+                import.model_count = file.models.len();
+                import.selected_model = 0;
+                import.status = format!(
+                    "{}: {} model(s), {} importable entr{}, {} with material properties",
+                    path.display(),
+                    file.models.len(),
+                    rows.len(),
+                    if rows.len() == 1 { "y" } else { "ies" },
+                    described,
+                );
+                if described == 0 {
+                    // The common case for external tools, and worth saying out loud
+                    // so "why is only the colour importing?" answers itself.
+                    import.status.push_str(" — colours only, no MATL chunks");
+                }
+                println!("vox import: {}", import.status);
+                import.selected_row = 0;
+                import.rows = rows;
+                // Kept so "Show model in studio" has geometry to build from; the
+                // panel only ever needs the palette side.
+                self.loaded_vox = Some(file);
+            }
+            Err(error) => {
+                import.status = error.clone();
+                println!("vox import failed: {error}");
+            }
+        }
+    }
+
     /// E2b test tool — hand the authority a whole POOL to carve
     /// ([`voxel_rt::debug_pool`]), so the swim states can be felt in the app and
     /// not only asserted in tests.
@@ -466,6 +763,9 @@ impl AppState {
     /// [`Self::upload_world_updates`]. The frame thread pays for a `Box` here; the
     /// hundreds of thousands of `set_voxel` calls happen on the world thread.
     fn carve_test_pool(&mut self) {
+        if !self.world_edits_allowed() {
+            return;
+        }
         let pose = self.active_pose();
         let pool = match self.crosshair_voxel() {
             Some(voxel) => WaterPool::at_voxel(voxel),
@@ -496,6 +796,9 @@ impl AppState {
     /// miss path hangs the body in mid-air, which is what makes it a clean
     /// refraction test.
     fn spawn_test_water_body(&mut self) {
+        if !self.world_edits_allowed() {
+            return;
+        }
         let pose = self.active_pose();
         let blob = match self.crosshair_voxel() {
             Some(voxel) => WaterBlob::at_voxel(voxel),
@@ -735,6 +1038,17 @@ impl AppState {
                 }
                 self.character_step_micros = started.elapsed().as_secs_f32() * 1e6;
             }
+            // Look only. The orbit derives its position from yaw/pitch in
+            // `active_pose`, so translating the fly camera here would move a point
+            // nothing reads — and WASD must not drift the subject out of frame,
+            // which is the entire reason this mode exists.
+            ControlMode::StudioOrbit => {
+                self.fly_camera.yaw +=
+                    camera_input.mouse_delta.0 * self.fly_camera.mouse_sensitivity;
+                self.fly_camera.pitch = (self.fly_camera.pitch
+                    - camera_input.mouse_delta.1 * self.fly_camera.mouse_sensitivity)
+                    .clamp(STUDIO_MIN_PITCH_RADIANS, STUDIO_MAX_PITCH_RADIANS);
+            }
         }
         // E2: edits are requested BEFORE the frame is encoded and their deltas are
         // uploaded right after, so a click shows up in the very next frame.
@@ -743,6 +1057,13 @@ impl AppState {
         let camera_uniform = match self.control_mode {
             ControlMode::Fly => self.fly_camera.gpu_uniform(self.renderer.resolution()),
             ControlMode::Walk => self.character.gpu_uniform(self.renderer.resolution()),
+            // Built from the orbit pose itself rather than a camera struct, so
+            // `active_pose` stays the single definition of where the studio eye is —
+            // the edit ray and the underwater test read the same one.
+            ControlMode::StudioOrbit => self.active_pose().gpu_uniform(
+                self.fly_camera.vertical_fov_radians,
+                self.renderer.resolution(),
+            ),
         };
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
@@ -831,10 +1152,13 @@ impl AppState {
                 stats: self.world_host.stats(),
             },
             movement: MovementReadout {
+                studio_orbit_distance_meters: (self.control_mode == ControlMode::StudioOrbit)
+                    .then_some(self.studio_distance_meters),
                 walking: self.control_mode == ControlMode::Walk,
                 speed_meters_per_second: match self.control_mode {
                     ControlMode::Fly => self.fly_camera.movement_speed,
                     ControlMode::Walk => self.character.settings.walk_speed,
+                    ControlMode::StudioOrbit => self.studio_distance_meters,
                 },
                 grounded: self.character.grounded(),
                 submersion: self.character.submersion(),
@@ -857,6 +1181,9 @@ impl AppState {
             &mut self.sun_settings,
             &mut self.quality,
             &mut carve_test_pool_requested,
+            &mut self.material_table,
+            &mut self.material_panel,
+            &mut self.material_provenance,
         );
         let readback_slot = self
             .frame_timers
@@ -876,6 +1203,7 @@ impl AppState {
         if carve_test_pool_requested {
             self.carve_test_pool();
         }
+        self.upload_material_edits();
         if self.vsync_enabled != previous_vsync_enabled {
             self.gpu_context.set_vsync(self.vsync_enabled);
         }
@@ -1003,6 +1331,14 @@ impl ApplicationHandler for App {
                     match state.control_mode {
                         ControlMode::Fly => state.fly_camera.adjust_movement_speed(notches),
                         ControlMode::Walk => state.character.adjust_walk_speed(notches),
+                        // In the studio there is nowhere to walk to, so the wheel
+                        // does the thing you actually want: pull in and out.
+                        // Multiplicative so a notch feels the same at every zoom.
+                        ControlMode::StudioOrbit => {
+                            state.studio_distance_meters = (state.studio_distance_meters
+                                * 1.15_f32.powf(-notches))
+                            .clamp(STUDIO_MIN_DISTANCE_METERS, STUDIO_MAX_DISTANCE_METERS);
+                        }
                     }
                 }
             }
@@ -1053,4 +1389,53 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::default();
     event_loop.run_app(&mut app).expect("event loop error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The studio must not be diggable, and the two world modes must stay editable.
+    /// Spelled out per variant rather than as `!= StudioOrbit`, so adding a mode
+    /// forces a decision here instead of inheriting one.
+    #[test]
+    fn only_the_studio_forbids_world_edits() {
+        assert!(ControlMode::Fly.allows_world_edits());
+        assert!(ControlMode::Walk.allows_world_edits());
+        assert!(!ControlMode::StudioOrbit.allows_world_edits());
+    }
+
+    /// The studio orbit distance must stay inside a band that neither puts the eye
+    /// inside the sample nor shrinks it to nothing — the two failure modes a
+    /// wheel-driven radius has.
+    #[test]
+    fn the_studio_orbit_band_is_usable() {
+        const { assert!(STUDIO_MIN_DISTANCE_METERS > voxel_core::world::VOXEL_SIZE) };
+        const { assert!(STUDIO_MIN_DISTANCE_METERS < STUDIO_MAX_DISTANCE_METERS) };
+        // The default framing must be reachable by the wheel from either end.
+        const { assert!(studio::CAMERA_DISTANCE_METERS > STUDIO_MIN_DISTANCE_METERS) };
+        const { assert!(studio::CAMERA_DISTANCE_METERS < STUDIO_MAX_DISTANCE_METERS) };
+    }
+
+    /// Pitch must stop short of straight up and straight down: at exactly +/-PI/2
+    /// the forward vector is parallel to world up and the `forward x Y` camera basis
+    /// is degenerate, which collapses the frame.
+    #[test]
+    fn the_studio_pitch_clamp_avoids_the_degenerate_basis() {
+        let limit = std::f32::consts::FRAC_PI_2;
+        assert!(STUDIO_MAX_PITCH_RADIANS < limit);
+        assert!(STUDIO_MIN_PITCH_RADIANS > -limit);
+        for pitch in [STUDIO_MIN_PITCH_RADIANS, STUDIO_MAX_PITCH_RADIANS] {
+            let pose = studio::orbit_pose(
+                &studio::StudioScene::default(),
+                0.0,
+                pitch,
+                studio::CAMERA_DISTANCE_METERS,
+            );
+            assert!(
+                pose.right.is_finite() && (pose.right.length() - 1.0).abs() < 1e-4,
+                "the camera basis degenerated at pitch {pitch}"
+            );
+        }
+    }
 }

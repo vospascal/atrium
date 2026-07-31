@@ -37,6 +37,7 @@ use wgpu::util::DeviceExt;
 
 use crate::brickmap::{Brickmap, BrickmapArray, BrickmapMetadata};
 use crate::lighting::LightingUniform;
+use crate::material::{GpuMaterial, MATERIAL_COUNT};
 use crate::world_edit::ArrayWrite;
 
 pub struct WorldBindings {
@@ -49,6 +50,7 @@ pub struct WorldBindings {
     column_max_buffer: wgpu::Buffer,
     brick_occupancy_bits_buffer: wgpu::Buffer,
     skip_distance_buffer: wgpu::Buffer,
+    bound_buffer: wgpu::Buffer,
 }
 
 impl WorldBindings {
@@ -82,11 +84,16 @@ impl WorldBindings {
                 &brickmap.occupancy_words,
             ),
             material_words_buffer: storage_buffer("world material words", &brickmap.material_words),
-            // 1152 bytes for all 24 rows — never patched, so no COPY_DST.
+            // 2080 bytes for all 26 rows. COPY_DST since S0: the material panel
+            // re-uploads the WHOLE table on any edit
+            // ([`WorldBindings::write_material_table`]). Its initial contents are
+            // the compiled defaults, which is exactly what
+            // `MaterialTable::default()` holds, so the CPU and GPU agree before
+            // the first edit without the two having to be wired together here.
             material_table_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("world material table"),
                 contents: bytemuck::cast_slice(&crate::material::gpu_materials()),
-                usage: wgpu::BufferUsages::STORAGE,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }),
             lighting_uniform_buffer,
             column_max_buffer: storage_buffer(
@@ -100,6 +107,10 @@ impl WorldBindings {
             skip_distance_buffer: storage_buffer(
                 "world brick skip distances",
                 &brickmap.brick_skip_distance_words,
+            ),
+            bound_buffer: storage_buffer(
+                "world brick directional bounds",
+                &brickmap.brick_bound_words,
             ),
         }
     }
@@ -136,6 +147,7 @@ impl WorldBindings {
             storage_entry(8),  // per-XZ-column max occupied brick Y
             storage_entry(9),  // 1-bit-per-brick occupancy grid
             storage_entry(10), // chebyshev skip-distance bytes
+            storage_entry(15), // AADF directional bounds (11-14 are CAGI's)
         ]
     }
 
@@ -157,6 +169,7 @@ impl WorldBindings {
             entry(8, &self.column_max_buffer),
             entry(9, &self.brick_occupancy_bits_buffer),
             entry(10, &self.skip_distance_buffer),
+            entry(15, &self.bound_buffer),
         ]
     }
 
@@ -181,6 +194,28 @@ impl WorldBindings {
         );
     }
 
+    /// Re-upload the whole material table — S0's live-editing seam.
+    ///
+    /// Wholesale rather than per-row on purpose: the table is 2080 bytes, which is
+    /// far below any threshold where a partial write would pay for the bookkeeping
+    /// of tracking which rows are dirty. One `write_buffer` per frame in which
+    /// anything changed, and none at all otherwise
+    /// ([`crate::material_table::MaterialTable::take_dirty`] is what gates it).
+    ///
+    /// Note the tier this does NOT cover: CAGI bakes albedo, quantised
+    /// transmittance and the emitter slot into its own cell-attribute volume and
+    /// never reads binding 5, so an albedo edit lands here instantly and in the GI
+    /// bounce only after an attribute re-pack.
+    pub fn write_material_table(&self, queue: &wgpu::Queue, rows: &[GpuMaterial]) {
+        debug_assert_eq!(
+            rows.len(),
+            MATERIAL_COUNT,
+            "the material table must upload every row: the shader indexes it by \
+             material id and a short write would leave stale rows behind"
+        );
+        queue.write_buffer(&self.material_table_buffer, 0, bytemuck::cast_slice(rows));
+    }
+
     fn buffer_of(&self, array: BrickmapArray) -> &wgpu::Buffer {
         match array {
             BrickmapArray::BrickIndices => &self.brick_indices_buffer,
@@ -189,6 +224,7 @@ impl WorldBindings {
             BrickmapArray::ColumnMaxBrickY => &self.column_max_buffer,
             BrickmapArray::BrickOccupancyBits => &self.brick_occupancy_bits_buffer,
             BrickmapArray::BrickSkipDistances => &self.skip_distance_buffer,
+            BrickmapArray::BrickBounds => &self.bound_buffer,
         }
     }
 
@@ -204,6 +240,7 @@ impl WorldBindings {
             + self.column_max_buffer.size()
             + self.brick_occupancy_bits_buffer.size()
             + self.skip_distance_buffer.size()
+            + self.bound_buffer.size()
     }
 
     /// Upload this frame's lighting uniform. Written ONCE per frame by the frame

@@ -208,6 +208,32 @@ architecture-specific (re-run everything on Quest 3 in Stage 6):
 - `ENABLE_BRICK_BIT_GRID` **off** — redundant next to the distance byte for the
   traversal; its data is read by E1b's AO brick early-out. Retry where caches
   are small.
+- `ENABLE_DIRECTIONAL_SKIP` **off** — AADF: jump the box spanned by six per-axis
+  bounds instead of the chebyshev cube. Slower in every scenario (A 5.011 vs
+  4.748, B 6.791 vs 6.550, C 4.565 vs 4.408, D 5.055 vs 4.973 ms). The FIELD is
+  better — 27,578 empty cells where chebyshev grants reach 0 get a mean 5.19
+  cells, mean reach overall 9.10 → 10.82 — but reading it costs more than the
+  reach returns: the chebyshev byte doubles as the occupancy test (one load, two
+  answers) where a bound is a second load, 2 MB stops being cache-resident where
+  500 KB was, and six 5-bit fields cost shifts where a byte costs a compare.
+  Retry on Quest: the reach win is hardware-independent, the cache cost is not.
+  Adapted from NAADF (Ulschmid et al., CGF 2026, MIT).
+
+Not a lever, and deliberately so:
+
+- **Uniform-brick tag** — a brick that is one material in all 512 cells is hit at
+  its entry face with no descent and no level-1 fetch. 40,531 of 69,977 occupied
+  bricks qualify (57.9%), taking the brickmap from 45.2 MB to 21.9 MB. There is
+  no `ENABLE_` flag because a collapsed brick has no level-1 slot at all, so a
+  shader compiled without the fast path would read its material id as a slot
+  index — tag and fast path are one data format, not a toggle, and the only way
+  to turn it off is to build different DATA. That is what `bench_dda
+  --no-collapse` does (a whole separate run, since every variant in a section
+  shares one uploaded brickmap): **scenario A 4.744 ms collapsed against 5.069
+  uncollapsed (6.4% faster), scenario C 4.402 against 4.899 (10.1% faster)**,
+  taking the minimum of three runs each because the uncollapsed build carries
+  more variance and noise only adds. Adapted from NAADF (Ulschmid et al., CGF
+  2026, MIT).
 
 Quality levers with recorded verdicts (details in the E1 / E1b / E1c sections):
 

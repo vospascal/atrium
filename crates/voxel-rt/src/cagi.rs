@@ -30,7 +30,7 @@ use crate::brickmap::{
     BRICK_GRID_Z, BRICK_SIZE, EMPTY_BRICK, EMPTY_COLUMN, MATERIAL_WORDS_PER_BRICK,
     OCCUPANCY_WORDS_PER_BRICK,
 };
-use crate::material::{materials, MaterialFlags};
+use crate::material::MATERIALS;
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 /// Cell attribute bit 24: the cell absorbs light (see [`SOLID_FILL_DIVISOR`]).
@@ -78,10 +78,10 @@ pub const EMITTER_PALETTE_SLOTS: usize = MAX_EMITTERS + 1;
 /// 1.. for each [`MaterialFlags::EMISSIVE`] row in table order.
 fn emitter_indices() -> Vec<u32> {
     let mut next_index = 0_u32;
-    materials()
+    MATERIALS
         .iter()
         .map(|material| {
-            if !material.flags.contains(MaterialFlags::EMISSIVE) {
+            if !material.is_emissive() {
                 return 0;
             }
             next_index += 1;
@@ -95,9 +95,8 @@ fn emitter_indices() -> Vec<u32> {
 /// Slot 0 is black and is what every non-emissive cell reads, so the CA needs no
 /// branch: it can always look up, and a non-emitter simply injects nothing.
 pub fn emitter_palette() -> Vec<[f32; 4]> {
-    let table = materials();
     let mut palette = vec![[0.0_f32; 4]; EMITTER_PALETTE_SLOTS];
-    for (material, index) in table.iter().zip(emitter_indices()) {
+    for (material, index) in MATERIALS.iter().zip(emitter_indices()) {
         if index == 0 {
             continue;
         }
@@ -106,12 +105,8 @@ pub fn emitter_palette() -> Vec<[f32; 4]> {
             "the material table has more than {MAX_EMITTERS} emissive rows, which \
              no longer fit the 3-bit cell emitter field (widen it or share slots)"
         );
-        palette[index as usize] = [
-            material.emission[0],
-            material.emission[1],
-            material.emission[2],
-            0.0,
-        ];
+        let emission = material.emitted_radiance();
+        palette[index as usize] = [emission[0], emission[1], emission[2], 0.0];
     }
     palette
 }
@@ -577,12 +572,12 @@ fn packed_albedo(albedo: [f32; 3]) -> u32 {
 /// the same coarseness the albedo has had since E4.
 fn material_attribute_table() -> Vec<u32> {
     let emitters = emitter_indices();
-    materials()
+    MATERIALS
         .iter()
         .zip(emitters)
         .map(|(material, emitter)| {
             packed_albedo(material.albedo)
-                | quantize_transmittance(material.transmittance)
+                | quantize_transmittance(material.transmittance())
                 | (emitter << CELL_EMITTER_SHIFT)
         })
         .collect()
@@ -1193,13 +1188,13 @@ mod tests {
     /// never disagree with a full rebuild.
     #[test]
     fn both_attribute_builders_pack_transmittance_identically() {
-        let materials = materials();
+        let materials = MATERIALS;
         let table = material_attribute_table();
         for (id, material) in materials.iter().enumerate() {
             let packed = table[id];
             assert_eq!(
                 packed & CELL_TRANSMITTANCE_MASK,
-                quantize_transmittance(material.transmittance),
+                quantize_transmittance(material.transmittance()),
                 "material {id} transmittance drifted"
             );
             assert_eq!(
@@ -1221,11 +1216,11 @@ mod tests {
         assert_eq!(CELL_EMITTER_MASK & 0x00ff_ffff, 0);
 
         let table = material_attribute_table();
-        for (id, material) in materials().iter().enumerate() {
+        for (id, material) in MATERIALS.iter().enumerate() {
             let slot = (table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT;
             assert_eq!(
                 slot != 0,
-                material.flags.contains(MaterialFlags::EMISSIVE),
+                material.is_emissive(),
                 "{} emitter slot disagrees with its EMISSIVE flag",
                 material.name
             );
@@ -1243,7 +1238,7 @@ mod tests {
 
         let table = material_attribute_table();
         let mut emitters_seen = 0;
-        for (id, material) in materials().iter().enumerate() {
+        for (id, material) in MATERIALS.iter().enumerate() {
             let slot = ((table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT) as usize;
             if slot == 0 {
                 continue;
@@ -1251,7 +1246,7 @@ mod tests {
             emitters_seen += 1;
             assert_eq!(
                 &palette[slot][..3],
-                &material.emission[..],
+                &material.emitted_radiance()[..],
                 "{} radiance did not survive the palette",
                 material.name
             );
@@ -1264,10 +1259,10 @@ mod tests {
     #[test]
     fn emitters_get_distinct_slots() {
         let table = material_attribute_table();
-        let slots: Vec<u32> = materials()
+        let slots: Vec<u32> = MATERIALS
             .iter()
             .enumerate()
-            .filter(|(_, material)| material.flags.contains(MaterialFlags::EMISSIVE))
+            .filter(|(_, material)| material.is_emissive())
             .map(|(id, _)| (table[id] & CELL_EMITTER_MASK) >> CELL_EMITTER_SHIFT)
             .collect();
         let mut unique = slots.clone();

@@ -10,6 +10,7 @@ pub mod noise;
 pub mod streamed_source;
 pub mod terrain_chunk;
 pub mod terrain_import;
+pub mod vox;
 pub mod voxel_source;
 pub mod water_sim;
 pub mod wind;

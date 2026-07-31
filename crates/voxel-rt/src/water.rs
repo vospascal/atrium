@@ -926,7 +926,7 @@ mod tests {
             "blue should out-scatter red by more than an order of magnitude, got {albedo:?}"
         );
         // ...and it is NOT the water row's diffuse albedo, which is what it replaced.
-        let painted = crate::material::materials()
+        let painted = crate::material::MATERIALS
             [crate::material::material_id(voxel_core::world::Voxel::Water) as usize]
             .albedo;
         assert!(

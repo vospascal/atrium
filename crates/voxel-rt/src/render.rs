@@ -21,6 +21,7 @@ use crate::cagi::{CagiGrid, CagiSettings};
 use crate::camera::CameraUniform;
 use crate::frame_timing::{GpuFrameTimers, SPAN_CAGI, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
+use crate::material::GpuMaterial;
 use crate::passes::blit::BlitPass;
 use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
 use crate::passes::dda::DdaPass;
@@ -204,6 +205,16 @@ impl Renderer {
     /// a sun move (or any injection/transport change) requires.
     pub fn mark_light_volume_dirty(&mut self) {
         self.light_volume.mark_dirty();
+    }
+
+    /// Re-upload the material table — S0's live-editing seam.
+    ///
+    /// Passes straight through to the world bindings because the table belongs to
+    /// the world, not to a pass: both the shading pass and the CAGI pass bind it.
+    /// Only the direct-shading tier is covered here; the GI bounce reads CAGI's own
+    /// baked cell attributes and needs a re-pack to follow.
+    pub fn write_material_table(&self, queue: &wgpu::Queue, rows: &[GpuMaterial]) {
+        self.world_bindings.write_material_table(queue, rows);
     }
 
     /// Precompile the pipeline permutations the quality presets need, so

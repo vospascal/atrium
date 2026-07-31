@@ -9,4 +9,7 @@ description = "Renderer-agnostic voxel data, storage, generation, and noise — 
 # the same types the bevy adapter uses — zero conversion friction.
 glam = "0.30"
 serde = { version = "1", features = ["derive"] }
+# MagicaVoxel .vox parsing (src/vox.rs). Lives here because a .vox file is world
+# data — a grid plus a palette — and TWO renderers consume it.
+dot_vox = "5"
 serde_json = "1"

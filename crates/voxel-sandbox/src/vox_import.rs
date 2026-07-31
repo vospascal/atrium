@@ -1,9 +1,14 @@
 //! MagicaVoxel `.vox` prop import.
 //!
-//! Loads a model via `dot_vox` and meshes it with the same culled-face +
-//! baked-AO + color-jitter treatment as the terrain, so hand-made (or
-//! MagicaVoxel-procedural) props sit visually seamless in the world.
-//! MagicaVoxel is Z-up; the engine is Y-up — axes are swapped on load.
+//! Loads a model through [`voxel_core::vox`] and meshes it with the same
+//! culled-face + baked-AO + color-jitter treatment as the terrain, so hand-made
+//! (or MagicaVoxel-procedural) props sit visually seamless in the world.
+//!
+//! The format parsing used to live here. It moved to `voxel-core` when voxel-rt
+//! gained a `.vox` material importer: a second copy of the axis swap, the palette
+//! decode and the palette-index arithmetic was exactly the duplication that work
+//! set out to end. This module keeps the parts that are about *meshing a prop for
+//! Bevy* and nothing about the file format.
 
 use std::path::Path;
 
@@ -11,6 +16,7 @@ use bevy::prelude::*;
 
 use crate::mesh::{ambient_occlusion_level, MeshBuffers, FACE_DIRECTIONS, QUAD_CORNERS};
 use voxel_core::noise::{hash_3d, hash_to_unit};
+use voxel_core::vox::VoxFile;
 use voxel_core::world::VOXEL_SIZE;
 
 pub struct VoxModel {
@@ -56,37 +62,39 @@ impl VoxModel {
 }
 
 /// Load every model in a `.vox` file (packs commonly hold several).
+///
+/// The FORMAT work — reading the chunks, swapping Z-up to Y-up, and resolving the
+/// palette's two index spaces — moved to [`voxel_core::vox`], because a `.vox`
+/// grid is world data and voxel-rt's material import needs the same three things.
+/// What stays here is the one thing that is genuinely this renderer's: baking each
+/// cell's palette colour into the linear RGBA the mesher wants.
+///
+/// The colour conversion deliberately still goes through Bevy's
+/// `Color::srgba_u8().to_linear()` on the raw bytes rather than
+/// [`voxel_core::vox::VoxPaletteEntry::linear_rgb`]. Both implement the same sRGB
+/// transfer, but routing this crate's pixels through a second implementation to
+/// save one line would be risking a look change for nothing.
 pub fn load_vox_models(path: &Path) -> Result<Vec<VoxModel>, String> {
-    let vox_data = dot_vox::load(path.to_str().unwrap_or_default())
-        .map_err(|error| format!("cannot load {}: {error}", path.display()))?;
-    if vox_data.models.is_empty() {
-        return Err(format!("{} contains no models", path.display()));
-    }
-
-    let models = vox_data
+    let file = VoxFile::load(path)?;
+    let models = file
         .models
         .iter()
         .map(|model| {
-            // MagicaVoxel: x/y ground plane, z up → engine: x/z ground, y up.
-            let size_x = model.size.x as i32;
-            let size_y = model.size.z as i32;
-            let size_z = model.size.y as i32;
-            let mut cells = vec![None; (size_x * size_y * size_z) as usize];
-
-            for voxel in &model.voxels {
-                let color = vox_data.palette[voxel.i as usize];
-                let linear = Color::srgba_u8(color.r, color.g, color.b, color.a).to_linear();
-                let engine_x = voxel.x as i32;
-                let engine_y = voxel.z as i32;
-                let engine_z = voxel.y as i32;
-                cells[((engine_y * size_z + engine_z) * size_x + engine_x) as usize] =
-                    Some([linear.red, linear.green, linear.blue, 1.0]);
-            }
-
+            let cells = model
+                .cells
+                .iter()
+                .map(|cell| {
+                    let entry = file.palette[(*cell)? as usize];
+                    let linear =
+                        Color::srgba_u8(entry.rgba[0], entry.rgba[1], entry.rgba[2], entry.rgba[3])
+                            .to_linear();
+                    Some([linear.red, linear.green, linear.blue, 1.0])
+                })
+                .collect();
             VoxModel {
-                size_x,
-                size_y,
-                size_z,
+                size_x: model.size_x,
+                size_y: model.size_y,
+                size_z: model.size_z,
                 cells,
             }
         })

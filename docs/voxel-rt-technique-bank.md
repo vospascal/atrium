@@ -43,7 +43,23 @@ of a nearest-brick lookup — fixes the *quantization* (blockiness) with no new
 data, a few extra fetches; (2) only then consider voxel-level clearance, which
 also fixes the *magnitude* ceiling (grazing rays pass distance-1 bricks whose
 clearance is bounded by half a brick, so penumbrae can never widen properly).
-Idea (1) is untested and cheap; it is the first thing to bench if this comes back.
+Idea (1) is untested and cheap.
+
+**Revival order rewritten 2026-07-31 — a third, cheaper door now exists and is
+already built.** The R1/NAADF batch (`voxel-rt-research-dossier.md`) added a
+**directional (AADF) distance field** as ledger 1.13, shipped **off** behind
+`ENABLE_DIRECTIONAL_SKIP` because it lost the traversal A/B on M3 Max. But it lost
+for a reason that **does not apply to a penumbra term**: the chebyshev byte
+answers distance *and* occupancy in one load, so the directional field's second
+load costs more than its extra reach returns — and a penumbra estimate needs the
+reach while not needing the occupancy answer at all. The relevant measurement:
+**27,578 empty cells that chebyshev grants reach 0 get a mean 5.19 cells** from
+the directional field, and zero-reach grazing cells are exactly the population
+whose half-a-brick ceiling produced the failure above. So the order is now
+**(1) the AADF field behind the existing lever — a lever flip plus a penumbra
+term, no new data; (2) trilinear clearance interpolation; (3) voxel-level
+clearance (≈37 MB)**. This is the cheapest open shot at any documented negative in
+the project.
 
 ### T2 — Three-channel exponential atmosphere → E7
 One `exp(-density * distance)` per RGB channel with *different* constants:

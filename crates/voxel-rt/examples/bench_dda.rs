@@ -233,8 +233,17 @@ fn main() {
     // independent by the isolation rule, so running one in isolation is
     // exactly equivalent to reading its rows out of a full run — and it keeps
     // a single section inside a shell timeout.
+    // `--no-collapse` builds the brickmap WITHOUT the uniform collapse, which is
+    // the only valid way to turn the uniform-brick fast path off (tag and fast
+    // path are one data format — see Brickmap::build_uncollapsed). It is a whole
+    // separate run rather than a variant column because every variant in a
+    // section shares one uploaded brickmap; compare the `current` column of a
+    // normal run against the `current` column of a --no-collapse run, and take
+    // several of each, because cross-run noise is the same order as the effect.
+    let collapse_uniform = !std::env::args().any(|argument| argument == "--no-collapse");
     let selected_sections: Vec<usize> = std::env::args()
         .skip(1)
+        .filter(|argument| argument != "--no-collapse")
         .map(|argument| {
             argument
                 .parse()
@@ -246,11 +255,16 @@ fn main() {
 
     let world_start = Instant::now();
     let world = VoxelWorld::generate(WORLD_SEED, WORLD_SEASON);
-    let brickmap = Brickmap::build(&world);
+    let brickmap = if collapse_uniform {
+        Brickmap::build(&world)
+    } else {
+        Brickmap::build_uncollapsed(&world)
+    };
     println!(
-        "world + brickmap ready in {:.2?} ({} occupied bricks)",
+        "world + brickmap ready in {:.2?} ({} occupied bricks, uniform collapse {})",
         world_start.elapsed(),
-        brickmap.occupied_brick_count()
+        brickmap.occupied_brick_count(),
+        if collapse_uniform { "on" } else { "OFF" }
     );
 
     let (device, queue) = create_headless_device();

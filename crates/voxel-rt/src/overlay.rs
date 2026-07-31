@@ -26,6 +26,9 @@ use crate::character::Submersion;
 use crate::debug_pool::{POOL_DEPTH_METERS, POOL_DISTANCE_AHEAD_METERS, POOL_WATER_RADIUS_METERS};
 use crate::frame_timing::FrameTimings;
 use crate::lighting::SunSettings;
+use crate::material_edit::{draw_material_section, MaterialPanelState};
+use crate::material_table::MaterialTable;
+use crate::material_tune::ProvenanceTable;
 use crate::shadows::ShadowMode;
 use crate::variants::{
     levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
@@ -55,6 +58,11 @@ pub struct OverlayFrameData {
 /// What the overlay shows about movement (E2b). Flat and pre-read so the panel
 /// never borrows the controller itself.
 pub struct MovementReadout {
+    /// S0 — the studio orbit radius in meters when the material studio is driving
+    /// the view, `None` for the two world modes. Takes precedence over the fields
+    /// below, none of which mean anything in the studio: there is no ground to be
+    /// grounded on and nowhere to walk.
+    pub studio_orbit_distance_meters: Option<f32>,
     /// False = the fly camera, true = the character body.
     pub walking: bool,
     /// The mouse-wheel-tuned base speed of whichever mode is active, m/s.
@@ -148,6 +156,9 @@ impl Overlay {
         sun_settings: &mut SunSettings,
         quality: &mut RenderQuality,
         carve_test_pool_requested: &mut bool,
+        material_table: &mut MaterialTable,
+        material_panel: &mut MaterialPanelState,
+        material_provenance: &mut ProvenanceTable,
     ) {
         let average_frame_time_seconds = if self.frame_time_samples.is_empty() {
             0.0
@@ -232,7 +243,17 @@ impl Overlay {
                         draw_movement_readout(ui, &frame_data.movement);
                         ui.checkbox(vsync_enabled, "VSync");
                         draw_quality_section(ui, quality);
-                        draw_debug_section(ui, carve_test_pool_requested);
+                        draw_material_section(
+                            ui,
+                            material_table,
+                            material_panel,
+                            material_provenance,
+                        );
+                        draw_debug_section(
+                            ui,
+                            carve_test_pool_requested,
+                            frame_data.movement.studio_orbit_distance_meters.is_none(),
+                        );
                         ui.collapsing("Sun", |ui| {
                             ui.add(
                                 egui::Slider::new(&mut sun_settings.azimuth_degrees, 0.0..=360.0)
@@ -302,6 +323,19 @@ impl Overlay {
 /// switches it, and (in walk mode) the body's state plus what its collision step
 /// costs the frame thread.
 fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
+    // S0 — the studio has its own single line and none of the body state below it.
+    if let Some(distance_meters) = movement.studio_orbit_distance_meters {
+        ui.label(format!(
+            "mode: MATERIAL STUDIO | orbit {distance_meters:.2} m"
+        ))
+        .on_hover_text(
+            "S0: one voxel on a plate, judged in isolation. Mouse turns the subject, \
+             the wheel pulls in and out. Launched with `--studio`; no world is \
+             generated at all, and the movement modes are off because there is \
+             nowhere to walk.",
+        );
+        return;
+    }
     let mode_line = if movement.walking {
         format!(
             "mode: WALK (F = fly) | {:.1} m/s",
@@ -359,20 +393,37 @@ fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
 /// measured frame-time verdicts and drive shader permutations, and a one-shot
 /// world edit has neither. The overlay only *asks* — the platform layer owns the
 /// edit, exactly as with every other control here.
-fn draw_debug_section(ui: &mut egui::Ui, carve_test_pool_requested: &mut bool) {
+fn draw_debug_section(
+    ui: &mut egui::Ui,
+    carve_test_pool_requested: &mut bool,
+    world_edits_allowed: bool,
+) {
     ui.collapsing("Debug tools", |ui| {
-        if ui
-            .button(format!(
-                "Carve {POOL_DEPTH_METERS:.0} m water pool ahead (P)"
-            ))
-            .on_hover_text(format!(
+        // Greyed out rather than left clickable-but-ignored: a button that does
+        // nothing reads as a bug, and the studio deliberately has no world to edit.
+        let hover = if world_edits_allowed {
+            format!(
                 "MODIFIES THE WORLD. Carves a {:.0} m wide, {POOL_DEPTH_METERS:.0} m deep pool \
                  with a walk-in shore, centred {POOL_DISTANCE_AHEAD_METERS:.0} m in front of the \
                  eye, and fills it with water — the island's own water is at most 1.75 m deep, \
                  under the 1.44 m the body needs to swim. Applied through E2's edit pipeline on \
                  the world thread; the light volume re-floods afterwards.",
                 POOL_WATER_RADIUS_METERS * 2.0,
-            ))
+            )
+        } else {
+            "Disabled in the material studio: its scene is composed, not dug, and \
+             the whole point is that the voxel in frame is a known sample. Restart \
+             without `--studio` to edit the world."
+                .to_string()
+        };
+        if ui
+            .add_enabled(
+                world_edits_allowed,
+                egui::Button::new(format!(
+                    "Carve {POOL_DEPTH_METERS:.0} m water pool ahead (P)"
+                )),
+            )
+            .on_hover_text(hover)
             .clicked()
         {
             *carve_test_pool_requested = true;

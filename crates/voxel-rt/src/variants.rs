@@ -28,7 +28,7 @@
 //! patching, and `crate::passes::dda::build_shader_source` remains the single
 //! place a shader source is assembled.
 
-use crate::ao::{AoDirectionMode, AoMode, AoSettings};
+use crate::ao::{patch_shader_const, AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
 use crate::lighting::{GiParams, ShadingParams, WaterParams};
 use crate::shadows::{ShadowMode, ShadowSettings};
@@ -61,6 +61,7 @@ pub enum LeverId {
     AnyHitShadow,
     BrickBitGrid,
     DistanceSkip,
+    DirectionalSkip,
     // Ambient occlusion (E1 / E1b).
     AoMode,
     AoStrength,
@@ -106,6 +107,8 @@ pub enum LeverId {
     EditClearanceUpdate,
     EditClearanceRadius,
     EditGiReflood,
+    // Materials (S1).
+    MaterialFaceRoles,
     // Resolution (S0).
     RenderScale,
 }
@@ -122,6 +125,8 @@ pub enum LeverSubsystem {
     Water,
     /// E2 — world authority, threading and the edit pipeline.
     WorldEdit,
+    /// S1 — the material model: face roles now, pattern layers and animation later.
+    Materials,
     Resolution,
 }
 
@@ -134,18 +139,20 @@ impl LeverSubsystem {
             LeverSubsystem::GlobalIllumination => "GI (CAGI)",
             LeverSubsystem::Water => "Water",
             LeverSubsystem::WorldEdit => "World edits",
+            LeverSubsystem::Materials => "Materials",
             LeverSubsystem::Resolution => "Resolution",
         }
     }
 
     /// Panel order.
-    pub const ALL: [LeverSubsystem; 7] = [
+    pub const ALL: [LeverSubsystem; 8] = [
         LeverSubsystem::Traversal,
         LeverSubsystem::AmbientOcclusion,
         LeverSubsystem::Shadows,
         LeverSubsystem::GlobalIllumination,
         LeverSubsystem::Water,
         LeverSubsystem::WorldEdit,
+        LeverSubsystem::Materials,
         LeverSubsystem::Resolution,
     ];
 }
@@ -290,6 +297,10 @@ pub enum BenchSection {
     /// Runs over its own brickmap (the island plus a carved debug pool), so its
     /// numbers deliberately do not compare with sections 1-5.
     Water,
+    /// Section 9: S1+ material-model levers — face roles now, pattern layers and
+    /// animation as they land. Measured on the shading pass, since everything in
+    /// this arc is ALU on a hit the traversal already found.
+    Materials,
 }
 
 /// One registry row.
@@ -328,6 +339,7 @@ impl LeverId {
             LeverId::AnyHitShadow => LeverValue::Flag(traversal.any_hit_shadow),
             LeverId::BrickBitGrid => LeverValue::Flag(traversal.brick_bit_grid),
             LeverId::DistanceSkip => LeverValue::Flag(traversal.distance_skip),
+            LeverId::DirectionalSkip => LeverValue::Flag(traversal.directional_skip),
             LeverId::AoMode => LeverValue::Mode(ambient_occlusion.mode.shader_value()),
             LeverId::AoStrength => LeverValue::Scalar(ambient_occlusion.strength),
             LeverId::AoRayCount => LeverValue::Count(ambient_occlusion.ray_count),
@@ -385,6 +397,7 @@ impl LeverId {
                 LeverValue::Count(quality.world_edit.clearance_radius_cells)
             }
             LeverId::EditGiReflood => LeverValue::Flag(quality.world_edit.gi_reflood),
+            LeverId::MaterialFaceRoles => LeverValue::Flag(quality.materials.face_roles),
             LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
         }
     }
@@ -404,6 +417,7 @@ impl LeverId {
             LeverId::AnyHitShadow => traversal.any_hit_shadow = value.expect_flag(self),
             LeverId::BrickBitGrid => traversal.brick_bit_grid = value.expect_flag(self),
             LeverId::DistanceSkip => traversal.distance_skip = value.expect_flag(self),
+            LeverId::DirectionalSkip => traversal.directional_skip = value.expect_flag(self),
             LeverId::AoMode => {
                 ambient_occlusion.mode = AoMode::from_shader_value(value.expect_mode(self));
             }
@@ -503,6 +517,9 @@ impl LeverId {
                 quality.world_edit.clearance_radius_cells = value.expect_count(self);
             }
             LeverId::EditGiReflood => quality.world_edit.gi_reflood = value.expect_flag(self),
+            LeverId::MaterialFaceRoles => {
+                quality.materials.face_roles = value.expect_flag(self);
+            }
             LeverId::RenderScale => {
                 quality.render_scale = value
                     .expect_scalar(self)
@@ -559,6 +576,33 @@ pub const REGISTRY: &[Lever] = &[
             section: BenchSection::Traversal,
             label: "no-dist-skip",
             overrides: &[(LeverId::DistanceSkip, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::DirectionalSkip,
+        subsystem: LeverSubsystem::Traversal,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("ENABLE_DIRECTIONAL_SKIP"),
+        label: "AADF directional skip",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "MEASURED LOSS, off. Slower than the chebyshev cube in every \
+                  scenario: A 5.011 vs 4.748, B 6.791 vs 6.550, C 4.565 vs 4.408, \
+                  D 5.055 vs 4.973 ms. The FIELD is genuinely better — 27,578 \
+                  empty cells where chebyshev grants reach 0 get a mean 5.19 \
+                  cells, mean reach overall 9.10 -> 10.82 — but reading it costs \
+                  more than the extra reach returns: the chebyshev byte doubles \
+                  as the occupancy test (one load, two answers) where a bound is \
+                  a second load, 2 MB stops being cache-resident where 500 KB \
+                  was, and six 5-bit fields cost shifts where a byte costs a \
+                  compare. KEPT because the reach win is hardware-independent \
+                  and the cache cost is not: re-evaluate on Quest. From NAADF \
+                  (Ulschmid et al., CGF 2026, MIT).",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Traversal,
+            label: "with-directional-skip",
+            overrides: &[(LeverId::DirectionalSkip, LeverValue::Flag(true))],
         }],
     },
     Lever {
@@ -1910,6 +1954,32 @@ pub const REGISTRY: &[Lever] = &[
             overrides: &[(LeverId::EditGiReflood, LeverValue::Flag(false))],
         }],
     },
+    // ---- Materials (S1) ----
+    Lever {
+        id: LeverId::MaterialFaceRoles,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_FACE_ROLES"),
+        label: "per-face roles (top/side/bottom)",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "S1, ships OFF because turning it on changes how the ISLAND looks, and \
+                  re-authoring the world's materials is S6's deliberate step with a \
+                  re-recorded baseline — not a side effect of building the mechanism. \
+                  Cost is a flag test and a select on a hit that already knows its face: \
+                  the DDA records the stepped axis and the ray's sign along it for E1's \
+                  analytic corner AO, so the face is free and no traversal changes. Rows \
+                  without authored roles upload their base values in all three slots, so \
+                  they are bit-identical either way — any delta outside `grass` is a bug. \
+                  Grass is the demonstration case: earth sides with a green top, which is \
+                  what stops a cut bank reading as green rock.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-face-roles",
+            overrides: &[(LeverId::MaterialFaceRoles, LeverValue::Flag(true))],
+        }],
+    },
     // ---- Resolution (S0) ----
     Lever {
         id: LeverId::RenderScale,
@@ -2078,9 +2148,53 @@ pub fn preset_spec(preset: QualityPreset) -> &'static QualityPresetSpec {
         .unwrap_or_else(|| panic!("preset {preset:?} has no QUALITY_PRESETS row"))
 }
 
-/// Everything the renderer's quality is: the three lever groups plus the
-/// resolution knob and the preset tag. The overlay mutates it, the passes read
-/// it, and `crate::passes::dda::build_shader_source` compiles it.
+/// S1 — the material model's levers.
+///
+/// Its own struct rather than loose fields on [`RenderQuality`] because this arc
+/// adds several more (pattern layers, animation, sub-voxel models), and each will
+/// want the same treatment: a shader const, a registry row, a bench column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaterialSettings {
+    /// S1 — read per-face-role albedo and roughness instead of the row's base.
+    pub face_roles: bool,
+}
+
+impl MaterialSettings {
+    /// Whether switching to `self` needs the shading pipeline recompiled: true when
+    /// any SHADER-CONST lever moved. Every lever in this group is a shader const
+    /// today, so this is a plain inequality — but it is spelled out as a method so
+    /// the first runtime lever added here does not silently start forcing rebuilds.
+    pub fn requires_pipeline_rebuild(&self, applied: &MaterialSettings) -> bool {
+        self.face_roles != applied.face_roles
+    }
+
+    /// Patch this group's consts into a shader source, the same way every other
+    /// lever group does — so the bench harness can A/B it by source substitution
+    /// and the shipped default is literally the unpatched file.
+    pub fn patch_shader_source(&self, source: &str) -> String {
+        patch_shader_const(
+            source,
+            "MATERIAL_FACE_ROLES",
+            if self.face_roles { "true" } else { "false" },
+        )
+    }
+}
+
+impl Default for MaterialSettings {
+    /// Face roles ship OFF.
+    ///
+    /// Not because they are unmeasured — the cost is a flag test and a select on a
+    /// hit that already knows its face — but because turning them ON changes how the
+    /// island LOOKS, and that is S6's decision, taken deliberately with a re-recorded
+    /// baseline, rather than a side effect of building the mechanism.
+    fn default() -> MaterialSettings {
+        MaterialSettings { face_roles: false }
+    }
+}
+
+/// Everything the renderer's quality is: the lever groups plus the resolution knob
+/// and the preset tag. The overlay mutates it, the passes read it, and
+/// `crate::passes::dda::build_shader_source` compiles it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderQuality {
     /// Which named tier these knobs came from ([`QualityPreset::Custom`] once
@@ -2098,6 +2212,8 @@ pub struct RenderQuality {
     /// registry, the presets and the overlay panel are built on, so E2's knobs
     /// live here for the same reason every other lever does.
     pub world_edit: WorldEditSettings,
+    /// S1 — the material model.
+    pub materials: MaterialSettings,
     /// Storage-texture size / surface size (1.0 = native).
     pub render_scale: f32,
 }
@@ -2123,6 +2239,7 @@ impl RenderQuality {
             shadows: ShadowSettings::default(),
             global_illumination: CagiSettings::default(),
             water: WaterSettings::default(),
+            materials: MaterialSettings::default(),
             world_edit: WorldEditSettings::default(),
             render_scale: MAX_RENDER_SCALE,
         }
@@ -2160,6 +2277,7 @@ impl RenderQuality {
                 .global_illumination
                 .requires_pipeline_rebuild(&applied.global_illumination)
             || self.water.requires_pipeline_rebuild(&applied.water)
+            || self.materials.requires_pipeline_rebuild(&applied.materials)
     }
 
     /// Whether switching from `applied` to `self` needs the CAGI light volume
@@ -2414,8 +2532,10 @@ mod tests {
             global_illumination,
             water,
             world_edit,
+            materials,
             render_scale,
         } = baseline;
+        let MaterialSettings { face_roles } = materials;
         let TraversalSettings {
             column_fast_forward,
             descend_fast_forward,
@@ -2423,6 +2543,7 @@ mod tests {
             any_hit_shadow,
             brick_bit_grid,
             distance_skip,
+            directional_skip,
         } = traversal;
         let AoSettings {
             mode,
@@ -2490,6 +2611,7 @@ mod tests {
             (LeverId::AnyHitShadow, LeverValue::Flag(any_hit_shadow)),
             (LeverId::BrickBitGrid, LeverValue::Flag(brick_bit_grid)),
             (LeverId::DistanceSkip, LeverValue::Flag(distance_skip)),
+            (LeverId::DirectionalSkip, LeverValue::Flag(directional_skip)),
             (LeverId::AoMode, LeverValue::Mode(mode.shader_value())),
             (LeverId::AoStrength, LeverValue::Scalar(strength)),
             (LeverId::AoRayCount, LeverValue::Count(ray_count)),
@@ -2586,6 +2708,7 @@ mod tests {
                 LeverValue::Count(clearance_radius_cells),
             ),
             (LeverId::EditGiReflood, LeverValue::Flag(gi_reflood)),
+            (LeverId::MaterialFaceRoles, LeverValue::Flag(face_roles)),
             (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
         ];
 

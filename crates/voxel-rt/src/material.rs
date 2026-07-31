@@ -3,23 +3,47 @@
 //!
 //! Replaces the colour-only `palette()` this module grew out of. The change is
 //! an indirection, not a data-size change: the world still stores ONE BYTE per
-//! voxel ([`material_id`]), and everything below is a 24-row lookup table
-//! costing [`MATERIAL_TABLE_BYTES`] (1152 bytes) on the GPU. Material richness
-//! is therefore effectively free; per-*voxel* state is the expensive axis and
-//! this module deliberately does not touch it.
+//! voxel ([`material_id`]), and everything below is a [`MATERIAL_COUNT`]-row
+//! lookup table costing [`MATERIAL_TABLE_BYTES`] (2080 bytes) on the GPU.
+//! Material richness is therefore effectively free; per-*voxel* state is the
+//! expensive axis and this module deliberately does not touch it.
 //!
 //! Two halves, one source of truth:
 //!
-//! * [`Material`] — the authored row, CPU-side, including the acoustic
-//!   coefficients that no GPU pass reads.
-//! * [`GpuMaterial`] — the render subset, `#[repr(C)]` and std430-clean at 48
+//! * [`MATERIALS`] — the authored rows, CPU-side, including the acoustic
+//!   coefficients that no GPU pass reads. A [`Material`] is a small shared
+//!   header plus a [`MaterialKind`] payload; see below.
+//! * [`GpuMaterial`] — the render subset, `#[repr(C)]` and std430-clean at 80
 //!   bytes, uploaded to binding 5 (`shaders/world.wgsl`).
+//!
+//! ## Why the authored row is a union and the uploaded row is flat
+//!
+//! An authored row and an uploaded row want opposite things, and conflating them
+//! is what left this table full of sentinels:
+//!
+//! * The **uploaded** row wants every field present unconditionally, so the
+//!   hottest shading path can read `materials[id].roughness` with no branch. A
+//!   "does not apply" value there is correct and necessary.
+//! * The **authored** row wants only the fields that mean something, because a
+//!   sentinel is indistinguishable from a real value to whoever is authoring it.
+//!   `index_of_refraction: 1.0` on stone did not mean "stone refracts like air",
+//!   it meant "this column does not apply to stone" — and a `NOT_A_MEDIUM`
+//!   absorption triple sat on 24 of 26 rows saying the same thing twice.
+//!
+//! So [`Material`] carries a [`MaterialKind`] — `Air`, `Solid`,
+//! `Cover { transmittance }` or `Medium(..)` — with `emission` as an orthogonal
+//! `Option`, because emission composes with any kind (`glow_block` is an
+//! emitting `Solid`, `glow_berry` an emitting `Cover`). Every scalar the GPU row
+//! needs is then *derived* by an accessor ([`Material::transmittance`],
+//! [`Material::opacity`], [`Material::index_of_refraction`], …), and
+//! [`MaterialFlags`] is derived rather than hand-authored alongside the data it
+//! describes — which is what used to let a row's flags and its values disagree.
 //!
 //! ## Which fields have consumers today
 //!
 //! Only `albedo` is read by a shipped pass ([`crate::passes::dda`] shading and
 //! [`crate::cagi`]'s bounce tint). The rest are authored now because the cost
-//! of this table is *hand-writing 24 rows*, and doing that twice is worse than
+//! of this table is *hand-writing every row*, and doing that twice is worse than
 //! carrying fields that are still dark:
 //!
 //! | field | consumer | status |
@@ -90,6 +114,14 @@ pub const WATER_ABSORPTION_PER_METER: [f32; 3] = [0.446, 0.090, 0.015];
 /// scattering-dominated) are one model with different numbers. A single painted
 /// albedo cannot express a cloud at all, because a cloud IS scattering.
 pub const WATER_SCATTERING_PER_METER: [f32; 3] = [0.004, 0.030, 0.045];
+
+/// The absorption/scattering value of a material a ray cannot travel INSIDE: no
+/// absorption, no scattering. What [`Material::absorption_per_meter`] and
+/// [`Material::scattering_per_meter`] derive for every non-[`Medium`] kind.
+///
+/// A sentinel in the uploaded row, which is where a sentinel belongs — it is no
+/// longer something an author has to write on 24 rows.
+pub const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Number of material ids (== number of `Voxel` variants, Air included).
 pub const MATERIAL_COUNT: usize = 26;
@@ -203,12 +235,23 @@ pub fn material_is_empty_for_edits(material: u8) -> bool {
     matches!(material_voxel(material), Voxel::Air) || material_is_liquid(material)
 }
 
-/// Whether a material id is a liquid — the per-voxel form of
-/// [`MaterialFlags::LIQUID`], without building the table (the character samples
-/// this a few times per frame, and so does E6's water-medium march).
-/// `liquid_predicate_agrees_with_the_table` pins the two together.
+/// Whether a material id is a liquid.
+///
+/// Reads the table's own [`MediumPhase::Liquid`] rather than testing for
+/// `Voxel::Water`, which is what it used to do: a hardcoded water arm meant the
+/// next transparent fluid (oil, honey — the dossier's own targets) would have
+/// been a liquid to the shader, which reads [`MaterialFlags::LIQUID`], and not to
+/// the character controller, which reads this. They agreed by test, not by
+/// mechanism. Now there is one mechanism.
+///
+/// Cheap despite being table-driven, because [`MATERIALS`] is a `const` array
+/// rather than an allocated `Vec` — the character samples this a few times per
+/// frame and so does E6's water-medium march. Ids past the table are not liquid,
+/// matching [`material_voxel`]'s air sentinel.
 pub fn material_is_liquid(material: u8) -> bool {
-    matches!(material_voxel(material), Voxel::Water)
+    MATERIALS
+        .get(material as usize)
+        .is_some_and(Material::is_liquid)
 }
 
 /// Per-material boolean properties, packed into one word for the GPU.
@@ -232,6 +275,13 @@ impl MaterialFlags {
     /// A fluid: relevant to the fluid CA, to swim/wade movement, and to the
     /// "listener is submerged" audio test.
     pub const LIQUID: MaterialFlags = MaterialFlags(1 << 3);
+    /// S1 — this row's top and bottom faces differ from its sides, so the shading
+    /// path must pick per-face values instead of the row's base ones.
+    ///
+    /// A flag rather than a sentinel comparison in the shader: "are the top values
+    /// equal to the base values" is three float compares per hit to answer a
+    /// question the CPU already knows the answer to.
+    pub const FACE_ROLES: MaterialFlags = MaterialFlags(1 << 4);
 
     /// Both flag sets combined.
     pub const fn union(self, other: MaterialFlags) -> MaterialFlags {
@@ -249,38 +299,38 @@ impl MaterialFlags {
     }
 }
 
-/// One authored material row.
+/// The phase of a participating [`Medium`] — what the volume *is*, mechanically,
+/// as opposed to how it looks.
 ///
-/// `albedo` values are sRGB-encoded exactly as they were in the colour palette
-/// this table replaced (lifted originally from `voxel-sandbox`'s `voxel_color`
-/// match, one representative value per type — positional variation such as
-/// dryness/season/depth blending is still not modelled here).
+/// Split out rather than carried as an `is_liquid` bool because the phase is what
+/// the non-render consumers actually branch on: only a liquid is empty to the
+/// editor and wadeable by the character. It also gives the dossier's whole
+/// transparency target set a home — *"water, oil, clouds and honey"* — without a
+/// per-material special case: clouds are a `Gas`, glass and ice are a `Solid`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediumPhase {
+    /// Flows and can be swum in: water, oil, honey. Empty to the editor ("to the
+    /// editor, water IS air") and wadeable rather than blocking.
+    Liquid,
+    /// A volume with no surface to stand on: cloud, fog, smoke. Scattering-
+    /// dominated, which is why a painted albedo cannot express one at all.
+    Gas,
+    /// A transparent SOLID: glass, ice. A ray travels inside it, but a body does
+    /// not — it blocks movement and it is an ordinary block to the editor.
+    Solid,
+}
+
+/// A participating medium: the payload of [`MaterialKind::Medium`], and the only
+/// kind whose coefficients a ray reads while travelling *inside* a voxel.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Material {
-    /// Human-readable name; diagnostics and the overlay only.
-    pub name: &'static str,
-    /// Diffuse colour, sRGB-encoded. Also the GI bounce tint.
-    pub albedo: [f32; 3],
-    /// Emitted radiance, linear and unbounded above 1.0 — a source is allowed
-    /// to be brighter than any surface can reflect. Non-zero on the M1b
-    /// emissive rows only.
-    pub emission: [f32; 3],
-    /// 0.0 = mirror, 1.0 = fully diffuse.
-    pub roughness: f32,
-    /// Specular reflectance at normal incidence (F0).
-    pub specular: f32,
-    /// 1.0 = opaque. Below 1.0 the traversal must continue through the voxel.
-    pub opacity: f32,
-    /// Fraction of light passing THROUGH the voxel, for transport rather than
-    /// for viewing: this is what stops CAGI treating a leaf canopy as a wall.
-    pub transmittance: f32,
-    /// Index of refraction — how hard this material bends a ray that enters it,
+pub struct Medium {
+    /// What this volume is, mechanically. See [`MediumPhase`].
+    pub phase: MediumPhase,
+    /// Index of refraction — how hard this medium bends a ray that enters it,
     /// and (through `((n - 1) / (n + 1))^2`) how much it mirrors at normal
-    /// incidence. **1.0 means "does not refract"**, which is the honest value for
-    /// every opaque row: the E6 water model reads this column only for materials
-    /// it actually enters.
+    /// incidence.
     ///
-    /// Authored per material rather than as a water constant on purpose (E6,
+    /// Lives on the medium rather than being a water constant on purpose (E6,
     /// 2026-07-31): the dossier records xima's own transparency target as *"water,
     /// oil, clouds and honey"* — transparency is a per-material CLASS, and every
     /// member of it has its own index (water 1.333, oil ~1.47, honey ~1.50).
@@ -289,8 +339,7 @@ pub struct Material {
     /// row's existing pad slot.
     pub index_of_refraction: f32,
     /// **Absorption** coefficient per metre, per channel: light this medium
-    /// removes from a ray passing through it. All-zero for everything a ray cannot
-    /// enter.
+    /// removes from a ray passing through it.
     ///
     /// Authored as a coefficient PAIR with [`Self::scattering_per_meter`] rather
     /// than as a volume colour, because a medium's colour is not a property you
@@ -300,13 +349,140 @@ pub struct Material {
     /// colour it shows from these two triples: extinction is
     /// `absorption + scattering`, and the medium's own apparent colour is the
     /// single-scattering albedo `scattering / extinction`. Nothing is painted.
+    ///
+    /// The pair is also what makes the whole class expressible with one model:
+    /// water (moderate absorption, weak blue-favouring scattering), oil and honey
+    /// (strong absorption, low scattering), clouds (near-zero absorption,
+    /// scattering-dominated).
     pub absorption_per_meter: [f32; 3],
     /// **Scattering** coefficient per metre, per channel: light this medium
     /// redirects rather than destroys, and therefore the light a ray picks UP along
-    /// its path. All-zero for everything a ray cannot enter.
+    /// its path.
     pub scattering_per_meter: [f32; 3],
-    /// Boolean properties.
-    pub flags: MaterialFlags,
+    /// 1.0 = opaque. Below 1.0 the traversal must continue through the voxel.
+    pub opacity: f32,
+    /// Fraction of light passing THROUGH the voxel, for transport rather than for
+    /// viewing.
+    pub transmittance: f32,
+}
+
+/// What KIND of material a row is — the discriminant that decides which optical
+/// payload it carries, and therefore which scalars and [`MaterialFlags`] it
+/// derives.
+///
+/// See the module docs for why the authored row is a union while the uploaded row
+/// stays flat. In short: a sentinel is correct in a wire format and misleading in
+/// an authoring format, and this table had `index_of_refraction: 1.0` meaning
+/// "not applicable" on 24 of 26 rows.
+///
+/// Deliberately open to extension rather than final — the reference engines put
+/// simulation state (density, conductivity) and a behaviour rule table on the
+/// material, which is where backlog B6/B10 eventually goes. Adding a variant
+/// breaks every `match` site, which is the desired failure mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MaterialKind {
+    /// Id 0 only: the miss sentinel. The DDA never calls the shading path on an
+    /// unoccupied voxel, so this row is never sampled on a hit; it is kept fully
+    /// zeroed so a bug that samples it produces black rather than something
+    /// plausible. Transmits everything, occludes nothing.
+    Air,
+    /// Ordinary opaque terrain. Nothing passes through and nothing travels
+    /// inside: no transmittance, no refraction, no medium coefficients. The
+    /// common case, and the reason a flat row was mostly sentinels.
+    Solid,
+    /// Thin vegetation: a surface that occludes for *viewing* but lets some light
+    /// through for *transport*, which is what stops CAGI painting a canopy as a
+    /// wall. Also the ray-direction-skew wind target.
+    Cover {
+        /// Fraction of light passing THROUGH the voxel. Must be above zero — a
+        /// leaf that blocks 100% of the light is what makes GI paint black
+        /// canopies.
+        transmittance: f32,
+    },
+    /// A participating medium a ray travels INSIDE: water today, oil, honey,
+    /// clouds and glass by the same model.
+    Medium(Medium),
+}
+
+/// S1 — what one face role overrides. The row's own `albedo`/`roughness` are the
+/// SIDES; a role that wants the base value simply repeats it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceOverride {
+    /// Diffuse colour for this role, sRGB-encoded like [`Material::albedo`].
+    pub albedo: [f32; 3],
+    pub roughness: f32,
+}
+
+/// S1 — per-face-role overrides: a voxel whose top and bottom differ from its
+/// sides.
+///
+/// The cheapest real gain in the whole arc, and the thing that makes a grass block
+/// read as a grass block rather than as a green cube.
+///
+/// **Three roles, not six.** A voxel almost never wants its four sides to differ
+/// from each other — the cases that motivate this (grass, snow-capped stone, a
+/// scorched top) are all "the sky-facing face is different". Six would double the
+/// uploaded row to buy a case nothing has asked for; `PerFace` stays a named
+/// follow-on.
+///
+/// **All three roles are explicit overrides, including the sides.** The row's own
+/// `albedo`/`roughness` stay what they were before S1 and are what every face reads
+/// when the lever is off.
+///
+/// Tempting to make the sides implicit — "the base IS the side" — and it is wrong.
+/// Grass is the case that proves it: a grass block's *sides* are earth and only its
+/// top is green, so an implicit-side design forces the base to become dirt, and
+/// then grass renders BROWN with the feature switched off. The off state has to be
+/// the pre-S1 look, so the pre-S1 value has to stay where it was and the roles have
+/// to be a separate set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceRoles {
+    /// The `+Y` face.
+    pub top: FaceOverride,
+    /// The four side faces.
+    pub side: FaceOverride,
+    /// The `-Y` face. Usually the darkest: it is the one face that never sees the
+    /// sky.
+    pub bottom: FaceOverride,
+}
+
+/// One authored material row: a small shared header plus a [`MaterialKind`]
+/// payload.
+///
+/// `albedo` values are sRGB-encoded exactly as they were in the colour palette
+/// this table replaced (lifted originally from `voxel-sandbox`'s `voxel_color`
+/// match, one representative value per type — positional variation such as
+/// dryness/season/depth blending is still not modelled here).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Material {
+    /// Human-readable name; diagnostics and the material panel.
+    pub name: &'static str,
+    /// Diffuse colour, sRGB-encoded. Also the GI bounce tint. Shared by every
+    /// kind, because everything has a surface colour — including a medium, whose
+    /// `albedo` is its *surface* reflectance and emphatically not its volume
+    /// colour (that is derived; see [`Material::single_scattering_albedo`]).
+    pub albedo: [f32; 3],
+    /// 0.0 = mirror, 1.0 = fully diffuse.
+    pub roughness: f32,
+    /// Specular reflectance at normal incidence (F0).
+    pub specular: f32,
+    /// Which kind of material this is, and its kind-specific payload.
+    pub kind: MaterialKind,
+    /// Emitted radiance, linear and unbounded above 1.0 — a source is allowed to
+    /// be brighter than any surface can reflect. `None` on every row that does
+    /// not emit, rather than a zero triple that reads as an authored value.
+    ///
+    /// Orthogonal to [`Self::kind`] rather than a variant of it, because emission
+    /// genuinely composes with any kind: `glow_block` is an emitting `Solid` and
+    /// `glow_berry` an emitting `Cover`.
+    pub emission: Option<[f32; 3]>,
+    /// S1 — per-face overrides, or `None` for a row whose faces are all alike.
+    ///
+    /// `None` rather than a `FaceRoles` holding three copies of the base values, so
+    /// that "this row has no face roles" is a fact the CPU knows and can hand the
+    /// shader as a flag, instead of something the shader has to discover by
+    /// comparing floats on every hit.
+    pub face_roles: Option<FaceRoles>,
     /// Acoustic absorption at [125, 250, 500, 1k, 2k, 4k] Hz; 0.0 fully
     /// reflective, 1.0 fully absorptive. See the module docs on the shared
     /// vocabulary with atrium's `WallMaterial::alpha`.
@@ -314,32 +490,190 @@ pub struct Material {
 }
 
 impl Material {
-    /// This row's GPU subset — everything except `name` and `acoustic_alpha`.
-    pub fn to_gpu(self) -> GpuMaterial {
+    /// This row's medium payload, or `None` for everything a ray cannot enter.
+    pub const fn medium(&self) -> Option<&Medium> {
+        match &self.kind {
+            MaterialKind::Medium(medium) => Some(medium),
+            _ => None,
+        }
+    }
+
+    /// Fraction of light passing THROUGH this voxel, for transport rather than
+    /// for viewing: what stops CAGI treating a leaf canopy as a wall.
+    ///
+    /// Derived: air transmits everything, a solid nothing, and cover and media
+    /// carry their own authored value.
+    pub const fn transmittance(&self) -> f32 {
+        match &self.kind {
+            MaterialKind::Air => 1.0,
+            MaterialKind::Solid => 0.0,
+            MaterialKind::Cover { transmittance } => *transmittance,
+            MaterialKind::Medium(medium) => medium.transmittance,
+        }
+    }
+
+    /// 1.0 = opaque; below 1.0 the traversal must continue through the voxel.
+    /// Air is fully transparent, every surface is opaque, a medium authors it.
+    pub const fn opacity(&self) -> f32 {
+        match &self.kind {
+            MaterialKind::Air => 0.0,
+            MaterialKind::Solid | MaterialKind::Cover { .. } => 1.0,
+            MaterialKind::Medium(medium) => medium.opacity,
+        }
+    }
+
+    /// Index of refraction. Everything a ray cannot enter reads exactly
+    /// [`AIR_INDEX_OF_REFRACTION`] — "refracts like the air around it" is the
+    /// honest uploaded value, and the E6 water model reads this only for
+    /// materials it actually enters.
+    pub const fn index_of_refraction(&self) -> f32 {
+        match &self.kind {
+            MaterialKind::Medium(medium) => medium.index_of_refraction,
+            _ => AIR_INDEX_OF_REFRACTION,
+        }
+    }
+
+    /// Per-channel absorption per metre; all-zero for everything a ray cannot
+    /// travel inside.
+    pub const fn absorption_per_meter(&self) -> [f32; 3] {
+        match &self.kind {
+            MaterialKind::Medium(medium) => medium.absorption_per_meter,
+            _ => NOT_A_MEDIUM,
+        }
+    }
+
+    /// Per-channel scattering per metre; all-zero for everything a ray cannot
+    /// travel inside.
+    pub const fn scattering_per_meter(&self) -> [f32; 3] {
+        match &self.kind {
+            MaterialKind::Medium(medium) => medium.scattering_per_meter,
+            _ => NOT_A_MEDIUM,
+        }
+    }
+
+    /// Emitted radiance, or black for the rows that do not emit — the uploaded
+    /// form of [`Self::emission`].
+    pub const fn emitted_radiance(&self) -> [f32; 3] {
+        match self.emission {
+            Some(emission) => emission,
+            None => [0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Whether this row is a liquid: flows, is empty to the editor, and is waded
+    /// or swum rather than stood on.
+    pub const fn is_liquid(&self) -> bool {
+        matches!(
+            &self.kind,
+            MaterialKind::Medium(Medium {
+                phase: MediumPhase::Liquid,
+                ..
+            })
+        )
+    }
+
+    /// Whether this row is thin cover — the ray-skew wind target.
+    pub const fn is_foliage(&self) -> bool {
+        matches!(&self.kind, MaterialKind::Cover { .. })
+    }
+
+    /// Whether this row emits light: the CAGI injection candidate test (E5).
+    pub const fn is_emissive(&self) -> bool {
+        self.emission.is_some()
+    }
+
+    /// This row's boolean properties, **derived** from its kind and emission
+    /// rather than authored beside them.
+    ///
+    /// Authoring flags next to the data they describe is what let a row's flags
+    /// and its values disagree; there is now no way to write a `LIQUID` row with
+    /// no medium, or a foliage row that blocks all light.
+    pub const fn flags(&self) -> MaterialFlags {
+        let structural = match &self.kind {
+            // Traversal continues through air and through any medium.
+            MaterialKind::Air => MaterialFlags::TRANSPARENT,
+            MaterialKind::Solid => MaterialFlags::NONE,
+            MaterialKind::Cover { .. } => MaterialFlags::FOLIAGE,
+            MaterialKind::Medium(medium) => match medium.phase {
+                MediumPhase::Liquid => MaterialFlags::TRANSPARENT.union(MaterialFlags::LIQUID),
+                MediumPhase::Gas | MediumPhase::Solid => MaterialFlags::TRANSPARENT,
+            },
+        };
+        let with_emission = if self.emission.is_some() {
+            structural.union(MaterialFlags::EMISSIVE)
+        } else {
+            structural
+        };
+        if self.face_roles.is_some() {
+            with_emission.union(MaterialFlags::FACE_ROLES)
+        } else {
+            with_emission
+        }
+    }
+
+    /// This row's face roles, or the base values repeated — the uploaded form.
+    ///
+    /// A row without roles uploads its base values in all three slots, so the
+    /// shader's per-face read is the identity and the FACE_ROLES flag is what tells
+    /// it not to bother.
+    pub const fn face_roles_or_base(&self) -> FaceRoles {
+        match self.face_roles {
+            Some(roles) => roles,
+            None => {
+                let base = FaceOverride {
+                    albedo: self.albedo,
+                    roughness: self.roughness,
+                };
+                FaceRoles {
+                    top: base,
+                    side: base,
+                    bottom: base,
+                }
+            }
+        }
+    }
+
+    /// This row's GPU subset — everything except `name` and `acoustic_alpha`,
+    /// with every union payload expanded into an unconditional field.
+    ///
+    /// The sentinels this fills in (`AIR_INDEX_OF_REFRACTION` on a solid, a zero
+    /// absorption triple on anything a ray cannot enter) are correct *here*: the
+    /// shading path reads every field without branching, and that is worth more
+    /// than the bytes a packed union would save on a 2 KB table.
+    pub fn to_gpu(&self) -> GpuMaterial {
+        let roles = self.face_roles_or_base();
         GpuMaterial {
             albedo: self.albedo,
-            transmittance: self.transmittance,
-            emission: self.emission,
+            transmittance: self.transmittance(),
+            emission: self.emitted_radiance(),
             roughness: self.roughness,
-            opacity: self.opacity,
+            opacity: self.opacity(),
             specular: self.specular,
-            flags: self.flags.bits(),
-            index_of_refraction: self.index_of_refraction,
-            absorption_per_meter: self.absorption_per_meter,
+            flags: self.flags().bits(),
+            index_of_refraction: self.index_of_refraction(),
+            absorption_per_meter: self.absorption_per_meter(),
             _pad_absorption: 0.0,
-            scattering_per_meter: self.scattering_per_meter,
+            scattering_per_meter: self.scattering_per_meter(),
             _pad_scattering: 0.0,
+            top_albedo: roles.top.albedo,
+            top_roughness: roles.top.roughness,
+            side_albedo: roles.side.albedo,
+            side_roughness: roles.side.roughness,
+            bottom_albedo: roles.bottom.albedo,
+            bottom_roughness: roles.bottom.roughness,
         }
     }
 
     /// Extinction per metre, per channel: `absorption + scattering` — the total
     /// rate at which this medium removes light from a ray, and the exponent of the
     /// Beer-Lambert term.
-    pub fn extinction_per_meter(self) -> [f32; 3] {
+    pub fn extinction_per_meter(&self) -> [f32; 3] {
+        let absorption = self.absorption_per_meter();
+        let scattering = self.scattering_per_meter();
         [
-            self.absorption_per_meter[0] + self.scattering_per_meter[0],
-            self.absorption_per_meter[1] + self.scattering_per_meter[1],
-            self.absorption_per_meter[2] + self.scattering_per_meter[2],
+            absorption[0] + scattering[0],
+            absorption[1] + scattering[1],
+            absorption[2] + scattering[2],
         ]
     }
 
@@ -353,12 +687,13 @@ impl Material {
     /// blue scatters ~11x more than red. Zero for a medium with no scattering (an
     /// absorption-only medium darkens without colouring). Channels with no
     /// extinction at all read 0 rather than dividing by zero.
-    pub fn single_scattering_albedo(self) -> [f32; 3] {
+    pub fn single_scattering_albedo(&self) -> [f32; 3] {
         let extinction = self.extinction_per_meter();
+        let scattering = self.scattering_per_meter();
         let mut albedo = [0.0_f32; 3];
         for channel in 0..3 {
             if extinction[channel] > 0.0 {
-                albedo[channel] = self.scattering_per_meter[channel] / extinction[channel];
+                albedo[channel] = scattering[channel] / extinction[channel];
             }
         }
         albedo
@@ -388,6 +723,16 @@ pub struct GpuMaterial {
     pub _pad_absorption: f32,
     pub scattering_per_meter: [f32; 3],
     pub _pad_scattering: f32,
+    /// S1 — the `+Y` face's values. Equal to `albedo`/`roughness` on a row with no
+    /// face roles, so the shader's per-face read is the identity there.
+    pub top_albedo: [f32; 3],
+    pub top_roughness: f32,
+    /// S1 — the four side faces' values.
+    pub side_albedo: [f32; 3],
+    pub side_roughness: f32,
+    /// S1 — the `-Y` face's values.
+    pub bottom_albedo: [f32; 3],
+    pub bottom_roughness: f32,
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -431,12 +776,16 @@ const ACOUSTIC_SNOW: [f32; 6] = [0.45, 0.75, 0.90, 0.95, 0.95, 0.95];
 /// Row 0 (Air) is the miss sentinel and is never sampled on a hit: the DDA only
 /// calls the shading path on an occupied voxel. It is kept fully zeroed so a
 /// bug that samples it produces black rather than something plausible.
-pub fn materials() -> Vec<Material> {
-    /// A material a ray cannot travel INSIDE: no absorption, no scattering. Every
-    /// row but the liquids, including air (the miss sentinel).
-    const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
-
-    /// Shorthand for the many rows that differ only in albedo and transmittance.
+///
+/// A `const` array rather than a function returning a `Vec`: the CPU predicates
+/// ([`material_is_liquid`] and friends) are sampled a few times per frame by the
+/// character controller and by E6's medium march, and they now read the table
+/// instead of hardcoding a voxel arm — which would have been an allocation per
+/// call. [`crate::material_table::MaterialTable`] clones this as its `Default`
+/// for live editing; this stays the compiled truth.
+pub const MATERIALS: [Material; MATERIAL_COUNT] = {
+    /// Shorthand for the many thin-cover rows that differ only in albedo,
+    /// roughness and transmittance.
     const fn foliage(
         name: &'static str,
         albedo: [f32; 3],
@@ -446,15 +795,11 @@ pub fn materials() -> Vec<Material> {
         Material {
             name,
             albedo,
-            emission: [0.0, 0.0, 0.0],
             roughness,
             specular: 0.03,
-            opacity: 1.0,
-            transmittance,
-            index_of_refraction: AIR_INDEX_OF_REFRACTION,
-            absorption_per_meter: NOT_A_MEDIUM,
-            scattering_per_meter: NOT_A_MEDIUM,
-            flags: MaterialFlags::FOLIAGE,
+            kind: MaterialKind::Cover { transmittance },
+            emission: None,
+            face_roles: None,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
         }
     }
@@ -469,42 +814,66 @@ pub fn materials() -> Vec<Material> {
         Material {
             name,
             albedo,
-            emission: [0.0, 0.0, 0.0],
             roughness,
             specular,
-            opacity: 1.0,
-            transmittance: 0.0,
-            index_of_refraction: AIR_INDEX_OF_REFRACTION,
-            absorption_per_meter: NOT_A_MEDIUM,
-            scattering_per_meter: NOT_A_MEDIUM,
-            flags: MaterialFlags::NONE,
+            kind: MaterialKind::Solid,
+            emission: None,
+            face_roles: None,
             acoustic_alpha,
         }
     }
 
-    vec![
+    [
         // 0  Air — miss sentinel, never sampled.
         Material {
             name: "air",
             albedo: [0.0, 0.0, 0.0],
-            emission: [0.0, 0.0, 0.0],
             roughness: 0.0,
             specular: 0.0,
-            opacity: 0.0,
-            transmittance: 1.0,
-            index_of_refraction: AIR_INDEX_OF_REFRACTION,
-            absorption_per_meter: NOT_A_MEDIUM,
-            scattering_per_meter: NOT_A_MEDIUM,
-            flags: MaterialFlags::TRANSPARENT,
+            kind: MaterialKind::Air,
+            emission: None,
+            face_roles: None,
             acoustic_alpha: [0.0; 6],
         },
-        opaque(
-            "grass",
-            [0.41, 0.52, 0.29],
-            0.95,
-            0.02,
-            ACOUSTIC_SOFT_GROUND,
-        ),
+        // 1  Grass — S1's demonstration case, and the reason face roles exist.
+        //
+        // A grass block is earth with a green skin on the sky-facing face. Before
+        // S1 the whole cube was the green, so a cut bank read as green rock; the
+        // SIDES are now the same dirt the row below it is, and only the top is
+        // green. The bottom is dirt too, marginally darker: it is the one face that
+        // never sees the sky.
+        //
+        // Note this changes nothing until MATERIAL_FACE_ROLES is switched on — the
+        // lever ships off because turning it on changes the island's look, which is
+        // S6's decision and not a side effect of building the mechanism.
+        Material {
+            name: "grass",
+            // The pre-S1 green, unchanged: this is what every face reads while the
+            // lever is off, so switching the feature off is switching S1 off.
+            albedo: [0.41, 0.52, 0.29],
+            roughness: 0.95,
+            specular: 0.02,
+            kind: MaterialKind::Solid,
+            emission: None,
+            face_roles: Some(FaceRoles {
+                // Green only where the sky can reach.
+                top: FaceOverride {
+                    albedo: [0.41, 0.52, 0.29],
+                    roughness: 0.95,
+                },
+                // The sides are the same earth as the `dirt` row below them, which
+                // is what stops a cut bank reading as green rock.
+                side: FaceOverride {
+                    albedo: [0.44, 0.32, 0.22],
+                    roughness: 0.97,
+                },
+                bottom: FaceOverride {
+                    albedo: [0.35, 0.26, 0.18],
+                    roughness: 0.97,
+                },
+            }),
+            acoustic_alpha: ACOUSTIC_SOFT_GROUND,
+        },
         foliage("tall_grass", [0.28, 0.45, 0.23], 0.90, 0.35),
         opaque("dirt", [0.44, 0.32, 0.22], 0.97, 0.02, ACOUSTIC_SOFT_GROUND),
         opaque("sand", [0.86, 0.77, 0.55], 0.95, 0.02, ACOUSTIC_SOFT_GROUND),
@@ -527,15 +896,18 @@ pub fn materials() -> Vec<Material> {
         Material {
             name: "water",
             albedo: [0.19, 0.52, 0.71],
-            emission: [0.0, 0.0, 0.0],
             roughness: 0.05,
             specular: 0.02,
-            opacity: 0.70,
-            transmittance: 0.85,
-            index_of_refraction: WATER_INDEX_OF_REFRACTION,
-            absorption_per_meter: WATER_ABSORPTION_PER_METER,
-            scattering_per_meter: WATER_SCATTERING_PER_METER,
-            flags: MaterialFlags::TRANSPARENT.union(MaterialFlags::LIQUID),
+            kind: MaterialKind::Medium(Medium {
+                phase: MediumPhase::Liquid,
+                index_of_refraction: WATER_INDEX_OF_REFRACTION,
+                absorption_per_meter: WATER_ABSORPTION_PER_METER,
+                scattering_per_meter: WATER_SCATTERING_PER_METER,
+                opacity: 0.70,
+                transmittance: 0.85,
+            }),
+            emission: None,
+            face_roles: None,
             acoustic_alpha: ACOUSTIC_WATER,
         },
         opaque("trunk", [0.45, 0.31, 0.19], 0.90, 0.03, ACOUSTIC_WOOD),
@@ -561,15 +933,11 @@ pub fn materials() -> Vec<Material> {
         Material {
             name: "glow_block",
             albedo: [0.95, 0.93, 0.88],
-            emission: [3.00, 2.80, 2.40],
             roughness: 0.60,
             specular: 0.04,
-            opacity: 1.0,
-            transmittance: 0.0,
-            index_of_refraction: AIR_INDEX_OF_REFRACTION,
-            absorption_per_meter: NOT_A_MEDIUM,
-            scattering_per_meter: NOT_A_MEDIUM,
-            flags: MaterialFlags::EMISSIVE,
+            kind: MaterialKind::Solid,
+            emission: Some([3.00, 2.80, 2.40]),
+            face_roles: None,
             acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
         },
         // 25  GlowBerry (M1b) — the dim cool emitter, and thin cover rather
@@ -577,95 +945,600 @@ pub fn materials() -> Vec<Material> {
         Material {
             name: "glow_berry",
             albedo: [0.55, 0.95, 0.80],
-            emission: [0.50, 1.10, 0.80],
             roughness: 0.60,
             specular: 0.04,
-            opacity: 1.0,
-            transmittance: 0.20,
-            index_of_refraction: AIR_INDEX_OF_REFRACTION,
-            absorption_per_meter: NOT_A_MEDIUM,
-            scattering_per_meter: NOT_A_MEDIUM,
-            flags: MaterialFlags::EMISSIVE.union(MaterialFlags::FOLIAGE),
+            kind: MaterialKind::Cover {
+                transmittance: 0.20,
+            },
+            emission: Some([0.50, 1.10, 0.80]),
+            face_roles: None,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
         },
     ]
-}
+};
 
-/// The material table in upload form, for binding 5.
+/// The compiled material table in upload form, for binding 5.
+///
+/// Only the *initial* upload goes through this — once
+/// [`crate::material_table::MaterialTable`] owns the rows, it uploads its own.
 pub fn gpu_materials() -> Vec<GpuMaterial> {
-    materials().into_iter().map(Material::to_gpu).collect()
+    MATERIALS.iter().map(Material::to_gpu).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The **upload pin**: the exact 26 GPU rows this table produced before the
+    /// authored row became a union (`git show HEAD~:...` at the time of the
+    /// refactor, dumped through the old `to_gpu`).
+    ///
+    /// This replaces an older test that pinned the authored *albedo column*. That
+    /// pin was aimed at the right property — "a structural change must not shift a
+    /// pixel" — but at the wrong layer: it froze the one column this arc exists to
+    /// re-author, while leaving every other column free to drift. Pinning the
+    /// UPLOADED row instead is strictly stronger (it covers all ten fields,
+    /// including the derived ones and the flag word) and it constrains only what
+    /// reaches the GPU, which is what "no pixel moves" actually means.
+    ///
+    /// When a stage deliberately re-authors the table, this constant is what gets
+    /// updated, in the same commit, with the reason in the message.
+    ///
+    /// It pins the fields that existed BEFORE S1 and deliberately does not grow as
+    /// the row does. S1 widened `GpuMaterial` with per-face-role slots; pinning
+    /// those here too would mean regenerating this constant every time the row gains
+    /// a field, which is how a pin quietly stops being evidence. The new slots get
+    /// their own tests, which assert the property that actually matters: a row
+    /// without authored roles uploads its base values in every slot.
+    const UPLOAD_PIN: [CorePin; MATERIAL_COUNT] = [
+        // 0  air
+        CorePin {
+            albedo: [0.0, 0.0, 0.0],
+            transmittance: 1.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.0,
+            opacity: 0.0,
+            specular: 0.0,
+            flags: 4,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 1  grass
+        CorePin {
+            albedo: [0.41, 0.52, 0.29],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.95,
+            opacity: 1.0,
+            specular: 0.02,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 2  tall_grass
+        CorePin {
+            albedo: [0.28, 0.45, 0.23],
+            transmittance: 0.35,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 3  dirt
+        CorePin {
+            albedo: [0.44, 0.32, 0.22],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.97,
+            opacity: 1.0,
+            specular: 0.02,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 4  sand
+        CorePin {
+            albedo: [0.86, 0.77, 0.55],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.95,
+            opacity: 1.0,
+            specular: 0.02,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 5  sediment
+        CorePin {
+            albedo: [0.17, 0.16, 0.11],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.97,
+            opacity: 1.0,
+            specular: 0.02,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 6  stone
+        CorePin {
+            albedo: [0.52, 0.52, 0.55],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.85,
+            opacity: 1.0,
+            specular: 0.04,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 7  water
+        CorePin {
+            albedo: [0.19, 0.52, 0.71],
+            transmittance: 0.85,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.05,
+            opacity: 0.7,
+            specular: 0.02,
+            flags: 12,
+            index_of_refraction: 1.333,
+            absorption_per_meter: [0.446, 0.09, 0.015],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.004, 0.03, 0.045],
+            _pad_scattering: 0.0,
+        },
+        // 8  trunk
+        CorePin {
+            albedo: [0.45, 0.31, 0.19],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 9  trunk_birch
+        CorePin {
+            albedo: [0.8, 0.78, 0.72],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.85,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 10 leaves
+        CorePin {
+            albedo: [0.38, 0.505, 0.235],
+            transmittance: 0.25,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.88,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 11 leaves_dark
+        CorePin {
+            albedo: [0.281, 0.374, 0.174],
+            transmittance: 0.2,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.88,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 12 leaves_birch
+        CorePin {
+            albedo: [0.51, 0.58, 0.28],
+            transmittance: 0.28,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.88,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 13 leaves_pine
+        CorePin {
+            albedo: [0.21, 0.345, 0.24],
+            transmittance: 0.15,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 14 flower_pink
+        CorePin {
+            albedo: [0.93, 0.55, 0.75],
+            transmittance: 0.3,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 15 flower_white
+        CorePin {
+            albedo: [0.96, 0.95, 0.9],
+            transmittance: 0.3,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 16 flower_yellow
+        CorePin {
+            albedo: [0.95, 0.83, 0.35],
+            transmittance: 0.3,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 17 flower_blue
+        CorePin {
+            albedo: [0.45, 0.52, 0.92],
+            transmittance: 0.3,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 18 water_weed
+        CorePin {
+            albedo: [0.15, 0.3, 0.19],
+            transmittance: 0.35,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.85,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 19 lily_pad
+        CorePin {
+            albedo: [0.26, 0.5, 0.24],
+            transmittance: 0.2,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.8,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 20 lily_bloom
+        CorePin {
+            albedo: [0.95, 0.92, 0.85],
+            transmittance: 0.25,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.85,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 21 reed
+        CorePin {
+            albedo: [0.55, 0.56, 0.31],
+            transmittance: 0.3,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.9,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 22 cattail_head
+        CorePin {
+            albedo: [0.32, 0.18, 0.08],
+            transmittance: 0.1,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.92,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 1,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 23 snow
+        CorePin {
+            albedo: [0.92, 0.93, 0.96],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.75,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 24 glow_block
+        CorePin {
+            albedo: [0.95, 0.93, 0.88],
+            transmittance: 0.0,
+            emission: [3.0, 2.8, 2.4],
+            roughness: 0.6,
+            opacity: 1.0,
+            specular: 0.04,
+            flags: 2,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+        // 25 glow_berry
+        CorePin {
+            albedo: [0.55, 0.95, 0.8],
+            transmittance: 0.2,
+            emission: [0.5, 1.1, 0.8],
+            roughness: 0.6,
+            opacity: 1.0,
+            specular: 0.04,
+            flags: 3,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
+    ];
+
+    /// The subset of [`GpuMaterial`] that existed before S1 — what [`UPLOAD_PIN`]
+    /// freezes.
+    #[derive(Debug, PartialEq)]
+    struct CorePin {
+        albedo: [f32; 3],
+        transmittance: f32,
+        emission: [f32; 3],
+        roughness: f32,
+        opacity: f32,
+        specular: f32,
+        flags: u32,
+        index_of_refraction: f32,
+        absorption_per_meter: [f32; 3],
+        _pad_absorption: f32,
+        scattering_per_meter: [f32; 3],
+        _pad_scattering: f32,
+    }
+
+    impl CorePin {
+        /// A row's pre-S1 fields.
+        ///
+        /// The flag word is masked to the pre-S1 bits: S1 adds `FACE_ROLES`, and a
+        /// row that legitimately sets it must not read as a pin violation. Which
+        /// rows set it is pinned separately, by
+        /// `only_grass_authors_face_roles_today`.
+        fn of(row: &GpuMaterial) -> CorePin {
+            const PRE_S1_FLAGS: u32 = 0b1111;
+            CorePin {
+                albedo: row.albedo,
+                transmittance: row.transmittance,
+                emission: row.emission,
+                roughness: row.roughness,
+                opacity: row.opacity,
+                specular: row.specular,
+                flags: row.flags & PRE_S1_FLAGS,
+                index_of_refraction: row.index_of_refraction,
+                absorption_per_meter: row.absorption_per_meter,
+                _pad_absorption: row._pad_absorption,
+                scattering_per_meter: row.scattering_per_meter,
+                _pad_scattering: row._pad_scattering,
+            }
+        }
+    }
+
+    // ---- The S0 gate: the union must be a pure authoring refactor -----------
+
+    /// Every uploaded byte must be what it was before the union existed. This is
+    /// the whole S0 gate in one assertion: the authored row got a shape, and the
+    /// GPU saw no difference at all.
+    #[test]
+    fn the_uploaded_table_is_unchanged_by_the_union() {
+        let uploaded = gpu_materials();
+        assert_eq!(uploaded.len(), UPLOAD_PIN.len());
+        for (id, (actual, pinned)) in uploaded.iter().zip(UPLOAD_PIN.iter()).enumerate() {
+            assert_eq!(
+                &CorePin::of(actual),
+                pinned,
+                "material {id} ({}) no longer uploads the values it used to",
+                MATERIALS[id].name
+            );
+        }
+    }
+
+    /// The uploaded slice must be exactly the table, with no padding surprises —
+    /// what `write_buffer` actually sends.
+    #[test]
+    fn the_uploaded_slice_is_the_whole_table() {
+        let rows = gpu_materials();
+        let bytes = bytemuck::cast_slice::<GpuMaterial, u8>(&rows);
+        assert_eq!(bytes.len(), MATERIAL_TABLE_BYTES);
+        assert_eq!(
+            bytes.len(),
+            MATERIAL_COUNT * std::mem::size_of::<GpuMaterial>()
+        );
+    }
+
+    // ---- Structural invariants of the table --------------------------------
+
     #[test]
     fn table_covers_every_material_id() {
-        assert_eq!(materials().len(), MATERIAL_COUNT);
+        assert_eq!(MATERIALS.len(), MATERIAL_COUNT);
+    }
+
+    /// Structural replacement for the old frozen-albedo pin: the properties a
+    /// row must satisfy whatever colour it is authored as.
+    #[test]
+    fn every_row_is_structurally_sound() {
+        let mut names = std::collections::HashSet::new();
+        for material in &MATERIALS {
+            assert!(!material.name.is_empty(), "a row has no name");
+            assert!(
+                names.insert(material.name),
+                "duplicate material name {}",
+                material.name
+            );
+            let finite = |value: f32| value.is_finite();
+            assert!(
+                material.albedo.iter().copied().all(finite)
+                    && material.emitted_radiance().iter().copied().all(finite)
+                    && finite(material.roughness)
+                    && finite(material.specular)
+                    && finite(material.transmittance())
+                    && finite(material.opacity())
+                    && finite(material.index_of_refraction()),
+                "{} has a non-finite value",
+                material.name
+            );
+            assert!(
+                material.absorption_per_meter().iter().all(|c| *c >= 0.0)
+                    && material.scattering_per_meter().iter().all(|c| *c >= 0.0),
+                "{} has a negative medium coefficient",
+                material.name
+            );
+        }
     }
 
     /// Air is the miss sentinel: sampling it must produce black, not a
     /// plausible-looking colour that hides the bug.
     #[test]
     fn air_row_is_zeroed() {
-        let air = materials()[0];
+        let air = MATERIALS[0];
+        assert!(matches!(air.kind, MaterialKind::Air));
         assert_eq!(air.albedo, [0.0, 0.0, 0.0]);
-        assert_eq!(air.emission, [0.0, 0.0, 0.0]);
-        assert_eq!(air.opacity, 0.0);
+        assert_eq!(air.emitted_radiance(), [0.0, 0.0, 0.0]);
+        assert_eq!(air.opacity(), 0.0);
+        // Air is the ONLY row of its kind — a second one would mean two sentinels.
+        assert_eq!(
+            MATERIALS
+                .iter()
+                .filter(|m| matches!(m.kind, MaterialKind::Air))
+                .count(),
+            1
+        );
     }
 
     /// The GPU row must stay a whole number of 16-byte std430 rows with no
     /// interior padding, or the WGSL `array<Material>` stride silently disagrees
-    /// with the upload. 80 bytes since E6 added the absorption/scattering pair.
+    /// with the upload.
+    ///
+    /// 128 bytes since S1 added the three per-face-role slots (E6's
+    /// absorption/scattering pair took it to 80). Eight std430 rows, each a `vec3`
+    /// followed by the scalar filling its `w`.
     #[test]
     fn gpu_row_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 128);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
         assert_eq!(std::mem::align_of::<GpuMaterial>(), 4);
-        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 80);
+        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 128);
+        // Still trivially free against a ~41 MB world: material richness is not the
+        // expensive axis, per-VOXEL state is.
+        assert_eq!(MATERIAL_TABLE_BYTES, 3328);
     }
 
-    /// Every authored row must round-trip into its GPU form unchanged — the
-    /// upload path must never quietly drop a field.
-    #[test]
-    fn every_row_round_trips_to_gpu() {
-        for material in materials() {
-            let gpu = material.to_gpu();
-            assert_eq!(gpu.albedo, material.albedo, "{}", material.name);
-            assert_eq!(gpu.emission, material.emission, "{}", material.name);
-            assert_eq!(gpu.roughness, material.roughness, "{}", material.name);
-            assert_eq!(gpu.specular, material.specular, "{}", material.name);
-            assert_eq!(gpu.opacity, material.opacity, "{}", material.name);
-            assert_eq!(
-                gpu.transmittance, material.transmittance,
-                "{}",
-                material.name
-            );
-            assert_eq!(gpu.flags, material.flags.bits(), "{}", material.name);
-            assert_eq!(
-                gpu.index_of_refraction, material.index_of_refraction,
-                "{}",
-                material.name
-            );
-            assert_eq!(
-                gpu.absorption_per_meter, material.absorption_per_meter,
-                "{}",
-                material.name
-            );
-            assert_eq!(
-                gpu.scattering_per_meter, material.scattering_per_meter,
-                "{}",
-                material.name
-            );
-        }
-    }
-
-    /// Physical sanity, applied to all 24 rows at once: the ranges every
-    /// consumer will assume.
     #[test]
     fn every_row_is_physically_in_range() {
-        for material in materials() {
+        for material in &MATERIALS {
             let in_unit_range = |value: f32| (0.0..=1.0).contains(&value);
             assert!(
                 material.albedo.iter().copied().all(in_unit_range),
@@ -673,15 +1546,19 @@ mod tests {
                 material.name
             );
             assert!(
-                material.emission.iter().copied().all(|v| v >= 0.0),
+                material
+                    .emitted_radiance()
+                    .iter()
+                    .copied()
+                    .all(|v| v >= 0.0),
                 "{} emission must not be negative",
                 material.name
             );
             assert!(
                 in_unit_range(material.roughness)
                     && in_unit_range(material.specular)
-                    && in_unit_range(material.opacity)
-                    && in_unit_range(material.transmittance),
+                    && in_unit_range(material.opacity())
+                    && in_unit_range(material.transmittance()),
                 "{} has a scalar outside [0, 1]",
                 material.name
             );
@@ -693,83 +1570,142 @@ mod tests {
         }
     }
 
-    /// The albedo column is the one part of this table with live consumers, so
-    /// it must be bit-identical to the colour palette M1 replaced — M1 is a
-    /// structural change and must not shift a single rendered pixel.
-    #[test]
-    fn albedo_column_is_unchanged_from_the_colour_palette() {
-        let palette: [[f32; 3]; MATERIAL_COUNT] = [
-            [0.0, 0.0, 0.0],
-            [0.41, 0.52, 0.29],
-            [0.28, 0.45, 0.23],
-            [0.44, 0.32, 0.22],
-            [0.86, 0.77, 0.55],
-            [0.17, 0.16, 0.11],
-            [0.52, 0.52, 0.55],
-            [0.19, 0.52, 0.71],
-            [0.45, 0.31, 0.19],
-            [0.80, 0.78, 0.72],
-            [0.38, 0.505, 0.235],
-            [0.281, 0.374, 0.174],
-            [0.51, 0.58, 0.28],
-            [0.21, 0.345, 0.24],
-            [0.93, 0.55, 0.75],
-            [0.96, 0.95, 0.90],
-            [0.95, 0.83, 0.35],
-            [0.45, 0.52, 0.92],
-            [0.15, 0.30, 0.19],
-            [0.26, 0.50, 0.24],
-            [0.95, 0.92, 0.85],
-            [0.55, 0.56, 0.31],
-            [0.32, 0.18, 0.08],
-            [0.92, 0.93, 0.96],
-            // M1b additions — no pre-M1 palette entry to preserve.
-            [0.95, 0.93, 0.88],
-            [0.55, 0.95, 0.80],
-        ];
-        for (id, material) in materials().iter().enumerate() {
-            assert_eq!(
-                material.albedo, palette[id],
-                "material id {id} changed colour"
-            );
-        }
-    }
+    // ---- The union: flags and scalars are DERIVED, so they cannot disagree --
 
-    /// Every foliage row is the ray-skew wind target, and every one of them
-    /// must transmit some light — a leaf that blocks 100% of the light is what
-    /// makes CA GI paint black canopies.
+    /// The point of the union. Before it, `flags` was authored beside the values
+    /// it described and nothing stopped the two disagreeing — a `LIQUID` row with
+    /// no medium, or a `FOLIAGE` row that blocked all light, were both writable.
+    /// Now each flag is a function of the kind, so this test checks a derivation
+    /// rather than policing hand-written data.
     #[test]
-    fn foliage_rows_transmit_light() {
-        for material in materials()
-            .iter()
-            .filter(|m| m.flags.contains(MaterialFlags::FOLIAGE))
-        {
-            assert!(
-                material.transmittance > 0.0,
-                "{} is foliage but blocks all light",
+    fn flags_are_derived_from_the_kind() {
+        for material in &MATERIALS {
+            let flags = material.flags();
+            assert_eq!(
+                flags.contains(MaterialFlags::FOLIAGE),
+                matches!(material.kind, MaterialKind::Cover { .. }),
+                "{} FOLIAGE disagrees with its kind",
+                material.name
+            );
+            assert_eq!(
+                flags.contains(MaterialFlags::EMISSIVE),
+                material.emission.is_some(),
+                "{} EMISSIVE disagrees with its emission",
+                material.name
+            );
+            assert_eq!(
+                flags.contains(MaterialFlags::TRANSPARENT),
+                matches!(material.kind, MaterialKind::Air | MaterialKind::Medium(..)),
+                "{} TRANSPARENT disagrees with its kind",
+                material.name
+            );
+            assert_eq!(
+                flags.contains(MaterialFlags::LIQUID),
+                material.is_liquid(),
+                "{} LIQUID disagrees with its phase",
                 material.name
             );
         }
-        // Guard against the flag silently disappearing from the whole table.
-        assert!(materials()
-            .iter()
-            .any(|m| m.flags.contains(MaterialFlags::FOLIAGE)));
     }
 
-    /// Water is the only row that is both transparent and liquid, and its
-    /// acoustic behaviour must not drift toward the visual intuition: a water
-    /// surface reflects sound almost perfectly.
+    /// Only a medium may carry medium coefficients or bend a ray. Everything else
+    /// must upload the honest "does not apply" sentinels — which is now
+    /// structurally impossible to get wrong, and this pins that.
     #[test]
-    fn water_is_transparent_liquid_and_acoustically_reflective() {
-        let water = materials()[material_id(Voxel::Water) as usize];
-        assert!(water.flags.contains(MaterialFlags::TRANSPARENT));
-        assert!(water.flags.contains(MaterialFlags::LIQUID));
-        assert!(water.opacity < 1.0);
+    fn only_media_refract_or_carry_coefficients() {
+        for material in &MATERIALS {
+            match material.medium() {
+                Some(medium) => {
+                    assert!(
+                        medium.index_of_refraction > 1.0 && medium.index_of_refraction < 2.0,
+                        "{} is a medium but its index of refraction is {}",
+                        material.name,
+                        medium.index_of_refraction
+                    );
+                }
+                None => {
+                    assert_eq!(
+                        material.index_of_refraction(),
+                        AIR_INDEX_OF_REFRACTION,
+                        "{} cannot be entered, so its index must be exactly air's",
+                        material.name
+                    );
+                    assert_eq!(material.absorption_per_meter(), NOT_A_MEDIUM);
+                    assert_eq!(material.scattering_per_meter(), NOT_A_MEDIUM);
+                }
+            }
+        }
+    }
+
+    /// Every cover row must transmit some light — a leaf that blocks 100% of it is
+    /// what makes CAGI paint black canopies.
+    #[test]
+    fn cover_rows_transmit_light() {
+        let mut cover_rows = 0;
+        for material in &MATERIALS {
+            if let MaterialKind::Cover { transmittance } = material.kind {
+                cover_rows += 1;
+                assert!(
+                    transmittance > 0.0,
+                    "{} is cover but blocks all light",
+                    material.name
+                );
+                assert!(material.is_foliage(), "{} must be foliage", material.name);
+            }
+        }
+        // Guard against the kind silently disappearing from the whole table.
+        assert!(cover_rows > 0, "no cover rows left in the table");
+    }
+
+    /// Water is the only medium today, and its acoustic behaviour must not drift
+    /// toward the visual intuition: a water surface reflects sound almost
+    /// perfectly (alpha ~0.01), which transparency wrongly suggests otherwise.
+    #[test]
+    fn water_is_a_liquid_medium_and_acoustically_reflective() {
+        let water = MATERIALS[material_id(Voxel::Water) as usize];
+        let medium = water.medium().expect("water must be a medium");
+        assert_eq!(medium.phase, MediumPhase::Liquid);
+        assert_eq!(medium.index_of_refraction, WATER_INDEX_OF_REFRACTION);
+        assert!(water.is_liquid());
+        assert!(water.opacity() < 1.0);
         assert!(
             water.acoustic_alpha.iter().all(|alpha| *alpha <= 0.05),
             "water must stay acoustically reflective"
         );
+        // The value must survive the upload — it rides in the row's former pad word.
+        assert_eq!(
+            water.to_gpu().index_of_refraction,
+            WATER_INDEX_OF_REFRACTION
+        );
     }
+
+    /// The volume colour must be DERIVED from the coefficient pair, never taken
+    /// from the surface albedo — the specific error the E6 rule forbids.
+    #[test]
+    fn a_mediums_colour_is_derived_not_painted() {
+        let water = MATERIALS[material_id(Voxel::Water) as usize];
+        let derived = water.single_scattering_albedo();
+        assert!(
+            derived[2] > derived[1] && derived[1] > derived[0],
+            "water's derived colour is not blue-dominant: {derived:?}"
+        );
+        // Extinction is the pair's sum, per channel.
+        let absorption = water.absorption_per_meter();
+        let scattering = water.scattering_per_meter();
+        for (channel, extinction) in water.extinction_per_meter().iter().enumerate() {
+            assert!(
+                (extinction - (absorption[channel] + scattering[channel])).abs() < 1e-9,
+                "channel {channel} extinction is not absorption + scattering"
+            );
+        }
+        // A row a ray cannot enter has no colour to derive, and must not divide by zero.
+        assert_eq!(
+            MATERIALS[material_id(Voxel::Stone) as usize].single_scattering_albedo(),
+            [0.0, 0.0, 0.0]
+        );
+    }
+
+    // ---- Ids, predicates and the flag word ---------------------------------
 
     /// [`material_voxel`] must be the exact inverse of [`material_id`], or every
     /// CPU consumer of a material byte silently reads the wrong voxel type.
@@ -825,44 +1761,10 @@ mod tests {
         }
     }
 
-    /// E6 — the authored index-of-refraction column: every row that a ray can
-    /// actually enter must bend it, and every row it cannot must be exactly 1.0.
-    /// The value is per material rather than a water constant because transparency
-    /// is a material class (water 1.333, oil ~1.47, honey ~1.50).
-    #[test]
-    fn the_index_of_refraction_column_is_authored_per_material() {
-        for material in materials() {
-            let refracts = material.flags.contains(MaterialFlags::LIQUID);
-            if refracts {
-                assert!(
-                    material.index_of_refraction > 1.0 && material.index_of_refraction < 2.0,
-                    "{} is a liquid but its index of refraction is {}",
-                    material.name,
-                    material.index_of_refraction
-                );
-            } else {
-                assert_eq!(
-                    material.index_of_refraction, AIR_INDEX_OF_REFRACTION,
-                    "{} does not refract, so its index must be exactly air's",
-                    material.name
-                );
-            }
-        }
-        let water = materials()[material_id(Voxel::Water) as usize];
-        assert_eq!(water.index_of_refraction, WATER_INDEX_OF_REFRACTION);
-        // The value must survive the upload — it rides in the row's former pad
-        // word, and the row must still be 48 bytes.
-        assert_eq!(
-            water.to_gpu().index_of_refraction,
-            WATER_INDEX_OF_REFRACTION
-        );
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 80);
-    }
-
-    /// E6 — the edit path's single notion of emptiness ("to the editor, water IS
-    /// air"). Spelled out per variant because it is a design decision, not an
-    /// accident of a flag: air and every liquid are empty, everything a body can
-    /// stand on or walk through is not.
+    /// The edit path's single notion of emptiness ("to the editor, water IS air").
+    /// Spelled out per variant because it is a design decision, not an accident of
+    /// a flag: air and every liquid are empty, everything a body can stand on or
+    /// walk through is not.
     #[test]
     fn the_edit_predicate_treats_every_liquid_as_air() {
         assert!(material_is_empty_for_edits(material_id(Voxel::Air)));
@@ -883,10 +1785,10 @@ mod tests {
                 "{voxel:?} must be editable, not empty"
             );
         }
-        // The rule is the LIQUID flag, not a water special case — so the next
+        // The rule is the liquid PHASE, not a water special case — so the next
         // transparent fluid inherits it without a branch.
-        for (id, material) in materials().iter().enumerate() {
-            if material.flags.contains(MaterialFlags::LIQUID) {
+        for (id, material) in MATERIALS.iter().enumerate() {
+            if material.is_liquid() {
                 assert!(
                     material_is_empty_for_edits(id as u8),
                     "{} is a liquid but the editor would treat it as a block",
@@ -894,82 +1796,195 @@ mod tests {
                 );
             }
         }
+        // A non-liquid medium (glass, ice) must NOT be empty to the editor: a ray
+        // enters it, a body does not. Nothing authors one yet, so check the
+        // derivation directly rather than pretend the table covers it.
+        let glass = Material {
+            name: "glass_probe",
+            albedo: [0.9, 0.95, 1.0],
+            roughness: 0.05,
+            specular: 0.04,
+            kind: MaterialKind::Medium(Medium {
+                phase: MediumPhase::Solid,
+                index_of_refraction: 1.52,
+                absorption_per_meter: [0.02, 0.02, 0.03],
+                scattering_per_meter: NOT_A_MEDIUM,
+                opacity: 0.1,
+                transmittance: 0.95,
+            }),
+            emission: None,
+            face_roles: None,
+            acoustic_alpha: [0.03; 6],
+        };
+        assert!(!glass.is_liquid());
+        assert!(glass.flags().contains(MaterialFlags::TRANSPARENT));
+        assert!(!glass.flags().contains(MaterialFlags::LIQUID));
     }
 
-    /// The cheap liquid predicate and the table's LIQUID flag must not drift.
+    /// The cheap liquid predicate and the table must not drift. They used to agree
+    /// only by this test, because the predicate hardcoded `Voxel::Water`; now it
+    /// reads the table, so this pins one mechanism rather than reconciling two.
     #[test]
     fn liquid_predicate_agrees_with_the_table() {
-        for (id, material) in materials().iter().enumerate() {
+        for (id, material) in MATERIALS.iter().enumerate() {
             assert_eq!(
                 material_is_liquid(id as u8),
-                material.flags.contains(MaterialFlags::LIQUID),
+                material.is_liquid(),
                 "{} disagrees about being a liquid",
                 material.name
             );
         }
         assert!(material_is_liquid(material_id(Voxel::Water)));
+        // Ids past the table are not liquid, matching the air sentinel.
+        assert!(!material_is_liquid(MATERIAL_COUNT as u8));
+        assert!(!material_is_liquid(u8::MAX));
     }
 
-    /// The emissive rows must actually emit, and every non-emissive row must
-    /// stay dark — an accidental non-zero emission would light the world from
-    /// its terrain.
+    /// The emissive rows must actually emit, and every other row must stay dark —
+    /// an accidental non-zero emission would light the world from its terrain.
     #[test]
     fn only_the_emissive_rows_emit() {
-        for material in materials() {
-            let emits = material.emission.iter().any(|channel| *channel > 0.0);
+        for material in &MATERIALS {
+            let emits = material.emitted_radiance().iter().any(|c| *c > 0.0);
             assert_eq!(
                 emits,
-                material.flags.contains(MaterialFlags::EMISSIVE),
-                "{} emission disagrees with its EMISSIVE flag",
+                material.is_emissive(),
+                "{} emission disagrees with its emissive flag",
                 material.name
             );
         }
         assert_eq!(
-            materials()
-                .iter()
-                .filter(|m| m.flags.contains(MaterialFlags::EMISSIVE))
-                .count(),
+            MATERIALS.iter().filter(|m| m.is_emissive()).count(),
             2,
             "M1b authored exactly two emitters"
         );
     }
 
     /// The two emitters are deliberately a contrasting PAIR: one occludes, one
-    /// does not. E5's injection rule has to handle both, so if a later edit
-    /// makes them alike the test that keeps E5 honest is gone.
+    /// does not. E5's injection rule has to handle both, so if a later edit makes
+    /// them alike the test that keeps E5 honest is gone.
+    ///
+    /// Note what the union made explicit here: the contrast is not two tuned
+    /// transmittance numbers, it is two different KINDS that happen to both emit.
     #[test]
     fn the_two_emitters_contrast_in_occlusion() {
-        let glow_block = materials()[material_id(Voxel::GlowBlock) as usize];
-        let berry = materials()[material_id(Voxel::GlowBerry) as usize];
-        assert!(
-            glow_block.transmittance == 0.0,
+        let glow_block = MATERIALS[material_id(Voxel::GlowBlock) as usize];
+        let berry = MATERIALS[material_id(Voxel::GlowBerry) as usize];
+        assert!(matches!(glow_block.kind, MaterialKind::Solid));
+        assert!(matches!(berry.kind, MaterialKind::Cover { .. }));
+        assert_eq!(
+            glow_block.transmittance(),
+            0.0,
             "the glow block must occlude"
         );
-        assert!(berry.transmittance > 0.0, "the berries must not occlude");
+        assert!(berry.transmittance() > 0.0, "the berries must not occlude");
         assert!(
-            glow_block.emission[0] > berry.emission[0],
+            glow_block.emitted_radiance()[0] > berry.emitted_radiance()[0],
             "the glow block is the bright one"
         );
         assert!(
-            berry.emission[1] > berry.emission[0],
+            berry.emitted_radiance()[1] > berry.emitted_radiance()[0],
             "the berries are the cool one"
         );
     }
 
-    /// `material_id` and `material_voxel` must stay exact inverses across the
-    /// WHOLE table, M1b's additions included — the id byte is what the world
-    /// stores, so a gap here silently turns a voxel into air.
+    // ---- S1: face roles ------------------------------------------------------
+
+    /// The property the whole stage rests on: a row with no authored roles uploads
+    /// its base values in EVERY role slot, so the shader's per-face read is the
+    /// identity there and turning the lever on cannot change such a row.
     #[test]
-    fn ids_and_voxels_are_exact_inverses() {
-        for id in 1..MATERIAL_COUNT as u8 {
-            assert_eq!(
-                material_id(material_voxel(id)),
-                id,
-                "material id {id} does not round-trip"
+    fn a_row_without_face_roles_uploads_its_base_in_every_slot() {
+        for row in &MATERIALS {
+            if row.face_roles.is_some() {
+                continue;
+            }
+            let gpu = row.to_gpu();
+            assert_eq!(gpu.top_albedo, row.albedo, "{} top", row.name);
+            assert_eq!(gpu.side_albedo, row.albedo, "{} side", row.name);
+            assert_eq!(gpu.bottom_albedo, row.albedo, "{} bottom", row.name);
+            assert_eq!(gpu.top_roughness, row.roughness, "{} top", row.name);
+            assert_eq!(gpu.side_roughness, row.roughness, "{} side", row.name);
+            assert_eq!(gpu.bottom_roughness, row.roughness, "{} bottom", row.name);
+            assert!(
+                !row.flags().contains(MaterialFlags::FACE_ROLES),
+                "{} claims face roles it does not have",
+                row.name
             );
         }
-        assert_eq!(material_voxel(0), Voxel::Air);
-        assert_eq!(material_voxel(MATERIAL_COUNT as u8), Voxel::Air);
+    }
+
+    /// The FACE_ROLES flag must be derived, never authored beside the data — the
+    /// same rule every other flag follows.
+    #[test]
+    fn the_face_roles_flag_is_derived() {
+        for row in &MATERIALS {
+            assert_eq!(
+                row.flags().contains(MaterialFlags::FACE_ROLES),
+                row.face_roles.is_some(),
+                "{} FACE_ROLES disagrees with its roles",
+                row.name
+            );
+        }
+        assert_eq!(MaterialFlags::FACE_ROLES.bits(), 16);
+        // It must not collide with the pre-S1 bits, which `CorePin` masks on.
+        assert_eq!(MaterialFlags::FACE_ROLES.bits() & 0b1111, 0);
+    }
+
+    /// **The bit-identity guarantee.** Grass is the only row that authors roles
+    /// today, and its BASE values must still be the pre-S1 green — because the base
+    /// is what every face reads while the lever is off.
+    ///
+    /// This is the test that would have caught the mistake made while writing S1:
+    /// putting the earth colour in the base and the green in the top role reads
+    /// correctly with the feature ON and turns the whole island brown with it OFF.
+    #[test]
+    fn only_grass_authors_face_roles_today() {
+        let authored: Vec<&str> = MATERIALS
+            .iter()
+            .filter(|row| row.face_roles.is_some())
+            .map(|row| row.name)
+            .collect();
+        assert_eq!(
+            authored,
+            vec!["grass"],
+            "S1 authored roles on unexpected rows"
+        );
+
+        let grass = MATERIALS[material_id(Voxel::Grass) as usize];
+        // The pre-S1 palette value, which the lever-off path must keep rendering.
+        assert_eq!(grass.albedo, [0.41, 0.52, 0.29]);
+        assert_eq!(grass.roughness, 0.95);
+
+        let roles = grass.face_roles.expect("grass authors roles");
+        // Green on top, earth on the sides — the point of the feature.
+        assert_eq!(roles.top.albedo, grass.albedo, "the top is the grass green");
+        assert_ne!(roles.side.albedo, grass.albedo, "the sides must differ");
+        // The sides are the dirt row's own colour, so a cut bank matches the
+        // material below it rather than approximating it.
+        assert_eq!(
+            roles.side.albedo,
+            MATERIALS[material_id(Voxel::Dirt) as usize].albedo
+        );
+        // The bottom never sees the sky, so it is darker than the sides.
+        let brightness = |albedo: [f32; 3]| albedo.iter().sum::<f32>();
+        assert!(brightness(roles.bottom.albedo) < brightness(roles.side.albedo));
+    }
+
+    /// `face_roles_or_base` must be exactly the base for an unroled row and exactly
+    /// the authored roles for a roled one — it is what `to_gpu` uploads.
+    #[test]
+    fn face_roles_or_base_is_the_identity_without_roles() {
+        let stone = MATERIALS[material_id(Voxel::Stone) as usize];
+        let roles = stone.face_roles_or_base();
+        assert_eq!(roles.top.albedo, stone.albedo);
+        assert_eq!(roles.side.albedo, stone.albedo);
+        assert_eq!(roles.bottom.albedo, stone.albedo);
+        assert_eq!(roles.top, roles.side);
+        assert_eq!(roles.side, roles.bottom);
+
+        let grass = MATERIALS[material_id(Voxel::Grass) as usize];
+        assert_eq!(grass.face_roles_or_base(), grass.face_roles.unwrap());
     }
 
     #[test]

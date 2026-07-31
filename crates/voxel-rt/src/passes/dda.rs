@@ -50,7 +50,8 @@ pub fn build_shader_source(quality: &RenderQuality) -> String {
     let gi_patched = quality
         .global_illumination
         .patch_volume_consts(&shadows_patched);
-    quality.water.patch_shader_source(&gi_patched)
+    let water_patched = quality.water.patch_shader_source(&gi_patched);
+    quality.materials.patch_shader_source(&water_patched)
 }
 
 pub struct DdaPass {
@@ -395,6 +396,7 @@ pub(crate) mod tests {
                 any_hit_shadow: true,
                 brick_bit_grid: true,
                 distance_skip: false,
+                directional_skip: false,
             },
         ] {
             let quality = RenderQuality {

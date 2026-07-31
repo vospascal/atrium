@@ -244,6 +244,21 @@ pub struct Brickmap {
     /// d - 1 bricks, which the traversal jumps in one step (`distance_skip`
     /// in dda.wgsl).
     pub brick_skip_distance_words: Vec<u32>,
+    /// AADF (binding 11): six 5-bit directional bounds per brick cell, packed one
+    /// `u32` per cell in [`BOUND_DIRECTIONS`] order. Built by
+    /// [`directional_bounds`]; 2 MB for the 125x32x125 grid.
+    ///
+    /// Carried ALONGSIDE the chebyshev bytes, not instead of them: chebyshev
+    /// answers "how big is the empty cube here", which the soft-shadow penumbra
+    /// term needs and a directional bound cannot express.
+    pub brick_bound_words: Vec<u32>,
+    /// Whether [`Brickmap::brick_bound_words`] still describes this brickmap.
+    ///
+    /// Set false the first time an edit makes a previously empty brick occupied,
+    /// at which point the field is FLATTENED to zeros — see
+    /// [`Brickmap::invalidate_bounds`] for why that is the correct response
+    /// rather than an incremental repair.
+    bounds_valid: bool,
     /// Level-1 slots ever handed out (the high-water mark): the prefix of the
     /// level-1 arrays that has held real data. Live bricks =
     /// `allocated_brick_slots - free_brick_slots.len()`.
@@ -275,17 +290,19 @@ pub enum BrickmapArray {
     ColumnMaxBrickY,
     BrickOccupancyBits,
     BrickSkipDistances,
+    BrickBounds,
 }
 
 impl BrickmapArray {
     /// Every array, for the uploader's exhaustive mapping and the tests.
-    pub const ALL: [BrickmapArray; 6] = [
+    pub const ALL: [BrickmapArray; 7] = [
         BrickmapArray::BrickIndices,
         BrickmapArray::OccupancyWords,
         BrickmapArray::MaterialWords,
         BrickmapArray::ColumnMaxBrickY,
         BrickmapArray::BrickOccupancyBits,
         BrickmapArray::BrickSkipDistances,
+        BrickmapArray::BrickBounds,
     ];
 }
 
@@ -388,6 +405,25 @@ impl Brickmap {
     /// later stages (and the acoustic resolver) can derive stricter masks
     /// from the material bytes.
     pub fn build(world: &VoxelWorld) -> Brickmap {
+        Brickmap::build_with_collapse(world, true)
+    }
+
+    /// [`Brickmap::build`] with the uniform collapse suppressed — a MEASUREMENT
+    /// FIXTURE, not a shipping configuration.
+    ///
+    /// With no collapse there are no [`BRICK_TAG_UNIFORM`] pointers, so
+    /// `brick_is_uniform` is false everywhere and the shader's uniform fast path
+    /// never fires. That makes this the only valid "uniform tag off" state: the
+    /// tag and the fast path are one data format (see
+    /// [`collapse_uniform_bricks`]), so they can only be disabled together, and
+    /// only by building different DATA rather than by flipping a shader const.
+    /// `bench_dda --no-collapse` uses this to put a frame-time number on a change
+    /// that is otherwise memory-measured only.
+    pub fn build_uncollapsed(world: &VoxelWorld) -> Brickmap {
+        Brickmap::build_with_collapse(world, false)
+    }
+
+    fn build_with_collapse(world: &VoxelWorld, collapse: bool) -> Brickmap {
         let mut brick_indices = vec![EMPTY_BRICK; BRICK_GRID_X * BRICK_GRID_Y * BRICK_GRID_Z];
         let mut occupancy_words: Vec<u32> = Vec::new();
         let mut material_words: Vec<u32> = Vec::new();
@@ -449,12 +485,56 @@ impl Brickmap {
             }
         }
 
-        collapse_uniform_bricks(
-            &mut brick_indices,
-            &mut occupancy_words,
-            &mut material_words,
-        );
+        if collapse {
+            collapse_uniform_bricks(
+                &mut brick_indices,
+                &mut occupancy_words,
+                &mut material_words,
+            );
+        }
 
+        Brickmap::finish(
+            brick_indices,
+            occupancy_words,
+            material_words,
+            column_max_brick_y,
+            max_occupied_brick_y,
+        )
+    }
+
+    /// An all-air brickmap, sized for the world but holding nothing.
+    ///
+    /// The entry point for scenes that are *composed* rather than generated — S0's
+    /// [`crate::studio`] builds its sample voxel with [`Brickmap::set_voxel`] from
+    /// here. There is no `VoxelWorld::empty`, and adding one would mean a
+    /// generation-side change to serve a renderer-side need; the brickmap already
+    /// owns the incremental edit path (E2), so composing through it reuses the
+    /// tested route instead of opening a second one.
+    ///
+    /// Cheap in wall-clock but NOT in memory: the level-0 grid and the derived
+    /// per-cell fields are dense and sized by the world, so this allocates the same
+    /// ~7 MB of level-0 arrays a generated world does. Only the level-1 brick data
+    /// is empty.
+    pub fn empty() -> Brickmap {
+        Brickmap::finish(
+            vec![EMPTY_BRICK; BRICK_GRID_X * BRICK_GRID_Y * BRICK_GRID_Z],
+            Vec::new(),
+            Vec::new(),
+            vec![EMPTY_COLUMN; BRICK_GRID_X * BRICK_GRID_Z],
+            EMPTY_COLUMN,
+        )
+    }
+
+    /// Add the edit headroom and build every DERIVED field from a finished level-0
+    /// grid — the one place that happens, so [`Brickmap::build`] and
+    /// [`Brickmap::empty`] cannot disagree about what a consistent brickmap is.
+    fn finish(
+        brick_indices: Vec<u32>,
+        mut occupancy_words: Vec<u32>,
+        mut material_words: Vec<u32>,
+        column_max_brick_y: Vec<u32>,
+        max_occupied_brick_y: u32,
+    ) -> Brickmap {
         let allocated_brick_slots = (occupancy_words.len() / OCCUPANCY_WORDS_PER_BRICK) as u32;
         // Edit headroom (E2): the arrays — and therefore the GPU buffers created
         // from them — carry EDIT_BRICK_HEADROOM spare slots, so materializing a
@@ -463,6 +543,8 @@ impl Brickmap {
         occupancy_words.resize(brick_capacity as usize * OCCUPANCY_WORDS_PER_BRICK, 0);
         material_words.resize(brick_capacity as usize * MATERIAL_WORDS_PER_BRICK, 0);
         let brick_occupancy_bit_words = pack_occupancy_bits(&brick_indices);
+        let brick_bound_words =
+            directional_bounds(&brick_indices, BRICK_GRID_X, BRICK_GRID_Y, BRICK_GRID_Z);
         let brick_skip_distance_words = pack_bytes_little_endian(&chebyshev_skip_distances(
             &brick_indices,
             BRICK_GRID_X,
@@ -476,6 +558,8 @@ impl Brickmap {
             column_max_brick_y,
             brick_occupancy_bit_words,
             brick_skip_distance_words,
+            brick_bound_words,
+            bounds_valid: true,
             allocated_brick_slots,
             brick_capacity,
             free_brick_slots: Vec::new(),
@@ -613,7 +697,8 @@ impl Brickmap {
             + self.material_words.len()
             + self.column_max_brick_y.len()
             + self.brick_occupancy_bit_words.len()
-            + self.brick_skip_distance_words.len())
+            + self.brick_skip_distance_words.len()
+            + self.brick_bound_words.len())
             * 4
     }
 
@@ -649,6 +734,7 @@ impl Brickmap {
             BrickmapArray::ColumnMaxBrickY => &self.column_max_brick_y,
             BrickmapArray::BrickOccupancyBits => &self.brick_occupancy_bit_words,
             BrickmapArray::BrickSkipDistances => &self.brick_skip_distance_words,
+            BrickmapArray::BrickBounds => &self.brick_bound_words,
         }
     }
 
@@ -739,6 +825,9 @@ impl Brickmap {
                 ranges.push(BrickmapArray::BrickIndices, cell);
                 self.brick_occupancy_bit_words[cell >> 5] |= 1 << (cell & 31);
                 ranges.push(BrickmapArray::BrickOccupancyBits, cell >> 5);
+                // A cell just GAINED occupancy, which is the one direction that
+                // can make an AADF bound unsafe.
+                self.invalidate_bounds(&mut ranges);
                 edit.clearance_cells_written += self.shrink_clearance_around(brick, &mut ranges);
                 self.raise_column_and_world_max(column, brick[1] as u32, &mut ranges);
             }
@@ -778,6 +867,41 @@ impl Brickmap {
 
         edit.dirty = ranges.finish();
         Some(edit)
+    }
+
+    /// Flatten the AADF bound field to zeros, permanently, the first time an
+    /// edit makes a previously empty brick occupied.
+    ///
+    /// WHY FLATTENING RATHER THAN REPAIRING. A bound is only unsafe when it is
+    /// too LARGE, so digging is harmless (the field just gets conservative) and
+    /// only ADDING geometry can break it. A new brick at cell `c` invalidates
+    /// every cell whose box reaches `c` — up to [`BOUND_MAX`] cells away on each
+    /// axis, so a repair means re-relaxing a 63^3 box, ~250k cells, tens of
+    /// milliseconds PER EDIT. That is not a price worth paying for a lever that
+    /// measured slower than the chebyshev cube it replaces (see the
+    /// `DirectionalSkip` verdict in `src/variants.rs`).
+    ///
+    /// Zero is always safe: it claims nothing beyond the cell itself, so the
+    /// traversal reads "no skip available" and takes a single step, exactly as it
+    /// would with the lever off. The cost is one 2 MB upload, once per session,
+    /// and after it the directional skip is inert until the next full rebuild.
+    ///
+    /// If AADF is ever revived — most likely on Quest, where the cache trade-off
+    /// differs — THIS is the function to replace with a local re-relaxation, and
+    /// `bounds_valid` is the flag that says whether one is owed.
+    fn invalidate_bounds(&mut self, ranges: &mut DirtyRanges) {
+        if !self.bounds_valid {
+            return; // already flat; nothing can go stale twice
+        }
+        self.bounds_valid = false;
+        self.brick_bound_words.fill(0);
+        ranges.push_range(BrickmapArray::BrickBounds, 0..self.brick_bound_words.len());
+    }
+
+    /// Whether [`Brickmap::brick_bound_words`] still describes this brickmap. False
+    /// once an edit has flattened it — see [`Brickmap::invalidate_bounds`].
+    pub fn bounds_are_valid(&self) -> bool {
+        self.bounds_valid
     }
 
     /// Give a UNIFORM cell private level-1 storage, expanding the tag back into
@@ -1154,13 +1278,12 @@ pub fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
 /// equal. A half-air brick does not qualify — a ray through it must still find
 /// the surface, so there is nothing to skip.
 ///
-/// MEASURED on the shipped island: 40,531 of 69,977 occupied bricks collapse
-/// (57.9%), taking the whole brickmap from 45.2 MB to 21.9 MB. The traversal
-/// also stops descending into them (`ENABLE_UNIFORM_BRICKS` has no lever — see
-/// below), but that half is UNMEASURED: the shader fast path and this collapse
-/// are the same change, so A/B-ing the frame time needs a second brickmap built
-/// with the collapse off, and `bench_dda` shares ONE brickmap across variants.
-/// Do not claim a ms win for this until that exists.
+/// MEASURED on the shipped island. Memory: 40,531 of 69,977 occupied bricks
+/// collapse (57.9%), taking the whole brickmap from 45.2 MB to 21.9 MB. Frame
+/// time, via `bench_dda --no-collapse` (minimum of three runs each, because the
+/// uncollapsed build is the noisier one and noise only adds): scenario A 4.744 ms
+/// collapsed against 5.069 uncollapsed (6.4% faster), scenario C 4.402 against
+/// 4.899 (10.1% faster).
 ///
 /// WHY THERE IS NO LEVER: a collapsed brick has no level-1 slot at all, so a
 /// shader compiled without the fast path would read its material id as a slot
@@ -1272,6 +1395,140 @@ fn pack_bytes_little_endian(bytes: &[u8]) -> Vec<u32> {
         words[index >> 2] |= u32::from(byte) << ((index & 3) * 8);
     }
     words
+}
+
+// ---- Directional bounds (AADF) ------------------------------------------------
+
+/// Bits per directional bound, so six fit one `u32` (6 x 5 = 30).
+pub const BOUND_BITS: u32 = 5;
+
+/// Largest value a bound can hold — 31 cells, i.e. a 31 m skip in one step.
+/// The world is 125 bricks across, so a maximal free run costs four steps
+/// instead of one; that is a far cheaper compromise than a second word per cell.
+pub const BOUND_MAX: u32 = (1 << BOUND_BITS) - 1;
+
+/// Field order, matching NAADF's `checkMatchingBounds`: -x, +x, -y, +y, -z, +z
+/// at shifts 0, 5, 10, 15, 20, 25. Each entry is the axis and the step sign.
+pub const BOUND_DIRECTIONS: [(usize, i32); 6] = [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)];
+
+/// One directional bound out of a packed word.
+#[inline]
+pub const fn bound_of(packed: u32, direction: usize) -> u32 {
+    (packed >> (direction as u32 * BOUND_BITS)) & BOUND_MAX
+}
+
+/// Per cell, how many FURTHER cells the ray may cross in each of the six axis
+/// directions such that the whole box spanned by all six bounds is empty.
+///
+/// This is the AADF of NAADF (Ulschmid et al., CGF 2026, MIT) — see
+/// `Content/shaders/world/data/boundsCommon.fxh`. It replaces nothing: the
+/// chebyshev field stays, because the two answer different questions.
+///
+/// WHY IT BEATS AN ISOTROPIC FIELD. Chebyshev gives the half-width of the
+/// largest empty CUBE, so it is capped by the nearest obstacle in ANY direction.
+/// A ray skimming one cell above the terrain gets a cube of half-width 1 — the
+/// ground is right there — even though it could fly a hundred metres forward.
+/// Directional bounds describe a BOX, which is free to be long and thin: that
+/// cell's `-y` bound is 0, its `+x` bound is however far the corridor runs. Low
+/// sun shadows and grazing water reflections are made of exactly those rays.
+///
+/// THE GROWTH RULE, and why the box claim is sound. `bound_d(c)` may grow from
+/// `k` to `k+1` only if the neighbour `n = c + d` is empty AND `bound_d'(n) >=
+/// bound_d'(c)` for every direction except `-d` (the opposite one, which is the
+/// only bound that cannot matter). Then the newly claimed slab sits at offset
+/// `k` from `n`, inside `Box(n)`, and spans perpendicular extents no larger than
+/// `n`'s — so `Box(c)` stays empty by induction. Dropping the OPPOSITE direction
+/// from the test rather than the direction being grown is the whole trick; test
+/// the growth direction too or the induction has nothing to stand on.
+///
+/// Relaxation runs to a fixed point, which takes one round per unit of the
+/// largest bound (<= [`BOUND_MAX`] + 1 rounds). Updating in place is safe: every
+/// value ever read is itself a valid bound, so the condition still implies
+/// safety. The result is a conservative fixed point, not a unique maximum —
+/// under-approximating costs steps and never correctness.
+///
+/// Costs 63 ms on the island (it was 1.16 s before the sweep order below; the
+/// naive round-per-cell version needed ~32 rounds where this needs a handful).
+/// Note 58% of empty cells saturate `+x` at [`BOUND_MAX`], so 5 bits — not the
+/// geometry — is what caps most bounds; a maximal run costs four steps instead
+/// of one. Widening would need a second word, which is not obviously worth it.
+///
+/// EDITS still rebuild the whole field. At 63 ms that is fine for a rebuild but
+/// far too slow per edit; a localized re-relaxation (the way the chebyshev field
+/// has `shrink_clearance_around` / `grow_clearance_around`) is still owed.
+fn directional_bounds(
+    brick_indices: &[u32],
+    grid_x: usize,
+    grid_y: usize,
+    grid_z: usize,
+) -> Vec<u32> {
+    let mut bounds = vec![0_u32; brick_indices.len()];
+    let index_of = |x: usize, y: usize, z: usize| x + y * grid_x + z * grid_x * grid_y;
+    let extent = [grid_x, grid_y, grid_z];
+
+    loop {
+        let mut grew = false;
+        for (direction, &(axis, step)) in BOUND_DIRECTIONS.iter().enumerate() {
+            let opposite = direction ^ 1;
+            let shift = direction as u32 * BOUND_BITS;
+            // Sweep AGAINST the growth direction, so the neighbour a cell
+            // consults has already been updated this pass. A whole corridor then
+            // resolves in ONE sweep instead of advancing one cell per round —
+            // that is the difference between ~32 rounds and a handful.
+            let order = |axis_index: usize, length: usize| -> Vec<usize> {
+                if axis_index == axis && step > 0 {
+                    (0..length).rev().collect()
+                } else {
+                    (0..length).collect()
+                }
+            };
+            let (order_x, order_y, order_z) =
+                (order(0, grid_x), order(1, grid_y), order(2, grid_z));
+
+            for &z in &order_z {
+                for &y in &order_y {
+                    for &x in &order_x {
+                        let cell = index_of(x, y, z);
+                        if brick_indices[cell] != EMPTY_BRICK {
+                            continue; // occupied: every bound stays 0
+                        }
+                        let mut position = [x, y, z];
+                        let moved = position[axis] as i32 + step;
+                        if moved < 0 || moved >= extent[axis] as i32 {
+                            continue; // the grid edge bounds the box
+                        }
+                        position[axis] = moved as usize;
+                        let neighbour = index_of(position[0], position[1], position[2]);
+                        if brick_indices[neighbour] != EMPTY_BRICK {
+                            continue;
+                        }
+                        let neighbour_bounds = bounds[neighbour];
+                        // Grow as far as this neighbour allows in one visit. The
+                        // ceiling is `bound_d(neighbour) + 1`, because the test
+                        // below includes direction `d` itself and fails once we
+                        // pass the neighbour's own reach.
+                        while bound_of(bounds[cell], direction) < BOUND_MAX {
+                            let mine = bounds[cell];
+                            // Every direction but the OPPOSITE one must be at
+                            // least as roomy at the neighbour as it is here.
+                            let matched = (0..6).all(|other| {
+                                other == opposite
+                                    || bound_of(neighbour_bounds, other) >= bound_of(mine, other)
+                            });
+                            if !matched {
+                                break;
+                            }
+                            bounds[cell] += 1 << shift;
+                            grew = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !grew {
+            return bounds;
+        }
+    }
 }
 
 /// Exact chebyshev (L-infinity) distance transform over the brick grid: per
@@ -2203,6 +2460,219 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// THE safety gate for AADF. Every cell's claimed box — spanned by all six
+    /// of its bounds at once — must be entirely empty. A false bound here would
+    /// let a ray jump THROUGH geometry, which is the one traversal bug that
+    /// cannot be shrugged off as a few steps of lost performance.
+    ///
+    /// Checked on a synthetic grid rather than the island so the occupancy
+    /// pattern is adversarial (isolated cells, walls, thin corridors) and the
+    /// whole grid can be verified exhaustively instead of sampled.
+    #[test]
+    fn directional_bounds_claim_only_empty_boxes() {
+        const GRID: usize = 24;
+        let mut brick_indices = vec![EMPTY_BRICK; GRID * GRID * GRID];
+        let index_of = |x: usize, y: usize, z: usize| x + y * GRID + z * GRID * GRID;
+
+        // A floor, a wall with a gap, a couple of isolated blocks and some
+        // scattered noise — the thin-corridor cases are the ones that separate a
+        // box claim from an axis-line claim.
+        for z in 0..GRID {
+            for x in 0..GRID {
+                brick_indices[index_of(x, 0, z)] = 0; // floor
+                if x == 12 && z != 7 {
+                    for y in 0..GRID {
+                        brick_indices[index_of(x, y, z)] = 0; // wall, gap at z=7
+                    }
+                }
+            }
+        }
+        brick_indices[index_of(4, 5, 4)] = 0;
+        brick_indices[index_of(18, 9, 3)] = 0;
+        for step in 0..GRID {
+            brick_indices[index_of(
+                (step * 7) % GRID,
+                1 + (step * 5) % (GRID - 1),
+                (step * 11) % GRID,
+            )] = 0;
+        }
+
+        let bounds = directional_bounds(&brick_indices, GRID, GRID, GRID);
+
+        let mut boxes_checked = 0_usize;
+        let mut widest = 0_u32;
+        for z in 0..GRID {
+            for y in 0..GRID {
+                for x in 0..GRID {
+                    let cell = index_of(x, y, z);
+                    if brick_indices[cell] != EMPTY_BRICK {
+                        assert_eq!(
+                            bounds[cell], 0,
+                            "occupied cell ({x}, {y}, {z}) claims a box"
+                        );
+                        continue;
+                    }
+                    let packed = bounds[cell];
+                    let low = [
+                        x - bound_of(packed, 0) as usize,
+                        y - bound_of(packed, 2) as usize,
+                        z - bound_of(packed, 4) as usize,
+                    ];
+                    let high = [
+                        x + bound_of(packed, 1) as usize,
+                        y + bound_of(packed, 3) as usize,
+                        z + bound_of(packed, 5) as usize,
+                    ];
+                    widest = widest.max(bound_of(packed, 1));
+                    for box_z in low[2]..=high[2] {
+                        for box_y in low[1]..=high[1] {
+                            for box_x in low[0]..=high[0] {
+                                assert_eq!(
+                                    brick_indices[index_of(box_x, box_y, box_z)],
+                                    EMPTY_BRICK,
+                                    "cell ({x}, {y}, {z}) claims a box containing the OCCUPIED \
+                                     cell ({box_x}, {box_y}, {box_z}) — bounds {packed:#010x}"
+                                );
+                            }
+                        }
+                    }
+                    boxes_checked += 1;
+                }
+            }
+        }
+        assert!(
+            boxes_checked > 10_000,
+            "barely checked anything: {boxes_checked}"
+        );
+        assert!(
+            widest > 1,
+            "bounds never grew past 1 — the relaxation did nothing"
+        );
+    }
+
+    /// The point of AADF over chebyshev: a cell in a thin horizontal corridor
+    /// must claim a LONG box even though its vertical clearance is nil. This is
+    /// the grazing-ray case (low sun shadows, water reflections) and the only
+    /// reason to carry a second field at all.
+    #[test]
+    fn a_thin_corridor_gets_a_long_box_where_chebyshev_gets_one_cell() {
+        const GRID: usize = 32;
+        let mut brick_indices = vec![EMPTY_BRICK; GRID * GRID * GRID];
+        let index_of = |x: usize, y: usize, z: usize| x + y * GRID + z * GRID * GRID;
+        // Floor at y=0 and ceiling at y=2: everything at y=1 is a one-cell-tall
+        // corridor running the full length of x and z.
+        for z in 0..GRID {
+            for x in 0..GRID {
+                brick_indices[index_of(x, 0, z)] = 0;
+                brick_indices[index_of(x, 2, z)] = 0;
+            }
+        }
+
+        let bounds = directional_bounds(&brick_indices, GRID, GRID, GRID);
+        let chebyshev = chebyshev_skip_distances(&brick_indices, GRID, GRID, GRID);
+
+        let cell = index_of(GRID / 2, 1, GRID / 2);
+        let packed = bounds[cell];
+        assert_eq!(bound_of(packed, 2), 0, "the floor is one cell below");
+        assert_eq!(bound_of(packed, 3), 0, "the ceiling is one cell above");
+        // The corridor runs to the grid edge, which bounds the box before
+        // BOUND_MAX does: from x = GRID/2 there are GRID/2 - 1 cells left.
+        let corridor_run = (GRID / 2 - 1) as u32;
+        assert!(
+            corridor_run < BOUND_MAX,
+            "pick a grid that the bound can span"
+        );
+        assert_eq!(
+            bound_of(packed, 1),
+            corridor_run,
+            "+x should run the whole corridor to the grid edge"
+        );
+        // Chebyshev cannot express this: its cube is capped by the floor.
+        assert_eq!(
+            chebyshev[cell], 1,
+            "chebyshev should see only a 1-cell cube here"
+        );
+    }
+
+    /// AADF bounds must never survive an edit that ADDS geometry. A stale-high
+    /// bound is the one traversal bug that tunnels a ray through solid matter,
+    /// and the field has no incremental repair — so the invariant this test pins
+    /// is "after such an edit the field is flat, and the flattening was
+    /// published to the GPU".
+    #[test]
+    fn adding_a_brick_flattens_the_directional_bounds() {
+        let world = VoxelWorld::generate(1234, 0.0);
+        let mut brickmap = Brickmap::build(&world);
+        assert!(
+            brickmap.bounds_are_valid(),
+            "a freshly built map has valid bounds"
+        );
+        assert!(
+            brickmap.brick_bound_words.iter().any(|&word| word != 0),
+            "the built field should describe some free space"
+        );
+
+        // Find an EMPTY brick with an occupied neighbour below, so placing one
+        // voxel makes a previously empty cell occupied.
+        let target = (0..BRICK_GRID_Z)
+            .flat_map(|z| (0..BRICK_GRID_Y).map(move |y| (y, z)))
+            .flat_map(|(y, z)| (0..BRICK_GRID_X).map(move |x| (x, y, z)))
+            .find(|&(x, y, z)| {
+                let cell = x + y * BRICK_GRID_X + z * BRICK_GRID_X * BRICK_GRID_Y;
+                brickmap.brick_indices[cell] == EMPTY_BRICK
+            })
+            .expect("the island must contain an empty brick");
+
+        let edit = brickmap
+            .set_voxel(
+                (target.0 * BRICK_SIZE) as i32,
+                (target.1 * BRICK_SIZE) as i32,
+                (target.2 * BRICK_SIZE) as i32,
+                Voxel::Stone,
+                ClearanceUpdate::FullRebuild,
+            )
+            .expect("placing into empty space must produce an edit");
+        assert!(
+            edit.brick_allocated,
+            "the empty brick must have materialized"
+        );
+
+        assert!(
+            !brickmap.bounds_are_valid(),
+            "bounds must be marked invalid"
+        );
+        assert!(
+            brickmap.brick_bound_words.iter().all(|&word| word == 0),
+            "a surviving non-zero bound could tunnel a ray through the new brick"
+        );
+        assert!(
+            edit.dirty
+                .iter()
+                .any(|dirty| dirty.array == BrickmapArray::BrickBounds
+                    && dirty.first_word == 0
+                    && dirty.word_count == brickmap.brick_bound_words.len()),
+            "the flattening must be published to the GPU, or only the CPU copy is safe"
+        );
+
+        // Flattening happens at most once: a second edit must not re-publish 2 MB.
+        let second = brickmap.set_voxel(
+            (target.0 * BRICK_SIZE) as i32 + 1,
+            (target.1 * BRICK_SIZE) as i32,
+            (target.2 * BRICK_SIZE) as i32,
+            Voxel::Stone,
+            ClearanceUpdate::FullRebuild,
+        );
+        if let Some(second) = second {
+            assert!(
+                !second
+                    .dirty
+                    .iter()
+                    .any(|dirty| dirty.array == BrickmapArray::BrickBounds),
+                "the bound field was already flat; re-uploading it is pure waste"
+            );
         }
     }
 }

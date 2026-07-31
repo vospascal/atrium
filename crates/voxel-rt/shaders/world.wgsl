@@ -20,7 +20,7 @@
 //   4  storage  material_words — 128 u32 words per occupied brick; one byte
 //                               per voxel, same local index, little-endian
 //                               (byte 0 = bits 0..8)
-//   5  storage  materials     — array<Material> (48 bytes/row), indexed by
+//   5  storage  materials     — array<Material> (80 bytes/row), indexed by
 //                               material id; see src/material.rs, which owns
 //                               the table and pins this layout by test
 //   7  uniform  Lighting      — lighting.rs LightingUniform (96 bytes; sun
@@ -33,6 +33,10 @@
 //   9  storage  brick_occupancy_bits — one bit per brick cell (same x-major
 //                               cell index as brick_indices; bit cell & 31 of
 //                               word cell >> 5); set = brick occupied
+//  15  storage  brick_bounds  — one u32 per brick cell: six 5-bit AADF
+//                               directional bounds (-x, +x, -y, +y, -z, +z).
+//                               Numbered 15 because 11-14 belong to the CAGI
+//                               pass's own bindings.
 //  10  storage  brick_skip_distances — one byte per brick cell, little-endian
 //                               packed like material_words: chebyshev
 //                               distance in bricks to the nearest occupied
@@ -148,13 +152,20 @@ struct Lighting {
 @group(0) @binding(2) var<storage, read> brick_indices: array<u32>;
 @group(0) @binding(3) var<storage, read> occupancy_words: array<u32>;
 @group(0) @binding(4) var<storage, read> material_words: array<u32>;
-// One row of the M1 material table (src/material.rs `GpuMaterial`). Laid out as
-// three 16-byte rows, each a vec3 followed by the scalar filling its w slot, so
+// One row of the material table (src/material.rs `GpuMaterial`). Laid out as
+// FIVE 16-byte rows, each a vec3 followed by the scalar filling its w slot, so
 // std430 adds no implicit padding and the Rust upload matches byte for byte.
+//
+// This is the FLAT form on purpose. The authored row on the CPU is a tagged union
+// (`MaterialKind`: Air / Solid / Cover / Medium), because a sentinel there is
+// indistinguishable from a real value to whoever is authoring it. Here the
+// opposite is true: this is the hottest read in the renderer, so every field is
+// present unconditionally and the shading path never branches to find out whether
+// a column applies. `to_gpu()` expands the union and fills the sentinels in.
 struct Material {
     albedo: vec3<f32>,      // sRGB-encoded, as authored
     transmittance: f32,     // light passing THROUGH (transport; M2 reads it)
-    emission: vec3<f32>,    // linear radiance; all-zero until M1b
+    emission: vec3<f32>,    // linear radiance; zero on every non-emitting row
     roughness: f32,
     opacity: f32,           // < 1.0 => traversal must continue through
     specular: f32,
@@ -173,19 +184,76 @@ struct Material {
     _pad_absorption: f32,
     scattering_per_meter: vec3<f32>,
     _pad_scattering: f32,
+    // S1: per-face-role values. On a row WITHOUT face roles all three hold the base
+    // albedo/roughness, so a per-face read is the identity — which is why the
+    // MATERIAL_FLAG_FACE_ROLES bit exists: it lets the shading path skip the
+    // selection entirely rather than discover it is pointless three floats later.
+    top_albedo: vec3<f32>,
+    top_roughness: f32,
+    side_albedo: vec3<f32>,
+    side_roughness: f32,
+    bottom_albedo: vec3<f32>,
+    bottom_roughness: f32,
 }
 
-// Mirrors `MaterialFlags` in src/material.rs.
+// Mirrors `MaterialFlags` in src/material.rs, where these are DERIVED from the
+// authored row's kind rather than written beside it — so a row can no longer
+// claim LIQUID with no medium, or claim foliage while blocking all light.
 const MATERIAL_FLAG_FOLIAGE: u32 = 1u;
 const MATERIAL_FLAG_EMISSIVE: u32 = 2u;
 const MATERIAL_FLAG_TRANSPARENT: u32 = 4u;
 const MATERIAL_FLAG_LIQUID: u32 = 8u;
+// S1: this row's top and bottom differ from its sides.
+const MATERIAL_FLAG_FACE_ROLES: u32 = 16u;
+
+// S1 — MATERIAL_FACE_ROLES is patched in by the variant registry. Off reproduces
+// every pre-S1 frame bit-for-bit, because with it off nothing reads the per-role
+// slots at all.
+const MATERIAL_FACE_ROLES: bool = false;
+
+// S1 — this hit's albedo, picked by which face was struck.
+//
+// The face is free: the DDA already records the axis it last stepped and the sign
+// of the ray along it, because the analytic corner AO needed an integer face frame.
+// `hit_normal` builds its normal as `-axis_sign` on `axis`, so a `+Y` normal — the
+// top face — is `axis == 1` with a NEGATIVE sign, which is the one thing about this
+// that reads backwards and is therefore worth stating.
+fn material_face_albedo(material: u32, axis: u32, axis_sign: f32) -> vec3<f32> {
+    let row = materials[material];
+    if (!MATERIAL_FACE_ROLES || (row.flags & MATERIAL_FLAG_FACE_ROLES) == 0u) {
+        return row.albedo;
+    }
+    if (axis != 1u) {
+        return row.side_albedo;
+    }
+    return select(row.bottom_albedo, row.top_albedo, axis_sign < 0.0);
+}
+
+/// S1 — this hit's roughness, by the same rule.
+fn material_face_roughness(material: u32, axis: u32, axis_sign: f32) -> f32 {
+    let row = materials[material];
+    if (!MATERIAL_FACE_ROLES || (row.flags & MATERIAL_FLAG_FACE_ROLES) == 0u) {
+        return row.roughness;
+    }
+    if (axis != 1u) {
+        return row.side_roughness;
+    }
+    return select(row.bottom_roughness, row.top_roughness, axis_sign < 0.0);
+}
 
 @group(0) @binding(5) var<storage, read> materials: array<Material>;
 @group(0) @binding(7) var<uniform> lighting: Lighting;
 @group(0) @binding(8) var<storage, read> column_max_brick_y: array<u32>;
 @group(0) @binding(9) var<storage, read> brick_occupancy_bits: array<u32>;
 @group(0) @binding(10) var<storage, read> brick_skip_distances: array<u32>;
+@group(0) @binding(15) var<storage, read> brick_bounds: array<u32>;
+
+// AADF field layout — mirrors BOUND_BITS / BOUND_DIRECTIONS in src/brickmap.rs.
+// Six 5-bit bounds per brick cell in order -x, +x, -y, +y, -z, +z: how many
+// FURTHER cells the ray may cross in that direction such that the whole box
+// spanned by all six is empty.
+const BOUND_BITS: u32 = 5u;
+const BOUND_MASK: u32 = 31u;
 
 // ---- A/B benchmark levers ----------------------------------------------------
 // Compile-time flags (naga folds them; disabled paths cost nothing). The
@@ -232,6 +300,21 @@ const ENABLE_BRICK_BIT_GRID: bool = false;
 // brick costs one byte-load from the 500 KB grid instead of a u32 from the
 // 2 MB pointer grid — and skips whole cubes of empty air besides.
 const ENABLE_DISTANCE_SKIP: bool = true;
+// AADF directional skip: jump the box spanned by the cell's six directional
+// bounds (binding 15) instead of the chebyshev cube. DOCUMENTED NEGATIVE on M3
+// Max — default OFF; see the registry verdict in src/variants.rs for the four
+// scenario numbers. The FIELD is better than chebyshev and that is measurable
+// (27,578 grazing cells go from reach 0 to a mean 5.19 cells); reading it is
+// what costs more than it returns:
+//   - the chebyshev byte doubles as the occupancy test, so one load answers
+//     both questions; the bound word is a SECOND load on top of it;
+//   - 2 MB of bounds against 500 KB of distance bytes, so the cache-resident
+//     grid stops being cache-resident;
+//   - unpacking six 5-bit fields costs shifts where a byte compare costs one.
+// Kept as a lever because the reach advantage is hardware-independent while the
+// cache cost is not — Quest has a different hierarchy and may flip this.
+// From NAADF (Ulschmid et al., CGF 2026, MIT).
+const ENABLE_DIRECTIONAL_SKIP: bool = false;
 
 // ---- E1b: shadow levers (technique bank T1) -----------------------------------
 // 0 = hard (one binary any-hit shadow ray — the voxel-purist default and the
@@ -677,8 +760,39 @@ fn brick_neighborhood_empty(brick_cell: vec3<i32>) -> bool {
 fn distance_skip(state: ptr<function, DdaState>, origin: vec3<f32>, direction: vec3<f32>,
                  inverse_direction: vec3<f32>, skip_cells: i32,
                  clamp_min: vec3<i32>, clamp_max: vec3<i32>) {
-    let box_min = vec3<f32>((*state).cell - vec3<i32>(skip_cells - 1)) * BRICK_SIZE;
-    let box_max = vec3<f32>((*state).cell + vec3<i32>(skip_cells)) * BRICK_SIZE;
+    // The chebyshev cube is the symmetric case of the general box below.
+    let half_width = vec3<i32>(skip_cells - 1);
+    bounded_skip(state, origin, direction, inverse_direction, half_width, half_width,
+                 clamp_min, clamp_max);
+}
+
+// One directional bound out of a packed AADF word.
+fn bound_of(packed: u32, direction: u32) -> u32 {
+    return (packed >> (direction * BOUND_BITS)) & BOUND_MASK;
+}
+
+// The AADF box of an empty brick cell, as (low, high) cell counts. Returns zero
+// extents when the cell has no room to claim, which the callers read as "no skip
+// available, take a single dda_step".
+fn directional_box(cell_index: u32) -> array<vec3<i32>, 2> {
+    let packed = brick_bounds[cell_index];
+    let low = vec3<i32>(i32(bound_of(packed, 0u)), i32(bound_of(packed, 2u)),
+                        i32(bound_of(packed, 4u)));
+    let high = vec3<i32>(i32(bound_of(packed, 1u)), i32(bound_of(packed, 3u)),
+                         i32(bound_of(packed, 5u)));
+    return array<vec3<i32>, 2>(low, high);
+}
+
+// The general form of the jump above: `low`/`high` are per-axis counts of
+// guaranteed-empty cells on each side of the current one, so the empty region is
+// the box of cells [cell - low, cell + high]. The chebyshev cube passes the same
+// value for both; AADF passes its six directional bounds. ONE routine, so the
+// tunnel-safety argument is made once.
+fn bounded_skip(state: ptr<function, DdaState>, origin: vec3<f32>, direction: vec3<f32>,
+                inverse_direction: vec3<f32>, low: vec3<i32>, high: vec3<i32>,
+                clamp_min: vec3<i32>, clamp_max: vec3<i32>) {
+    let box_min = vec3<f32>((*state).cell - low) * BRICK_SIZE;
+    let box_max = vec3<f32>((*state).cell + high + vec3<i32>(1, 1, 1)) * BRICK_SIZE;
     let t_far = max((box_min - origin) * inverse_direction,
                     (box_max - origin) * inverse_direction);
     var exit_axis = 2u;
@@ -991,6 +1105,15 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32,
             if (fine.material != 0u) {
                 return fine;
             }
+        } else if (ENABLE_DIRECTIONAL_SKIP) {
+            let extents = directional_box(cell_index);
+            if (any(extents[0] + extents[1] > vec3<i32>(0, 0, 0))) {
+                bounded_skip(&state, origin, direction, inverse_direction,
+                             extents[0], extents[1], vec3<i32>(0, 0, 0),
+                             grid_size - vec3<i32>(1, 1, 1));
+                column_stale = true;
+                continue;
+            }
         } else if (ENABLE_DISTANCE_SKIP) {
             let skip_cells = skip_distance_of(cell_index);
             if (skip_cells >= 2u) {
@@ -1109,7 +1232,16 @@ fn trace_shadow_visibility(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
                 visibility = soft_penumbra_update(visibility, &state, skip_cells,
                                                   origin, direction);
             }
-            if (ENABLE_DISTANCE_SKIP && skip_cells >= 2u) {
+            if (ENABLE_DIRECTIONAL_SKIP) {
+                let extents = directional_box(cell_index);
+                if (any(extents[0] + extents[1] > vec3<i32>(0, 0, 0))) {
+                    bounded_skip(&state, origin, direction, inverse_direction,
+                                 extents[0], extents[1], vec3<i32>(0, 0, 0),
+                                 grid_size - vec3<i32>(1, 1, 1));
+                    column_stale = true;
+                    continue;
+                }
+            } else if (ENABLE_DISTANCE_SKIP && skip_cells >= 2u) {
                 distance_skip(&state, origin, direction, inverse_direction,
                               i32(skip_cells), vec3<i32>(0, 0, 0),
                               grid_size - vec3<i32>(1, 1, 1));

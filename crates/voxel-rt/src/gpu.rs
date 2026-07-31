@@ -14,9 +14,14 @@ use winit::window::Window;
 /// fails validation at startup.
 ///
 /// Portability note for E9: Metal allows 31 buffers per stage and Adreno 6xx/7xx
-/// Vulkan drivers report 24+ storage buffers per stage, so 10 is comfortably
+/// Vulkan drivers report 24+ storage buffers per stage, so 11 is comfortably
 /// inside the Quest target too.
-pub const REQUIRED_STORAGE_BUFFERS_PER_STAGE: u32 = 10;
+///
+/// Went 10 -> 11 when the AADF directional-bound field (binding 15) landed. If a
+/// target ever caps below this, the fix is to concatenate the two empty-space
+/// fields — chebyshev bytes and directional bounds — into one buffer with an
+/// offset per array rather than to drop either.
+pub const REQUIRED_STORAGE_BUFFERS_PER_STAGE: u32 = 11;
 
 /// The device descriptor every consumer must use: the raised storage-buffer limit
 /// plus whatever timestamp support the adapter offers (GPU pass timing degrades to

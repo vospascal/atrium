@@ -610,7 +610,10 @@ fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                  pixel: vec2<f32>, sun_transmission: vec3<f32>) -> vec3<f32> {
     let normal = hit_normal(hit);
-    let albedo = srgb_decode(materials[hit.material].albedo);
+    // S1: per-face albedo. Identical to the row's base albedo unless the row
+    // authored face roles AND the lever is on, so this is the pre-S1 value
+    // bit-for-bit in the shipped configuration.
+    let albedo = srgb_decode(material_face_albedo(hit.material, hit.axis, hit.axis_sign));
 
     var sun_visibility = 0.0;
     let sun_facing = dot(normal, lighting.sun_direction);
@@ -756,7 +759,7 @@ fn water_interior_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f3
 // which is the whole point: structure instead of a constant.
 fn water_cheap_surface_radiance(hit: Hit, water_material: u32) -> vec3<f32> {
     let normal = hit_normal(hit);
-    let albedo = srgb_decode(materials[hit.material].albedo);
+    let albedo = srgb_decode(material_face_albedo(hit.material, hit.axis, hit.axis_sign));
     // Downwelling light arrives from above, so a face's share of it is its own
     // up-facing cosine — floored at a quarter so a vertical pool wall is dim rather
     // than black, which is what the real multiply-scattered field does.
