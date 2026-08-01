@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672af9a680-000000000000000b",
+  "name": "dirt",
+  "voxel_material_slot": 3,
+  "material": {
+    "albedo": [
+      0.44,
+      0.32,
+      0.22
+    ],
+    "roughness": 0.97,
+    "specular": 0.02,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.1,
+      0.2,
+      0.4,
+      0.55,
+      0.6,
+      0.6
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e2feb3f48-0000000000000051"
+}

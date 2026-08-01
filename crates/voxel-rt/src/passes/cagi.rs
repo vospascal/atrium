@@ -6,7 +6,7 @@
 //! - [`LightVolume`] — the ping-pong buffer pair, the static per-cell attributes
 //!   and the volume uniform. Recreated when the resolution lever moves or CAGI is
 //!   switched off (a placeholder grid then keeps the shading pass's bindings
-//!   valid for ~12 bytes instead of ~13 MB). It also owns the FRONT index (which
+//!   valid for ~16 bytes instead of ~13 MB). It also owns the FRONT index (which
 //!   buffer holds the newest values) and the re-flood flag.
 //! - [`CagiPass`] — the pipeline (cached per compile-time lever permutation) and
 //!   the two bind groups, one per ping-pong direction.
@@ -23,13 +23,17 @@
 //! |---------|----------|
 //! | 11 | storage (read)       front light volume |
 //! | 12 | storage (read_write) back light volume — CA pass only |
-//! | 13 | storage (read)       static per-cell attributes (albedo + solid bit) |
+//! | 13 | storage (read)       per-cell attributes + E5b emission (5 u32 words) |
 //! | 14 | uniform              grid dimensions + transport coefficients |
+//! | 15 | storage (read)       shared AADF directional bounds |
 
 use wgpu::util::DeviceExt;
 
 use crate::brickmap::Brickmap;
-use crate::cagi::{build_cell_attributes, material_attribute_table, CagiGrid, CagiSettings};
+use crate::cagi::{
+    build_cell_attributes_with_emission, material_attribute_table, CagiGrid, CagiSettings,
+    LightCellUpdate, CELL_DATA_WORDS,
+};
 use crate::material::Material;
 use crate::variants::RenderQuality;
 
@@ -74,10 +78,44 @@ pub struct LightVolume {
     grid: CagiGrid,
     /// Ping-pong pair. `volume_buffers[front]` holds the newest values.
     volume_buffers: [wgpu::Buffer; 2],
-    attributes_buffer: wgpu::Buffer,
+    /// Two u32 words per cell: the packed bounce attribute and E5b's 10:10:10
+    /// emission. Keeping them together stays within macOS's 11-storage-buffer
+    /// compute-stage limit and avoids a mostly-zero vec4 allocation.
+    cell_data_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     front: usize,
     needs_reflood: bool,
+}
+
+fn pack_emission(emission: [f32; 4]) -> u32 {
+    let [red, green, blue] =
+        crate::cagi::quantize_radiance([emission[0], emission[1], emission[2]]);
+    red | (green << 10) | (blue << 20)
+}
+
+/// Append ONE cell's binding-13 payload. The single place that decides how many
+/// words a cell occupies, because both writers stride by
+/// [`CELL_DATA_WORDS`] and a writer that pushed a different count would silently
+/// shift every following cell — which is exactly what the incremental path did
+/// while the full upload was correct.
+fn push_cell_data(data: &mut Vec<u32>, attribute: u32, emission: [f32; 4]) {
+    let before = data.len();
+    data.push(attribute);
+    data.push(pack_emission(emission));
+    debug_assert_eq!(
+        data.len() - before,
+        CELL_DATA_WORDS,
+        "a cell payload must be exactly CELL_DATA_WORDS, or the stride lies"
+    );
+}
+
+fn pack_cell_data(attributes: &[u32], emissions: &[[f32; 4]]) -> Vec<u32> {
+    assert_eq!(attributes.len(), emissions.len());
+    let mut data = Vec::with_capacity(attributes.len() * CELL_DATA_WORDS);
+    for (&attribute, emission) in attributes.iter().zip(emissions) {
+        push_cell_data(&mut data, attribute, *emission);
+    }
+    data
 }
 
 impl LightVolume {
@@ -93,7 +131,7 @@ impl LightVolume {
         Self::new_with_attributes(device, brickmap, settings, AttributeSource::BuildNow, rows)
     }
 
-    /// The same, with a choice about the ~50 ms CPU attribute build (E4 measured
+    /// The same, with a choice about the ~0.5 s CPU attribute build (release bench
     /// it; E2 moved it off the frame): build it here, or allocate the buffer zeroed
     /// and wait for [`Self::write_all_attributes`] from the world thread.
     ///
@@ -109,11 +147,16 @@ impl LightVolume {
         rows: &[Material],
     ) -> Self {
         let grid = settings.grid(brickmap);
-        let attributes = match (settings.enabled, attribute_source) {
-            (true, AttributeSource::BuildNow) => {
-                build_cell_attributes(brickmap, &grid, &material_attribute_table(rows))
-            }
-            _ => vec![0_u32; grid.cell_count()],
+        let (attributes, emissions) = match (settings.enabled, attribute_source) {
+            (true, AttributeSource::BuildNow) => build_cell_attributes_with_emission(
+                brickmap,
+                &grid,
+                &material_attribute_table(rows),
+            ),
+            _ => (
+                vec![0_u32; grid.cell_count()],
+                vec![[0.0_f32; 4]; grid.cell_count()],
+            ),
         };
         let volume_buffer = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -125,26 +168,24 @@ impl LightVolume {
                 mapped_at_creation: false,
             })
         };
+        let cell_data = pack_cell_data(&attributes, &emissions);
         Self {
             grid,
             volume_buffers: [
                 volume_buffer("cagi light volume A"),
                 volume_buffer("cagi light volume B"),
             ],
-            attributes_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("cagi cell attributes"),
-                contents: bytemuck::cast_slice(&attributes),
+            cell_data_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cagi cell attributes and emissions"),
+                contents: bytemuck::cast_slice(&cell_data),
                 // COPY_DST since E2: an edit patches the touched cells, and a
                 // resolution switch uploads a set that was built off-frame.
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }),
             uniform_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cagi volume uniform"),
-                contents: bytemuck::bytes_of(&grid.uniform(rows)),
-                // COPY_DST since S2: the emitter palette is built from the material
-                // table, and that table is live-editable — so authoring an emissive
-                // material has to be able to reach this buffer.
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                contents: bytemuck::bytes_of(&grid.uniform()),
+                usage: wgpu::BufferUsages::UNIFORM,
             }),
             front: 0,
             // A fresh volume is uninitialized GPU memory: the first encode must
@@ -226,7 +267,7 @@ impl LightVolume {
         }
         entries.push(wgpu::BindGroupEntry {
             binding: 13,
-            resource: self.attributes_buffer.as_entire_binding(),
+            resource: self.cell_data_buffer.as_entire_binding(),
         });
         entries.push(wgpu::BindGroupEntry {
             binding: 14,
@@ -260,7 +301,7 @@ impl LightVolume {
         &self,
         queue: &wgpu::Queue,
         grid: Option<CagiGrid>,
-        cells: &[(usize, u32)],
+        cells: &[LightCellUpdate],
     ) {
         if grid != Some(self.grid) {
             return;
@@ -270,46 +311,30 @@ impl LightVolume {
         let flush = |run: &mut Vec<u32>, first_cell: usize| {
             if !run.is_empty() {
                 queue.write_buffer(
-                    &self.attributes_buffer,
-                    (first_cell * 4) as u64,
+                    &self.cell_data_buffer,
+                    (first_cell * CELL_DATA_WORDS * 4) as u64,
                     bytemuck::cast_slice(run),
                 );
                 run.clear();
             }
         };
-        for (cell_index, attribute) in cells {
-            if *cell_index >= self.grid.cell_count() {
+        for update in cells {
+            if update.index >= self.grid.cell_count() {
                 continue; // above the volume's clamped height
             }
             if run.is_empty() {
-                run_first_cell = *cell_index;
-            } else if *cell_index != run_first_cell + run.len() {
+                run_first_cell = update.index;
+            } else if update.index != run_first_cell + run.len() / CELL_DATA_WORDS {
                 flush(&mut run, run_first_cell);
-                run_first_cell = *cell_index;
+                run_first_cell = update.index;
             }
-            run.push(*attribute);
+            // The SAME per-cell packer the initial upload and the full re-pack
+            // use: the run offsets above are computed in cell strides, so a cell
+            // written at any other width scribbles its emission over the next
+            // cell's attribute word.
+            push_cell_data(&mut run, update.attribute, update.emission);
         }
         flush(&mut run, run_first_cell);
-    }
-
-    /// S2 — re-upload the volume uniform, which carries the **emitter palette**.
-    ///
-    /// The palette is derived from the material table, and since S2 that table is
-    /// live-editable: authoring emission on a row (or an emission pattern layer on one)
-    /// changes what the CA should inject. Cheap enough to be unconditional on a dirty
-    /// table — the uniform is a few hundred bytes and the rest of it is grid geometry
-    /// that simply rewrites to the same values.
-    ///
-    /// Note what this does NOT do: it does not tell any *cell* that it is an emitter.
-    /// That lives in the attribute volume, so a row that becomes emissive for the first
-    /// time also needs [`Self::write_all_attributes`] — which is the ~50 ms re-pack the
-    /// panel offers explicitly rather than running on a slider tick.
-    pub fn write_uniform(&self, queue: &wgpu::Queue, rows: &[Material]) {
-        queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&self.grid.uniform(rows)),
-        );
     }
 
     /// Upload a whole attribute set built elsewhere (the world thread, after a
@@ -320,11 +345,16 @@ impl LightVolume {
         queue: &wgpu::Queue,
         grid: &CagiGrid,
         attributes: &[u32],
+        emissions: &[[f32; 4]],
     ) -> bool {
-        if *grid != self.grid || attributes.len() != self.grid.cell_count() {
+        if *grid != self.grid
+            || attributes.len() != self.grid.cell_count()
+            || emissions.len() != self.grid.cell_count()
+        {
             return false;
         }
-        queue.write_buffer(&self.attributes_buffer, 0, bytemuck::cast_slice(attributes));
+        let cell_data = pack_cell_data(attributes, emissions);
+        queue.write_buffer(&self.cell_data_buffer, 0, bytemuck::cast_slice(&cell_data));
         // The volume was flooded against zeroed attributes; start over.
         self.mark_dirty();
         true
@@ -334,7 +364,7 @@ impl LightVolume {
     pub fn gpu_bytes(&self) -> u64 {
         self.volume_buffers[0].size()
             + self.volume_buffers[1].size()
-            + self.attributes_buffer.size()
+            + self.cell_data_buffer.size()
             + self.uniform_buffer.size()
     }
 }
@@ -342,7 +372,7 @@ impl LightVolume {
 /// Where a fresh [`LightVolume`]'s static attributes come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttributeSource {
-    /// Build them from the brickmap now, on the calling thread (~50 ms — a frame
+    /// Build them from the brickmap now, on the calling thread (~0.5 s — a frame
     /// hitch if that thread is the frame thread).
     BuildNow,
     /// Allocate zeroed and wait for [`LightVolume::write_all_attributes`].
@@ -500,6 +530,37 @@ mod tests {
     use super::*;
     use crate::cagi::{CagiRule, CagiSampleMode, CagiSkyTest};
 
+    /// Every writer of binding 13 must lay a cell down in exactly
+    /// [`CELL_DATA_WORDS`], because the byte offsets are computed in cell strides.
+    ///
+    /// This is a regression test, not a formality: the full upload packed 2 words
+    /// per cell while the incremental edit path pushed 5 (the attribute plus four
+    /// raw f32 channels). Nothing caught it — the GPU write path has no test — so
+    /// every edit wrote at 2.5x the stride and scribbled f32 bit patterns over the
+    /// following cells' attribute words.
+    #[test]
+    fn every_writer_lays_a_cell_down_in_one_stride() {
+        let attributes = [0xdead_beef_u32, 0x0000_0001, 0x00ff_ffff];
+        let emissions = [[3.0, 0.0, 0.0, 0.0], [0.0; 4], [0.25, 0.5, 1.0, 0.0]];
+
+        let packed = pack_cell_data(&attributes, &emissions);
+        assert_eq!(packed.len(), attributes.len() * CELL_DATA_WORDS);
+
+        // The incremental path's per-cell push must produce byte-identical output
+        // to the full upload's, or a patched cell disagrees with a re-packed one.
+        let mut incremental = Vec::new();
+        for (&attribute, &emission) in attributes.iter().zip(&emissions) {
+            push_cell_data(&mut incremental, attribute, emission);
+        }
+        assert_eq!(incremental, packed);
+
+        // And each cell's attribute is readable at its own stride, which is what
+        // `cagi_cell_attribute` in the WGSL assumes.
+        for (cell, &attribute) in attributes.iter().enumerate() {
+            assert_eq!(packed[cell * CELL_DATA_WORDS], attribute);
+        }
+    }
+
     #[test]
     fn default_settings_build_the_shipped_shader() {
         assert_eq!(
@@ -541,12 +602,19 @@ mod tests {
             for sky_test in [CagiSkyTest::ColumnMax, CagiSkyTest::UpwardTrace] {
                 for sun_cache in [true, false] {
                     for sample_mode in [CagiSampleMode::Nearest, CagiSampleMode::Trilinear] {
+                        // E5c sweeps here too, and specifically for the OFF value: the
+                        // bounce is called from inside its own `if`, so with the lever
+                        // off naga must delete `cagi_emitter_bounce` and its cell_data
+                        // reads entirely. Pairing it with `rule` is the useful axis —
+                        // the whole point of the lever is that it makes the rules agree.
+                        let emitter_bounce = rule != CagiRule::MaxDecrement;
                         let quality = RenderQuality {
                             global_illumination: CagiSettings {
                                 rule,
                                 sky_test,
                                 sun_cache,
                                 sample_mode,
+                                emitter_bounce,
                                 ..CagiSettings::default()
                             },
                             ..RenderQuality::default()
@@ -563,7 +631,8 @@ mod tests {
                         assert!(
                             validation_error.is_none(),
                             "CAGI {rule:?} / {sky_test:?} / cache {sun_cache} / \
-                             {sample_mode:?} failed wgpu validation: {validation_error:?}"
+                             {sample_mode:?} / bounce {emitter_bounce} failed wgpu \
+                             validation: {validation_error:?}"
                         );
                     }
                 }

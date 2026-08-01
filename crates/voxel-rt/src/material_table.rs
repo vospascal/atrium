@@ -5,7 +5,7 @@
 //! Why this exists at all. Before S0 the table reached the GPU exactly once, in
 //! `WorldBindings::new`, through a buffer created without `COPY_DST` — so a live
 //! material edit was not merely unimplemented, it was *impossible*. Every one of
-//! the 26 rows had to be tuned by editing Rust and rebuilding, which is why half
+//! the 27 rows had to be tuned by editing Rust and rebuilding, which is why half
 //! the columns were authored blind (roughness is a uniform `0.60` across every
 //! solid, a value written when nothing read it). Every later stage of this arc —
 //! face roles, pattern layers, animation, the re-authored roughness column — is
@@ -20,7 +20,7 @@
 //!   edits what a human wrote and [`Material::to_gpu`] stays the one place the
 //!   union is expanded.
 //! * **Dirty is a single flag, not a per-row set.** The table is
-//!   [`crate::material::MATERIAL_TABLE_BYTES`] = 2080 bytes; tracking which rows
+//!   [`crate::material::MATERIAL_TABLE_BYTES`] = 6912 bytes; tracking which rows
 //!   changed would cost more code than the write it saves, and a `write_buffer`
 //!   of 2 KB is not measurable against a frame.
 //! * **`Default` is the compiled table**, which is what makes "reset this row"
@@ -39,6 +39,7 @@
 //! with a story for those predicates, not just a combo box.
 
 use crate::material::{GpuMaterial, Material, MATERIALS, MATERIAL_COUNT};
+use crate::material_graph::{MaterialGraphProgram, MaterialSampleContext};
 
 /// The live material table plus its upload gate.
 #[derive(Clone, Debug, PartialEq)]
@@ -137,7 +138,7 @@ impl MaterialTable {
     /// The light volume's builders take this rather than the rows themselves, so an
     /// edit's incremental light-cell update and the full re-pack both describe the LIVE
     /// table. Before S2 they read the compiled one, which made the re-pack a no-op for a
-    /// material edit. 104 bytes and `Copy`, so it rides in a `VoxelEdit` across the
+    /// material edit. 416 bytes and `Copy`, so it rides in a `VoxelEdit` across the
     /// world-thread boundary — see [`crate::cagi::MaterialAttributes`].
     pub fn cagi_attributes(&self) -> crate::cagi::MaterialAttributes {
         crate::cagi::material_attribute_table(&self.rows)
@@ -147,12 +148,43 @@ impl MaterialTable {
         debug_assert_eq!(self.rows.len(), MATERIAL_COUNT);
         self.rows.iter().map(Material::to_gpu).collect()
     }
+
+    /// Apply one compiled graph sample to a flat material row. This is the
+    /// bridge used by previews and future graph-backed rows; it refuses to
+    /// overwrite explicit face-role authoring because those roles are a
+    /// separate authored layer with different semantics.
+    pub fn apply_graph_sample(
+        &mut self,
+        material: u8,
+        program: &MaterialGraphProgram,
+        context: MaterialSampleContext,
+    ) -> bool {
+        let Some(row) = self.rows.get_mut(material as usize) else {
+            return false;
+        };
+        if row.face_roles.is_some() {
+            return false;
+        }
+        let sample = program.evaluate(context);
+        row.albedo = [
+            sample.base_color[0],
+            sample.base_color[1],
+            sample.base_color[2],
+        ];
+        row.roughness = sample.roughness.clamp(0.0, 1.0);
+        let emission = [sample.emission[0], sample.emission[1], sample.emission[2]];
+        row.emission = (emission.iter().any(|value| *value != 0.0)).then_some(emission);
+        self.dirty = true;
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{NodeRegistry, PropertyValue, SocketKey};
     use crate::material::{material_id, MaterialKind};
+    use crate::material_graph::{compile, new_material_graph};
     use voxel_core::world::Voxel;
 
     /// The default table must be the compiled one AND must not ask for an upload:
@@ -232,6 +264,38 @@ mod tests {
         assert!(table.take_dirty().is_none());
         table.reset_row(u8::MAX);
         assert!(table.take_dirty().is_none());
+    }
+
+    #[test]
+    fn a_compiled_graph_can_drive_a_flat_row_without_destroying_face_roles() {
+        let mut graph = new_material_graph("table test");
+        let surface = graph
+            .nodes
+            .iter_mut()
+            .find(|(_, node)| node.node_type.0 == "material.surface")
+            .map(|(_, node)| node)
+            .unwrap();
+        surface.socket_defaults.insert(
+            SocketKey("base_color".into()),
+            PropertyValue::Color([0.9, 0.1, 0.2, 1.0]),
+        );
+        surface
+            .socket_defaults
+            .insert(SocketKey("roughness".into()), PropertyValue::Scalar(0.2));
+        let program = compile(&graph, &NodeRegistry).unwrap();
+        let stone = material_id(Voxel::Stone);
+        let mut table = MaterialTable::default();
+        assert!(table.apply_graph_sample(
+            stone,
+            &program,
+            crate::material_graph::MaterialSampleContext {
+                position: [0.0; 3],
+                normal: [0.0, 1.0, 0.0],
+            },
+        ));
+        assert_eq!(table.row(stone).unwrap().albedo, [0.9, 0.1, 0.2]);
+        assert_eq!(table.row(stone).unwrap().roughness, 0.2);
+        assert!(table.take_dirty().is_some());
     }
 
     /// The kind must survive a value edit untouched. The panel is not allowed to

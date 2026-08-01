@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672a184730-0000000000000005",
+  "name": "grass",
+  "voxel_material_slot": 1,
+  "material": {
+    "albedo": [
+      0.41,
+      0.52,
+      0.29
+    ],
+    "roughness": 0.95,
+    "specular": 0.02,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": {
+      "top": {
+        "albedo": [
+          0.41,
+          0.52,
+          0.29
+        ],
+        "roughness": 0.95
+      },
+      "side": {
+        "albedo": [
+          0.44,
+          0.32,
+          0.22
+        ],
+        "roughness": 0.97
+      },
+      "bottom": {
+        "albedo": [
+          0.35,
+          0.26,
+          0.18
+        ],
+        "roughness": 0.97
+      }
+    },
+    "patterns": [],
+    "acoustic_alpha": [
+      0.1,
+      0.2,
+      0.4,
+      0.55,
+      0.6,
+      0.6
+    ]
+  },
+  "graph": "vx-000000000000000018c77d2217356f88-0000000000000001"
+}

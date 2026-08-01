@@ -14,7 +14,7 @@
 //! synchronization that avoiding the copy would need.
 
 use crate::brickmap::{Brickmap, BrickmapArray, BrickmapEdit, ClearanceUpdate};
-use crate::cagi::{cell_attribute, CagiGrid, MaterialAttributes};
+use crate::cagi::{CagiGrid, LightCellUpdate, MaterialAttributes};
 
 /// How a removal that empties a brick repairs the chebyshev clearance field —
 /// the registry-facing mirror of [`ClearanceUpdate`] (which carries the radius
@@ -100,7 +100,7 @@ pub struct VoxelEdit {
     /// The material table's CAGI attributes, so an edit's light-cell update describes
     /// the LIVE table rather than the compiled one (S2).
     ///
-    /// The reduced 104-byte `Copy` form rather than the rows themselves, precisely so
+    /// The reduced 416-byte `Copy` form rather than the rows themselves, precisely so
     /// it can ride in this struct across the thread boundary — see
     /// [`crate::cagi::MaterialAttributes`]. Every edit already carries `light_grid` for
     /// the same reason: the world thread cannot reach the renderer's state, so anything
@@ -147,7 +147,7 @@ pub trait BulkEdit: Send {
 pub struct BulkEditRequest {
     pub shape: Box<dyn BulkEdit>,
     pub light_grid: Option<CagiGrid>,
-    /// See [`VoxelEdit::material_attributes`] — same reason, same 104 bytes.
+    /// See [`VoxelEdit::material_attributes`] — same reason, same 416 bytes.
     pub material_attributes: MaterialAttributes,
 }
 
@@ -182,7 +182,7 @@ pub struct WorldDelta {
     /// grid those indices are for — the uploader drops them if the light volume has
     /// been reallocated at another resolution since (a lever moved while the edit
     /// was in flight), because a full attribute rebuild is already on its way.
-    pub light_cells: Vec<(usize, u32)>,
+    pub light_cells: Vec<LightCellUpdate>,
     pub light_grid: Option<CagiGrid>,
     /// The metadata uniform changed (brick count and/or global max brick Y).
     pub metadata: Option<crate::brickmap::BrickmapMetadata>,
@@ -200,7 +200,11 @@ impl WorldDelta {
     /// of the E2 verdict).
     pub fn upload_bytes(&self) -> usize {
         self.writes.iter().map(ArrayWrite::bytes).sum::<usize>()
-            + self.light_cells.len() * 4
+            // What the GPU buffer actually holds per cell, not the CPU-side
+            // `LightCellUpdate`: the emission is packed 10:10:10 into one word on
+            // the way out, so an f32-triple price here would overstate an edit by
+            // 2.5x — and this number IS the E2 verdict.
+            + self.light_cells.len() * crate::cagi::CELL_DATA_BYTES
             + if self.metadata.is_some() {
                 std::mem::size_of::<crate::brickmap::BrickmapMetadata>()
             } else {
@@ -339,70 +343,119 @@ pub fn apply_bulk(
 }
 
 /// The CAGI cells an edit invalidates. A cell never straddles two bricks and its
-/// attribute is a function of its OWN voxels only (highest occupied voxel's
-/// albedo, plus the quarter-fill solid bit), so exactly one cell changes per
-/// edited voxel — the E4 attribute build's 48 ms collapses to one cell's worth of
-/// work.
+/// attribute is a function of its voxels plus one-voxel neighbour exposure, so an
+/// edit invalidates the containing cell and adjacent cells whose exposed area
+/// changed.
 fn light_cell_updates(
     brickmap: &Brickmap,
     edit: &VoxelEdit,
     applied: &BrickmapEdit,
-) -> Vec<(usize, u32)> {
+) -> Vec<LightCellUpdate> {
     let Some(grid) = edit.light_grid else {
         return Vec::new();
     };
-    let cell = [
-        applied.voxel[0] as u32 / grid.cell_voxels,
-        applied.voxel[1] as u32 / grid.cell_voxels,
-        applied.voxel[2] as u32 / grid.cell_voxels,
-    ];
-    if (0..3).any(|axis| cell[axis] >= grid.size[axis]) {
-        return Vec::new(); // above the volume's clamped height: nothing to update
+    let mut cells = Vec::new();
+    for [dx, dy, dz] in [
+        [0, 0, 0],
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ] {
+        let voxel = [
+            applied.voxel[0] + dx,
+            applied.voxel[1] + dy,
+            applied.voxel[2] + dz,
+        ];
+        if voxel.iter().any(|coordinate| *coordinate < 0) {
+            continue;
+        }
+        let cell = [
+            voxel[0] as u32 / grid.cell_voxels,
+            voxel[1] as u32 / grid.cell_voxels,
+            voxel[2] as u32 / grid.cell_voxels,
+        ];
+        if (0..3).any(|axis| cell[axis] >= grid.size[axis]) {
+            continue;
+        }
+        cells.push(cell);
     }
-    vec![(
-        grid.cell_index(cell),
-        cell_attribute(brickmap, &grid, cell, &edit.material_attributes),
-    )]
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+        .into_iter()
+        .map(|cell| crate::cagi::cell_attribute(brickmap, &grid, cell, &edit.material_attributes))
+        .collect()
 }
 
 /// Every CAGI cell overlapping an inclusive voxel box, with its attribute
 /// recomputed from the finished brickmap — the bulk path's counterpart to
 /// [`light_cell_updates`].
 ///
-/// Deliberately the cell box rather than the exact set of touched cells: a
-/// superset is correct (a cell whose voxels did not change recomputes to the same
-/// attribute) and it costs one pass instead of deduplicating hundreds of
-/// thousands of cell indices.
+/// Recomputes the touched cell box plus the six face-adjacent cell slabs. A
+/// diagonal cell cannot share a voxel face with the edit, so it cannot have its
+/// exposed area changed and is intentionally excluded.
 fn light_cells_in_voxel_box(
     brickmap: &Brickmap,
     light_grid: Option<CagiGrid>,
     lowest_voxel: [i32; 3],
     highest_voxel: [i32; 3],
     attribute_table: &MaterialAttributes,
-) -> Vec<(usize, u32)> {
+) -> Vec<LightCellUpdate> {
     let Some(grid) = light_grid else {
         return Vec::new();
     };
-    let cell_bounds: Vec<(u32, u32)> = (0..3)
-        .map(|axis| {
-            let low = lowest_voxel[axis].max(0) as u32 / grid.cell_voxels;
-            let high = highest_voxel[axis].max(0) as u32 / grid.cell_voxels;
-            (low.min(grid.size[axis]), (high + 1).min(grid.size[axis]))
-        })
-        .collect();
+    // Clamping `low` as well as `high` would turn a box that sits ENTIRELY above
+    // the volume's clamped height into the topmost cell slab — correct values, but
+    // a whole slab plus its six neighbour slabs recomputed for an edit that
+    // changed nothing in the volume. Drop those boxes instead.
+    let mut cell_bounds = Vec::with_capacity(3);
+    for axis in 0..3 {
+        let low = lowest_voxel[axis].max(0) as u32 / grid.cell_voxels;
+        if low >= grid.size[axis] {
+            return Vec::new();
+        }
+        let high = (highest_voxel[axis].max(0) as u32 / grid.cell_voxels)
+            .min(grid.size[axis].saturating_sub(1));
+        cell_bounds.push((low, high));
+    }
     let mut cells = Vec::new();
-    for z in cell_bounds[2].0..cell_bounds[2].1 {
-        for y in cell_bounds[1].0..cell_bounds[1].1 {
-            for x in cell_bounds[0].0..cell_bounds[0].1 {
-                let cell = [x, y, z];
-                cells.push((
-                    grid.cell_index(cell),
-                    cell_attribute(brickmap, &grid, cell, attribute_table),
-                ));
+    for z in cell_bounds[2].0..=cell_bounds[2].1 {
+        for y in cell_bounds[1].0..=cell_bounds[1].1 {
+            for x in cell_bounds[0].0..=cell_bounds[0].1 {
+                cells.push([x, y, z]);
             }
         }
     }
+    // Exposure can also change in the six cell slabs immediately outside the
+    // edited box. Diagonal cells cannot share a voxel face with the edit.
+    for axis in 0..3 {
+        for side in [
+            cell_bounds[axis].0.checked_sub(1),
+            cell_bounds[axis].1.checked_add(1),
+        ] {
+            let Some(side) = side.filter(|value| *value < grid.size[axis]) else {
+                continue;
+            };
+            for z in cell_bounds[2].0..=cell_bounds[2].1 {
+                for y in cell_bounds[1].0..=cell_bounds[1].1 {
+                    for x in cell_bounds[0].0..=cell_bounds[0].1 {
+                        let mut cell = [x, y, z];
+                        cell[axis] = side;
+                        cells.push(cell);
+                    }
+                }
+            }
+        }
+    }
+    cells.sort_unstable();
+    cells.dedup();
     cells
+        .into_iter()
+        .map(|cell| crate::cagi::cell_attribute(brickmap, &grid, cell, attribute_table))
+        .collect()
 }
 
 #[cfg(test)]
@@ -462,7 +515,7 @@ mod tests {
         assert_eq!(delta.material, 0);
         assert!(!delta.arrays_grew);
         assert_eq!(delta.clearance_cells_written, 0, "no brick flipped");
-        assert_eq!(delta.light_cells.len(), 1);
+        assert!(!delta.light_cells.is_empty());
         for write in &delta.writes {
             let words = brickmap.array_words(write.array);
             assert_eq!(
@@ -472,8 +525,11 @@ mod tests {
                 write.array
             );
         }
+        // The brickmap words plus at most seven 8-byte CAGI cells (the edited cell
+        // and its six face neighbours). Tight on purpose: this number is the E2
+        // verdict, so it should fail when E5b's fan-out or packing grows.
         assert!(
-            delta.upload_bytes() <= 64,
+            delta.upload_bytes() <= 128,
             "a carve inside an existing brick uploaded {} bytes",
             delta.upload_bytes()
         );
@@ -532,16 +588,28 @@ mod tests {
                 },
                 &settings,
             ) {
-                deltas.extend(delta.light_cells);
+                deltas.extend(
+                    delta
+                        .light_cells
+                        .into_iter()
+                        .map(|update| (update.index, update.attribute, update.emission)),
+                );
             }
         }
         assert!(!deltas.is_empty());
-        let rebuilt =
-            crate::cagi::build_cell_attributes(&brickmap, &grid, &MaterialAttributes::compiled());
-        for (cell_index, attribute) in deltas {
+        let (rebuilt, rebuilt_emissions) = crate::cagi::build_cell_attributes_with_emission(
+            &brickmap,
+            &grid,
+            &MaterialAttributes::compiled(),
+        );
+        for (cell_index, attribute, emission) in deltas {
             assert_eq!(
                 attribute, rebuilt[cell_index],
                 "cell {cell_index}'s incremental attribute drifted from the rebuild"
+            );
+            assert_eq!(
+                &emission, &rebuilt_emissions[cell_index],
+                "cell {cell_index}'s incremental emission drifted from the rebuild"
             );
         }
     }

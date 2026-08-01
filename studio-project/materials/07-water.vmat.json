@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672c2a8948-0000000000000017",
+  "name": "water",
+  "voxel_material_slot": 7,
+  "material": {
+    "albedo": [
+      0.19,
+      0.52,
+      0.71
+    ],
+    "roughness": 0.05,
+    "specular": 0.02,
+    "kind": {
+      "kind": "medium",
+      "phase": "liquid",
+      "index_of_refraction": 1.333,
+      "absorption_per_meter": [
+        0.446,
+        0.09,
+        0.015
+      ],
+      "scattering_per_meter": [
+        0.004,
+        0.03,
+        0.045
+      ],
+      "opacity": 0.7,
+      "transmittance": 0.85
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.01,
+      0.01,
+      0.01,
+      0.01,
+      0.02,
+      0.02
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e35078540-0000000000000061"
+}

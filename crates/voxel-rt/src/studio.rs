@@ -103,9 +103,21 @@ pub enum StudioPose {
     /// block is its own cell's only occupant and always wins.
     ///
     /// See [`EmitterWall`](StudioPose::EmitterWall)'s placement in
-    /// [`StudioScene::build`]: the block is put where its cell does **not** elect it, so
-    /// this pose currently demonstrates the failure. When the sweep is fixed it will
-    /// light, which is exactly the before/after this prop is for.
+    /// [`StudioScene::build`]: the block is put where its cell does **not** elect it,
+    /// which is the case that used to fail.
+    ///
+    /// **What passing looks like, as of E5c:** a warm halo on the wall around the block,
+    /// spanning roughly one to two cells, and *the same halo whichever `CAGI_RULE` is
+    /// selected*. Rule-independence is the actual assertion — before E5c the emitter's
+    /// only route out was the propagation stencil, so it survived the scale-free
+    /// `MaxDecrement` and all but vanished under the shipped `Diffusion6` (152 vs 45 of
+    /// 1023 in the adjacent cell). Toggling `emitter bounce` in the Quality overlay is
+    /// the before/after this prop exists for.
+    ///
+    /// Two things it does NOT prove, so do not read them into it: the block itself
+    /// clips to flat white (Reinhard on an 8-bit target — E7b's HDR intermediate is
+    /// what fixes that, not this), and the halo's *absolute* brightness is a tuning
+    /// question owned by the `emissive scale` knob.
     EmitterWall,
 }
 
@@ -539,17 +551,17 @@ mod tests {
         assert_eq!(emitters, 1, "the prop must embed exactly one emitter");
     }
 
-    /// The embedded glow block must claim its cell's emitter slot **even though its cell
-    /// does not elect it** as the albedo voxel.
+    /// The embedded glow block must contribute to its cell's E5b radiance even though
+    /// its cell does not elect it as the albedo voxel.
     ///
     /// This started life as a characterisation test asserting the opposite — the sweep
     /// took the last voxel visited for every field, so a light embedded in a surface was
     /// outvoted by whichever neighbour sat higher in the cell and injected nothing. It
-    /// failed the moment `fold_voxel_attribute` made the emitter index sticky, which is
-    /// what it was written to do.
+    /// failed when emission was tied to the elected voxel; E5b makes the source an
+    /// exposed-area accumulation instead.
     #[test]
     fn the_embedded_emitter_claims_its_cell() {
-        use crate::cagi::{CagiSettings, MaterialAttributes, CELL_EMITTER_MASK};
+        use crate::cagi::{CagiSettings, MaterialAttributes};
 
         let scene = StudioScene {
             pose: StudioPose::EmitterWall,
@@ -565,8 +577,11 @@ mod tests {
             block[1] as u32 / grid.cell_voxels,
             block[2] as u32 / grid.cell_voxels,
         ];
-        let attribute =
+        let update =
             crate::cagi::cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled());
+
+        let attribute = update.attribute;
+        let emission = update.emission;
 
         // The block is NOT the voxel its cell elects for albedo — that is the whole
         // point of where the prop puts it, and what used to make it invisible to the CA.
@@ -579,12 +594,9 @@ mod tests {
             elected, block,
             "the prop must place the block where its cell does NOT elect it"
         );
-        // ...and it claims the emitter slot regardless, because emission is sticky.
-        assert_ne!(
-            attribute & CELL_EMITTER_MASK,
-            0,
-            "the embedded emitter lost its cell — an emitter must not be outvoted by a \
-             non-emitting neighbour"
+        assert!(
+            emission[0] > 0.0,
+            "the exposed embedded emitter contributed no light"
         );
         // The albedo still comes from the elected voxel, i.e. the wall material rather
         // than the glow block: the two rules coexist in one word by design.

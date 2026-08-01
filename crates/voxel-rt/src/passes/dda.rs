@@ -12,6 +12,7 @@
 //! `shaders/dda.wgsl` document their own thirds.
 
 use crate::camera::CameraUniform;
+use crate::material_graph::MaterialGraphShaderSet;
 use crate::variants::RenderQuality;
 
 use super::cagi::LightVolume;
@@ -36,6 +37,7 @@ pub const SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/cagi_volume.wgsl"),
     include_str!("../../shaders/water.wgsl"),
     include_str!("../../shaders/dda.wgsl"),
+    include_str!("../../shaders/material_graph.wgsl"),
 );
 
 /// [`SHADER_SOURCE`] with every experiment's compile-time levers patched in.
@@ -57,6 +59,16 @@ pub fn build_shader_source(quality: &RenderQuality) -> String {
         .patch_volume_consts(&shadows_patched);
     let water_patched = quality.water.patch_shader_source(&gi_patched);
     quality.materials.patch_shader_source(&water_patched)
+}
+
+/// Build the shading source with the optional material-graph dispatch appended.
+/// An empty set returns the ordinary source unchanged, preserving the shipped
+/// renderer and all existing quality-preset cache keys.
+pub fn build_shader_source_with_material_graphs(
+    quality: &RenderQuality,
+    graphs: &MaterialGraphShaderSet,
+) -> String {
+    graphs.inject_into_dda(&build_shader_source(quality))
 }
 
 pub struct DdaPass {

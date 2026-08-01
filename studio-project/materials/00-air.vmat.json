@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c7776729b79d18-0000000000000002",
+  "name": "air",
+  "voxel_material_slot": 0,
+  "material": {
+    "albedo": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "roughness": 0.0,
+    "specular": 0.0,
+    "kind": {
+      "kind": "air"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e0e4e01e0-0000000000000001"
+}

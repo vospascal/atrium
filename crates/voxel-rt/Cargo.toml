@@ -10,7 +10,10 @@ egui = "0.35"
 egui-wgpu = "0.35"
 egui-winit = "0.35"
 glam = "0.30"
+naga = { version = "29", features = ["wgsl-in"] }
 pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 voxel-core = { version = "0.1.0", path = "../voxel-core" }
 wgpu = "29"
 winit = "0.30"

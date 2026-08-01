@@ -1,0 +1,356 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c7af1e33d85fc8-000000000000005d",
+  "name": "stone Material Graph",
+  "kind": "material",
+  "interface": {
+    "inputs": {},
+    "outputs": {}
+  },
+  "nodes": {
+    "g-0000000000000004": {
+      "node_type": "material.pattern_layer",
+      "node_type_version": 1,
+      "properties": {
+        "amount": {
+          "type": "scalar",
+          "value": 1.0
+        },
+        "blend": {
+          "type": "text",
+          "value": "multiply"
+        },
+        "emission_intensity": {
+          "type": "scalar",
+          "value": 1.0
+        },
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_bottom": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_side": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_top": {
+          "type": "boolean",
+          "value": true
+        },
+        "target": {
+          "type": "text",
+          "value": "albedo"
+        },
+        "target_color": {
+          "type": "color",
+          "value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-0000000000000008": {
+      "node_type": "material.pattern_noise",
+      "node_type_version": 1,
+      "properties": {
+        "frame": {
+          "type": "text",
+          "value": "world"
+        },
+        "octaves": {
+          "type": "integer",
+          "value": 4
+        },
+        "period_meters": {
+          "type": "scalar",
+          "value": 0.02
+        },
+        "texels_per_voxel": {
+          "type": "integer",
+          "value": 8
+        },
+        "vary_per_face": {
+          "type": "boolean",
+          "value": true
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-000000000000000a": {
+      "node_type": "material.pattern_layer",
+      "node_type_version": 1,
+      "properties": {
+        "amount": {
+          "type": "scalar",
+          "value": 1.0
+        },
+        "blend": {
+          "type": "text",
+          "value": "add"
+        },
+        "emission_intensity": {
+          "type": "scalar",
+          "value": 16.0
+        },
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_bottom": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_side": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_top": {
+          "type": "boolean",
+          "value": true
+        },
+        "target": {
+          "type": "text",
+          "value": "emission"
+        },
+        "target_color": {
+          "type": "color",
+          "value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-000000000000000c": {
+      "node_type": "material.pattern_speckle",
+      "node_type_version": 1,
+      "properties": {
+        "density": {
+          "type": "scalar",
+          "value": 0.25
+        },
+        "frame": {
+          "type": "text",
+          "value": "world"
+        },
+        "period_meters": {
+          "type": "scalar",
+          "value": 0.02
+        },
+        "texels_per_voxel": {
+          "type": "integer",
+          "value": 8
+        },
+        "vary_per_face": {
+          "type": "boolean",
+          "value": true
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-000000000000000e": {
+      "node_type": "material.output",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-00000000000000bb": {
+      "node_type": "material.base_color",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "color",
+          "value": [
+            0.52,
+            0.52,
+            0.55,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-00000000000000bc": {
+      "node_type": "material.roughness",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "scalar",
+          "value": 0.85
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-00000000000000bd": {
+      "node_type": "material.emission",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "color",
+          "value": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d": {
+      "node_type": "material.surface",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    }
+  },
+  "links": {
+    "g-0000000000000005": {
+      "from": {
+        "node": "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-0000000000000004",
+        "socket": "surface"
+      },
+      "order": 0
+    },
+    "g-0000000000000009": {
+      "from": {
+        "node": "g-0000000000000008",
+        "socket": "pattern"
+      },
+      "to": {
+        "node": "g-0000000000000004",
+        "socket": "pattern"
+      },
+      "order": 0
+    },
+    "g-000000000000000b": {
+      "from": {
+        "node": "g-0000000000000004",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-000000000000000a",
+        "socket": "surface"
+      },
+      "order": 0
+    },
+    "g-000000000000000d": {
+      "from": {
+        "node": "g-000000000000000c",
+        "socket": "pattern"
+      },
+      "to": {
+        "node": "g-000000000000000a",
+        "socket": "pattern"
+      },
+      "order": 0
+    },
+    "g-000000000000000f": {
+      "from": {
+        "node": "g-000000000000000a",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-000000000000000e",
+        "socket": "surface"
+      },
+      "order": 0
+    },
+    "g-00000000000000be": {
+      "from": {
+        "node": "g-00000000000000bb",
+        "socket": "color"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d",
+        "socket": "base_color"
+      },
+      "order": 0
+    },
+    "g-00000000000000bf": {
+      "from": {
+        "node": "g-00000000000000bc",
+        "socket": "value"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d",
+        "socket": "roughness"
+      },
+      "order": 0
+    },
+    "g-00000000000000c0": {
+      "from": {
+        "node": "g-00000000000000bd",
+        "socket": "color"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d",
+        "socket": "emission"
+      },
+      "order": 0
+    }
+  },
+  "layout": {
+    "positions": {
+      "g-0000000000000004": [
+        807.5808,
+        170.5424
+      ],
+      "g-0000000000000008": [
+        533.0094,
+        403.78885
+      ],
+      "g-000000000000000a": [
+        1099.8219,
+        -172.65012
+      ],
+      "g-000000000000000c": [
+        778.0018,
+        -149.55316
+      ],
+      "g-000000000000000e": [
+        1368.1414,
+        -164.13037
+      ],
+      "g-00000000000000bb": [
+        80.0,
+        20.0
+      ],
+      "g-00000000000000bc": [
+        80.0,
+        220.0
+      ],
+      "g-00000000000000bd": [
+        80.0,
+        420.0
+      ],
+      "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d": [
+        439.9112,
+        159.91118
+      ]
+    }
+  }
+}

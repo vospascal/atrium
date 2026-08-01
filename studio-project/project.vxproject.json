@@ -1,0 +1,240 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c77765202f9ec8-0000000000000001",
+  "name": "Voxel Studio",
+  "material_assignments": {
+    "0": {
+      "id": "vx-000000000000000018c7776729b79d18-0000000000000002",
+      "path": "materials/00-air.vmat.json"
+    },
+    "1": {
+      "id": "vx-000000000000000018c777672a184730-0000000000000005",
+      "path": "materials/01-grass.vmat.json"
+    },
+    "10": {
+      "id": "vx-000000000000000018c777672dd40ee0-0000000000000020",
+      "path": "materials/10-leaves.vmat.json"
+    },
+    "11": {
+      "id": "vx-000000000000000018c777672eda24a0-0000000000000023",
+      "path": "materials/11-leaves-dark.vmat.json"
+    },
+    "12": {
+      "id": "vx-000000000000000018c777672f39b578-0000000000000026",
+      "path": "materials/12-leaves-birch.vmat.json"
+    },
+    "13": {
+      "id": "vx-000000000000000018c777672f9477d8-0000000000000029",
+      "path": "materials/13-leaves-pine.vmat.json"
+    },
+    "14": {
+      "id": "vx-000000000000000018c777672fdff410-000000000000002c",
+      "path": "materials/14-flower-pink.vmat.json"
+    },
+    "15": {
+      "id": "vx-000000000000000018c77767302b3d80-000000000000002f",
+      "path": "materials/15-flower-white.vmat.json"
+    },
+    "16": {
+      "id": "vx-000000000000000018c7776730772330-0000000000000032",
+      "path": "materials/16-flower-yellow.vmat.json"
+    },
+    "17": {
+      "id": "vx-000000000000000018c7776730ce3440-0000000000000035",
+      "path": "materials/17-flower-blue.vmat.json"
+    },
+    "18": {
+      "id": "vx-000000000000000018c7776731395608-0000000000000038",
+      "path": "materials/18-water-weed.vmat.json"
+    },
+    "19": {
+      "id": "vx-000000000000000018c7776731a0af10-000000000000003b",
+      "path": "materials/19-lily-pad.vmat.json"
+    },
+    "2": {
+      "id": "vx-000000000000000018c777672a90af68-0000000000000008",
+      "path": "materials/02-tall-grass.vmat.json"
+    },
+    "20": {
+      "id": "vx-000000000000000018c7776731fdc330-000000000000003e",
+      "path": "materials/20-lily-bloom.vmat.json"
+    },
+    "21": {
+      "id": "vx-000000000000000018c7776732831030-0000000000000041",
+      "path": "materials/21-reed.vmat.json"
+    },
+    "22": {
+      "id": "vx-000000000000000018c77767331d9ab0-0000000000000044",
+      "path": "materials/22-cattail-head.vmat.json"
+    },
+    "23": {
+      "id": "vx-000000000000000018c77767337bf308-0000000000000047",
+      "path": "materials/23-snow.vmat.json"
+    },
+    "24": {
+      "id": "vx-000000000000000018c7776733e36b50-000000000000004a",
+      "path": "materials/24-glow-block.vmat.json"
+    },
+    "25": {
+      "id": "vx-000000000000000018c777673441db18-000000000000004d",
+      "path": "materials/25-glow-berry.vmat.json"
+    },
+    "26": {
+      "id": "vx-000000000000000018c77767349d31e8-0000000000000050",
+      "path": "materials/26-lava.vmat.json"
+    },
+    "3": {
+      "id": "vx-000000000000000018c777672af9a680-000000000000000b",
+      "path": "materials/03-dirt.vmat.json"
+    },
+    "4": {
+      "id": "vx-000000000000000018c777672b457c90-000000000000000e",
+      "path": "materials/04-sand.vmat.json"
+    },
+    "5": {
+      "id": "vx-000000000000000018c777672b931f90-0000000000000011",
+      "path": "materials/05-sediment.vmat.json"
+    },
+    "6": {
+      "id": "vx-000000000000000018c777672bdf2480-0000000000000014",
+      "path": "materials/06-stone.vmat.json"
+    },
+    "7": {
+      "id": "vx-000000000000000018c777672c2a8948-0000000000000017",
+      "path": "materials/07-water.vmat.json"
+    },
+    "8": {
+      "id": "vx-000000000000000018c777672c991de0-000000000000001a",
+      "path": "materials/08-trunk.vmat.json"
+    },
+    "9": {
+      "id": "vx-000000000000000018c777672cf24230-000000000000001d",
+      "path": "materials/09-trunk-birch.vmat.json"
+    }
+  },
+  "quality_recipes": [
+    {
+      "id": "vx-000000000000000018c777673529e958-0000000000000053",
+      "path": "quality/active.vquality.json"
+    }
+  ],
+  "active_quality_recipe": "vx-000000000000000018c777673529e958-0000000000000053",
+  "graph_assets": [
+    {
+      "id": "vx-000000000000000018c7af1e0e4e01e0-0000000000000001",
+      "path": "graphs/material-00.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
+      "path": "graphs/material-01.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e15a5bcd0-0000000000000009",
+      "path": "graphs/material-10.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e17003bf0-000000000000000d",
+      "path": "graphs/material-11.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e18860ce8-0000000000000011",
+      "path": "graphs/material-12.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e19ed0370-0000000000000015",
+      "path": "graphs/material-13.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e1b6e3ca0-0000000000000019",
+      "path": "graphs/material-14.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e1d2b2328-000000000000001d",
+      "path": "graphs/material-15.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e1e96d4a0-0000000000000021",
+      "path": "graphs/material-16.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e20004010-0000000000000025",
+      "path": "graphs/material-17.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e21703f18-0000000000000029",
+      "path": "graphs/material-18.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e22b774b8-000000000000002d",
+      "path": "graphs/material-19.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e241c63b8-0000000000000031",
+      "path": "graphs/material-02.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e25898c30-0000000000000035",
+      "path": "graphs/material-20.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e274e8908-0000000000000039",
+      "path": "graphs/material-21.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e298d45d8-000000000000003d",
+      "path": "graphs/material-22.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2ad5e6c0-0000000000000041",
+      "path": "graphs/material-23.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
+      "path": "graphs/material-24.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2d5de190-0000000000000049",
+      "path": "graphs/material-25.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2e9f8568-000000000000004d",
+      "path": "graphs/material-26.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2feb3f48-0000000000000051",
+      "path": "graphs/material-03.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e31346118-0000000000000055",
+      "path": "graphs/material-04.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e328e1518-0000000000000059",
+      "path": "graphs/material-05.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e35078540-0000000000000061",
+      "path": "graphs/material-07.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e36324d88-0000000000000065",
+      "path": "graphs/material-08.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e374a8000-0000000000000069",
+      "path": "graphs/material-09.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e33d85fc8-000000000000005d",
+      "path": "graphs/material-06.vgraph.json"
+    }
+  ],
+  "world_profiles": [
+    {
+      "id": "world-default-v2",
+      "path": "world/active.vworld.json"
+    }
+  ],
+  "active_world_profile": "world-default-v2",
+  "runtime_assets": []
+}

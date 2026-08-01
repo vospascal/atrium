@@ -32,7 +32,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::thread::JoinHandle;
 
 use crate::brickmap::Brickmap;
-use crate::cagi::{build_cell_attributes, CagiGrid, MaterialAttributes};
+use crate::cagi::{CagiGrid, MaterialAttributes};
 use crate::world_edit::{
     apply, apply_bulk, BulkEditRequest, VoxelEdit, WorldDelta, WorldEditSettings,
 };
@@ -46,6 +46,7 @@ pub enum WorldUpdate {
     LightAttributes {
         grid: CagiGrid,
         attributes: Vec<u32>,
+        emissions: Vec<[f32; 4]>,
         build_micros: f32,
     },
 }
@@ -210,7 +211,7 @@ impl WorldHost {
         }
     }
 
-    /// Rebuild the CAGI volume's static attributes for `grid` (E4's ~50 ms sweep,
+    /// Rebuild the CAGI volume's static attributes for `grid` (E4's ~0.5 s sweep,
     /// which a GI resolution switch triggers). In variant B this happens on the
     /// world thread and arrives through [`Self::drain`]; in variant A it is applied
     /// inline and the frame pays for it — which is exactly the hitch E2 set out to
@@ -238,12 +239,17 @@ impl WorldHost {
             None => {
                 let brickmap = self.read();
                 let started = std::time::Instant::now();
-                let attributes = build_cell_attributes(&brickmap, &grid, &attribute_table);
+                let (attributes, emissions) = crate::cagi::build_cell_attributes_with_emission(
+                    &brickmap,
+                    &grid,
+                    &attribute_table,
+                );
                 let build_micros = started.elapsed().as_secs_f32() * 1e6;
                 drop(brickmap);
                 self.queued.push(WorldUpdate::LightAttributes {
                     grid,
                     attributes,
+                    emissions,
                     build_micros,
                 });
             }
@@ -317,13 +323,18 @@ fn world_thread_main(
             }
             WorkerRequest::LightAttributes(grid, attribute_table) => {
                 let started = std::time::Instant::now();
-                let attributes = {
+                let (attributes, emissions) = {
                     let brickmap = brickmap.read().expect("the world lock is never poisoned");
-                    build_cell_attributes(&brickmap, &grid, &attribute_table)
+                    crate::cagi::build_cell_attributes_with_emission(
+                        &brickmap,
+                        &grid,
+                        &attribute_table,
+                    )
                 };
                 let update = WorldUpdate::LightAttributes {
                     grid,
                     attributes,
+                    emissions,
                     build_micros: started.elapsed().as_secs_f32() * 1e6,
                 };
                 if results.send(update).is_err() {

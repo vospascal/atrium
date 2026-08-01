@@ -1,0 +1,181 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
+  "name": "grass Material Graph",
+  "kind": "material",
+  "interface": {
+    "inputs": {},
+    "outputs": {}
+  },
+  "nodes": {
+    "g-0000000000000009": {
+      "node_type": "material.output",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-000000000000000a": {
+      "node_type": "material.face_color",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {
+        "base": {
+          "type": "color",
+          "value": [
+            0.41,
+            0.52,
+            0.29,
+            1.0
+          ]
+        },
+        "bottom": {
+          "type": "color",
+          "value": [
+            0.35,
+            0.26,
+            0.18,
+            1.0
+          ]
+        },
+        "side": {
+          "type": "color",
+          "value": [
+            0.44,
+            0.32,
+            0.22,
+            1.0
+          ]
+        },
+        "top": {
+          "type": "color",
+          "value": [
+            0.41,
+            0.52,
+            0.29,
+            1.0
+          ]
+        }
+      },
+      "unknown_payload": null
+    },
+    "g-000000000000000b": {
+      "node_type": "material.face_roughness",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {
+        "base": {
+          "type": "scalar",
+          "value": 0.95
+        },
+        "bottom": {
+          "type": "scalar",
+          "value": 0.97
+        },
+        "side": {
+          "type": "scalar",
+          "value": 0.97
+        },
+        "top": {
+          "type": "scalar",
+          "value": 0.95
+        }
+      },
+      "unknown_payload": null
+    },
+    "g-000000000000000c": {
+      "node_type": "material.emission",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "color",
+          "value": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "surface-vx-000000000000000018c77d2217356f88-0000000000000001": {
+      "node_type": "material.surface",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    }
+  },
+  "links": {
+    "g-000000000000000d": {
+      "from": {
+        "node": "g-000000000000000a",
+        "socket": "color"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c77d2217356f88-0000000000000001",
+        "socket": "base_color"
+      },
+      "order": 0
+    },
+    "g-000000000000000e": {
+      "from": {
+        "node": "g-000000000000000b",
+        "socket": "value"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c77d2217356f88-0000000000000001",
+        "socket": "roughness"
+      },
+      "order": 0
+    },
+    "g-000000000000000f": {
+      "from": {
+        "node": "g-000000000000000c",
+        "socket": "color"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c77d2217356f88-0000000000000001",
+        "socket": "emission"
+      },
+      "order": 0
+    },
+    "surface-chain-vx-000000000000000018c77d2217356f88-0000000000000001-0": {
+      "from": {
+        "node": "surface-vx-000000000000000018c77d2217356f88-0000000000000001",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-0000000000000009",
+        "socket": "surface"
+      },
+      "order": 0
+    }
+  },
+  "layout": {
+    "positions": {
+      "g-0000000000000009": [
+        700.0,
+        160.0
+      ],
+      "g-000000000000000a": [
+        80.0,
+        20.0
+      ],
+      "g-000000000000000b": [
+        80.0,
+        220.0
+      ],
+      "g-000000000000000c": [
+        80.0,
+        420.0
+      ],
+      "surface-vx-000000000000000018c77d2217356f88-0000000000000001": [
+        440.0,
+        160.0
+      ]
+    }
+  }
+}

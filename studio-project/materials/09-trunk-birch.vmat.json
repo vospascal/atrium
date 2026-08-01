@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672cf24230-000000000000001d",
+  "name": "trunk_birch",
+  "voxel_material_slot": 9,
+  "material": {
+    "albedo": [
+      0.8,
+      0.78,
+      0.72
+    ],
+    "roughness": 0.85,
+    "specular": 0.03,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.15,
+      0.11,
+      0.1,
+      0.07,
+      0.06,
+      0.07
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e374a8000-0000000000000069"
+}

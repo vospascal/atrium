@@ -16,8 +16,9 @@
 //! storage texture, writing the lighting uniform, and switching the pipeline on
 //! a compile-time lever change all stay in the platform layer.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
+use egui::{Event, Key, MouseWheelUnit};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
@@ -25,11 +26,16 @@ use crate::ao::AoMode;
 use crate::character::Submersion;
 use crate::debug_pool::{POOL_DEPTH_METERS, POOL_DISTANCE_AHEAD_METERS, POOL_WATER_RADIUS_METERS};
 use crate::frame_timing::FrameTimings;
+use crate::graph::{
+    FieldDeclarationStatic, FieldTarget, GraphCommand, InputPin, LinkId, NodeCategory,
+    NodeDeclaration, NodeId, NodePreview, NodeRecord, NodeRegistry, NodeTypeId, OutputPin,
+    PropertyValue, SocketKey, SocketType,
+};
 use crate::lighting::SunSettings;
-use crate::material_edit::{draw_material_section, MaterialPanelState};
+use crate::material_graph::{ConnectorDrag, GraphEditorState};
 use crate::material_table::MaterialTable;
-use crate::material_tune::ProvenanceTable;
 use crate::shadows::ShadowMode;
+use crate::studio_assets::StudioAssetPanelState;
 use crate::variants::{
     levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
     RenderQuality, QUALITY_PRESETS, VOXELS_PER_METER,
@@ -39,6 +45,7 @@ use crate::world_edit::ClearanceUpdateMode;
 use crate::world_host::WorldEditStats;
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
+const GRAPH_NODE_CONTROL_ZOOM: f32 = 0.95;
 
 /// Read-only per-frame display data for the stats panel.
 pub struct OverlayFrameData {
@@ -132,7 +139,22 @@ impl Overlay {
     /// a click on the overlay panel) so the platform layer can skip its own
     /// handling.
     pub fn handle_window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
-        self.winit_state.on_window_event(window, event).consumed
+        let consumed = self.winit_state.on_window_event(window, event).consumed;
+        // `on_window_event` only reports whether this particular event was
+        // consumed. The graph canvas is an interactive region even when the
+        // event is a wheel or a middle-button gesture, so also consult egui's
+        // current hit-test state to keep viewport input from leaking through.
+        consumed
+            || self.context.egui_wants_pointer_input()
+            || self.context.egui_wants_keyboard_input()
+    }
+
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.context.egui_wants_keyboard_input()
+    }
+
+    pub fn wants_pointer_input(&self) -> bool {
+        self.context.egui_wants_pointer_input()
     }
 
     pub fn record_frame_time(&mut self, frame_time_seconds: f32) {
@@ -157,8 +179,8 @@ impl Overlay {
         quality: &mut RenderQuality,
         carve_test_pool_requested: &mut bool,
         material_table: &mut MaterialTable,
-        material_panel: &mut MaterialPanelState,
-        material_provenance: &mut ProvenanceTable,
+        studio_assets: &mut StudioAssetPanelState,
+        graph_editor: &mut GraphEditorState,
     ) {
         let average_frame_time_seconds = if self.frame_time_samples.is_empty() {
             0.0
@@ -180,6 +202,7 @@ impl Overlay {
 
         let raw_input = self.winit_state.take_egui_input(window);
         let full_output = self.context.run_ui(raw_input, |root_ui| {
+            draw_graph_drawer(root_ui, graph_editor, material_table);
             egui::Area::new(egui::Id::new("fps_overlay"))
                 .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
                 .show(root_ui.ctx(), |ui| {
@@ -242,13 +265,9 @@ impl Overlay {
                         ));
                         draw_movement_readout(ui, &frame_data.movement);
                         ui.checkbox(vsync_enabled, "VSync");
+                        draw_studio_assets_section(ui, studio_assets);
                         draw_quality_section(ui, quality);
-                        draw_material_section(
-                            ui,
-                            material_table,
-                            material_panel,
-                            material_provenance,
-                        );
+                        ui.label("Material authoring is defined by nodes in Graph Studio.");
                         draw_debug_section(
                             ui,
                             carve_test_pool_requested,
@@ -455,6 +474,2445 @@ fn draw_debug_section(
             *carve_test_pool_requested = true;
         }
     });
+}
+
+/// Persistent Studio controls. This only raises a request; the platform layer
+/// owns filesystem I/O, loading, and all renderer consequences.
+fn draw_studio_assets_section(ui: &mut egui::Ui, state: &mut StudioAssetPanelState) {
+    ui.collapsing("Project", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("folder");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.project_path)
+                    .desired_width(190.0)
+                    .hint_text("studio-project"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("quality name");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.quality_name)
+                    .desired_width(150.0)
+                    .hint_text("Active quality"),
+            );
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Save project")
+                .on_hover_text(
+                    "Saves every live material row, the current quality settings, and the \
+                     project manifest. Generated GPU data and pipelines are not saved.",
+                )
+                .clicked()
+            {
+                state.save_requested = true;
+            }
+            if ui
+                .button("Load project")
+                .on_hover_text(
+                    "Loads saved materials and the active quality recipe. Invalid files leave \
+                     the live renderer on its last valid state.",
+                )
+                .clicked()
+            {
+                state.load_requested = true;
+            }
+        });
+        ui.checkbox(&mut state.autosave_enabled, "Autosave after 2 seconds idle")
+            .on_hover_text(
+                "Writes the same portable project assets after authored material or quality values stop changing. \
+                 The first manual save enables this automatically.",
+            );
+        if state.recovery_available {
+            ui.separator();
+            ui.label("An interrupted save was found.");
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Restore recovery")
+                    .on_hover_text("Restores the complete pre-commit snapshot, then saves it normally.")
+                    .clicked()
+                {
+                    state.restore_recovery_requested = true;
+                }
+                if ui
+                    .button("Discard recovery")
+                    .on_hover_text("Deletes only the interrupted-save journal; normal project assets remain.")
+                    .clicked()
+                {
+                    state.discard_recovery_requested = true;
+                }
+            });
+        }
+        if !state.status.is_empty() {
+            ui.label(&state.status);
+        }
+    });
+}
+
+/// Blender-style Graph Studio split editor. Unlike an anchored `Area`, a
+/// `TopBottomPanel` reserves layout space, so the node editor and the rendered
+/// viewport are separate regions rather than one floating overlay covering the
+/// other.
+fn draw_graph_drawer(
+    ui: &mut egui::Ui,
+    state: &mut GraphEditorState,
+    material_table: &MaterialTable,
+) {
+    let max_height = (ui.ctx().viewport_rect().height() * 0.8).max(320.0);
+    let mut expanded = state.visible;
+    let mut toggle_requested = false;
+    // The v2 ids intentionally discard the oversized panel state created by
+    // the first drawer implementation. The compact default should apply on
+    // the next launch instead of being masked by egui's persisted PanelState.
+    let collapsed_panel = egui::Panel::bottom(egui::Id::new("graph_studio_collapsed_v3"))
+        .resizable(false)
+        .exact_size(34.0);
+    let expanded_panel = egui::Panel::bottom(egui::Id::new("graph_studio_expanded_v3"))
+        .resizable(false)
+        .exact_size(state.drawer_height.clamp(120.0, max_height));
+    let _panel = egui::Panel::show_switched(
+        ui,
+        &mut expanded,
+        collapsed_panel,
+        expanded_panel,
+        |ui, is_expanded| {
+            ui.horizontal(|ui| {
+                let toggle_label = if is_expanded {
+                    "▾ Graph Studio"
+                } else {
+                    "▸ Graph Studio"
+                };
+                if ui.button(toggle_label).clicked() {
+                    toggle_requested = true;
+                }
+                ui.label(format!("Material {:02}", state.material_slot));
+                if !is_expanded {
+                    ui.label("click to open node editor");
+                }
+                ui.separator();
+                ui.label(&state.status);
+            });
+            if is_expanded {
+                let handle_rect = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), 8.0),
+                );
+                let handle_response = ui.interact(
+                    handle_rect,
+                    egui::Id::new("graph_studio_resize_handle_v3"),
+                    egui::Sense::click_and_drag(),
+                );
+                let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|pos| pos.y));
+                if handle_response.drag_started() {
+                    state.drawer_resize_last_y = pointer_y;
+                }
+                if handle_response.dragged() {
+                    if let (Some(previous_y), Some(current_y)) =
+                        (state.drawer_resize_last_y, pointer_y)
+                    {
+                        let delta = current_y - previous_y;
+                        state.drawer_height =
+                            (state.drawer_height - delta).clamp(120.0, max_height);
+                        state.drawer_resize_last_y = Some(current_y);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                if handle_response.drag_stopped() {
+                    state.drawer_resize_last_y = None;
+                }
+                ui.painter().rect_filled(
+                    handle_rect,
+                    0.0,
+                    if handle_response.hovered() || handle_response.dragged() {
+                        egui::Color32::from_rgb(145, 190, 235)
+                    } else {
+                        egui::Color32::from_rgb(75, 84, 100)
+                    },
+                );
+                ui.advance_cursor_after_rect(handle_rect);
+                ui.separator();
+                draw_graph_section_contents(ui, state, material_table);
+            }
+        },
+    );
+    if toggle_requested {
+        expanded = !expanded;
+    }
+    state.visible = expanded;
+}
+
+/// First Graph Studio canvas. It intentionally uses egui primitives rather
+/// than making a widget library the owner of graph semantics: every edit still
+/// goes through `GraphCommand` and `GraphHistory`.
+fn draw_graph_section_contents(
+    ui: &mut egui::Ui,
+    state: &mut GraphEditorState,
+    material_table: &MaterialTable,
+) {
+    let registry = NodeRegistry;
+    let previous_material_slot = state.material_slot;
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Undo").clicked() {
+            state.undo(&registry);
+        }
+        if ui.button("Redo").clicked() {
+            state.redo(&registry);
+        }
+        if ui.button("Open").clicked() {
+            state.open_requested = true;
+        }
+        let graph_valid = !state
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::graph::DiagnosticSeverity::Error);
+        if ui
+            .add_enabled(graph_valid, egui::Button::new("Save"))
+            .on_disabled_hover_text("Resolve graph errors before saving")
+            .clicked()
+        {
+            state.save_requested = true;
+        }
+        if ui.button("Duplicate").clicked() {
+            state.duplicate_requested = true;
+        }
+        if ui.button("Copy").clicked() {
+            state.copy_selected();
+        }
+        if ui
+            .add_enabled(state.can_paste(), egui::Button::new("Paste"))
+            .clicked()
+        {
+            state.paste_clipboard(&registry);
+        }
+        if ui.button("Reset").clicked() {
+            state.reset_requested = true;
+        }
+        if ui.button("Frame all").clicked() {
+            state.frame_all_requested = true;
+        }
+        if ui
+            .add_enabled(
+                !state.selected_nodes.is_empty(),
+                egui::Button::new("Frame selected"),
+            )
+            .clicked()
+        {
+            state.frame_selection_requested = true;
+        }
+        ui.separator();
+        ui.label("material");
+        egui::ComboBox::from_id_salt("graph-material-slot")
+            .selected_text(graph_material_label(material_table, state.material_slot))
+            .show_ui(ui, |ui| {
+                for slot in 0..material_table.rows().len() as u8 {
+                    ui.selectable_value(
+                        &mut state.material_slot,
+                        slot,
+                        graph_material_label(material_table, slot),
+                    );
+                }
+            });
+    });
+    if state.material_slot != previous_material_slot {
+        state.material_select_requested = Some(state.material_slot);
+        state.status = format!(
+            "Selected {} — loading graph",
+            graph_material_label(material_table, state.material_slot)
+        );
+    }
+    ui.horizontal(|ui| {
+        ui.label("add");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.search)
+                .desired_width(150.0)
+                .hint_text("search nodes"),
+        );
+        let visible_nodes = state.visible_node_types(&registry);
+        egui::ComboBox::from_id_salt("graph-node-type")
+            .selected_text(&state.node_type)
+            .show_ui(ui, |ui| {
+                for category in NodeCategory::ALL {
+                    let category_nodes = visible_nodes
+                        .iter()
+                        .copied()
+                        .filter(|node| node.category == *category);
+                    let mut category_nodes = category_nodes.peekable();
+                    if category_nodes.peek().is_none() {
+                        continue;
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new(category.label()).strong());
+                    for node in category_nodes {
+                        ui.selectable_value(&mut state.node_type, node.id.to_string(), node.id);
+                    }
+                }
+            });
+        let selected_node_type = NodeTypeId(state.node_type.clone());
+        let can_add_selected = state
+            .graph
+            .can_add_node_type(&registry, &selected_node_type);
+        if ui
+            .add_enabled(can_add_selected, egui::Button::new("Add node"))
+            .on_disabled_hover_text("This graph already contains the maximum number of this node")
+            .clicked()
+        {
+            state.add_node(NodeTypeId(state.node_type.clone()), &registry);
+        }
+        if let Some(layer) = registry.declarations().iter().find(|declaration| {
+            declaration.kinds.contains(&state.graph.kind)
+                && declaration.operation
+                    == crate::graph::NodeOperation::Material(
+                        crate::graph::MaterialNodeOperation::PatternLayer,
+                    )
+        }) {
+            let can_add_layer = state
+                .graph
+                .can_add_node_type(&registry, &NodeTypeId(layer.id.into()));
+            if ui
+                .add_enabled(
+                    can_add_layer,
+                    egui::Button::new(format!("Add {}", layer.title)),
+                )
+                .clicked()
+            {
+                state.add_node(NodeTypeId(layer.id.to_string()), &registry);
+            }
+        }
+    });
+
+    // Let the canvas consume the panel's remaining height. A fixed canvas
+    // height would become the panel's implicit minimum and make the top edge
+    // appear stuck when the user tries to resize the drawer smaller.
+    let canvas_height = ui.available_height().max(1.0);
+    let canvas_size = egui::vec2(ui.available_width(), canvas_height);
+    // Register the canvas as a click-only input boundary. It deliberately does
+    // not own a drag gesture, so node headers and middle-button navigation keep
+    // their custom behavior, but it does tell the platform that the pointer is
+    // inside Graph Studio and must not drive the rendered viewport.
+    let (canvas_rect, canvas_response) = ui.allocate_exact_size(canvas_size, egui::Sense::click());
+    let painter = ui.painter_at(canvas_rect);
+    painter.rect_filled(canvas_rect, 4.0, egui::Color32::from_rgb(24, 27, 34));
+    painter.rect_stroke(
+        canvas_rect,
+        4.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 76, 88)),
+        egui::StrokeKind::Outside,
+    );
+    let canvas_hovered = canvas_response.hovered();
+    let (
+        pointer_position,
+        middle_down,
+        scroll_delta,
+        zoom_delta,
+        translation_delta,
+        has_multi_touch,
+        has_point_wheel,
+        shift_down,
+    ) = ui.input(|input| {
+        let has_point_wheel = input.raw.events.iter().any(|event| {
+            matches!(
+                event,
+                Event::MouseWheel {
+                    unit: MouseWheelUnit::Point,
+                    ..
+                }
+            )
+        });
+        (
+            input.pointer.hover_pos(),
+            input.pointer.middle_down(),
+            input.smooth_scroll_delta(),
+            input.zoom_delta(),
+            input.translation_delta(),
+            input.multi_touch().is_some(),
+            has_point_wheel,
+            input.modifiers.shift,
+        )
+    });
+    let (delete_pressed, copy_pressed, paste_pressed, command_modifier) = ui.input(|input| {
+        (
+            input.key_pressed(Key::Backspace) || input.key_pressed(Key::Delete),
+            input.key_pressed(Key::C),
+            input.key_pressed(Key::V),
+            input.modifiers.command || input.modifiers.ctrl,
+        )
+    });
+    if !ui.ctx().egui_wants_keyboard_input() && command_modifier {
+        if copy_pressed {
+            state.copy_selected();
+        }
+        if paste_pressed {
+            state.paste_clipboard(&registry);
+        }
+    }
+    if canvas_hovered
+        && delete_pressed
+        && !ui.ctx().egui_wants_keyboard_input()
+        && (!state.selected_nodes.is_empty() || state.selected_node.is_some())
+    {
+        let mut nodes = state.selected_nodes.iter().cloned().collect::<Vec<_>>();
+        if nodes.is_empty() {
+            nodes.push(state.selected_node.clone().expect("checked above"));
+        }
+        state.remove_nodes(nodes.clone(), &registry);
+        state.selected_nodes.clear();
+        state.selected_node = None;
+        state.status = format!(
+            "{} node{} deleted",
+            nodes.len(),
+            if nodes.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    // Middle-button panning is latched at the point where the gesture starts.
+    // Relying on `canvas_response.hovered()` for every frame made the grab feel
+    // sticky when the cursor crossed a node, separator, or the canvas edge.
+    if !middle_down {
+        state.canvas_middle_pan_active = false;
+        state.canvas_middle_pan_last_pointer = None;
+    } else if !state.canvas_middle_pan_active && canvas_hovered {
+        state.canvas_middle_pan_active = true;
+        state.canvas_middle_pan_last_pointer =
+            pointer_position.map(|pointer| [pointer.x, pointer.y]);
+    }
+
+    let mut navigation_changed = false;
+    if state.canvas_middle_pan_active {
+        if let Some(pointer) = pointer_position {
+            let current = [pointer.x, pointer.y];
+            if let Some(previous) = state.canvas_middle_pan_last_pointer {
+                let delta = [current[0] - previous[0], current[1] - previous[1]];
+                if delta[0] != 0.0 || delta[1] != 0.0 {
+                    state.pan[0] += delta[0];
+                    state.pan[1] += delta[1];
+                    navigation_changed = true;
+                }
+            }
+            state.canvas_middle_pan_last_pointer = Some(current);
+        }
+    }
+
+    if canvas_hovered {
+        // A two-finger trackpad gesture arrives either as egui multi-touch or
+        // as a point-unit wheel event. Both represent content translation. A
+        // shifted wheel is also a useful explicit pan fallback on a mouse.
+        let trackpad_pan = if has_multi_touch {
+            translation_delta
+        } else if has_point_wheel || shift_down {
+            scroll_delta
+        } else {
+            egui::Vec2::ZERO
+        };
+        if trackpad_pan != egui::Vec2::ZERO {
+            state.pan[0] += trackpad_pan.x;
+            state.pan[1] += trackpad_pan.y;
+            navigation_changed = true;
+        }
+
+        // Pinch/ctrl-scroll zoom and ordinary mouse-wheel zoom are anchored at
+        // the pointer, so the graph under the cursor stays in place. Point-unit
+        // trackpad scrolling is excluded here because it is used for panning.
+        let mut zoom_factor = zoom_delta;
+        if !has_multi_touch && !has_point_wheel && !shift_down {
+            // egui's wheel delta follows content movement: positive Y means
+            // scrolling down, which should zoom out in a node editor.
+            zoom_factor *= (-scroll_delta.y * 0.0015).exp();
+        }
+        if zoom_factor.is_finite() && (zoom_factor - 1.0).abs() > f32::EPSILON {
+            let old_zoom = state.zoom;
+            let new_zoom = (old_zoom * zoom_factor).clamp(0.45, 2.5);
+            if (new_zoom - old_zoom).abs() > f32::EPSILON {
+                let pointer = pointer_position.unwrap_or(canvas_rect.center());
+                let pointer_in_canvas = pointer - canvas_rect.min;
+                let graph_at_pointer =
+                    (pointer_in_canvas - egui::vec2(state.pan[0], state.pan[1])) / old_zoom;
+                let new_pan = pointer_in_canvas - graph_at_pointer * new_zoom;
+                state.zoom = new_zoom;
+                state.pan = [new_pan.x, new_pan.y];
+                navigation_changed = true;
+            }
+        }
+    }
+    if navigation_changed {
+        ui.ctx().request_repaint();
+    }
+
+    let pan = state.pan;
+    let zoom = state.zoom;
+    let to_screen = |position: [f32; 2]| {
+        egui::pos2(
+            canvas_rect.left() + pan[0] + position[0] * zoom,
+            canvas_rect.top() + pan[1] + position[1] * zoom,
+        )
+    };
+
+    // Blender's node editor uses a quiet, regular grid rather than a framed
+    // list. Major lines every five cells make panning and spacing legible.
+    let grid_step = 24.0 * zoom;
+    if grid_step > 1.0 {
+        let x_offset = pan[0].rem_euclid(grid_step);
+        let y_offset = pan[1].rem_euclid(grid_step);
+        let mut x = canvas_rect.left() + x_offset;
+        let mut column = 0;
+        while x <= canvas_rect.right() {
+            let major = column % 5 == 0;
+            painter.line_segment(
+                [
+                    egui::pos2(x, canvas_rect.top()),
+                    egui::pos2(x, canvas_rect.bottom()),
+                ],
+                egui::Stroke::new(
+                    if major { 1.0 } else { 0.5 },
+                    if major {
+                        egui::Color32::from_rgb(45, 49, 57)
+                    } else {
+                        egui::Color32::from_rgb(33, 37, 44)
+                    },
+                ),
+            );
+            x += grid_step;
+            column += 1;
+        }
+        let mut y = canvas_rect.top() + y_offset;
+        let mut row = 0;
+        while y <= canvas_rect.bottom() {
+            let major = row % 5 == 0;
+            painter.line_segment(
+                [
+                    egui::pos2(canvas_rect.left(), y),
+                    egui::pos2(canvas_rect.right(), y),
+                ],
+                egui::Stroke::new(
+                    if major { 1.0 } else { 0.5 },
+                    if major {
+                        egui::Color32::from_rgb(45, 49, 57)
+                    } else {
+                        egui::Color32::from_rgb(33, 37, 44)
+                    },
+                ),
+            );
+            y += grid_step;
+            row += 1;
+        }
+    }
+
+    let mut visuals = Vec::new();
+    for node_id in state.graph.nodes.keys().cloned() {
+        let Some(record) = state.graph.nodes.get(&node_id).cloned() else {
+            continue;
+        };
+        let Some(declaration) = registry.find(&record.node_type) else {
+            continue;
+        };
+        let position = *state
+            .graph
+            .layout
+            .positions
+            .get(&node_id)
+            .unwrap_or(&[0.0, 0.0]);
+        let socket_rows = declaration.inputs.len().max(declaration.outputs.len());
+        let property_rows = declaration
+            .fields
+            .iter()
+            .filter(|field| field.target == FieldTarget::Property)
+            .count();
+        let collapsed = state.collapsed_nodes.contains(&node_id);
+        let rows = if collapsed {
+            socket_rows.max(1)
+        } else {
+            socket_rows.saturating_add(property_rows).max(1)
+        };
+        let preview_height = if collapsed {
+            0.0
+        } else {
+            graph_node_preview_height(&record, declaration)
+        };
+        let node_size = egui::vec2(
+            204.0 * zoom,
+            (28.0 + 8.0 + preview_height + rows as f32 * 20.0 + 8.0) * zoom,
+        );
+        visuals.push(GraphNodeVisual {
+            id: node_id,
+            record,
+            declaration,
+            preview_height,
+            rect: egui::Rect::from_min_size(to_screen(position), node_size),
+        });
+    }
+
+    if (state.frame_all_requested || state.frame_selection_requested) && !visuals.is_empty() {
+        let frame_ids = if state.frame_selection_requested && !state.selected_nodes.is_empty() {
+            state.selected_nodes.iter().collect::<Vec<_>>()
+        } else {
+            visuals.iter().map(|visual| &visual.id).collect::<Vec<_>>()
+        };
+        let mut min = egui::pos2(f32::INFINITY, f32::INFINITY);
+        let mut max = egui::pos2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for visual in visuals
+            .iter()
+            .filter(|visual| frame_ids.contains(&&visual.id))
+        {
+            let position = state
+                .graph
+                .layout
+                .positions
+                .get(&visual.id)
+                .copied()
+                .unwrap_or([0.0, 0.0]);
+            min.x = min.x.min(position[0]);
+            min.y = min.y.min(position[1]);
+            max.x = max.x.max(position[0] + visual.rect.width() / zoom);
+            max.y = max.y.max(position[1] + visual.rect.height() / zoom);
+        }
+        let width = (max.x - min.x).max(1.0);
+        let height = (max.y - min.y).max(1.0);
+        state.zoom = ((canvas_rect.width() - 40.0) / width)
+            .min((canvas_rect.height() - 40.0) / height)
+            .clamp(0.45, 2.5);
+        let center = egui::pos2((min.x + max.x) * 0.5, (min.y + max.y) * 0.5);
+        let canvas_center = canvas_rect.center() - canvas_rect.min;
+        state.pan = [
+            canvas_center.x - center.x * state.zoom,
+            canvas_center.y - center.y * state.zoom,
+        ];
+        state.frame_all_requested = false;
+        state.frame_selection_requested = false;
+        ui.ctx().request_repaint();
+    }
+
+    // Draw links first, so the nodes sit above the wires just like Blender.
+    // Moving a saturated socket temporarily hides its old wire. The command is
+    // only committed on release, so Escape still restores the original graph.
+    let detached_link_ids = state
+        .connector_drag
+        .as_ref()
+        .map(|drag| graph_connector_detached_link_ids(drag, &visuals, &state.graph))
+        .unwrap_or_default();
+    for (link_id, link) in &state.graph.links {
+        if detached_link_ids.contains(link_id) {
+            continue;
+        }
+        let Some(source) = visuals.iter().find(|node| node.id == link.from.node) else {
+            continue;
+        };
+        let Some(destination) = visuals.iter().find(|node| node.id == link.to.node) else {
+            continue;
+        };
+        let Some(source_index) = source
+            .declaration
+            .outputs
+            .iter()
+            .position(|socket| socket.key == link.from.socket.0)
+        else {
+            continue;
+        };
+        let Some(destination_index) = destination
+            .declaration
+            .inputs
+            .iter()
+            .position(|socket| socket.key == link.to.socket.0)
+        else {
+            continue;
+        };
+        let from = graph_socket_position(
+            source.rect,
+            false,
+            source_index,
+            zoom,
+            source.preview_height,
+        );
+        let to = graph_socket_position(
+            destination.rect,
+            true,
+            destination_index,
+            zoom,
+            destination.preview_height,
+        );
+        let socket_type = source.declaration.outputs[source_index].value_type;
+        draw_graph_wire(&painter, from, to, graph_socket_color(socket_type));
+    }
+
+    // While a connector is being dragged, keep a live wire under the pointer.
+    // Only a socket with spare capacity can become an add-node operation. A
+    // saturated socket is moving its existing wire and therefore has no `+`.
+    if state.connector_menu_position.is_none() {
+        if let (Some(drag), Some(pointer)) = (&state.connector_drag, pointer_position) {
+            if let Some(origin) = graph_connector_origin(drag, &visuals, zoom) {
+                let source_socket = graph_connector_source_socket(drag, &visuals);
+                let color = source_socket
+                    .map(|socket| graph_socket_color(socket.value_type))
+                    .unwrap_or(egui::Color32::from_gray(210));
+                match drag {
+                    ConnectorDrag::FromOutput(_) => {
+                        draw_graph_wire(&painter, origin, pointer, color)
+                    }
+                    ConnectorDrag::FromInput(_) => {
+                        draw_graph_wire(&painter, pointer, origin, color)
+                    }
+                }
+                painter.circle_stroke(pointer, 9.0 * zoom.max(0.75), egui::Stroke::new(1.5, color));
+                if detached_link_ids.is_empty() {
+                    painter.text(
+                        pointer + egui::vec2(11.0, -13.0),
+                        egui::Align2::LEFT_TOP,
+                        "+",
+                        egui::FontId::proportional(20.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+            }
+        }
+    }
+
+    // The node bodies are custom-painted rectangles rather than egui widgets.
+    // Track their drag gesture explicitly so the interaction remains reliable
+    // even when a node overlaps a socket or the pointer leaves the canvas.
+    let pointer_position = ui.input(|input| input.pointer.hover_pos());
+    let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
+    let primary_down = ui.input(|input| input.pointer.primary_down());
+    let primary_released = ui.input(|input| input.pointer.primary_released());
+    let selection_modifier =
+        ui.input(|input| input.modifiers.shift || input.modifiers.command || input.modifiers.ctrl);
+    if state.dragging_node.is_none() && state.box_select_start.is_none() && primary_pressed {
+        if let Some(pointer_position) = pointer_position {
+            if let Some(visual) = visuals
+                .iter()
+                .rev()
+                .find(|visual| visual.rect.contains(pointer_position))
+            {
+                let was_selected = state.selected_nodes.contains(&visual.id);
+                if selection_modifier {
+                    if was_selected {
+                        state.selected_nodes.remove(&visual.id);
+                    } else {
+                        state.selected_nodes.insert(visual.id.clone());
+                    }
+                } else if !was_selected {
+                    state.selected_nodes.clear();
+                    state.selected_nodes.insert(visual.id.clone());
+                }
+                state.selected_node = if state.selected_nodes.contains(&visual.id) {
+                    Some(visual.id.clone())
+                } else {
+                    state.selected_nodes.iter().next().cloned()
+                };
+                if graph_visual_header_hit(visual, pointer_position, zoom) {
+                    if pointer_position.x <= visual.rect.left() + 28.0 * zoom {
+                        if !state.collapsed_nodes.insert(visual.id.clone()) {
+                            state.collapsed_nodes.remove(&visual.id);
+                        }
+                        state.status = if state.collapsed_nodes.contains(&visual.id) {
+                            "Node collapsed".to_string()
+                        } else {
+                            "Node expanded".to_string()
+                        };
+                    } else if !state.selected_nodes.is_empty() {
+                        state.dragging_node = Some(visual.id.clone());
+                        state.drag_pointer_start = Some([pointer_position.x, pointer_position.y]);
+                        state.drag_start_positions = state
+                            .selected_nodes
+                            .iter()
+                            .map(|id| {
+                                (
+                                    id.clone(),
+                                    *state.graph.layout.positions.get(id).unwrap_or(&[0.0, 0.0]),
+                                )
+                            })
+                            .collect();
+                        state.status = format!("Dragging {}", visual.declaration.title);
+                    }
+                }
+            } else if canvas_hovered && state.connector_drag.is_none() {
+                state.box_select_start = Some([pointer_position.x, pointer_position.y]);
+                state.box_select_current = Some([pointer_position.x, pointer_position.y]);
+                if !selection_modifier {
+                    state.selected_nodes.clear();
+                    state.selected_node = None;
+                }
+            }
+        }
+    }
+    if let Some(start) = state.box_select_start {
+        if primary_down {
+            if let Some(pointer) = pointer_position {
+                state.box_select_current = Some([pointer.x, pointer.y]);
+                ui.ctx().request_repaint();
+            }
+        }
+        if primary_released || !primary_down {
+            let end = state.box_select_current.unwrap_or(start);
+            let selection_rect = egui::Rect::from_two_pos(
+                egui::pos2(start[0], start[1]),
+                egui::pos2(end[0], end[1]),
+            );
+            let mut boxed = Vec::new();
+            for visual in &visuals {
+                if selection_rect.intersects(visual.rect) {
+                    boxed.push(visual.id.clone());
+                }
+            }
+            if selection_modifier {
+                state.selected_nodes.extend(boxed);
+            } else {
+                state.selected_nodes = boxed.into_iter().collect();
+            }
+            state.selected_node = state.selected_nodes.iter().next().cloned();
+            state.box_select_start = None;
+            state.box_select_current = None;
+        }
+    }
+    if let Some(dragging_node) = state.dragging_node.clone() {
+        if primary_down {
+            if let (Some(pointer_position), Some(pointer_start)) =
+                (pointer_position, state.drag_pointer_start)
+            {
+                if state.drag_start_positions.contains_key(&dragging_node) {
+                    let delta = [
+                        (pointer_position.x - pointer_start[0]) / zoom,
+                        (pointer_position.y - pointer_start[1]) / zoom,
+                    ];
+                    for (id, start) in state.drag_start_positions.clone() {
+                        state
+                            .graph
+                            .layout
+                            .positions
+                            .insert(id, [start[0] + delta[0], start[1] + delta[1]]);
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        if primary_released || !primary_down {
+            if !state.drag_start_positions.is_empty() {
+                let starts = std::mem::take(&mut state.drag_start_positions);
+                let positions = starts
+                    .iter()
+                    .map(|(id, start)| {
+                        let end = *state.graph.layout.positions.get(id).unwrap_or(start);
+                        state.graph.layout.positions.insert(id.clone(), *start);
+                        (id.clone(), end)
+                    })
+                    .collect();
+                state.apply(GraphCommand::MoveNodes { positions }, &registry);
+            }
+            state.dragging_node = None;
+            state.drag_pointer_start = None;
+        }
+    }
+
+    let hovered_socket =
+        pointer_position.and_then(|pointer| graph_socket_hit_at_pointer(&visuals, pointer, zoom));
+    for visual in &visuals {
+        let node_id = &visual.id;
+        let rect = visual.rect;
+        let header_height = 28.0 * zoom;
+        let row_height = 20.0 * zoom;
+        let socket_rows = visual
+            .declaration
+            .inputs
+            .len()
+            .max(visual.declaration.outputs.len());
+        let selected = state.selected_nodes.contains(node_id);
+        let collapsed = state.collapsed_nodes.contains(node_id);
+        painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(40, 42, 47));
+        let header_rect = egui::Rect::from_min_max(
+            rect.left_top(),
+            egui::pos2(rect.right(), rect.top() + header_height),
+        );
+        painter.rect_filled(
+            header_rect,
+            6.0,
+            graph_node_header_color(visual.declaration),
+        );
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(
+                if selected { 1.5 } else { 1.0 },
+                if selected {
+                    egui::Color32::from_rgb(220, 235, 255)
+                } else {
+                    egui::Color32::from_rgb(18, 19, 22)
+                },
+            ),
+            egui::StrokeKind::Outside,
+        );
+        painter.text(
+            rect.left_top() + egui::vec2(9.0 * zoom, 6.0 * zoom),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{} {}",
+                if collapsed { "▸" } else { "▾" },
+                visual.declaration.title
+            ),
+            egui::FontId::proportional(12.0 * zoom.max(0.75)),
+            egui::Color32::WHITE,
+        );
+        painter.circle_filled(
+            rect.right_top() + egui::vec2(-12.0 * zoom, 14.0 * zoom),
+            4.0 * zoom.max(0.75),
+            egui::Color32::from_rgb(220, 220, 220),
+        );
+
+        if !collapsed {
+            if let Some(preview_type) = graph_node_preview_type(&visual.record, visual.declaration)
+            {
+                let preview_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        rect.left() + 8.0 * zoom,
+                        rect.top() + header_height + 4.0 * zoom,
+                    ),
+                    egui::vec2(
+                        rect.width() - 16.0 * zoom,
+                        visual.preview_height * zoom - 8.0 * zoom,
+                    ),
+                );
+                draw_graph_node_preview(
+                    &painter,
+                    preview_rect,
+                    &visual.record,
+                    visual.declaration,
+                    preview_type,
+                );
+            }
+        }
+
+        for (index, socket) in visual.declaration.inputs.iter().enumerate() {
+            let point = graph_socket_position(rect, true, index, zoom, visual.preview_height);
+            let socket_rect = egui::Rect::from_center_size(
+                point,
+                egui::vec2(18.0 * zoom.max(0.75), 18.0 * zoom.max(0.75)),
+            );
+            let color = graph_socket_color(socket.value_type);
+            let link_count = state
+                .graph
+                .links
+                .values()
+                .filter(|link| link.to.node == *node_id && link.to.socket.0 == socket.key)
+                .count();
+            draw_graph_socket(
+                &painter,
+                point,
+                color,
+                socket.cardinality,
+                true,
+                link_count,
+                zoom,
+            );
+            if hovered_socket
+                .as_ref()
+                .is_some_and(|hit| hit.node == *node_id && hit.input && hit.socket.0 == socket.key)
+            {
+                let compatible = state.connector_drag.as_ref().is_some_and(|drag| {
+                    graph_connector_can_link(
+                        drag,
+                        &GraphSocketHit {
+                            node: node_id.clone(),
+                            socket: SocketKey(socket.key.into()),
+                            input: true,
+                        },
+                        &state.graph,
+                        &registry,
+                    )
+                });
+                painter.circle_stroke(
+                    point,
+                    9.0 * zoom.max(0.75),
+                    egui::Stroke::new(
+                        2.0,
+                        if compatible {
+                            egui::Color32::from_rgb(100, 240, 130)
+                        } else {
+                            egui::Color32::from_rgb(240, 100, 100)
+                        },
+                    ),
+                );
+            }
+            let socket_response = ui
+                .interact(
+                    socket_rect,
+                    egui::Id::new(("graph-input", node_id.0.as_str(), socket.key)),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_text(format!(
+                    "Input · {:?} · {} · {}",
+                    socket.value_type,
+                    graph_socket_capacity_label(socket.cardinality, link_count),
+                    socket.cardinality.description()
+                ));
+            painter.text(
+                point + egui::vec2(10.0 * zoom.max(0.75), -7.0 * zoom.max(0.75)),
+                egui::Align2::LEFT_TOP,
+                socket.key,
+                egui::FontId::proportional(10.0 * zoom.max(0.75)),
+                egui::Color32::from_gray(215),
+            );
+            if socket_response.drag_started() {
+                state.connector_drag = Some(ConnectorDrag::FromInput(InputPin {
+                    node: node_id.clone(),
+                    socket: SocketKey(socket.key.into()),
+                }));
+                state.connector_menu_position = None;
+                state.connector_menu_filter.clear();
+                state.pending_output = None;
+                state.status = if socket.cardinality.accepts_additional(link_count) {
+                    format!("Dragging into `{}` — release to add a node", socket.key)
+                } else {
+                    format!(
+                        "Dragging into `{}` — linking a new source replaces its current connection",
+                        socket.key
+                    )
+                };
+            } else if socket_response.clicked() && state.connector_drag.is_none() {
+                if let Some(from) = state.pending_output.take() {
+                    state.apply(
+                        GraphCommand::Connect {
+                            id: LinkId::new(),
+                            from,
+                            to: InputPin {
+                                node: node_id.clone(),
+                                socket: SocketKey(socket.key.into()),
+                            },
+                        },
+                        &registry,
+                    );
+                }
+            }
+        }
+        for (index, socket) in visual.declaration.outputs.iter().enumerate() {
+            let point = graph_socket_position(rect, false, index, zoom, visual.preview_height);
+            let socket_rect = egui::Rect::from_center_size(
+                point,
+                egui::vec2(18.0 * zoom.max(0.75), 18.0 * zoom.max(0.75)),
+            );
+            let color = graph_socket_color(socket.value_type);
+            let link_count = state
+                .graph
+                .links
+                .values()
+                .filter(|link| link.from.node == *node_id && link.from.socket.0 == socket.key)
+                .count();
+            draw_graph_socket(
+                &painter,
+                point,
+                color,
+                socket.cardinality,
+                false,
+                link_count,
+                zoom,
+            );
+            if hovered_socket
+                .as_ref()
+                .is_some_and(|hit| hit.node == *node_id && !hit.input && hit.socket.0 == socket.key)
+            {
+                painter.circle_stroke(
+                    point,
+                    9.0 * zoom.max(0.75),
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 240, 130)),
+                );
+            }
+            if state
+                .pending_output
+                .as_ref()
+                .is_some_and(|pending| pending.node == *node_id && pending.socket.0 == socket.key)
+            {
+                painter.circle_stroke(
+                    point,
+                    8.0 * zoom.max(0.75),
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+            }
+            let socket_response = ui
+                .interact(
+                    socket_rect,
+                    egui::Id::new(("graph-output", node_id.0.as_str(), socket.key)),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_text(format!(
+                    "Output · {:?} · {} · {}",
+                    socket.value_type,
+                    graph_socket_capacity_label(socket.cardinality, link_count),
+                    socket.cardinality.description()
+                ));
+            painter.text(
+                point - egui::vec2(10.0 * zoom.max(0.75), 7.0 * zoom.max(0.75)),
+                egui::Align2::RIGHT_TOP,
+                socket.key,
+                egui::FontId::proportional(10.0 * zoom.max(0.75)),
+                egui::Color32::from_gray(215),
+            );
+            if socket_response.drag_started() {
+                state.connector_drag = Some(ConnectorDrag::FromOutput(OutputPin {
+                    node: node_id.clone(),
+                    socket: SocketKey(socket.key.into()),
+                }));
+                state.connector_menu_position = None;
+                state.connector_menu_filter.clear();
+                state.pending_output = None;
+                state.status = if socket.cardinality.accepts_additional(link_count) {
+                    format!("Dragging `{}` — release to add a node", socket.key)
+                } else {
+                    format!(
+                        "Dragging `{}` — linking a new destination replaces its current connection",
+                        socket.key
+                    )
+                };
+            } else if socket_response.clicked() && state.connector_drag.is_none() {
+                state.pending_output = Some(OutputPin {
+                    node: node_id.clone(),
+                    socket: SocketKey(socket.key.into()),
+                });
+                state.status = format!("Output `{}` selected — click an input", socket.key);
+            }
+        }
+
+        if !collapsed {
+            for (index, field) in visual
+                .declaration
+                .fields
+                .iter()
+                .filter(|field| field.target == FieldTarget::Property)
+                .enumerate()
+            {
+                let row = socket_rows + index;
+                let y = rect.top()
+                    + header_height
+                    + (8.0 + visual.preview_height) * zoom
+                    + row as f32 * row_height;
+                let property_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + 8.0 * zoom, y + 1.0 * zoom),
+                    egui::vec2(
+                        rect.width() - 16.0 * zoom,
+                        (row_height - 2.0 * zoom).max(1.0),
+                    ),
+                );
+                painter.rect_filled(property_rect, 2.0, egui::Color32::from_rgb(53, 56, 63));
+                let mut value = visual
+                    .record
+                    .properties
+                    .get(field.key)
+                    .cloned()
+                    .unwrap_or_else(|| field.default.value());
+                let changed = if zoom < GRAPH_NODE_CONTROL_ZOOM {
+                    let response = ui.interact(
+                        property_rect,
+                        egui::Id::new((
+                            "graph-node-property-summary",
+                            node_id.0.as_str(),
+                            field.key,
+                        )),
+                        egui::Sense::hover(),
+                    );
+                    response.on_hover_text("Zoom to 100% to edit this property");
+                    draw_graph_property_summary(&painter, property_rect, field, &value, zoom);
+                    false
+                } else {
+                    ui.push_id(
+                        ("graph-node-property", node_id.0.as_str(), field.key),
+                        |ui| {
+                            ui.scope_builder(
+                                egui::UiBuilder::new()
+                                    .max_rect(property_rect)
+                                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                                |ui| {
+                                    ui.add_enabled_ui(!field.read_only, |ui| {
+                                        draw_graph_property(ui, field, &mut value, zoom)
+                                    })
+                                    .inner
+                                },
+                            )
+                            .inner
+                        },
+                    )
+                    .inner
+                };
+                if changed {
+                    state.apply(
+                        GraphCommand::SetProperty {
+                            node: node_id.clone(),
+                            property: field.key.to_string(),
+                            value,
+                        },
+                        &registry,
+                    );
+                }
+            }
+        }
+    }
+
+    if let (Some(start), Some(end)) = (state.box_select_start, state.box_select_current) {
+        let selection_rect =
+            egui::Rect::from_two_pos(egui::pos2(start[0], start[1]), egui::pos2(end[0], end[1]));
+        painter.rect_filled(
+            selection_rect,
+            2.0,
+            egui::Color32::from_rgba_unmultiplied(80, 140, 220, 35),
+        );
+        painter.rect_stroke(
+            selection_rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    // A connector drag either completes on a compatible socket, removes a
+    // moved saturated connection, or becomes the filtered add-node menu when
+    // released over empty space with capacity still available.
+    if primary_released && state.connector_drag.is_some() && state.connector_menu_position.is_none()
+    {
+        let drag = state.connector_drag.clone().expect("checked above");
+        let detached_link_ids = graph_connector_detached_link_ids(&drag, &visuals, &state.graph);
+        if let Some(pointer) = pointer_position {
+            if let Some(hit) = graph_socket_hit_at_pointer(&visuals, pointer, zoom) {
+                if graph_connector_can_link(&drag, &hit, &state.graph, &registry) {
+                    let (from, to) = graph_connector_link(&drag, hit);
+                    state.apply(
+                        GraphCommand::Connect {
+                            id: LinkId::new(),
+                            from,
+                            to,
+                        },
+                        &registry,
+                    );
+                    state.connector_drag = None;
+                    state.pending_output = None;
+                    state.status = "Connector linked".to_string();
+                } else if !detached_link_ids.is_empty() {
+                    state.apply(
+                        GraphCommand::Transaction {
+                            commands: detached_link_ids
+                                .into_iter()
+                                .map(|id| GraphCommand::Disconnect { id })
+                                .collect(),
+                        },
+                        &registry,
+                    );
+                    state.connector_drag = None;
+                    state.pending_output = None;
+                    state.status = "Connection removed".to_string();
+                } else {
+                    state.connector_menu_position = Some([pointer.x, pointer.y]);
+                    state.connector_menu_filter.clear();
+                    state.status = "No compatible socket here — choose a node to add".to_string();
+                }
+            } else if !detached_link_ids.is_empty() {
+                state.apply(
+                    GraphCommand::Transaction {
+                        commands: detached_link_ids
+                            .into_iter()
+                            .map(|id| GraphCommand::Disconnect { id })
+                            .collect(),
+                    },
+                    &registry,
+                );
+                state.connector_drag = None;
+                state.pending_output = None;
+                state.status = "Connection removed".to_string();
+            } else {
+                state.connector_menu_position = Some([pointer.x, pointer.y]);
+                state.connector_menu_filter.clear();
+                state.status = "Choose a compatible node to add".to_string();
+            }
+        } else {
+            state.connector_drag = None;
+        }
+    }
+
+    draw_graph_connector_menu(ui, state, &registry, &visuals, canvas_rect, zoom);
+
+    ui.label(format!(
+        "zoom {:.0}% | {} nodes | {} links",
+        state.zoom * 100.0,
+        state.graph.nodes.len(),
+        state.graph.links.len()
+    ));
+    if let Some(node_id) = state.selected_node.clone() {
+        draw_graph_inspector(ui, state, &registry, &node_id);
+    }
+    for diagnostic in &state.diagnostics {
+        ui.colored_label(
+            if diagnostic.severity == crate::graph::DiagnosticSeverity::Error {
+                egui::Color32::from_rgb(255, 125, 125)
+            } else {
+                egui::Color32::from_rgb(255, 210, 100)
+            },
+            format!("{}: {}", diagnostic.code, diagnostic.message),
+        );
+    }
+}
+
+struct GraphNodeVisual {
+    id: NodeId,
+    record: NodeRecord,
+    declaration: &'static NodeDeclaration,
+    preview_height: f32,
+    rect: egui::Rect,
+}
+
+#[derive(Clone)]
+struct GraphSocketHit {
+    node: NodeId,
+    socket: SocketKey,
+    input: bool,
+}
+
+#[derive(Clone)]
+struct GraphConnectorCandidate {
+    node_type: NodeTypeId,
+    node_title: String,
+    socket: SocketKey,
+}
+
+fn graph_socket_hit_at_pointer(
+    visuals: &[GraphNodeVisual],
+    pointer: egui::Pos2,
+    zoom: f32,
+) -> Option<GraphSocketHit> {
+    let hit_radius = 10.0 * zoom.max(0.75);
+    for visual in visuals.iter().rev() {
+        for (index, socket) in visual.declaration.inputs.iter().enumerate() {
+            let point =
+                graph_socket_position(visual.rect, true, index, zoom, visual.preview_height);
+            if point.distance(pointer) <= hit_radius {
+                return Some(GraphSocketHit {
+                    node: visual.id.clone(),
+                    socket: SocketKey(socket.key.into()),
+                    input: true,
+                });
+            }
+        }
+        for (index, socket) in visual.declaration.outputs.iter().enumerate() {
+            let point =
+                graph_socket_position(visual.rect, false, index, zoom, visual.preview_height);
+            if point.distance(pointer) <= hit_radius {
+                return Some(GraphSocketHit {
+                    node: visual.id.clone(),
+                    socket: SocketKey(socket.key.into()),
+                    input: false,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn graph_connector_source_socket(
+    drag: &ConnectorDrag,
+    visuals: &[GraphNodeVisual],
+) -> Option<crate::graph::SocketDeclarationStatic> {
+    let (node, socket, input) = match drag {
+        ConnectorDrag::FromOutput(pin) => (&pin.node, &pin.socket, false),
+        ConnectorDrag::FromInput(pin) => (&pin.node, &pin.socket, true),
+    };
+    visuals
+        .iter()
+        .find(|visual| visual.id == *node)
+        .and_then(|visual| {
+            if input {
+                visual
+                    .declaration
+                    .inputs
+                    .iter()
+                    .find(|candidate| candidate.key == socket.0)
+                    .copied()
+            } else {
+                visual
+                    .declaration
+                    .outputs
+                    .iter()
+                    .find(|candidate| candidate.key == socket.0)
+                    .copied()
+            }
+        })
+}
+
+/// A full socket does not start a second connection: it moves its existing
+/// one. Keep this as a presentation-only projection until the drop succeeds,
+/// so cancelling the gesture does not mutate the graph.
+fn graph_connector_detached_link_ids(
+    drag: &ConnectorDrag,
+    visuals: &[GraphNodeVisual],
+    graph: &crate::graph::GraphAsset,
+) -> BTreeSet<LinkId> {
+    let Some(socket) = graph_connector_source_socket(drag, visuals) else {
+        return BTreeSet::new();
+    };
+    let links = graph
+        .links
+        .iter()
+        .filter(|(_, link)| match drag {
+            ConnectorDrag::FromOutput(pin) => {
+                link.from.node == pin.node && link.from.socket == pin.socket
+            }
+            ConnectorDrag::FromInput(pin) => {
+                link.to.node == pin.node && link.to.socket == pin.socket
+            }
+        })
+        .map(|(id, _)| id.clone())
+        .collect::<BTreeSet<_>>();
+    if socket.cardinality.accepts_additional(links.len()) {
+        BTreeSet::new()
+    } else {
+        links
+    }
+}
+
+fn graph_connector_origin(
+    drag: &ConnectorDrag,
+    visuals: &[GraphNodeVisual],
+    zoom: f32,
+) -> Option<egui::Pos2> {
+    let (node, socket, input) = match drag {
+        ConnectorDrag::FromOutput(pin) => (&pin.node, &pin.socket, false),
+        ConnectorDrag::FromInput(pin) => (&pin.node, &pin.socket, true),
+    };
+    let visual = visuals.iter().find(|visual| visual.id == *node)?;
+    let sockets = if input {
+        visual.declaration.inputs
+    } else {
+        visual.declaration.outputs
+    };
+    let index = sockets
+        .iter()
+        .position(|candidate| candidate.key == socket.0)?;
+    Some(graph_socket_position(
+        visual.rect,
+        input,
+        index,
+        zoom,
+        visual.preview_height,
+    ))
+}
+
+fn graph_connector_can_link(
+    drag: &ConnectorDrag,
+    hit: &GraphSocketHit,
+    graph: &crate::graph::GraphAsset,
+    registry: &NodeRegistry,
+) -> bool {
+    let pins = match drag {
+        ConnectorDrag::FromOutput(from) if hit.input => Some((
+            from.clone(),
+            InputPin {
+                node: hit.node.clone(),
+                socket: hit.socket.clone(),
+            },
+        )),
+        ConnectorDrag::FromInput(to) if !hit.input => Some((
+            OutputPin {
+                node: hit.node.clone(),
+                socket: hit.socket.clone(),
+            },
+            to.clone(),
+        )),
+        _ => None,
+    };
+    pins.is_some_and(|(from, to)| graph.connection_plan(registry, &from, &to).is_ok())
+}
+
+fn graph_connector_link(drag: &ConnectorDrag, hit: GraphSocketHit) -> (OutputPin, InputPin) {
+    match drag {
+        ConnectorDrag::FromOutput(from) => (
+            from.clone(),
+            InputPin {
+                node: hit.node,
+                socket: hit.socket,
+            },
+        ),
+        ConnectorDrag::FromInput(to) => (
+            OutputPin {
+                node: hit.node,
+                socket: hit.socket,
+            },
+            to.clone(),
+        ),
+    }
+}
+
+fn graph_connector_candidates(
+    drag: &ConnectorDrag,
+    source: crate::graph::SocketDeclarationStatic,
+    filter: &str,
+    graph: &crate::graph::GraphAsset,
+    registry: &NodeRegistry,
+) -> Vec<GraphConnectorCandidate> {
+    let query = filter.trim().to_ascii_lowercase();
+    let wants_input = matches!(drag, ConnectorDrag::FromOutput(_));
+    registry
+        .declarations()
+        .iter()
+        .filter(|declaration| {
+            declaration.kinds.contains(&graph.kind)
+                && graph.can_add_node_type(registry, &NodeTypeId(declaration.id.into()))
+        })
+        .flat_map(|declaration| {
+            let sockets = if wants_input {
+                declaration.inputs
+            } else {
+                declaration.outputs
+            };
+            let query = query.clone();
+            sockets.iter().filter_map(move |socket| {
+                let compatible = if wants_input {
+                    source.can_feed(*socket)
+                } else {
+                    socket.can_feed(source)
+                };
+                if !compatible {
+                    return None;
+                }
+                let title = declaration.title.to_string();
+                let searchable =
+                    format!("{} {} {}", declaration.id, title, socket.key).to_ascii_lowercase();
+                if !query.is_empty() && !searchable.contains(&query) {
+                    return None;
+                }
+                Some(GraphConnectorCandidate {
+                    node_type: NodeTypeId(declaration.id.to_string()),
+                    node_title: title,
+                    socket: SocketKey(socket.key.to_string()),
+                })
+            })
+        })
+        .collect()
+}
+
+fn draw_graph_connector_menu(
+    ui: &mut egui::Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    visuals: &[GraphNodeVisual],
+    canvas_rect: egui::Rect,
+    zoom: f32,
+) {
+    let Some(menu_position) = state.connector_menu_position else {
+        return;
+    };
+    let Some(drag) = state.connector_drag.clone() else {
+        state.connector_menu_position = None;
+        return;
+    };
+    let Some(source_socket) = graph_connector_source_socket(&drag, visuals) else {
+        return;
+    };
+    let candidates = graph_connector_candidates(
+        &drag,
+        source_socket,
+        &state.connector_menu_filter,
+        &state.graph,
+        registry,
+    );
+    let mut selected = None;
+    let menu_pos = egui::pos2(menu_position[0], menu_position[1]);
+    egui::Area::new(egui::Id::new("graph_connector_add_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu_pos)
+        .show(ui.ctx(), |menu_ui| {
+            egui::Frame::popup(menu_ui.style()).show(menu_ui, |menu_ui| {
+                menu_ui.set_min_width(300.0);
+                menu_ui.horizontal(|menu_ui| {
+                    menu_ui.label("⌕");
+                    menu_ui.add(
+                        egui::TextEdit::singleline(&mut state.connector_menu_filter)
+                            .desired_width(260.0)
+                            .hint_text("search compatible nodes"),
+                    );
+                });
+                menu_ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(menu_ui, |menu_ui| {
+                        if candidates.is_empty() {
+                            menu_ui.colored_label(
+                                egui::Color32::from_gray(160),
+                                "No compatible nodes",
+                            );
+                        }
+                        for candidate in &candidates {
+                            let label =
+                                format!("{}  >  {}", candidate.node_title, candidate.socket.0);
+                            if menu_ui
+                                .selectable_label(false, label)
+                                .on_hover_text(format!(
+                                    "Add {} and connect its `{}` socket",
+                                    candidate.node_title, candidate.socket.0
+                                ))
+                                .clicked()
+                            {
+                                selected = Some(candidate.clone());
+                            }
+                        }
+                    });
+            });
+        });
+
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        state.connector_drag = None;
+        state.connector_menu_position = None;
+        state.connector_menu_filter.clear();
+        state.status = "Connector insert cancelled".to_string();
+        return;
+    }
+
+    let Some(candidate) = selected else {
+        return;
+    };
+    let graph_position = {
+        let pointer_in_canvas = menu_pos - canvas_rect.min;
+        let x_offset = match drag {
+            ConnectorDrag::FromOutput(_) => 12.0,
+            ConnectorDrag::FromInput(_) => 216.0,
+        };
+        [
+            pointer_in_canvas.x / zoom - x_offset,
+            pointer_in_canvas.y / zoom - 38.0,
+        ]
+    };
+    let node_id = NodeId::new();
+    let (from, to) = match drag {
+        ConnectorDrag::FromOutput(output) => (
+            output,
+            InputPin {
+                node: node_id.clone(),
+                socket: candidate.socket,
+            },
+        ),
+        ConnectorDrag::FromInput(input) => (
+            OutputPin {
+                node: node_id.clone(),
+                socket: candidate.socket,
+            },
+            input,
+        ),
+    };
+    if !state.apply(
+        GraphCommand::Transaction {
+            commands: vec![
+                GraphCommand::AddNode {
+                    id: node_id.clone(),
+                    node_type: candidate.node_type,
+                    position: graph_position,
+                },
+                GraphCommand::Connect {
+                    id: LinkId::new(),
+                    from,
+                    to,
+                },
+            ],
+        },
+        registry,
+    ) {
+        return;
+    }
+    state.selected_node = Some(node_id.clone());
+    state.selected_nodes.clear();
+    state.selected_nodes.insert(node_id);
+    state.connector_drag = None;
+    state.connector_menu_position = None;
+    state.connector_menu_filter.clear();
+    state.status = "Node added and connector linked".to_string();
+}
+
+fn draw_graph_socket(
+    painter: &egui::Painter,
+    point: egui::Pos2,
+    color: egui::Color32,
+    cardinality: crate::graph::Cardinality,
+    input: bool,
+    link_count: usize,
+    zoom: f32,
+) {
+    let scale = zoom.max(0.75);
+    let accepts_more = cardinality.accepts_additional(link_count);
+    let fill = if accepts_more {
+        egui::Color32::from_rgb(40, 42, 47)
+    } else {
+        color
+    };
+    if input && cardinality.allows_many() {
+        let rect = egui::Rect::from_center_size(point, egui::vec2(14.0 * scale, 9.0 * scale));
+        painter.rect_filled(rect, 4.5 * scale, fill);
+        painter.rect_stroke(
+            rect,
+            4.5 * scale,
+            egui::Stroke::new(1.5, color),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        painter.circle_filled(point, 5.0 * scale, fill);
+        painter.circle_stroke(point, 5.0 * scale, egui::Stroke::new(1.5, color));
+    }
+}
+
+fn graph_socket_capacity_label(
+    cardinality: crate::graph::Cardinality,
+    link_count: usize,
+) -> String {
+    match cardinality.maximum {
+        Some(maximum) => {
+            let state = if cardinality.accepts_additional(link_count) {
+                "open"
+            } else {
+                "full; a new link replaces the current one"
+            };
+            format!("{link_count}/{maximum} links ({state})")
+        }
+        None => format!("{link_count} links (open)"),
+    }
+}
+
+fn graph_socket_position(
+    rect: egui::Rect,
+    input: bool,
+    index: usize,
+    zoom: f32,
+    preview_height: f32,
+) -> egui::Pos2 {
+    let row_height = 20.0 * zoom;
+    let y = rect.top()
+        + (28.0 + 8.0 + preview_height) * zoom
+        + index as f32 * row_height
+        + row_height * 0.5;
+    if input {
+        egui::pos2(rect.left(), y)
+    } else {
+        egui::pos2(rect.right(), y)
+    }
+}
+
+fn graph_visual_header_hit(visual: &GraphNodeVisual, pointer: egui::Pos2, zoom: f32) -> bool {
+    let header = egui::Rect::from_min_max(
+        visual.rect.left_top(),
+        egui::pos2(visual.rect.right(), visual.rect.top() + 28.0 * zoom),
+    );
+    header.contains(pointer) && pointer.x < header.right() - 24.0 * zoom
+}
+
+fn graph_material_label(material_table: &MaterialTable, slot: u8) -> String {
+    let Some(material) = material_table.row(slot) else {
+        return format!("{slot:02}  <none>");
+    };
+    let mut label = format!("{slot:02}  {}", material.name);
+    if material.face_roles.is_some() {
+        label.push_str("  · faces");
+    }
+    let layers = material.patterns.active_count();
+    if layers > 0 {
+        label.push_str(&format!(
+            "  · {layers} layer{}",
+            if layers == 1 { "" } else { "s" }
+        ));
+    }
+    label
+}
+
+fn graph_node_preview_type(
+    _record: &NodeRecord,
+    declaration: &NodeDeclaration,
+) -> Option<SocketType> {
+    match declaration.preview {
+        NodePreview::None => None,
+        NodePreview::ColorWheel | NodePreview::MaterialSphere | NodePreview::ColorRamp => {
+            Some(SocketType::Color)
+        }
+        NodePreview::Noise => Some(SocketType::Scalar),
+        NodePreview::Value => declaration.outputs.first().map(|socket| socket.value_type),
+    }
+}
+
+fn graph_node_preview_height(_record: &NodeRecord, declaration: &NodeDeclaration) -> f32 {
+    match declaration.preview {
+        NodePreview::None => 0.0,
+        NodePreview::ColorWheel => 112.0,
+        NodePreview::MaterialSphere => 64.0,
+        NodePreview::Noise | NodePreview::ColorRamp => 76.0,
+        NodePreview::Value => 46.0,
+    }
+}
+
+fn draw_graph_node_preview(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    record: &NodeRecord,
+    declaration: &NodeDeclaration,
+    socket_type: SocketType,
+) {
+    painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(23, 25, 29));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(12, 13, 15)),
+        egui::StrokeKind::Inside,
+    );
+    if declaration.preview == NodePreview::ColorWheel {
+        draw_graph_color_wheel(painter, rect, graph_record_color(record));
+        return;
+    }
+    if declaration.preview == NodePreview::MaterialSphere {
+        let center = rect.center() + egui::vec2(-rect.width() * 0.04, rect.height() * 0.05);
+        let radius = rect.height().min(rect.width()) * 0.36;
+        for step in (1..=12).rev() {
+            let t = step as f32 / 12.0;
+            let offset = egui::vec2(-radius * 0.22 * (1.0 - t), -radius * 0.28 * (1.0 - t));
+            let shade = (80.0 + 130.0 * t) as u8;
+            painter.circle_filled(
+                center + offset,
+                radius * t,
+                egui::Color32::from_rgb(shade, shade, shade),
+            );
+        }
+        painter.circle_filled(
+            center + egui::vec2(-radius * 0.22, -radius * 0.28),
+            radius * 0.12,
+            egui::Color32::from_white_alpha(210),
+        );
+        return;
+    }
+    if declaration.preview == NodePreview::Noise {
+        draw_graph_noise_preview(painter, rect, record);
+        return;
+    }
+    if declaration.preview == NodePreview::ColorRamp {
+        draw_graph_color_ramp_preview(painter, rect, record);
+        return;
+    }
+    match socket_type {
+        SocketType::Color => {
+            let color = graph_record_color(record);
+            painter.rect_filled(
+                rect.shrink2(egui::vec2(3.0, 3.0)),
+                2.0,
+                egui::Color32::from_rgba_unmultiplied(
+                    (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                    (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                    (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                    (color[3].clamp(0.0, 1.0) * 255.0) as u8,
+                ),
+            );
+        }
+        SocketType::Scalar => {
+            let value = graph_record_scalar(record).clamp(0.0, 1.0);
+            let segments = 16;
+            for index in 0..segments {
+                let left = rect.left() + rect.width() * index as f32 / segments as f32;
+                let right = rect.left() + rect.width() * (index + 1) as f32 / segments as f32;
+                let shade = (255.0 * index as f32 / (segments - 1) as f32) as u8;
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(left, rect.top()),
+                        egui::pos2(right, rect.bottom()),
+                    ),
+                    0.0,
+                    egui::Color32::from_gray(shade),
+                );
+            }
+            let marker_x = rect.left() + rect.width() * value;
+            painter.line_segment(
+                [
+                    egui::pos2(marker_x, rect.top()),
+                    egui::pos2(marker_x, rect.bottom()),
+                ],
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 180, 65)),
+            );
+        }
+        SocketType::Vector3 => {
+            let colors = [
+                egui::Color32::from_rgb(180, 75, 75),
+                egui::Color32::from_rgb(75, 180, 95),
+                egui::Color32::from_rgb(75, 110, 210),
+            ];
+            for (index, color) in colors.into_iter().enumerate() {
+                let row = egui::Rect::from_min_size(
+                    egui::pos2(
+                        rect.left() + 4.0,
+                        rect.top() + 3.0 + index as f32 * (rect.height() - 6.0) / 3.0,
+                    ),
+                    egui::vec2(rect.width() - 8.0, (rect.height() - 9.0) / 3.0),
+                );
+                painter.rect_filled(row, 2.0, color);
+            }
+        }
+        _ => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "preview",
+                egui::FontId::proportional(9.0),
+                egui::Color32::from_gray(160),
+            );
+        }
+    }
+}
+
+fn draw_graph_noise_preview(painter: &egui::Painter, rect: egui::Rect, record: &NodeRecord) {
+    let columns = 28;
+    let rows = 12;
+    let scale = graph_record_scalar_named(record, "scale", 1.0).max(0.01);
+    let detail_key = if record
+        .socket_defaults
+        .contains_key(&SocketKey("octaves".into()))
+    {
+        "octaves"
+    } else {
+        "detail"
+    };
+    let octaves = graph_record_scalar_named(record, detail_key, 4.0).clamp(1.0, 8.0);
+    let roughness = graph_record_scalar_named(record, "roughness", 0.5).clamp(0.0, 1.0);
+    for row in 0..rows {
+        for column in 0..columns {
+            let x = column as f32 / columns as f32;
+            let y = row as f32 / rows as f32;
+            let value =
+                graph_preview_fbm([x * 4.0 * scale, y * 4.0 * scale, 0.0], octaves, roughness);
+            let shade = (value.clamp(0.0, 1.0) * 255.0) as u8;
+            let cell = egui::Rect::from_min_max(
+                egui::pos2(
+                    rect.left() + rect.width() * column as f32 / columns as f32,
+                    rect.top() + rect.height() * row as f32 / rows as f32,
+                ),
+                egui::pos2(
+                    rect.left() + rect.width() * (column + 1) as f32 / columns as f32 + 0.4,
+                    rect.top() + rect.height() * (row + 1) as f32 / rows as f32 + 0.4,
+                ),
+            );
+            painter.rect_filled(cell, 0.0, egui::Color32::from_gray(shade));
+        }
+    }
+}
+
+fn draw_graph_color_ramp_preview(painter: &egui::Painter, rect: egui::Rect, record: &NodeRecord) {
+    let color_a = graph_record_color_named(record, "color_a", [0.08, 0.2, 0.03, 1.0]);
+    let color_b = graph_record_color_named(record, "color_b", [0.55, 0.8, 0.12, 1.0]);
+    let position_a = graph_record_scalar_named(record, "position_a", 0.25);
+    let position_b = graph_record_scalar_named(record, "position_b", 0.75);
+    let span = (position_b - position_a).abs().max(0.000001);
+    let columns = 32;
+    for column in 0..columns {
+        let factor = column as f32 / (columns - 1) as f32;
+        let t = ((factor - position_a) / span).clamp(0.0, 1.0);
+        let color: [f32; 4] =
+            std::array::from_fn(|index| color_a[index] * (1.0 - t) + color_b[index] * t);
+        let column_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                rect.left() + rect.width() * column as f32 / columns as f32,
+                rect.top(),
+            ),
+            egui::pos2(
+                rect.left() + rect.width() * (column + 1) as f32 / columns as f32 + 0.5,
+                rect.bottom(),
+            ),
+        );
+        painter.rect_filled(
+            column_rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(
+                (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                (color[3].clamp(0.0, 1.0) * 255.0) as u8,
+            ),
+        );
+    }
+}
+
+fn graph_preview_hash(point: [f32; 3]) -> f32 {
+    (point[0] * 127.1 + point[1] * 311.7 + point[2] * 74.7)
+        .sin()
+        .mul_add(43_758.547, 0.0)
+        .fract()
+        .abs()
+}
+
+fn graph_preview_value_noise(point: [f32; 3]) -> f32 {
+    let cell = point.map(f32::floor);
+    let local = point.map(f32::fract);
+    let blend = local.map(|value| value * value * (3.0 - 2.0 * value));
+    let sample =
+        |dx: f32, dy: f32, dz: f32| graph_preview_hash([cell[0] + dx, cell[1] + dy, cell[2] + dz]);
+    let x00 = sample(0.0, 0.0, 0.0) * (1.0 - blend[0]) + sample(1.0, 0.0, 0.0) * blend[0];
+    let x10 = sample(0.0, 1.0, 0.0) * (1.0 - blend[0]) + sample(1.0, 1.0, 0.0) * blend[0];
+    let x01 = sample(0.0, 0.0, 1.0) * (1.0 - blend[0]) + sample(1.0, 0.0, 1.0) * blend[0];
+    let x11 = sample(0.0, 1.0, 1.0) * (1.0 - blend[0]) + sample(1.0, 1.0, 1.0) * blend[0];
+    let y0 = x00 * (1.0 - blend[1]) + x10 * blend[1];
+    let y1 = x01 * (1.0 - blend[1]) + x11 * blend[1];
+    y0 * (1.0 - blend[2]) + y1 * blend[2]
+}
+
+fn graph_preview_fbm(point: [f32; 3], octaves: f32, roughness: f32) -> f32 {
+    let mut total = 0.0;
+    let mut amplitude = 1.0;
+    let mut frequency = 1.0;
+    let mut normalisation = 0.0;
+    for octave in 0..8 {
+        if (octave as f32) < octaves {
+            total += graph_preview_value_noise(point.map(|value| value * frequency)) * amplitude;
+            normalisation += amplitude;
+        }
+        frequency *= 2.0;
+        amplitude *= roughness;
+    }
+    if normalisation > 0.0 {
+        total / normalisation
+    } else {
+        0.0
+    }
+}
+
+fn draw_graph_color_wheel(painter: &egui::Painter, rect: egui::Rect, color: [f32; 4]) {
+    let wheel_radius = rect.height().min(rect.width() * 0.62) * 0.42;
+    let wheel_center = egui::pos2(rect.left() + wheel_radius + 7.0, rect.center().y);
+    let segments = 32;
+    for segment in 0..segments {
+        let start = segment as f32 / segments as f32 * std::f32::consts::TAU;
+        let end = (segment + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+        let points = vec![
+            wheel_center,
+            wheel_center + egui::vec2(start.cos() * wheel_radius, start.sin() * wheel_radius),
+            wheel_center + egui::vec2(end.cos() * wheel_radius, end.sin() * wheel_radius),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            egui::Color32::from_rgb(
+                (hsv_to_rgb(segment as f32 / segments as f32, 1.0, 1.0)[0] * 255.0) as u8,
+                (hsv_to_rgb(segment as f32 / segments as f32, 1.0, 1.0)[1] * 255.0) as u8,
+                (hsv_to_rgb(segment as f32 / segments as f32, 1.0, 1.0)[2] * 255.0) as u8,
+            ),
+            egui::Stroke::NONE,
+        ));
+    }
+    painter.circle_filled(
+        wheel_center,
+        wheel_radius * 0.58,
+        egui::Color32::from_white_alpha(215),
+    );
+    let marker = egui::pos2(
+        wheel_center.x + (color[0] - color[1]) * wheel_radius * 0.2,
+        wheel_center.y + (color[2] - color[1]) * wheel_radius * 0.2,
+    );
+    painter.circle_stroke(
+        marker,
+        4.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
+    );
+    let value_bar = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - 22.0, rect.top() + 7.0),
+        egui::pos2(rect.right() - 10.0, rect.bottom() - 7.0),
+    );
+    for row in 0..16 {
+        let t = row as f32 / 15.0;
+        let shade = ((1.0 - t) * 255.0) as u8;
+        let row_rect = egui::Rect::from_min_max(
+            egui::pos2(value_bar.left(), value_bar.top() + value_bar.height() * t),
+            egui::pos2(
+                value_bar.right(),
+                value_bar.top() + value_bar.height() * (t + 1.0 / 15.0).min(1.0),
+            ),
+        );
+        painter.rect_filled(row_rect, 0.0, egui::Color32::from_gray(shade));
+    }
+    let swatch = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 8.0, rect.bottom() - 17.0),
+        egui::pos2(rect.right() - 31.0, rect.bottom() - 5.0),
+    );
+    painter.rect_filled(
+        swatch,
+        2.0,
+        egui::Color32::from_rgba_unmultiplied(
+            (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+            (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+            (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+            (color[3].clamp(0.0, 1.0) * 255.0) as u8,
+        ),
+    );
+}
+
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
+    let h = (hue.rem_euclid(1.0) * 6.0).floor() as i32;
+    let f = hue.rem_euclid(1.0) * 6.0 - h as f32;
+    let p = value * (1.0 - saturation);
+    let q = value * (1.0 - f * saturation);
+    let t = value * (1.0 - (1.0 - f) * saturation);
+    match h {
+        0 => [value, t, p],
+        1 => [q, value, p],
+        2 => [p, value, t],
+        3 => [p, q, value],
+        4 => [t, p, value],
+        _ => [value, p, q],
+    }
+}
+
+fn graph_record_color(record: &NodeRecord) -> [f32; 4] {
+    record
+        .properties
+        .values()
+        .chain(record.socket_defaults.values())
+        .find_map(|value| match value {
+            PropertyValue::Color(color) => Some(*color),
+            _ => None,
+        })
+        .unwrap_or([0.35, 0.5, 0.85, 1.0])
+}
+
+fn graph_record_scalar(record: &NodeRecord) -> f32 {
+    record
+        .properties
+        .values()
+        .chain(record.socket_defaults.values())
+        .find_map(|value| match value {
+            PropertyValue::Scalar(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0.5)
+}
+
+fn graph_record_scalar_named(record: &NodeRecord, name: &str, fallback: f32) -> f32 {
+    record
+        .properties
+        .get(name)
+        .or_else(|| record.socket_defaults.get(&SocketKey(name.to_string())))
+        .and_then(|value| match value {
+            PropertyValue::Scalar(value) => Some(*value),
+            PropertyValue::Integer(value) => Some(*value as f32),
+            _ => None,
+        })
+        .unwrap_or(fallback)
+}
+
+fn graph_record_color_named(record: &NodeRecord, name: &str, fallback: [f32; 4]) -> [f32; 4] {
+    record
+        .properties
+        .get(name)
+        .or_else(|| record.socket_defaults.get(&SocketKey(name.to_string())))
+        .and_then(|value| match value {
+            PropertyValue::Color(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(fallback)
+}
+
+fn draw_graph_wire(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    color: egui::Color32,
+) {
+    let handle = ((to.x - from.x).abs() * 0.45).max(28.0);
+    let control_a = egui::pos2(from.x + handle, from.y);
+    let control_b = egui::pos2(to.x - handle, to.y);
+    let mut points = Vec::with_capacity(25);
+    for index in 0..=24 {
+        let t = index as f32 / 24.0;
+        let inverse = 1.0 - t;
+        points.push(egui::pos2(
+            inverse.powi(3) * from.x
+                + 3.0 * inverse.powi(2) * t * control_a.x
+                + 3.0 * inverse * t.powi(2) * control_b.x
+                + t.powi(3) * to.x,
+            inverse.powi(3) * from.y
+                + 3.0 * inverse.powi(2) * t * control_a.y
+                + 3.0 * inverse * t.powi(2) * control_b.y
+                + t.powi(3) * to.y,
+        ));
+    }
+    painter.add(egui::Shape::line(
+        points.clone(),
+        egui::Stroke::new(3.0, egui::Color32::from_black_alpha(90)),
+    ));
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.7, color)));
+}
+
+fn graph_socket_color(socket_type: SocketType) -> egui::Color32 {
+    match socket_type {
+        SocketType::Scalar => egui::Color32::from_rgb(221, 181, 65),
+        SocketType::Integer => egui::Color32::from_rgb(177, 205, 91),
+        SocketType::Vector3 => egui::Color32::from_rgb(154, 109, 208),
+        SocketType::Color => egui::Color32::from_rgb(221, 181, 65),
+        SocketType::Boolean => egui::Color32::from_rgb(93, 178, 101),
+        SocketType::Text => egui::Color32::from_rgb(185, 185, 185),
+        SocketType::Asset => egui::Color32::from_rgb(108, 173, 207),
+        SocketType::MaterialSurface => egui::Color32::from_rgb(182, 81, 94),
+        SocketType::MaterialRole => egui::Color32::from_rgb(192, 115, 82),
+        SocketType::ScalarField
+        | SocketType::MaskField
+        | SocketType::VoxelField
+        | SocketType::PointField
+        | SocketType::SplineField
+        | SocketType::BiomeField
+        | SocketType::Environment => egui::Color32::from_rgb(85, 156, 205),
+        SocketType::FeatureSet => egui::Color32::from_rgb(122, 154, 72),
+        SocketType::AudioSignal => egui::Color32::from_rgb(160, 91, 186),
+        SocketType::AnimationSignal => egui::Color32::from_rgb(191, 87, 151),
+        SocketType::QualityProfile | SocketType::RenderTarget => {
+            egui::Color32::from_rgb(86, 150, 205)
+        }
+    }
+}
+
+fn graph_node_header_color(declaration: &NodeDeclaration) -> egui::Color32 {
+    let [red, green, blue] = declaration.category.color();
+    egui::Color32::from_rgb(red, green, blue)
+}
+
+fn draw_graph_inspector(
+    ui: &mut egui::Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    node_id: &crate::graph::NodeId,
+) {
+    let Some(record) = state.graph.nodes.get(node_id).cloned() else {
+        return;
+    };
+    let Some(declaration) = registry.find(&record.node_type) else {
+        ui.label(format!("Unknown node type `{}`", record.node_type.0));
+        return;
+    };
+    ui.collapsing(format!("Inspector — {}", declaration.title), |ui| {
+        ui.label(declaration.description);
+        if ui.button("Delete node").clicked() {
+            state.remove_nodes(vec![node_id.clone()], registry);
+            state.selected_node = None;
+            state.selected_nodes.clear();
+            return;
+        }
+        for field in declaration.fields {
+            let mut value = match field.target {
+                FieldTarget::Property => record.properties.get(field.key),
+                FieldTarget::InputSocket => record
+                    .socket_defaults
+                    .get(&SocketKey(field.key.to_string())),
+            }
+            .cloned()
+            .unwrap_or_else(|| field.default.value());
+            let changed = ui
+                .add_enabled_ui(!field.read_only, |ui| draw_property(ui, field, &mut value))
+                .inner;
+            if !changed {
+                continue;
+            }
+            match field.target {
+                FieldTarget::Property => state.apply(
+                    GraphCommand::SetProperty {
+                        node: node_id.clone(),
+                        property: field.key.to_string(),
+                        value,
+                    },
+                    registry,
+                ),
+                FieldTarget::InputSocket => state.apply(
+                    GraphCommand::SetSocketDefault {
+                        node: node_id.clone(),
+                        socket: SocketKey(field.key.to_string()),
+                        value,
+                    },
+                    registry,
+                ),
+            };
+        }
+        if declaration.fields.is_empty() {
+            ui.label("This node has no editable defaults yet.");
+        }
+    });
+}
+
+/// The canvas is a zoomed document, not a normal form. At readable zoom it
+/// uses compact, bounded widgets; further out it draws a clipped value summary
+/// instead of allowing egui's fixed-size controls to escape their node rows.
+fn draw_graph_property(
+    ui: &mut egui::Ui,
+    field: &FieldDeclarationStatic,
+    value: &mut PropertyValue,
+    zoom: f32,
+) -> bool {
+    let before = value.clone();
+    ui.scope(|ui| {
+        let style = ui.style_mut();
+        style.spacing.item_spacing = egui::vec2(4.0 * zoom, 0.0);
+        style.spacing.interact_size = egui::vec2(32.0 * zoom, 18.0 * zoom);
+        for font in style.text_styles.values_mut() {
+            font.size *= zoom;
+        }
+        ui.horizontal(|ui| {
+            let label_width = (ui.available_width() * 0.44).clamp(52.0 * zoom, 96.0 * zoom);
+            ui.add_sized(
+                egui::vec2(label_width, 18.0 * zoom),
+                egui::Label::new(field.label).truncate(),
+            )
+            .on_hover_text(field.description);
+            let control_width = ui.available_width().max(20.0 * zoom);
+            match value {
+                PropertyValue::Scalar(value) => {
+                    let range = field
+                        .soft_range
+                        .or(field.hard_range)
+                        .map(|range| range.min..=range.max)
+                        .unwrap_or(-1.0..=1.0);
+                    ui.add_sized(
+                        egui::vec2(control_width, 18.0 * zoom),
+                        egui::Slider::new(value, range).text("").show_value(true),
+                    );
+                }
+                PropertyValue::Color(value) => {
+                    let mut rgba = *value;
+                    if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                        *value = rgba;
+                    }
+                }
+                PropertyValue::Vector3(value) => {
+                    let range = field
+                        .soft_range
+                        .or(field.hard_range)
+                        .map(|range| range.min..=range.max)
+                        .unwrap_or(-10.0..=10.0);
+                    let component_width = (control_width / 3.0 - 2.0 * zoom).max(12.0 * zoom);
+                    for component in value {
+                        ui.add_sized(
+                            egui::vec2(component_width, 18.0 * zoom),
+                            egui::DragValue::new(component).range(range.clone()),
+                        );
+                    }
+                }
+                PropertyValue::Boolean(value) => {
+                    ui.checkbox(value, "");
+                }
+                PropertyValue::Integer(value) => {
+                    let mut widget = egui::DragValue::new(value);
+                    if let Some(range) = field.hard_range {
+                        widget = widget.range(range.min as i64..=range.max as i64);
+                    }
+                    if let Some(step) = field.step {
+                        widget = widget.speed(step);
+                    }
+                    ui.add_sized(egui::vec2(control_width, 18.0 * zoom), widget);
+                }
+                PropertyValue::Text(value) => {
+                    if !field.choices.is_empty() {
+                        egui::ComboBox::from_id_salt(("graph-node-enum", field.key))
+                            .width(control_width)
+                            .selected_text(value.as_str())
+                            .show_ui(ui, |ui| {
+                                for choice in field.choices {
+                                    ui.selectable_value(value, (*choice).to_string(), *choice);
+                                }
+                            });
+                    } else {
+                        ui.add_sized(
+                            egui::vec2(control_width, 18.0 * zoom),
+                            egui::TextEdit::singleline(value),
+                        );
+                    }
+                }
+                PropertyValue::Asset(value) => {
+                    ui.add_sized(
+                        egui::vec2(control_width, 18.0 * zoom),
+                        egui::Label::new(&value.0).truncate(),
+                    );
+                }
+            }
+        });
+    });
+    *value != before
+}
+
+fn draw_graph_property_summary(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    field: &FieldDeclarationStatic,
+    value: &PropertyValue,
+    zoom: f32,
+) {
+    let summary = match value {
+        PropertyValue::Scalar(value) => format!("{}  {value:.3}", field.label),
+        PropertyValue::Color([red, green, blue, _]) => format!(
+            "{}  #{:02X}{:02X}{:02X}",
+            field.label,
+            (red.clamp(0.0, 1.0) * 255.0) as u8,
+            (green.clamp(0.0, 1.0) * 255.0) as u8,
+            (blue.clamp(0.0, 1.0) * 255.0) as u8,
+        ),
+        PropertyValue::Vector3([x, y, z]) => format!("{}  {x:.1}, {y:.1}, {z:.1}", field.label),
+        PropertyValue::Boolean(value) => {
+            format!("{}  {}", field.label, if *value { "on" } else { "off" })
+        }
+        PropertyValue::Integer(value) => format!("{}  {value}", field.label),
+        PropertyValue::Text(value) => format!("{}  {value}", field.label),
+        PropertyValue::Asset(value) => format!("{}  {}", field.label, value.0),
+    };
+    painter.with_clip_rect(rect).text(
+        rect.left_center() + egui::vec2(4.0 * zoom, 0.0),
+        egui::Align2::LEFT_CENTER,
+        summary,
+        egui::FontId::proportional((11.0 * zoom).max(5.0)),
+        egui::Color32::from_gray(205),
+    );
+}
+
+fn draw_property(
+    ui: &mut egui::Ui,
+    field: &FieldDeclarationStatic,
+    value: &mut PropertyValue,
+) -> bool {
+    let before = value.clone();
+    ui.horizontal(|ui| {
+        ui.label(field.label).on_hover_text(field.description);
+        match value {
+            PropertyValue::Scalar(value) => {
+                let range = field
+                    .soft_range
+                    .or(field.hard_range)
+                    .map(|range| range.min..=range.max)
+                    .unwrap_or(-1.0..=1.0);
+                ui.add(egui::Slider::new(value, range).text("").show_value(true));
+            }
+            PropertyValue::Color(value) => {
+                let mut rgba = *value;
+                if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                    *value = rgba;
+                }
+            }
+            PropertyValue::Vector3(value) => {
+                let range = field
+                    .soft_range
+                    .or(field.hard_range)
+                    .map(|range| range.min..=range.max)
+                    .unwrap_or(-10.0..=10.0);
+                for component in value {
+                    ui.add(egui::Slider::new(component, range.clone()).show_value(true));
+                }
+            }
+            PropertyValue::Boolean(value) => {
+                ui.checkbox(value, "on");
+            }
+            PropertyValue::Integer(value) => {
+                let mut widget = egui::DragValue::new(value);
+                if let Some(range) = field.hard_range {
+                    widget = widget.range(range.min as i64..=range.max as i64);
+                }
+                if let Some(step) = field.step {
+                    widget = widget.speed(step);
+                }
+                ui.add(widget);
+            }
+            PropertyValue::Text(value) => {
+                if !field.choices.is_empty() {
+                    egui::ComboBox::from_id_salt(("graph-enum", field.key))
+                        .selected_text(value.as_str())
+                        .show_ui(ui, |ui| {
+                            for choice in field.choices {
+                                ui.selectable_value(value, (*choice).to_string(), *choice);
+                            }
+                        });
+                } else {
+                    ui.text_edit_singleline(value);
+                }
+            }
+            PropertyValue::Asset(value) => {
+                ui.label(&value.0);
+            }
+        }
+    });
+    *value != before
 }
 
 /// The E1c Quality section: preset selector on top, then every registry lever

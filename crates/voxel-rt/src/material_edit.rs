@@ -1,6 +1,6 @@
 //! S0 — the material panel: the authoring loop that did not exist.
 //!
-//! Before this, every one of the 26 rows was tuned by editing Rust and rebuilding,
+//! Before this, every one of the 27 rows was tuned by editing Rust and rebuilding,
 //! and the table buffer was created without `COPY_DST` so a live edit was
 //! impossible even in principle. That is why half the columns were authored blind —
 //! roughness is a uniform `0.60` across every solid, written when nothing read it.
@@ -13,16 +13,17 @@
 //! nothing else. A `Solid` has no index of refraction to drag and no absorption
 //! triple to be confused by; a `Medium` has both. Before the union those columns
 //! existed on every row carrying sentinels, and a panel over that shape would have
-//! offered 26 rows of controls that silently did nothing on 24 of them.
+//! offered 27 rows of controls that silently did nothing on 25 of them.
 //!
 //! ## The two tiers, stated rather than hidden
 //!
-//! [`crate::cagi`] bakes albedo, a quantised transmittance and the emitter slot
-//! into its own cell-attribute volume and its shaders never read the material
-//! binding. So an albedo edit is instant in direct shading and **stale in the GI
-//! bounce** until the attributes are re-packed. Rather than pretend otherwise, the
+//! [`crate::cagi`] bakes albedo and quantised transmittance into its packed cell
+//! attributes, and E5b stores packed per-cell emission beside that word. Its shaders never
+//! read the material binding. So an albedo or emission edit is instant in direct
+//! shading and **stale in the GI bounce** until the attributes are re-packed. Rather than
+//! pretend otherwise, the
 //! panel labels which fields are in which tier and offers the re-pack explicitly —
-//! it is a ~50 ms rebuild that belongs off-frame on the world thread, not something
+//! it is a ~0.5 s rebuild that belongs off-frame on the world thread, not something
 //! to run silently on every slider tick.
 //!
 //! ## Why kind is shown but not editable
@@ -242,7 +243,7 @@ fn draw_import_section(
                     "Rebuilds the studio around this file's geometry, with each \
                      palette entry drawn as the table row it is bound to below. The \
                      bindings default to the nearest albedo match, because a .vox \
-                     palette can hold 256 colours and this table has a fixed 26 rows \
+                     palette can hold 256 colours and this table has a fixed 27 rows \
                      welded to the voxel enum — so a file's colours cannot become \
                      rows, only be previewed through existing ones.",
                 )
@@ -690,12 +691,10 @@ fn draw_emission(ui: &mut egui::Ui, row: &mut Material) {
     match &mut row.emission {
         Some(emission) => {
             ui.label("emission (linear, may exceed 1)").on_hover_text(
-                "Emitted radiance. CAGI stores a 3-bit emitter INDEX per cell and looks \
-                 the radiance up in a palette built from this table — and since S2 that \
-                 palette is re-uploaded from the LIVE table, so dragging this changes \
-                 the light the volume injects without any re-pack. Only a row becoming \
-                 emissive for the first time needs the re-pack, to tell the CELLS they \
-                 hold an emitter. Note the scale cannot mean anything physical until an \
+                "Emitted radiance. E5b folds this row's mean into each cell's exposed \
+                 emitting area during the GI attribute build. Direct shading changes \
+                 immediately; the GI bounce sees it after the explicit re-pack. Note the \
+                 scale cannot mean anything physical until an \
                  HDR intermediate exists — today a bright emitter clips to flat white, \
                  so raising this makes a light flatter, not brighter.",
             );
@@ -704,9 +703,8 @@ fn draw_emission(ui: &mut egui::Ui, row: &mut Material) {
         None => {
             ui.label("emission: none").on_hover_text(
                 "This row does not emit. Adding emission is structural, not cosmetic: \
-                 it changes the row's EMISSIVE flag, which decides whether CAGI \
-                 injects it as a light source and which of the 8 emitter palette slots \
-                 it claims. So it is a compiled-table change, not a slider.",
+                 it changes the row's EMISSIVE flag and makes it eligible for E5b's \
+                 exposed-area GI contribution. The cell buffer updates on re-pack.",
             );
         }
     }
@@ -725,11 +723,10 @@ fn draw_face_roles(ui: &mut egui::Ui, row: &mut Material) {
     ui.collapsing("Face roles (top / side / bottom)", |ui| {
         ui.label("needs the MATERIAL_FACE_ROLES lever under Quality")
             .on_hover_text(
-                "These values are UPLOADED but not READ until the lever is on. It \
-                 ships off because turning it on changes how the island looks, and \
-                 re-authoring the world's materials is a deliberate later step. The \
-                 fields above are what every face uses while it is off — which is why \
-                 this row's base albedo is still its pre-S1 colour.",
+                "These values are read on the normal tiers. Potato patches the lever \
+                 off as its flat-material fallback. The fields above are what every \
+                 face uses while it is off — which is why this row's base albedo is \
+                 still its pre-S1 colour.",
             );
         for (label, face, hint) in [
             (
@@ -836,10 +833,8 @@ fn draw_pattern_layers(ui: &mut egui::Ui, row: &mut Material) {
         |ui| {
             ui.label("needs the MATERIAL_PATTERNS lever under Quality")
                 .on_hover_text(
-                    "Layers are UPLOADED but not READ until the lever is on, for the same \
-                 reason face roles ship off: no row authors one yet, so turning it on \
-                 today changes nothing, and authoring the island's materials is a \
-                 deliberate later step with a re-recorded baseline. The Quality panel \
+                    "Layers are read on the normal tiers; Potato patches the lever off \
+                 and caps the stack at zero for its cheap fallback. The Quality panel \
                  also holds the global strength and the per-hit layer cap.",
                 );
 
@@ -877,12 +872,12 @@ fn draw_pattern_layers(ui: &mut egui::Ui, row: &mut Material) {
                         egui::Button::new("add layer"),
                     )
                     .on_hover_text(
-                        "Starts at amount 0, which is the exact identity — so a new layer \
-                     is safe to leave in the row while its generator is dialled in.",
+                        "Starts at amount 1 with the 2 cm feature and 8x8 texel defaults, \
+                     so the new layer is visible immediately; dial it down if needed.",
                     )
                     .clicked()
                 {
-                    row.patterns.push(PatternLayer::IDENTITY);
+                    row.patterns.push(PatternLayer::DEFAULT);
                 }
                 if ui
                     .add_enabled(active > 0, egui::Button::new("clear all"))
@@ -1276,10 +1271,10 @@ fn draw_tier_controls(
     if ui
         .button("re-pack GI attributes")
         .on_hover_text(
-            "CAGI bakes albedo, a quantised transmittance and the emitter slot into its \
-             own cell-attribute volume, and its shaders never read the material table — \
-             so those three fields are live in direct shading and STALE in the GI bounce \
-             until this runs. A ~50 ms rebuild, so it goes to the world thread rather \
+            "CAGI bakes albedo, quantised transmittance and E5b per-cell emission into \
+             its cell buffers, and its shaders never read the material table — so these \
+             fields are live in direct shading and STALE in the GI bounce until this \
+             runs. A ~0.5 s rebuild, so it goes to the world thread rather \
              than into a frame.\n\n\
              This genuinely works as of S2. Until then the rebuild read the COMPILED \
              table, so it recomputed the attributes it already had and a material edit \
@@ -1366,7 +1361,7 @@ mod tests {
     }
 
     /// The re-pack request must be a latch the platform layer clears, not a
-    /// fire-and-forget — a ~50 ms rebuild triggered every frame would be a hitch
+    /// fire-and-forget — a ~0.5 s rebuild triggered every frame would be a hitch
     /// machine.
     #[test]
     fn the_repack_request_is_a_one_shot_latch() {

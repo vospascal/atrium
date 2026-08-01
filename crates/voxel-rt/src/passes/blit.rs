@@ -123,10 +123,15 @@ impl BlitPass {
             Self::create_bind_group(device, &self.bind_group_layout, source_view, sampler);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
+        target_width: u32,
+        target_height: u32,
+        viewport_width: u32,
+        viewport_height: u32,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -147,6 +152,20 @@ impl BlitPass {
         });
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_viewport(
+            0.0,
+            0.0,
+            viewport_width as f32,
+            viewport_height as f32,
+            0.0,
+            1.0,
+        );
+        render_pass.set_scissor_rect(
+            0,
+            0,
+            viewport_width.min(target_width),
+            viewport_height.min(target_height),
+        );
         render_pass.draw(0..3, 0..1);
     }
 

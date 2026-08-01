@@ -1,0 +1,216 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777673529e958-0000000000000053",
+  "name": "Active quality",
+  "preset": "Balanced",
+  "values": {
+    "AnyHitShadow": {
+      "type": "flag",
+      "value": false
+    },
+    "AoBrickEarlyOut": {
+      "type": "flag",
+      "value": false
+    },
+    "AoDirectionMode": {
+      "type": "mode",
+      "value": 0
+    },
+    "AoDistanceFade": {
+      "type": "flag",
+      "value": false
+    },
+    "AoDistanceFalloff": {
+      "type": "flag",
+      "value": true
+    },
+    "AoFadeEnd": {
+      "type": "voxel_distance",
+      "value": 480
+    },
+    "AoFadeStart": {
+      "type": "voxel_distance",
+      "value": 240
+    },
+    "AoMaxDistance": {
+      "type": "voxel_distance",
+      "value": 8
+    },
+    "AoMissRadiance": {
+      "type": "flag",
+      "value": false
+    },
+    "AoMode": {
+      "type": "mode",
+      "value": 1
+    },
+    "AoRayCount": {
+      "type": "count",
+      "value": 2
+    },
+    "AoStrength": {
+      "type": "scalar",
+      "value": 0.8
+    },
+    "AoSunAwareRayBudget": {
+      "type": "flag",
+      "value": false
+    },
+    "BrickBitGrid": {
+      "type": "flag",
+      "value": false
+    },
+    "ColumnFastForward": {
+      "type": "flag",
+      "value": false
+    },
+    "DescendFastForward": {
+      "type": "flag",
+      "value": false
+    },
+    "DirectionalSkip": {
+      "type": "flag",
+      "value": false
+    },
+    "DistanceSkip": {
+      "type": "flag",
+      "value": true
+    },
+    "EditClearanceRadius": {
+      "type": "count",
+      "value": 8
+    },
+    "EditClearanceUpdate": {
+      "type": "mode",
+      "value": 0
+    },
+    "EditGiReflood": {
+      "type": "flag",
+      "value": true
+    },
+    "EditWorldThread": {
+      "type": "flag",
+      "value": true
+    },
+    "GiAmbientFloor": {
+      "type": "scalar",
+      "value": 0.25
+    },
+    "GiEmissive": {
+      "type": "flag",
+      "value": true
+    },
+    "GiEmissiveScale": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "GiEmitterBounce": {
+      "type": "flag",
+      "value": true
+    },
+    "GiEnabled": {
+      "type": "flag",
+      "value": true
+    },
+    "GiIterationsPerFrame": {
+      "type": "count",
+      "value": 2
+    },
+    "GiResolution": {
+      "type": "count",
+      "value": 4
+    },
+    "GiRule": {
+      "type": "mode",
+      "value": 1
+    },
+    "GiSampleMode": {
+      "type": "mode",
+      "value": 1
+    },
+    "GiSkyTest": {
+      "type": "mode",
+      "value": 0
+    },
+    "GiStrength": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "GiSunBounce": {
+      "type": "scalar",
+      "value": 0.35
+    },
+    "GiSunCache": {
+      "type": "flag",
+      "value": true
+    },
+    "GiTransmission": {
+      "type": "flag",
+      "value": false
+    },
+    "GlobalMaxTerminate": {
+      "type": "flag",
+      "value": true
+    },
+    "MaterialFaceRoles": {
+      "type": "flag",
+      "value": true
+    },
+    "MaterialPatternMaxLayers": {
+      "type": "count",
+      "value": 4
+    },
+    "MaterialPatternStrength": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "MaterialPatterns": {
+      "type": "flag",
+      "value": true
+    },
+    "RenderScale": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "ShadowMode": {
+      "type": "mode",
+      "value": 0
+    },
+    "ShadowPenumbraScale": {
+      "type": "scalar",
+      "value": 115.0
+    },
+    "WaterAbsorption": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "WaterBounces": {
+      "type": "count",
+      "value": 1
+    },
+    "WaterMode": {
+      "type": "mode",
+      "value": 4
+    },
+    "WaterRayCutoff": {
+      "type": "scalar",
+      "value": 0.04
+    },
+    "WaterScattering": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "WaterSunThroughLiquid": {
+      "type": "flag",
+      "value": true
+    },
+    "WaterTirFallback": {
+      "type": "mode",
+      "value": 1
+    },
+    "WaterUnderwaterInterface": {
+      "type": "mode",
+      "value": 1
+    }
+  }
+}

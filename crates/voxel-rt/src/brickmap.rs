@@ -87,6 +87,15 @@ pub const BRICK_TAG_UNIFORM: u32 = 1;
 /// Tag `0b10`: RESERVED for a shared template — the payload will be an index
 /// into a deduplicated brick palette. Nothing emits this yet; it is spelled out
 /// so the tag space is allocated before the shaders learn to branch on it.
+///
+/// It stays unimplemented for a measured reason, not an oversight. At our 8³
+/// edge, `brick_census` finds **81% of sculpted bricks already distinct — dedup
+/// factor 1.2×, 15.2 → 12.6 MB**, which does not pay for a palette indirection.
+/// 4³ would give 2.5×, but only with a third hierarchy level above it, and that
+/// chunk level — not the match rate — is the actual gate. See ledger 3.7: if the
+/// chunk level ever lands, re-run the census with transform matching (mirror +
+/// axis permutation) before concluding anything, because 1.2× is an exact-match
+/// floor.
 pub const BRICK_TAG_TEMPLATE: u32 = 2;
 
 /// Tag `0b11`: no non-air voxels. [`EMPTY_BRICK`] is `u32::MAX`, which carries
@@ -597,6 +606,22 @@ impl Brickmap {
         let word = self.material_words
             [brick_slot(pointer) as usize * MATERIAL_WORDS_PER_BRICK + (bit >> 2)];
         ((word >> ((bit & 3) * 8)) & 0xff) as u8
+    }
+
+    /// Highest occupied voxel in one XZ column. The cached brick-column bound
+    /// makes this at most a short downward scan in ordinary terrain and avoids
+    /// a full WORLD_SIZE_Y sweep for profile-driven surface generation.
+    pub fn top_occupied_y(&self, x: i32, z: i32) -> Option<i32> {
+        if x < 0 || z < 0 || x >= WORLD_SIZE_X as i32 || z >= WORLD_SIZE_Z as i32 {
+            return None;
+        }
+        let brick_column = x as usize / BRICK_SIZE + (z as usize / BRICK_SIZE) * BRICK_GRID_X;
+        let max_brick_y = self.column_max_brick_y[brick_column];
+        if max_brick_y == EMPTY_COLUMN {
+            return None;
+        }
+        let upper = (((max_brick_y + 1) as usize * BRICK_SIZE).min(WORLD_SIZE_Y) - 1) as i32;
+        (0..=upper).rev().find(|y| self.get(x, *y, z) != 0)
     }
 
     /// Whether the occupancy bit is set at a world voxel coordinate (false

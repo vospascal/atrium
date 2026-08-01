@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672bdf2480-0000000000000014",
+  "name": "stone",
+  "voxel_material_slot": 6,
+  "material": {
+    "albedo": [
+      0.52,
+      0.52,
+      0.55
+    ],
+    "roughness": 0.85,
+    "specular": 0.04,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.02,
+      0.02,
+      0.03,
+      0.03,
+      0.04,
+      0.05
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e33d85fc8-000000000000005d"
+}

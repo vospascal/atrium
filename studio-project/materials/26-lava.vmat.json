@@ -1,0 +1,59 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c77767349d31e8-0000000000000050",
+  "name": "lava",
+  "voxel_material_slot": 26,
+  "material": {
+    "albedo": [
+      0.42,
+      0.09,
+      0.015
+    ],
+    "roughness": 0.42,
+    "specular": 0.03,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": [
+      1.2,
+      0.16,
+      0.015
+    ],
+    "face_roles": null,
+    "patterns": [
+      {
+        "generator": {
+          "kind": "noise",
+          "octaves": 2
+        },
+        "frame": "face",
+        "period_meters": 0.02,
+        "target": "emission",
+        "blend": "add",
+        "amount": 0.85,
+        "target_color": [
+          1.35,
+          0.34,
+          0.02
+        ],
+        "faces": {
+          "top": true,
+          "side": true,
+          "bottom": true
+        },
+        "texels_per_voxel": 8,
+        "vary_per_face": true,
+        "emission_intensity": 2.0
+      }
+    ],
+    "acoustic_alpha": [
+      0.1,
+      0.06,
+      0.04,
+      0.03,
+      0.03,
+      0.03
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e2e9f8568-000000000000004d"
+}

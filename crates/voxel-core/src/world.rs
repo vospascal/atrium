@@ -140,6 +140,8 @@ pub enum Voxel {
     /// occludes light. Named after the "conditional glowing berries" recorded in
     /// `docs/xima-engine-dossier.md`.
     GlowBerry,
+    /// Molten, patterned, emissive terrain.
+    Lava,
 }
 
 impl Voxel {

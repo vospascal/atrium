@@ -548,3 +548,145 @@ don't — frame times, hardware, comparison footage against a brickmap?
    the entry proposing it was being written. Three verdicts changed (R1, R3, R5).
    **Re-read the ledger and plan immediately before recording a verdict**, not at
    the start of the session that records it.
+
+---
+
+## Batch 2 — 2026-07-31 (1 source)
+
+Headline: **the DAG family is now closed with a number instead of an argument.**
+R11 is the current state of the art in sparse-voxel compression, read in full, and
+it prices itself out of this engine twice over — once on its preprocessing model
+(hours, static-only) and once, more surprisingly, on its own render benchmark,
+where the *uncompressed* SVDAG with fixed-width pointers beats every compressed
+variant the authors built. It also supplies the one number that reopens nothing
+but corrects a floor: our brick dedup ratio was measured under *exact* match
+only, and transform-aware matching is the half we never priced.
+
+| # | Source | Verdict |
+|---|---|---|
+| R11 | **TSVDAG** — Transform-Aware Sparse Voxel DAGs (I3D / PACMCGIT 2025, TU Delft) | ❌ **DEAD, structurally** (ledger 1.15). Static by construction — hours of preprocess, no edit path — against our 4.9 ms republish. Its own Fig. 10 shows compression *costing* frame time (+12% encoding, +30% translations) while plain fixed-32-bit SVDAG wins. One transferable number lands on ledger **3.7** |
+
+---
+
+### R11 — Transform-Aware Sparse Voxel Directed Acyclic Graphs
+
+Mathijs Molenaar, Elmar Eisemann · *Proc. ACM Comput. Graph. Interact. Tech.*
+8(1), Article 11, May 2025 (I3D) · [doi:10.1145/3728301](https://doi.org/10.1145/3728301)
+· authors' version read in full, 16 pages · TU Delft.
+
+**What it is.** The current state of the art in *static* sparse-voxel geometry
+compression. An SVDAG fuses octree subtrees that are bit-identical; SSVDAG
+(Villanueva et al. 2016) also fuses those equal under **mirror symmetry**. This
+paper generalizes the idea to **any transformation expressible as a recursive
+reorder of child pointers**, and picks a practical subset:
+
+- **S** — mirror symmetry (the SSVDAG case, plus a bug fix, below).
+- **A** — **axis permutations** (`(x,y,z) → (z,x,y)`, 6 of them). Combined with S
+  this spans the full symmetry group of the cube — *every 90° rotation*, which
+  SSVDAG structurally could not express.
+- **T** — **destructive translations**: shift a subtree's contents and let
+  whatever leaves the subtree bounds vanish. Not a pointer reorder at all, which
+  is why it needs its own traversal machinery and its own search.
+
+Plus a compact encoding, because element count is only half of compression:
+variable-length **16/32/48-bit pointers**, a per-level **lookup table** of 64-bit
+entries for hot pointers, and **Huffman-coded transform IDs**.
+
+**They also found a real bug in the prior art.** SSVDAG stores symmetry
+invariance as a 3-bit mask `{mx, my, mz}`, assuming the axes are independent. They
+are not: a grid can be invariant under *xy* while being invariant under neither
+*x* nor *y*. The correct mask is **7 bits** (x, y, z, xy, xz, yz, xyz). Fixing it
+measurably improves SSVDAG's own ratio — worth noting as a *class* of bug, since
+it is exactly the shape of error a "these flags are orthogonal" assumption
+produces, and we make that assumption in packed bounds too (`BOUND_BITS`).
+
+**Results, memory, all scenes at 64k³** (their Table 4; a dense grid would be
+35 TB):
+
+| Scene | SVO | SVDAG | SSVDAG | theirs (S+A+T) |
+|---|---|---|---|---|
+| Citadel | 11430 MB | 1454 MB | 932 MB | **597 MB** (−36%) |
+| Bunny | 10137 | 1736 | 1080 | **663** (−39%) |
+| Crown | 25647 | 4146 | 2654 | **1851** (−30%) |
+| Bistro | 13537 | 1309 | 870 | **721** (−17%) |
+
+A **20–35% improvement over the previous best**, and genuinely impressive
+compression work.
+
+#### Why it is dead here, and the second reason is the interesting one
+
+**1. It is static by construction, and says so.** §1: *"we focus on improving a
+specific class of 3D voxel structures, namely **static** Sparse Voxel Directed
+Acyclic Graphs."* Finding the translations takes **"a couple of hours" on CPU**
+for one 64K³ scene at L=4 — and that is *after* the paper's own contribution took
+it from O(NV²) to O(NV); the naive form was *"weeks of computation."* Mirror plus
+axis permutation alone is under a minute, so the cheap half is affordable at any
+scale — but there is no incremental update anywhere in the paper. Our E2 pipeline
+republishes an edit in **4.9 ms** and materializes a brick as a word patch into
+4096 spare slots (ledger 3.6). These are opposite design points, and the editable
+line of that research is a different pair of papers the authors cite: **Careil,
+Billeter & Eisemann 2020** (interactively modifying compressed SVDAGs) and
+**Molenaar & Eisemann 2024** (editing compact voxel representations on the GPU).
+Those are the references if the DAG question is ever asked again.
+
+**2. Their own render benchmark argues against compressing at all** — and this is
+the transferable half. Fig. 10, RTX 4070, 1080p path-traced, 4 bounces:
+
+> *"As expected, an SVDAG with **fixed 32-bit pointer encoding outperforms
+> variable pointer length methods** in render time; typically by about 10%."*
+
+Enabling the pointer LUT + Huffman costs **+12% frame time**; translations add
+**~30%** (Bistro ≈28 ms → ≈41 ms). Their diagnosis: the GPU memory system is not
+built for variable-length reads, and the deeper traversal stack causes register
+pressure or spilling.
+
+**This is ledger 1.13's lesson arriving from a second, independent direction.**
+There it was one load answering two questions; here it is fixed-width pointers
+beating cleverly-packed ones. Both say the same thing: **on this hardware, the
+cost of *decoding* a compact structure outruns what the compactness buys.** Our
+two-level brickmap with one 32-bit tagged pointer sits at the fast end of exactly
+the axis they measured, and it got there without the argument.
+
+**3. Incidental confirmation of one of our own negatives.** They replaced the
+DAG's top levels with a hardware BVH through OptiX and *"found that this reduces
+performance, despite promising findings by Söderlund et al."* Same direction as
+our own finding that bolting an acceleration structure on top of a structure that
+is already an acceleration structure does not pay.
+
+#### The one number worth keeping: our dedup ratio was measured under exact match only
+
+`BRICK_TAG_TEMPLATE` is a **reserved bit pattern with no implementation** — it
+appears twice in the crate, as a doc comment and a constant, and nothing reads or
+writes it. It was left unbuilt because `brick_census` measured exact-match dedup
+as not worth a chunk level. Re-run 2026-07-31, seed 1337:
+
+| cell edge | occupied | of which uniform | sculpted distinct | dedup factor | payload |
+|---|---|---|---|---|---|
+| 2³ | 12.0% | 90.0% | 2.2% | **45.3×** | 3.1 MB → **15.4 MB** ❌ pointers cost more than the data |
+| 4³ | 12.8% | 74.5% | 39.4% | **2.5×** | 8.4 MB → 5.3 MB |
+| **8³ (shipped)** | 14.4% | 58.6% | 81.0% | **1.2×** | 15.2 MB → 12.6 MB |
+| 16³ | 16.8% | 36.4% | 88.0% | 1.1× | 27.8 MB → 24.5 MB |
+
+Note the 2³ row: a 45× dedup factor that *loses* memory outright, because the
+pointer to a shared 8-byte payload costs more than the payload. The ratio is not
+the metric; bytes are.
+
+R11's Table 2 shows that on the *same* geometry, adding S+A to exact matching
+removes a further **19–22%** of elements, and S+A+T removes **27–50%**. Those are
+octree nodes at 64k³, not our 8³ bricks, so the numbers do not transfer — but the
+*direction* does: **our 1.2× is a floor measured under exact match, not a ceiling**,
+and the 48-element cube symmetry group is the sub-minute half of their search.
+
+**This changes no verdict.** 8³ dedup was never blocked on match rate — it was
+blocked on 12.6 MB of savings not justifying a third hierarchy level, and 4³'s
+better 2.5× being unreachable without that same chunk level. Transform matching
+would move the ratio, not remove the blocker. Recorded as ledger **3.7** so that
+if the chunk level ever lands for another reason, the census is re-run *with*
+symmetry before anyone concludes dedup is dead again.
+
+#### Verdict
+
+❌ **DEAD** — ledger **1.15**. Nothing to build. Documented because it closes the
+SVO/DAG branch of the design space with measurements from its own authors rather
+than with our reasoning, and because its render-performance table is the second
+independent confirmation of the load-count principle behind 1.13.

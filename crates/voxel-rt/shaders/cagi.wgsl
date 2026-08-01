@@ -98,6 +98,23 @@ const CAGI_TRANSMISSION: bool = false;
 // changes nothing. The bench measures a world with no emitters, which is exactly
 // why its number cannot justify the default either way.
 const CAGI_EMISSIVE: bool = true;
+// CAGI_EMITTER_BOUNCE (E5c) — whether an AIR cell reads the emission of its solid
+// face neighbours directly, instead of waiting for the propagation stencil to
+// carry it.
+//
+// ON by default, and unlike most rows here the measurement argues FOR the default
+// rather than being absent: the diffusion numerator is transmission/6, which is
+// near-lossless for a uniform field (6V * 0.94/6 = 0.94V) and keeps 15.7% of a
+// lone bright neighbour among five dark ones. Measured on the `wall + glow block`
+// prop, the air cell in front of the emitter settles at 152/1023 under
+// CAGI_RULE_MAX_DECREMENT (scale-free) and 45/1023 under the SHIPPED
+// CAGI_RULE_DIFFUSION_6. So a point light worked only under a rule that is not the
+// default, which is the bug this closes: with the bounce on, the neighbour reads
+// the emitter's own mean under every rule.
+//
+// Off restores that rule-dependent behaviour exactly, which is what makes the
+// before/after measurable.
+const CAGI_EMITTER_BOUNCE: bool = true;
 // Fixed-point shift of both diffusion numerators (see CagiVolumeMeta).
 const CAGI_DIFFUSION_SHIFT: u32 = 12u;
 
@@ -250,6 +267,54 @@ fn cagi_sun_bounce(cell: vec3<i32>, sun_already_found: bool) -> vec3<f32> {
     return sun * lighting.gi_params.z * (albedo_sum / lambert_sum);
 }
 
+// E5c: the radiance an AIR cell receives from EMISSIVE solid face neighbours,
+// injected directly rather than propagated.
+//
+// The same 6-neighbour walk as `cagi_sun_bounce`, and deliberately so — an emitter
+// is a bounce surface whose radiance happens to be its own instead of the sun's.
+// Two differences, both making this the cheaper of the two:
+//
+// * no shadow ray. The source is the neighbour itself, so there is nothing to
+//   occlude — where the sun term has to prove the SUN reaches the cell.
+// * no Lambert weighting. The neighbour's stored value is already a mean radiance
+//   over its exposed area (E5b), i.e. what leaves that face in every direction, so
+//   weighting it by a direction would be double-counting the area term.
+//
+// Several emissive neighbours take the MAX rather than the sum: the light word is a
+// clamped 10-bit channel and the CA composes every source with `max` already (sky,
+// sun, the cell's own emission), so summing here would be the one place in the
+// transport that could overshoot what a channel can hold.
+fn cagi_emitter_bounce(cell: vec3<i32>) -> vec3<f32> {
+    var brightest = vec3<f32>(0.0, 0.0, 0.0);
+    let grid = vec3<i32>(cagi_volume_meta.grid_size);
+    for (var axis = 0u; axis < 3u; axis = axis + 1u) {
+        for (var side = 0u; side < 2u; side = side + 1u) {
+            var offset = vec3<i32>(0, 0, 0);
+            let step = select(-1, 1, side == 0u);
+            if (axis == 0u) {
+                offset.x = step;
+            } else if (axis == 1u) {
+                offset.y = step;
+            } else {
+                offset.z = step;
+            }
+            let neighbour = cell + offset;
+            // A cell outside the grid has no cell_data slot, so this bounds test is
+            // the emission read's guard — not merely a correctness nicety like the
+            // one in `cagi_attributes_of`, which can afford to answer "solid".
+            if (any(neighbour < vec3<i32>(0, 0, 0)) || any(neighbour >= grid)) {
+                continue;
+            }
+            let index = cagi_cell_index(vec3<u32>(neighbour));
+            if ((cagi_cell_attribute(index) & CAGI_CELL_SOLID) == 0u) {
+                continue; // not a surface: whatever light it holds the stencil carries
+            }
+            brightest = max(brightest, cagi_cell_emission(index));
+        }
+    }
+    return brightest;
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let grid = cagi_volume_meta.grid_size;
@@ -259,7 +324,7 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let index = cagi_cell_index(invocation);
     let cell = vec3<i32>(invocation);
 
-    let attributes = cagi_cell_attributes[index];
+    let attributes = cagi_cell_attribute(index);
     if ((attributes & CAGI_CELL_SOLID) != 0u) {
         // An emissive solid is a SOURCE, not an absorber: it pins its own
         // radiance every iteration so the air cells around it read it as a
@@ -267,7 +332,7 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
         // lit-looking but light nothing, because the CA only ever reads
         // neighbours' light words.
         if (CAGI_EMISSIVE) {
-            let emission = cagi_cell_emission(attributes);
+            let emission = cagi_cell_emission(index);
             if (any(emission > vec3<f32>(0.0))) {
                 light_volume_out[index] = cagi_pack(cagi_quantize(emission));
                 return;
@@ -304,7 +369,13 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     // threshold, so it lands here instead: same injection, clamped from below
     // exactly like the sky term.
     if (CAGI_EMISSIVE) {
-        emission = max(emission, cagi_quantize(cagi_cell_emission(attributes)));
+        emission = max(emission, cagi_quantize(cagi_cell_emission(index)));
+        // E5c: and the emission of any emissive SOLID next door, which the stencil
+        // cannot be relied on to carry — a lone bright neighbour survives
+        // max-decrement but loses 84% per step under the shipped diffusion rule.
+        if (CAGI_EMITTER_BOUNCE) {
+            emission = max(emission, cagi_quantize(cagi_emitter_bounce(cell)));
+        }
     }
     var is_sun_source = false;
     let bounce = cagi_sun_bounce(cell, sun_already_found);
