@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672b457c90-000000000000000e",
+  "name": "sand",
+  "voxel_material_slot": 4,
+  "material": {
+    "albedo": [
+      0.86,
+      0.77,
+      0.55
+    ],
+    "roughness": 0.95,
+    "specular": 0.02,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.1,
+      0.2,
+      0.4,
+      0.55,
+      0.6,
+      0.6
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e31346118-0000000000000055"
+}

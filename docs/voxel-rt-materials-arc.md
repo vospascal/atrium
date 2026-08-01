@@ -28,13 +28,13 @@ current; leave the rest alone unless it stops being true.
 | **S2c** | Patterned emitters cast light (mean → GI volume) | ⏳ built, **gate not passed** |
 | **S2d** | Sun/ambient dimming + emission colour x intensity, so S2c is judgeable | ⏳ built, awaiting the S2c gate |
 | — | Embedded-emitter fix, **step 1**: sticky emitter index in the cell sweep | ✅ landed (CAGI, not this arc) |
-| — | Step 2 (area-weighted per-cell radiance) → became **E5b**, see the plan | ⬜ proposed, not approved |
+| — | Step 2 (area-weighted per-cell radiance) → became **E5b**, see the plan | ✅ implemented + CPU-gated; visual/GPU gate pending |
 | **S3** | Animation — value oscillation + pattern drift | ⬜ not started |
 | **S4** | Template library | ⬜ not started |
 | **S5** | Sub-voxel models (the only stage that touches traversal) | ⬜ not started |
 | **S6** | Apply to real materials, re-author roughness/specular | ⬜ not started |
 
-**256 tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
+**254 library tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
 `cargo clippy --all-targets` clean.
 
 ### Next action
@@ -43,8 +43,9 @@ current; leave the rest alone unless it stops being true.
 visibly lights a neighbouring surface. Procedure below.
 
 Step 1 of the embedded-emitter fix is in, so an emitter now always injects rather than
-sometimes injecting nothing — the `wall + glow block` prop should light up. Expect it to be
-**too bright and half-metre blocky**: that is E5b's job, not a gate failure.
+sometimes injecting nothing — the `wall + glow block` prop should light up. E5b now applies
+the exposed-area weighting, so the remaining visual question is whether the patterned source
+reads like the authored texture rather than a block-sized light.
 
 If nothing lights at all, the suspects in order are: the `emissive scale` lever under GI
 (global, defaults 1.0), whether the attribute re-pack was pressed, the ~32-frame GI
@@ -67,15 +68,15 @@ on purpose.
 
 All under **Materials** in the overlay:
 
-1. **Quality → Materials → `pattern layers`** must be ON. It ships off, because no
-   compiled row authors a layer and turning it on is S6's decision.
+1. **Quality → Materials → `pattern layers`** is ON by default on Balanced, Quest and
+   Beautiful (four-layer cap); Potato deliberately patches it off and caps at zero.
 2. **`row`** dropdown — picks the row being edited **and, in the studio, the voxel on
    screen**. Row 6 is stone, 24 is `glow_block` (already a 3.0 emitter).
 3. **Studio subject** — `single voxel` / `wall (16x16)` / `cube (4x4x4)` /
    `wall + glow block`. The wall is for continuity and any period over one voxel; the cube
    is for corners; the last is a **diagnostic prop**, see below.
-4. **Pattern layers → add layer**, then dial. A new layer starts at `amount: 0`, which is
-   the exact identity, so it is safe to add before configuring.
+4. **Pattern layers → add layer**, then dial. A new layer starts fully on at `amount: 1`,
+   with the shared 8×8 texel and 0.02 m feature defaults; dial it down if needed.
 
 ### To see an emitter at all
 
@@ -121,19 +122,14 @@ wins — so this is a pre-existing E5 bug the materials arc exposed, not one it 
 The prop places the block where its cell does **not** elect it as the albedo voxel, which
 is exactly the case that used to fail.
 
-**Step 1 is DONE.** `fold_voxel_attribute` now carries two rules in one word: albedo and
-transmittance still take the last voxel visited (the cell's highest — the surface the sun
-hits, which is what a bounce tint wants), while the **emitter index is sticky** — once any
-voxel in a cell is found to emit, no later non-emitting voxel can evict it. A light is a
-*source*; being outvoted by a higher neighbour meant contributing nothing. Pinned by
-`folding_a_voxel_keeps_the_last_albedo_and_any_emitter` and
-`an_emitter_is_found_wherever_it_sits_in_the_cell` (the emitter is found at all 16
-positions of a cell layer — the order-independence the fix actually buys).
+**Step 1 is DONE.** The pre-E5b sticky-source fix ensured an embedded source could not be
+discarded by the albedo election. It is now superseded for emission by the area
+accumulator below; albedo/transmittance still take the last voxel visited.
 
-**Step 2 is NOT done, and the prop still overstates.** The cell injects the emitter's
-FULL radiance regardless of how much of it emits, so one 12.5 cm block lights as though a
-50 cm cell of it were glowing — deterministic and visible now, but too bright and too
-large.
+**Step 2 / E5b is IMPLEMENTED.** The cell stores the mean radiance of exposed emitting
+faces divided by all exposed faces, so a buried source contributes zero and a small source
+no longer lights like the whole half-metre cell. CPU tests pin the embedded reduction and
+incremental/full rebuild agreement; the studio/GPU gate remains.
 
 **That step became its own stage: `E5b` in `docs/voxel-rt-plan.md`.** It is CAGI's work,
 not this arc's — per-cell mean radiance weighted by exposed emitting area, retiring the
@@ -164,22 +160,22 @@ free. Numbers and verdicts in `docs/voxel-rt-bench.md`.
 
 ## Open decisions
 
-These are waiting on Pascal, not on work:
+Remaining decisions and gates:
 
-- **`Voxel::Lava` as its own row?** It crosses the **enum weld** — material ids are 1:1
-  with `voxel-core`'s 26-variant `Voxel` enum through two hand-mirrored matches, so one
-  variant touches ~10 sites across three crates (`world.rs`, `terrain_chunk.rs`,
-  `material.rs` ×4 including `MATERIAL_COUNT` and the upload pin, and four matches in
-  `voxel-sandbox/mesh.rs`, which the plan's non-goals currently protect). Mechanical, but
-  a deliberate crossing. The alternative is to keep authoring lava-like looks on
+- **`Voxel::Lava` as its own row — RESOLVED.** Lava now has its own enum/material id,
+  solid semantics, sandbox colour, authored warm patterned emission, and upload pin.
+  The enum weld was mechanical and deliberately crossed rather than overloading
   `glow_block`.
 - **`CAGI_TRANSMISSION`** still ships off pending an app-run verdict (predates this arc).
-- **When to turn `per-face roles` and `pattern layers` on by default** — that is S6, with
-  a re-recorded baseline, because it changes how the island looks.
-- **Approve E5b?** Emission at every scale (area-weighted per-cell mean radiance, retiring
-  the 3-bit emitter index and 8-slot palette). Written up in `docs/voxel-rt-plan.md`;
-  proposed, not approved. It is what makes glowing `.vox` berries work as a material and
-  what stops one 12.5 cm block lighting like a 50 cm cell.
+- **`per-face roles` and `pattern layers` defaults — RESOLVED separately from E5b.**
+  Normal tiers enable both; Potato keeps them off (and keeps zero pattern layers) for
+  its low-cost path. This is a visual-baseline change, not part of the E5b data model.
+- **E5b implementation gate:** emission at every scale now uses an area-weighted per-cell
+  mean radiance, with the 3-bit emitter index and palette retired. CPU tests cover buried
+  zero, embedded reduction, and incremental/full rebuild agreement. The remaining gate is
+  the studio visual check and GPU sweep benchmark. The release bench now builds and reports
+  its CPU/memory sections before attempting the GPU run; this machine simply cannot acquire
+  a Metal adapter.
 
 ## Known limits (by decision, not by accident)
 
@@ -192,8 +188,9 @@ These are waiting on Pascal, not on work:
 - **`opacity` is not a pattern target.** It is a traversal input, decided before shading,
   so patterning it would move the layer stack into the innermost traversal loop — the one
   cost this stage is built to avoid. A dissolve effect wants it; named follow-on.
-- **7 emitter palette slots.** A patterned emitter claims one, and CAGI's per-cell field
-  is 3 bits. Two rows emit today.
+- **Per-cell emission buffer.** E5b adds one packed 10:10:10 word beside the attribute
+  word (16 bytes/cell total including ping-pong at the shipped 0.5 m rung), trading the
+  old palette field for the range needed by voxel- and texel-scale sources.
 - **The GI volume gets a MEAN, not the pattern.** Deliberate and physically right: cells
   are 0.5 m and the light reaching elsewhere from a speckled surface *is* its average.
   Near field vs far field, not one model approximated twice.

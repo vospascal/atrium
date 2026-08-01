@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672eda24a0-0000000000000023",
+  "name": "leaves_dark",
+  "voxel_material_slot": 11,
+  "material": {
+    "albedo": [
+      0.281,
+      0.374,
+      0.174
+    ],
+    "roughness": 0.88,
+    "specular": 0.03,
+    "kind": {
+      "kind": "cover",
+      "transmittance": 0.2
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.03,
+      0.06,
+      0.11,
+      0.17,
+      0.27,
+      0.31
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e17003bf0-000000000000000d"
+}

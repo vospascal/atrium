@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672c991de0-000000000000001a",
+  "name": "trunk",
+  "voxel_material_slot": 8,
+  "material": {
+    "albedo": [
+      0.45,
+      0.31,
+      0.19
+    ],
+    "roughness": 0.9,
+    "specular": 0.03,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.15,
+      0.11,
+      0.1,
+      0.07,
+      0.06,
+      0.07
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e36324d88-0000000000000065"
+}

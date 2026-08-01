@@ -111,7 +111,7 @@ deltas; the audio side gets the authority itself.**
   occupancy bits, material bytes, brick allocation/free, the chebyshev clearance
   field, column + global heights, the E4 CAGI cell attributes) and publishes
   **owned `WorldDelta`s** — 14 bytes for a typical edit — through a channel the
-  render thread drains. Also where the ~50 ms CAGI attribute rebuild goes when the
+  render thread drains. Also where the ~0.5 s CAGI attribute rebuild goes when the
   GI resolution lever moves, so that stops being a frame hitch, and where **bulk
   edits** run: a `BulkEdit` shape is expanded into voxel spans and applied here as
   ONE coalesced delta (E2b's pool carve: 130 634 voxels, 116.9 ms off-frame,
@@ -124,7 +124,7 @@ deltas; the audio side gets the authority itself.**
   the right answer for a *stable* view (a save, a network frame), not for "what is
   the world right now".
 - **Rayon: not needed, deliberately.** The only remaining multi-millisecond CPU
-  jobs (the 62 ms build, the 50 ms attribute rebuild, the 31 ms full clearance
+  jobs (the 62 ms build, the 0.46–0.56 s attribute rebuild, the 31 ms full clearance
   rebuild) all became *off-frame* rather than *fast*, and off-frame was the whole
   requirement. Parallelizing them is available if a future job is latency-critical.
 - **Frame-thread readers of the authority (E2b):** the walking body takes the read
@@ -572,7 +572,11 @@ buffers both passes bind.
 **Gate (Pascal, in-app):** are shadowed areas lit by directional, colour-bled bounce
 light — noiselessly — and does a sun drag re-flood cleanly inside a second?
 
-### E5 — CAGI v1: emissives + live editing 🟡 (injection DONE, flood PARKED)
+### E5 — CAGI v1: emissives + live editing 🟡 (historical pre-E5b injection)
+
+E5's palette/index injection was the stepping stone; **E5b supersedes its per-cell
+emission representation** with the area-weighted buffer described below. The live-edit
+and repack seam remains part of the shipped path.
 
 **Landed 2026-07-31:** the emission table (M1/M1b — `material.rs`, with
 `GlowBlock` + `GlowBerry`), placement (**L** places a glow block through E2's
@@ -622,7 +626,7 @@ sun slider and not for a placed lamp.
 **Gate:** place a lantern → warm light bleeds around corners, zero noise;
 edit→light latency number.
 
-### E5b — Emission at every scale: per-cell mean radiance ⬜ **PROPOSED** (Pascal, 2026-07-31, from the materials arc)
+### E5b — Emission at every scale: per-cell mean radiance ✅ **IMPLEMENTED; VISUAL/GPU GATE PENDING** (Pascal, 2026-07-31, from the materials arc)
 
 *Ladder position: after the materials arc, before or beside E7. Found by trying to make
 one glow block in a wall light anything.*
@@ -675,11 +679,19 @@ by volume fraction:
   transmittance 4 + emitter 3 = 32) in a shared-exponent or packed-float form, since the
   range is 512×.
 - Costs a slower attribute sweep: exposed area needs each occupied voxel's 6 neighbours
-  tested. The sweep walks ~37 M voxels in ~50 ms today, so plausibly 2–4× that. Off-frame
-  on the world thread, so affordable — but measure it. Within-brick neighbour tests are
+  tested. The release bench measures **0.46–0.56 s** for the 37 M-voxel sweep across
+  the 1.00–0.25 m rungs (0.48 s at the shipped 0.50 m rung), so it remains off-frame
+  on the world thread; it is not a 50 ms job. A self+six incremental recompute is
+  **0.008 ms median / 0.009 ms p95** at 0.50 m cells. Within-brick neighbour tests are
   cheap bit math on the occupancy words; brick boundaries are the awkward part.
 - **Retires the 7-emitter ceiling** as a side effect, which is worth having independently:
   a 256-entry `.vox` palette cannot live inside seven emitter slots.
+
+**Implementation status (2026-07-31):** CAGI keeps albedo/solid/transmittance and a
+packed 10:10:10 E5b mean in one two-word-per-cell buffer. The full and incremental
+attribute builders use transmittance-weighted face coverage, and world-edit deltas
+carry one typed cell update for the packed word and emission. The CPU gate is green;
+the remaining acceptance is the studio visual prop and a hardware GPU sweep benchmark.
 
 #### The seam that must be right BEFORE S5
 
@@ -721,7 +733,7 @@ ray, so 8–12 rays fit in ~1.4 ms** — inside the slot CAGI already occupies
 (1.4–2.0 ms all-in at Balanced).
 
 - **Scope is deliberately small: keep E4's storage, ping-pong, vertical clamp,
-  incremental attributes (4.7d), emitter index (E5) and trilinear solid-tap
+  incremental attributes (4.7d), packed per-cell emission (E5b) and trilinear solid-tap
   sampling (2.13e); swap ONLY the update rule.** Traced directions instead of, or
   alongside, the 6-neighbour integer diffusion. No new buffer, no frame-graph
   change, no G-buffer dependency — which is why this does not need to be
@@ -757,6 +769,100 @@ ray, so 8–12 rays fit in ~1.4 ms** — inside the slot CAGI already occupies
 **Gate (proposed):** does shaded indirect light gain reach and directionality that
 diffusion cannot produce, at ≤ E4's current CA cost — and does the deterministic
 variant still pass the CPU cross-check bit for bit?
+
+### E5c — Sub-cell emitters actually light things 🔶 (Pascal, 2026-07-31: *"only max-decrement or something is working"* / *"i expected rays to also work"*)
+
+*Found by looking at the `wall + glow block` prop after E5b landed and asking why it
+still does not light. E5b was not the cause — it removed 5.3x of accidental
+over-brightness that had been masking two separate missing mechanisms.*
+
+**What a sub-cell emitter has to do, and what actually happens:**
+
+| | mechanism | status before E5c |
+|---|---|---|
+| (a) look bright itself | `shade_hit`'s `+ emission` term | ✅ works |
+| (b) light what it is embedded in (near field) | — | ❌ **no mechanism exists** |
+| (c) bleed round corners (far field) | the CAGI volume | 🔶 only under one non-default rule |
+
+**Measured on the `EmitterWall` prop (2026-07-31, CPU):**
+
+| fact | value |
+|---|---|
+| the glow block's share of its cell's exposed faces | exactly **1/16** (2 of 32) → cell emission 0.1875, pin **192**/1023 |
+| adjacent air cell, steady state, `MaxDecrement` | **152** — retains 79% of the source |
+| adjacent air cell, steady state, `Diffusion6` (**shipped default**) | **45** — retains 24% |
+| the diffusion numerator, 642/4096 | 0.94x for a **uniform** field, **0.157x for a point source** |
+
+**The root cause of (c), and it is structural rather than tuning.** The diffusion
+numerator is `transmission / 6`, which is near-lossless for a uniform field
+(`6V * 0.94/6 = 0.94V`) and keeps 15.7% of a lone bright neighbour among five dark
+ones. `MaxDecrement` is scale-free — `max(neighbours) - attenuation` treats one
+bright neighbour exactly like a uniform field. So E5's emitters were effectively
+validated on the only rule that can carry a point source, while the shipped default
+is the one that cannot.
+
+**The root cause of (b): there is no gather path to an emitter anywhere.** Sky is
+injected into air cells; the sun is injected into air cells from their solid
+neighbours' attributes (`cagi_sun_bounce`, deliberately bypassing the stencil);
+emitters get **nothing**. So a local emitter reaches a receiving surface through
+exactly one channel, `cagi_sample_surface`, which is why the rule choice is
+currently the entire difference between the prop working and not.
+
+**Why the CA fix leads and the ray fix follows.** `indirect_light` samples the volume
+gated on `CAGI_ENABLED` only, never on `AO_MODE` — so a CA-side fix reaches Balanced,
+Quest and Beautiful. An AO-ray gather is structurally tied to
+`AO_MODE == AO_MODE_RAY_TRACED`, which is **Beautiful alone** (`AO_MODE` ships as
+`AnalyticCorner`; Potato and Quest use it too). The CA fix is also noiseless, where a
+2-ray gather over 1 m is not.
+
+#### Step 1 — `CAGI_EMITTER_BOUNCE`: an air cell reads its emissive neighbours
+
+An air cell scans its 6 face neighbours and injects each solid neighbour's per-cell
+emission through the same `max(...)` composition the sky and sun terms use. The same
+shape as `cagi_sun_bounce` minus the shadow ray — the emitter is adjacent, so there
+is nothing to trace, which makes it **cheaper than the sun term**. The emission is
+already in binding 13: no new binding, no new uniform, no new CPU work.
+
+Takes the adjacent cell from **45 to ~192** (the emitter's own mean, injected rather
+than diffused) and makes the result **identical under all three rules**, retiring the
+accidental dependency on `MaxDecrement`.
+
+Not available on Potato, which has GI off — that tier is the "CAGI is excludable"
+proof, so no emitter GI there is the correct answer rather than a gap.
+
+**Gate:** on the shipped `Diffusion6`, does the block light the wall around it and
+bleed round a corner?
+
+#### Step 2 — let the brightness be dialled
+
+`pack_emission` clamps to 1.0 **before** `gi_params.w` is applied, so a saturated
+emitter surface cannot be raised at all — fix with a headroom divisor or rgb9e5
+(same 32 bits, no range limit). Then re-derive the `emissive_scale` default, which
+E5b moved by 5.3x for this prop. An app run, not a guess.
+
+#### Step 3 — the tests that would have caught this
+
+A per-rule assertion that an air cell adjacent to an emissive solid ends up lit is
+the test this hole fell through; extend the bench's CAGI CPU/GPU cross-check to an
+emitter scene. `EmitterWall`'s doc comment still says *"this pose currently
+demonstrates the failure"* and should describe what passing looks like.
+
+#### Step 4 — optional, after Step 1 proves the look
+
+An AO-ray emitter gather buys a **sharp sub-cell** near field, since Step 1's is
+inherently a 0.5 m blocky patch. `ray_traced_occlusion` already holds
+`occluder.material` and currently only accumulates occlusion from it — so an AO ray
+that hits a glow block **darkens** the wall. That sign error is worth fixing whatever
+else happens. Contract: the gather belongs inside `indirect` (it is reflected light,
+so albedo applies) but must **not** be scaled by the AO factor, because each ray
+already carries its own visibility — exactly the reasoning already written down for
+`AO_MISS_RADIANCE`'s sky term. If the blockiness reads badly off Beautiful, the
+fallback is a rays-free analytic neighbour term in the shape of
+`analytic_neighborhood_occlusion`, **not** promoting `AO_MODE`.
+
+**Explicitly not the fix:** E5b's area weighting is correct and stays (flux is
+conserved); and `emissive_scale` is not the answer, because raising it masks the
+missing near field and blows out large emitters.
 
 ### E6 — Water: reflections + refraction 🔶 (implemented 2026-07-31, PULLED AHEAD of E5; **look gate FAILED, steps 1-3 landed**; being taken one step at a time at Pascal's request)
 
@@ -1066,15 +1172,14 @@ added for. That was wrong when written and is now fixed.
 
 **The fix is a seam, not a plumbing change.** Passing `&[Material]` down to the attribute
 builders does not work — the incremental per-edit path runs on the world thread and would
-need an 8 KB copy per 2.8 us edit. But the builders do not want materials, they want
-*"material id -> packed attribute word"*: `MaterialAttributes` is that, 104 bytes and
-`Copy`, so it rides in a `VoxelEdit` across the thread boundary for free. The emitter
-palette still needs the rows (it carries f32 radiances) and is rebuilt per uniform upload
-on the render thread, where the live table is at hand. The volume uniform gained
-`COPY_DST` for the same reason — a live palette had no way to reach the GPU either.
+need an 8 KB copy per edit. But the builders do not want materials, they want
+*"material id -> packed attribute word"*: `MaterialAttributes` is now a 416-byte
+`Copy` table carrying both the packed word and each row's mean emission, so it rides in
+a `VoxelEdit` across the thread boundary. E5b uses those means to build the packed
+per-cell emission word; the old emitter palette and its uniform upload are retired.
 
 **What a 0.5 m GI cell can represent, and why a mean is the right answer rather than a
-compromise.** CAGI holds a 3-bit emitter index per half-metre cell; it cannot carry
+compromise.** CAGI holds one area-weighted mean per half-metre cell; it cannot carry
 per-texel structure and never could. It does not need to: the light arriving *somewhere
 else* from a speckled emissive surface is that surface's **average** emission times its
 area. So the two tiers are not one model approximated twice, they are the **near field

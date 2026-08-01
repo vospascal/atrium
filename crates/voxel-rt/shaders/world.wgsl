@@ -248,10 +248,9 @@ fn material_pattern_count(flags: u32) -> u32 {
     return (flags >> 8u) & 0x7u;
 }
 
-// S1 — MATERIAL_FACE_ROLES is patched in by the variant registry. Off reproduces
-// every pre-S1 frame bit-for-bit, because with it off nothing reads the per-role
-// slots at all.
-const MATERIAL_FACE_ROLES: bool = false;
+// S1 — MATERIAL_FACE_ROLES is patched in by the variant registry. The shipped
+// path reads authored per-face slots; rows without them are identical either way.
+const MATERIAL_FACE_ROLES: bool = true;
 
 // S1 — this hit's albedo, picked by which face was struck.
 //

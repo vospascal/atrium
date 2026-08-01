@@ -14,10 +14,9 @@
 //  11  storage  light_volume        — the FRONT ping-pong buffer: one u32 per
 //                                    cell, layout below (read-only here; the
 //                                    CA writes the BACK buffer at binding 12)
-//  13  storage  cagi_cell_attributes — one u32 per cell: the cell's bounce
-//                                    albedo (sRGB 8:8:8) plus the solid flag
-//                                    (bit 24). Static, built on the CPU from
-//                                    the brickmap (src/cagi.rs).
+//  13  storage  cagi_cell_data — two u32 words per cell: the bounce attribute
+//                                    word followed by E5b's packed 10:10:10
+//                                    exposed-area-weighted emission.
 //  14  uniform  CagiVolumeMeta      — grid dimensions + the integer transport
 //                                    coefficients (cagi.rs CagiVolumeUniform)
 //
@@ -58,13 +57,27 @@ struct CagiVolumeMeta {
     // Diffusion rule, 26-neighbour variant: the weighted sum (face 4, edge 2,
     // corner 1) times this, >> 12.
     diffusion_26_numerator: u32,
-    // E5: emitter radiance per 3-bit emitter index; slot 0 is black.
-    emitters: array<vec4<f32>, 8>,
 }
 
 @group(0) @binding(11) var<storage, read> light_volume: array<u32>;
-@group(0) @binding(13) var<storage, read> cagi_cell_attributes: array<u32>;
+@group(0) @binding(13) var<storage, read> cagi_cell_data: array<u32>;
 @group(0) @binding(14) var<uniform> cagi_volume_meta: CagiVolumeMeta;
+
+const CAGI_CELL_DATA_WORDS: u32 = 2u;
+
+fn cagi_cell_attribute(cell_index: u32) -> u32 {
+    return cagi_cell_data[cell_index * CAGI_CELL_DATA_WORDS];
+}
+
+fn cagi_cell_emission(cell_index: u32) -> vec3<f32> {
+    let base = cell_index * CAGI_CELL_DATA_WORDS + 1u;
+    let packed = cagi_cell_data[base];
+    return vec3<f32>(
+        f32(packed & 0x3ffu),
+        f32((packed >> 10u) & 0x3ffu),
+        f32((packed >> 20u) & 0x3ffu),
+    ) * CAGI_RADIANCE_PER_STEP * lighting.gi_params.w;
+}
 
 // ---- E4: CAGI levers, the half both passes need -------------------------------
 // The rest (propagation rule, sky test, sun-source caching) are levers of the CA
@@ -90,7 +103,6 @@ const CAGI_SAMPLE_MODE: u32 = 1u;
 const CAGI_CELL_SOLID: u32 = 0x01000000u;
 const CAGI_TRANSMITTANCE_SHIFT: u32 = 25u;
 const CAGI_TRANSMITTANCE_LEVELS: f32 = 15.0;
-const CAGI_EMITTER_SHIFT: u32 = 29u;
 // Light word bits.
 const CAGI_CHANNEL_MASK: u32 = 0x3ffu;
 const CAGI_CHANNEL_MAX: u32 = 1023u;
@@ -150,7 +162,7 @@ fn cagi_attributes_of(cell: vec3<i32>) -> u32 {
     if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= grid)) {
         return CAGI_CELL_SOLID;
     }
-    return cagi_cell_attributes[cagi_cell_index(vec3<u32>(cell))];
+    return cagi_cell_attribute(cagi_cell_index(vec3<u32>(cell)));
 }
 
 fn cagi_cell_is_solid(cell: vec3<i32>) -> bool {
@@ -164,14 +176,6 @@ fn cagi_cell_is_solid(cell: vec3<i32>) -> bool {
 fn cagi_cell_transmittance(attributes: u32) -> f32 {
     let quantized = (attributes >> CAGI_TRANSMITTANCE_SHIFT) & 0xfu;
     return f32(quantized) * (1.0 / CAGI_TRANSMITTANCE_LEVELS);
-}
-
-// The radiance a cell EMITS (E5), from its 3-bit emitter index. Non-emissive
-// cells index slot 0, which is black, so this needs no branch — every cell can
-// look up and a non-emitter simply injects nothing.
-fn cagi_cell_emission(attributes: u32) -> vec3<f32> {
-    let slot = (attributes >> CAGI_EMITTER_SHIFT) & 0x7u;
-    return cagi_volume_meta.emitters[slot].rgb * lighting.gi_params.w;
 }
 
 // The cell's bounce albedo, decoded to linear. Zero for cells with no occupied

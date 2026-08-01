@@ -84,7 +84,7 @@ impl WorldBindings {
                 &brickmap.occupancy_words,
             ),
             material_words_buffer: storage_buffer("world material words", &brickmap.material_words),
-            // 2080 bytes for all 26 rows. COPY_DST since S0: the material panel
+            // 6912 bytes for all 27 rows. COPY_DST since S0: the material panel
             // re-uploads the WHOLE table on any edit
             // ([`WorldBindings::write_material_table`]). Its initial contents are
             // the compiled defaults, which is exactly what
@@ -196,16 +196,15 @@ impl WorldBindings {
 
     /// Re-upload the whole material table — S0's live-editing seam.
     ///
-    /// Wholesale rather than per-row on purpose: the table is 2080 bytes, which is
+    /// Wholesale rather than per-row on purpose: the table is 6912 bytes, which is
     /// far below any threshold where a partial write would pay for the bookkeeping
     /// of tracking which rows are dirty. One `write_buffer` per frame in which
     /// anything changed, and none at all otherwise
     /// ([`crate::material_table::MaterialTable::take_dirty`] is what gates it).
     ///
-    /// Note the tier this does NOT cover: CAGI bakes albedo, quantised
-    /// transmittance and the emitter slot into its own cell-attribute volume and
-    /// never reads binding 5, so an albedo edit lands here instantly and in the GI
-    /// bounce only after an attribute re-pack.
+    /// Note the tier this does NOT cover: CAGI never reads binding 5, so an albedo
+    /// edit lands here instantly and in the GI bounce only after an attribute
+    /// re-pack. E5b's per-cell emission is uploaded alongside that attribute buffer.
     pub fn write_material_table(&self, queue: &wgpu::Queue, rows: &[GpuMaterial]) {
         debug_assert_eq!(
             rows.len(),

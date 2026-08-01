@@ -4,6 +4,7 @@
 //! OpenXR entry point later without touching the renderer. All winit types
 //! stay in this file; camera.rs is pure math.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,24 +22,36 @@ use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
 use voxel_rt::debug_pool::{WaterBlob, WaterPool};
+use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
+use voxel_rt::graph::GraphAsset;
+use voxel_rt::graph::NodeRegistry;
 use voxel_rt::lighting::SunSettings;
 use voxel_rt::material;
 use voxel_rt::material_edit::{MaterialPanelState, VoxImportState};
+use voxel_rt::material_graph::{
+    compile as compile_material_graph, GraphEditorState, MaterialGraphShaderSet,
+};
+use voxel_rt::material_graph_assets::MaterialGraphAssetService;
+use voxel_rt::material_graph_layers::sync_pattern_layers_from_graph;
 use voxel_rt::material_table::MaterialTable;
-use voxel_rt::material_tune::ProvenanceTable;
 use voxel_rt::overlay::{MovementReadout, Overlay, OverlayFrameData, WorldEditReadout};
 use voxel_rt::passes::cagi::AttributeSource;
 use voxel_rt::passes::{cagi, dda};
 use voxel_rt::render::Renderer;
 use voxel_rt::studio;
+use voxel_rt::studio_assets::{
+    live_state_fingerprint, AssetError, StudioAssetPanelState, StudioProject, StudioProjectStore,
+};
 use voxel_rt::variants::{QualityPreset, RenderQuality, QUALITY_PRESETS};
 use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
 use voxel_rt::world_edit::{BulkEdit, BulkEditRequest, VoxelEdit};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
+use voxel_rt::world_profile::CompiledWorldProfile;
+use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
 
 /// World generation parameters, matching voxel-sandbox's defaults
 /// (`WorldSeed(1)`, season 0.0 = high summer) so both renderers show the
@@ -59,6 +72,75 @@ const EDIT_REACH_METERS: f32 = 24.0;
 /// voxel — and it is a platform-layer input feel, not a lever (the registry holds
 /// what the pipeline's COST depends on).
 const EDIT_REPEAT_HZ: f32 = 8.0;
+
+/// Project folder selected by `--project <folder>`, or the Studio-local default.
+/// The folder is only created when the user explicitly saves.
+fn studio_project_path_from_args() -> PathBuf {
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--project" {
+            if let Some(path) = arguments.next() {
+                return PathBuf::from(path);
+            }
+        }
+    }
+    PathBuf::from("studio-project")
+}
+
+fn load_studio_project(
+    project_path: &PathBuf,
+    material_table: &mut MaterialTable,
+    quality: &mut RenderQuality,
+) -> (StudioProject, Option<CompiledWorldProfile>, String) {
+    let store = StudioProjectStore::new(project_path);
+    // Startup obeys the same last-known-good rule as the in-app Load button:
+    // a malformed later asset must not leave an earlier material half-applied.
+    let mut loaded_table = material_table.clone();
+    let mut loaded_quality = *quality;
+    match StudioProject::load_live_state(&store, &mut loaded_table, &mut loaded_quality) {
+        Ok((project, warnings)) => {
+            let compiled_world = match project.compile_active_world_profile(&store) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    return (
+                        StudioProject::new("Voxel Studio"),
+                        None,
+                        format!("Could not load world profile: {error}"),
+                    )
+                }
+            };
+            *material_table = loaded_table;
+            *quality = loaded_quality;
+            let warning_suffix = if warnings.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({} warning{})",
+                    warnings.len(),
+                    if warnings.len() == 1 { "" } else { "s" }
+                )
+            };
+            (
+                project,
+                compiled_world,
+                format!(
+                    "Loaded project from {}{warning_suffix}",
+                    project_path.display()
+                ),
+            )
+        }
+        Err(AssetError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (
+            StudioProject::new("Voxel Studio"),
+            None,
+            format!("New project — save to {}", project_path.display()),
+        ),
+        Err(error) => (
+            StudioProject::new("Voxel Studio"),
+            None,
+            format!("Could not load project: {error}"),
+        ),
+    }
+}
 
 /// S0 — how close and how far the studio orbit can get.
 ///
@@ -164,6 +246,17 @@ impl ControlMode {
     }
 }
 
+/// The single native-input routing decision for the split Studio surface.
+/// Rendering remains shared, but only the region under the pointer receives
+/// camera, editor, or overlay input; a future panel can add one enum variant
+/// without another collection of boolean guards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputRegion {
+    Viewport,
+    GraphStudio,
+    Overlay,
+}
+
 /// A body whose head is where the fly camera's eye is, looking the same way and
 /// carrying the same look/FOV feel — the fly -> walk handover. The ground snap is
 /// the caller's next step (it needs the world).
@@ -252,6 +345,9 @@ struct AppState {
     applied_quality: RenderQuality,
     input_state: InputState,
     cursor_grabbed: bool,
+    /// Latest physical cursor position. The viewport and Graph Studio use
+    /// this same boundary for routing camera versus editor input.
+    cursor_position: Option<(f64, f64)>,
     vsync_enabled: bool,
     previous_frame_time: Instant,
     /// Terminal FPS diagnostic: frames counted since the last 2-second log
@@ -278,18 +374,57 @@ struct AppState {
     /// S0b — which rows came from a `.vox` and what they looked like when they
     /// arrived, so a re-import can refresh the file's values without discarding
     /// hand tuning.
-    material_provenance: ProvenanceTable,
+    /// Phase 0 — the persisted Studio project and the overlay's save/load requests.
+    studio_project: StudioProject,
+    /// Validated composition root for biome, generation, presentation, audio,
+    /// and animation resolution. Authored assets remain the source of truth.
+    world_profile: Option<CompiledWorldProfile>,
+    environment_runtime: RuntimeEnvironmentState,
+    studio_assets: StudioAssetPanelState,
+    /// Phase 2 — successfully compiled graph functions selected by material slot.
+    material_graph_shaders: MaterialGraphShaderSet,
+    graph_editor: GraphEditorState,
+    /// Content-aware autosave debounce. Renderer cache changes never enter this
+    /// fingerprint, so a quiet project does not keep rewriting JSON every frame.
+    observed_project_fingerprint: Option<u64>,
+    saved_project_fingerprint: Option<u64>,
+    autosave_due_at: Option<Instant>,
 }
 
 impl AppState {
     fn new(event_loop: &ActiveEventLoop) -> Self {
+        let project_path = studio_project_path_from_args();
+        let mut material_table = MaterialTable::default();
+        let mut quality = RenderQuality::default();
+        let (studio_project, world_profile, mut project_status) =
+            load_studio_project(&project_path, &mut material_table, &mut quality);
+        let material_graph_shaders = MaterialGraphAssetService::load_shader_set(
+            &project_path,
+            &studio_project,
+            &material_table,
+        )
+        .unwrap_or_else(|error| panic!("canonical material graphs failed to load: {error}"));
+        project_status.push_str(&format!(
+            "; loaded {} canonical material graphs",
+            material_graph_shaders.len()
+        ));
+        let recovery_available = StudioProjectStore::new(&project_path)
+            .load_recovery()
+            .ok()
+            .flatten()
+            .is_some();
+        let project_fingerprint = live_state_fingerprint(&material_table, &quality).ok();
         // S0 — `--studio` swaps the generated island for the material studio: one
         // voxel on a plate, orbit camera. Excludable by construction (the plan's
         // isolation rule): the island path is not merely skipped, no world is
         // generated at all, which is also why the studio starts instantly.
         let studio_mode = std::env::args().any(|argument| argument == "--studio");
         let studio_scene = studio::StudioScene::default();
-        let brickmap = if studio_mode {
+        let environment_runtime = RuntimeEnvironmentState {
+            season: Season::Summer,
+            ..RuntimeEnvironmentState::default()
+        };
+        let mut brickmap = if studio_mode {
             let brickmap_start = Instant::now();
             let brickmap = studio_scene.build();
             println!(
@@ -316,6 +451,21 @@ impl AppState {
             );
             brickmap
         };
+        if !studio_mode {
+            if let Some(profile) = &world_profile {
+                let applied = apply_initial_generation_profile(
+                    &mut brickmap,
+                    profile,
+                    &environment_runtime,
+                    u64::from(WORLD_SEED),
+                )
+                .unwrap_or_else(|error| panic!("world profile generation failed: {error}"));
+                println!(
+                    "world profile sampled {} columns and added {} voxels",
+                    applied.sampled_columns, applied.changed_voxels
+                );
+            }
+        }
 
         let window_attributes = Window::default_attributes()
             .with_title("voxel-rt")
@@ -327,7 +477,6 @@ impl AppState {
         );
 
         let gpu_context = GpuContext::new(window.clone());
-        let quality = RenderQuality::default();
         let mut renderer = Renderer::new(
             &gpu_context.device,
             gpu_context.surface_format(),
@@ -335,8 +484,22 @@ impl AppState {
             gpu_context.surface_config.height,
             &brickmap,
             &quality.global_illumination,
-            &material::MATERIALS,
+            material_table.rows(),
         );
+        // WorldBindings starts from compiled defaults for its standalone path;
+        // the project asset may have restored overrides before the renderer was
+        // created, so install those once before the first frame.
+        renderer.write_material_table(&gpu_context.queue, &material_table.gpu_rows());
+        // Renderer::new starts from the source's unpatched shader and native
+        // render scale. A restored quality recipe must be installed before the
+        // first visible frame rather than waiting for a future UI edit.
+        renderer.set_dda_shader_source(
+            &gpu_context.device,
+            &dda::build_shader_source_with_material_graphs(&quality, &material_graph_shaders),
+        );
+        renderer.set_cagi_shader_source(&gpu_context.device, &cagi::build_shader_source(&quality));
+        renderer.set_render_scale(&gpu_context.device, quality.render_scale);
+        quality.render_scale = renderer.render_scale();
         let light_volume_grid = renderer.light_volume_grid();
         println!(
             "CAGI light volume {}x{}x{} cells at {} voxels ({:.2} m): {:.1} MB \
@@ -363,7 +526,9 @@ impl AppState {
             .collect();
         let dda_shader_sources: Vec<String> = preset_qualities
             .iter()
-            .map(dda::build_shader_source)
+            .map(|quality| {
+                dda::build_shader_source_with_material_graphs(quality, &material_graph_shaders)
+            })
             .collect();
         let cagi_shader_sources: Vec<String> = preset_qualities
             .iter()
@@ -391,6 +556,7 @@ impl AppState {
         // here and the frame thread stops owning the brickmap.
         let mut world_host = WorldHost::new(brickmap);
         world_host.set_world_thread(quality.world_edit.world_thread);
+        let graph_editor_slot = material::material_id(studio_scene.sample);
 
         Self {
             window,
@@ -413,6 +579,7 @@ impl AppState {
             applied_quality: quality,
             input_state: InputState::default(),
             cursor_grabbed: false,
+            cursor_position: None,
             vsync_enabled: true,
             previous_frame_time: Instant::now(),
             fps_log_timer: Instant::now(),
@@ -424,11 +591,342 @@ impl AppState {
                 import: VoxImportState::new(),
                 ..MaterialPanelState::default()
             },
-            material_table: MaterialTable::default(),
+            material_table: {
+                // The initial GPU write above already consumed a restored table.
+                // Do not make the first idle frame upload it once more.
+                let _ = material_table.take_dirty();
+                material_table
+            },
             studio_scene,
             studio_distance_meters: studio::CAMERA_DISTANCE_METERS,
             loaded_vox: None,
-            material_provenance: ProvenanceTable::default(),
+            studio_project,
+            world_profile,
+            environment_runtime,
+            studio_assets: StudioAssetPanelState {
+                status: project_status,
+                recovery_available,
+                ..StudioAssetPanelState::new(project_path.display().to_string())
+            },
+            material_graph_shaders,
+            graph_editor: GraphEditorState::new(graph_editor_slot),
+            observed_project_fingerprint: project_fingerprint,
+            saved_project_fingerprint: None,
+            autosave_due_at: None,
+        }
+    }
+
+    fn save_studio_project(&mut self, autosave: bool) -> bool {
+        let project_path = PathBuf::from(self.studio_assets.project_path.trim());
+        if project_path.as_os_str().is_empty() {
+            self.studio_assets.status = "Choose a project folder before saving".to_string();
+            return false;
+        }
+        let quality_name = if self.studio_assets.quality_name.trim().is_empty() {
+            "Active quality"
+        } else {
+            self.studio_assets.quality_name.trim()
+        };
+        let store = StudioProjectStore::new(&project_path);
+        match self.studio_project.save_live_state(
+            &store,
+            quality_name,
+            &self.material_table,
+            &self.quality,
+        ) {
+            Ok(()) => {
+                self.studio_assets.status = if autosave {
+                    format!("Autosaved project to {}", project_path.display())
+                } else {
+                    format!("Saved project to {}", project_path.display())
+                };
+                self.studio_assets.autosave_enabled = true;
+                self.studio_assets.recovery_available = false;
+                self.saved_project_fingerprint =
+                    live_state_fingerprint(&self.material_table, &self.quality).ok();
+                self.observed_project_fingerprint = self.saved_project_fingerprint;
+                self.autosave_due_at = None;
+                true
+            }
+            Err(error) => {
+                self.studio_assets.status = format!("Save failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn load_studio_project_from_panel(&mut self) {
+        let project_path = PathBuf::from(self.studio_assets.project_path.trim());
+        if project_path.as_os_str().is_empty() {
+            self.studio_assets.status = "Choose a project folder before loading".to_string();
+            return;
+        }
+        // Load into copies so a malformed project never partially replaces the
+        // last-known-good materials or quality in the live renderer.
+        let mut table = self.material_table.clone();
+        let mut quality = self.quality;
+        match StudioProject::load_live_state(
+            &StudioProjectStore::new(&project_path),
+            &mut table,
+            &mut quality,
+        ) {
+            Ok((project, warnings)) => {
+                let store = StudioProjectStore::new(&project_path);
+                let world_profile = match project.compile_active_world_profile(&store) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        self.studio_assets.status =
+                            format!("Load failed; kept current project: world profile {error}");
+                        return;
+                    }
+                };
+                let graph_shaders = match MaterialGraphAssetService::load_shader_set(
+                    &project_path,
+                    &project,
+                    &table,
+                ) {
+                    Ok(shaders) => shaders,
+                    Err(error) => {
+                        self.studio_assets.status =
+                            format!("Load failed; kept current project: material graphs {error}");
+                        return;
+                    }
+                };
+                self.studio_project = project;
+                self.world_profile = world_profile;
+                self.material_table = table;
+                self.quality = quality;
+                self.material_graph_shaders = graph_shaders;
+                self.material_panel.repack_gi_requested = true;
+                if let Err(error) = self.rebuild_generated_world_from_profile() {
+                    self.studio_assets.status =
+                        format!("Load failed while applying world profile: {error}");
+                    return;
+                }
+                let fingerprint = live_state_fingerprint(&self.material_table, &self.quality).ok();
+                self.observed_project_fingerprint = fingerprint;
+                self.saved_project_fingerprint = fingerprint;
+                self.autosave_due_at = None;
+                self.studio_assets.status = if warnings.is_empty() {
+                    format!("Loaded project from {}", project_path.display())
+                } else {
+                    let warning_status = format!(
+                        "{} warning{}",
+                        warnings.len(),
+                        if warnings.len() == 1 { "" } else { "s" }
+                    );
+                    [
+                        format!("Loaded project from {}", project_path.display()),
+                        warning_status,
+                    ]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+                };
+                self.renderer.set_dda_shader_source(
+                    &self.gpu_context.device,
+                    &dda::build_shader_source_with_material_graphs(
+                        &self.quality,
+                        &self.material_graph_shaders,
+                    ),
+                );
+            }
+            Err(error) => {
+                self.studio_assets.status = format!("Load failed; kept current project: {error}");
+            }
+        }
+    }
+
+    fn restore_studio_recovery(&mut self) {
+        let project_path = PathBuf::from(self.studio_assets.project_path.trim());
+        let store = StudioProjectStore::new(&project_path);
+        let mut table = self.material_table.clone();
+        let mut quality = self.quality;
+        match store.load_recovery() {
+            Ok(Some(snapshot)) => match snapshot.apply_to_live(&mut table, &mut quality) {
+                Ok(warnings) => {
+                    let recovered_project = StudioProject {
+                        manifest: snapshot.manifest,
+                    };
+                    let world_profile = match recovered_project.compile_active_world_profile(&store)
+                    {
+                        Ok(profile) => profile,
+                        Err(error) => {
+                            self.studio_assets.status =
+                                format!("Recovery world profile could not load: {error}");
+                            return;
+                        }
+                    };
+                    let graph_shaders = match MaterialGraphAssetService::load_shader_set(
+                        &project_path,
+                        &recovered_project,
+                        &table,
+                    ) {
+                        Ok(shaders) => shaders,
+                        Err(error) => {
+                            self.studio_assets.status =
+                                format!("Recovery material graphs are invalid: {error}");
+                            return;
+                        }
+                    };
+                    self.studio_project = recovered_project;
+                    self.world_profile = world_profile;
+                    self.material_table = table;
+                    self.quality = quality;
+                    self.material_graph_shaders = graph_shaders;
+                    self.material_panel.repack_gi_requested = true;
+                    if let Err(error) = self.rebuild_generated_world_from_profile() {
+                        self.studio_assets.status =
+                            format!("Recovery world profile could not apply: {error}");
+                        return;
+                    }
+                    self.studio_assets.status = if warnings.is_empty() {
+                        "Recovered interrupted save; committing it now".to_string()
+                    } else {
+                        format!(
+                            "Recovered interrupted save with {} warning(s); committing it now",
+                            warnings.len()
+                        )
+                    };
+                    let _ = self.save_studio_project(false);
+                }
+                Err(error) => {
+                    self.studio_assets.status =
+                        format!("Recovery failed; kept current project: {error}")
+                }
+            },
+            Ok(None) => {
+                self.studio_assets.recovery_available = false;
+                self.studio_assets.status = "No recovery snapshot found".to_string();
+            }
+            Err(error) => {
+                self.studio_assets.status = format!("Could not read recovery snapshot: {error}")
+            }
+        }
+    }
+
+    fn discard_studio_recovery(&mut self) {
+        let store = StudioProjectStore::new(self.studio_assets.project_path.trim());
+        match store.clear_recovery() {
+            Ok(()) => {
+                self.studio_assets.recovery_available = false;
+                self.studio_assets.status = "Discarded interrupted-save recovery".to_string();
+            }
+            Err(error) => {
+                self.studio_assets.status = format!("Could not discard recovery: {error}")
+            }
+        }
+    }
+
+    fn compile_graph_editor(&mut self) {
+        let registry = NodeRegistry;
+        let slot = self.graph_editor.material_slot;
+        if let Some(row) = self.material_table.row_mut(slot) {
+            match sync_pattern_layers_from_graph(&self.graph_editor.graph, row) {
+                Ok(true) => {
+                    self.material_panel.repack_gi_requested = true;
+                    self.graph_editor.status =
+                        "Surface chain synced to the live material — compiling".to_string();
+                }
+                Ok(false) => {}
+                Err(error) => self.graph_editor.status = error.to_string(),
+            }
+        }
+        let graph = &self.graph_editor.graph;
+        match compile_material_graph(graph, &registry) {
+            Ok(program) => {
+                self.material_graph_shaders
+                    .insert(self.graph_editor.material_slot, program);
+                self.renderer.set_dda_shader_source(
+                    &self.gpu_context.device,
+                    &dda::build_shader_source_with_material_graphs(
+                        &self.quality,
+                        &self.material_graph_shaders,
+                    ),
+                );
+                self.graph_editor.diagnostics = graph.resolve(&registry).diagnostics;
+                self.graph_editor.status = format!(
+                    "Compiled graph for material slot {}",
+                    self.graph_editor.material_slot
+                );
+            }
+            Err(error) => {
+                self.graph_editor.diagnostics = graph.resolve(&registry).diagnostics;
+                self.graph_editor.status = error.to_string();
+            }
+        }
+    }
+
+    fn open_graph_editor_graph(&mut self) {
+        let slot = self.graph_editor.material_slot;
+        let project_path = PathBuf::from(self.studio_assets.project_path.trim());
+        // Graph Studio and the material preview share one selected row. Opening
+        // a graph therefore changes the studio subject as well as the editor;
+        // the next material-upload pass applies the row to the visible sample.
+        self.material_panel.selected = slot;
+        match MaterialGraphAssetService::open(
+            &project_path,
+            &self.studio_project,
+            &self.material_table,
+            slot,
+        ) {
+            Ok(Some(opened)) => {
+                self.graph_editor.open_graph(slot, opened.graph);
+                if !opened.status.is_empty() {
+                    self.graph_editor.status = opened.status;
+                }
+            }
+            Ok(None) => {
+                self.graph_editor.status = format!("No material row for slot {slot}");
+            }
+            Err(error) => self.graph_editor.status = format!("Could not open graph: {error}"),
+        }
+    }
+
+    fn save_graph_editor_graph(&mut self) {
+        let slot = self.graph_editor.material_slot;
+        let project_path = PathBuf::from(self.studio_assets.project_path.trim());
+        let graph = self.graph_editor.graph.clone();
+        match MaterialGraphAssetService::save(&project_path, &mut self.studio_project, slot, &graph)
+        {
+            Ok(()) => {
+                self.graph_editor.save_requested = false;
+                self.graph_editor.status = format!(
+                    "Saved graph for material slot {}",
+                    self.graph_editor.material_slot
+                );
+            }
+            Err(error) => self.graph_editor.status = format!("Save graph failed: {error}"),
+        }
+    }
+
+    fn duplicate_graph_editor_graph(&mut self) {
+        let mut graph = self.graph_editor.graph.clone();
+        let replacement = GraphAsset::new(format!("{} Copy", graph.name), graph.kind);
+        graph.id = replacement.id;
+        graph.name = replacement.name;
+        self.graph_editor
+            .open_graph(self.graph_editor.material_slot, graph);
+        self.graph_editor.status = "Graph duplicated — save it to persist the copy".to_string();
+    }
+
+    fn update_project_autosave(&mut self) {
+        let Ok(fingerprint) = live_state_fingerprint(&self.material_table, &self.quality) else {
+            return;
+        };
+        if self.observed_project_fingerprint != Some(fingerprint) {
+            self.observed_project_fingerprint = Some(fingerprint);
+            self.autosave_due_at = Some(Instant::now() + Duration::from_secs(2));
+        }
+        if self.studio_assets.autosave_enabled
+            && !self.studio_assets.recovery_available
+            && self.saved_project_fingerprint != Some(fingerprint)
+            && self
+                .autosave_due_at
+                .is_some_and(|due| Instant::now() >= due)
+        {
+            self.save_studio_project(true);
         }
     }
 
@@ -579,6 +1077,44 @@ impl AppState {
         }
     }
 
+    fn rendered_viewport_height(&self) -> u32 {
+        let surface_height = self.gpu_context.surface_config.height.max(1);
+        let logical_panel_height = if self.graph_editor.visible {
+            self.graph_editor.drawer_height
+        } else {
+            34.0
+        };
+        let panel_height = (logical_panel_height * self.window.scale_factor() as f32)
+            .round()
+            .max(1.0) as u32;
+        surface_height.saturating_sub(panel_height).max(1)
+    }
+
+    fn pointer_over_graph_editor(&self) -> bool {
+        let Some((_, physical_y)) = self.cursor_position else {
+            return false;
+        };
+        let scale = self.window.scale_factor().max(f64::EPSILON);
+        let logical_y = physical_y / scale;
+        let logical_height = self.window.inner_size().height as f64 / scale;
+        let panel_height = if self.graph_editor.visible {
+            self.graph_editor.drawer_height as f64
+        } else {
+            34.0
+        };
+        logical_y >= (logical_height - panel_height).max(0.0)
+    }
+
+    fn input_region(&self) -> InputRegion {
+        if self.pointer_over_graph_editor() {
+            InputRegion::GraphStudio
+        } else if self.overlay.wants_pointer_input() {
+            InputRegion::Overlay
+        } else {
+            InputRegion::Viewport
+        }
+    }
+
     /// E2 — one edit at the crosshair: DDA from the eye through the CPU brickmap
     /// ([`voxel_dda::cast`], the same traversal atrium's audio rays will use), then
     /// hand the change to the authority. Never touches the GPU and never blocks:
@@ -658,9 +1194,9 @@ impl AppState {
     ///
     /// The two tiers the panel advertises are both honoured here:
     ///
-    /// * the material table itself is 2080 bytes and goes straight out, gated by
+    /// * the material table itself is 6912 bytes and goes straight out, gated by
     ///   [`MaterialTable::take_dirty`] so an idle panel costs nothing;
-    /// * CAGI's baked cell attributes are a ~50 ms rebuild, so a re-pack is handed
+    /// * CAGI's baked cell attributes are a ~0.5 s rebuild, so a re-pack is handed
     ///   to the world thread through the SAME seam an edit's light attributes use
     ///   and lands via `WorldUpdate::LightAttributes`. Never automatic on a slider
     ///   tick — that would be a hitch per pixel of mouse travel.
@@ -668,12 +1204,9 @@ impl AppState {
         if let Some(rows) = self.material_table.take_dirty() {
             self.renderer
                 .write_material_table(&self.gpu_context.queue, &rows);
-            // S2 — the CAGI emitter palette is derived from the same table, so an
-            // emissive edit has to reach it too. Cheap (a few hundred uniform bytes) and
-            // unconditional, unlike the per-CELL attribute re-pack, which is the ~50 ms
-            // rebuild the panel offers as an explicit button.
-            self.renderer
-                .write_cagi_emitter_palette(&self.gpu_context.queue, self.material_table.rows());
+            // E5b emission lives in the per-cell buffer. A material emission edit
+            // reaches GI when the explicit attribute re-pack below is requested;
+            // direct shading still updates immediately through the material table.
         }
         if std::mem::take(&mut self.material_panel.repack_gi_requested)
             && self.quality.global_illumination.enabled
@@ -782,6 +1315,33 @@ impl AppState {
             .framing_distance_meters()
             .clamp(STUDIO_MIN_DISTANCE_METERS, STUDIO_MAX_DISTANCE_METERS);
         bricks
+    }
+
+    fn rebuild_generated_world_from_profile(&mut self) -> Result<(), String> {
+        if self.control_mode == ControlMode::StudioOrbit {
+            return Ok(());
+        }
+        let world = VoxelWorld::generate(WORLD_SEED, WORLD_SEASON);
+        let mut brickmap = Brickmap::build(&world);
+        if let Some(profile) = &self.world_profile {
+            apply_initial_generation_profile(
+                &mut brickmap,
+                profile,
+                &self.environment_runtime,
+                u64::from(WORLD_SEED),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        self.world_host = WorldHost::new(brickmap);
+        self.world_host
+            .set_world_thread(self.quality.world_edit.world_thread);
+        {
+            let brickmap = self.world_host.read();
+            self.renderer
+                .reupload_world(&self.gpu_context.device, &brickmap);
+        }
+        self.renderer.mark_light_volume_dirty();
+        Ok(())
     }
 
     /// S0b — rebuild the studio around a loaded `.vox` model.
@@ -1066,12 +1626,14 @@ impl AppState {
                 WorldUpdate::LightAttributes {
                     grid,
                     attributes,
+                    emissions,
                     build_micros,
                 } => {
                     let installed = self.renderer.write_light_volume_attributes(
                         &self.gpu_context.queue,
                         grid,
                         attributes,
+                        emissions,
                     );
                     println!(
                         "CAGI attributes rebuilt off-frame in {:.1} ms ({}installed)",
@@ -1176,6 +1738,11 @@ impl AppState {
         // uploaded right after, so a click shows up in the very next frame.
         self.apply_held_edits(now);
         self.upload_world_updates();
+        // The graph editor is a reserved bottom panel, not a transparent overlay.
+        // Keep the ray-traced storage texture and camera aspect ratio aligned with
+        // the remaining upper viewport so the Studio subject stays centered there.
+        self.renderer
+            .set_viewport_height(&self.gpu_context.device, self.rendered_viewport_height());
         let camera_uniform = match self.control_mode {
             ControlMode::Fly => self.fly_camera.gpu_uniform(self.renderer.resolution()),
             ControlMode::Walk => self.character.gpu_uniform(self.renderer.resolution()),
@@ -1304,8 +1871,8 @@ impl AppState {
             &mut self.quality,
             &mut carve_test_pool_requested,
             &mut self.material_table,
-            &mut self.material_panel,
-            &mut self.material_provenance,
+            &mut self.studio_assets,
+            &mut self.graph_editor,
         );
         let readback_slot = self
             .frame_timers
@@ -1325,6 +1892,38 @@ impl AppState {
         if carve_test_pool_requested {
             self.carve_test_pool();
         }
+        if std::mem::take(&mut self.studio_assets.save_requested) {
+            self.save_studio_project(false);
+        }
+        if std::mem::take(&mut self.studio_assets.load_requested) {
+            self.load_studio_project_from_panel();
+        }
+        if std::mem::take(&mut self.studio_assets.restore_recovery_requested) {
+            self.restore_studio_recovery();
+        }
+        if std::mem::take(&mut self.studio_assets.discard_recovery_requested) {
+            self.discard_studio_recovery();
+        }
+        if let Some(slot) = self.graph_editor.material_select_requested.take() {
+            self.graph_editor.material_slot = slot;
+            self.open_graph_editor_graph();
+        }
+        if std::mem::take(&mut self.graph_editor.open_requested) {
+            self.open_graph_editor_graph();
+        }
+        if std::mem::take(&mut self.graph_editor.duplicate_requested) {
+            self.duplicate_graph_editor_graph();
+        }
+        if std::mem::take(&mut self.graph_editor.reset_requested) {
+            self.graph_editor.reset_graph();
+        }
+        if std::mem::take(&mut self.graph_editor.save_requested) {
+            self.save_graph_editor_graph();
+        }
+        if std::mem::take(&mut self.graph_editor.compile_requested) {
+            self.compile_graph_editor();
+        }
+        self.update_project_autosave();
         self.upload_material_edits();
         if self.vsync_enabled != previous_vsync_enabled {
             self.gpu_context.set_vsync(self.vsync_enabled);
@@ -1343,7 +1942,10 @@ impl AppState {
             // arbitrary Custom combination compiles once and stays cached.
             self.renderer.set_dda_shader_source(
                 &self.gpu_context.device,
-                &dda::build_shader_source(&self.quality),
+                &dda::build_shader_source_with_material_graphs(
+                    &self.quality,
+                    &self.material_graph_shaders,
+                ),
             );
             self.renderer.set_cagi_shader_source(
                 &self.gpu_context.device,
@@ -1361,7 +1963,7 @@ impl AppState {
             .quality
             .requires_light_volume_rebuild(&self.applied_quality)
         {
-            // E2: the ~50 ms attribute build goes to the world thread when there is
+            // E2: the ~0.5 s attribute build goes to the world thread when there is
             // one — the volume is then allocated zeroed (valid, just unlit) and the
             // flood starts when the attributes arrive, so a resolution switch costs
             // latency instead of a frame hitch.
@@ -1419,6 +2021,14 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else {
             return;
         };
+        match &event {
+            WindowEvent::CursorMoved { position, .. } => {
+                state.cursor_position = Some((position.x, position.y));
+            }
+            WindowEvent::CursorLeft { .. } => state.cursor_position = None,
+            _ => {}
+        }
+        let input_region = state.input_region();
         let egui_consumed = state.overlay.handle_window_event(&state.window, &event);
 
         match event {
@@ -1426,8 +2036,13 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => state.resize(new_size),
             WindowEvent::RedrawRequested => state.redraw(),
             WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(key_code) = event.physical_key {
-                    state.handle_keyboard(key_code, event.state == ElementState::Pressed);
+                if input_region == InputRegion::Viewport
+                    && !egui_consumed
+                    && !state.overlay.wants_keyboard_input()
+                {
+                    if let PhysicalKey::Code(key_code) = event.physical_key {
+                        state.handle_keyboard(key_code, event.state == ElementState::Pressed);
+                    }
                 }
             }
             // Left click enters mouse-look, then REMOVES the aimed voxel; right
@@ -1438,17 +2053,20 @@ impl ApplicationHandler for App {
                 button,
                 ..
             } => {
+                if input_region != InputRegion::Viewport && state.cursor_grabbed {
+                    state.set_cursor_grabbed(false);
+                }
                 state.handle_mouse_button(
                     button,
                     button_state == ElementState::Pressed,
-                    egui_consumed,
+                    input_region != InputRegion::Viewport || egui_consumed,
                 );
             }
             // Mouse wheel tunes the ACTIVE mode's speed: 12 m/s was too fast to
             // line voxels up by eye, so the base is slow and the wheel covers the
             // range. In walk mode the same notch tunes the walk speed (E2b).
             WindowEvent::MouseWheel { delta, .. } => {
-                if !egui_consumed {
+                if input_region == InputRegion::Viewport && !egui_consumed {
                     let notches = match delta {
                         MouseScrollDelta::LineDelta(_, vertical_lines) => vertical_lines,
                         MouseScrollDelta::PixelDelta(position) => position.y as f32 / 50.0,
@@ -1481,7 +2099,10 @@ impl ApplicationHandler for App {
             return;
         };
         if let DeviceEvent::MouseMotion { delta } = event {
-            if state.cursor_grabbed {
+            if state.cursor_grabbed
+                && state.input_region() == InputRegion::Viewport
+                && !state.overlay.wants_pointer_input()
+            {
                 state.input_state.mouse_delta.0 += delta.0 as f32;
                 state.input_state.mouse_delta.1 += delta.1 as f32;
             }

@@ -18,7 +18,7 @@ Numbers are M3 Max @ 2560×1440 from the headless harness
 `voxel-rt-technique-bank.md` (Shadertoy menu, T-numbers),
 `voxel-optimization-candidates.md` (the sandbox/mesh-era list this ledger
 triages), `voxel-rt-research-dossier.md` (published papers/engines, R-numbers —
-the source and reasoning behind every row tagged **R1–R10**).
+the source and reasoning behind every row tagged **R1–R11**).
 
 ### The one principle that predicts these verdicts
 
@@ -58,6 +58,7 @@ building it, rather than discovering it per lever.
 | 1.9 | **Brick-grid mip pyramid** (distant rays step coarser) | 🔜 OPEN | The one *real* ray-tracer form of sandbox candidate C. Distinct from 2.7, which lost. No slot yet. **Design constraint, borrowed from alpha-tested mipmapping (R7): max-downsample the DISTANCE FIELD, never average the coverage** — averaging is exactly what makes thin geometry evaporate at coarse levels (the same mechanism as E4's canopy leak, wanted there, fatal here). Composes with 1.13: a *directional* field mipped by max is the conservative form of this row, and 1.13's data already exists behind a lever |
 | 1.10 | Frustum culling | ❌ DEAD | Per-pixel rays are perfect culling by construction — nothing to cull |
 | 1.11 | **Workgroup-cooperative brick traversal** (shared-memory prefetch) | 🔜 OPEN | Untested, no number. Adjacent pixels' rays walk near-identical brick sequences, so a workgroup could fetch each brick once into shared memory instead of once per lane. This is the ray-tracer form of sandbox's "group work by coherence" (5.10's motivation, not its implementation). Bench before believing |
+| 1.15 | **SVO / SVDAG / SSVDAG / TSVDAG** (hierarchical subtree fusion under transformations) | ❌ DEAD, structurally | **R11.** Read in full (Molenaar & Eisemann, I3D 2025). Priced out twice. **(a) Static by construction** — the paper's own §1 says so; translation search is *"a couple of hours"* per 64K³ scene after their O(NV²)→O(NV) fix, with no incremental update anywhere, against E2's **4.9 ms** republish and 3.6's word-patch materialization. **(b) Its own render benchmark argues against compressing at all**: *"an SVDAG with fixed 32-bit pointer encoding outperforms variable pointer length methods… by about 10%"*, their LUT+Huffman costs **+12%** frame time and translations **+30%** (Bistro ≈28 → ≈41 ms), blamed on variable-length reads and traversal-stack register pressure. **That is 1.2/1.13's load-count lesson arriving from an independent direction** — our two fixed levels with one 32-bit tagged pointer already sit at the fast end of the axis they measured. They also confirm our own negative: a hardware BVH over the top levels *"reduces performance"*. Editable-DAG line, if ever asked again: Careil et al. 2020, Molenaar & Eisemann 2024 |
 | 1.14 | NAADF's per-VOXEL in-cell AADF form (distances bounded by the parent cell) | ❌ DEAD by arithmetic | **R1.** The form the paper uses at its innermost layer, priced against our fanout rather than theirs: they nest 4³ voxels in 4³ blocks, we use 8³ bricks, so a per-voxel field is 512 entries × ~18–24 bits ≈ **1.2–1.5 KB per brick against our 64 B occupancy mask — roughly 100 MB**. 1.13 tested the *brick*-level form instead, which is the only rung where the memory works, and that already lost on load count. **The transferable half of the paper landed as 1.12, not as either directional row** |
 
 ## 2. Lighting, shading & occlusion
@@ -103,6 +104,7 @@ building it, rather than discovering it per lever.
 | 3.3 | Interior-voxel culling | 🔜 OPEN (deferred) | **Memory only, zero traversal speed** — rays terminate on the shell. ~20–30 MB of 41.4 MB back. Blocked because the brickmap doubles as the *acoustic* occupancy structure: audio occlusion through a hill must still see the hill. Revisit at Quest (E9) |
 | 3.4 | Voxel-level clearance field | 🔜 OPEN | ≈37 MB. Would unblock 2.11. **E2 did not add it**: the brick-level field is what the edit path now repairs incrementally, and a voxel-level one would multiply that work by 512 per edit as well as costing the memory. Re-open at E3/E9 with the incremental-update cost in the estimate |
 | 3.6 | **Edit headroom in the level-1 arrays** | ✅ USED | E2, see 4.7c. 2.4 MB per side to keep brick materialization a word patch |
+| 3.7 | **Brick template dedup** (`BRICK_TAG_TEMPLATE` — many pointers into one shared level-1 slot) | 🔜 OPEN, gated on a chunk level | **The tag is a RESERVED bit pattern with no implementation** — it occurs twice in the crate, a doc comment and a constant, read by nothing. `brick_census` (re-run 2026-07-31, seed 1337) says why, at our shipped 8³: **81% of sculpted bricks are already distinct, dedup factor 1.2×, 15.2 → 12.6 MB.** 4³ is the real sweet spot (**2.5×**, 8.4 → 5.3 MB) but is unreachable without a third hierarchy level. 2³ is the cautionary row: **45.3× dedup that LOSES memory** (3.1 → 15.4 MB) because a pointer costs more than an 8-byte payload — the ratio is not the metric, bytes are. **Re-run the census WITH transform matching before this is ever closed as dead (R11):** our 1.2× is an *exact-match* floor, and R11's Table 2 shows S+A removing a further 19–22% of elements and S+A+T 27–50% on the same geometry (their octree nodes at 64k³, so direction only, not the number). The cube symmetry group is the sub-minute half of their search. Note the blocker is the chunk level, not the match rate — transforms move the ratio, not the gate. Related: xima dossier's brick dedup + copy-on-write |
 
 ## 4. Threading, authority & generation — the GPU-first question
 
@@ -250,17 +252,20 @@ re-prewarm) instead of branching at runtime.
   and nearest volume sampling, E6 the second water interface (free above water,
   2.35× from below it). E2's inline-authority and full-clearance-rebuild
   levers live in the registry with the same discipline.
-- 🔜 **OPEN: 25** — dominated by E3 (GPU generation) and E7 (the look pass, which
+- 🔜 **OPEN: 26** — dominated by E3 (GPU generation) and E7 (the look pass, which
   is cheap and almost entirely unbuilt). The R1–R10 research batch added four:
   **2.19 ray-fed CAGI probes** (the one with a proposed slot, E4b), 4.12, 4.13
-  and the 7.11 observation.
-- ❌ **DEAD: 28** — 13 mesh-era techniques with no ray-tracer analogue, plus 15
+  and the 7.11 observation. R11 added **3.7 brick template dedup** — the reserved
+  tag nothing implements, gated on a chunk level rather than on match rate.
+- ❌ **DEAD: 29** — 13 mesh-era techniques with no ray-tracer analogue, plus 16
   measured or scope closures (E4 closed 0.25 m cells; **E2 closed GPU authority,
   snapshot swapping and per-frame data readback**; **E2b closed the sandbox's
   heightfield terrain-follower** — it cannot see an edited world; **E6 closed
   sampling the light volume for water's in-scatter** — absorbing cells hold zero
   light, so every pool would be black; **the R-batch closed ReSTIR (2.16a),
-  neural denoising (2.16b) and NAADF's per-voxel AADF form (1.14)**).
+  neural denoising (2.16b), NAADF's per-voxel AADF form (1.14) and the entire
+  SVO/DAG branch (1.15, R11 — static by construction, and its own benchmark shows
+  compression costing frame time)**).
 
 **Cheapest open shot on the page, added 2026-07-31:** re-testing 2.11 (soft
 shadows) over 1.13's directional field. The data is already built behind

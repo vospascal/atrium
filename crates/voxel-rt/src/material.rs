@@ -4,7 +4,7 @@
 //! Replaces the colour-only `palette()` this module grew out of. The change is
 //! an indirection, not a data-size change: the world still stores ONE BYTE per
 //! voxel ([`material_id`]), and everything below is a [`MATERIAL_COUNT`]-row
-//! lookup table costing [`MATERIAL_TABLE_BYTES`] (2080 bytes) on the GPU.
+//! lookup table costing [`MATERIAL_TABLE_BYTES`] (6912 bytes) on the GPU.
 //! Material richness is therefore effectively free; per-*voxel* state is the
 //! expensive axis and this module deliberately does not touch it.
 //!
@@ -28,7 +28,7 @@
 //!   sentinel is indistinguishable from a real value to whoever is authoring it.
 //!   `index_of_refraction: 1.0` on stone did not mean "stone refracts like air",
 //!   it meant "this column does not apply to stone" — and a `NOT_A_MEDIUM`
-//!   absorption triple sat on 24 of 26 rows saying the same thing twice.
+//!   absorption triple sat on 25 of 27 rows saying the same thing twice.
 //!
 //! So [`Material`] carries a [`MaterialKind`] — `Air`, `Solid`,
 //! `Cover { transmittance }` or `Medium(..)` — with `emission` as an orthogonal
@@ -57,9 +57,9 @@
 //! | `acoustic_alpha` | atrium's reverb model | authored, unread |
 //!
 //! M1b added the first two EMISSIVE rows — `GlowBlock` (bright, warm, solid)
-//! and `GlowBerry` (dim, cool, thin cover) — so E5 has something to light with and
-//! two contrasting cases to light it with: an occluding source and a
-//! non-occluding one. Neither is PLACED by world generation; see the note on
+//! and `GlowBerry` (dim, cool, thin cover) — and E5b adds patterned `Lava`, so the
+//! transport has occluding, non-occluding, and area-patterned sources to exercise.
+//! None is PLACED by world generation; see the note on
 //! [`materials`].
 //!
 //! ## The acoustic column
@@ -80,8 +80,8 @@
 use voxel_core::world::{Voxel, VOXEL_SIZE};
 
 use crate::pattern::{
-    apply_stack_color, GpuPatternLayer, PatternSample, PatternStack, PatternTarget,
-    MAX_PATTERN_LAYERS, NO_PATTERNS,
+    apply_stack_color, GpuPatternLayer, PatternBlend, PatternFaces, PatternFrame, PatternGenerator,
+    PatternLayer, PatternSample, PatternStack, PatternTarget, MAX_PATTERN_LAYERS, NO_PATTERNS,
 };
 
 /// Index of refraction of air — 1.000293 in reality, and the value carried by
@@ -129,7 +129,7 @@ pub const WATER_SCATTERING_PER_METER: [f32; 3] = [0.004, 0.030, 0.045];
 pub const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Number of material ids (== number of `Voxel` variants, Air included).
-pub const MATERIAL_COUNT: usize = 26;
+pub const MATERIAL_COUNT: usize = 27;
 
 /// Air's material id, and the DDA's miss sentinel — the shading path is only ever
 /// called on an occupied voxel, so row 0 is never sampled on a hit.
@@ -172,6 +172,7 @@ pub fn material_id(voxel: Voxel) -> u8 {
         Voxel::Snow => 23,
         Voxel::GlowBlock => 24,
         Voxel::GlowBerry => 25,
+        Voxel::Lava => 26,
     }
 }
 
@@ -209,6 +210,7 @@ pub fn material_voxel(material: u8) -> Voxel {
         23 => Voxel::Snow,
         24 => Voxel::GlowBlock,
         25 => Voxel::GlowBerry,
+        26 => Voxel::Lava,
         _ => Voxel::Air,
     }
 }
@@ -414,7 +416,7 @@ pub struct Medium {
 /// See the module docs for why the authored row is a union while the uploaded row
 /// stays flat. In short: a sentinel is correct in a wire format and misleading in
 /// an authoring format, and this table had `index_of_refraction: 1.0` meaning
-/// "not applicable" on 24 of 26 rows.
+/// "not applicable" on 25 of 27 rows.
 ///
 /// Deliberately open to extension rather than final — the reference engines put
 /// simulation state (density, conductivity) and a behaviour rule table on the
@@ -634,9 +636,8 @@ impl Material {
     /// specks would light nothing (Pascal, 2026-07-31: *"i do think it makes sense to
     /// be able to let them emit light"*).
     ///
-    /// One consumer: [`crate::cagi`]'s emitter palette and its 3-bit per-cell index.
-    /// So a patterned emitter now **claims one of the seven palette slots**, which is
-    /// the real budget this widening spends.
+    /// Consumer: [`crate::cagi`]'s E5b material table. The row's mean is later
+    /// weighted by exposed area into a per-cell emission value.
     pub const fn is_emissive(&self) -> bool {
         self.emission.is_some() || self.has_emission_layers()
     }
@@ -655,14 +656,26 @@ impl Material {
         false
     }
 
+    /// The COARSEST period among this row's emission layers, which is what decides
+    /// how wide a region [`Self::mean_emitted_radiance`] has to average over.
+    fn coarsest_emission_period(&self) -> f32 {
+        let mut coarsest = 0.0_f32;
+        for slot in self.patterns.layers.iter().flatten() {
+            if matches!(slot.target, PatternTarget::Emission) && slot.amount > 0.0 {
+                coarsest = coarsest.max(slot.period_meters);
+            }
+        }
+        coarsest
+    }
+
     /// The **mean** emitted radiance over this row's surface — what the GI volume
     /// injects, as opposed to what a pixel shows.
     ///
     /// ## Why a mean is the right answer rather than a compromise
     ///
-    /// CAGI is a cellular automaton on half-metre cells holding a 3-bit emitter index.
-    /// It cannot represent per-texel structure and never could. But it does not need
-    /// to: the light arriving somewhere else from a speckled emissive surface is the
+    /// CAGI is a cellular automaton on half-metre cells holding a per-cell mean.
+    /// It cannot represent per-texel structure and does not need to: the light arriving
+    /// somewhere else from a speckled emissive surface is the
     /// surface's **average** emission times its area. Detail matters to the eye looking
     /// at the surface; only the mean escapes it. So the two tiers are not an
     /// approximation of one model, they are the near field and the far field, and each
@@ -685,10 +698,28 @@ impl Material {
         if !self.has_emission_layers() {
             return base;
         }
-        // 16 samples per axis. Enough for a mean (which converges fast) and offset by
-        // half a step so it does not land systematically on texel centres or corners,
-        // which would bias the estimate for the coarser texel rungs.
-        const SAMPLES: usize = 16;
+        // The sampling SPAN, in voxels, and the reason this is not simply one voxel.
+        //
+        // One voxel is a valid mean only while every period is SMALLER than a voxel,
+        // because only then does one voxel span many pattern cells. Past that, all the
+        // samples land inside a single cell and the "mean" silently becomes a point
+        // sample of it. Measured on a `Speckle { density: 0.30 }` emission layer
+        // (Pascal, 2026-07-31, the magenta wall): 0.077 at a 0.02 m period, and
+        // **exactly 0.0** at 0.25 m and above, because the one sampled voxel fell in a
+        // gap between specks. `Flat` and `Noise` were no better — they returned one
+        // cell's value (7.4 and 9.1 at 2.8 m) and called it an average, which moves if
+        // the hardcoded voxel below moves. So the span follows the coarsest period.
+        const PERIODS_SPANNED: f32 = 8.0;
+        let span_voxels = (self.coarsest_emission_period() * PERIODS_SPANNED / VOXEL_SIZE)
+            .ceil()
+            .max(1.0);
+        // 24 samples per axis, offset by half a step so they do not land systematically
+        // on texel centres or corners. Held deliberately low rather than scaled with
+        // the span: this runs for every row on every EDIT (`MaterialAttributes` rides
+        // in a `VoxelEdit`), and the bug above was BIAS, not variance — spreading the
+        // same handful of samples over the real period makes the estimate unbiased,
+        // where more samples in the wrong place would not.
+        const SAMPLES: usize = 24;
         let mut total = [0.0_f64; 3];
         let mut weight_total = 0.0_f64;
         // (axis, sign, how many faces this stands for) — the four sides are one case.
@@ -696,16 +727,30 @@ impl Material {
             let mut face_total = [0.0_f64; 3];
             for row in 0..SAMPLES {
                 for column in 0..SAMPLES {
-                    let along = (row as f32 + 0.5) / SAMPLES as f32;
-                    let across = (column as f32 + 0.5) / SAMPLES as f32;
-                    // A representative voxel, offset off the world origin so the world
-                    // frame is sampled somewhere typical rather than at its one cell
-                    // whose hash is zero.
-                    let voxel = [301, 199, 407];
+                    let along = (row as f32 + 0.5) / SAMPLES as f32 * span_voxels;
+                    let across = (column as f32 + 0.5) / SAMPLES as f32 * span_voxels;
+                    // Spread over the face PLANE of this axis, so both in-plane
+                    // directions vary independently — `axis == 1` is a top/bottom face
+                    // (the x/z plane), otherwise it is a side (the y/z plane).
+                    let offset = if axis == 1 {
+                        [along, 0.0, across]
+                    } else {
+                        [0.0, along, across]
+                    };
+                    // A representative origin, off the world origin so the world frame
+                    // is sampled somewhere typical rather than at its one cell whose
+                    // hash is zero. The integer voxel follows the offset, so the
+                    // per-voxel frame's hash varies across the span too — sampling one
+                    // voxel could never average that at all.
+                    let voxel = [
+                        301 + offset[0] as i32,
+                        199 + offset[1] as i32,
+                        407 + offset[2] as i32,
+                    ];
                     let world = [
-                        (voxel[0] as f32 + along) * VOXEL_SIZE,
-                        (voxel[1] as f32 + if axis == 1 { across } else { along }) * VOXEL_SIZE,
-                        (voxel[2] as f32 + across) * VOXEL_SIZE,
+                        (301.0 + offset[0]) * VOXEL_SIZE,
+                        (199.0 + offset[1]) * VOXEL_SIZE,
+                        (407.0 + offset[2]) * VOXEL_SIZE,
                     ];
                     let sample = PatternSample {
                         world_meters: world,
@@ -1021,9 +1066,8 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
         // green. The bottom is dirt too, marginally darker: it is the one face that
         // never sees the sky.
         //
-        // Note this changes nothing until MATERIAL_FACE_ROLES is switched on — the
-        // lever ships off because turning it on changes the island's look, which is
-        // S6's decision and not a side effect of building the mechanism.
+        // The shipped tiers read these roles; Potato patches MATERIAL_FACE_ROLES off
+        // as its deliberate flat-material fallback.
         Material {
             name: "grass",
             // The pre-S1 green, unchanged: this is what every face reads while the
@@ -1135,6 +1179,32 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
+        },
+        // 26  Lava — patterned orange/yellow emission. The surface pattern is
+        // deliberately authored as material data, so it can later be refined by
+        // S5 without changing the CAGI emission contract.
+        Material {
+            name: "lava",
+            albedo: [0.42, 0.09, 0.015],
+            roughness: 0.42,
+            specular: 0.03,
+            kind: MaterialKind::Solid,
+            emission: Some([1.20, 0.16, 0.015]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Noise { octaves: 2 },
+                frame: PatternFrame::Face,
+                period_meters: crate::pattern::DEFAULT_PERIOD_METERS,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 0.85,
+                target_color: [1.35, 0.34, 0.02],
+                faces: PatternFaces::ALL,
+                texels_per_voxel: 8,
+                vary_per_face: true,
+                emission_intensity: 2.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
         },
     ]
 };
@@ -1563,6 +1633,21 @@ mod tests {
             scattering_per_meter: [0.0, 0.0, 0.0],
             _pad_scattering: 0.0,
         },
+        // 26 lava
+        CorePin {
+            albedo: [0.42, 0.09, 0.015],
+            transmittance: 0.0,
+            emission: [1.2, 0.16, 0.015],
+            roughness: 0.42,
+            opacity: 1.0,
+            specular: 0.03,
+            flags: 2,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
     ];
 
     /// The subset of [`GpuMaterial`] that existed before S1 — what [`UPLOAD_PIN`]
@@ -1718,7 +1803,7 @@ mod tests {
         // expensive axis, per-VOXEL state is. The whole S2 layer model costs 3.3 KB
         // of table, which is the argument for putting detail on the material rather
         // than on the voxel restated as a number.
-        assert_eq!(MATERIAL_TABLE_BYTES, 6656);
+        assert_eq!(MATERIAL_TABLE_BYTES, 6912);
         // The pattern slots must account for exactly half the row, or the WGSL's
         // fixed-size array has drifted from `MAX_PATTERN_LAYERS`.
         assert_eq!(
@@ -1944,6 +2029,7 @@ mod tests {
             Voxel::TrunkBirch,
             Voxel::Leaves,
             Voxel::Snow,
+            Voxel::Lava,
         ] {
             assert!(
                 material_blocks_movement(material_id(voxel)),
@@ -2047,8 +2133,8 @@ mod tests {
         }
         assert_eq!(
             MATERIALS.iter().filter(|m| m.is_emissive()).count(),
-            2,
-            "M1b authored exactly two emitters"
+            3,
+            "M1b/E5b authored exactly three emitters"
         );
     }
 
@@ -2181,25 +2267,23 @@ mod tests {
 
     // ---- S2: the pattern stack ---------------------------------------------
 
-    /// The S2 half of the bit-identity guarantee. **No row authors a pattern layer
-    /// yet**, so every uploaded byte outside the new slots is what S1 left, and the
-    /// new slots are all inactive.
-    ///
-    /// Authoring the island's materials is S6's step, taken deliberately with a
-    /// re-recorded baseline. If this test ever fails because a row gained a layer,
-    /// that is the moment to check it was a decision and not a demo left behind.
+    /// Lava is the first intentionally authored patterned material. Every other
+    /// row remains the unpatterned identity with inactive pattern slots.
     #[test]
-    fn no_row_authors_a_pattern_layer_yet() {
+    fn lava_is_the_first_authored_pattern_layer() {
         let authored: Vec<&str> = MATERIALS
             .iter()
             .filter(|row| !row.patterns.is_empty())
             .map(|row| row.name)
             .collect();
-        assert!(
-            authored.is_empty(),
-            "S2 authored pattern layers on {authored:?} — that is S6's step"
-        );
+        assert_eq!(authored, vec!["lava"]);
         for row in &MATERIALS {
+            if row.name == "lava" {
+                assert!(row.flags().contains(MaterialFlags::PATTERNS));
+                assert_eq!(row.flags().pattern_count(), 1);
+                assert_eq!(row.patterns.layers[0].unwrap().faces, PatternFaces::ALL);
+                continue;
+            }
             assert!(!row.flags().contains(MaterialFlags::PATTERNS));
             assert_eq!(row.flags().pattern_count(), 0);
             for slot in row.to_gpu().patterns {

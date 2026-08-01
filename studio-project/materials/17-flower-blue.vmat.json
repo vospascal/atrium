@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c7776730ce3440-0000000000000035",
+  "name": "flower_blue",
+  "voxel_material_slot": 17,
+  "material": {
+    "albedo": [
+      0.45,
+      0.52,
+      0.92
+    ],
+    "roughness": 0.9,
+    "specular": 0.03,
+    "kind": {
+      "kind": "cover",
+      "transmittance": 0.3
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.03,
+      0.06,
+      0.11,
+      0.17,
+      0.27,
+      0.31
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e20004010-0000000000000025"
+}

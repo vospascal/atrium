@@ -2344,7 +2344,8 @@ the earth colour lives. Grass is still the only row authoring roles.
 `material-patterns-0-layers` runs the lever ON with the cap at zero: **+0.2% (C and
 D)** and **0 differing pixels in all four scenarios**. So the cost of *having* the mechanism
 compiled in, on a row that authors nothing, is nothing — which is what makes it safe
-to ship the lever on once S6 authors the rows, instead of needing a second table.
+which is why the normal tiers ship the lever on; S6 can author more rows without a
+second table. Potato remains the measured zero-layer fallback.
 
 ### Verdict C — **the entry cost exceeds the dearest generator**, and that is the finding
 

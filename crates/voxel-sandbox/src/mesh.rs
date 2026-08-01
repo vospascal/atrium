@@ -1360,6 +1360,7 @@ fn voxel_color(
         // berry cluster as pale green. The GLOW is voxel-rt's (CAGI, E5).
         Voxel::GlowBlock => ([0.95, 0.93, 0.88], 1.0, 0.02),
         Voxel::GlowBerry => ([0.55, 0.95, 0.80], 1.0, 0.10),
+        Voxel::Lava => ([0.95, 0.20, 0.015], 1.0, 0.02),
         Voxel::Air => unreachable!("air voxels are never meshed"),
     };
 

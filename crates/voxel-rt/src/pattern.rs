@@ -492,17 +492,23 @@ pub const TEXEL_RUNGS: [u32; 6] = [0, 2, 4, 8, 16, 32];
 /// to look right is a default in the wrong place.
 pub const DEFAULT_TEXELS_PER_VOXEL: u32 = 8;
 
+/// Default feature size for a newly added layer: 2 cm detail, sampled on the
+/// default 8×8 face grid. Larger-scale materials can still raise the period in
+/// the panel when they want bands or cross-voxel mottle.
+pub const DEFAULT_PERIOD_METERS: f32 = 0.02;
+
 /// Ceiling on the texel grid. 32 per voxel edge is a 3.9 mm texel — already finer than
 /// a pixel at arm's length, so past it the snap stops being visible and only costs the
 /// two floors.
 pub const MAX_TEXELS_PER_VOXEL: u32 = 32;
 
 impl PatternLayer {
-    /// A layer that changes nothing — the starting point the panel adds.
+    /// A layer that changes nothing — the safe baseline for internal composition
+    /// and tests.
     pub const IDENTITY: PatternLayer = PatternLayer {
         generator: PatternGenerator::Noise { octaves: 3 },
         frame: PatternFrame::World,
-        period_meters: 0.25,
+        period_meters: DEFAULT_PERIOD_METERS,
         target: PatternTarget::Albedo,
         blend: PatternBlend::Multiply,
         amount: 0.0,
@@ -511,6 +517,13 @@ impl PatternLayer {
         texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
         vary_per_face: true,
         emission_intensity: 1.0,
+    };
+
+    /// The panel's newly-added layer: same shared 8×8/2 cm defaults, but fully
+    /// applied so the author sees the pattern immediately.
+    pub const DEFAULT: PatternLayer = PatternLayer {
+        amount: 1.0,
+        ..Self::IDENTITY
     };
 
     /// The uploaded form.
@@ -593,7 +606,7 @@ pub struct PatternStack {
     pub layers: [Option<PatternLayer>; MAX_PATTERN_LAYERS],
 }
 
-/// A row with no patterns at all — what 26 of 26 rows carry until S6.
+/// A row with no patterns at all — what 26 of 27 rows carry until S6.
 pub const NO_PATTERNS: PatternStack = PatternStack {
     layers: [None; MAX_PATTERN_LAYERS],
 };
@@ -1284,6 +1297,17 @@ mod tests {
             ..PatternLayer::IDENTITY
         };
         assert_eq!((absurd.packed() >> 15) & 0xff, MAX_TEXELS_PER_VOXEL);
+    }
+
+    #[test]
+    fn the_default_layer_uses_two_centimetre_features() {
+        assert_eq!(PatternLayer::IDENTITY.period_meters, DEFAULT_PERIOD_METERS);
+        assert_eq!(DEFAULT_PERIOD_METERS, 0.02);
+        assert_eq!(PatternLayer::DEFAULT.amount, 1.0);
+        assert_eq!(
+            PatternLayer::DEFAULT.texels_per_voxel,
+            DEFAULT_TEXELS_PER_VOXEL
+        );
     }
 
     /// A new layer must default to the texel grid, because that is what almost every

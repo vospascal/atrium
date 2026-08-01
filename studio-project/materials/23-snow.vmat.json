@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c77767337bf308-0000000000000047",
+  "name": "snow",
+  "voxel_material_slot": 23,
+  "material": {
+    "albedo": [
+      0.92,
+      0.93,
+      0.96
+    ],
+    "roughness": 0.75,
+    "specular": 0.03,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.45,
+      0.75,
+      0.9,
+      0.95,
+      0.95,
+      0.95
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e2ad5e6c0-0000000000000041"
+}

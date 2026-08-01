@@ -4,9 +4,9 @@
 //! wires them together. Camera and lighting math stay outside — the caller hands
 //! in a finished [`CameraUniform`] and [`LightingUniform`] each frame.
 //!
-//! Render scale: the storage texture is created at `surface size *
-//! render_scale` (the overlay's perf lever, default 1.0). The DDA pass then
-//! traces proportionally fewer rays and the blit upscales with linear
+//! Render scale: the storage texture is created at the active viewport size
+//! times `render_scale` (the overlay's perf lever, default 1.0). The DDA pass
+//! then traces proportionally fewer rays and the blit upscales with linear
 //! filtering. [`Renderer::resolution`] always reports the STORAGE size —
 //! that is what the camera's ray basis and the dispatch must match.
 //!
@@ -47,6 +47,9 @@ pub struct Renderer {
     cagi_pass: CagiPass,
     dda_pass: DdaPass,
     blit_pass: BlitPass,
+    /// Height of the active rendered viewport. The Studio node editor can
+    /// reserve a bottom region without stretching the 3D view underneath it.
+    viewport_height: u32,
 }
 
 impl Renderer {
@@ -75,6 +78,7 @@ impl Renderer {
             surface_width: width,
             surface_height: height,
             render_scale,
+            viewport_height: height,
             world_bindings,
             light_volume,
             cagi_pass,
@@ -103,6 +107,20 @@ impl Renderer {
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.surface_width = width;
         self.surface_height = height;
+        self.viewport_height = self.viewport_height.min(height).max(1);
+        self.recreate_storage(device);
+    }
+
+    /// Set the physical height occupied by the rendered viewport. The remainder
+    /// of the surface is reserved for editor panels and stays black until egui
+    /// draws those panels. Recreating the storage texture keeps the camera's
+    /// aspect ratio and DDA dispatch aligned with the visible region.
+    pub fn set_viewport_height(&mut self, device: &wgpu::Device, height: u32) {
+        let height = height.clamp(1, self.surface_height.max(1));
+        if height == self.viewport_height {
+            return;
+        }
+        self.viewport_height = height;
         self.recreate_storage(device);
     }
 
@@ -126,17 +144,7 @@ impl Renderer {
     /// `attribute_source` is E2's world-thread seam: `Deferred` allocates the
     /// static attributes zeroed and expects
     /// [`Renderer::write_light_volume_attributes`] once the world thread has built
-    /// them, which is how a GI resolution switch stops being a ~50 ms frame hitch.
-    /// S2 — re-upload the CAGI emitter palette from the live material table.
-    ///
-    /// Pairs with [`Self::write_material_table`]: that one makes an edit visible in
-    /// direct shading, this one makes an emissive edit visible to the light volume's
-    /// injection. Neither reaches which CELLS are emitters — that is the attribute
-    /// re-pack.
-    pub fn write_cagi_emitter_palette(&self, queue: &wgpu::Queue, materials: &[Material]) {
-        self.light_volume.write_uniform(queue, materials);
-    }
-
+    /// them, which is how a GI resolution switch stops being a ~0.5 s frame hitch.
     pub fn rebuild_light_volume(
         &mut self,
         device: &wgpu::Device,
@@ -169,9 +177,10 @@ impl Renderer {
         queue: &wgpu::Queue,
         grid: &CagiGrid,
         attributes: &[u32],
+        emissions: &[[f32; 4]],
     ) -> bool {
         self.light_volume
-            .write_all_attributes(queue, grid, attributes)
+            .write_all_attributes(queue, grid, attributes, emissions)
     }
 
     /// Apply one edit's GPU delta (E2): the touched brickmap words, the touched
@@ -261,7 +270,7 @@ impl Renderer {
         let (storage_view, storage_width, storage_height) = create_storage_texture(
             device,
             self.surface_width,
-            self.surface_height,
+            self.viewport_height,
             self.render_scale,
         );
         self.storage_view = storage_view;
@@ -325,6 +334,10 @@ impl Renderer {
         self.blit_pass.encode(
             encoder,
             target_view,
+            self.surface_width,
+            self.surface_height,
+            self.surface_width,
+            self.viewport_height,
             frame_timers.map(|timers| timers.render_span_begin_writes(SPAN_POST)),
         );
     }
@@ -333,11 +346,11 @@ impl Renderer {
 fn create_storage_texture(
     device: &wgpu::Device,
     surface_width: u32,
-    surface_height: u32,
+    viewport_height: u32,
     render_scale: f32,
 ) -> (wgpu::TextureView, u32, u32) {
     let width = ((surface_width as f32 * render_scale) as u32).max(1);
-    let height = ((surface_height as f32 * render_scale) as u32).max(1);
+    let height = ((viewport_height as f32 * render_scale) as u32).max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("frame storage texture"),
         size: wgpu::Extent3d {

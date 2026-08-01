@@ -26,9 +26,9 @@
 // shipped values are the ones written here, so the unpatched file IS the default
 // configuration.
 
-// Off reproduces every pre-S2 frame bit-for-bit: with it false nothing below is
-// called at all, and the shading path is the S1 renderer.
-const MATERIAL_PATTERNS: bool = false;
+// The shipped path evaluates authored layers; Potato patches this const off for
+// the deliberately flat fallback tier.
+const MATERIAL_PATTERNS: bool = true;
 
 // Global scale on every layer's amount, 0..1. The tier knob: it turns detail down
 // everywhere without editing 26 rows, which is what a Quest preset needs.
@@ -463,6 +463,69 @@ fn material_pattern_emission(material: u32, sample: PatternSample) -> vec3<f32> 
         MAX_PATTERN_LAYERS,
     );
     var emission = row.emission;
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        let layer = row.patterns[slot];
+        if (pattern_target(layer) == PATTERN_TARGET_EMISSION) {
+            emission = pattern_apply_color(layer, emission, sample, brickmap.voxel_size_meters);
+        }
+    }
+    return emission;
+}
+
+// Graph-backed surfaces still retain the authored legacy layer stack. The graph
+// supplies the base value; these variants apply the same face/world/voxel layer
+// semantics without replacing the authored pattern behavior.
+fn material_pattern_albedo_from_base(material: u32, sample: PatternSample,
+                                     base: vec3<f32>) -> vec3<f32> {
+    let row = materials[material];
+    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return base;
+    }
+    let count = min(
+        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    var albedo = base;
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        let layer = row.patterns[slot];
+        if (pattern_target(layer) == PATTERN_TARGET_ALBEDO) {
+            albedo = pattern_apply_color(layer, albedo, sample, brickmap.voxel_size_meters);
+        }
+    }
+    return albedo;
+}
+
+fn material_pattern_roughness_from_base(material: u32, sample: PatternSample,
+                                        base: f32) -> f32 {
+    let row = materials[material];
+    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return base;
+    }
+    let count = min(
+        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    var roughness = base;
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        let layer = row.patterns[slot];
+        if (pattern_target(layer) == PATTERN_TARGET_ROUGHNESS) {
+            roughness = pattern_apply_scalar(layer, roughness, sample, brickmap.voxel_size_meters);
+        }
+    }
+    return clamp(roughness, 0.0, 1.0);
+}
+
+fn material_pattern_emission_from_base(material: u32, sample: PatternSample,
+                                       base: vec3<f32>) -> vec3<f32> {
+    let row = materials[material];
+    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return base;
+    }
+    let count = min(
+        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    var emission = base;
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_EMISSION) {

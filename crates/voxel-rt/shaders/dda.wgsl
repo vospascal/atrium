@@ -610,6 +610,11 @@ fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                  pixel: vec2<f32>, sun_transmission: vec3<f32>) -> vec3<f32> {
     let normal = hit_normal(hit);
+    let graph_material = material_graph_surface(
+        hit.material,
+        ray_origin + ray_direction * hit.distance,
+        normal,
+    );
     // S1 + S2: the per-face albedo with the row's albedo pattern layers applied.
     // Identical to the row's base albedo unless the row authored roles or layers AND
     // the matching lever is on, so this is the pre-S1 value bit-for-bit in the
@@ -618,7 +623,19 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     // The sample is built once and shared by albedo and emission: the frames need a
     // world position, a voxel and a face, and none of that changes between targets.
     let pattern = pattern_sample(hit, ray_origin, ray_direction);
-    let albedo = srgb_decode(material_pattern_albedo(hit.material, pattern));
+    var albedo = srgb_decode(material_pattern_albedo(hit.material, pattern));
+    if (graph_material.graph_active) {
+        var graph_base = graph_material.base_color.rgb;
+        // Graphs authored before face-role nodes existed used a flat base color.
+        // Let those graphs retain the material table's directional appearance;
+        // an explicit face_color node opts into graph-owned face semantics.
+        if (!graph_material.face_color_active && MATERIAL_FACE_ROLES
+            && (materials[hit.material].flags & MATERIAL_FLAG_FACE_ROLES) != 0u) {
+            graph_base = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
+        }
+        albedo = srgb_decode(material_pattern_albedo_from_base(
+            hit.material, pattern, graph_base));
+    }
 
     var sun_visibility = 0.0;
     let sun_facing = dot(normal, lighting.sun_direction);
@@ -649,7 +666,11 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     // S2: patterned emission, for a surface whose glow is not uniform — embers in
     // rock, a rune in a wall. Identical to the row's flat emission with the lever
     // off, and identical on every row that authors no emission layer.
-    let emission = material_pattern_emission(hit.material, pattern) * lighting.gi_params.w;
+    var emission = material_pattern_emission(hit.material, pattern) * lighting.gi_params.w;
+    if (graph_material.graph_active) {
+        emission = material_pattern_emission_from_base(
+            hit.material, pattern, graph_material.emission.rgb) * lighting.gi_params.w;
+    }
     return albedo * (sun + indirect) + emission;
 }
 

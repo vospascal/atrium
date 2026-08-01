@@ -1,0 +1,116 @@
+{
+  "schema_version": 2,
+  "id": "world-default-v2",
+  "name": "Atrium Temperate World",
+  "biomes": {
+    "biomes": [
+      {
+        "id": "temperate_forest",
+        "name": "Temperate Forest",
+        "selector": {
+          "constraints": [
+            {
+              "channel": "temperature",
+              "range": { "min": -1.0, "max": 1.0, "falloff": 0.25 },
+              "weight": 1.0
+            },
+            {
+              "channel": "humidity",
+              "range": { "min": -0.25, "max": 1.0, "falloff": 0.25 },
+              "weight": 0.75
+            }
+          ],
+          "priority": 0
+        },
+        "traits": ["terrestrial", "forested"],
+        "surface_profile": "temperate_ground",
+        "material_palette": "temperate_palette",
+        "feature_sets": [],
+        "audio_profile": null,
+        "animation_profile": null
+      }
+    ]
+  },
+  "surface_profiles": [
+    {
+      "id": "temperate_ground",
+      "base_layers": {
+        "surface": "ground.surface",
+        "subsoil": "ground.subsoil",
+        "deep": "ground.deep"
+      },
+      "rules": [
+        {
+          "id": "winter_snow_layer",
+          "priority": 100,
+          "condition": {
+            "All": [
+              { "Season": "winter" },
+              {
+                "Compare": {
+                  "source": "NormalY",
+                  "operation": "greater_equal",
+                  "value": 0.65
+                }
+              }
+            ]
+          },
+          "action": {
+            "AddVoxelLayer": {
+              "role": "cover.snow",
+              "thickness_voxels": 1
+            }
+          }
+        }
+      ],
+      "modifiers": []
+    }
+  ],
+  "material_palettes": [
+    {
+      "id": "temperate_palette",
+      "bindings": {
+        "ground.surface": {
+          "choices": [
+            {
+              "material": "vx-000000000000000018c777672a184730-0000000000000005",
+              "weight": 1.0
+            }
+          ],
+          "traits": ["organic", "wettable", "snowable"]
+        },
+        "ground.subsoil": {
+          "choices": [
+            {
+              "material": "vx-000000000000000018c777672af9a680-000000000000000b",
+              "weight": 1.0
+            }
+          ],
+          "traits": ["porous", "organic"]
+        },
+        "ground.deep": {
+          "choices": [
+            {
+              "material": "vx-000000000000000018c777672bdf2480-0000000000000014",
+              "weight": 1.0
+            }
+          ],
+          "traits": ["mineral"]
+        },
+        "cover.snow": {
+          "choices": [
+            {
+              "material": "vx-000000000000000018c77767337bf308-0000000000000047",
+              "weight": 1.0
+            }
+          ],
+          "traits": []
+        }
+      }
+    }
+  ],
+  "modifiers": [],
+  "feature_sets": [],
+  "audio_profiles": [],
+  "animation_profiles": []
+}

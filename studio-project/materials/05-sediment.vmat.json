@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c777672b931f90-0000000000000011",
+  "name": "sediment",
+  "voxel_material_slot": 5,
+  "material": {
+    "albedo": [
+      0.17,
+      0.16,
+      0.11
+    ],
+    "roughness": 0.97,
+    "specular": 0.02,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.1,
+      0.2,
+      0.4,
+      0.55,
+      0.6,
+      0.6
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e328e1518-0000000000000059"
+}

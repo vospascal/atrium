@@ -272,6 +272,16 @@ fn main() {
         if collapse_uniform { "on" } else { "OFF" }
     );
 
+    // The CPU-side E5b attribute/emission build is useful even on machines
+    // without a compatible GPU. Keep this report before adapter acquisition so
+    // a failed hardware bench still records the cost that does not need one.
+    if runs_section(5) {
+        report_light_volume_memory(&brickmap);
+    }
+    if runs_section(6) {
+        report_edit_build_times(&world, &brickmap);
+    }
+
     let (device, queue) = create_headless_device();
     // The brickmap/lighting buffers are uploaded ONCE and shared by every
     // variant's shading and CAGI passes (E4's WorldBindings seam) — a section
@@ -316,7 +326,6 @@ fn main() {
         );
     }
     if runs_section(5) {
-        report_light_volume_memory(&brickmap);
         run_section(&device, &queue, &world_bindings, &brickmap, cagi_section());
         report_cagi_convergence(&device, &queue, &world_bindings, &brickmap);
         report_cagi_cpu_cross_check(&device, &queue, &world_bindings, &brickmap);
@@ -326,7 +335,6 @@ fn main() {
         // it prints distributions (median / p99 / max) instead of medians: the
         // whole question is whether an edit can hitch a frame.
         report_edit_memory(&device, &brickmap);
-        report_edit_build_times(&world, &brickmap);
         report_edit_storm(&device, &queue, &brickmap, &edit_storm_runs());
         report_edit_reflood(&device, &queue, &brickmap);
         report_pool_carve(&device, &queue, &brickmap);
@@ -379,6 +387,241 @@ fn main() {
             materials_section(),
         );
     }
+    if runs_section(10) {
+        report_emitter_probes(&device, &queue);
+    }
+}
+
+/// E5c — the numbers behind *"does a small light look like a small light"*, measured
+/// headlessly instead of eyeballed from a screenshot.
+///
+/// **Why this section exists.** Every emitter question in the E5b/E5c arc was answered
+/// by hand-rolling a throwaway probe — the 1/16 area weighting, the 45-vs-152
+/// diffusion asymmetry, the patterned mean reading 0.0 above a 0.25 m period. Two of
+/// those rigs were written and deleted in a single session, and the one bug that
+/// actually shipped (`pack_emission` writing five words into a two-word stride) got
+/// past 256 unit tests precisely because nothing reads the GPU's own cell data back.
+/// So this reads the volume AND the rendered pixels, and prints both.
+///
+/// The metric that matters for a *sub-cell* emitter is not peak brightness, it is the
+/// **half-width**: how far from the block the wall's brightness falls to half. A tight
+/// pool and a broad dim wash can carry the same flux, and only the falloff tells them
+/// apart — which is exactly the judgement a screenshot is worst at.
+///
+/// Its own bindings and brickmap: the studio prop, not the island.
+fn report_emitter_probes(device: &wgpu::Device, queue: &wgpu::Queue) {
+    use voxel_rt::studio::{orbit_pose, StudioPose, StudioScene};
+
+    println!();
+    println!("== E5c emitter probes (studio `wall + glow block`) ==");
+
+    let scene = StudioScene {
+        pose: StudioPose::EmitterWall,
+        ..StudioScene::default()
+    };
+    let brickmap = scene.build();
+    let bindings = WorldBindings::new(device, &brickmap);
+    let block = scene.emitter_block_voxel();
+
+    // Yaw a quarter turn, NOT zero: `orbit_pose` looks along
+    // `(cos yaw, sin pitch, sin yaw)` and the wall is one voxel thick in z, so yaw 0
+    // views it edge-on as a sliver and every measurement below reads sky instead.
+    let scenario = Scenario {
+        label: "emitter wall",
+        pose: orbit_pose(&scene, std::f32::consts::FRAC_PI_2, 0.0, 4.0),
+        sun: SunSettings::default(),
+        capture_image: false,
+    };
+
+    let cell_voxels = CagiSettings::default().cell_voxels as i32;
+    let emitter_cell = [
+        block[0] / cell_voxels,
+        block[1] / cell_voxels,
+        block[2] / cell_voxels,
+    ];
+
+    println!(
+        "  block voxel {:?} -> cell {:?} at {} voxels/cell",
+        block, emitter_cell, cell_voxels
+    );
+    println!();
+    println!(
+        "  {:<28} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "rule / bounce", "pin", "+1", "+2", "+3", "sky", "peak", "half"
+    );
+
+    for rule in [
+        CagiRule::MaxDecrement,
+        CagiRule::Diffusion6,
+        CagiRule::Diffusion26,
+    ] {
+        for emitter_bounce in [true, false] {
+            let mut quality = RenderQuality::default();
+            quality.global_illumination.rule = rule;
+            quality.global_illumination.emitter_bounce = emitter_bounce;
+            let variant = Variant::new(format!("{rule:?}-bounce-{emitter_bounce}"), quality);
+            let (width, height) = variant.resolution();
+            let target = create_render_target(device, width, height);
+            let mut resources =
+                VariantResources::new(device, &bindings, &brickmap, &variant, &target.view);
+            resources.flood_to_convergence(device, queue, &bindings, &variant, &scenario);
+
+            // The volume: the emitter cell's pinned value and the radiance stepping
+            // away from the wall along its normal (the wall is one voxel thick in z).
+            let volume = read_back_volume(device, queue, &resources.light_volume);
+            let grid = resources.light_volume.grid();
+            let read = |cell: [i32; 3]| -> u32 {
+                if (0..3).any(|axis| cell[axis] < 0 || cell[axis] >= grid.size[axis] as i32) {
+                    return 0;
+                }
+                let index = grid.cell_index([cell[0] as u32, cell[1] as u32, cell[2] as u32]);
+                unpack_light(volume[index])[0]
+            };
+            let along_normal: Vec<u32> = (0..4)
+                .map(|step| read([emitter_cell[0], emitter_cell[1], emitter_cell[2] + step]))
+                .collect();
+            // The AMBIENT level the emitter has to beat, read in open air well clear of
+            // the wall at the same height. This is the comparison that decides whether a
+            // light reads as a light at all: an emitter dimmer than the sky around it
+            // cannot, however correct its transport is.
+            let sky_reference = read([emitter_cell[0] + 12, emitter_cell[1], emitter_cell[2] + 12]);
+
+            // And the pixels: peak brightness plus the half-width, in the rendered
+            // image the app would actually show.
+            render_once(device, queue, &bindings, &resources, &variant, &scenario);
+            let image = read_back_image(device, queue, &target);
+            let profile = wall_brightness_profile(&image, width, height);
+            let (peak, half_width) = peak_and_half_width(&profile);
+
+            println!(
+                "  {:<28} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+                format!("{rule:?} / {}", if emitter_bounce { "on" } else { "OFF" }),
+                along_normal[0],
+                along_normal[1],
+                along_normal[2],
+                along_normal[3],
+                sky_reference,
+                peak,
+                half_width,
+            );
+
+            let path = std::path::Path::new("target").join(format!(
+                "emitter-probe-{rule:?}-bounce-{emitter_bounce}.png"
+            ));
+            write_png(&path, &image, width, height);
+        }
+    }
+    println!(
+        "  pin/+N/sky are 0..1023 red from the light volume — pin is the emitter cell, +N \
+         steps away from the wall along its normal, sky is open air 12 cells clear."
+    );
+    println!(
+        "  peak is the brightest red (0..255) on the rendered wall; half is how many \
+         pixels from that peak brightness falls by half — the tight-pool/broad-wash \
+         number a screenshot cannot give."
+    );
+    println!("  PNGs written to target/emitter-probe-*.png");
+
+    // ---- E5c step 2: what should `emissive_scale` actually be? ------------------
+    //
+    // Not a taste question, a ratio. The emitter has to out-brighten the ambient
+    // ALREADY in the cells around it (sky, plus the sun bounce off the plate) or it
+    // cannot read as a light no matter how correct its transport is. So sweep the knob
+    // and print emitter-over-ambient.
+    println!();
+    println!("== E5c emissive scale sweep (shipped rule) ==");
+    println!(
+        "  {:<8} {:>7} {:>9} {:>7} {:>28}",
+        "scale", "pin", "ambient", "ratio", "lateral, +1 out (0..5 cells)"
+    );
+    for scale in [1.0_f32, 2.0, 4.0, 8.0, 16.0] {
+        let mut quality = RenderQuality::default();
+        quality.global_illumination.emissive_scale = scale;
+        let variant = Variant::new(format!("emissive-scale-{scale}"), quality);
+        let (width, height) = variant.resolution();
+        let target = create_render_target(device, width, height);
+        let mut resources =
+            VariantResources::new(device, &bindings, &brickmap, &variant, &target.view);
+        resources.flood_to_convergence(device, queue, &bindings, &variant, &scenario);
+
+        let volume = read_back_volume(device, queue, &resources.light_volume);
+        let grid = resources.light_volume.grid();
+        let read = |cell: [i32; 3]| -> u32 {
+            if (0..3).any(|axis| cell[axis] < 0 || cell[axis] >= grid.size[axis] as i32) {
+                return 0;
+            }
+            let index = grid.cell_index([cell[0] as u32, cell[1] as u32, cell[2] as u32]);
+            unpack_light(volume[index])[0]
+        };
+        let pin = read(emitter_cell);
+        // The ambient in the cell the wall's surface actually samples: one step out
+        // along the normal, which is where `cagi_sample_surface` lands.
+        let ambient = read([emitter_cell[0] + 6, emitter_cell[1], emitter_cell[2] + 1]);
+
+        // The LATERAL profile: the cells one step out from the wall, walking sideways
+        // away from the emitter. Measured in the volume rather than in pixels on
+        // purpose — the volume is the ground truth for "where is the light", and a
+        // pixel row through this scene is mostly sky and plate, which is how two
+        // earlier attempts at this ended up measuring the background instead.
+        let lateral: Vec<u32> = (0..6)
+            .map(|step| read([emitter_cell[0] + step, emitter_cell[1], emitter_cell[2] + 1]))
+            .collect();
+
+        render_once(device, queue, &bindings, &resources, &variant, &scenario);
+        let image = read_back_image(device, queue, &target);
+
+        println!(
+            "  {:<8} {:>7} {:>9} {:>7.2} {:>28}",
+            scale,
+            pin,
+            ambient,
+            pin as f32 / ambient.max(1) as f32,
+            format!("{lateral:?}"),
+        );
+        let path = std::path::Path::new("target").join(format!("emitter-scale-{scale}.png"));
+        write_png(&path, &image, width, height);
+    }
+    println!(
+        "  ambient is the same-height cell 6 cells along the wall, one step out — what \
+         the wall's own surface sample sees where the emitter does not reach. A light \
+         has to beat it, and `ratio` is by how much."
+    );
+}
+
+/// Peak of a brightness profile and its half-width in pixels: walk out from the peak
+/// until brightness has fallen by half.
+///
+/// The half-width is the point of this section. Flux is conserved by E5b, so a tight
+/// bright pool and a broad dim wash can carry the SAME total light and differ only in
+/// this number — and "too spread out" is exactly the judgement an eye makes badly.
+fn peak_and_half_width(profile: &[u8]) -> (u8, usize) {
+    let Some((peak_index, &peak)) = profile.iter().enumerate().max_by_key(|(_, value)| **value)
+    else {
+        return (0, 0);
+    };
+    let half = peak / 2;
+    let mut width = 0;
+    for step in 1..profile.len() {
+        let low = profile.get(peak_index.saturating_sub(step)).copied();
+        let high = profile.get(peak_index + step).copied();
+        if low.is_none_or(|value| value <= half) || high.is_none_or(|value| value <= half) {
+            width = step;
+            break;
+        }
+    }
+    (peak, width)
+}
+
+/// Red-channel brightness along the image's horizontal centre line — the falloff a
+/// sub-cell emitter is judged on, sampled where the block sits.
+fn wall_brightness_profile(rgba_bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row = height / 2;
+    (0..width)
+        .map(|column| {
+            let offset = ((row * width + column) * 4) as usize;
+            rgba_bytes.get(offset).copied().unwrap_or(0)
+        })
+        .collect()
 }
 
 /// The material table with four pattern layers on every row a ray can hit — the
@@ -971,7 +1214,7 @@ fn report_light_volume_memory(brickmap: &Brickmap) {
         // The static attribute buffer is rebuilt whenever the resolution lever
         // moves, so its CPU cost is a real (one-off) hitch the app pays.
         let build_start = Instant::now();
-        let attributes = voxel_rt::cagi::build_cell_attributes(
+        let (attributes, _) = voxel_rt::cagi::build_cell_attributes_with_emission(
             brickmap,
             &grid,
             &voxel_rt::cagi::MaterialAttributes::compiled(),
@@ -995,7 +1238,7 @@ fn report_light_volume_memory(brickmap: &Brickmap) {
         );
     }
     println!(
-        "  (total = 2 ping-pong buffers + the static attribute buffer; the vertical \
+        "  (total = 2 ping-pong buffers + the packed attribute/emission buffer; the vertical \
          extent is clamped to the world's occupied height + 2 cells, which is the \
          difference between {} and {} cells of height at 4 voxels)",
         voxel_rt::cagi::CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y).size[1],
@@ -1136,7 +1379,7 @@ fn report_cagi_cpu_cross_check(
         let volume_after = read_back_volume(device, queue, &resources.light_volume);
 
         let grid = resources.light_volume.grid();
-        let attributes = voxel_rt::cagi::build_cell_attributes(
+        let (attributes, _) = voxel_rt::cagi::build_cell_attributes_with_emission(
             brickmap,
             &grid,
             &voxel_rt::cagi::MaterialAttributes::compiled(),
@@ -1445,6 +1688,38 @@ fn report_edit_build_times(world: &VoxelWorld, brickmap: &Brickmap) {
          {:>10.2?} for {:.1} MB",
         clone_time,
         snapshot.cpu_bytes() as f32 / 1e6
+    );
+    let grid = voxel_rt::cagi::CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y);
+    let attributes = voxel_rt::cagi::MaterialAttributes::compiled();
+    let probe_cell = [grid.size[0] / 2, grid.size[1] / 2, grid.size[2] / 2];
+    let mut e5b_samples = Vec::with_capacity(32);
+    for _ in 0..32 {
+        let started = Instant::now();
+        let mut checksum = 0_u32;
+        for offset in [
+            [0_i32, 0, 0],
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            [0, 0, -1],
+        ] {
+            let cell = [
+                (probe_cell[0] as i32 + offset[0]).clamp(0, grid.size[0] as i32 - 1) as u32,
+                (probe_cell[1] as i32 + offset[1]).clamp(0, grid.size[1] as i32 - 1) as u32,
+                (probe_cell[2] as i32 + offset[2]).clamp(0, grid.size[2] as i32 - 1) as u32,
+            ];
+            checksum ^=
+                voxel_rt::cagi::cell_attribute(brickmap, &grid, cell, &attributes).attribute;
+        }
+        std::hint::black_box(checksum);
+        e5b_samples.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    let e5b = summarize(&mut e5b_samples);
+    println!(
+        "  E5b self+six cell attribute/emission recompute: median {:>7.3} ms, p95 {:>7.3} ms",
+        e5b.0, e5b.1
     );
     // The clearance field alone: the cost the FullRebuild strategy pays per freed
     // brick, isolated by rebuilding it through a removal on a scratch copy.

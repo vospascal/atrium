@@ -87,6 +87,7 @@ pub enum LeverId {
     GiSunCache,
     GiTransmission,
     GiEmissive,
+    GiEmitterBounce,
     GiEmissiveScale,
     GiSampleMode,
     GiIterationsPerFrame,
@@ -376,6 +377,7 @@ impl LeverId {
             LeverId::GiSunCache => LeverValue::Flag(global_illumination.sun_cache),
             LeverId::GiTransmission => LeverValue::Flag(global_illumination.transmission),
             LeverId::GiEmissive => LeverValue::Flag(global_illumination.emissive),
+            LeverId::GiEmitterBounce => LeverValue::Flag(global_illumination.emitter_bounce),
             LeverId::GiEmissiveScale => LeverValue::Scalar(global_illumination.emissive_scale),
             LeverId::GiSampleMode => {
                 LeverValue::Mode(global_illumination.sample_mode.shader_value())
@@ -483,6 +485,9 @@ impl LeverId {
                 global_illumination.transmission = value.expect_flag(self);
             }
             LeverId::GiEmissive => global_illumination.emissive = value.expect_flag(self),
+            LeverId::GiEmitterBounce => {
+                global_illumination.emitter_bounce = value.expect_flag(self)
+            }
             LeverId::GiEmissiveScale => {
                 global_illumination.emissive_scale = value.expect_scalar(self);
             }
@@ -1376,6 +1381,37 @@ pub const REGISTRY: &[Lever] = &[
         }],
     },
     Lever {
+        id: LeverId::GiEmitterBounce,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_EMITTER_BOUNCE"),
+        label: "emitter bounce (air reads emissive neighbours)",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "E5c, ON by default — and unusually for this registry the MEASUREMENT \
+                  argues for the default rather than being absent. The diffusion \
+                  numerator is transmission/6: near-lossless for a UNIFORM field \
+                  (6V * 0.94/6 = 0.94V) but it keeps only 15.7% of a lone bright \
+                  neighbour among five dark ones. Measured on the `wall + glow block` \
+                  prop, the air cell in front of the emitter settles at 152/1023 under \
+                  MaxDecrement (which is scale-free) and 45/1023 under the SHIPPED \
+                  Diffusion6 — so a point light worked only under a rule that is not \
+                  the default. With this on, the neighbour reads the emitter's own mean \
+                  under every rule, which is the whole point: it makes emitters \
+                  RULE-INDEPENDENT. Cost is strictly less than the sun bounce it copies \
+                  — the same 6-neighbour walk with no shadow ray (the source is \
+                  adjacent) and no Lambert weight (E5b's stored value is already a mean \
+                  over exposed area, so weighting by direction would double-count). Off \
+                  restores E5's rule-dependent behaviour exactly, which is what makes \
+                  the before/after measurable.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-no-emitter-bounce",
+            overrides: &[(LeverId::GiEmitterBounce, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
         id: LeverId::GiEmissiveScale,
         subsystem: LeverSubsystem::GlobalIllumination,
         kind: LeverKind::Runtime,
@@ -1877,7 +1913,7 @@ pub const REGISTRY: &[Lever] = &[
                   for an edit, a clearance rebuild or a CAGI attribute rebuild. Off \
                   (variant A, inline) is identical in output and cheap for the common \
                   edit, but every rare-but-real cost lands INSIDE a frame: the \
-                  clearance full-rebuild strategy and E4's ~50 ms attribute rebuild on \
+                  clearance full-rebuild strategy and E4's ~0.5 s attribute rebuild on \
                   a GI resolution switch are frame hitches there and invisible here. \
                   Numbers in the bench doc's E2 section.",
         mode_options: &[],
@@ -1989,11 +2025,11 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::ShaderConst,
         shader_const: Some("MATERIAL_FACE_ROLES"),
         label: "per-face roles (top/side/bottom)",
-        default_value: LeverValue::Flag(false),
+        default_value: LeverValue::Flag(true),
         range: LeverRange::Discrete,
-        verdict: "S1, ships OFF because turning it on changes how the ISLAND looks, and \
-                  re-authoring the world's materials is S6's deliberate step with a \
-                  re-recorded baseline — not a side effect of building the mechanism. \
+        verdict: "S1, ships ON on every tier except Potato: the hit already knows its \
+                  face, so the cost is one flag test and one select. Potato disables it \
+                  with the rest of the material detail to keep its cheap shader path. \
                   Cost is a flag test and a select on a hit that already knows its face: \
                   the DDA records the stepped axis and the ray's sign along it for E1's \
                   analytic corner AO, so the face is free and no traversal changes. Rows \
@@ -2015,18 +2051,16 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::ShaderConst,
         shader_const: Some("MATERIAL_PATTERNS"),
         label: "pattern layers",
-        default_value: LeverValue::Flag(false),
+        default_value: LeverValue::Flag(true),
         range: LeverRange::Discrete,
-        verdict: "S2, ships OFF for the same reason S1 does: no row authors a layer \
-                  yet, so turning it on today changes nothing at all, and authoring \
-                  the island's materials is S6's step with a re-recorded baseline. \
-                  Cost is a bit test per hit on an unpatterned row, and one generator \
+        verdict: "S2, ships ON with the four-layer cap on every tier except Potato: \
+                  the cost is a bit test on an unpatterned row and one generator \
                   evaluation per active layer per HIT on a patterned one — never per \
                   traversal step, which is the whole reason detail lives on the \
                   material rather than in the hot loop. The bench sweeps 0/1/2/4 \
                   layers because that per-layer slope is the number that decides how \
-                  many layers a Quest tier can afford; a bit test on a row with no \
-                  layers is not a measurement of anything.",
+                  many layers a Quest tier can afford. Potato sets the cap to zero and \
+                  disables the path; the other tiers show all authored layers.",
         mode_options: &[],
         bench: &[BenchPoint {
             section: BenchSection::Materials,
@@ -2184,6 +2218,10 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             (LeverId::AoDistanceFade, LeverValue::Flag(true)),
             (LeverId::AoFadeStart, LeverValue::VoxelDistance(120)),
             (LeverId::AoFadeEnd, LeverValue::VoxelDistance(240)),
+            // Potato is the one intentionally flat material tier.
+            (LeverId::MaterialFaceRoles, LeverValue::Flag(false)),
+            (LeverId::MaterialPatterns, LeverValue::Flag(false)),
+            (LeverId::MaterialPatternMaxLayers, LeverValue::Count(0)),
             // The only tier without CAGI: it also proves the experiment is
             // excludable, and it is the E1c renderer bit for bit.
             (LeverId::GiEnabled, LeverValue::Flag(false)),
@@ -2348,20 +2386,12 @@ impl MaterialSettings {
 }
 
 impl Default for MaterialSettings {
-    /// Face roles and patterns both ship OFF.
-    ///
-    /// Not because either is unmeasured — face roles are a flag test and a select on
-    /// a hit that already knows its face, and patterns are a flag test on a row with
-    /// no layers, which is every row today — but because turning them ON is what
-    /// changes how the island LOOKS. That is S6's decision, taken deliberately with a
-    /// re-recorded baseline, rather than a side effect of building the mechanism.
-    ///
-    /// The two scalars ship at their neutral values, so switching `patterns` on is
-    /// the only thing the author has to do to see what a row authored.
+    /// Material detail is part of the normal shipped look. Potato is the only tier
+    /// that explicitly disables it; its sparse overrides preserve the cheap fallback.
     fn default() -> MaterialSettings {
         MaterialSettings {
-            face_roles: false,
-            patterns: false,
+            face_roles: true,
+            patterns: true,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
         }
@@ -2551,9 +2581,9 @@ mod tests {
         "CAGI_SKY_TEST_COLUMN_MAX",
         "CAGI_SKY_TEST_UPWARD_TRACE",
         "CAGI_CELL_SOLID",
+        "CAGI_CELL_DATA_WORDS",
         "CAGI_TRANSMITTANCE_SHIFT",
         "CAGI_TRANSMITTANCE_LEVELS",
-        "CAGI_EMITTER_SHIFT",
         "CAGI_CHANNEL_MASK",
         "CAGI_CHANNEL_MAX",
         "CAGI_SUN_SOURCE_FLAG",
@@ -2853,6 +2883,7 @@ mod tests {
             sun_cache,
             transmission,
             emissive,
+            emitter_bounce,
             iterations_per_frame,
             strength: gi_strength,
             ambient_floor,
@@ -2941,6 +2972,7 @@ mod tests {
             (LeverId::GiSunCache, LeverValue::Flag(sun_cache)),
             (LeverId::GiTransmission, LeverValue::Flag(transmission)),
             (LeverId::GiEmissive, LeverValue::Flag(emissive)),
+            (LeverId::GiEmitterBounce, LeverValue::Flag(emitter_bounce)),
             (LeverId::GiEmissiveScale, LeverValue::Scalar(emissive_scale)),
             (
                 LeverId::GiSampleMode,
@@ -3225,12 +3257,24 @@ mod tests {
         assert_eq!(potato.ambient_occlusion.fade_start_voxels, 120); // 15 m
         assert_eq!(potato.ambient_occlusion.fade_end_voxels, 240); // 30 m
         assert_eq!(potato.render_scale, 0.7);
+        assert!(!potato.materials.face_roles);
+        assert!(!potato.materials.patterns);
+        assert_eq!(potato.materials.pattern_max_layers, 0);
 
         let quest = preset_spec(QualityPreset::Quest).resolve();
         assert_eq!(quest.ambient_occlusion.mode, AoMode::AnalyticCorner);
         assert_eq!(quest.shadows.mode, ShadowMode::Hard);
         assert!(!quest.ambient_occlusion.distance_fade);
         assert_eq!(quest.render_scale, 0.8);
+
+        let balanced = preset_spec(QualityPreset::Balanced).resolve();
+        let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
+
+        for tier in [quest, balanced, beautiful] {
+            assert!(tier.materials.face_roles);
+            assert!(tier.materials.patterns);
+            assert_eq!(tier.materials.pattern_max_layers, MAX_PATTERN_LAYERS as u32);
+        }
 
         // E4: the GI tiering. Potato is the only tier without a light volume, so
         // it stays the "CAGI is excludable" proof; Quest trades cell size for
@@ -3241,7 +3285,6 @@ mod tests {
         assert_eq!(quest.global_illumination.cell_voxels, 8);
         assert_eq!(quest.global_illumination.iterations_per_frame, 2);
 
-        let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
         assert!(beautiful.global_illumination.enabled);
         assert_eq!(beautiful.global_illumination.cell_voxels, 4);
         assert_eq!(beautiful.global_illumination.iterations_per_frame, 4);

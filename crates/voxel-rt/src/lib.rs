@@ -21,16 +21,22 @@
 //! live in the shader without a documented verdict and a bench column.
 
 pub mod ao;
+pub mod biome;
 pub mod brickmap;
 pub mod cagi;
 pub mod camera;
 pub mod character;
 pub mod debug_pool;
+pub mod environment;
 pub mod frame_timing;
 pub mod gpu;
+pub mod graph;
 pub mod lighting;
 pub mod material;
 pub mod material_edit;
+pub mod material_graph;
+pub mod material_graph_assets;
+pub mod material_graph_layers;
 pub mod material_table;
 pub mod material_tune;
 pub mod overlay;
@@ -39,6 +45,7 @@ pub mod pattern;
 pub mod render;
 pub mod shadows;
 pub mod studio;
+pub mod studio_assets;
 pub mod traversal;
 pub mod variants;
 pub mod vox_material;
@@ -46,3 +53,5 @@ pub mod voxel_dda;
 pub mod water;
 pub mod world_edit;
 pub mod world_host;
+pub mod world_profile;
+pub mod world_profile_runtime;

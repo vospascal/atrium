@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c7776733e36b50-000000000000004a",
+  "name": "glow_block",
+  "voxel_material_slot": 24,
+  "material": {
+    "albedo": [
+      0.95,
+      0.93,
+      0.88
+    ],
+    "roughness": 0.6,
+    "specular": 0.04,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": [
+      3.0,
+      2.8,
+      2.4
+    ],
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.1,
+      0.06,
+      0.04,
+      0.03,
+      0.03,
+      0.03
+    ]
+  },
+  "graph": "vx-000000000000000018c7af1e2c154c60-0000000000000045"
+}
