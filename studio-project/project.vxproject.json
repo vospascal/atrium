@@ -125,10 +125,6 @@
       "path": "graphs/material-00.vgraph.json"
     },
     {
-      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
-      "path": "graphs/material-01.vgraph.json"
-    },
-    {
       "id": "vx-000000000000000018c7af1e15a5bcd0-0000000000000009",
       "path": "graphs/material-10.vgraph.json"
     },
@@ -231,6 +227,10 @@
     {
       "id": "world-main-v3",
       "path": "graphs/world.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
+      "path": "graphs/material-01.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",

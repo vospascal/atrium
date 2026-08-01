@@ -8,6 +8,55 @@
     "outputs": {}
   },
   "nodes": {
+    "g-0000000000000004": {
+      "node_type": "material.pattern_layer",
+      "node_type_version": 1,
+      "properties": {
+        "amount": {
+          "type": "scalar",
+          "value": 0.41
+        },
+        "blend": {
+          "type": "text",
+          "value": "mix_to_color"
+        },
+        "emission_intensity": {
+          "type": "scalar",
+          "value": 0.0
+        },
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_bottom": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_side": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_top": {
+          "type": "boolean",
+          "value": false
+        },
+        "target": {
+          "type": "text",
+          "value": "albedo"
+        },
+        "target_color": {
+          "type": "color",
+          "value": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
     "g-0000000000000009": {
       "node_type": "material.output",
       "node_type_version": 1,
@@ -100,6 +149,111 @@
       "socket_defaults": {},
       "unknown_payload": null
     },
+    "g-0000000000000011": {
+      "node_type": "material.pattern_noise",
+      "node_type_version": 1,
+      "properties": {
+        "frame": {
+          "type": "text",
+          "value": "world"
+        },
+        "octaves": {
+          "type": "integer",
+          "value": 4
+        },
+        "period_meters": {
+          "type": "scalar",
+          "value": 0.02
+        },
+        "texels_per_voxel": {
+          "type": "integer",
+          "value": 8
+        },
+        "vary_per_face": {
+          "type": "boolean",
+          "value": true
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-0000000000000015": {
+      "node_type": "material.pattern_layer",
+      "node_type_version": 1,
+      "properties": {
+        "amount": {
+          "type": "scalar",
+          "value": 0.61
+        },
+        "blend": {
+          "type": "text",
+          "value": "mix_to_color"
+        },
+        "emission_intensity": {
+          "type": "scalar",
+          "value": 0.0
+        },
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "faces_bottom": {
+          "type": "boolean",
+          "value": false
+        },
+        "faces_side": {
+          "type": "boolean",
+          "value": false
+        },
+        "faces_top": {
+          "type": "boolean",
+          "value": true
+        },
+        "target": {
+          "type": "text",
+          "value": "albedo"
+        },
+        "target_color": {
+          "type": "color",
+          "value": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-0000000000000018": {
+      "node_type": "material.pattern_noise",
+      "node_type_version": 1,
+      "properties": {
+        "frame": {
+          "type": "text",
+          "value": "world"
+        },
+        "octaves": {
+          "type": "integer",
+          "value": 4
+        },
+        "period_meters": {
+          "type": "scalar",
+          "value": 0.02
+        },
+        "texels_per_voxel": {
+          "type": "integer",
+          "value": 8
+        },
+        "vary_per_face": {
+          "type": "boolean",
+          "value": true
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
     "surface-vx-000000000000000018c77d2217356f88-0000000000000001": {
       "node_type": "material.surface",
       "node_type_version": 1,
@@ -142,9 +296,42 @@
       },
       "order": 0
     },
-    "surface-chain-vx-000000000000000018c77d2217356f88-0000000000000001-0": {
+    "g-0000000000000013": {
+      "from": {
+        "node": "g-0000000000000011",
+        "socket": "pattern"
+      },
+      "to": {
+        "node": "g-0000000000000004",
+        "socket": "pattern"
+      },
+      "order": 0
+    },
+    "g-0000000000000014": {
       "from": {
         "node": "surface-vx-000000000000000018c77d2217356f88-0000000000000001",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-0000000000000004",
+        "socket": "surface"
+      },
+      "order": 0
+    },
+    "g-0000000000000016": {
+      "from": {
+        "node": "g-0000000000000004",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-0000000000000015",
+        "socket": "surface"
+      },
+      "order": 0
+    },
+    "g-0000000000000017": {
+      "from": {
+        "node": "g-0000000000000015",
         "socket": "surface"
       },
       "to": {
@@ -152,13 +339,28 @@
         "socket": "surface"
       },
       "order": 0
+    },
+    "g-0000000000000019": {
+      "from": {
+        "node": "g-0000000000000018",
+        "socket": "pattern"
+      },
+      "to": {
+        "node": "g-0000000000000015",
+        "socket": "pattern"
+      },
+      "order": 0
     }
   },
   "layout": {
     "positions": {
+      "g-0000000000000004": [
+        839.134,
+        244.00969
+      ],
       "g-0000000000000009": [
-        700.0,
-        160.0
+        1411.8903,
+        135.65108
       ],
       "g-000000000000000a": [
         80.0,
@@ -171,6 +373,18 @@
       "g-000000000000000c": [
         80.0,
         420.0
+      ],
+      "g-0000000000000011": [
+        500.16864,
+        412.09192
+      ],
+      "g-0000000000000015": [
+        1162.5322,
+        246.84607
+      ],
+      "g-0000000000000018": [
+        953.5661,
+        617.01605
       ],
       "surface-vx-000000000000000018c77d2217356f88-0000000000000001": [
         440.0,
