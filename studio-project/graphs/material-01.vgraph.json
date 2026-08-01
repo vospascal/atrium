@@ -167,7 +167,7 @@
         },
         "texels_per_voxel": {
           "type": "integer",
-          "value": 8
+          "value": 16
         },
         "vary_per_face": {
           "type": "boolean",
