@@ -56,9 +56,9 @@
             ]
           },
           "action": {
-            "AddVoxelLayer": {
+            "AddWorldVoxelLayer": {
               "role": "cover.snow",
-              "thickness_voxels": 1
+              "thickness_world_voxels": 1
             }
           }
         }

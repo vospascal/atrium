@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use voxel_core::world::{Voxel, VoxelWorld};
+use voxel_core::world::{Voxel, VoxelWorld, WorldVoxelCoord};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{
@@ -21,7 +21,6 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
-use voxel_rt::debug_pool::{WaterBlob, WaterPool};
 use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
@@ -48,14 +47,12 @@ use voxel_rt::variants::{QualityPreset, RenderQuality, QUALITY_PRESETS};
 use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
-use voxel_rt::world_edit::{BulkEdit, BulkEditRequest, VoxelEdit};
+use voxel_rt::world_edit::VoxelEdit;
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 use voxel_rt::world_profile::CompiledWorldProfile;
 use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
 
-/// World generation parameters, matching voxel-sandbox's defaults
-/// (`WorldSeed(1)`, season 0.0 = high summer) so both renderers show the
-/// same island.
+/// Deterministic world-generation defaults.
 const WORLD_SEED: u32 = 1;
 const WORLD_SEASON: f32 = 0.0;
 
@@ -973,19 +970,6 @@ impl AppState {
                     self.toggle_control_mode();
                 }
             }
-            // Water test tools, both acting ON THE CROSSHAIR like every other
-            // edit: P carves a swimmable pool (E2b), Shift+P spawns a
-            // free-standing body of the same size (E6's isolated optics target).
-            // Shift is already tracked as `down_held`, so this needs no modifier
-            // plumbing of its own.
-            KeyCode::KeyP => {
-                if pressed {
-                    match self.input_state.down_held {
-                        true => self.spawn_test_water_body(),
-                        false => self.carve_test_pool(),
-                    }
-                }
-            }
             // M1b: L places a glow block against the aimed face — the same edit
             // a right click makes, with the emissive material instead of stone.
             // Deliberately NOT hold-to-repeat: a light source is placed one at a
@@ -1160,13 +1144,21 @@ impl AppState {
         if !self.world_edits_allowed() {
             return;
         }
+        let hit_world = WorldVoxelCoord::from_detail_cell(hit.voxel);
         let (voxel, material) = if let Some(placed_material) = placed_material {
             if hit.face_normal == [0, 0, 0] {
                 return; // the eye is inside geometry: there is no face to build on
             }
-            (hit.face_voxel, placed_material)
+            (
+                [
+                    hit_world.x + hit.face_normal[0],
+                    hit_world.y + hit.face_normal[1],
+                    hit_world.z + hit.face_normal[2],
+                ],
+                placed_material,
+            )
         } else {
-            (hit.voxel, Voxel::Air)
+            ([hit_world.x, hit_world.y, hit_world.z], Voxel::Air)
         };
         let light_grid = self
             .quality
@@ -1268,8 +1260,8 @@ impl AppState {
     /// S2 — rebuild the studio into `pose`.
     ///
     /// Clears any loaded `.vox` subject, because the subject overrides the pose:
-    /// asking for a wall and getting the campfire you loaded ten minutes ago would
-    /// read as the button not working.
+    /// asking for a wall and getting an earlier imported asset would read as the
+    /// button not working.
     fn set_studio_pose(&mut self, pose: studio::StudioPose) {
         if self.control_mode != ControlMode::StudioOrbit {
             self.material_panel.import.status =
@@ -1346,8 +1338,8 @@ impl AppState {
 
     /// S0b — rebuild the studio around a loaded `.vox` model.
     ///
-    /// Only in the studio: the island is a generated world and dropping a campfire
-    /// into the middle of it is a placement feature, not a material one.
+    /// Only in the studio: placing an asset in the generated world is a world-edit
+    /// feature, not a material-preview operation.
     ///
     /// Replaces the whole world rather than editing the existing one. That is the
     /// honest shape of the operation — the subject changed, so every derived
@@ -1435,101 +1427,6 @@ impl AppState {
         }
     }
 
-    /// E2b test tool — hand the authority a whole POOL to carve
-    /// ([`voxel_rt::debug_pool`]), so the swim states can be felt in the app and
-    /// not only asserted in tests.
-    ///
-    /// Same seam as a click: a request in, a coalesced delta out, uploaded by
-    /// [`Self::upload_world_updates`]. The frame thread pays for a `Box` here; the
-    /// hundreds of thousands of `set_voxel` calls happen on the world thread.
-    fn carve_test_pool(&mut self) {
-        if !self.world_edits_allowed() {
-            return;
-        }
-        let pose = self.active_pose();
-        let pool = match self.crosshair_voxel() {
-            Some(voxel) => WaterPool::at_voxel(voxel),
-            None => WaterPool::in_front_of(pose.position, pose.forward),
-        };
-        let light_grid = self.bulk_edit_light_grid();
-        println!(
-            "carving the {} at voxel ({}, {}), water surface {:.2?}",
-            pool.label(),
-            pool.centre_voxel_x,
-            pool.centre_voxel_z,
-            pool.surface_centre(),
-        );
-        self.world_host.request_bulk_edit(
-            BulkEditRequest {
-                shape: Box::new(pool),
-                light_grid,
-                material_attributes: self.material_table.cagi_attributes(),
-            },
-            &self.quality.world_edit,
-        );
-    }
-
-    /// Shift+P — a free-standing body of water at the crosshair
-    /// ([`voxel_rt::debug_pool::WaterBlob`]): the E6 optics target, with sky
-    /// behind it instead of a lit pool bed.
-    ///
-    /// Aiming at open sky is not a failure here, it is the interesting case: the
-    /// miss path hangs the body in mid-air, which is what makes it a clean
-    /// refraction test.
-    fn spawn_test_water_body(&mut self) {
-        if !self.world_edits_allowed() {
-            return;
-        }
-        let pose = self.active_pose();
-        let blob = match self.crosshair_voxel() {
-            Some(voxel) => WaterBlob::at_voxel(voxel),
-            None => WaterBlob::in_front_of(pose.position, pose.forward),
-        };
-        let light_grid = self.bulk_edit_light_grid();
-        println!(
-            "spawning the {} centred on voxel ({}, {}, {}), world {:.2?}",
-            blob.label(),
-            blob.centre_voxel_x,
-            blob.centre_voxel_y,
-            blob.centre_voxel_z,
-            blob.centre(),
-        );
-        self.world_host.request_bulk_edit(
-            BulkEditRequest {
-                shape: Box::new(blob),
-                light_grid,
-                material_attributes: self.material_table.cagi_attributes(),
-            },
-            &self.quality.world_edit,
-        );
-    }
-
-    /// The voxel the crosshair is on, or `None` past [`EDIT_REACH_METERS`] — so a
-    /// bulk tool lands exactly where a click would. Uses the same
-    /// [`voxel_dda::CastTarget::EditableVoxel`] as the click path, which means it
-    /// sees through water like air (the plan's "to the EDITOR, water IS air"): aim
-    /// into a pond and the tool targets the bed, not the skin.
-    fn crosshair_voxel(&self) -> Option<[i32; 3]> {
-        let pose = self.active_pose();
-        let brickmap = self.world_host.read();
-        voxel_dda::cast(
-            &brickmap,
-            pose.position.to_array(),
-            pose.forward.to_array(),
-            EDIT_REACH_METERS,
-            voxel_dda::CastTarget::EditableVoxel,
-        )
-        .map(|hit| hit.voxel)
-    }
-
-    /// The light volume a bulk edit must repair, or `None` when GI is off.
-    fn bulk_edit_light_grid(&self) -> Option<voxel_rt::cagi::CagiGrid> {
-        self.quality
-            .global_illumination
-            .enabled
-            .then(|| self.renderer.light_volume_grid())
-    }
-
     /// A mouse button changed: enter mouse-look, or start/stop a hold-to-repeat
     /// edit. All winit types stay in this file (platform-layer rule).
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, egui_consumed: bool) {
@@ -1599,7 +1496,6 @@ impl AppState {
             match update {
                 WorldUpdate::Delta(delta) => {
                     geometry_changed = true;
-                    let upload_start = Instant::now();
                     if !self
                         .renderer
                         .apply_world_delta(&self.gpu_context.queue, delta)
@@ -1607,20 +1503,6 @@ impl AppState {
                         // The brick headroom ran out: the buffers must be
                         // reallocated from the brickmap instead of patched.
                         needs_full_reupload = true;
-                    }
-                    // A bulk delta is the one case worth a line: it is the only
-                    // edit big enough that "did the frame notice?" is a question,
-                    // and these are the four numbers that answer it.
-                    if delta.voxels_written > 1 {
-                        println!(
-                            "bulk edit: {} voxels applied off-frame in {:.1} ms, \
-                             {:.0} KB in {} uploads costing this frame {:.2} ms",
-                            delta.voxels_written,
-                            delta.apply_micros / 1000.0,
-                            delta.upload_bytes() as f32 / 1024.0,
-                            delta.writes.len(),
-                            upload_start.elapsed().as_secs_f32() * 1000.0,
-                        );
                     }
                 }
                 WorldUpdate::LightAttributes {
@@ -1754,6 +1636,8 @@ impl AppState {
                 self.renderer.resolution(),
             ),
         };
+        self.sun_settings.advance_day_cycle(frame_time_seconds);
+        self.environment_runtime.day_phase = self.sun_settings.day_phase;
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
         // imperceptible.
@@ -1766,7 +1650,10 @@ impl AppState {
         // static, the sun is not). Dragging the slider therefore re-floods every
         // frame of the drag, which is what makes the GI follow the drag instead of
         // lagging a second behind it.
-        if self.sun_settings != self.flooded_sun_settings {
+        if self
+            .sun_settings
+            .requires_light_reflood(&self.flooded_sun_settings)
+        {
             self.renderer.mark_light_volume_dirty();
             self.flooded_sun_settings = self.sun_settings;
         }
@@ -1824,7 +1711,6 @@ impl AppState {
             self.frame_timers.as_ref(),
         );
         let previous_vsync_enabled = self.vsync_enabled;
-        let mut carve_test_pool_requested = false;
         // E6 — is the view underwater? Asked of the ACTIVE eye against the
         // authority, so it is the same question the shading pass asks of the
         // primary ray's origin, and it holds in fly mode too.
@@ -1869,7 +1755,6 @@ impl AppState {
             &mut self.vsync_enabled,
             &mut self.sun_settings,
             &mut self.quality,
-            &mut carve_test_pool_requested,
             &mut self.material_table,
             &mut self.studio_assets,
             &mut self.graph_editor,
@@ -1889,9 +1774,6 @@ impl AppState {
         surface_frame.present();
         self.fps_log_frame_count += 1;
 
-        if carve_test_pool_requested {
-            self.carve_test_pool();
-        }
         if std::mem::take(&mut self.studio_assets.save_requested) {
             self.save_studio_project(false);
         }

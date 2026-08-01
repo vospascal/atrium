@@ -34,7 +34,7 @@
 //! Blocking is [`material_blocks_movement`], i.e. `voxel-core`'s
 //! `Voxel::is_solid()`. It excludes **water** and **thin cover** (tall grass,
 //! flowers, reeds, lily pads, weeds), so you walk *through* vegetation and
-//! *into* water, which matches voxel-sandbox and is the intended feel. Note the
+//! *into* water, which preserves the intended feel. Note the
 //! consequence that leaves ARE solid (`is_solid` counts them): you can stand on
 //! a canopy here where sandbox lets you fall through it. That is one predicate
 //! away if it ever reads wrong, and it keeps tree trunks solid without a
@@ -49,7 +49,7 @@
 //! the body is pinned head-out and has to actively dive; past
 //! [`SWIM_SURFACE_BAND_METERS`] it is neutral and drifts down slowly, so you can
 //! hold a depth instead of being corked back up (Pascal's requirement, and
-//! voxel-sandbox's feel, whose swimmer is a spring toward `water_surface + 0.1`).
+//! the original controller feel, whose swimmer is a spring toward `water_surface + 0.1`).
 //! A *constant* buoyant acceleration — the first version of this module — pushes
 //! the body to the surface from any depth, which is the behaviour this shape
 //! exists to remove.
@@ -89,7 +89,7 @@ pub const BODY_HEIGHT_METERS: f32 = 1.8;
 pub const EYE_HEIGHT_METERS: f32 = 1.65;
 
 /// Downward acceleration, m/s^2. Deliberately above real gravity (the same 22.0
-/// voxel-sandbox settled on): 9.81 makes a jump feel like a moon hop, and the
+/// the original controller settled on): 9.81 makes a jump feel like a moon hop, and the
 /// snappier value is what makes a 1.2 m jump land in ~0.47 s.
 pub const GRAVITY_METERS_PER_SECOND_SQUARED: f32 = 22.0;
 /// Fall-speed ceiling, m/s. Roughly a real skydiver's terminal velocity; here it
@@ -107,7 +107,7 @@ pub const JUMP_APEX_METERS: f32 = 1.2;
 /// makes walking an island miserable.
 pub const STEP_UP_METERS: f32 = 3.0 * VOXEL_SIZE;
 
-/// Walk speed, m/s (voxel-sandbox's 4.5).
+/// Walk speed, m/s.
 pub const WALK_SPEED_METERS_PER_SECOND: f32 = 4.5;
 /// Cap on the platform layer's speed multiplier while walking. The fly camera's
 /// boost is 4x, which at walk speed is 18 m/s — a sprint the collision feel
@@ -906,9 +906,10 @@ mod tests {
 
     use super::*;
     use crate::brickmap::ClearanceUpdate;
-    use crate::debug_pool::WaterPool;
-    use crate::world_edit::{apply_bulk, BulkEditRequest, WorldEditSettings};
-    use voxel_core::world::{Voxel, VoxelWorld, WATER_LEVEL};
+    use voxel_core::world::{
+        Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, WATER_LEVEL,
+        WORLD_VOXELS_Y,
+    };
 
     /// The island every test walks on. NOTE: generates the full world — run the
     /// suite with `--release`.
@@ -953,23 +954,68 @@ mod tests {
         }
     }
 
-    /// Carve the [`crate::debug_pool`] test pool into the island through the real
-    /// bulk-edit path, and return where it is.
+    #[derive(Clone, Copy)]
+    struct WaterPool {
+        centre_voxel_x: i32,
+        centre_voxel_z: i32,
+    }
+
+    impl WaterPool {
+        fn surface_centre(self) -> Vec3 {
+            Vec3::new(
+                (self.centre_voxel_x as f32 + 0.5) * VOXEL_SIZE,
+                (WATER_LEVEL + 1) as f32 * VOXEL_SIZE,
+                (self.centre_voxel_z as f32 + 0.5) * VOXEL_SIZE,
+            )
+        }
+    }
+
+    /// Build a stepped swimming basin from aligned one-metre blocks. This is a
+    /// test fixture, not an alternate fine-cell world-edit path.
     fn carve_test_pool(brickmap: &mut Brickmap) -> WaterPool {
+        let detail = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let centre_world = [62, 62];
         let pool = WaterPool {
-            centre_voxel_x: 500,
-            centre_voxel_z: 500,
+            centre_voxel_x: centre_world[0] * detail + detail / 2,
+            centre_voxel_z: centre_world[1] * detail + detail / 2,
         };
-        apply_bulk(
-            brickmap,
-            &BulkEditRequest {
-                shape: Box::new(pool),
-                light_grid: None,
-                material_attributes: crate::cagi::MaterialAttributes::compiled(),
-            },
-            &WorldEditSettings::default(),
-        )
-        .expect("carving the pool changes the world");
+        for dz in -4_i32..=4 {
+            for dx in -4_i32..=4 {
+                let radius = dx.abs().max(dz.abs());
+                let bed_y = match radius {
+                    4 => 10,
+                    3 => 9,
+                    2 => 8,
+                    _ => 5,
+                };
+                let x = centre_world[0] + dx;
+                let z = centre_world[1] + dz;
+                brickmap.set_world_voxel(
+                    WorldVoxelCoord::new(x, bed_y, z),
+                    Voxel::Stone,
+                    TEST_CLEARANCE,
+                );
+                for y in (bed_y + 1)..WORLD_VOXELS_Y as i32 {
+                    brickmap.set_world_voxel(
+                        WorldVoxelCoord::new(x, y, z),
+                        Voxel::Air,
+                        TEST_CLEARANCE,
+                    );
+                }
+                for y in (bed_y + 1)..=10 {
+                    brickmap.set_world_voxel(
+                        WorldVoxelCoord::new(x, y, z),
+                        Voxel::Water,
+                        TEST_CLEARANCE,
+                    );
+                }
+                brickmap.set_world_voxel(
+                    WorldVoxelCoord::new(x, 11, z),
+                    Voxel::Air,
+                    TEST_CLEARANCE,
+                );
+            }
+        }
         pool
     }
 
@@ -1017,7 +1063,8 @@ mod tests {
     /// body must land back on the ground it left.
     #[test]
     fn a_jump_reaches_the_configured_apex() {
-        let brickmap = island();
+        let mut brickmap = island();
+        flat_walkway(&mut brickmap, (480, 520), 500);
         let mut body = standing_body(&brickmap, 500, 500, 0.0);
         let ground_y = body.feet_position.y;
         assert!(body.grounded(), "the body must start grounded");
@@ -1224,26 +1271,16 @@ mod tests {
     /// settles at a stable float line with the head out — no chatter.
     #[test]
     fn deep_water_wades_then_swims_and_floats_without_chatter() {
-        let brickmap = island();
+        let mut brickmap = island();
+        let pool = carve_test_pool(&mut brickmap);
         let water_surface = (WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
-        // Find the deepest water column in a band across the island.
-        let mut deepest = None;
-        for voxel_z in (200..800).step_by(8) {
-            for voxel_x in (200..800).step_by(8) {
-                if !material_is_liquid(brickmap.get(voxel_x, WATER_LEVEL, voxel_z)) {
-                    continue;
-                }
-                let floor_y = (0..WATER_LEVEL)
-                    .rev()
-                    .find(|y| material_blocks_movement(brickmap.get(voxel_x, *y, voxel_z)))
-                    .unwrap_or(0);
-                let depth = (WATER_LEVEL - floor_y) as f32 * VOXEL_SIZE;
-                if deepest.is_none_or(|(best_depth, _, _)| depth > best_depth) {
-                    deepest = Some((depth, voxel_x, voxel_z));
-                }
-            }
-        }
-        let (depth, voxel_x, voxel_z) = deepest.expect("the island has water");
+        let voxel_x = pool.centre_voxel_x;
+        let voxel_z = pool.centre_voxel_z;
+        let floor_y = (0..WATER_LEVEL)
+            .rev()
+            .find(|y| material_blocks_movement(brickmap.get(voxel_x, *y, voxel_z)))
+            .expect("the basin has a floor");
+        let depth = (WATER_LEVEL - floor_y) as f32 * VOXEL_SIZE;
         assert!(
             depth > BODY_HEIGHT_METERS * SWIM_SUBMERSION_FRACTION,
             "deepest water found is only {depth:.2} m — too shallow to swim in"
@@ -1310,8 +1347,7 @@ mod tests {
         );
     }
 
-    /// The acceptance criterion for the [`crate::debug_pool`] test tool: carve the
-    /// pool and swimming must actually become reachable ON FOOT — wade in from the
+    /// A block-aligned basin must make swimming reachable ON FOOT — wade in from the
     /// shallows, cross the threshold, then float head-out without chatter. A pool
     /// that does not do this is a broken tool, and this is the test that says so.
     /// NOTE: generates the full world — run with `--release`.
@@ -1439,7 +1475,7 @@ mod tests {
         );
     }
 
-    /// The buoyancy SHAPE (Pascal, from voxel-sandbox's feel): you float at the
+    /// The buoyancy shape: you float at the
     /// surface and you are neutral at depth. Dive must go under and STAY under
     /// when released — a constant buoyant acceleration, which is what this
     /// controller shipped with first, corks the body back up from any depth and
@@ -1537,16 +1573,11 @@ mod tests {
     #[test]
     fn shallow_water_damps_walking_speed() {
         let mut brickmap = island();
-        let (voxel_x, voxel_z) = (508, 492);
-        let surface_y = surface_voxel_y(&brickmap, voxel_x, voxel_z);
-        // Two voxels of water on top of the terrain, ahead of the body.
-        fill_box(
-            &mut brickmap,
-            [voxel_x - 4, surface_y + 1, voxel_z - 8],
-            [voxel_x + 40, surface_y + 2, voxel_z + 8],
-            Voxel::Water,
-        );
-        let mut body = standing_body(&brickmap, voxel_x, voxel_z, 0.0);
+        let pool = carve_test_pool(&mut brickmap);
+        // The basin's radius-three ring has one complete metre of water over its bed.
+        let voxel_x = pool.centre_voxel_x + 3 * DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let voxel_z = pool.centre_voxel_z;
+        let mut body = standing_body(&brickmap, voxel_x, voxel_z, PI);
         body.settings.walk_speed = 4.0;
         let mut wading_distance = 0.0;
         let before = body.feet_position;
@@ -1557,7 +1588,7 @@ mod tests {
         assert_eq!(
             body.submersion(),
             Submersion::Wading,
-            "standing in 0.25 m of water must read as wading"
+            "standing in one metre of water must read as wading"
         );
         let dry_distance = 4.0 * 0.5; // 0.5 s at 4 m/s
         assert!(

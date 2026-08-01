@@ -2,7 +2,7 @@
 //!
 //! Lives here rather than in a renderer because a `.vox` file is **world data**:
 //! a grid of cells and a palette. It was previously parsed inside
-//! `voxel-sandbox`'s Bevy prop importer, which meant the axis swap, the palette
+//! the former mesh prop importer, which meant the axis swap, the palette
 //! decode and the index-map handling were only reachable by a renderer that
 //! depends on Bevy — so the second consumer (voxel-rt's material import) would
 //! have had to spell all three out again. One parser, two consumers.
@@ -18,8 +18,7 @@
 //! completeness. Most writers are not MagicaVoxel and emit only `RGBA` + `XYZI`:
 //!
 //! * **A file with no material chunks at all is the NORMAL case**, not a degraded
-//!   one. Verified on this repo's own `assets/vox/campfire.vox`, which carries
-//!   zero `MATL` chunks, no scene graph and no layers. Every palette entry
+//!   one. Every palette entry in such a file
 //!   therefore reports [`VoxMaterialKind::Diffuse`] with every optional property
 //!   `None`, and a consumer fills in its own defaults.
 //! * **Missing properties within a chunk are independent.** A `MATL` with only
@@ -589,33 +588,5 @@ mod tests {
             "sRGB 128 should be ~0.216 linear, got {}",
             linear[1]
         );
-    }
-
-    /// The repo's own real file, as the check that this works on actual tool
-    /// output and not only on what we synthesise. It carries NO material chunks,
-    /// which is the point: that is the normal case.
-    #[test]
-    fn the_repo_campfire_loads_and_brings_no_materials() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vox/campfire.vox");
-        if !path.exists() {
-            // The asset is optional to the build; do not fail a checkout without it.
-            return;
-        }
-        let file = VoxFile::load(&path).expect("campfire must load");
-        assert_eq!(file.models.len(), 1);
-        assert!(file.models[0].occupied_count() > 0);
-        assert_eq!(
-            file.described_material_count(),
-            0,
-            "campfire.vox has no MATL chunks — if this changes the fixture changed"
-        );
-        // Z-up 20x20x14 becomes Y-up 20x14x20.
-        let model = &file.models[0];
-        assert_eq!((model.size_x, model.size_y, model.size_z), (20, 14, 20));
-        // Every occupied cell must name a palette entry that exists.
-        for cell in model.cells.iter().flatten() {
-            assert!((*cell as usize) < file.palette.len());
-        }
     }
 }

@@ -1,13 +1,15 @@
 //! Runtime adapter from compiled world profiles to the current brickmap.
 //!
 //! The authored model stays renderer-independent. This module is the concrete
-//! consumer that turns physical `AddVoxelLayer` projections into generated
+//! consumer that turns physical `AddWorldVoxelLayer` projections into generated
 //! voxels before GPU upload. Presentation, audio, and animation consumers can
 //! subscribe to the same compiled profile without entering world generation.
 
 use std::collections::BTreeMap;
 
-use voxel_core::world::{Voxel, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::{
+    Voxel, WorldVoxelCoord, WORLD_VOXELS_X, WORLD_VOXELS_Y, WORLD_VOXELS_Z, WORLD_VOXEL_SIZE_METERS,
+};
 
 use crate::brickmap::{Brickmap, ClearanceUpdate};
 use crate::environment::{
@@ -35,8 +37,8 @@ pub fn apply_initial_generation_profile(
         return Ok(GenerationApplication::default());
     }
     let mut result = GenerationApplication::default();
-    for z in 0..WORLD_SIZE_Z as i32 {
-        for x in 0..WORLD_SIZE_X as i32 {
+    for z in 0..WORLD_VOXELS_Z as i32 {
+        for x in 0..WORLD_VOXELS_X as i32 {
             let Some(surface_y) = terrain_surface_y(brickmap, x, z) else {
                 continue;
             };
@@ -50,13 +52,16 @@ pub fn apply_initial_generation_profile(
             let generated = GeneratedEnvironment {
                 world_seed,
                 position: [
-                    (x as f32 + 0.5) * VOXEL_SIZE,
-                    (surface_y as f32 + 1.0) * VOXEL_SIZE,
-                    (z as f32 + 0.5) * VOXEL_SIZE,
+                    (x as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
+                    (surface_y as f32 + 1.0) * WORLD_VOXEL_SIZE_METERS,
+                    (z as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
                 ],
                 normal,
                 fields: BTreeMap::from([
-                    (EnvironmentChannel::Elevation, surface_y as f32 * VOXEL_SIZE),
+                    (
+                        EnvironmentChannel::Elevation,
+                        surface_y as f32 * WORLD_VOXEL_SIZE_METERS,
+                    ),
                     (EnvironmentChannel::Depth, 0.0),
                     (EnvironmentChannel::Slope, slope),
                     (EnvironmentChannel::Temperature, 0.0),
@@ -72,16 +77,19 @@ pub fn apply_initial_generation_profile(
                 if voxel == Voxel::Air {
                     continue;
                 }
-                for _ in 0..layer.thickness_voxels {
+                for _ in 0..layer.thickness_world_voxels {
                     let y = surface_y + offset;
-                    let existing = brickmap.get(x, y, z);
+                    let coordinate = WorldVoxelCoord::new(x, y, z);
+                    if !coordinate.is_in_bounds() {
+                        break;
+                    }
+                    let detail = coordinate.detail_origin();
+                    let existing = brickmap.get(detail[0], detail[1], detail[2]);
                     if (existing == 0
                         || (!material_blocks_movement(existing) && !material_is_liquid(existing)))
                         && brickmap
-                            .set_voxel(
-                                x,
-                                y,
-                                z,
+                            .set_world_voxel(
+                                coordinate,
                                 voxel,
                                 ClearanceUpdate::LocalBox { radius_cells: 0 },
                             )
@@ -98,10 +106,10 @@ pub fn apply_initial_generation_profile(
 }
 
 fn terrain_surface_y(brickmap: &Brickmap, x: i32, z: i32) -> Option<i32> {
-    let top = brickmap.top_occupied_y(x, z)?;
     let mut encountered_liquid = false;
-    for y in (0..=top).rev() {
-        let material = brickmap.get(x, y, z);
+    for y in (0..WORLD_VOXELS_Y as i32).rev() {
+        let detail = WorldVoxelCoord::new(x, y, z).detail_origin();
+        let material = brickmap.get(detail[0], detail[1], detail[2]);
         encountered_liquid |= material_is_liquid(material);
         if material_blocks_movement(material) {
             return (!encountered_liquid).then_some(y);

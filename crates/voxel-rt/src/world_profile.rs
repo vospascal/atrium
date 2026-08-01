@@ -224,9 +224,9 @@ pub enum SurfaceAction {
         layer: SurfaceLayer,
         role: MaterialRole,
     },
-    AddVoxelLayer {
+    AddWorldVoxelLayer {
         role: MaterialRole,
-        thickness_voxels: u8,
+        thickness_world_voxels: u8,
     },
 }
 
@@ -432,7 +432,7 @@ pub struct AddedVoxelLayer {
     pub role: MaterialRole,
     pub material: AssetId,
     pub material_slot: u8,
-    pub thickness_voxels: u8,
+    pub thickness_world_voxels: u8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -531,7 +531,7 @@ impl CompiledWorldProfile {
     pub fn has_active_voxel_layer_rules(&self, runtime: &RuntimeEnvironmentState) -> bool {
         self.asset.surface_profiles.iter().any(|profile| {
             profile.rules.iter().any(|rule| {
-                matches!(rule.action, SurfaceAction::AddVoxelLayer { .. })
+                matches!(rule.action, SurfaceAction::AddWorldVoxelLayer { .. })
                     && rule.condition.may_match_runtime(runtime)
             })
         })
@@ -561,10 +561,10 @@ impl CompiledWorldProfile {
                 SurfaceAction::SetRole { layer, role } => {
                     roles.insert(*layer, role.clone());
                 }
-                SurfaceAction::AddVoxelLayer {
+                SurfaceAction::AddWorldVoxelLayer {
                     role,
-                    thickness_voxels,
-                } => added_roles.push((role.clone(), *thickness_voxels)),
+                    thickness_world_voxels,
+                } => added_roles.push((role.clone(), *thickness_world_voxels)),
             }
         }
 
@@ -586,7 +586,7 @@ impl CompiledWorldProfile {
             });
         }
         let mut added_voxel_layers = Vec::new();
-        for (role, thickness_voxels) in added_roles {
+        for (role, thickness_world_voxels) in added_roles {
             let binding = palette.bindings.get(&role).ok_or_else(|| {
                 WorldProfileError::new(
                     "missing_material_role",
@@ -598,7 +598,7 @@ impl CompiledWorldProfile {
                 material_slot: self.material_slot(&material)?,
                 material,
                 role,
-                thickness_voxels,
+                thickness_world_voxels,
             });
         }
 
@@ -915,7 +915,8 @@ fn validate_world_profile(
         let mut required_roles: BTreeSet<_> = surface.base_layers.values().cloned().collect();
         for rule in &surface.rules {
             match &rule.action {
-                SurfaceAction::SetRole { role, .. } | SurfaceAction::AddVoxelLayer { role, .. } => {
+                SurfaceAction::SetRole { role, .. }
+                | SurfaceAction::AddWorldVoxelLayer { role, .. } => {
                     required_roles.insert(role.clone());
                 }
             }
@@ -970,11 +971,12 @@ fn validate_world_profile(
                     format!("surface rule `{}` is invalid", rule.id),
                 ));
             }
-            if let SurfaceAction::AddVoxelLayer {
-                thickness_voxels, ..
+            if let SurfaceAction::AddWorldVoxelLayer {
+                thickness_world_voxels,
+                ..
             } = rule.action
             {
-                if thickness_voxels == 0 {
+                if thickness_world_voxels == 0 {
                     return Err(WorldProfileError::new(
                         "invalid_layer_thickness",
                         format!("surface rule `{}` adds an empty layer", rule.id),
@@ -1225,9 +1227,9 @@ mod tests {
                             value: 0.65,
                         },
                     ]),
-                    action: SurfaceAction::AddVoxelLayer {
+                    action: SurfaceAction::AddWorldVoxelLayer {
                         role: role("cover.snow"),
-                        thickness_voxels: 1,
+                        thickness_world_voxels: 1,
                     },
                 }],
                 modifiers: vec![SurfaceModifierRule {

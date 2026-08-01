@@ -146,6 +146,13 @@ struct Lighting {
     //   y = tint — how coloured the water is (0 = neutral, 1 = physical)
     //   z, w = reserved (E7's water look pass)
     water_optics: vec4<f32>,
+    // Day/night sky state (lighting.rs CelestialState). The active directional
+    // light above becomes the moon at night; these retain both physical bodies
+    // so the background, reflections and water all see the same sky.
+    celestial_sun: vec4<f32>,  // xyz direction, w daylight
+    celestial_moon: vec4<f32>, // xyz direction, w moon phase
+    sky_zenith: vec4<f32>,     // rgb radiance, w star rotation
+    sky_horizon: vec4<f32>,    // rgb radiance, w moonlight
 }
 
 @group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;

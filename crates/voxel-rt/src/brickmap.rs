@@ -25,7 +25,9 @@
 
 use std::ops::Range;
 
-use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
+use voxel_core::world::{
+    Voxel, VoxelWorld, WorldVoxelCoord, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
+};
 
 use crate::material::material_id;
 
@@ -182,11 +184,12 @@ pub const DIRTY_RANGE_GAP_WORDS: usize = 64;
 pub struct BrickmapMetadata {
     /// Brick grid dimensions (125, 32, 125).
     pub brick_grid_size: [u32; 3],
-    /// How many occupied bricks exist (= `occupancy_words.len() / 16`).
+    /// Allocated sculpted/detail brick payloads. Uniform world blocks are tagged
+    /// directly in level 0 and do not contribute to this count.
     pub occupied_brick_count: u32,
-    /// World dimensions in voxels (1000, 256, 1000).
+    /// Renderer detail-grid dimensions (1000, 256, 1000).
     pub world_size_voxels: [u32; 3],
-    /// Edge length of one voxel in meters ([`VOXEL_SIZE`] = 0.125).
+    /// Edge length of one renderer detail cell in metres (0.125).
     pub voxel_size_meters: f32,
     /// Highest occupied brick Y anywhere in the world ([`EMPTY_COLUMN`] when
     /// no bricks exist). Upward rays above this height can never hit.
@@ -697,7 +700,8 @@ impl Brickmap {
         }
     }
 
-    /// Number of occupied bricks (bricks with at least one non-air voxel).
+    /// Number of allocated sculpted/detail brick payloads. Uniform one-metre
+    /// world voxels live directly in level 0 and do not consume this pool.
     pub fn occupied_brick_count(&self) -> u32 {
         self.allocated_brick_slots - self.free_brick_slots.len() as u32
     }
@@ -882,6 +886,90 @@ impl Brickmap {
                 edit.brick_freed = true;
                 edit.metadata_changed = true;
                 ranges.push(BrickmapArray::BrickIndices, cell);
+                self.brick_occupancy_bit_words[cell >> 5] &= !(1 << (cell & 31));
+                ranges.push(BrickmapArray::BrickOccupancyBits, cell >> 5);
+                edit.clearance_cells_written +=
+                    self.grow_clearance_around(brick, clearance, &mut ranges);
+                self.lower_column_and_world_max(column, brick[1] as u32, &mut ranges);
+            }
+        }
+
+        edit.dirty = ranges.finish();
+        Some(edit)
+    }
+
+    /// Replace one complete one-metre world voxel.
+    ///
+    /// The brickmap's 8³ payload is detail storage, not the gameplay edit unit.
+    /// Ordinary add/remove/replace operations therefore update the level-0 cell
+    /// directly: empty or one uniform material. If the cell previously held an
+    /// asset/detail payload, this operation deliberately replaces the whole asset
+    /// tile and recycles its private level-1 slot.
+    pub fn set_world_voxel(
+        &mut self,
+        coordinate: WorldVoxelCoord,
+        voxel: Voxel,
+        clearance: ClearanceUpdate,
+    ) -> Option<BrickmapEdit> {
+        if !coordinate.is_in_bounds() {
+            return None;
+        }
+        let brick = [
+            coordinate.x as usize,
+            coordinate.y as usize,
+            coordinate.z as usize,
+        ];
+        let cell = brick[0] + brick[1] * BRICK_GRID_X + brick[2] * BRICK_GRID_X * BRICK_GRID_Y;
+        let column = brick[0] + brick[2] * BRICK_GRID_X;
+        let previous_pointer = self.brick_indices[cell];
+        let material = material_id(voxel);
+        if (material == 0 && previous_pointer == EMPTY_BRICK)
+            || (material != 0
+                && brick_is_uniform(previous_pointer)
+                && brick_uniform_material(previous_pointer) == material)
+        {
+            return None;
+        }
+
+        let detail_origin = coordinate.detail_origin();
+        let previous_material = self.get(detail_origin[0], detail_origin[1], detail_origin[2]);
+        let mut edit = BrickmapEdit {
+            voxel: detail_origin,
+            previous_material,
+            material,
+            brick_allocated: false,
+            brick_freed: false,
+            arrays_grew: false,
+            metadata_changed: false,
+            clearance_cells_written: 0,
+            dirty: Vec::new(),
+        };
+        let mut ranges = DirtyRanges::default();
+        let was_occupied = previous_pointer != EMPTY_BRICK;
+
+        if brick_is_unique(previous_pointer) {
+            self.free_brick_slot(brick_slot(previous_pointer), &mut ranges);
+            edit.brick_freed = true;
+            edit.metadata_changed = true;
+        }
+
+        self.brick_indices[cell] = if material == 0 {
+            EMPTY_BRICK
+        } else {
+            uniform_brick(material)
+        };
+        ranges.push(BrickmapArray::BrickIndices, cell);
+
+        let is_occupied = material != 0;
+        if was_occupied != is_occupied {
+            edit.metadata_changed = true;
+            if is_occupied {
+                self.brick_occupancy_bit_words[cell >> 5] |= 1 << (cell & 31);
+                ranges.push(BrickmapArray::BrickOccupancyBits, cell >> 5);
+                self.invalidate_bounds(&mut ranges);
+                edit.clearance_cells_written += self.shrink_clearance_around(brick, &mut ranges);
+                self.raise_column_and_world_max(column, brick[1] as u32, &mut ranges);
+            } else {
                 self.brick_occupancy_bit_words[cell >> 5] &= !(1 << (cell & 31));
                 ranges.push(BrickmapArray::BrickOccupancyBits, cell >> 5);
                 edit.clearance_cells_written +=
@@ -1264,10 +1352,8 @@ impl DirtyRanges {
 /// Sort word ranges per array and merge the ones separated by at most
 /// [`DIRTY_RANGE_GAP_WORDS`] unchanged words — one `write_buffer` per survivor.
 ///
-/// Public because a BULK edit
-/// ([`crate::world_edit::apply_bulk`]) coalesces ACROSS thousands of
-/// [`Brickmap::set_voxel`] calls: without that, a pool carve would publish tens
-/// of thousands of one-word uploads for words that are mostly neighbours.
+/// Kept public for batched import and generation jobs that collect dirty ranges
+/// before publishing them to GPU buffers.
 pub fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
     ranges.sort_by_key(|range| {
         (
@@ -1670,8 +1756,7 @@ mod tests {
         0, 1, 6, 7, 8, 9, 15, 16, 17, 63, 64, 65, 127, 128, 129, 255, 256, 257, 449, 450, 499, 500,
         501, 503, 504, 505, 599, 600, 601, 807, 808, 809, 991, 992, 993, 997, 998, 999,
     ];
-    /// y samples: brick boundaries plus the interesting terrain bands
-    /// (PLATEAU_FLOOR = 58, WATER_LEVEL = 84, tree crowns ~96-160).
+    /// y samples: brick boundaries plus the generated terrain and water bands.
     const AXIS_SAMPLES_Y: &[i32] = &[
         0, 1, 6, 7, 8, 9, 15, 16, 17, 55, 56, 57, 63, 64, 65, 83, 84, 85, 95, 96, 97, 127, 128,
         129, 159, 160, 161, 254, 255,
@@ -1680,16 +1765,15 @@ mod tests {
     /// Round trip: `Brickmap::get` must agree with `VoxelWorld::get` mapped
     /// through `material_id`, over a deterministic sample grid (~42k
     /// coordinates) heavy on brick boundaries, plus out-of-bounds probes.
-    /// NOTE: generates the full 1000x256x1000 world — slow in debug builds,
+    /// NOTE: expands the 125x32x125 world through its 1000x256x1000 renderer grid,
     /// run with `--release` when iterating.
     #[test]
     fn brickmap_round_trips_generated_world() {
         let world = VoxelWorld::generate(1234, 0.0);
         let brickmap = Brickmap::build(&world);
-        assert!(
-            brickmap.occupied_brick_count() > 0,
-            "island produced no occupied bricks"
-        );
+        // One generated world voxel maps exactly to one uniform 8³ brick, so the
+        // level-1 sculpted-brick pool is expected to remain empty.
+        assert_eq!(brickmap.occupied_brick_count(), 0);
 
         let mut non_air_seen = 0_u64;
         for &z in AXIS_SAMPLES_XZ {
@@ -2205,6 +2289,80 @@ mod tests {
             assert!(brickmap
                 .set_voxel(x, y, z, Voxel::Stone, clearance)
                 .is_none());
+        }
+    }
+
+    #[test]
+    fn a_world_edit_adds_and_removes_one_complete_metre() {
+        let mut brickmap = Brickmap::empty();
+        let coordinate = WorldVoxelCoord::new(10, 20, 30);
+        let origin = coordinate.detail_origin();
+        let clearance = ClearanceUpdate::LocalBox { radius_cells: 4 };
+
+        let added = brickmap
+            .set_world_voxel(coordinate, Voxel::Stone, clearance)
+            .expect("adding a world voxel changes the map");
+        assert_eq!(added.voxel, origin);
+        assert_eq!(
+            brickmap.occupied_brick_count(),
+            0,
+            "uniform blocks need no detail slot"
+        );
+        for z in 0..BRICK_SIZE as i32 {
+            for y in 0..BRICK_SIZE as i32 {
+                for x in 0..BRICK_SIZE as i32 {
+                    assert_eq!(
+                        brickmap.get(origin[0] + x, origin[1] + y, origin[2] + z),
+                        material_id(Voxel::Stone)
+                    );
+                }
+            }
+        }
+        assert!(brickmap
+            .set_world_voxel(coordinate, Voxel::Stone, clearance)
+            .is_none());
+
+        brickmap
+            .set_world_voxel(coordinate, Voxel::Air, clearance)
+            .expect("removing a world voxel changes the map");
+        for z in 0..BRICK_SIZE as i32 {
+            for y in 0..BRICK_SIZE as i32 {
+                for x in 0..BRICK_SIZE as i32 {
+                    assert_eq!(brickmap.get(origin[0] + x, origin[1] + y, origin[2] + z), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_world_edit_replaces_an_asset_detail_payload() {
+        let mut brickmap = Brickmap::empty();
+        let coordinate = WorldVoxelCoord::new(12, 21, 31);
+        let origin = coordinate.detail_origin();
+        let clearance = ClearanceUpdate::LocalBox { radius_cells: 4 };
+        brickmap.set_voxel(
+            origin[0] + 2,
+            origin[1] + 3,
+            origin[2] + 4,
+            Voxel::Snow,
+            clearance,
+        );
+        assert_eq!(brickmap.occupied_brick_count(), 1);
+
+        let replaced = brickmap
+            .set_world_voxel(coordinate, Voxel::Sand, clearance)
+            .expect("world edit replaces the asset tile");
+        assert!(replaced.brick_freed);
+        assert_eq!(brickmap.occupied_brick_count(), 0);
+        for z in 0..BRICK_SIZE as i32 {
+            for y in 0..BRICK_SIZE as i32 {
+                for x in 0..BRICK_SIZE as i32 {
+                    assert_eq!(
+                        brickmap.get(origin[0] + x, origin[1] + y, origin[2] + z),
+                        material_id(Voxel::Sand)
+                    );
+                }
+            }
         }
     }
 

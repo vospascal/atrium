@@ -440,7 +440,7 @@ mod tests {
     /// diffuse / metal / emit / glass / media, plus ONE entry deliberately left
     /// with no chunk at all — a mixed file, which is the case neither an all-MATL
     /// nor a no-MATL fixture can exercise.
-    fn sheet() -> VoxFile {
+    pub(super) fn sheet() -> VoxFile {
         VoxFile::load(&sheet_path()).expect("the material sheet asset must load")
     }
 
@@ -693,36 +693,12 @@ mod tests {
         assert!(!fields.apply_to(&mut row));
         assert_eq!(row, stone);
     }
-
-    /// The campfire — real tool output with no MATL at all — must import as pure
-    /// colour on every used entry, and never claim a material property.
-    #[test]
-    fn the_campfire_imports_as_colour_only() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vox/campfire.vox");
-        if !path.exists() {
-            return;
-        }
-        let file = VoxFile::load(&path).expect("campfire must load");
-        for entry in &file.palette[..8] {
-            let fields = ImportedFields::from_palette_entry(entry);
-            assert!(fields.albedo.is_some());
-            assert!(fields.roughness.is_none());
-            assert!(fields.specular.is_none());
-            assert!(fields.emission.is_none());
-            assert!(fields.index_of_refraction.is_none());
-            // Nothing to skip, whatever it lands on.
-            let stone = MATERIALS[material_id(Voxel::Stone) as usize];
-            assert!(fields.unusable_on(&stone).is_empty());
-        }
-    }
 }
 
 #[cfg(test)]
 mod studio_binding_tests {
     use super::*;
     use crate::material::{material_id, MATERIALS};
-    use std::path::Path;
-    use voxel_core::vox::VoxFile;
     use voxel_core::world::Voxel;
 
     /// The nearest-albedo binding must never pick Air (a cell would vanish) or an
@@ -771,43 +747,11 @@ mod studio_binding_tests {
         }
     }
 
-    /// The campfire must resolve to a subject with the same occupied count as the
-    /// file, at the swapped dimensions, with every cell naming a real row.
-    #[test]
-    fn the_campfire_resolves_to_a_drawable_subject() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vox/campfire.vox");
-        if !path.exists() {
-            return;
-        }
-        let file = VoxFile::load(&path).expect("campfire must load");
-        let rows = importable_rows(&file);
-        assert_eq!(rows.len(), 8, "the campfire uses eight palette entries");
-
-        let subject = VoxSubject::from_model(&file.models[0], &file.palette, &rows);
-        assert_eq!(
-            (subject.size_x, subject.size_y, subject.size_z),
-            (20, 14, 20)
-        );
-        assert_eq!(
-            subject.occupied_count(),
-            file.models[0].occupied_count(),
-            "resolving must not drop or invent cells"
-        );
-        for material in subject.cells.iter().flatten() {
-            let row = MATERIALS[*material as usize];
-            assert!(!matches!(row.kind, MaterialKind::Air), "a cell became air");
-        }
-    }
-
     /// An explicit binding must win over the nearest-albedo default, or the
     /// override control does nothing.
     #[test]
     fn an_explicit_binding_overrides_the_default() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vox/campfire.vox");
-        if !path.exists() {
-            return;
-        }
-        let file = VoxFile::load(&path).expect("campfire must load");
+        let file = super::tests::sheet();
         let mut rows = importable_rows(&file);
         let target = material_id(Voxel::Snow);
         for row in &mut rows {

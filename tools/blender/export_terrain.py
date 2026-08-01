@@ -4,7 +4,7 @@ Usage (inside Blender):
   1. Select your terrain object — any modifier / geometry-nodes stack works,
      the EVALUATED surface is what gets sampled.
   2. Run this script (Text editor ▸ Run, or paste in the Python console).
-  3. Load it in the sandbox:  cargo run -p voxel-sandbox -- <OUTPUT>.terrain.json
+  3. Load it in voxel-rt: cargo run -p voxel-rt -- <OUTPUT>.terrain.json
 
 Conventions (how the Blender layout maps into the engine):
   * Blender meters == engine meters; the object's XY bounding box is mapped

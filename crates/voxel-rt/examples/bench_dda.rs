@@ -96,9 +96,6 @@ use voxel_rt::cagi::{
 };
 use voxel_rt::camera::{CameraInput, CameraPose, CameraUniform, DEFAULT_VERTICAL_FOV_RADIANS};
 use voxel_rt::character::{self, CharacterController, CharacterSettings};
-use voxel_rt::debug_pool::{
-    WaterPool, POOL_DEPTH_METERS, POOL_SHORE_WIDTH_METERS, POOL_WATER_RADIUS_METERS,
-};
 use voxel_rt::lighting::{LightingUniform, SunSettings};
 use voxel_rt::material::{GpuMaterial, MaterialKind, MATERIALS};
 use voxel_rt::passes::cagi::{CagiPass, LightVolume};
@@ -113,11 +110,47 @@ use voxel_rt::variants::{
     QUALITY_PRESETS,
 };
 use voxel_rt::voxel_dda;
-use voxel_rt::world_edit::{BulkEdit, BulkEditRequest, VoxelEdit, WorldEditSettings};
+use voxel_rt::world_edit::{VoxelEdit, WorldEditSettings};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
 use glam::Vec3;
-use voxel_core::world::{Voxel, VoxelWorld, VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::{
+    Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, VOXEL_SIZE, WATER_LEVEL,
+    WORLD_SIZE_X, WORLD_SIZE_Z,
+};
+
+const POOL_DEPTH_METERS: f32 = 5.0;
+
+/// Water-optics benchmark fixture. Its geometry is composed exclusively from
+/// aligned one-metre world voxels; the detail coordinates are only camera-facing
+/// compatibility fields.
+#[derive(Clone, Copy)]
+struct WaterPool {
+    centre_voxel_x: i32,
+    centre_voxel_z: i32,
+}
+
+impl WaterPool {
+    fn in_front_of(eye: Vec3, forward: Vec3) -> Self {
+        let centre = eye + Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero() * 10.0;
+        Self {
+            centre_voxel_x: (centre.x / VOXEL_SIZE).floor() as i32,
+            centre_voxel_z: (centre.z / VOXEL_SIZE).floor() as i32,
+        }
+    }
+
+    fn surface_centre(self) -> Vec3 {
+        Vec3::new(
+            (self.centre_voxel_x as f32 + 0.5) * VOXEL_SIZE,
+            (WATER_LEVEL + 1) as f32 * VOXEL_SIZE,
+            (self.centre_voxel_z as f32 + 0.5) * VOXEL_SIZE,
+        )
+    }
+
+    fn label(self) -> &'static str {
+        "one-metre-block water basin"
+    }
+}
 
 /// Output resolution at render scale 1.0: the dev machine's physical Retina
 /// size (2560x1440, reported as 1280x720 logical). All historical numbers were
@@ -337,7 +370,6 @@ fn main() {
         report_edit_memory(&device, &brickmap);
         report_edit_storm(&device, &queue, &brickmap, &edit_storm_runs());
         report_edit_reflood(&device, &queue, &brickmap);
-        report_pool_carve(&device, &queue, &brickmap);
         report_occupancy_readback(&device, &queue, &brickmap);
         report_audio_ray_cost(&brickmap);
     }
@@ -946,8 +978,7 @@ fn water_section(pool: WaterPool) -> Section {
     }
 }
 
-/// Section 8's world: the seed-1 island with ONE debug pool carved into it,
-/// through E2's bulk-edit path exactly as the app's `P` key does.
+/// Section 8's world: the seed-1 island with one block-aligned water basin.
 ///
 /// Why a separate brickmap rather than the shared one: the island's own water is
 /// 0.6-1.75 m deep, so refraction has almost nothing to travel through and an
@@ -958,16 +989,34 @@ fn water_section(pool: WaterPool) -> Section {
 /// 1-7 still measure the untouched island.
 fn water_section_world(brickmap: &Brickmap, pool: WaterPool) -> Brickmap {
     let mut pooled = brickmap.clone();
-    let delta = voxel_rt::world_edit::apply_bulk(
-        &mut pooled,
-        &BulkEditRequest {
-            shape: Box::new(pool),
-            light_grid: None,
-            material_attributes: voxel_rt::cagi::MaterialAttributes::compiled(),
-        },
-        &WorldEditSettings::default(),
-    )
-    .expect("carving the section-8 pool must change the world");
+    let detail = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+    let centre_x = pool.centre_voxel_x.div_euclid(detail);
+    let centre_z = pool.centre_voxel_z.div_euclid(detail);
+    let clearance = ClearanceUpdate::LocalBox { radius_cells: 8 };
+    let mut blocks_written = 0_usize;
+    for dz in -4_i32..=4 {
+        for dx in -4_i32..=4 {
+            let radius = dx.abs().max(dz.abs());
+            let bed_y = match radius {
+                4 => 9,
+                3 => 8,
+                2 => 7,
+                _ => 5,
+            };
+            let x = centre_x + dx;
+            let z = centre_z + dz;
+            pooled.set_world_voxel(WorldVoxelCoord::new(x, bed_y, z), Voxel::Stone, clearance);
+            blocks_written += 1;
+            for y in (bed_y + 1)..voxel_core::world::WORLD_VOXELS_Y as i32 {
+                pooled.set_world_voxel(WorldVoxelCoord::new(x, y, z), Voxel::Air, clearance);
+            }
+            for y in (bed_y + 1)..=10 {
+                pooled.set_world_voxel(WorldVoxelCoord::new(x, y, z), Voxel::Water, clearance);
+                blocks_written += 1;
+            }
+            pooled.set_world_voxel(WorldVoxelCoord::new(x, 11, z), Voxel::Air, clearance);
+        }
+    }
     println!();
     println!(
         "== section 8 world: island + one {} at voxel ({}, {}) ==",
@@ -976,8 +1025,8 @@ fn water_section_world(brickmap: &Brickmap, pool: WaterPool) -> Brickmap {
         pool.centre_voxel_z,
     );
     println!(
-        "  {} voxels written, water surface at {:.2} m, {:.0} m deep",
-        delta.voxels_written,
+        "  {} one-metre blocks written, water surface at {:.2} m, {:.0} m deep",
+        blocks_written,
         pool.surface_centre().y,
         POOL_DEPTH_METERS,
     );
@@ -1201,7 +1250,7 @@ const CONVERGENCE_ITERATIONS: u32 = 160;
 /// decision.
 fn report_light_volume_memory(brickmap: &Brickmap) {
     println!();
-    println!("== E4 light volume memory (world 1000x256x1000 voxels) ==");
+    println!("== E4 light volume memory (125x32x125 m world; 1000x256x1000 detail grid) ==");
     println!(
         "{:<12} {:>18} {:>12} {:>14} {:>14} {:>12} {:>14}",
         "cell voxels", "grid", "cells", "one buffer", "ping-pong", "total", "CPU attr build"
@@ -2586,216 +2635,6 @@ fn report_edit_reflood(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Br
     }
 }
 
-/// E2b's test-pool carve, measured as a BULK edit: the biggest single world
-/// change the engine can be asked for today, and therefore the honest test of
-/// whether E2's authority really keeps big work off the frame.
-///
-/// Four numbers, one per requirement: voxels touched, world-thread wall time,
-/// upload bytes (and how many `write_buffer` calls the coalescing leaves), and
-/// the WORST frame-thread cost measured while the carve is in flight — frames
-/// keep rendering throughout, exactly as in the app. Then the CAGI response,
-/// because the carve moves geometry and adds water: the same global re-flood the
-/// wall gets, reported in frames to bit-exact.
-fn report_pool_carve(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap) {
-    println!();
-    println!("== E2b test-pool carve (bulk edit) ==");
-    let quality = RenderQuality::default();
-    let variant = Variant::new("pool-carve".to_string(), quality);
-    let scenario = &build_scenarios(&[])[2];
-    let (width, height) = variant.resolution();
-    let target = create_render_target(device, width, height);
-    let mut host = WorldHost::new(brickmap.clone());
-    let (world_bindings, mut resources) = {
-        let world = host.read();
-        let world_bindings = WorldBindings::new(device, &world);
-        let resources =
-            VariantResources::new(device, &world_bindings, &world, &variant, &target.view);
-        (world_bindings, resources)
-    };
-    let light_grid = quality
-        .global_illumination
-        .enabled
-        .then(|| resources.light_volume.grid());
-    resources.flood_to_convergence(device, queue, &world_bindings, &variant, scenario);
-    let lighting_uniform = scenario.lighting_uniform(&quality);
-
-    // The shipped configuration: the authority on its own thread, so the request
-    // is a channel send and the frame thread only drains.
-    host.set_world_thread(true);
-    let pool = WaterPool {
-        centre_voxel_x: 500,
-        centre_voxel_z: 500,
-    };
-    let requested_at = Instant::now();
-    host.request_bulk_edit(
-        BulkEditRequest {
-            shape: Box::new(pool),
-            light_grid,
-            material_attributes: voxel_rt::cagi::MaterialAttributes::compiled(),
-        },
-        &quality.world_edit,
-    );
-
-    // Keep rendering frames until the delta arrives, timing the frame-thread half
-    // (drain + upload) separately from the whole frame.
-    let mut pipeline_samples: Vec<f32> = Vec::new();
-    let mut frames_in_flight = 0_usize;
-    let mut delta_frame_pipeline_milliseconds = 0.0;
-    let mut voxels_written = 0_usize;
-    let mut upload_bytes = 0_usize;
-    let mut upload_calls = 0_usize;
-    let mut apply_milliseconds = 0.0;
-    let mut clearance_cells = 0_usize;
-    let mut light_cells = 0_usize;
-    let mut latency_milliseconds = 0.0;
-    while voxels_written == 0 {
-        let frame_start = Instant::now();
-        for update in host.drain() {
-            if let WorldUpdate::Delta(delta) = update {
-                latency_milliseconds = requested_at.elapsed().as_secs_f32() * 1000.0;
-                assert!(
-                    !delta.arrays_grew,
-                    "the pool outgrew the brick headroom — it should only free bricks"
-                );
-                for write in &delta.writes {
-                    world_bindings.apply_array_write(queue, write);
-                }
-                if let Some(metadata) = &delta.metadata {
-                    world_bindings.write_metadata(queue, metadata);
-                }
-                resources.light_volume.write_cell_attributes(
-                    queue,
-                    delta.light_grid,
-                    &delta.light_cells,
-                );
-                resources.light_volume.mark_dirty();
-                voxels_written = delta.voxels_written;
-                upload_bytes = delta.upload_bytes();
-                upload_calls = delta.writes.len();
-                apply_milliseconds = delta.apply_micros / 1000.0;
-                clearance_cells = delta.clearance_cells_written;
-                light_cells = delta.light_cells.len();
-                delta_frame_pipeline_milliseconds = frame_start.elapsed().as_secs_f32() * 1000.0;
-            }
-        }
-        pipeline_samples.push(frame_start.elapsed().as_secs_f32() * 1000.0);
-        if voxels_written == 0 {
-            frames_in_flight += 1;
-        }
-
-        // The GPU half, blocked to completion, so a "frame" here is a whole frame.
-        world_bindings.write_lighting(queue, &lighting_uniform);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("bench pool carve frame"),
-        });
-        resources.cagi_pass.encode(
-            &mut encoder,
-            &mut resources.light_volume,
-            quality.gi_iterations_per_frame(),
-            None,
-        );
-        resources.dda_pass.encode(
-            queue,
-            &mut encoder,
-            &scenario.camera_uniform((width, height)),
-            resources.light_volume.front(),
-            width,
-            height,
-            None,
-        );
-        queue.submit([encoder.finish()]);
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .expect("device poll failed");
-        assert!(
-            frames_in_flight < 600,
-            "the pool carve never came back from the world thread"
-        );
-    }
-    let worst_waiting_frame = pipeline_samples
-        .iter()
-        .take(frames_in_flight)
-        .copied()
-        .fold(0.0_f32, f32::max);
-
-    println!(
-        "  shape: {:.0} m of water across, {:.0} m deep, {:.0} m graded shore, centred on \
-         voxel ({}, {})",
-        POOL_WATER_RADIUS_METERS * 2.0,
-        POOL_DEPTH_METERS,
-        POOL_SHORE_WIDTH_METERS,
-        pool.centre_voxel_x,
-        pool.centre_voxel_z,
-    );
-    println!("  voxels written (one delta):      {voxels_written:>10}");
-    println!("  world-thread apply:              {apply_milliseconds:>10.1} ms");
-    println!("  request -> delta available:      {latency_milliseconds:>10.1} ms");
-    println!(
-        "  upload:                          {:>10.0} KB in {upload_calls} write_buffer calls",
-        upload_bytes as f32 / 1024.0,
-    );
-    println!(
-        "  ...bytes per voxel:              {:>10.1} B (a per-voxel delta would be ~64 B)",
-        upload_bytes as f32 / voxels_written as f32,
-    );
-    println!("  clearance cells rewritten:       {clearance_cells:>10}");
-    println!("  CAGI cells re-attributed:        {light_cells:>10}");
-    println!(
-        "  frame thread, {frames_in_flight} frames waiting:   {worst_waiting_frame:>10.3} ms worst"
-    );
-    println!("  frame thread, the upload frame:  {delta_frame_pipeline_milliseconds:>10.3} ms",);
-
-    // CAGI: the carve removed terrain and added water, so the volume is wrong
-    // until it re-floods. Same global re-flood as any edit — measured, not assumed.
-    let converged = {
-        resources.light_volume.mark_dirty();
-        resources.run_iterations(
-            device,
-            queue,
-            &world_bindings,
-            &lighting_uniform,
-            CONVERGENCE_ITERATIONS,
-        );
-        read_back_volume(device, queue, &resources.light_volume)
-    };
-    println!("  CAGI re-flood after the carve:");
-    println!(
-        "  {:>10} {:>8} {:>18} {:>10}",
-        "iterations", "frames", "differing cells", "%"
-    );
-    resources.light_volume.mark_dirty();
-    resources.run_iterations(device, queue, &world_bindings, &lighting_uniform, 0);
-    let mut iterations_done = 0_u32;
-    for rung in [0_u32, 2, 4, 8, 16, 32, 64, 128] {
-        if rung > iterations_done {
-            resources.run_iterations(
-                device,
-                queue,
-                &world_bindings,
-                &lighting_uniform,
-                rung - iterations_done,
-            );
-            iterations_done = rung;
-        }
-        let volume = read_back_volume(device, queue, &resources.light_volume);
-        let differing = volume
-            .iter()
-            .zip(&converged)
-            .filter(|(current, target)| current != target)
-            .count();
-        println!(
-            "  {rung:>10} {:>8.1} {differing:>18} {:>9.4}%",
-            rung as f32 / quality.global_illumination.iterations_per_frame as f32,
-            differing as f64 / converged.len() as f64 * 100.0,
-        );
-    }
-}
-
-/// The E2 memory table: CPU authority, GPU buffers, and what the edit headroom
-/// costs.
 fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
     println!();
     println!("== E2 memory ==");

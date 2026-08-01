@@ -1578,9 +1578,8 @@ mod tests {
             );
         }
     }
-    /// A cell's radiance is now a quantity of exposed emitting area, not an
-    /// elected material slot. The embedded-emitter studio prop must therefore
-    /// produce a non-zero but sub-material radiance.
+    /// A complete one-metre emitting block fills its CAGI cells and therefore
+    /// contributes the material's full radiance at an exposed cell.
     #[test]
     fn embedded_emission_is_area_weighted() {
         let scene = crate::studio::StudioScene {
@@ -1599,11 +1598,9 @@ mod tests {
             cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled()).emission;
         let full = MATERIALS[crate::material::material_id(Voxel::GlowBlock) as usize]
             .mean_emitted_radiance();
-        assert!(emission[0] > 0.0);
-        assert!(
-            emission[0] < full[0],
-            "embedded source was not area weighted"
-        );
+        for channel in 0..3 {
+            assert!((emission[channel] - full[channel]).abs() < 1e-5);
+        }
     }
 
     /// E5c — the test the original hole fell through: an air cell beside an
@@ -1771,6 +1768,7 @@ mod tests {
         };
         let mut brickmap = scene.build();
         let block = scene.emitter_block_voxel();
+        let world_block = scene.emitter_block_world_voxel();
         for offset in [
             [1, 0, 0],
             [-1, 0, 0],
@@ -1779,12 +1777,14 @@ mod tests {
             [0, 0, 1],
             [0, 0, -1],
         ] {
-            brickmap.set_voxel(
-                block[0] + offset[0],
-                block[1] + offset[1],
-                block[2] + offset[2],
+            brickmap.set_world_voxel(
+                voxel_core::world::WorldVoxelCoord::new(
+                    world_block[0] + offset[0],
+                    world_block[1] + offset[1],
+                    world_block[2] + offset[2],
+                ),
                 Voxel::Stone,
-                crate::brickmap::ClearanceUpdate::LocalBox { radius_cells: 1 },
+                crate::brickmap::ClearanceUpdate::LocalBox { radius_cells: 8 },
             );
         }
         let grid = CagiSettings::default().grid(&brickmap);

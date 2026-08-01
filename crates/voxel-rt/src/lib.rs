@@ -8,8 +8,7 @@
 //! world authority + edit threading (`world_edit`, `world_host`, E2) ↔ CPU
 //! traversal for picking and audio (`voxel_dda`, E2/E8) ↔
 //! camera (`camera`) ↔ character body + voxel collision (`character`, E2b — the
-//! audio listener at E8 and the VR player at E9) ↔ the swim-test pool carve
-//! (`debug_pool`, an E2b test tool riding the E2 bulk-edit path) ↔
+//! audio listener at E8 and the VR player at E9) ↔
 //! lighting (`lighting`) ↔ traversal levers (`traversal`,
 //! S2) ↔ ambient occlusion (`ao`, E1) ↔ sun shadows (`shadows`, E1b) ↔ CAGI light
 //! volume (`cagi`, E4) ↔ water optics (`water`, E6) ↔ lever registry + quality
@@ -26,7 +25,6 @@ pub mod brickmap;
 pub mod cagi;
 pub mod camera;
 pub mod character;
-pub mod debug_pool;
 pub mod environment;
 pub mod frame_timing;
 pub mod gpu;

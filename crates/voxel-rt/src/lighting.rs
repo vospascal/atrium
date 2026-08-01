@@ -12,6 +12,8 @@
 //! Sun color/intensity and the hemisphere-ambient colors are fixed constants
 //! for now (Stage 4's look pass decides whether they become settings too).
 
+use std::f32::consts::TAU;
+
 use glam::Vec3;
 
 /// Sun color, linear RGB — slightly warm daylight.
@@ -50,6 +52,10 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 80     | `gi_params`           | `vec4<f32>` | the runtime CAGI knobs — see [`GiParams`] |
 /// | 96     | `water_params`        | `vec4<f32>` | the runtime E6 water knobs — see [`WaterParams`] |
 /// | 112    | `water_optics`        | `vec4<f32>` | the E6 water look knobs — see [`WaterParams`] |
+/// | 128    | `celestial_sun`       | `vec4<f32>` | physical sun direction + daylight |
+/// | 144    | `celestial_moon`      | `vec4<f32>` | moon direction + phase |
+/// | 160    | `sky_zenith`          | `vec4<f32>` | zenith radiance + star rotation |
+/// | 176    | `sky_horizon`         | `vec4<f32>` | horizon radiance + moonlight |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -62,6 +68,14 @@ pub struct LightingUniform {
     pub gi_params: [f32; 4],
     pub water_params: [f32; 4],
     pub water_optics: [f32; 4],
+    /// xyz = physical sun direction (including below the horizon), w = daylight.
+    pub celestial_sun: [f32; 4],
+    /// xyz = moon direction, w = moon phase (0/1 new, 0.5 full).
+    pub celestial_moon: [f32; 4],
+    /// rgb = sky zenith radiance, w = star-field rotation in radians.
+    pub sky_zenith: [f32; 4],
+    /// rgb = sky horizon radiance, w = moonlight strength.
+    pub sky_horizon: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -206,6 +220,18 @@ pub struct SunSettings {
     /// is still enough to read every surface, so an emitter's contribution stays
     /// invisible. Turning both down is what makes a dark room dark.
     pub ambient_scale: f32,
+    /// Drive the light and sky from [`Self::day_phase`] instead of treating the
+    /// azimuth/elevation fields as a completely manual directional light.
+    pub day_night_enabled: bool,
+    /// Advance [`Self::day_phase`] each frame. The Studio defaults to a frozen
+    /// noon so opening a material never changes underneath the author.
+    pub cycle_running: bool,
+    /// Normalized time of day: 0/1 midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset.
+    pub day_phase: f32,
+    /// Real seconds for one complete in-world day.
+    pub day_length_seconds: f32,
+    /// 0/1 new moon, 0.5 full moon.
+    pub moon_phase: f32,
 }
 
 impl Default for SunSettings {
@@ -221,13 +247,140 @@ impl Default for SunSettings {
             elevation_degrees: stage_one_direction.y.asin().to_degrees(),
             intensity_scale: 1.0,
             ambient_scale: 1.0,
+            day_night_enabled: true,
+            cycle_running: false,
+            day_phase: 0.5,
+            day_length_seconds: 240.0,
+            moon_phase: 0.85,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CelestialState {
+    sun_direction: Vec3,
+    moon_direction: Vec3,
+    active_direction: Vec3,
+    active_color: [f32; 3],
+    direct_strength: f32,
+    ambient_strength: f32,
+    daylight: f32,
+    moonlight: f32,
+    zenith: [f32; 3],
+    horizon: [f32; 3],
+    star_rotation: f32,
+}
+
+fn mix_rgb(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
+    [
+        from[0] + (to[0] - from[0]) * amount,
+        from[1] + (to[1] - from[1]) * amount,
+        from[2] + (to[2] - from[2]) * amount,
+    ]
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 impl SunSettings {
-    /// Unit direction from a surface toward the sun.
-    pub fn sun_direction(&self) -> Vec3 {
+    pub fn advance_day_cycle(&mut self, elapsed_seconds: f32) {
+        if self.day_night_enabled && self.cycle_running {
+            let day_length = self.day_length_seconds.max(1.0);
+            self.day_phase =
+                (self.day_phase + elapsed_seconds.max(0.0) / day_length).rem_euclid(1.0);
+        }
+    }
+
+    /// Human-readable 24-hour clock for the Studio overlay.
+    pub fn clock_label(&self) -> String {
+        let total_minutes = (self.day_phase.rem_euclid(1.0) * 24.0 * 60.0).round() as u32;
+        format!("{:02}:{:02}", (total_minutes / 60) % 24, total_minutes % 60)
+    }
+
+    fn celestial_state(&self) -> CelestialState {
+        if !self.day_night_enabled {
+            let direction = self.manual_sun_direction();
+            return CelestialState {
+                sun_direction: direction,
+                moon_direction: -direction,
+                active_direction: direction,
+                active_color: SUN_COLOR,
+                direct_strength: 1.0,
+                ambient_strength: 1.0,
+                daylight: 1.0,
+                moonlight: 0.0,
+                zenith: [0.08, 0.31, 2.55],
+                horizon: [2.55, 1.37, 0.63],
+                star_rotation: 0.0,
+            };
+        }
+
+        let phase = self.day_phase.rem_euclid(1.0);
+        let orbit = (phase - 0.25) * TAU;
+        let sun_height = orbit.sin();
+        let daylight = smoothstep(0.0, 0.25, sun_height);
+        let moonlight = smoothstep(0.05, 0.35, -sun_height);
+        let elevation = self.elevation_degrees.to_radians() * sun_height;
+        // A 160-degree east-to-west sweep between sunrise and sunset, while the
+        // authored azimuth remains the noon direction and preserves the old look.
+        let azimuth = (self.azimuth_degrees + (phase - 0.5) * 320.0).to_radians();
+        let (sin_elevation, cos_elevation) = elevation.sin_cos();
+        let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+        let sun_direction = Vec3::new(
+            cos_elevation * cos_azimuth,
+            sin_elevation,
+            cos_elevation * sin_azimuth,
+        )
+        .normalize();
+        let moon_direction = -sun_direction;
+        let is_day = sun_height > 0.0;
+        let active_direction = if is_day {
+            sun_direction
+        } else {
+            moon_direction
+        };
+        let horizon_warmth = 1.0 - smoothstep(0.0, 0.35, sun_height.max(0.0));
+        let sun_color = mix_rgb(SUN_COLOR, [1.0, 0.52, 0.24], horizon_warmth);
+        let moon_color = [0.38, 0.50, 1.0];
+        let phase_brightness = 0.15 + 0.85 * (0.5 - 0.5 * (self.moon_phase * TAU).cos());
+        let direct_strength = if is_day {
+            daylight * (0.75 + 0.25 * sun_height.max(0.0))
+        } else {
+            moonlight * phase_brightness * 0.045
+        };
+        let ambient_strength = 0.045 + daylight * 0.955 + moonlight * phase_brightness * 0.08;
+
+        const NIGHT_ZENITH: [f32; 3] = [0.002, 0.004, 0.018];
+        const DAY_ZENITH: [f32; 3] = [0.08, 0.31, 2.55];
+        const NIGHT_HORIZON: [f32; 3] = [0.012, 0.020, 0.060];
+        const DAY_HORIZON: [f32; 3] = [2.55, 1.37, 0.63];
+        const TWILIGHT: [f32; 3] = [3.0, 0.55, 0.12];
+        let twilight = (1.0 - (sun_height.abs() / 0.28).min(1.0)) * 0.55;
+        let zenith = mix_rgb(NIGHT_ZENITH, DAY_ZENITH, daylight);
+        let horizon = mix_rgb(
+            mix_rgb(NIGHT_HORIZON, DAY_HORIZON, daylight),
+            TWILIGHT,
+            twilight,
+        );
+
+        CelestialState {
+            sun_direction,
+            moon_direction,
+            active_direction,
+            active_color: if is_day { sun_color } else { moon_color },
+            direct_strength,
+            ambient_strength,
+            daylight,
+            moonlight,
+            zenith,
+            horizon,
+            star_rotation: phase * TAU,
+        }
+    }
+
+    fn manual_sun_direction(&self) -> Vec3 {
         let azimuth_radians = self.azimuth_degrees.to_radians();
         let elevation_radians = self.elevation_degrees.to_radians();
         let (sin_elevation, cos_elevation) = elevation_radians.sin_cos();
@@ -237,6 +390,27 @@ impl SunSettings {
             sin_elevation,
             cos_elevation * sin_azimuth,
         )
+    }
+
+    /// Unit direction from a surface toward the sun.
+    pub fn sun_direction(&self) -> Vec3 {
+        self.celestial_state().active_direction
+    }
+
+    /// Whether the CAGI volume has drifted far enough from its last celestial
+    /// solution to warrant a new flood. Direct light and the sky still update
+    /// every frame; this threshold prevents an animated clock from resetting
+    /// the iterative volume sixty times per second.
+    pub fn requires_light_reflood(&self, previous: &Self) -> bool {
+        let current = self.celestial_state();
+        let previous_state = previous.celestial_state();
+        current
+            .active_direction
+            .dot(previous_state.active_direction)
+            < 0.9994
+            || (current.direct_strength - previous_state.direct_strength).abs() > 0.04
+            || (self.intensity_scale - previous.intensity_scale).abs() > f32::EPSILON
+            || (self.ambient_scale - previous.ambient_scale).abs() > f32::EPSILON
     }
 
     /// This frame's GPU lighting data. `shading_params` carries the
@@ -250,21 +424,21 @@ impl SunSettings {
         gi_params: GiParams,
         water_params: WaterParams,
     ) -> LightingUniform {
-        let sun_direction = self.sun_direction();
+        let celestial = self.celestial_state();
         LightingUniform {
-            sun_direction: sun_direction.to_array(),
+            sun_direction: celestial.active_direction.to_array(),
             _pad0: 0.0,
             sun_color_intensity: [
-                SUN_COLOR[0],
-                SUN_COLOR[1],
-                SUN_COLOR[2],
-                SUN_INTENSITY * self.intensity_scale.max(0.0),
+                celestial.active_color[0],
+                celestial.active_color[1],
+                celestial.active_color[2],
+                SUN_INTENSITY * self.intensity_scale.max(0.0) * celestial.direct_strength,
             ],
             sky_ambient: [
-                SKY_AMBIENT_COLOR[0],
-                SKY_AMBIENT_COLOR[1],
+                SKY_AMBIENT_COLOR[0] * (0.25 + 0.75 * celestial.daylight),
+                SKY_AMBIENT_COLOR[1] * (0.25 + 0.75 * celestial.daylight),
                 SKY_AMBIENT_COLOR[2],
-                AMBIENT_STRENGTH * self.ambient_scale.max(0.0),
+                AMBIENT_STRENGTH * self.ambient_scale.max(0.0) * celestial.ambient_strength,
             ],
             ground_ambient: [
                 GROUND_AMBIENT_COLOR[0],
@@ -276,6 +450,30 @@ impl SunSettings {
             gi_params: gi_params.to_array(),
             water_params: water_params.to_array(),
             water_optics: water_params.optics_to_array(),
+            celestial_sun: [
+                celestial.sun_direction.x,
+                celestial.sun_direction.y,
+                celestial.sun_direction.z,
+                celestial.daylight,
+            ],
+            celestial_moon: [
+                celestial.moon_direction.x,
+                celestial.moon_direction.y,
+                celestial.moon_direction.z,
+                self.moon_phase.clamp(0.0, 1.0),
+            ],
+            sky_zenith: [
+                celestial.zenith[0],
+                celestial.zenith[1],
+                celestial.zenith[2],
+                celestial.star_rotation,
+            ],
+            sky_horizon: [
+                celestial.horizon[0],
+                celestial.horizon[1],
+                celestial.horizon[2],
+                celestial.moonlight,
+            ],
         }
     }
 }
@@ -318,7 +516,7 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 128);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 192);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
     }
 
@@ -426,5 +624,63 @@ mod tests {
         };
         let direction = settings.sun_direction();
         assert!((direction - Vec3::Y).length() < 1e-5);
+    }
+
+    #[test]
+    fn day_cycle_advances_only_when_enabled_and_running() {
+        let mut settings = SunSettings::default();
+        let noon = settings.day_phase;
+        settings.advance_day_cycle(60.0);
+        assert_eq!(settings.day_phase, noon, "paused Studio clock moved");
+
+        settings.cycle_running = true;
+        settings.advance_day_cycle(settings.day_length_seconds * 0.75);
+        assert!(
+            (settings.day_phase - 0.25).abs() < 1e-5,
+            "day phase did not wrap"
+        );
+
+        settings.day_night_enabled = false;
+        let stopped = settings.day_phase;
+        settings.advance_day_cycle(60.0);
+        assert_eq!(settings.day_phase, stopped, "disabled cycle moved");
+    }
+
+    #[test]
+    fn noon_and_midnight_produce_distinct_sky_states() {
+        let noon = probe_uniform_for(
+            SunSettings {
+                day_phase: 0.5,
+                ..SunSettings::default()
+            },
+            1.0,
+        );
+        let midnight = probe_uniform_for(
+            SunSettings {
+                day_phase: 0.0,
+                ..SunSettings::default()
+            },
+            1.0,
+        );
+        assert!(noon.celestial_sun[3] > midnight.celestial_sun[3]);
+        assert!(midnight.celestial_moon[1] > 0.0);
+        assert!(noon.celestial_moon[1] < 0.0);
+        assert!(noon.sky_zenith[2] > midnight.sky_zenith[2]);
+        assert_eq!(
+            SunSettings {
+                day_phase: 0.5,
+                ..SunSettings::default()
+            }
+            .clock_label(),
+            "12:00"
+        );
+        assert_eq!(
+            SunSettings {
+                day_phase: 0.0,
+                ..SunSettings::default()
+            }
+            .clock_label(),
+            "00:00"
+        );
     }
 }

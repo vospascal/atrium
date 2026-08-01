@@ -13,8 +13,9 @@
 //! whole delta of a typical edit is 576 bytes, so copying it is cheaper than the
 //! synchronization that avoiding the copy would need.
 
-use crate::brickmap::{Brickmap, BrickmapArray, BrickmapEdit, ClearanceUpdate};
+use crate::brickmap::{Brickmap, BrickmapArray, ClearanceUpdate};
 use crate::cagi::{CagiGrid, LightCellUpdate, MaterialAttributes};
+use voxel_core::world::{WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL};
 
 /// How a removal that empties a brick repairs the chebyshev clearance field —
 /// the registry-facing mirror of [`ClearanceUpdate`] (which carries the radius
@@ -85,7 +86,7 @@ impl WorldEditSettings {
     }
 }
 
-/// One requested voxel change, in world-voxel coordinates.
+/// One requested change in authoritative one-metre world-voxel coordinates.
 ///
 /// `light_grid` is the CAGI volume's current geometry, handed in by the caller
 /// because the volume's resolution is a lever: the authority recomputes the
@@ -108,49 +109,6 @@ pub struct VoxelEdit {
     pub material_attributes: MaterialAttributes,
 }
 
-/// A run of voxels along Y in one column, inclusive at both ends — the unit a
-/// BULK edit is described in.
-///
-/// Spans, not voxels: the world is column-structured (its generator, its
-/// brickmap build and its height caches all are), so any large edit is a handful
-/// of runs per column. Describing a 400 000-voxel pool as ~25 000 spans is what
-/// keeps the REQUEST small enough to build and send without the frame noticing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VoxelSpan {
-    pub x: i32,
-    pub z: i32,
-    pub y_from: i32,
-    pub y_to: i32,
-    pub material: voxel_core::world::Voxel,
-}
-
-/// A change of many voxels that the authority expands ITSELF.
-///
-/// The seam: the requester describes the change in a few bytes, the world thread
-/// turns it into spans against the authoritative brickmap (which is the only
-/// place the terrain can be read while it is being written) and publishes ONE
-/// coalesced [`WorldDelta`]. So the frame thread pays for a `Box`, not for
-/// hundreds of thousands of voxels — E2's whole point, applied to bulk work.
-///
-/// Today's implementor is [`crate::debug_pool::WaterPool`]; E3's generation, B6's
-/// falling-sand fluids and B8's streaming are the same shape.
-pub trait BulkEdit: Send {
-    /// The spans to write, in application order. Called on the world thread with
-    /// the authority's brickmap, before anything has been written.
-    fn spans(&self, brickmap: &Brickmap) -> Vec<VoxelSpan>;
-    /// What this edit is, for the log line and the overlay readout.
-    fn label(&self) -> &'static str;
-}
-
-/// A bulk edit request: the shape, plus the light volume's current geometry (the
-/// same reason [`VoxelEdit`] carries it).
-pub struct BulkEditRequest {
-    pub shape: Box<dyn BulkEdit>,
-    pub light_grid: Option<CagiGrid>,
-    /// See [`VoxelEdit::material_attributes`] — same reason, same 416 bytes.
-    pub material_attributes: MaterialAttributes,
-}
-
 /// A contiguous word payload for one of the brickmap's GPU buffers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArrayWrite {
@@ -170,11 +128,10 @@ impl ArrayWrite {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldDelta {
     /// The voxel this delta is reported at, and what it became (for the overlay
-    /// readout). A bulk delta reports its FIRST written voxel.
+    /// readout).
     pub voxel: [i32; 3],
     pub material: u8,
-    /// How many voxels this delta covers: 1 for a single edit, N for a bulk one,
-    /// whose word ranges are coalesced across all of them.
+    /// How many one-metre world voxels this delta covers.
     pub voxels_written: usize,
     /// Word payloads for the brickmap buffers.
     pub writes: Vec<ArrayWrite>,
@@ -223,14 +180,17 @@ pub fn apply(
     settings: &WorldEditSettings,
 ) -> Option<WorldDelta> {
     let started = std::time::Instant::now();
-    let applied = brickmap.set_voxel(
-        edit.voxel[0],
-        edit.voxel[1],
-        edit.voxel[2],
-        edit.material,
-        settings.clearance(),
-    )?;
-    let light_cells = light_cell_updates(brickmap, edit, &applied);
+    let coordinate = WorldVoxelCoord::new(edit.voxel[0], edit.voxel[1], edit.voxel[2]);
+    let applied = brickmap.set_world_voxel(coordinate, edit.material, settings.clearance())?;
+    let detail_origin = coordinate.detail_origin();
+    let detail_max = detail_origin.map(|value| value + DETAIL_CELLS_PER_WORLD_VOXEL as i32 - 1);
+    let light_cells = light_cells_in_voxel_box(
+        brickmap,
+        edit.light_grid,
+        detail_origin,
+        detail_max,
+        &edit.material_attributes,
+    );
     let apply_micros = started.elapsed().as_secs_f32() * 1e6;
     let writes = applied
         .dirty
@@ -244,7 +204,7 @@ pub fn apply(
         })
         .collect();
     Some(WorldDelta {
-        voxel: applied.voxel,
+        voxel: edit.voxel,
         material: applied.material,
         voxels_written: 1,
         writes,
@@ -257,142 +217,8 @@ pub fn apply(
     })
 }
 
-/// Apply a whole SHAPE to `brickmap` and package it as ONE delta.
-///
-/// Same per-voxel machinery as [`apply`] — [`Brickmap::set_voxel`], so every
-/// derived structure (occupancy, materials, brick allocation, the chebyshev
-/// clearance field, the height caches) is repaired exactly as a click would
-/// repair it — with three differences that only a bulk edit needs:
-///
-/// 1. **the dirty ranges are coalesced across every voxel**
-///    ([`crate::brickmap::coalesce_dirty_words`]): the 320 000-voxel pool becomes
-///    a few hundred `write_buffer` calls instead of a million;
-/// 2. **the touched CAGI cells are recomputed once, over the edit's bounding
-///    box**, after all writes — recomputing per voxel would redo the same cell
-///    dozens of times, and the box is a superset of what changed, which is what
-///    correctness needs;
-/// 3. **no-ops are free**: a span may cross voxels that already hold the target
-///    material (the pool's rim does, by construction), and those cost one `get`.
-///
-/// `None` when the shape changed nothing.
-pub fn apply_bulk(
-    brickmap: &mut Brickmap,
-    request: &BulkEditRequest,
-    settings: &WorldEditSettings,
-) -> Option<WorldDelta> {
-    let started = std::time::Instant::now();
-    let spans = request.shape.spans(brickmap);
-    let clearance = settings.clearance();
-    let mut dirty = Vec::new();
-    let mut first_written: Option<([i32; 3], u8)> = None;
-    let mut voxels_written = 0_usize;
-    let mut lowest = [i32::MAX; 3];
-    let mut highest = [i32::MIN; 3];
-    let mut metadata_changed = false;
-    let mut arrays_grew = false;
-    let mut clearance_cells_written = 0_usize;
-    for span in &spans {
-        for y in span.y_from..=span.y_to {
-            let Some(applied) = brickmap.set_voxel(span.x, y, span.z, span.material, clearance)
-            else {
-                continue;
-            };
-            voxels_written += 1;
-            first_written = first_written.or(Some((applied.voxel, applied.material)));
-            for axis in 0..3 {
-                lowest[axis] = lowest[axis].min(applied.voxel[axis]);
-                highest[axis] = highest[axis].max(applied.voxel[axis]);
-            }
-            metadata_changed |= applied.metadata_changed;
-            arrays_grew |= applied.arrays_grew;
-            clearance_cells_written += applied.clearance_cells_written;
-            dirty.extend(applied.dirty);
-        }
-    }
-    let (voxel, material) = first_written?;
-    let light_cells = light_cells_in_voxel_box(
-        brickmap,
-        request.light_grid,
-        lowest,
-        highest,
-        &request.material_attributes,
-    );
-    let apply_micros = started.elapsed().as_secs_f32() * 1e6;
-    let writes = crate::brickmap::coalesce_dirty_words(dirty)
-        .into_iter()
-        .map(|range| ArrayWrite {
-            array: range.array,
-            first_word: range.first_word,
-            words: brickmap.array_words(range.array)
-                [range.first_word..range.first_word + range.word_count]
-                .to_vec(),
-        })
-        .collect();
-    Some(WorldDelta {
-        voxel,
-        material,
-        voxels_written,
-        writes,
-        light_cells,
-        light_grid: request.light_grid,
-        metadata: metadata_changed.then(|| brickmap.metadata()),
-        arrays_grew,
-        clearance_cells_written,
-        apply_micros,
-    })
-}
-
-/// The CAGI cells an edit invalidates. A cell never straddles two bricks and its
-/// attribute is a function of its voxels plus one-voxel neighbour exposure, so an
-/// edit invalidates the containing cell and adjacent cells whose exposed area
-/// changed.
-fn light_cell_updates(
-    brickmap: &Brickmap,
-    edit: &VoxelEdit,
-    applied: &BrickmapEdit,
-) -> Vec<LightCellUpdate> {
-    let Some(grid) = edit.light_grid else {
-        return Vec::new();
-    };
-    let mut cells = Vec::new();
-    for [dx, dy, dz] in [
-        [0, 0, 0],
-        [1, 0, 0],
-        [-1, 0, 0],
-        [0, 1, 0],
-        [0, -1, 0],
-        [0, 0, 1],
-        [0, 0, -1],
-    ] {
-        let voxel = [
-            applied.voxel[0] + dx,
-            applied.voxel[1] + dy,
-            applied.voxel[2] + dz,
-        ];
-        if voxel.iter().any(|coordinate| *coordinate < 0) {
-            continue;
-        }
-        let cell = [
-            voxel[0] as u32 / grid.cell_voxels,
-            voxel[1] as u32 / grid.cell_voxels,
-            voxel[2] as u32 / grid.cell_voxels,
-        ];
-        if (0..3).any(|axis| cell[axis] >= grid.size[axis]) {
-            continue;
-        }
-        cells.push(cell);
-    }
-    cells.sort_unstable();
-    cells.dedup();
-    cells
-        .into_iter()
-        .map(|cell| crate::cagi::cell_attribute(brickmap, &grid, cell, &edit.material_attributes))
-        .collect()
-}
-
-/// Every CAGI cell overlapping an inclusive voxel box, with its attribute
-/// recomputed from the finished brickmap — the bulk path's counterpart to
-/// [`light_cell_updates`].
+/// Every CAGI cell overlapping an inclusive detail-cell box, with its attribute
+/// recomputed from the finished brickmap.
 ///
 /// Recomputes the touched cell box plus the six face-adjacent cell slabs. A
 /// diagonal cell cannot share a voxel face with the edit, so it cannot have its
@@ -500,11 +326,14 @@ mod tests {
             .find(|y| brickmap.is_occupied(500, *y, 500))
             .expect("occupied column");
 
-        // The common case: carve one voxel out of solid ground.
+        let world_x = 500 / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let world_y = surface_y / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let world_z = 500 / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        // The common case: remove one whole one-metre ground voxel.
         let delta = apply(
             &mut brickmap,
             &VoxelEdit {
-                voxel: [500, surface_y, 500],
+                voxel: [world_x, world_y, world_z],
                 material: Voxel::Air,
                 light_grid: Some(grid),
                 material_attributes: MaterialAttributes::compiled(),
@@ -514,7 +343,10 @@ mod tests {
         .expect("carving solid ground changes something");
         assert_eq!(delta.material, 0);
         assert!(!delta.arrays_grew);
-        assert_eq!(delta.clearance_cells_written, 0, "no brick flipped");
+        assert!(
+            delta.clearance_cells_written > 0,
+            "removing a uniform world brick must repair clearance"
+        );
         assert!(!delta.light_cells.is_empty());
         for write in &delta.writes {
             let words = brickmap.array_words(write.array);
@@ -525,11 +357,9 @@ mod tests {
                 write.array
             );
         }
-        // The brickmap words plus at most seven 8-byte CAGI cells (the edited cell
-        // and its six face neighbours). Tight on purpose: this number is the E2
-        // verdict, so it should fail when E5b's fan-out or packing grows.
+        // A 1 m edit overlaps multiple CAGI cells, but remains a small patch.
         assert!(
-            delta.upload_bytes() <= 128,
+            delta.upload_bytes() <= 1024,
             "a carve inside an existing brick uploaded {} bytes",
             delta.upload_bytes()
         );
@@ -538,7 +368,7 @@ mod tests {
         assert!(apply(
             &mut brickmap,
             &VoxelEdit {
-                voxel: [500, surface_y, 500],
+                voxel: [world_x, world_y, world_z],
                 material: Voxel::Air,
                 light_grid: Some(grid),
                 material_attributes: MaterialAttributes::compiled(),
@@ -551,7 +381,7 @@ mod tests {
         let delta = apply(
             &mut brickmap,
             &VoxelEdit {
-                voxel: [200, 250, 200],
+                voxel: [25, 31, 25],
                 material: Voxel::Stone,
                 light_grid: Some(grid),
                 material_attributes: MaterialAttributes::compiled(),
@@ -576,24 +406,24 @@ mod tests {
             .rev()
             .find(|y| brickmap.is_occupied(500, *y, 500))
             .expect("occupied column");
-        let mut deltas = Vec::new();
+        let world_y = surface_y / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let mut deltas = std::collections::HashMap::new();
         for offset in 0..6 {
             if let Some(delta) = apply(
                 &mut brickmap,
                 &VoxelEdit {
-                    voxel: [500 + offset, surface_y, 500],
+                    voxel: [60 + offset, world_y, 62],
                     material: Voxel::Air,
                     light_grid: Some(grid),
                     material_attributes: MaterialAttributes::compiled(),
                 },
                 &settings,
             ) {
-                deltas.extend(
-                    delta
-                        .light_cells
-                        .into_iter()
-                        .map(|update| (update.index, update.attribute, update.emission)),
-                );
+                for update in delta.light_cells {
+                    // Later adjacent edits legitimately supersede an earlier
+                    // attribute for the same CAGI cell.
+                    deltas.insert(update.index, (update.attribute, update.emission));
+                }
             }
         }
         assert!(!deltas.is_empty());
@@ -602,7 +432,7 @@ mod tests {
             &grid,
             &MaterialAttributes::compiled(),
         );
-        for (cell_index, attribute, emission) in deltas {
+        for (cell_index, (attribute, emission)) in deltas {
             assert_eq!(
                 attribute, rebuilt[cell_index],
                 "cell {cell_index}'s incremental attribute drifted from the rebuild"

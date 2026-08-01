@@ -44,7 +44,7 @@ use crate::pattern::{
 };
 use crate::studio::StudioPose;
 use crate::vox_material::VoxImportRow;
-use voxel_core::world::VOXEL_SIZE;
+use voxel_core::world::WORLD_VOXEL_SIZE_METERS;
 
 /// The panel's own UI state — what is selected and what it has asked for.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1145,10 +1145,10 @@ fn texel_rung_hint(rung: u32) -> String {
                 a texel the grid is the only thing you would see."
             .to_string();
     }
-    let millimeters = VOXEL_SIZE / rung as f32 * 1000.0;
+    let millimeters = WORLD_VOXEL_SIZE_METERS / rung as f32 * 1000.0;
     format!(
-        "{rung} x {rung} texels per face, {millimeters:.1} mm each. \
-         A .vox model drawn at {rung} cells per voxel lands on exactly this grid."
+        "{rung} x {rung} texels per 1 m block face, {millimeters:.1} mm each. \
+         At 8 x 8, material detail aligns to the 0.125 m asset-cell grid."
     )
 }
 

@@ -6,7 +6,6 @@ members = [
     "crates/bevy-ui",
     "crates/behavior",
     "crates/voxel-core",
-    "crates/voxel-sandbox",
     "crates/voxel-rt",
 ]
 
@@ -53,18 +52,13 @@ memprof = []
 [profile.dev.package."*"]
 opt-level = 3
 
-# Voxel generation + meshing iterates millions of cells; unusable at opt 0.
-[profile.dev.package.voxel-sandbox]
-opt-level = 2
-
-# voxel-core holds the hot generation + noise math (moved out of voxel-sandbox
-# in the Stage 0 refactor). The `*` glob above only covers dependencies, not
+# voxel-core holds the hot generation + noise math. The `*` glob above only covers dependencies, not
 # workspace members, so without this generation runs unoptimized (~20× slower).
 [profile.dev.package.voxel-core]
 opt-level = 2
 
 # voxel-rt traverses the voxel grid per pixel on the CPU side (brickmap builds,
-# uploads); same reasoning as voxel-sandbox/voxel-core above.
+# uploads); same reasoning as voxel-core above.
 [profile.dev.package.voxel-rt]
 opt-level = 2
 

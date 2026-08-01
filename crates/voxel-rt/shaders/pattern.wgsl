@@ -212,7 +212,10 @@ fn pattern_snap_to_texels(meters: vec3<f32>, texels: u32,
     if (texels == 0u) {
         return meters;
     }
-    let texel = voxel_size_meters / f32(texels);
+    // The brick is the authoritative one-metre world voxel. The smaller value in
+    // BrickmapMeta is the ray-traversal/detail-cell size.
+    let world_voxel_size_meters = voxel_size_meters * BRICK_SIZE;
+    let texel = world_voxel_size_meters / f32(texels);
     return floor(meters / texel) * texel + vec3<f32>(texel * 0.5);
 }
 
@@ -222,19 +225,20 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
                       voxel_size_meters: f32) -> vec3<f32> {
     let period = max(layer.period_meters, 1e-4);
     let frame = pattern_frame(layer);
+    let world_voxel_size_meters = voxel_size_meters * BRICK_SIZE;
+    let world_voxel = sample.voxel / vec3<i32>(i32(BRICK_SIZE));
     var meters = sample.world_meters;
     if (frame == PATTERN_FRAME_VOXEL) {
         // Quantised to the voxel's own centre, so the generator returns ONE value
         // for the whole voxel without any generator knowing about voxels — and why
         // the texel snap is a no-op here, a centre already being one point.
-        meters = (vec3<f32>(sample.voxel) + vec3<f32>(0.5)) * voxel_size_meters;
+        meters = (vec3<f32>(world_voxel) + vec3<f32>(0.5)) * world_voxel_size_meters;
     } else if (frame == PATTERN_FRAME_FACE) {
         // Voxel-local, so the pattern repeats identically on every face — which is
         // what "about the face" means. The face's own axis keeps its local value
         // rather than being zeroed, so a 3D generator still sees three varying
         // inputs on a face that happens to be flat in one of them.
-        meters = (sample.world_meters / voxel_size_meters - vec3<f32>(sample.voxel))
-            * voxel_size_meters;
+        meters = sample.world_meters - vec3<f32>(world_voxel) * world_voxel_size_meters;
     }
     // Otherwise WORLD: a field the world sits in, so it flows across neighbouring
     // voxels and CANNOT tile per voxel. The default, and the continuity argument.
@@ -256,15 +260,16 @@ fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
     if (!pattern_varies_per_face(layer) || pattern_frame(layer) != PATTERN_FRAME_FACE) {
         return 0u;
     }
-    // The face index 0..5 over (axis, sign), so a voxel's top and bottom differ too.
+    let world_voxel = sample.voxel / vec3<i32>(i32(BRICK_SIZE));
+    // The face index 0..5 over (axis, sign), so a world voxel's top and bottom differ too.
     var face = sample.axis * 2u;
     if (sample.axis_sign >= 0.0) {
         face = face + 1u;
     }
     return pattern_hash_u32(
-        (bitcast<u32>(sample.voxel.x) * 0x9e3779b9u)
-        ^ (bitcast<u32>(sample.voxel.y) * 0x85ebca6bu)
-        ^ (bitcast<u32>(sample.voxel.z) * 0xc2b2ae35u)
+        (bitcast<u32>(world_voxel.x) * 0x9e3779b9u)
+        ^ (bitcast<u32>(world_voxel.y) * 0x85ebca6bu)
+        ^ (bitcast<u32>(world_voxel.z) * 0xc2b2ae35u)
         ^ (face * 0x27d4eb2du)
     );
 }

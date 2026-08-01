@@ -285,14 +285,9 @@ impl LightVolume {
     /// Patch the static attributes of the cells an edit touched (E2). One `u32`
     /// per cell, so a placed voxel costs 4 bytes here.
     ///
-    /// **Consecutive cell indices become ONE `write_buffer`.** A click touches a
-    /// single cell and never notices, but a bulk edit
-    /// ([`crate::world_edit::apply_bulk`]) touches a box of them, which is
-    /// contiguous along X: without this, the test-pool carve spent **93 ms of one
-    /// frame** issuing 28 672 four-byte writes at ~3 µs of driver overhead each —
-    /// the upload, not the edit, was the hitch. Grouping the rows takes that to
-    /// under a millisecond. Requires `cells` to be sorted by index, which both
-    /// producers are.
+    /// **Consecutive cell indices become ONE `write_buffer`.** A one-metre edit
+    /// overlaps several CAGI cells, and grouping those sorted rows avoids paying
+    /// driver overhead once per four-byte attribute.
     ///
     /// `grid` is the grid the cell INDICES were computed for: a mismatch means the
     /// volume was reallocated at another resolution while the edit was in flight, so

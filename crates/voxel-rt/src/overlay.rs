@@ -24,7 +24,6 @@ use winit::window::Window;
 
 use crate::ao::AoMode;
 use crate::character::Submersion;
-use crate::debug_pool::{POOL_DEPTH_METERS, POOL_DISTANCE_AHEAD_METERS, POOL_WATER_RADIUS_METERS};
 use crate::frame_timing::FrameTimings;
 use crate::graph::{
     FieldDeclarationStatic, FieldTarget, GraphCommand, InputPin, LinkId, NodeCategory,
@@ -177,7 +176,6 @@ impl Overlay {
         vsync_enabled: &mut bool,
         sun_settings: &mut SunSettings,
         quality: &mut RenderQuality,
-        carve_test_pool_requested: &mut bool,
         material_table: &mut MaterialTable,
         studio_assets: &mut StudioAssetPanelState,
         graph_editor: &mut GraphEditorState,
@@ -252,7 +250,7 @@ impl Overlay {
                         ))
                         .on_hover_text(
                             "E2: voxel edits applied by the world authority — one per click, and \
-                             one coalesced delta per bulk edit (hence the separate voxel count). \
+                             one delta per one-metre world edit. \
                              `apply` is the CPU cost of patching the brickmap and every derived \
                              structure; `delta` is what the last edit uploaded to the GPU. On the \
                              world thread neither is paid inside a frame.",
@@ -268,20 +266,59 @@ impl Overlay {
                         draw_studio_assets_section(ui, studio_assets);
                         draw_quality_section(ui, quality);
                         ui.label("Material authoring is defined by nodes in Graph Studio.");
-                        draw_debug_section(
-                            ui,
-                            carve_test_pool_requested,
-                            frame_data.movement.studio_orbit_distance_meters.is_none(),
-                        );
                         ui.collapsing("Sun", |ui| {
-                            ui.add(
-                                egui::Slider::new(&mut sun_settings.azimuth_degrees, 0.0..=360.0)
+                            ui.checkbox(&mut sun_settings.day_night_enabled, "day/night sky");
+                            if sun_settings.day_night_enabled {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut sun_settings.cycle_running, "run clock");
+                                    ui.label(sun_settings.clock_label());
+                                });
+                                ui.add(
+                                    egui::Slider::new(&mut sun_settings.day_phase, 0.0..=1.0)
+                                        .text("time of day"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut sun_settings.day_length_seconds,
+                                        30.0..=1_200.0,
+                                    )
+                                    .logarithmic(true)
+                                    .text("seconds per day"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut sun_settings.moon_phase, 0.0..=1.0)
+                                        .text("moon phase"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut sun_settings.azimuth_degrees,
+                                        0.0..=360.0,
+                                    )
+                                    .text("noon azimuth"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut sun_settings.elevation_degrees,
+                                        2.0..=90.0,
+                                    )
+                                    .text("noon elevation"),
+                                );
+                            } else {
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut sun_settings.azimuth_degrees,
+                                        0.0..=360.0,
+                                    )
                                     .text("azimuth"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut sun_settings.elevation_degrees, 2.0..=90.0)
+                                );
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut sun_settings.elevation_degrees,
+                                        2.0..=90.0,
+                                    )
                                     .text("elevation"),
-                            );
+                                );
+                            }
                             ui.add(
                                 egui::Slider::new(&mut sun_settings.intensity_scale, 0.0..=2.0)
                                     .text("sun intensity")
@@ -429,51 +466,6 @@ fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
              the whole movement + collision step on the frame thread.",
         );
     }
-}
-
-/// Test tools that CHANGE THE WORLD, kept in their own section and worded so
-/// that is unmistakable.
-///
-/// Deliberately not registry levers: [`crate::variants::REGISTRY`] rows carry
-/// measured frame-time verdicts and drive shader permutations, and a one-shot
-/// world edit has neither. The overlay only *asks* — the platform layer owns the
-/// edit, exactly as with every other control here.
-fn draw_debug_section(
-    ui: &mut egui::Ui,
-    carve_test_pool_requested: &mut bool,
-    world_edits_allowed: bool,
-) {
-    ui.collapsing("Debug tools", |ui| {
-        // Greyed out rather than left clickable-but-ignored: a button that does
-        // nothing reads as a bug, and the studio deliberately has no world to edit.
-        let hover = if world_edits_allowed {
-            format!(
-                "MODIFIES THE WORLD. Carves a {:.0} m wide, {POOL_DEPTH_METERS:.0} m deep pool \
-                 with a walk-in shore, centred {POOL_DISTANCE_AHEAD_METERS:.0} m in front of the \
-                 eye, and fills it with water — the island's own water is at most 1.75 m deep, \
-                 under the 1.44 m the body needs to swim. Applied through E2's edit pipeline on \
-                 the world thread; the light volume re-floods afterwards.",
-                POOL_WATER_RADIUS_METERS * 2.0,
-            )
-        } else {
-            "Disabled in the material studio: its scene is composed, not dug, and \
-             the whole point is that the voxel in frame is a known sample. Restart \
-             without `--studio` to edit the world."
-                .to_string()
-        };
-        if ui
-            .add_enabled(
-                world_edits_allowed,
-                egui::Button::new(format!(
-                    "Carve {POOL_DEPTH_METERS:.0} m water pool ahead (P)"
-                )),
-            )
-            .on_hover_text(hover)
-            .clicked()
-        {
-            *carve_test_pool_requested = true;
-        }
-    });
 }
 
 /// Persistent Studio controls. This only raises a request; the platform layer

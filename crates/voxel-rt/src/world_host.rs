@@ -33,9 +33,7 @@ use std::thread::JoinHandle;
 
 use crate::brickmap::Brickmap;
 use crate::cagi::{CagiGrid, MaterialAttributes};
-use crate::world_edit::{
-    apply, apply_bulk, BulkEditRequest, VoxelEdit, WorldDelta, WorldEditSettings,
-};
+use crate::world_edit::{apply, VoxelEdit, WorldDelta, WorldEditSettings};
 
 /// Something the render thread must apply, produced by the authority.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,7 +54,7 @@ pub enum WorldUpdate {
 pub struct WorldEditStats {
     pub edits_applied: u64,
     pub edits_ignored: u64,
-    /// Voxels the applied edits changed — one per click, thousands per bulk edit.
+    /// One-metre world voxels changed.
     pub voxels_written: u64,
     pub last_apply_micros: f32,
     pub last_upload_bytes: usize,
@@ -65,7 +63,6 @@ pub struct WorldEditStats {
 
 enum WorkerRequest {
     Edit(VoxelEdit, WorldEditSettings),
-    BulkEdit(BulkEditRequest, WorldEditSettings),
     LightAttributes(CagiGrid, MaterialAttributes),
     Stop,
 }
@@ -181,36 +178,6 @@ impl WorldHost {
         }
     }
 
-    /// Queue one BULK edit — a shape the authority expands into spans itself
-    /// ([`crate::world_edit::BulkEdit`]) and publishes as a single coalesced
-    /// delta.
-    ///
-    /// The frame thread pays for a `Box` move; the hundreds of thousands of
-    /// `set_voxel` calls happen where every other multi-millisecond world job
-    /// already does. In variant A it is inline, and the frame hitches — which is
-    /// the A/B this host exists to make visible.
-    pub fn request_bulk_edit(&mut self, request: BulkEditRequest, settings: &WorldEditSettings) {
-        match &mut self.worker {
-            Some(worker) => {
-                worker.in_flight += 1;
-                worker
-                    .requests
-                    .send(WorkerRequest::BulkEdit(request, *settings))
-                    .expect("the world thread outlives its sender");
-            }
-            None => {
-                let mut brickmap = self
-                    .brickmap
-                    .write()
-                    .expect("the world lock is never poisoned");
-                match apply_bulk(&mut brickmap, &request, settings) {
-                    Some(delta) => self.queued.push(WorldUpdate::Delta(delta)),
-                    None => self.stats.edits_ignored += 1,
-                }
-            }
-        }
-    }
-
     /// Rebuild the CAGI volume's static attributes for `grid` (E4's ~0.5 s sweep,
     /// which a GI resolution switch triggers). In variant B this happens on the
     /// world thread and arrives through [`Self::drain`]; in variant A it is applied
@@ -310,17 +277,6 @@ fn world_thread_main(
                     }
                 }
             }
-            WorkerRequest::BulkEdit(request, settings) => {
-                let delta = {
-                    let mut brickmap = brickmap.write().expect("the world lock is never poisoned");
-                    apply_bulk(&mut brickmap, &request, &settings)
-                };
-                if let Some(delta) = delta {
-                    if results.send(WorldUpdate::Delta(delta)).is_err() {
-                        break;
-                    }
-                }
-            }
             WorkerRequest::LightAttributes(grid, attribute_table) => {
                 let started = std::time::Instant::now();
                 let (attributes, emissions) = {
@@ -349,7 +305,9 @@ fn world_thread_main(
 mod tests {
     use super::*;
     use crate::material::material_id;
-    use voxel_core::world::{Voxel, VoxelWorld, WORLD_SIZE_Y};
+    use voxel_core::world::{
+        Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, WORLD_SIZE_Y,
+    };
 
     fn island_host() -> WorldHost {
         WorldHost::new(Brickmap::build(&VoxelWorld::generate(1234, 0.0)))
@@ -374,16 +332,16 @@ mod tests {
         threaded_host.set_world_thread(true);
         assert!(threaded_host.is_threaded() && !inline_host.is_threaded());
 
-        let base_y = surface_y(&inline_host, 500, 500);
+        let base_y = surface_y(&inline_host, 500, 500) / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
         let edits: Vec<VoxelEdit> = (0..16)
             .map(|index| VoxelEdit {
-                voxel: [500 + index % 4, base_y - index / 4, 500],
+                voxel: [60 + index % 4, base_y - index / 4, 62],
                 material: Voxel::Air,
                 light_grid: None,
                 material_attributes: MaterialAttributes::compiled(),
             })
             .chain((0..8).map(|index| VoxelEdit {
-                voxel: [200 + index, 250, 200],
+                voxel: [25 + index, 31, 25],
                 material: Voxel::Stone,
                 light_grid: None,
                 material_attributes: MaterialAttributes::compiled(),
@@ -429,11 +387,11 @@ mod tests {
             "the two variants disagree about the world"
         );
         assert_eq!(
-            inline_world.get(200, 250, 200),
+            inline_world.get(200, 248, 200),
             material_id(Voxel::Stone),
             "the placed voxel is missing"
         );
-        assert_eq!(threaded_world.get(200, 250, 200), material_id(Voxel::Stone));
+        assert_eq!(threaded_world.get(200, 248, 200), material_id(Voxel::Stone));
     }
 
     /// Switching the lever mid-session must not lose edits: whatever the worker
@@ -444,11 +402,11 @@ mod tests {
         let settings = WorldEditSettings::default();
         let mut host = island_host();
         host.set_world_thread(true);
-        let base_y = surface_y(&host, 496, 496);
+        let base_y = surface_y(&host, 496, 496) / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
         for index in 0..24 {
             host.request_edit(
                 VoxelEdit {
-                    voxel: [496 + index % 6, base_y - index / 6, 496],
+                    voxel: [58 + index % 6, base_y - index / 6, 62],
                     material: Voxel::Air,
                     light_grid: None,
                     material_attributes: MaterialAttributes::compiled(),
@@ -467,7 +425,9 @@ mod tests {
         );
         let brickmap = host.read();
         for index in 0..24 {
-            assert!(!brickmap.is_occupied(496 + index % 6, base_y - index / 6, 496));
+            let coordinate = WorldVoxelCoord::new(58 + index % 6, base_y - index / 6, 62);
+            let detail = coordinate.detail_origin();
+            assert!(!brickmap.is_occupied(detail[0], detail[1], detail[2]));
         }
         assert_eq!(host.stats().edits_applied, 24);
         assert!(host.stats().total_upload_bytes > 0);

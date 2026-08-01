@@ -2,7 +2,7 @@
 // the swapchain. Three vertices, no vertex buffer.
 //
 // Color contract: the rgba8unorm storage texture holds DISPLAY-READY
-// (sRGB-encoded) values — the DDA pass shades voxel-sandbox's sRGB-authored
+// (sRGB-encoded) values — the DDA pass shades the project's sRGB-authored
 // material albedos as-is (see shaders/dda.wgsl). The swapchain format is sRGB, so the
 // hardware re-encodes fragment output on store; decoding here makes that a
 // round trip (presented bytes == storage-texture bytes, no double encode).

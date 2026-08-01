@@ -638,24 +638,23 @@ mod tests {
         let (voxel_x, voxel_z) = (WORLD_SIZE_X as i32 / 2, WORLD_SIZE_Z as i32 / 2);
         let surface_y = (0..WORLD_SIZE_Y as i32)
             .rev()
-            .find(|y| brickmap.is_occupied(voxel_x, *y, voxel_z))
-            .expect("the column is occupied");
-        let mut water_voxels = 0;
-        for offset in 1..=12 {
-            if brickmap
-                .set_voxel(
-                    voxel_x,
-                    surface_y + offset,
-                    voxel_z,
-                    Voxel::Water,
-                    ClearanceUpdate::LocalBox { radius_cells: 8 },
-                )
-                .is_none()
-            {
-                break;
-            }
-            water_voxels = offset;
+            .find(|y| {
+                let material = brickmap.get(voxel_x, *y, voxel_z);
+                material != 0 && !material_is_liquid(material)
+            })
+            .expect("the column has a solid bed");
+        let world_x = voxel_x.div_euclid(voxel_core::world::DETAIL_CELLS_PER_WORLD_VOXEL as i32);
+        let world_z = voxel_z.div_euclid(voxel_core::world::DETAIL_CELLS_PER_WORLD_VOXEL as i32);
+        let world_surface_y =
+            surface_y.div_euclid(voxel_core::world::DETAIL_CELLS_PER_WORLD_VOXEL as i32);
+        for offset in 1..=3 {
+            brickmap.set_world_voxel(
+                voxel_core::world::WorldVoxelCoord::new(world_x, world_surface_y + offset, world_z),
+                Voxel::Water,
+                ClearanceUpdate::LocalBox { radius_cells: 8 },
+            );
         }
+        let water_voxels = 3 * voxel_core::world::DETAIL_CELLS_PER_WORLD_VOXEL as i32;
         assert!(
             water_voxels >= 4,
             "only {water_voxels} voxels of water fit above the surface — the column is \

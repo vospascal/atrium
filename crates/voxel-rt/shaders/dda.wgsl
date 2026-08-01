@@ -17,7 +17,7 @@
 // term keeps its own shadow ray (see the AO and shadow lever blocks).
 //
 // Color pipeline: material albedos are sRGB-encoded (as authored in
-// voxel-sandbox's mesh.rs). This shader decodes them to linear (pow-2.2
+// the former mesh renderer). This shader decodes them to linear (pow-2.2
 // approximation — cheap and self-consistent with the encode below; the exact
 // piecewise curve buys nothing at 8 bits), does ALL lighting math in linear
 // (sun term + indirect term), applies a one-line Reinhard tonemap
@@ -171,17 +171,75 @@ fn tonemap_reinhard(color: vec3<f32>) -> vec3<f32> {
 
 // ---- Shading ----------------------------------------------------------------
 
-// Warm horizon fading into a blue zenith, with a sun glow. Linear radiance:
-// the constants are the Stage 1 sRGB sky pushed through decode + inverse
-// Reinhard (x^2.2 / (1 - x^2.2)) so the sky looks unchanged after the new
-// tonemap + encode.
+fn sky_hash(point: vec3<f32>) -> f32 {
+    var q = fract(point * vec3<f32>(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + vec3<f32>(33.33));
+    return fract((q.x + q.y) * q.z);
+}
+
+fn rotate_sky_y(direction: vec3<f32>, angle: f32) -> vec3<f32> {
+    let sine = sin(angle);
+    let cosine = cos(angle);
+    return vec3<f32>(
+        direction.x * cosine - direction.z * sine,
+        direction.y,
+        direction.x * sine + direction.z * cosine,
+    );
+}
+
+fn star_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
+    if (direction.y <= -0.02 || daylight >= 0.98) {
+        return vec3<f32>(0.0);
+    }
+    let rotated = rotate_sky_y(direction, -lighting.sky_zenith.w);
+    let grid = 180.0;
+    let cell = floor(rotated * grid);
+    let seed = sky_hash(cell);
+    if (seed < 0.992) {
+        return vec3<f32>(0.0);
+    }
+    let offset = vec3<f32>(
+        sky_hash(cell + vec3<f32>(13.1)),
+        sky_hash(cell + vec3<f32>(27.7)),
+        sky_hash(cell + vec3<f32>(41.3)),
+    ) * 0.55 + vec3<f32>(0.225);
+    let radius = length(fract(rotated * grid) - offset);
+    let core = smoothstep(0.24, 0.0, radius);
+    let brightness = (seed - 0.992) / 0.008;
+    let visibility = (1.0 - daylight) * (1.0 - daylight)
+        * smoothstep(-0.02, 0.12, direction.y);
+    let tint = mix(vec3<f32>(0.55, 0.72, 1.0), vec3<f32>(1.0, 0.82, 0.58),
+        step(0.72, brightness));
+    return tint * core * (0.3 + 5.0 * brightness * brightness) * visibility;
+}
+
+fn moon_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
+    let moon_direction = lighting.celestial_moon.xyz;
+    if (moon_direction.y < -0.06) {
+        return vec3<f32>(0.0);
+    }
+    let disc = smoothstep(0.99915, 0.99972, dot(direction, moon_direction));
+    let phase = lighting.celestial_moon.w;
+    let lit_fraction = 0.5 - 0.5 * cos(phase * 6.28318530718);
+    let earthshine = 0.035;
+    return vec3<f32>(0.48, 0.62, 1.0) * disc
+        * (earthshine + 4.0 * lit_fraction) * (1.0 - daylight * 0.9);
+}
+
+// The same analytic day/night sky is used for primary misses, AO misses,
+// water reflection and Snell's window. Its palette and celestial positions
+// come from the CPU clock, so every consumer changes together.
 fn sky_color(direction: vec3<f32>) -> vec3<f32> {
-    let horizon = vec3<f32>(2.55, 1.37, 0.63);
-    let zenith = vec3<f32>(0.08, 0.31, 2.55);
-    let elevation = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    var sky = mix(horizon, zenith, smoothstep(0.42, 0.78, elevation));
-    let sun_amount = pow(max(dot(direction, lighting.sun_direction), 0.0), 64.0);
-    sky = sky + lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w * sun_amount;
+    let daylight = lighting.celestial_sun.w;
+    let up = clamp(direction.y, 0.0, 1.0);
+    var sky = mix(lighting.sky_horizon.rgb, lighting.sky_zenith.rgb, pow(up, 0.55));
+    let toward_sun = max(dot(direction, lighting.celestial_sun.xyz), 0.0);
+    let sun_glow = pow(toward_sun, 6.0) * 0.22 + pow(toward_sun, 48.0) * 0.55;
+    let sun_disc = smoothstep(0.99955, 0.99985, toward_sun);
+    sky += vec3<f32>(1.0, 0.72, 0.42) * sun_glow * daylight;
+    sky += vec3<f32>(12.0, 8.5, 5.0) * sun_disc * daylight;
+    sky += moon_radiance(direction, daylight) * (1.0 + lighting.sky_horizon.w);
+    sky += star_radiance(direction, daylight);
     return sky;
 }
 
@@ -387,7 +445,7 @@ fn face_basis(hit: Hit) -> FaceBasis {
 // Occlusion of ONE face corner in [0, 1] from the three neighbours touching
 // it: two edge-adjacent and one diagonal. Two solid edge neighbours seal the
 // corner completely regardless of the diagonal — the classic voxel corner-AO
-// rule (this is the signal voxel-sandbox bakes into its mesh vertex colors, so
+// rule (this is the signal the former mesh path baked into vertex colors, so
 // the look is known-good for this art style).
 fn corner_occlusion(edge_a: bool, edge_b: bool, diagonal: bool) -> f32 {
     if (edge_a && edge_b) {

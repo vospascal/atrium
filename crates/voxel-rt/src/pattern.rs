@@ -60,7 +60,14 @@
 //! own cost argument. Albedo, roughness and emission are all read after the hit,
 //! and are free.
 
-use voxel_core::world::VOXEL_SIZE;
+#[cfg(test)]
+use voxel_core::world::DETAIL_CELL_SIZE_METERS;
+use voxel_core::world::{DETAIL_CELLS_PER_WORLD_VOXEL, WORLD_VOXEL_SIZE_METERS};
+
+// Traversal still reports the 0.125 m detail cell hit. Pattern frames below
+// deliberately promote that coordinate to its containing one-metre world voxel.
+#[cfg(test)]
+const VOXEL_SIZE: f32 = DETAIL_CELL_SIZE_METERS;
 
 /// Layer slots per material row.
 ///
@@ -183,9 +190,8 @@ pub enum PatternFrame {
     /// generator returns ONE value for the whole voxel. Deliberately per-voxel
     /// motifs — tone jitter being the whole point.
     Voxel,
-    /// Voxel-local `u`/`v` within the hit face, so the pattern is *about* the face:
-    /// wear concentrated toward an edge, a drip running down a side. Period `0.125`
-    /// (one [`VOXEL_SIZE`]) spans exactly one face.
+    /// One-metre-world-voxel-local `u`/`v` within the hit face, so the pattern is
+    /// about the authored block face. A period of 1 m spans exactly one face.
     Face,
 }
 
@@ -357,9 +363,9 @@ impl PatternFaces {
 pub struct PatternLayer {
     pub generator: PatternGenerator,
     pub frame: PatternFrame,
-    /// The size of the generator's largest feature, in **metres**. One
-    /// [`VOXEL_SIZE`] is 0.125, so this is the field that decides which of the four
-    /// scales the layer is acting on.
+    /// The size of the generator's largest feature, in **metres**. This is
+    /// independent of the 0.125 m texel snap: period controls the feature while
+    /// `texels_per_voxel` controls material-detail resolution.
     pub period_meters: f32,
     pub target: PatternTarget,
     pub blend: PatternBlend,
@@ -384,7 +390,7 @@ pub struct PatternLayer {
     /// **Texels per voxel edge**, or `0` for a continuous field.
     ///
     /// The generator is sampled once per texel and held flat across it, so the result
-    /// is piecewise constant on an `n x n` grid per face — the blocky look, rather
+    /// is piecewise constant on an `n x n` grid per one-metre block face — the blocky look, rather
     /// than a smooth field that happens to sit on voxels.
     ///
     /// This is the setting the S2 gate asked for, and it is the one that was missing
@@ -398,12 +404,12 @@ pub struct PatternLayer {
     /// *sample position* makes every generator blocky at once — noise becomes blocky
     /// noise, speckles become square specks — and it stays orthogonal to the period,
     /// which keeps its own job of setting the FEATURE size. 8 texels with a 1 m period
-    /// is a large soft field rendered in 1.5 cm squares; 8 texels with a 0.125 m period
-    /// is per-face detail. One field, both.
+    /// is a large field rendered in 0.125 m squares; changing the period changes the
+    /// feature, not the physical detail-cell size. One field, both.
     ///
     /// **The grid is anchored to the world, not to the face**, so in
     /// [`PatternFrame::World`] it lines up across neighbouring voxels: the texel size
-    /// divides [`VOXEL_SIZE`] exactly and world zero is a voxel boundary, so a texel
+    /// divides the 1 m world-voxel edge exactly and world zero is a voxel boundary, so a texel
     /// never straddles a voxel edge. That is what keeps the blocky look and cross-voxel
     /// continuity from being a trade-off.
     ///
@@ -460,7 +466,7 @@ pub const MAX_EMISSION_INTENSITY: f32 = 16.0;
 
 /// Texel-grid rungs the panel offers, and what the bench sweeps.
 ///
-/// Powers of two only, so the texel size divides [`VOXEL_SIZE`] exactly and the grid
+/// Powers of two only, so the texel size divides the 1 m world-voxel edge exactly and the grid
 /// stays aligned across voxels — the property the whole snap rests on. `0` is
 /// "continuous", i.e. the pre-snap behaviour.
 ///
@@ -884,21 +890,25 @@ impl PatternLayer {
     /// is also why the texel snap is a no-op there, a centre already being one point.
     fn coordinate(&self, sample: &PatternSample) -> [f32; 3] {
         let period = self.period_meters.max(MINIMUM_PERIOD_METERS);
+        let detail_per_world = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let world_voxel = [
+            sample.voxel[0].div_euclid(detail_per_world),
+            sample.voxel[1].div_euclid(detail_per_world),
+            sample.voxel[2].div_euclid(detail_per_world),
+        ];
         let meters = match self.frame {
             PatternFrame::World => sample.world_meters,
             PatternFrame::Voxel => [
-                (sample.voxel[0] as f32 + 0.5) * VOXEL_SIZE,
-                (sample.voxel[1] as f32 + 0.5) * VOXEL_SIZE,
-                (sample.voxel[2] as f32 + 0.5) * VOXEL_SIZE,
+                (world_voxel[0] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
+                (world_voxel[1] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
+                (world_voxel[2] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
             ],
-            // Voxel-local, so the pattern repeats identically on every face — which
-            // is what "about the face" means. The face axis keeps its own local
-            // value rather than being zeroed, so a 3D generator still sees three
-            // varying inputs on a face that happens to be flat in one of them.
+            // Local to the containing one-metre block. DDA's 0.125 m cell is an
+            // implementation detail here, not a material-pattern boundary.
             PatternFrame::Face => [
-                (sample.world_meters[0] / VOXEL_SIZE - sample.voxel[0] as f32) * VOXEL_SIZE,
-                (sample.world_meters[1] / VOXEL_SIZE - sample.voxel[1] as f32) * VOXEL_SIZE,
-                (sample.world_meters[2] / VOXEL_SIZE - sample.voxel[2] as f32) * VOXEL_SIZE,
+                sample.world_meters[0] - world_voxel[0] as f32 * WORLD_VOXEL_SIZE_METERS,
+                sample.world_meters[1] - world_voxel[1] as f32 * WORLD_VOXEL_SIZE_METERS,
+                sample.world_meters[2] - world_voxel[2] as f32 * WORLD_VOXEL_SIZE_METERS,
             ],
         };
         let snapped = self.snap_to_texels(meters);
@@ -916,14 +926,15 @@ impl PatternLayer {
     /// make an interpolating generator read the same lattice values that its
     /// neighbours read, correlating adjacent texels for no reason.
     ///
-    /// The grid is anchored at world zero and its size divides [`VOXEL_SIZE`] exactly
+    /// The grid is anchored at world zero and divides one 1 m world voxel exactly
     /// (see [`TEXEL_RUNGS`]), which is what makes a texel never straddle a voxel edge
     /// in the world frame.
     fn snap_to_texels(&self, meters: [f32; 3]) -> [f32; 3] {
         if self.texels_per_voxel == 0 {
             return meters;
         }
-        let texel = VOXEL_SIZE / self.texels_per_voxel.min(MAX_TEXELS_PER_VOXEL) as f32;
+        let texel =
+            WORLD_VOXEL_SIZE_METERS / self.texels_per_voxel.min(MAX_TEXELS_PER_VOXEL) as f32;
         [
             (meters[0] / texel).floor() * texel + texel * 0.5,
             (meters[1] / texel).floor() * texel + texel * 0.5,
@@ -963,13 +974,19 @@ impl PatternLayer {
         if !self.vary_per_face || self.frame != PatternFrame::Face {
             return 0;
         }
-        // The face index, so the top and bottom of one voxel differ as well as
-        // neighbouring voxels: 0..5 over (axis, sign).
+        let detail_per_world = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let world_voxel = [
+            sample.voxel[0].div_euclid(detail_per_world),
+            sample.voxel[1].div_euclid(detail_per_world),
+            sample.voxel[2].div_euclid(detail_per_world),
+        ];
+        // The face index, so the top and bottom of one world voxel differ as well
+        // as neighbouring world voxels: 0..5 over (axis, sign).
         let face = sample.axis * 2 + u32::from(sample.axis_sign >= 0.0);
         hash_u32(
-            (sample.voxel[0] as u32).wrapping_mul(0x9e37_79b9)
-                ^ (sample.voxel[1] as u32).wrapping_mul(0x85eb_ca6b)
-                ^ (sample.voxel[2] as u32).wrapping_mul(0xc2b2_ae35)
+            (world_voxel[0] as u32).wrapping_mul(0x9e37_79b9)
+                ^ (world_voxel[1] as u32).wrapping_mul(0x85eb_ca6b)
+                ^ (world_voxel[2] as u32).wrapping_mul(0xc2b2_ae35)
                 ^ face.wrapping_mul(0x27d4_eb2d),
         )
     }
@@ -1180,7 +1197,7 @@ mod tests {
     #[test]
     fn the_texel_snap_holds_one_value_across_each_texel() {
         let texels = 8;
-        let texel = VOXEL_SIZE / texels as f32;
+        let texel = WORLD_VOXEL_SIZE_METERS / texels as f32;
         let layer = PatternLayer {
             generator: PatternGenerator::Noise { octaves: 3 },
             frame: PatternFrame::World,
@@ -1225,11 +1242,11 @@ mod tests {
                 "{texels} is not a power of two, so its texels drift off the voxel grid"
             );
             assert!(texels <= MAX_TEXELS_PER_VOXEL);
-            // The texel size must divide VOXEL_SIZE with no remainder, exactly in f32.
-            let texel = VOXEL_SIZE / texels as f32;
+            // The texel size must divide one world voxel with no remainder.
+            let texel = WORLD_VOXEL_SIZE_METERS / texels as f32;
             assert_eq!(
                 texel * texels as f32,
-                VOXEL_SIZE,
+                WORLD_VOXEL_SIZE_METERS,
                 "{texels} texels do not reconstruct a voxel"
             );
             // A sample either side of a voxel boundary must land in DIFFERENT texels,
@@ -1238,7 +1255,7 @@ mod tests {
                 texels_per_voxel: texels,
                 ..PatternLayer::IDENTITY
             };
-            let boundary = 512.0 * VOXEL_SIZE;
+            let boundary = 64.0 * WORLD_VOXEL_SIZE_METERS;
             let below = layer.snap_to_texels([boundary - texel * 0.5, 0.0, 0.0])[0];
             let above = layer.snap_to_texels([boundary + texel * 0.5, 0.0, 0.0])[0];
             assert!(
@@ -1696,17 +1713,27 @@ mod tests {
             period_meters: 0.125,
             ..PatternLayer::IDENTITY
         };
-        let voxel = [514, 260, 519];
+        let world_voxel = [64, 32, 64];
+        let detail = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let detail_origin = [
+            world_voxel[0] * detail,
+            world_voxel[1] * detail,
+            world_voxel[2] * detail,
+        ];
         let mut seen: Option<f32> = None;
-        // Every corner and the centre of the same voxel.
+        // Every corner and the centre of the same one-metre voxel.
         for offset in [0.01, 0.5, 0.99] {
             let sample = sample_at(
                 [
-                    (voxel[0] as f32 + offset) * VOXEL_SIZE,
-                    (voxel[1] as f32 + offset) * VOXEL_SIZE,
-                    (voxel[2] as f32 + offset) * VOXEL_SIZE,
+                    (world_voxel[0] as f32 + offset) * WORLD_VOXEL_SIZE_METERS,
+                    (world_voxel[1] as f32 + offset) * WORLD_VOXEL_SIZE_METERS,
+                    (world_voxel[2] as f32 + offset) * WORLD_VOXEL_SIZE_METERS,
                 ],
-                voxel,
+                [
+                    detail_origin[0] + (offset * detail as f32).floor() as i32,
+                    detail_origin[1] + (offset * detail as f32).floor() as i32,
+                    detail_origin[2] + (offset * detail as f32).floor() as i32,
+                ],
             );
             let value = layer.generator_value(&sample);
             match seen {
@@ -1717,11 +1744,15 @@ mod tests {
         // And the NEIGHBOUR must differ, or it is not a tone, it is a constant.
         let neighbour = sample_at(
             [
-                (voxel[0] as f32 + 1.5) * VOXEL_SIZE,
-                (voxel[1] as f32 + 0.5) * VOXEL_SIZE,
-                (voxel[2] as f32 + 0.5) * VOXEL_SIZE,
+                (world_voxel[0] as f32 + 1.5) * WORLD_VOXEL_SIZE_METERS,
+                (world_voxel[1] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
+                (world_voxel[2] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
             ],
-            [voxel[0] + 1, voxel[1], voxel[2]],
+            [
+                detail_origin[0] + detail,
+                detail_origin[1],
+                detail_origin[2],
+            ],
         );
         assert_ne!(
             layer.generator_value(&neighbour),
@@ -1747,10 +1778,10 @@ mod tests {
             texels_per_voxel: 0,
             ..PatternLayer::IDENTITY
         };
-        let boundary = 515.0 * VOXEL_SIZE;
+        let boundary = 65.0 * WORLD_VOXEL_SIZE_METERS;
         let epsilon = 1e-4;
-        let inside = sample_at([boundary - epsilon, 32.0, 64.0], [514, 256, 512]);
-        let outside = sample_at([boundary + epsilon, 32.0, 64.0], [515, 256, 512]);
+        let inside = sample_at([boundary - epsilon, 32.0, 64.0], [519, 256, 512]);
+        let outside = sample_at([boundary + epsilon, 32.0, 64.0], [520, 256, 512]);
         let difference = (layer.generator_value(&inside) - layer.generator_value(&outside)).abs();
         assert!(
             difference < 1e-3,
@@ -1778,24 +1809,31 @@ mod tests {
         };
         // Walk the same intra-voxel offsets across eight neighbouring voxels and
         // collect the pattern each one shows.
-        let texel = VOXEL_SIZE / DEFAULT_TEXELS_PER_VOXEL as f32;
-        let arrangement = |voxel_x: i32| -> Vec<f32> {
+        let texel = WORLD_VOXEL_SIZE_METERS / DEFAULT_TEXELS_PER_VOXEL as f32;
+        let arrangement = |world_x: i32| -> Vec<f32> {
             (0..DEFAULT_TEXELS_PER_VOXEL)
                 .map(|step| {
-                    let x = voxel_x as f32 * VOXEL_SIZE + (step as f32 + 0.5) * texel;
-                    layer.generator_value(&sample_at([x, 32.0, 64.0], [voxel_x, 256, 512]))
+                    let x = world_x as f32 * WORLD_VOXEL_SIZE_METERS + (step as f32 + 0.5) * texel;
+                    layer.generator_value(&sample_at(
+                        [x, 32.0, 64.0],
+                        [
+                            world_x * DETAIL_CELLS_PER_WORLD_VOXEL as i32 + step as i32,
+                            256,
+                            512,
+                        ],
+                    ))
                 })
                 .collect()
         };
-        let first = arrangement(512);
+        let first = arrangement(64);
         // Every texel of a voxel must be a distinct sample, or the grid is coarser
         // than it claims.
         assert_eq!(first.len(), DEFAULT_TEXELS_PER_VOXEL as usize);
-        for neighbour in 513..520 {
+        for neighbour in 65..72 {
             assert_ne!(
                 arrangement(neighbour),
                 first,
-                "voxel {neighbour} repeats voxel 512's arrangement — the layer tiles"
+                "voxel {neighbour} repeats voxel 64's arrangement — the layer tiles"
             );
         }
     }

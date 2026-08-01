@@ -77,7 +77,7 @@
 //! Note that **water is acoustically near-perfectly reflective** (alpha ~0.01),
 //! which is the opposite of the visual intuition its transparency suggests.
 
-use voxel_core::world::{Voxel, VOXEL_SIZE};
+use voxel_core::world::{Voxel, DETAIL_CELL_SIZE_METERS, WORLD_VOXEL_SIZE_METERS};
 
 use crate::pattern::{
     apply_stack_color, GpuPatternLayer, PatternBlend, PatternFaces, PatternFrame, PatternGenerator,
@@ -493,7 +493,7 @@ pub struct FaceRoles {
 /// payload.
 ///
 /// `albedo` values are sRGB-encoded exactly as they were in the colour palette
-/// this table replaced (lifted originally from `voxel-sandbox`'s `voxel_color`
+/// this table replaced (lifted originally from the mesh renderer's `voxel_color`
 /// match, one representative value per type — positional variation such as
 /// dryness/season/depth blending is still not modelled here).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -710,9 +710,12 @@ impl Material {
         // cell's value (7.4 and 9.1 at 2.8 m) and called it an average, which moves if
         // the hardcoded voxel below moves. So the span follows the coarsest period.
         const PERIODS_SPANNED: f32 = 8.0;
-        let span_voxels = (self.coarsest_emission_period() * PERIODS_SPANNED / VOXEL_SIZE)
+        let span_voxels = (self.coarsest_emission_period() * PERIODS_SPANNED
+            / WORLD_VOXEL_SIZE_METERS)
             .ceil()
-            .max(1.0);
+            // One snapped block face has only eight distinct positions. Sample
+            // several blocks so sparse speckles cannot report a false zero.
+            .max(PERIODS_SPANNED);
         // 24 samples per axis, offset by half a step so they do not land systematically
         // on texel centres or corners. Held deliberately low rather than scaled with
         // the span: this runs for every row on every EDIT (`MaterialAttributes` rides
@@ -742,15 +745,16 @@ impl Material {
                     // hash is zero. The integer voxel follows the offset, so the
                     // per-voxel frame's hash varies across the span too — sampling one
                     // voxel could never average that at all.
-                    let voxel = [
-                        301 + offset[0] as i32,
-                        199 + offset[1] as i32,
-                        407 + offset[2] as i32,
-                    ];
+                    let world_origin = [37.0_f32, 24.0, 50.0];
                     let world = [
-                        (301.0 + offset[0]) * VOXEL_SIZE,
-                        (199.0 + offset[1]) * VOXEL_SIZE,
-                        (407.0 + offset[2]) * VOXEL_SIZE,
+                        (world_origin[0] + offset[0]) * WORLD_VOXEL_SIZE_METERS,
+                        (world_origin[1] + offset[1]) * WORLD_VOXEL_SIZE_METERS,
+                        (world_origin[2] + offset[2]) * WORLD_VOXEL_SIZE_METERS,
+                    ];
+                    let voxel = [
+                        (world[0] / DETAIL_CELL_SIZE_METERS).floor() as i32,
+                        (world[1] / DETAIL_CELL_SIZE_METERS).floor() as i32,
+                        (world[2] / DETAIL_CELL_SIZE_METERS).floor() as i32,
                     ];
                     let sample = PatternSample {
                         world_meters: world,
@@ -988,10 +992,8 @@ const ACOUSTIC_SNOW: [f32; 6] = [0.45, 0.75, 0.90, 0.95, 0.95, 0.95];
 ///
 /// **The M1b emissive rows are not placed by world generation.** Adding
 /// lanterns or berry clusters to the generator changes how the world LOOKS in
-/// both voxel-rt and voxel-sandbox, which is an aesthetic decision rather than
-/// a plumbing one; until it is made, the two rows are reachable through the E2
-/// edit API (the same route `crate::debug_pool` uses to carve its swim pool).
-/// E5 therefore has emitters to test with and the generated world is unchanged.
+/// the renderer is an aesthetic decision rather than a plumbing one. Until it is
+/// made, the rows remain available to one-metre world edits and Studio previews.
 ///
 /// Row 0 (Air) is the miss sentinel and is never sampled on a hit: the DDA only
 /// calls the shading path on an occupied voxel. It is kept fully zeroed so a
