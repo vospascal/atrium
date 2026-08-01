@@ -94,7 +94,7 @@
     },
     "GiAmbientFloor": {
       "type": "scalar",
-      "value": 0.25
+      "value": 0.0
     },
     "GiEmissive": {
       "type": "flag",
@@ -159,6 +159,14 @@
     "MaterialPatternMaxLayers": {
       "type": "count",
       "value": 4
+    },
+    "MaterialPatternFadeStart": {
+      "type": "scalar",
+      "value": 10.0
+    },
+    "MaterialPatternFadeEnd": {
+      "type": "scalar",
+      "value": 50.0
     },
     "MaterialPatternStrength": {
       "type": "scalar",

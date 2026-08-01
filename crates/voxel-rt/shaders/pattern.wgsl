@@ -39,11 +39,7 @@ const MATERIAL_PATTERN_STRENGTH: f32 = 1.0;
 // back. Clamps against MAX_PATTERN_LAYERS.
 const MATERIAL_PATTERN_MAX_LAYERS: u32 = 4u;
 
-// How many periods away a layer has faded out completely. See PATTERN_FADE_PERIODS
-// in src/pattern.rs for why the fade is expressed in periods rather than metres:
-// a 2 cm grain and a 1 m band alias at wildly different distances, and the
-// period is the only thing that knows which is which. Zero disables the fade.
-const MATERIAL_PATTERN_FADE_PERIODS: f32 = 250.0;
+// Absolute fade-start distance in metres from the runtime registry.
 
 // Generators. Mirrors `PatternGenerator::code`.
 const PATTERN_GENERATOR_FLAT: u32 = 0u;
@@ -294,12 +290,13 @@ fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
 // How much of this layer survives at this distance, 0..1. Applied to the AMOUNT, so
 // a faded layer converges on the material's unpatterned base rather than on grey.
 fn pattern_fade(layer: PatternLayer, distance_meters: f32) -> f32 {
-    if (MATERIAL_PATTERN_FADE_PERIODS <= 0.0) {
+    let fade_start_meters = lighting.material_params.x;
+    let fade_end_meters = lighting.material_params.y;
+    if (fade_end_meters <= 0.0) {
         return 1.0;
     }
-    let period = max(layer.period_meters, 1e-4);
-    let start = period * MATERIAL_PATTERN_FADE_PERIODS;
-    let end = start * 2.0;
+    let start = fade_start_meters;
+    let end = max(fade_end_meters, start);
     if (distance_meters <= start) {
         return 1.0;
     }

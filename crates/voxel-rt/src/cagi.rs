@@ -275,7 +275,10 @@ impl Default for CagiSettings {
             transmission: false,
             iterations_per_frame: 2,
             strength: 1.0,
-            ambient_floor: 0.25,
+            // No unoccluded readability light: sealed spaces without an
+            // emitter are physically black. The registry still exposes this
+            // as an explicit artistic override.
+            ambient_floor: 0.0,
             sun_bounce: 0.35,
             emissive_scale: 1.0,
         }

@@ -772,6 +772,7 @@ impl Material {
                         // the camera happens to be. A layer that fades out still lights
                         // the room it is in.
                         0.0,
+                        0.0,
                         MAX_PATTERN_LAYERS,
                     );
                     for channel in 0..3 {

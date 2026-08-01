@@ -197,6 +197,7 @@ impl Scenario {
             quality.shading_params(),
             quality.gi_params(),
             quality.water_params(),
+            quality.material_params(),
         )
     }
 }
@@ -2680,6 +2681,7 @@ fn scenario_sky_radiance() -> [f32; 3] {
         RenderQuality::default().shading_params(),
         RenderQuality::default().gi_params(),
         RenderQuality::default().water_params(),
+        RenderQuality::default().material_params(),
     );
     [
         uniform.sky_ambient[0] * uniform.sky_ambient[3],

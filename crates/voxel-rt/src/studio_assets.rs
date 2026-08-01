@@ -95,6 +95,11 @@ pub struct ProjectManifest {
     /// specific material/geometry/quality backend in later phases.
     #[serde(default)]
     pub graph_assets: Vec<AssetReference>,
+    /// Registry-led world composition root. This supersedes the old profile
+    /// selection for new projects; graph assets are the canonical authoring
+    /// surface for both World and Studio runtime modes.
+    #[serde(default)]
+    pub active_world_graph: Option<AssetId>,
     /// Reusable world-composition roots. Biomes, palettes, modifiers, features,
     /// audio, and animation are compiled from the active profile.
     pub world_profiles: Vec<AssetReference>,
@@ -115,6 +120,7 @@ impl ProjectManifest {
             quality_recipes: Vec::new(),
             active_quality_recipe: None,
             graph_assets: Vec::new(),
+            active_world_graph: None,
             world_profiles: Vec::new(),
             active_world_profile: None,
             runtime_assets: Vec::new(),
@@ -883,6 +889,41 @@ impl StudioProject {
             graphs.insert(graph.id.clone(), graph);
         }
         Ok(graphs)
+    }
+
+    /// Resolve the project's one canonical world composition graph. Unlike the
+    /// retired profile path this is an ordinary registered graph asset, so the
+    /// same identity/validation rules apply to materials and worlds.
+    pub fn load_active_world_graph(
+        &self,
+        store: &StudioProjectStore,
+    ) -> Result<Option<GraphAsset>, AssetError> {
+        let Some(active) = &self.manifest.active_world_graph else {
+            return Ok(None);
+        };
+        let reference = self
+            .manifest
+            .graph_assets
+            .iter()
+            .find(|reference| &reference.id == active)
+            .ok_or_else(|| {
+                AssetError::InvalidGraph(format!(
+                    "active world graph `{active}` is absent from the manifest"
+                ))
+            })?;
+        let graph = store.load_graph(&reference.path)?;
+        if graph.id != reference.id {
+            return Err(AssetError::InvalidGraph(format!(
+                "world graph `{}` does not match its manifest identity",
+                reference.path.display()
+            )));
+        }
+        if graph.kind != crate::graph::GraphKind::World {
+            return Err(AssetError::InvalidGraph(format!(
+                "active graph `{active}` is not a world graph"
+            )));
+        }
+        Ok(Some(graph))
     }
 
     /// Resolve every project-local identity required by world compilation.

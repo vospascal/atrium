@@ -80,29 +80,11 @@ const VOXEL_SIZE: f32 = DETAIL_CELL_SIZE_METERS;
 /// hit dominates a single layer, so layers 2-4 are about a third the price of layer 1.
 pub const MAX_PATTERN_LAYERS: usize = 4;
 
-/// How many periods away a layer has faded out completely.
-///
-/// The aliasing story, and the reason it is derived rather than authored. A layer
-/// crawls when its period shrinks below a pixel, and *when* that happens depends
-/// entirely on the period: 2 cm grain is sub-pixel at a few metres while a 1 m band
-/// never is. Authoring a fade distance per layer would mean re-deriving this by hand
-/// for every layer and getting it wrong on most of them.
-///
-/// Note this keys off the PERIOD even when [`PatternLayer::texels_per_voxel`] snaps the
-/// layer to a finer grid. Deliberate: the texels are hard edges, but a
-/// piecewise-constant signal box-filters toward its local mean, so it is better
-/// behaved under minification than the continuous field, not worse. Fading on texel
-/// size would erase a 1 m band because its texels are small, which is the wrong
-/// answer.
-///
-/// So the fade is expressed in **periods**, and the metric distance follows from
-/// the layer. At 1080p with the shipped field of view a pixel covers roughly one
-/// thousandth of its distance, so 250 periods puts the fade where a period spans
-/// about four pixels — the point at which detail stops reading as detail and starts
-/// reading as noise. That estimate is what the app run at the S2 gate checks; the
-/// number is a lever precisely because a screen-space threshold cannot be settled
-/// from a source file.
-pub const PATTERN_FADE_PERIODS: f32 = 250.0;
+/// Default camera distance at which material patterns begin fading. The runtime
+/// quality registry exposes start and end directly in metres. An end of zero
+/// disables fading.
+pub const PATTERN_FADE_START_METERS: f32 = 10.0;
+pub const PATTERN_FADE_END_METERS: f32 = 50.0;
 
 /// The generator: what shape a layer draws, before any frame or blend.
 ///
@@ -993,16 +975,15 @@ impl PatternLayer {
 
     /// How much of this layer survives at this distance, `0.0..=1.0`.
     ///
-    /// See [`PATTERN_FADE_PERIODS`]. The fade is applied to the *amount*, so a
+    /// See [`PATTERN_FADE_START_METERS`]. The fade is applied to the *amount*, so a
     /// faded layer converges on the material's unpatterned base rather than on
     /// black or on grey.
-    pub fn fade(&self, distance_meters: f32, fade_periods: f32) -> f32 {
-        if fade_periods <= 0.0 {
+    pub fn fade(&self, distance_meters: f32, fade_start_meters: f32, fade_end_meters: f32) -> f32 {
+        if fade_end_meters <= 0.0 {
             return 1.0;
         }
-        let period = self.period_meters.max(MINIMUM_PERIOD_METERS);
-        let start = period * fade_periods;
-        let end = start * 2.0;
+        let start = fade_start_meters;
+        let end = fade_end_meters.max(start);
         if distance_meters <= start {
             return 1.0;
         }
@@ -1014,11 +995,17 @@ impl PatternLayer {
 
     /// The layer's effective strength at this sample: `amount`, faded, and zero on
     /// a face the mask excludes.
-    pub fn strength(&self, sample: &PatternSample, fade_periods: f32) -> f32 {
+    pub fn strength(
+        &self,
+        sample: &PatternSample,
+        fade_start_meters: f32,
+        fade_end_meters: f32,
+    ) -> f32 {
         if !self.faces.includes(sample.axis, sample.axis_sign) {
             return 0.0;
         }
-        self.amount.clamp(0.0, 1.0) * self.fade(sample.distance_meters, fade_periods)
+        self.amount.clamp(0.0, 1.0)
+            * self.fade(sample.distance_meters, fade_start_meters, fade_end_meters)
     }
 
     /// Apply this layer to a colour target.
@@ -1026,9 +1013,10 @@ impl PatternLayer {
         &self,
         base: [f32; 3],
         sample: &PatternSample,
-        fade_periods: f32,
+        fade_start_meters: f32,
+        fade_end_meters: f32,
     ) -> [f32; 3] {
-        let strength = self.strength(sample, fade_periods);
+        let strength = self.strength(sample, fade_start_meters, fade_end_meters);
         if strength <= 0.0 {
             return base;
         }
@@ -1053,8 +1041,14 @@ impl PatternLayer {
     /// Apply this layer to a scalar target. `target_color`'s first channel is the
     /// target value, which is why the panel shows a single slider there instead of
     /// a colour picker.
-    pub fn apply_scalar(&self, base: f32, sample: &PatternSample, fade_periods: f32) -> f32 {
-        let strength = self.strength(sample, fade_periods);
+    pub fn apply_scalar(
+        &self,
+        base: f32,
+        sample: &PatternSample,
+        fade_start_meters: f32,
+        fade_end_meters: f32,
+    ) -> f32 {
+        let strength = self.strength(sample, fade_start_meters, fade_end_meters);
         if strength <= 0.0 {
             return base;
         }
@@ -1082,13 +1076,14 @@ pub fn apply_stack_color(
     base: [f32; 3],
     target: PatternTarget,
     sample: &PatternSample,
-    fade_periods: f32,
+    fade_start_meters: f32,
+    fade_end_meters: f32,
     max_layers: usize,
 ) -> [f32; 3] {
     let mut out = base;
     for layer in stack.active().take(max_layers) {
         if layer.target == target {
-            out = layer.apply_color(out, sample, fade_periods);
+            out = layer.apply_color(out, sample, fade_start_meters, fade_end_meters);
         }
     }
     out
@@ -1100,13 +1095,14 @@ pub fn apply_stack_scalar(
     base: f32,
     target: PatternTarget,
     sample: &PatternSample,
-    fade_periods: f32,
+    fade_start_meters: f32,
+    fade_end_meters: f32,
     max_layers: usize,
 ) -> f32 {
     let mut out = base;
     for layer in stack.active().take(max_layers) {
         if layer.target == target {
-            out = layer.apply_scalar(out, sample, fade_periods);
+            out = layer.apply_scalar(out, sample, fade_start_meters, fade_end_meters);
         }
     }
     out
@@ -1341,7 +1337,12 @@ mod tests {
         // Still the identity at amount zero, which is the other half of "safe to add".
         let sample = sample_at([64.3, 32.7, 64.9], [514, 262, 519]);
         assert_eq!(
-            PatternLayer::IDENTITY.apply_color([0.4, 0.5, 0.3], &sample, PATTERN_FADE_PERIODS),
+            PatternLayer::IDENTITY.apply_color(
+                [0.4, 0.5, 0.3],
+                &sample,
+                PATTERN_FADE_START_METERS,
+                PATTERN_FADE_END_METERS,
+            ),
             [0.4, 0.5, 0.3]
         );
     }
@@ -1664,8 +1665,24 @@ mod tests {
                         target_color: [1.0, 0.2, 0.7],
                         ..PatternLayer::IDENTITY
                     };
-                    assert_eq!(layer.apply_color(base, &sample, PATTERN_FADE_PERIODS), base);
-                    assert_eq!(layer.apply_scalar(0.6, &sample, PATTERN_FADE_PERIODS), 0.6);
+                    assert_eq!(
+                        layer.apply_color(
+                            base,
+                            &sample,
+                            PATTERN_FADE_START_METERS,
+                            PATTERN_FADE_END_METERS
+                        ),
+                        base
+                    );
+                    assert_eq!(
+                        layer.apply_scalar(
+                            0.6,
+                            &sample,
+                            PATTERN_FADE_START_METERS,
+                            PATTERN_FADE_END_METERS
+                        ),
+                        0.6
+                    );
                 }
             }
         }
@@ -1922,10 +1939,10 @@ mod tests {
         );
     }
 
-    /// The fade must be the identity up close, gone at range, and monotone between —
-    /// and it must scale with the period, which is the reason it is derived.
+    /// The fade is one predictable world-space distance for every layer: identity
+    /// up close, gone at twice the configured start, and monotone between.
     #[test]
-    fn the_fade_scales_with_the_period() {
+    fn the_fade_uses_absolute_metres() {
         let grain = PatternLayer {
             period_meters: 0.02,
             ..PatternLayer::IDENTITY
@@ -1934,25 +1951,38 @@ mod tests {
             period_meters: 1.0,
             ..PatternLayer::IDENTITY
         };
-        // 2 cm grain: full strength at arm's length, gone by ~10 m.
-        assert_eq!(grain.fade(0.5, PATTERN_FADE_PERIODS), 1.0);
-        assert_eq!(grain.fade(100.0, PATTERN_FADE_PERIODS), 0.0);
-        // A 1 m band at the same 100 m is untouched — the whole point.
-        assert_eq!(band.fade(100.0, PATTERN_FADE_PERIODS), 1.0);
+        // Both fine grain and broad bands obey the same camera distance.
+        assert_eq!(
+            grain.fade(0.5, PATTERN_FADE_START_METERS, PATTERN_FADE_END_METERS),
+            1.0
+        );
+        assert_eq!(
+            grain.fade(250.0, PATTERN_FADE_START_METERS, PATTERN_FADE_END_METERS),
+            0.0
+        );
+        assert_eq!(
+            band.fade(250.0, PATTERN_FADE_START_METERS, PATTERN_FADE_END_METERS),
+            0.0
+        );
+        assert!((0.0..1.0).contains(&grain.fade(
+            30.0,
+            PATTERN_FADE_START_METERS,
+            PATTERN_FADE_END_METERS
+        )));
 
         // Monotone, with no step.
         let mut previous = 1.0;
-        for step in 0..200 {
+        for step in 0..1600 {
             let distance = step as f32 * 0.15;
-            let fade = grain.fade(distance, PATTERN_FADE_PERIODS);
+            let fade = grain.fade(distance, PATTERN_FADE_START_METERS, PATTERN_FADE_END_METERS);
             assert!(fade <= previous + 1e-6, "the fade rose at {distance} m");
             assert!((0.0..=1.0).contains(&fade));
             previous = fade;
         }
 
-        // Zero periods disables the fade entirely, which is what the lever's
+        // Zero metres disables the fade entirely, which is what the lever's
         // off position has to mean.
-        assert_eq!(grain.fade(1e6, 0.0), 1.0);
+        assert_eq!(grain.fade(1e6, 0.0, 0.0), 1.0);
     }
 
     /// Multiply must only ever darken, and must converge on the base as the amount
@@ -1968,7 +1998,12 @@ mod tests {
                 blend: PatternBlend::Multiply,
                 ..PatternLayer::IDENTITY
             };
-            let out = layer.apply_color(base, &sample, PATTERN_FADE_PERIODS);
+            let out = layer.apply_color(
+                base,
+                &sample,
+                PATTERN_FADE_START_METERS,
+                PATTERN_FADE_END_METERS,
+            );
             for channel in 0..3 {
                 assert!(
                     out[channel] <= base[channel] + 1e-6,
@@ -2010,7 +2045,8 @@ mod tests {
             base,
             PatternTarget::Albedo,
             &sample,
-            PATTERN_FADE_PERIODS,
+            PATTERN_FADE_START_METERS,
+            PATTERN_FADE_END_METERS,
             MAX_PATTERN_LAYERS,
         );
         let second = apply_stack_color(
@@ -2018,7 +2054,8 @@ mod tests {
             base,
             PatternTarget::Albedo,
             &sample,
-            PATTERN_FADE_PERIODS,
+            PATTERN_FADE_START_METERS,
+            PATTERN_FADE_END_METERS,
             MAX_PATTERN_LAYERS,
         );
         assert_ne!(
@@ -2037,7 +2074,8 @@ mod tests {
                 base,
                 PatternTarget::Albedo,
                 &sample,
-                PATTERN_FADE_PERIODS,
+                PATTERN_FADE_START_METERS,
+                PATTERN_FADE_END_METERS,
                 MAX_PATTERN_LAYERS,
             ),
             base
@@ -2064,7 +2102,8 @@ mod tests {
             base,
             PatternTarget::Albedo,
             &sample,
-            PATTERN_FADE_PERIODS,
+            PATTERN_FADE_START_METERS,
+            PATTERN_FADE_END_METERS,
             2,
         );
         let first_only = apply_stack_color(
@@ -2072,7 +2111,8 @@ mod tests {
             base,
             PatternTarget::Albedo,
             &sample,
-            PATTERN_FADE_PERIODS,
+            PATTERN_FADE_START_METERS,
+            PATTERN_FADE_END_METERS,
             1,
         );
         let none = apply_stack_color(
@@ -2080,7 +2120,8 @@ mod tests {
             base,
             PatternTarget::Albedo,
             &sample,
-            PATTERN_FADE_PERIODS,
+            PATTERN_FADE_START_METERS,
+            PATTERN_FADE_END_METERS,
             0,
         );
         assert_eq!(none, base, "clamping to zero must be the identity");
@@ -2108,7 +2149,15 @@ mod tests {
         let mut top = sample_at([64.3, 32.7, 64.9], [514, 262, 519]);
         top.axis = 1;
         top.axis_sign = -1.0;
-        assert_ne!(layer.apply_color(base, &top, PATTERN_FADE_PERIODS), base);
+        assert_ne!(
+            layer.apply_color(
+                base,
+                &top,
+                PATTERN_FADE_START_METERS,
+                PATTERN_FADE_END_METERS
+            ),
+            base
+        );
 
         for (axis, sign) in [(0, 1.0), (0, -1.0), (2, 1.0), (2, -1.0), (1, 1.0)] {
             let sample = PatternSample {
@@ -2117,7 +2166,12 @@ mod tests {
                 ..top
             };
             assert_eq!(
-                layer.apply_color(base, &sample, PATTERN_FADE_PERIODS),
+                layer.apply_color(
+                    base,
+                    &sample,
+                    PATTERN_FADE_START_METERS,
+                    PATTERN_FADE_END_METERS
+                ),
                 base,
                 "the top-only layer applied to axis {axis} sign {sign}"
             );

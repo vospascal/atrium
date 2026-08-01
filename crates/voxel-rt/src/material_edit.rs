@@ -993,8 +993,7 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
             "The size of the generator's largest feature, in METRES — and the field \
              that decides which scale this layer acts on. One voxel is 0.125 m: below \
              that is within-face detail, at it is per-voxel, above it is a multi-voxel \
-             pattern. It also sets the distance fade: a layer fades out at a fixed \
-             number of PERIODS, so fine detail dies at range and coarse bands do not.",
+             pattern. The global texture-fade distance is set in Quality → Materials.",
         );
 
         egui::ComboBox::from_label("target")

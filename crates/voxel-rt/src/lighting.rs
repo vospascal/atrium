@@ -56,6 +56,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 144    | `celestial_moon`      | `vec4<f32>` | moon direction + phase |
 /// | 160    | `sky_zenith`          | `vec4<f32>` | zenith radiance + star rotation |
 /// | 176    | `sky_horizon`         | `vec4<f32>` | horizon radiance + moonlight |
+/// | 192    | `material_params`     | `vec4<f32>` | runtime material knobs |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -76,6 +77,8 @@ pub struct LightingUniform {
     pub sky_zenith: [f32; 4],
     /// rgb = sky horizon radiance, w = moonlight strength.
     pub sky_horizon: [f32; 4],
+    /// x = absolute pattern fade start distance in metres.
+    pub material_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -143,6 +146,24 @@ impl GiParams {
             self.ambient_floor,
             self.sun_bounce,
             self.emissive_scale,
+        ]
+    }
+}
+
+/// Runtime material controls carried by the shared frame uniform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialParams {
+    pub pattern_fade_start_meters: f32,
+    pub pattern_fade_end_meters: f32,
+}
+
+impl MaterialParams {
+    fn to_array(self) -> [f32; 4] {
+        [
+            self.pattern_fade_start_meters.max(0.0),
+            self.pattern_fade_end_meters.max(0.0),
+            0.0,
+            0.0,
         ]
     }
 }
@@ -423,6 +444,7 @@ impl SunSettings {
         shading_params: ShadingParams,
         gi_params: GiParams,
         water_params: WaterParams,
+        material_params: MaterialParams,
     ) -> LightingUniform {
         let celestial = self.celestial_state();
         LightingUniform {
@@ -474,6 +496,7 @@ impl SunSettings {
                 celestial.horizon[2],
                 celestial.moonlight,
             ],
+            material_params: material_params.to_array(),
         }
     }
 }
@@ -500,7 +523,7 @@ mod tests {
             },
             GiParams {
                 strength: 1.0,
-                ambient_floor: 0.25,
+                ambient_floor: 0.0,
                 sun_bounce: 0.35,
                 emissive_scale: 0.0,
             },
@@ -511,12 +534,16 @@ mod tests {
                 reserved_flow: 0.0,
                 refraction_strength: 1.0,
             },
+            MaterialParams {
+                pattern_fade_start_meters: crate::pattern::PATTERN_FADE_START_METERS,
+                pattern_fade_end_meters: crate::pattern::PATTERN_FADE_END_METERS,
+            },
         )
     }
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 192);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 208);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
     }
 
@@ -525,7 +552,7 @@ mod tests {
     #[test]
     fn gi_params_keep_their_vector_components() {
         let uniform = probe_uniform(115.0);
-        assert_eq!(uniform.gi_params, [1.0, 0.25, 0.35, 0.0]);
+        assert_eq!(uniform.gi_params, [1.0, 0.0, 0.35, 0.0]);
         // ...and the E1 knobs must be untouched by the new vector.
         assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
     }
@@ -537,7 +564,7 @@ mod tests {
         let uniform = probe_uniform(115.0);
         assert_eq!(uniform.water_params, [1.0, 1.0, 0.04, 0.0]);
         assert_eq!(uniform.water_optics, [1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(uniform.gi_params, [1.0, 0.25, 0.35, 0.0]);
+        assert_eq!(uniform.gi_params, [1.0, 0.0, 0.35, 0.0]);
         assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
     }
 

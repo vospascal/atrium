@@ -606,9 +606,9 @@ fn ambient_estimate(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 // With CAGI off it is E1c's hemisphere ambient, unchanged and bit-identical.
 // With CAGI on it is the light volume sampled in the air cell in front of the
 // hit face (`cagi_sample_surface`, which walks out of solid cells first), plus
-// whatever share of the hemisphere ambient the runtime floor keeps — the floor
-// exists because a coarse volume in a sealed pocket legitimately converges to
-// black, and a voxel engine with pitch-black interiors is unreadable.
+// whatever share of hemisphere ambient the optional runtime override keeps.
+// The authoritative default is zero: a sealed pocket with no emitter converges
+// to black. Raising the override is an explicit non-physical readability choice.
 //
 // The surface point is reconstructed here rather than passed in so the whole
 // function folds away when the lever is off: with CAGI_ENABLED = false naga

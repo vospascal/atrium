@@ -153,6 +153,7 @@ struct Lighting {
     celestial_moon: vec4<f32>, // xyz direction, w moon phase
     sky_zenith: vec4<f32>,     // rgb radiance, w star rotation
     sky_horizon: vec4<f32>,    // rgb radiance, w moonlight
+    material_params: vec4<f32>, // x/y = absolute pattern fade start/end, metres
 }
 
 @group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;

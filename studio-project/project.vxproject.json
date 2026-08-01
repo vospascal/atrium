@@ -227,8 +227,13 @@
     {
       "id": "vx-000000000000000018c7af1e33d85fc8-000000000000005d",
       "path": "graphs/material-06.vgraph.json"
+    },
+    {
+      "id": "world-main-v3",
+      "path": "graphs/world.vgraph.json"
     }
   ],
+  "active_world_graph": "world-main-v3",
   "world_profiles": [
     {
       "id": "world-default-v2",

@@ -9,7 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::graph::{GraphAsset, NodeRegistry};
-use crate::material_graph::{compile, MaterialGraphShaderSet};
+use crate::material_graph::{compile, MaterialGraphShaderSet, MaterialSampleContext};
+use crate::material_graph_layers::sync_pattern_layers_from_graph;
 use crate::material_table::MaterialTable;
 use crate::studio_assets::{AssetError, StudioProject, StudioProjectStore};
 
@@ -57,6 +58,84 @@ impl MaterialGraphAssetService {
             shaders.insert(slot, program);
         }
         Ok(shaders)
+    }
+
+    /// Resolve material graphs independently for a live editing session.
+    ///
+    /// Strict validation deliberately remains all-or-nothing in
+    /// [`Self::load_shader_set`].  The running editor, however, must keep every
+    /// valid project material active when one graph is being repaired.  A failed
+    /// slot falls back only to its loaded material row, while the valid slots
+    /// retain their graph programs.  The graph also projects its representative
+    /// surface values and pattern chain into the live table, which is the source
+    /// used by the world bindings and CAGI.
+    pub fn load_shader_set_for_editing(
+        project_path: &Path,
+        project: &StudioProject,
+        material_table: &mut MaterialTable,
+    ) -> (MaterialGraphShaderSet, Vec<String>) {
+        let store = StudioProjectStore::new(project_path);
+        let registry = NodeRegistry::builtin();
+        let mut shaders = MaterialGraphShaderSet::default();
+        let mut diagnostics = Vec::new();
+
+        for (slot_key, material_reference) in &project.manifest.material_assignments {
+            let result = (|| -> Result<(), AssetError> {
+                let slot = slot_key.parse::<u8>().map_err(|_| {
+                    AssetError::InvalidMaterial(format!(
+                        "material assignment key `{slot_key}` is not a u8"
+                    ))
+                })?;
+                let material = store.load_material(&material_reference.path)?;
+                let graph_reference = project
+                    .manifest
+                    .graph_assets
+                    .iter()
+                    .find(|reference| reference.id == material.graph)
+                    .ok_or_else(|| {
+                        AssetError::InvalidGraph(format!(
+                            "material `{}` references missing graph `{}`",
+                            material.id, material.graph
+                        ))
+                    })?;
+                let graph = store.load_graph(&graph_reference.path)?;
+                if graph.id != graph_reference.id {
+                    return Err(AssetError::InvalidGraph(format!(
+                        "graph asset `{}` does not match its manifest identity",
+                        graph_reference.path.display()
+                    )));
+                }
+                let program = compile(&graph, &registry).map_err(|error| {
+                    AssetError::InvalidGraph(format!("graph `{}` failed: {error}", graph.id))
+                })?;
+                let row = material_table.row_mut(slot).ok_or_else(|| {
+                    AssetError::InvalidMaterial(format!("material slot {slot} is out of range"))
+                })?;
+                sync_pattern_layers_from_graph(&graph, row).map_err(|error| {
+                    AssetError::InvalidGraph(format!(
+                        "graph `{}` pattern chain failed: {error}",
+                        graph.id
+                    ))
+                })?;
+                let _ = material_table.apply_graph_sample(
+                    slot,
+                    &program,
+                    MaterialSampleContext {
+                        position: [0.0; 3],
+                        normal: [0.0, 1.0, 0.0],
+                    },
+                );
+                shaders.insert(slot, program);
+                Ok(())
+            })();
+            if let Err(error) = result {
+                diagnostics.push(format!(
+                    "Material slot {slot_key} is using its basic material fallback: {error}"
+                ));
+            }
+        }
+
+        (shaders, diagnostics)
     }
 
     /// Load a slot's required canonical graph.

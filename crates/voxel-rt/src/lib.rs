@@ -25,6 +25,7 @@ pub mod brickmap;
 pub mod cagi;
 pub mod camera;
 pub mod character;
+pub mod engine_runtime;
 pub mod environment;
 pub mod frame_timing;
 pub mod gpu;

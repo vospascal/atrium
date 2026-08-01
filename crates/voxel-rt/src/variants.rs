@@ -30,8 +30,8 @@
 
 use crate::ao::{float_literal, patch_shader_const, AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
-use crate::lighting::{GiParams, ShadingParams, WaterParams};
-use crate::pattern::MAX_PATTERN_LAYERS;
+use crate::lighting::{GiParams, MaterialParams, ShadingParams, WaterParams};
+use crate::pattern::{MAX_PATTERN_LAYERS, PATTERN_FADE_END_METERS, PATTERN_FADE_START_METERS};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
 use crate::water::{WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface};
@@ -114,6 +114,8 @@ pub enum LeverId {
     MaterialPatterns,
     MaterialPatternStrength,
     MaterialPatternMaxLayers,
+    MaterialPatternFadeStart,
+    MaterialPatternFadeEnd,
     // Resolution (S0).
     RenderScale,
 }
@@ -416,6 +418,12 @@ impl LeverId {
             LeverId::MaterialPatternMaxLayers => {
                 LeverValue::Count(quality.materials.pattern_max_layers)
             }
+            LeverId::MaterialPatternFadeStart => {
+                LeverValue::Scalar(quality.materials.pattern_fade_start_meters)
+            }
+            LeverId::MaterialPatternFadeEnd => {
+                LeverValue::Scalar(quality.materials.pattern_fade_end_meters)
+            }
             LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
         }
     }
@@ -552,6 +560,12 @@ impl LeverId {
                 // `patch_shader_source` clamps on the way to the shader — which is the
                 // only place the bound actually matters, since it is the array length.
                 quality.materials.pattern_max_layers = value.expect_count(self);
+            }
+            LeverId::MaterialPatternFadeStart => {
+                quality.materials.pattern_fade_start_meters = value.expect_scalar(self).max(0.0);
+            }
+            LeverId::MaterialPatternFadeEnd => {
+                quality.materials.pattern_fade_end_meters = value.expect_scalar(self).max(0.0);
             }
             LeverId::RenderScale => {
                 quality.render_scale = value
@@ -1525,16 +1539,16 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::Runtime,
         shader_const: None,
         label: "ambient floor",
-        default_value: LeverValue::Scalar(0.25),
+        default_value: LeverValue::Scalar(0.0),
         range: LeverRange::Continuous {
             minimum: 0.0,
             maximum: 1.0,
             logarithmic: false,
         },
-        verdict: "Runtime (gi_params.y): the share of E1c's hemisphere ambient that \
-                  survives under CAGI. Not a fudge factor but a readability floor — a \
-                  correct flood converges to black in a sealed pocket, and 0.25 keeps \
-                  the per-face vertical gradient that makes voxel shapes legible there.",
+        verdict: "Runtime (gi_params.y): the share of analytic hemisphere ambient that \
+                  bypasses the light transport. Zero is authoritative: a sealed pocket \
+                  with no emitter is fully dark. Raise this only as an explicit \
+                  non-physical readability override.",
         mode_options: &[],
         bench: &[],
     },
@@ -2145,6 +2159,42 @@ pub const REGISTRY: &[Lever] = &[
             },
         ],
     },
+    Lever {
+        id: LeverId::MaterialPatternFadeStart,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "texture fade start (m)",
+        default_value: LeverValue::Scalar(PATTERN_FADE_START_METERS),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 250.0,
+            logarithmic: false,
+        },
+        verdict: "Material detail remains fully sharp through this camera distance, \
+                  then blends toward the unpatterned base until the fade-end distance. \
+                  Dragging is runtime-only and does not rebuild shaders.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::MaterialPatternFadeEnd,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "texture fade end (m)",
+        default_value: LeverValue::Scalar(PATTERN_FADE_END_METERS),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 250.0,
+            logarithmic: false,
+        },
+        verdict: "Material detail is fully gone at this camera distance. Values at or \
+                  below fade start produce a sharp cutoff; zero disables fading. \
+                  Dragging is runtime-only and does not rebuild shaders.",
+        mode_options: &[],
+        bench: &[],
+    },
     // ---- Resolution (S0) ----
     Lever {
         id: LeverId::RenderScale,
@@ -2210,8 +2260,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
     QualityPresetSpec {
         preset: QualityPreset::Potato,
         label: "Potato",
-        summary: "corner AO + hard shadows, NO light volume, zero-ray Fresnel-tinted \
-                  water, render scale 0.7, AO fade 15->30 m",
+        summary: "corner AO + hard shadows, NO light volume, flat materials, zero-ray \
+                  Fresnel-tinted water, render scale 0.7, AO fade 15->30 m",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
@@ -2239,8 +2289,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
         preset: QualityPreset::Quest,
         label: "Quest",
         summary: "corner AO + hard shadows, CAGI at 1 m cells x 2 iterations, \
-                  zero-ray Fresnel-tinted water, render scale 0.8 — E9 tunes this \
-                  tier on device",
+                  zero-ray Fresnel-tinted water, material fade 10->50 m, render \
+                  scale 0.8 — E9 tunes this tier on device",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
@@ -2248,6 +2298,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             // and the 20 MB budget.
             (LeverId::GiResolution, LeverValue::Count(8)),
             (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
+            (LeverId::MaterialPatternFadeStart, LeverValue::Scalar(10.0)),
+            (LeverId::MaterialPatternFadeEnd, LeverValue::Scalar(50.0)),
             (LeverId::WaterMode, LeverValue::Mode(1)),
             (LeverId::WaterSunThroughLiquid, LeverValue::Flag(false)),
             (LeverId::RenderScale, LeverValue::Scalar(0.8)),
@@ -2257,14 +2309,16 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
         preset: QualityPreset::Balanced,
         label: "Balanced",
         summary: "corner AO + hard shadows + CAGI at 0.5 m cells x 2 iterations + \
-                  Fresnel reflection & refraction at 1 water interface, full \
-                  resolution — the shipped default",
+                  Fresnel reflection & refraction at 1 water interface, material \
+                  fade 10->50 m, full resolution — the shipped default",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
             (LeverId::GiEnabled, LeverValue::Flag(true)),
             (LeverId::GiResolution, LeverValue::Count(4)),
             (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
+            (LeverId::MaterialPatternFadeStart, LeverValue::Scalar(10.0)),
+            (LeverId::MaterialPatternFadeEnd, LeverValue::Scalar(50.0)),
             (LeverId::WaterMode, LeverValue::Mode(4)),
             (LeverId::WaterBounces, LeverValue::Count(1)),
             (LeverId::WaterSunThroughLiquid, LeverValue::Flag(true)),
@@ -2276,7 +2330,7 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
         label: "Beautiful",
         summary: "ray-traced AO (2 rays / 8 voxels / cosine / falloff) + directional \
                   miss radiance + hard shadows + CAGI at 0.5 m cells x 4 iterations + \
-                  full water optics, full resolution",
+                  full water optics, material fade 100->200 m, full resolution",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(0)),
             (LeverId::AoRayCount, LeverValue::Count(2)),
@@ -2291,6 +2345,8 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             // Twice Balanced's propagation budget: the volume converges in half
             // the frames after a sun change, at twice the CA cost.
             (LeverId::GiIterationsPerFrame, LeverValue::Count(4)),
+            (LeverId::MaterialPatternFadeStart, LeverValue::Scalar(100.0)),
+            (LeverId::MaterialPatternFadeEnd, LeverValue::Scalar(200.0)),
             // E6: ONE interface, like Balanced. The second one was measured against
             // the cheap mirrored stand-in on the window-rim view and the two frames
             // are near-identical, while the full bounce costs 2.5x what the stand-in
@@ -2322,9 +2378,8 @@ pub fn preset_spec(preset: QualityPreset) -> &'static QualityPresetSpec {
 /// Its own struct rather than loose fields on [`RenderQuality`] because this arc
 /// adds several more (pattern layers, animation, sub-voxel models), and each will
 /// want the same treatment: a shader const, a registry row, a bench column.
-// No `Eq`: `pattern_strength` is an `f32`. `requires_pipeline_rebuild` compares
-// with `PartialEq`, which is the right comparison anyway — two settings that differ
-// only by a float are two different shaders.
+// No `Eq`: the authored controls contain floats. Pipeline invalidation below
+// compares only shader-constant fields; fade distance is a runtime uniform.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialSettings {
     /// S1 — read per-face-role albedo and roughness instead of the row's base.
@@ -2336,13 +2391,16 @@ pub struct MaterialSettings {
     /// S2 — layers evaluated per hit, whatever the row authored. The tier knob, and
     /// the only one of the three that buys frames.
     pub pattern_max_layers: u32,
+    /// Absolute camera distance in metres at which detail starts fading.
+    pub pattern_fade_start_meters: f32,
+    /// Absolute camera distance in metres where detail has fully faded out.
+    pub pattern_fade_end_meters: f32,
 }
 
 impl MaterialSettings {
     /// Whether switching to `self` needs the shading pipeline recompiled: true when
-    /// any SHADER-CONST lever moved. Every lever in this group is a shader const
-    /// today, so this is a plain inequality — but it is spelled out as a method so
-    /// the first runtime lever added here does not silently start forcing rebuilds.
+    /// any SHADER-CONST lever moved. Pattern fade distance is intentionally absent:
+    /// it rides the frame uniform and must remain smooth while dragged.
     ///
     /// Note that `pattern_strength` is in here, so dragging it recompiles. That is
     /// the deliberate trade S2 makes: a shader const lets naga fold a
@@ -2352,7 +2410,10 @@ impl MaterialSettings {
     /// while looking, and those live in the material table, which uploads without a
     /// rebuild.
     pub fn requires_pipeline_rebuild(&self, applied: &MaterialSettings) -> bool {
-        self != applied
+        self.face_roles != applied.face_roles
+            || self.patterns != applied.patterns
+            || self.pattern_strength != applied.pattern_strength
+            || self.pattern_max_layers != applied.pattern_max_layers
     }
 
     /// Patch this group's consts into a shader source, the same way every other
@@ -2394,6 +2455,8 @@ impl Default for MaterialSettings {
             patterns: true,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
+            pattern_fade_start_meters: PATTERN_FADE_START_METERS,
+            pattern_fade_end_meters: PATTERN_FADE_END_METERS,
         }
     }
 }
@@ -2523,6 +2586,13 @@ impl RenderQuality {
             ambient_floor: self.global_illumination.ambient_floor,
             sun_bounce: self.global_illumination.sun_bounce,
             emissive_scale: self.global_illumination.emissive_scale,
+        }
+    }
+
+    pub fn material_params(&self) -> MaterialParams {
+        MaterialParams {
+            pattern_fade_start_meters: self.materials.pattern_fade_start_meters,
+            pattern_fade_end_meters: self.materials.pattern_fade_end_meters,
         }
     }
 
@@ -2846,6 +2916,8 @@ mod tests {
             patterns,
             pattern_strength,
             pattern_max_layers,
+            pattern_fade_start_meters,
+            pattern_fade_end_meters,
         } = materials;
         let TraversalSettings {
             column_fast_forward,
@@ -3030,6 +3102,14 @@ mod tests {
             (
                 LeverId::MaterialPatternMaxLayers,
                 LeverValue::Count(pattern_max_layers),
+            ),
+            (
+                LeverId::MaterialPatternFadeStart,
+                LeverValue::Scalar(pattern_fade_start_meters),
+            ),
+            (
+                LeverId::MaterialPatternFadeEnd,
+                LeverValue::Scalar(pattern_fade_end_meters),
             ),
             (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
         ];
@@ -3249,6 +3329,17 @@ mod tests {
     }
 
     #[test]
+    fn pattern_fade_slider_is_runtime_and_reaches_the_uniform() {
+        let applied = RenderQuality::default();
+        let mut edited = applied;
+        edited.materials.pattern_fade_start_meters = 40.0;
+        edited.materials.pattern_fade_end_meters = 90.0;
+        assert!(!edited.requires_pipeline_rebuild(&applied));
+        assert_eq!(edited.material_params().pattern_fade_start_meters, 40.0);
+        assert_eq!(edited.material_params().pattern_fade_end_meters, 90.0);
+    }
+
+    #[test]
     fn preset_table_matches_the_e1b_per_tier_recommendation() {
         let potato = preset_spec(QualityPreset::Potato).resolve();
         assert_eq!(potato.ambient_occlusion.mode, AoMode::AnalyticCorner);
@@ -3265,10 +3356,16 @@ mod tests {
         assert_eq!(quest.ambient_occlusion.mode, AoMode::AnalyticCorner);
         assert_eq!(quest.shadows.mode, ShadowMode::Hard);
         assert!(!quest.ambient_occlusion.distance_fade);
+        assert_eq!(quest.materials.pattern_fade_start_meters, 10.0);
+        assert_eq!(quest.materials.pattern_fade_end_meters, 50.0);
         assert_eq!(quest.render_scale, 0.8);
 
         let balanced = preset_spec(QualityPreset::Balanced).resolve();
         let beautiful = preset_spec(QualityPreset::Beautiful).resolve();
+        assert_eq!(balanced.materials.pattern_fade_start_meters, 10.0);
+        assert_eq!(balanced.materials.pattern_fade_end_meters, 50.0);
+        assert_eq!(beautiful.materials.pattern_fade_start_meters, 100.0);
+        assert_eq!(beautiful.materials.pattern_fade_end_meters, 200.0);
 
         for tier in [quest, balanced, beautiful] {
             assert!(tier.materials.face_roles);

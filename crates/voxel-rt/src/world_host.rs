@@ -74,6 +74,11 @@ struct Worker {
     /// Requests sent minus updates drained — what the overlay shows as "pending"
     /// and what proves the frame is not waiting for them.
     in_flight: usize,
+    /// Only one expensive full light-attribute sweep is useful at a time. Live
+    /// material sliders can produce many newer states while it runs; retain
+    /// only the newest one instead of replaying stale lighting for seconds.
+    light_attributes_in_flight: bool,
+    pending_light_attributes: Option<(CagiGrid, MaterialAttributes)>,
 }
 
 pub struct WorldHost {
@@ -143,6 +148,8 @@ impl WorldHost {
                 results: result_receiver,
                 handle,
                 in_flight: 0,
+                light_attributes_in_flight: false,
+                pending_light_attributes: None,
             });
         } else if let Some(worker) = self.worker.take() {
             let _ = worker.requests.send(WorkerRequest::Stop);
@@ -197,7 +204,12 @@ impl WorldHost {
     ) {
         match &mut self.worker {
             Some(worker) => {
+                if worker.light_attributes_in_flight {
+                    worker.pending_light_attributes = Some((grid, attribute_table));
+                    return;
+                }
                 worker.in_flight += 1;
+                worker.light_attributes_in_flight = true;
                 worker
                     .requests
                     .send(WorkerRequest::LightAttributes(grid, attribute_table))
@@ -230,7 +242,25 @@ impl WorldHost {
         if let Some(worker) = &mut self.worker {
             while let Ok(update) = worker.results.try_recv() {
                 worker.in_flight = worker.in_flight.saturating_sub(1);
+                if matches!(update, WorldUpdate::LightAttributes { .. }) {
+                    worker.light_attributes_in_flight = false;
+                    // A newer authored state exists. Never flash this obsolete
+                    // result into the visible light volume.
+                    if worker.pending_light_attributes.is_some() {
+                        continue;
+                    }
+                }
                 updates.push(update);
+            }
+            if !worker.light_attributes_in_flight {
+                if let Some((grid, attributes)) = worker.pending_light_attributes.take() {
+                    worker.in_flight += 1;
+                    worker.light_attributes_in_flight = true;
+                    worker
+                        .requests
+                        .send(WorkerRequest::LightAttributes(grid, attributes))
+                        .expect("the world thread outlives its sender");
+                }
             }
         }
         for update in &updates {

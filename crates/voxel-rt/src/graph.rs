@@ -42,6 +42,7 @@ graph_id!(NodeTypeId);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphKind {
+    World,
     Material,
     MaterialFunction,
     Geometry,
@@ -74,6 +75,10 @@ pub enum SocketType {
     PointField,
     SplineField,
     BiomeField,
+    BiomeDefinition,
+    SurfaceProfile,
+    SurfaceRule,
+    MaterialBinding,
     Environment,
     FeatureSet,
     AudioSignal,
@@ -304,7 +309,48 @@ pub enum NodePreview {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeOperation {
     Material(MaterialNodeOperation),
-    Metadata,
+    World(WorldNodeOperation),
+    Environment(EnvironmentNodeOperation),
+    Biome(BiomeNodeOperation),
+    Surface(SurfaceNodeOperation),
+    Field(FieldNodeOperation),
+    Logic(LogicNodeOperation),
+}
+
+/// World-domain operations. The textual node type remains persisted, while this
+/// enum is the only compiler dispatch key; no world JSON schema sits beside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldNodeOperation {
+    Output,
+    GeneratedTerrain,
+    Compose,
+    StudioPreview,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvironmentNodeOperation {
+    Output,
+    Generated,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BiomeNodeOperation {
+    Output,
+    Definition,
+    Blend,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceNodeOperation {
+    Output,
+    Profile,
+    MaterialBinding,
+    AddVoxelLayer,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldNodeOperation {
+    Constant,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogicNodeOperation {
+    Always,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -384,11 +430,28 @@ const MATERIAL_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
     intermediates: MATERIAL_SURFACE_INTERMEDIATES,
     sink: NodeOperation::Material(MaterialNodeOperation::Output),
 }];
-pub static GRAPH_CONTRACTS: &[GraphContractStatic] = &[GraphContractStatic {
-    kind: GraphKind::Material,
-    nodes: MATERIAL_NODE_CONSTRAINTS,
-    flows: MATERIAL_FLOWS,
+const WORLD_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[NodeConstraintStatic {
+    operation: NodeOperation::World(WorldNodeOperation::Output),
+    cardinality: Cardinality::EXACTLY_ONE,
 }];
+const WORLD_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
+    value_type: SocketType::VoxelField,
+    source: NodeOperation::World(WorldNodeOperation::GeneratedTerrain),
+    intermediates: &[NodeOperation::World(WorldNodeOperation::Compose)],
+    sink: NodeOperation::World(WorldNodeOperation::Output),
+}];
+pub static GRAPH_CONTRACTS: &[GraphContractStatic] = &[
+    GraphContractStatic {
+        kind: GraphKind::Material,
+        nodes: MATERIAL_NODE_CONSTRAINTS,
+        flows: MATERIAL_FLOWS,
+    },
+    GraphContractStatic {
+        kind: GraphKind::World,
+        nodes: WORLD_NODE_CONSTRAINTS,
+        flows: WORLD_FLOWS,
+    },
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionPlan {
@@ -1070,14 +1133,45 @@ impl Default for NodeRegistry {
 pub const NodeRegistry: NodeRegistry = NodeRegistry::builtin();
 
 const MATERIAL: &[GraphKind] = &[GraphKind::Material];
-const QUALITY: &[GraphKind] = &[GraphKind::Quality];
-const RENDER: &[GraphKind] = &[GraphKind::RenderPipeline];
+const WORLD: &[GraphKind] = &[GraphKind::World];
 const SCALAR_UNIFORM_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
     key: "value",
     value_type: SocketType::Scalar,
     rate: EvaluationRate::Uniform,
     cardinality: Cardinality::ANY,
 }];
+const VOXEL_FIELD_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
+    key: "world",
+    value_type: SocketType::VoxelField,
+    rate: EvaluationRate::PerVoxel,
+    cardinality: Cardinality::ANY,
+}];
+const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
+    key: "world",
+    value_type: SocketType::VoxelField,
+    rate: EvaluationRate::PerVoxel,
+    cardinality: Cardinality::REQUIRED_SINGLE,
+}];
+const WORLD_COMPOSE_IN: &[SocketDeclarationStatic] = &[
+    SocketDeclarationStatic {
+        key: "world",
+        value_type: SocketType::VoxelField,
+        rate: EvaluationRate::PerVoxel,
+        cardinality: Cardinality::REQUIRED_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "environment",
+        value_type: SocketType::Environment,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "biomes",
+        value_type: SocketType::BiomeField,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+];
 const COLOR_UNIFORM_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
     key: "color",
     value_type: SocketType::Color,
@@ -1437,19 +1531,6 @@ const SCALAR_PER_SAMPLE_INPUT: &[SocketDeclarationStatic] = &[SocketDeclarationS
     rate: EvaluationRate::PerSample,
     cardinality: Cardinality::OPTIONAL_SINGLE,
 }];
-const PROFILE_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "profile",
-    value_type: SocketType::QualityProfile,
-    rate: EvaluationRate::Uniform,
-    cardinality: Cardinality::ANY,
-}];
-const TARGET_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "target",
-    value_type: SocketType::RenderTarget,
-    rate: EvaluationRate::Uniform,
-    cardinality: Cardinality::ANY,
-}];
-
 const NONE: Option<NumericRange> = None;
 const UNIT: Option<NumericRange> = Some(NumericRange::new(0.0, 1.0));
 const SIGNED: Option<NumericRange> = Some(NumericRange::new(-1.0, 1.0));
@@ -2794,27 +2875,51 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         VECTOR_REROUTE_FIELDS
     ),
     node!(
-        "quality.profile",
-        NodeOperation::Metadata,
-        "Quality Profile",
-        "A compiled rendering quality profile.",
-        NodeCategory::Quality,
+        "world.generated_terrain",
+        NodeOperation::World(WorldNodeOperation::GeneratedTerrain),
+        "Generated Terrain",
+        "Creates the deterministic base voxel terrain.",
+        NodeCategory::Environment,
         NodePreview::None,
-        QUALITY,
+        WORLD,
         &[],
-        PROFILE_OUT,
+        VOXEL_FIELD_OUT,
         &[]
     ),
     node!(
-        "render.target",
-        NodeOperation::Metadata,
-        "Render Target",
-        "A render-pipeline target.",
+        "world.compose",
+        NodeOperation::World(WorldNodeOperation::Compose),
+        "Surface Composer",
+        "Applies registered environment, biome, and surface programs to terrain.",
+        NodeCategory::Surface,
+        NodePreview::None,
+        WORLD,
+        WORLD_COMPOSE_IN,
+        VOXEL_FIELD_OUT,
+        &[]
+    ),
+    node!(
+        "world.output",
+        NodeOperation::World(WorldNodeOperation::Output),
+        "World Output",
+        "Final voxel world consumed by the engine.",
         NodeCategory::Render,
         NodePreview::None,
-        RENDER,
+        WORLD,
+        VOXEL_FIELD_IN,
         &[],
-        TARGET_OUT,
+        &[]
+    ),
+    node!(
+        "world.studio_preview",
+        NodeOperation::World(WorldNodeOperation::StudioPreview),
+        "Studio Preview",
+        "Builds the isolated material preview plate and subject.",
+        NodeCategory::Inputs,
+        NodePreview::None,
+        WORLD,
+        &[],
+        VOXEL_FIELD_OUT,
         &[]
     ),
 ];
@@ -3630,7 +3735,15 @@ mod tests {
                     has_default
                         || matches!(
                             input.value_type,
-                            SocketType::MaterialSurface | SocketType::MaskField
+                            SocketType::MaterialSurface
+                                | SocketType::MaskField
+                                | SocketType::VoxelField
+                                | SocketType::Environment
+                                | SocketType::BiomeField
+                                | SocketType::BiomeDefinition
+                                | SocketType::SurfaceProfile
+                                | SocketType::SurfaceRule
+                                | SocketType::MaterialBinding
                         ),
                     "primitive input {} on {} has no default/UI schema",
                     input.key,

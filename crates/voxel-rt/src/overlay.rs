@@ -2632,6 +2632,10 @@ fn graph_socket_color(socket_type: SocketType) -> egui::Color32 {
         | SocketType::PointField
         | SocketType::SplineField
         | SocketType::BiomeField
+        | SocketType::BiomeDefinition
+        | SocketType::SurfaceProfile
+        | SocketType::SurfaceRule
+        | SocketType::MaterialBinding
         | SocketType::Environment => egui::Color32::from_rgb(85, 156, 205),
         SocketType::FeatureSet => egui::Color32::from_rgb(122, 154, 72),
         SocketType::AudioSignal => egui::Color32::from_rgb(160, 91, 186),
