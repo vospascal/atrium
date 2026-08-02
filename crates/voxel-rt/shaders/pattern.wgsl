@@ -474,7 +474,7 @@ fn material_pattern_albedo_from_base(material: u32, sample: PatternSample,
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_ALBEDO) {
             albedo = pattern_apply_color(layer, albedo, sample, brickmap.voxel_size_meters,
-                pattern_animation_gain(animation, slot), animation.drift_velocity[slot].xyz);
+                pattern_animation_gain(animation, slot), pattern_animation_drift(animation, slot));
         }
     }
     return albedo;
@@ -496,7 +496,7 @@ fn material_pattern_roughness_from_base(material: u32, sample: PatternSample,
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_ROUGHNESS) {
             roughness = pattern_apply_scalar(layer, roughness, sample, brickmap.voxel_size_meters,
-                pattern_animation_gain(animation, slot), animation.drift_velocity[slot].xyz);
+                pattern_animation_gain(animation, slot), pattern_animation_drift(animation, slot));
         }
     }
     return clamp(roughness, 0.0, 1.0);
@@ -518,7 +518,7 @@ fn material_pattern_emission_from_base(material: u32, sample: PatternSample,
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_EMISSION) {
             emission = pattern_apply_color(layer, emission, sample, brickmap.voxel_size_meters,
-                pattern_animation_gain(animation, slot), animation.drift_velocity[slot].xyz);
+                pattern_animation_gain(animation, slot), pattern_animation_drift(animation, slot));
         }
     }
     return emission;

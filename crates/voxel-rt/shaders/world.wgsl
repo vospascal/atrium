@@ -147,6 +147,21 @@ fn pattern_animation_gain(animation: PatternAnimation, slot: u32) -> f32 {
     return animation.gain.w;
 }
 
+// The same if-chain for the drift array, and for the same reason the gain helper
+// above is one: `drift_velocity[slot]` with a LOOP VARIABLE is a dynamic index into
+// a by-value array in the private address space. WGSL allows it, but the backends
+// have to put the array somewhere addressable, so it lands in thread-local scratch
+// instead of registers — 64 bytes per invocation, on every shaded hit, spilled
+// whether or not any graph is animating. A branch chain reads a component and needs
+// no address, which is precisely why `gain` was written this way and why leaving its
+// neighbour on a dynamic index undid the care.
+fn pattern_animation_drift(animation: PatternAnimation, slot: u32) -> vec3<f32> {
+    if (slot == 0u) { return animation.drift_velocity[0].xyz; }
+    if (slot == 1u) { return animation.drift_velocity[1].xyz; }
+    if (slot == 2u) { return animation.drift_velocity[2].xyz; }
+    return animation.drift_velocity[3].xyz;
+}
+
 struct Lighting {
     sun_direction: vec3<f32>,       // unit vector, surface -> sun
     _pad0: f32,

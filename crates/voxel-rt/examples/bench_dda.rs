@@ -775,9 +775,9 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
 /// should be nearly all of it up close and almost none of it at range, since the
 /// fade is derived from the period.
 fn materials_section() -> Section {
-    let shipped = RenderQuality::default();
-    let mut variants = vec![Variant::new("material-flat".to_string(), shipped)];
-    variants.extend(registry_variants(BenchSection::Materials, &shipped));
+    let baseline = materials_off(RenderQuality::default());
+    let mut variants = vec![Variant::new("material-flat".to_string(), baseline)];
+    variants.extend(registry_variants(BenchSection::Materials, &baseline));
 
     Section {
         heading: "section 9: S1 face roles + S2 pattern layers",
@@ -1167,6 +1167,21 @@ fn water_off(mut quality: RenderQuality) -> RenderQuality {
     // sections would still walk through the island's lakes and the Stage 2 pixel
     // gate would move. Off means off.
     quality.water.sun_through_liquid = false;
+    quality
+}
+
+/// The material model forced off — the same isolation move `ao_off` / `gi_off` /
+/// `water_off` make, one arc later, and section 9 cannot mean anything without it.
+///
+/// S1 and S2 were both promoted into `RenderQuality::default()` once they gated, so
+/// `RenderQuality::default()` IS the four-layer variant. A section-9 run anchored on
+/// the shipped defaults therefore compares patterns against patterns: it reports 0
+/// differing pixels for `material-face-roles` and `material-patterns` and a delta
+/// inside noise, which is exactly what the 2026-08-02 re-run produced before this.
+/// The anchor has to be built off, not inherited.
+fn materials_off(mut quality: RenderQuality) -> RenderQuality {
+    quality.materials.face_roles = false;
+    quality.materials.patterns = false;
     quality
 }
 
