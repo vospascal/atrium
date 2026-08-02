@@ -449,102 +449,74 @@ fn pattern_sample(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> 
 // once per HIT and never once per traversal step, which is what keeps the whole
 // stage off the hot loop.
 
-// The authored layer stack, applied over a base the caller supplies.
+// The authored layer stack, applied over bases the caller supplies.
 //
-// There used to be two copies of each of these — one taking the material row's
-// own base and one taking a graph's — which meant every change to the layer
-// loop had to be made twice. The row-base variants below are now wrappers, so
-// the loop exists once and a graph and a plain material cannot diverge.
+// ONE loop over the slots, producing ALL THREE targets. There used to be three
+// functions with a loop each, and the shape was costing far more than it looked:
+// a four-layer row walked twelve slot iterations to do four slots' work, and each
+// function re-read the row and re-tested the flag. Fusing them is what makes the
+// per-hit cost proportional to the layers a material actually authored.
+//
+// The row is read THROUGH the storage binding — `materials[material].patterns[slot]`
+// and not `let row = materials[material]` — for the reason `pattern_animation_drift`
+// spells out one file over. Binding `row` copies the whole 256-byte Material into
+// private memory, `patterns` included, and the loop then dynamically indexes that
+// copy; reading through the binding is a plain buffer access the hardware offsets
+// for free. That single distinction measured -1.9 ms on the saturated table.
 //
 // `animation` carries the per-slot gain and drift a material graph supplied;
 // `pattern_animation_identity()` is the un-animated case and folds away.
-fn material_pattern_albedo_from_base(material: u32, sample: PatternSample,
-                                     base: vec3<f32>,
-                                     animation: PatternAnimation) -> vec3<f32> {
-    let row = materials[material];
-    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
-        return base;
-    }
-    let count = min(
-        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
-        MAX_PATTERN_LAYERS,
-    );
-    var albedo = base;
-    for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let layer = row.patterns[slot];
-        if (pattern_target(layer) == PATTERN_TARGET_ALBEDO) {
-            albedo = pattern_apply_color(layer, albedo, sample, brickmap.voxel_size_meters,
-                pattern_animation_gain(animation, slot), pattern_animation_drift(animation, slot));
-        }
-    }
-    return albedo;
+struct PatternSurface {
+    albedo: vec3<f32>,
+    roughness: f32,
+    emission: vec3<f32>,
 }
 
-fn material_pattern_roughness_from_base(material: u32, sample: PatternSample,
-                                        base: f32,
-                                        animation: PatternAnimation) -> f32 {
-    let row = materials[material];
-    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
-        return base;
+fn material_pattern_surface_from_base(material: u32, sample: PatternSample,
+                                      albedo_base: vec3<f32>, roughness_base: f32,
+                                      emission_base: vec3<f32>,
+                                      animation: PatternAnimation) -> PatternSurface {
+    var surface: PatternSurface;
+    surface.albedo = albedo_base;
+    surface.roughness = roughness_base;
+    surface.emission = emission_base;
+    let flags = materials[material].flags;
+    if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return surface;
     }
     let count = min(
-        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
+        min(material_pattern_count(flags), MATERIAL_PATTERN_MAX_LAYERS),
         MAX_PATTERN_LAYERS,
     );
-    var roughness = base;
+    let voxel_size_meters = brickmap.voxel_size_meters;
     for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let layer = row.patterns[slot];
-        if (pattern_target(layer) == PATTERN_TARGET_ROUGHNESS) {
-            roughness = pattern_apply_scalar(layer, roughness, sample, brickmap.voxel_size_meters,
-                pattern_animation_gain(animation, slot), pattern_animation_drift(animation, slot));
+        let layer = materials[material].patterns[slot];
+        let layer_target = pattern_target(layer);
+        let gain = pattern_animation_gain(animation, slot);
+        let drift = pattern_animation_drift(animation, slot);
+        if (layer_target == PATTERN_TARGET_ALBEDO) {
+            surface.albedo = pattern_apply_color(
+                layer, surface.albedo, sample, voxel_size_meters, gain, drift);
+        } else if (layer_target == PATTERN_TARGET_EMISSION) {
+            surface.emission = pattern_apply_color(
+                layer, surface.emission, sample, voxel_size_meters, gain, drift);
+        } else if (layer_target == PATTERN_TARGET_ROUGHNESS) {
+            surface.roughness = clamp(pattern_apply_scalar(
+                layer, surface.roughness, sample, voxel_size_meters, gain, drift), 0.0, 1.0);
         }
     }
-    return clamp(roughness, 0.0, 1.0);
+    return surface;
 }
 
-fn material_pattern_emission_from_base(material: u32, sample: PatternSample,
-                                       base: vec3<f32>,
-                                       animation: PatternAnimation) -> vec3<f32> {
-    let row = materials[material];
-    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
-        return base;
-    }
-    let count = min(
-        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
-        MAX_PATTERN_LAYERS,
-    );
-    var emission = base;
-    for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let layer = row.patterns[slot];
-        if (pattern_target(layer) == PATTERN_TARGET_EMISSION) {
-            emission = pattern_apply_color(layer, emission, sample, brickmap.voxel_size_meters,
-                pattern_animation_gain(animation, slot), pattern_animation_drift(animation, slot));
-        }
-    }
-    return emission;
-}
-
-// The row's own base, for a material with no graph. One line each, so the layer
-// loop above stays the single implementation.
-fn material_pattern_albedo(material: u32, sample: PatternSample) -> vec3<f32> {
-    return material_pattern_albedo_from_base(
+// The row's own bases, for a material with no graph. One call, so the layer loop
+// above stays the single implementation.
+fn material_pattern_surface(material: u32, sample: PatternSample) -> PatternSurface {
+    return material_pattern_surface_from_base(
         material,
         sample,
         material_face_albedo(material, sample.axis, sample.axis_sign),
-        pattern_animation_identity(),
-    );
-}
-
-fn material_pattern_roughness(material: u32, sample: PatternSample) -> f32 {
-    return material_pattern_roughness_from_base(
-        material,
-        sample,
         material_face_roughness(material, sample.axis, sample.axis_sign),
+        materials[material].emission,
         pattern_animation_identity(),
     );
-}
-
-fn material_pattern_emission(material: u32, sample: PatternSample) -> vec3<f32> {
-    return material_pattern_emission_from_base(
-        material, sample, materials[material].emission, pattern_animation_identity());
 }

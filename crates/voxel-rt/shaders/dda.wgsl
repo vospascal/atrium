@@ -688,19 +688,32 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     // The sample is built once and shared by albedo and emission: the frames need a
     // world position, a voxel and a face, and none of that changes between targets.
     let pattern = pattern_sample(hit, ray_origin, ray_direction);
-    var albedo = srgb_decode(material_pattern_albedo(hit.material, pattern));
+    // Pick the bases FIRST, then run the layer stack once over them. The graph
+    // branch used to sit after an unconditional `material_pattern_albedo` call and
+    // throw its result away, so every graph-active material walked the whole layer
+    // stack twice — once for a row base it did not want. Choosing the base is a
+    // handful of selects; evaluating the stack is the expensive part, and it now
+    // happens exactly once whether or not a graph is driving the surface.
+    var albedo_base = material_face_albedo(hit.material, pattern.axis, pattern.axis_sign);
+    var roughness_base = material_face_roughness(hit.material, pattern.axis, pattern.axis_sign);
+    var emission_base = materials[hit.material].emission;
+    var animation = pattern_animation_identity();
     if (graph_material.graph_active) {
-        var graph_base = graph_material.base_color.rgb;
+        albedo_base = graph_material.base_color.rgb;
         // Graphs authored before face-role nodes existed used a flat base color.
         // Let those graphs retain the material table's directional appearance;
         // an explicit face_color node opts into graph-owned face semantics.
         if (!graph_material.face_color_active && MATERIAL_FACE_ROLES
             && (materials[hit.material].flags & MATERIAL_FLAG_FACE_ROLES) != 0u) {
-            graph_base = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
+            albedo_base = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
         }
-        albedo = srgb_decode(material_pattern_albedo_from_base(
-            hit.material, pattern, graph_base, graph_material.animation));
+        roughness_base = graph_material.roughness;
+        emission_base = graph_material.emission.rgb;
+        animation = graph_material.animation;
     }
+    let surface = material_pattern_surface_from_base(
+        hit.material, pattern, albedo_base, roughness_base, emission_base, animation);
+    let albedo = srgb_decode(surface.albedo);
 
     var sun_visibility = 0.0;
     let sun_facing = dot(normal, lighting.sun_direction);
@@ -731,12 +744,7 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     // S2: patterned emission, for a surface whose glow is not uniform — embers in
     // rock, a rune in a wall. Identical to the row's flat emission with the lever
     // off, and identical on every row that authors no emission layer.
-    var emission = material_pattern_emission(hit.material, pattern) * lighting.gi_params.w;
-    if (graph_material.graph_active) {
-        emission = material_pattern_emission_from_base(
-            hit.material, pattern, graph_material.emission.rgb,
-            graph_material.animation) * lighting.gi_params.w;
-    }
+    let emission = surface.emission * lighting.gi_params.w;
     return albedo * (sun + indirect) + emission;
 }
 
