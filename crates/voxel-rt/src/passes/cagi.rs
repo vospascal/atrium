@@ -594,6 +594,181 @@ mod tests {
         }
     }
 
+    /// THE gate S3b exists for: an event-gated emitter must change the light in
+    /// the cells AROUND it, not only on its own face.
+    ///
+    /// Runs the real CA on a real device against a real brickmap and reads the
+    /// volume back, because every other S3b test stops at the CPU. Between "the
+    /// response reaches the material table" and "the room gets brighter" sit the
+    /// attribute pack, the uniform upload, the bind group and three shader read
+    /// sites, and none of those had a test that would notice them failing.
+    #[test]
+    fn an_event_gated_emitter_lights_its_neighbours_only_when_triggered() {
+        use crate::animation_clock::AnimationClockSample;
+        use crate::cagi::material_attribute_table;
+        use crate::lighting::SunSettings;
+        use crate::material::{material_id, MATERIALS, MATERIAL_COUNT};
+        use crate::material_graph::{EmissionEventResponse, EventSensorConfig, SensorFalloff};
+        use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
+        use voxel_core::world::Voxel;
+
+        let Some((device, queue)) = crate::passes::dda::tests::headless_device() else {
+            return;
+        };
+
+        // One 1 m glow block (8^3 traversal voxels) in an otherwise empty world,
+        // so nothing but the emitter can put light into the cells beside it.
+        let glow = material_id(Voxel::GlowBlock);
+        let origin = [64_i32, 64, 64];
+        let mut brickmap = Brickmap::empty();
+        for offset_z in 0..8 {
+            for offset_y in 0..8 {
+                for offset_x in 0..8 {
+                    brickmap.set_voxel(
+                        origin[0] + offset_x,
+                        origin[1] + offset_y,
+                        origin[2] + offset_z,
+                        Voxel::GlowBlock,
+                        crate::brickmap::ClearanceUpdate::FullRebuild,
+                    );
+                }
+            }
+        }
+
+        // Dark at rest, bright when something is within 8 m — the authored glow
+        // block's shape, stated here rather than loaded so the gate does not
+        // start failing because someone retuned an asset.
+        let mut rows = MATERIALS.to_vec();
+        rows[glow as usize].emission = None;
+        let mut responses = vec![None; MATERIAL_COUNT];
+        responses[glow as usize] = Some(EmissionEventResponse {
+            sensor: EventSensorConfig {
+                channel: 0,
+                radius_meters: 8.0,
+                falloff: SensorFalloff::Smoothstep,
+                attack_seconds: 0.0,
+                hold_seconds: 0.0,
+                release_seconds: 0.0,
+                invert: false,
+            },
+            resting: [0.0; 3],
+            triggered: [1.0, 0.9, 0.8],
+        });
+        let attributes = material_attribute_table(&rows, &responses);
+        assert_ne!(
+            attributes.word(glow) & crate::cagi::CELL_EVENT_RESPONSE_MASK,
+            0,
+            "the emitter did not get a response slot, so nothing below can pass"
+        );
+
+        let settings = CagiSettings::default();
+        let world_bindings = WorldBindings::new(&device, &brickmap);
+        let mut light_volume = LightVolume::new(&device, &brickmap, &settings, &attributes);
+        let cagi_pass = CagiPass::new(&device, &world_bindings, &light_volume);
+        let grid = light_volume.grid();
+
+        // The cell just above the block: air, touching an emissive face, and the
+        // one `cagi_emitter_bounce` is supposed to carry the emission into.
+        let neighbour = [
+            (origin[0] as u32 + 4) / settings.cell_voxels,
+            (origin[1] as u32 + 8) / settings.cell_voxels,
+            (origin[2] as u32 + 4) / settings.cell_voxels,
+        ];
+        let neighbour_index = grid.cell_index(neighbour);
+
+        let quality = RenderQuality::default();
+        let mut run = |events: &[GpuWorldEvent; MAX_WORLD_EVENTS], count: usize| -> u32 {
+            let (animation_params, event_params) = quality.animation_params(
+                AnimationClockSample::FROZEN,
+                AnimationClockSample::FROZEN,
+                count,
+            );
+            // Sun and sky OFF: the emitter must be the only thing in the volume,
+            // or its contribution is a rounding error against daylight — which is
+            // exactly why this is measured here and not judged by eye.
+            let mut lighting = SunSettings::default().lighting_uniform(
+                quality.shading_params(),
+                quality.gi_params(),
+                quality.water_params(),
+                quality.material_params(),
+                animation_params,
+                event_params,
+            );
+            lighting.sun_color_intensity[3] = 0.0;
+            lighting.sky_ambient[3] = 0.0;
+            world_bindings.write_lighting(&queue, &lighting);
+            world_bindings.write_world_events(&queue, events);
+            light_volume.mark_dirty();
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("s3b gate"),
+            });
+            cagi_pass.encode(&mut encoder, &mut light_volume, 24, None);
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("s3b gate readback"),
+                size: light_volume.front_buffer().size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(
+                light_volume.front_buffer(),
+                0,
+                &readback,
+                0,
+                readback.size(),
+            );
+            queue.submit([encoder.finish()]);
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |result| result.expect("map failed"));
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .expect("poll failed");
+            let words =
+                bytemuck::cast_slice::<u8, u32>(&readback.slice(..).get_mapped_range()).to_vec();
+            readback.unmap();
+            crate::cagi::unpack_light(words[neighbour_index])[0]
+        };
+
+        let dark = run(&[GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS], 0);
+
+        let mut events = [GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS];
+        events[0] = GpuWorldEvent {
+            // Standing right at the block, in METRES.
+            position_meters: [
+                (origin[0] as f32 + 4.0) * voxel_core::world::VOXEL_SIZE,
+                (origin[1] as f32 + 12.0) * voxel_core::world::VOXEL_SIZE,
+                (origin[2] as f32 + 4.0) * voxel_core::world::VOXEL_SIZE,
+            ],
+            radius_meters: 12.0,
+            started_epoch: 0.0,
+            started_remainder_seconds: 0.0,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: 0,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        };
+        let lit = run(&events, 1);
+
+        println!("neighbour cell above the emitter: rest {dark}/1023, lit {lit}/1023");
+        assert_eq!(
+            dark, 0,
+            "the emitter is authored dark at rest, so the cell above it must hold \
+             no light with nothing near — got {dark}/1023"
+        );
+        assert!(
+            lit > 0,
+            "THE S3b GATE FAILED: with an event on top of the emitter the cell \
+             above it is still {lit}/1023. The surface lights up (that is the DDA \
+             graph) but the light volume never saw it, so nothing around the block \
+             changes"
+        );
+    }
+
     #[test]
     fn default_settings_build_the_shipped_shader() {
         assert_eq!(
