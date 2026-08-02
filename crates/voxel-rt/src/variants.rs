@@ -118,6 +118,7 @@ pub enum LeverId {
     MaterialPatterns,
     MaterialPatternStrength,
     MaterialPatternMaxLayers,
+    MaterialPatternOctaveLod,
     MaterialPatternFadeStart,
     MaterialPatternFadeEnd,
     MaterialAnimationSpeed,
@@ -425,6 +426,9 @@ impl LeverId {
             LeverId::MaterialPatternMaxLayers => {
                 LeverValue::Count(quality.materials.pattern_max_layers)
             }
+            LeverId::MaterialPatternOctaveLod => {
+                LeverValue::Flag(quality.materials.pattern_octave_lod)
+            }
             LeverId::MaterialPatternFadeStart => {
                 LeverValue::Scalar(quality.materials.pattern_fade_start_meters)
             }
@@ -574,6 +578,9 @@ impl LeverId {
                 // `patch_shader_source` clamps on the way to the shader — which is the
                 // only place the bound actually matters, since it is the array length.
                 quality.materials.pattern_max_layers = value.expect_count(self);
+            }
+            LeverId::MaterialPatternOctaveLod => {
+                quality.materials.pattern_octave_lod = value.expect_flag(self);
             }
             LeverId::MaterialPatternFadeStart => {
                 quality.materials.pattern_fade_start_meters = value.expect_scalar(self).max(0.0);
@@ -2213,6 +2220,41 @@ pub const REGISTRY: &[Lever] = &[
         ],
     },
     Lever {
+        id: LeverId::MaterialPatternOctaveLod,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("PATTERN_OCTAVE_LOD"),
+        label: "drop sub-pixel noise octaves",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "Stops a fractal generator summing octaves whose feature size has \
+                  fallen below a pixel. Unlike every other knob in this subsystem it \
+                  is not a quality trade: an octave under a pixel cannot be resolved \
+                  and contributes only aliasing, so dropping it is the same argument \
+                  mip-mapping makes, applied to a procedural sum. Never drops below \
+                  one octave, so a distant layer softens toward its base frequency \
+                  rather than popping; disappearing is what the fade distances are \
+                  for. MEASURED 2026-08-02, and the result is SPLIT rather than the \
+                  win it was predicted to be: -0.24 ms top-down (A) and -0.20 ms (B), \
+                  but +0.09 ms at ground level (C) and +0.12 ms (D) — i.e. it COSTS \
+                  frames in the scenario it was expected to help most. The likely \
+                  mechanism is coherence, not arithmetic: a top-down shot puts every \
+                  hit at a similar distance so a warp agrees on its octave budget, \
+                  while a ground-level shot spans metres to the horizon within a \
+                  warp and the budget loop diverges. That is a hypothesis and not a \
+                  measurement. Default OFF, and kept as a lever rather than deleted \
+                  because an aerial or map view is exactly where it does pay.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-patterns-octave-lod",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialPatternOctaveLod, LeverValue::Flag(true)),
+            ],
+        }],
+    },
+    Lever {
         id: LeverId::MaterialPatternFadeStart,
         subsystem: LeverSubsystem::Materials,
         kind: LeverKind::Runtime,
@@ -2480,6 +2522,9 @@ pub struct MaterialSettings {
     /// S2 — layers evaluated per hit, whatever the row authored. The tier knob, and
     /// the only one of the three that buys frames.
     pub pattern_max_layers: u32,
+    /// Tier 1b — stop summing fractal octaves whose feature size has fallen below a
+    /// pixel. Quality-positive: those octaves only contributed aliasing.
+    pub pattern_octave_lod: bool,
     /// Absolute camera distance in metres at which detail starts fading.
     pub pattern_fade_start_meters: f32,
     /// Absolute camera distance in metres where detail has fully faded out.
@@ -2511,6 +2556,7 @@ impl MaterialSettings {
             || self.patterns != applied.patterns
             || self.pattern_strength != applied.pattern_strength
             || self.pattern_max_layers != applied.pattern_max_layers
+            || self.pattern_octave_lod != applied.pattern_octave_lod
     }
 
     /// Patch this group's consts into a shader source, the same way every other
@@ -2532,13 +2578,22 @@ impl MaterialSettings {
             "MATERIAL_PATTERN_STRENGTH",
             &float_literal(self.pattern_strength),
         );
-        patch_shader_const(
+        let layers = patch_shader_const(
             &strength,
             "MATERIAL_PATTERN_MAX_LAYERS",
             &format!(
                 "{}u",
                 self.pattern_max_layers.min(MAX_PATTERN_LAYERS as u32)
             ),
+        );
+        patch_shader_const(
+            &layers,
+            "PATTERN_OCTAVE_LOD",
+            if self.pattern_octave_lod {
+                "true"
+            } else {
+                "false"
+            },
         )
     }
 }
@@ -2552,6 +2607,7 @@ impl Default for MaterialSettings {
             patterns: true,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
+            pattern_octave_lod: false,
             animation_speed: 1.0,
             animation_deterministic: false,
             pattern_fade_start_meters: PATTERN_FADE_START_METERS,
@@ -2688,10 +2744,17 @@ impl RenderQuality {
         }
     }
 
-    pub fn material_params(&self) -> MaterialParams {
+    /// `render_height_pixels` is the DISPATCH height, not the window height: the
+    /// octave cutoff is about what a shaded pixel can resolve, and a preset that
+    /// renders at half scale resolves half as much.
+    pub fn material_params(&self, render_height_pixels: u32) -> MaterialParams {
         MaterialParams {
             pattern_fade_start_meters: self.materials.pattern_fade_start_meters,
             pattern_fade_end_meters: self.materials.pattern_fade_end_meters,
+            pixel_footprint_at_one_meter: crate::camera::pixel_footprint_at_one_meter(
+                crate::camera::DEFAULT_VERTICAL_FOV_RADIANS,
+                render_height_pixels,
+            ),
         }
     }
 
@@ -3046,6 +3109,7 @@ mod tests {
             patterns,
             pattern_strength,
             pattern_max_layers,
+            pattern_octave_lod,
             pattern_fade_start_meters,
             pattern_fade_end_meters,
             animation_speed,
@@ -3236,6 +3300,10 @@ mod tests {
             (
                 LeverId::MaterialPatternMaxLayers,
                 LeverValue::Count(pattern_max_layers),
+            ),
+            (
+                LeverId::MaterialPatternOctaveLod,
+                LeverValue::Flag(pattern_octave_lod),
             ),
             (
                 LeverId::MaterialPatternFadeStart,
@@ -3477,8 +3545,8 @@ mod tests {
         edited.materials.pattern_fade_start_meters = 40.0;
         edited.materials.pattern_fade_end_meters = 90.0;
         assert!(!edited.requires_pipeline_rebuild(&applied));
-        assert_eq!(edited.material_params().pattern_fade_start_meters, 40.0);
-        assert_eq!(edited.material_params().pattern_fade_end_meters, 90.0);
+        assert_eq!(edited.material_params(1440).pattern_fade_start_meters, 40.0);
+        assert_eq!(edited.material_params(1440).pattern_fade_end_meters, 90.0);
     }
 
     #[test]

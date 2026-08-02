@@ -112,6 +112,10 @@ pub enum Voxel {
     GlowBlock,
     GlowBerry,
     Lava,
+    /// Cut slate blocks in a running bond. The demonstration material for the
+    /// tessellation: it is the only row whose look comes from WHERE the tiles are
+    /// rather than from a field sampled across a surface.
+    SlateTile,
 }
 
 impl Voxel {

@@ -2112,6 +2112,10 @@ mod tests {
                     faces: PatternFaces::ALL,
                     texels_per_voxel: 8,
                     vary_per_face: true,
+                    domain_warp: 0.0,
+                    tile_aspect: 1.0,
+                    tile_bond: 0.5,
+                    tile_gap: 0.06,
                     emission_intensity: 16.0,
                 }]);
                 let mean = material_attribute_table(&rows, &[]).emission(stone);

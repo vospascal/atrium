@@ -462,6 +462,18 @@ pub enum MaterialNodeOperation {
     PatternFlat,
     PatternNoise,
     PatternSpeckle,
+    PatternPerlin,
+    PatternSimplex,
+    PatternRidged,
+    PatternTurbulence,
+    PatternWorley,
+    PatternWorleyEdge,
+    PatternWorleySmooth,
+    PatternWave,
+    PatternChecker,
+    PatternTileTone,
+    PatternTileEdge,
+    Tessellation,
     ConstantScalar,
     ConstantColor,
     AddScalar,
@@ -1447,6 +1459,94 @@ const PATTERN_SPECKLE_OUT: &[SocketDeclarationStatic] = &[socket!(
     "pattern",
     "Pattern",
     "1 inside a speck and 0 everywhere else.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_PERLIN_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Fractal Perlin gradient noise, 0..1. No axis bias.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_SIMPLEX_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Fractal simplex gradient noise, 0..1. Four corners per octave.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_RIDGED_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Ridged multifractal, 0..1. Creases at each octave's midline.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_TURBULENCE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Turbulence, 0..1. Creases at each octave's zero crossing.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_WORLEY_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Distance to the nearest feature point, 0..1.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_WORLEY_EDGE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Bright on the boundary between two cells, 0..1.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_WORLEY_SMOOTH_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Worley through a smooth minimum, 0..1. No hard creases.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_WAVE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Noise-bent bands along the frame's X, 0..1.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_TILE_TONE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "One flat value per tile, 0..1.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_TILE_EDGE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "0 in the joint, 1 at the tile's centre.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_CHECKER_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Alternating lattice cells: 1 and 0.",
     SocketType::MaskField,
     EvaluationRate::PerSample,
     Cardinality::ANY
@@ -3404,6 +3504,13 @@ const PATTERN_FRAME_FIELD: FieldDeclarationStatic = field(
              placed and removed around it.",
         ),
         choice(
+            "tile",
+            "Tile",
+            "Subdivide the wall into tiles and sample within one, so the pattern \
+             restarts at every joint and each tile draws its own independent copy. \
+             Period is the TILE SIZE here; the tessellation input sets the bond.",
+        ),
+        choice(
             "voxel",
             "Voxel",
             "Anchor the pattern to each one-metre block, so every block carries an \
@@ -3485,26 +3592,160 @@ const PATTERN_DENSITY_FIELD: FieldDeclarationStatic = field(
     EMPTY_CHOICES,
     false,
 );
-const PATTERN_FLAT_FIELDS: &[FieldDeclarationStatic] = &[
-    PATTERN_FRAME_FIELD,
-    PATTERN_PERIOD_FIELD,
-    PATTERN_TEXELS_FIELD,
-    PATTERN_VARIATION_FIELD,
-];
-const PATTERN_NOISE_FIELDS: &[FieldDeclarationStatic] = &[
-    PATTERN_FRAME_FIELD,
-    PATTERN_PERIOD_FIELD,
-    PATTERN_TEXELS_FIELD,
-    PATTERN_VARIATION_FIELD,
-    PATTERN_OCTAVES_FIELD,
-];
-const PATTERN_SPECKLE_FIELDS: &[FieldDeclarationStatic] = &[
-    PATTERN_FRAME_FIELD,
-    PATTERN_PERIOD_FIELD,
-    PATTERN_TEXELS_FIELD,
-    PATTERN_VARIATION_FIELD,
-    PATTERN_DENSITY_FIELD,
-];
+const PATTERN_DISTORTION_FIELD: FieldDeclarationStatic = field(
+    "distortion",
+    "Distortion",
+    "How far noise bends the bands, in periods. Zero rules perfectly straight \
+     lines; a quarter reads as wood grain.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.25),
+    Some(NumericRange::new(0.0, 2.0)),
+    Some(NumericRange::new(0.0, 2.0)),
+    Some(0.01),
+    EMPTY_CHOICES,
+    false,
+);
+/// On EVERY generator node, because domain warping composes with all of them —
+/// see [`crate::pattern::PatternLayer::domain_warp`]. That is the whole reason it
+/// is a shared field rather than a thirteenth generator.
+const PATTERN_WARP_FIELD: FieldDeclarationStatic = field(
+    "domain_warp",
+    "Domain Warp",
+    "Pushes the sample point through a noise field before this generator reads it \
+     (iq, 'domain warping'). Costs about one extra octave, so it trades against \
+     the octave count directly.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.0),
+    UNIT,
+    UNIT,
+    Some(0.01),
+    EMPTY_CHOICES,
+    false,
+);
+const PATTERN_SHARPNESS_FIELD: FieldDeclarationStatic = field(
+    "sharpness",
+    "Edge Sharpness",
+    "How abruptly the joint gives way to the tile face. Zero ramps all the way to \
+     the tile's centre and reads as pillows; toward one it is a narrow dark line \
+     around a flat tile.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.6),
+    UNIT,
+    UNIT,
+    Some(0.01),
+    EMPTY_CHOICES,
+    false,
+);
+const TILE_ASPECT_FIELD: FieldDeclarationStatic = field(
+    "tile_aspect",
+    "Tile Aspect",
+    "Tile width over height. 1 is square, 4 is a long brick. Only the `tile` frame \
+     reads it.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(1.0),
+    Some(NumericRange::new(
+        crate::pattern::MINIMUM_TILE_ASPECT,
+        crate::pattern::MAXIMUM_TILE_ASPECT,
+    )),
+    Some(NumericRange::new(
+        crate::pattern::MINIMUM_TILE_ASPECT,
+        crate::pattern::MAXIMUM_TILE_ASPECT,
+    )),
+    Some(0.05),
+    EMPTY_CHOICES,
+    false,
+);
+const TILE_BOND_FIELD: FieldDeclarationStatic = field(
+    "tile_bond",
+    "Bond",
+    "How far each course shifts relative to the one below, as a fraction of a tile. \
+     0 stacks the joints into continuous vertical lines; 0.5 is a running bond.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.5),
+    UNIT,
+    UNIT,
+    Some(0.01),
+    EMPTY_CHOICES,
+    false,
+);
+const TILE_GAP_FIELD: FieldDeclarationStatic = field(
+    "tile_gap",
+    "Gap",
+    "Grout width, as a fraction of the tile's short edge. Taken out of the tile's \
+     interior, so widening it opens the joints rather than moving the tiles.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.06),
+    Some(NumericRange::new(0.0, crate::pattern::MAXIMUM_TILE_GAP)),
+    Some(NumericRange::new(0.0, crate::pattern::MAXIMUM_TILE_GAP)),
+    Some(0.005),
+    EMPTY_CHOICES,
+    false,
+);
+const TESSELLATION_FIELDS: &[FieldDeclarationStatic] =
+    &[TILE_ASPECT_FIELD, TILE_BOND_FIELD, TILE_GAP_FIELD];
+/// The optional tessellation input every generator node carries.
+///
+/// OPTIONAL, and on all of them rather than only the tile pair, because the tile
+/// FRAME is what most materials will use it for: a noise layer set to `tile` needs
+/// to know where the tiles are just as much as a `tile tone` layer does, and a wall
+/// whose tone, grout and grain disagreed about the tiling would be a bug with no
+/// obvious cause.
+const TESSELLATION_IN: &[SocketDeclarationStatic] = &[socket!(
+    "tessellation",
+    "Tessellation",
+    "Optional. Where the tiles are, for a `tile`-framed layer or a tile generator.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::OPTIONAL_SINGLE
+)];
+const TESSELLATION_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "tessellation",
+    "Tessellation",
+    "Where the tiles are. Wire it into every generator that should share this \
+     tiling — they cannot disagree if they read the same node.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+/// The four fields every generator node carries. Spelled once rather than copied
+/// into twelve arrays, so adding a shared field cannot reach eleven of them and
+/// miss the twelfth.
+macro_rules! pattern_fields {
+    ($name:ident) => {
+        const $name: &[FieldDeclarationStatic] = &[
+            PATTERN_FRAME_FIELD,
+            PATTERN_PERIOD_FIELD,
+            PATTERN_TEXELS_FIELD,
+            PATTERN_VARIATION_FIELD,
+            PATTERN_WARP_FIELD,
+        ];
+    };
+    ($name:ident, $extra:expr) => {
+        const $name: &[FieldDeclarationStatic] = &[
+            PATTERN_FRAME_FIELD,
+            PATTERN_PERIOD_FIELD,
+            PATTERN_TEXELS_FIELD,
+            PATTERN_VARIATION_FIELD,
+            PATTERN_WARP_FIELD,
+            $extra,
+        ];
+    };
+}
+pattern_fields!(PATTERN_FLAT_FIELDS);
+pattern_fields!(PATTERN_WORLEY_FIELDS);
+pattern_fields!(PATTERN_WORLEY_EDGE_FIELDS);
+pattern_fields!(PATTERN_WORLEY_SMOOTH_FIELDS);
+pattern_fields!(PATTERN_CHECKER_FIELDS);
+pattern_fields!(PATTERN_TILE_TONE_FIELDS);
+pattern_fields!(PATTERN_TILE_EDGE_FIELDS, PATTERN_SHARPNESS_FIELD);
+pattern_fields!(PATTERN_NOISE_FIELDS, PATTERN_OCTAVES_FIELD);
+pattern_fields!(PATTERN_PERLIN_FIELDS, PATTERN_OCTAVES_FIELD);
+pattern_fields!(PATTERN_SIMPLEX_FIELDS, PATTERN_OCTAVES_FIELD);
+pattern_fields!(PATTERN_RIDGED_FIELDS, PATTERN_OCTAVES_FIELD);
+pattern_fields!(PATTERN_TURBULENCE_FIELDS, PATTERN_OCTAVES_FIELD);
+pattern_fields!(PATTERN_SPECKLE_FIELDS, PATTERN_DENSITY_FIELD);
+pattern_fields!(PATTERN_WAVE_FIELDS, PATTERN_DISTORTION_FIELD);
 const PATTERN_LAYER_FIELDS: &[FieldDeclarationStatic] = &[
     field(
         "animation_gain",
@@ -3870,7 +4111,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Procedural,
         NodePreview::Noise,
         MATERIAL,
-        &[],
+        TESSELLATION_IN,
         PATTERN_FLAT_OUT,
         PATTERN_FLAT_FIELDS
     ),
@@ -3882,7 +4123,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Procedural,
         NodePreview::Noise,
         MATERIAL,
-        &[],
+        TESSELLATION_IN,
         PATTERN_NOISE_OUT,
         PATTERN_NOISE_FIELDS
     ),
@@ -3894,9 +4135,154 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Procedural,
         NodePreview::Noise,
         MATERIAL,
-        &[],
+        TESSELLATION_IN,
         PATTERN_SPECKLE_OUT,
         PATTERN_SPECKLE_FIELDS
+    ),
+    node!(
+        "material.pattern_perlin",
+        NodeOperation::Material(MaterialNodeOperation::PatternPerlin),
+        "Perlin Pattern",
+        "Fractal Perlin gradient noise on the cubic lattice — no axis bias.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_PERLIN_OUT,
+        PATTERN_PERLIN_FIELDS
+    ),
+    node!(
+        "material.pattern_simplex",
+        NodeOperation::Material(MaterialNodeOperation::PatternSimplex),
+        "Simplex Pattern",
+        "Fractal gradient noise on the tetrahedral lattice — four corners per octave.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_SIMPLEX_OUT,
+        PATTERN_SIMPLEX_FIELDS
+    ),
+    node!(
+        "material.pattern_ridged",
+        NodeOperation::Material(MaterialNodeOperation::PatternRidged),
+        "Ridged Pattern",
+        "Ridged multifractal: veins, erosion channels, rock strata.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_RIDGED_OUT,
+        PATTERN_RIDGED_FIELDS
+    ),
+    node!(
+        "material.pattern_turbulence",
+        NodeOperation::Material(MaterialNodeOperation::PatternTurbulence),
+        "Turbulence Pattern",
+        "Turbulence: marble veining, smoke, weathering streaks.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_TURBULENCE_OUT,
+        PATTERN_TURBULENCE_FIELDS
+    ),
+    node!(
+        "material.pattern_worley",
+        NodeOperation::Material(MaterialNodeOperation::PatternWorley),
+        "Worley Pattern",
+        "Cellular F1 — pebbles, cells, lichen colonies.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_WORLEY_OUT,
+        PATTERN_WORLEY_FIELDS
+    ),
+    node!(
+        "material.pattern_worley_edge",
+        NodeOperation::Material(MaterialNodeOperation::PatternWorleyEdge),
+        "Worley Edge Pattern",
+        "Cellular F2 minus F1 — cracked mud, dried paint, mortar.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_WORLEY_EDGE_OUT,
+        PATTERN_WORLEY_EDGE_FIELDS
+    ),
+    node!(
+        "material.pattern_worley_smooth",
+        NodeOperation::Material(MaterialNodeOperation::PatternWorleySmooth),
+        "Smooth Worley Pattern",
+        "Cellular F1 through a smooth minimum — merged, blobby cells.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_WORLEY_SMOOTH_OUT,
+        PATTERN_WORLEY_SMOOTH_FIELDS
+    ),
+    node!(
+        "material.pattern_wave",
+        NodeOperation::Material(MaterialNodeOperation::PatternWave),
+        "Wave Pattern",
+        "Noise-bent bands — wood grain, geological strata, brushed metal.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_WAVE_OUT,
+        PATTERN_WAVE_FIELDS
+    ),
+    node!(
+        "material.pattern_checker",
+        NodeOperation::Material(MaterialNodeOperation::PatternChecker),
+        "Checker Pattern",
+        "Alternating lattice cells — tiles and boards.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_CHECKER_OUT,
+        PATTERN_CHECKER_FIELDS
+    ),
+    node!(
+        "material.pattern_tile_tone",
+        NodeOperation::Material(MaterialNodeOperation::PatternTileTone),
+        "Tile Tone",
+        "One flat shade per tile — the tone variation that makes masonry read as blocks.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_TILE_TONE_OUT,
+        PATTERN_TILE_TONE_FIELDS
+    ),
+    node!(
+        "material.pattern_tile_edge",
+        NodeOperation::Material(MaterialNodeOperation::PatternTileEdge),
+        "Tile Edge",
+        "Distance to the nearest tile edge — grout, and the bevel of a raised block.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        TESSELLATION_IN,
+        PATTERN_TILE_EDGE_OUT,
+        PATTERN_TILE_EDGE_FIELDS
+    ),
+    node!(
+        "material.tessellation",
+        NodeOperation::Material(MaterialNodeOperation::Tessellation),
+        "Tessellation",
+        "Divides a wall into bonded tiles. Share it between every layer that should \
+         agree about where the tiles are.",
+        NodeCategory::Procedural,
+        NodePreview::Noise,
+        MATERIAL,
+        &[],
+        TESSELLATION_OUT,
+        TESSELLATION_FIELDS
     ),
     node!(
         "material.pattern_layer",

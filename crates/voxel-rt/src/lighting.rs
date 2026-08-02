@@ -161,6 +161,15 @@ impl GiParams {
 pub struct MaterialParams {
     pub pattern_fade_start_meters: f32,
     pub pattern_fade_end_meters: f32,
+    /// World metres one pixel spans at one metre of distance — the vertical FOV
+    /// over the render height. Multiply by a hit distance and you have that hit's
+    /// pixel footprint in metres.
+    ///
+    /// A RESOLUTION-dependent value in the frame uniform rather than a shader
+    /// const, because the render scale moves with the quality preset and a const
+    /// would silently describe the wrong screen. `PATTERN_OCTAVE_LOD` reads it to
+    /// decide how many octaves of a fractal generator can still be resolved.
+    pub pixel_footprint_at_one_meter: f32,
 }
 
 impl MaterialParams {
@@ -168,7 +177,7 @@ impl MaterialParams {
         [
             self.pattern_fade_start_meters.max(0.0),
             self.pattern_fade_end_meters.max(0.0),
-            0.0,
+            self.pixel_footprint_at_one_meter.max(0.0),
             0.0,
         ]
     }
@@ -613,6 +622,7 @@ mod tests {
             MaterialParams {
                 pattern_fade_start_meters: crate::pattern::PATTERN_FADE_START_METERS,
                 pattern_fade_end_meters: crate::pattern::PATTERN_FADE_END_METERS,
+                pixel_footprint_at_one_meter: 0.0,
             },
             animation_params,
             event_params,

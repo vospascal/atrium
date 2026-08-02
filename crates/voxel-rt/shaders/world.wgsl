@@ -261,10 +261,17 @@ struct PatternLayer {
     // The second colour, sRGB-encoded, for mix-to-colour and add. Its first channel
     // is the target VALUE for a scalar target.
     target_color: vec3<f32>,
-    // The second free parameter. No generator reads it today; kept because the slot is
-    // free anyway (the vec3 below needs its w filled) and the next generator with two
-    // knobs would otherwise have to grow the row.
+    // The second free parameter: the domain-warp strength, which is shared by every
+    // generator rather than owned by one.
     param_b: f32,
+    // Row 2 — the tessellation. Read only by PATTERN_FRAME_TILE and the two tile
+    // generators; every other frame ignores all three. Mirrors GpuPatternLayer in
+    // src/pattern.rs, which documents why the row grew from 32 bytes to 48 rather
+    // than packing these into the six free bits of `packed`.
+    tile_aspect: f32,
+    tile_bond: f32,
+    tile_gap: f32,
+    _pad_row2: f32,
 }
 
 struct Material {

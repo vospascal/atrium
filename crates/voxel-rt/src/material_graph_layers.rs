@@ -18,8 +18,8 @@ use crate::graph::{
 use crate::material::Material;
 use crate::pattern::{
     PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternStack, PatternTarget,
-    MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES, MAX_PATTERN_LAYERS, MAX_TEXELS_PER_VOXEL,
-    NO_PATTERNS, TEXEL_RUNGS,
+    MAXIMUM_TILE_ASPECT, MAXIMUM_TILE_GAP, MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES,
+    MAX_PATTERN_LAYERS, MAX_TEXELS_PER_VOXEL, MINIMUM_TILE_ASPECT, NO_PATTERNS, TEXEL_RUNGS,
 };
 
 pub const MATERIAL_OUTPUT_NODE: &str = "material.output";
@@ -28,6 +28,20 @@ pub const PATTERN_LAYER_NODE: &str = "material.pattern_layer";
 pub const PATTERN_FLAT_NODE: &str = "material.pattern_flat";
 pub const PATTERN_NOISE_NODE: &str = "material.pattern_noise";
 pub const PATTERN_SPECKLE_NODE: &str = "material.pattern_speckle";
+pub const PATTERN_PERLIN_NODE: &str = "material.pattern_perlin";
+pub const PATTERN_SIMPLEX_NODE: &str = "material.pattern_simplex";
+pub const PATTERN_RIDGED_NODE: &str = "material.pattern_ridged";
+pub const PATTERN_TURBULENCE_NODE: &str = "material.pattern_turbulence";
+pub const PATTERN_WORLEY_NODE: &str = "material.pattern_worley";
+pub const PATTERN_WORLEY_EDGE_NODE: &str = "material.pattern_worley_edge";
+pub const PATTERN_WORLEY_SMOOTH_NODE: &str = "material.pattern_worley_smooth";
+pub const PATTERN_WAVE_NODE: &str = "material.pattern_wave";
+pub const PATTERN_CHECKER_NODE: &str = "material.pattern_checker";
+pub const PATTERN_TILE_TONE_NODE: &str = "material.pattern_tile_tone";
+pub const PATTERN_TILE_EDGE_NODE: &str = "material.pattern_tile_edge";
+/// The shared tessellation. Not a generator — it produces no pattern of its own;
+/// it configures where the tiles ARE, and the layers downstream read it.
+pub const TESSELLATION_NODE: &str = "material.tessellation";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialSurfaceChain {
@@ -89,6 +103,14 @@ pub fn append_pattern_layer_nodes(
     output: &NodeId,
     stack: &PatternStack,
 ) {
+    // One tessellation node per DISTINCT tiling, shared by every layer that uses it.
+    //
+    // Not one per layer, and not one for the whole stack. Per layer would defeat the
+    // node's purpose the moment you dragged a slider — the layers would silently
+    // disagree about where the tiles are. One for the stack would be a lie whenever
+    // two layers legitimately tile differently, and would round-trip the second
+    // one's numbers into the first's.
+    let mut tessellations: Vec<(TileKey, NodeId)> = Vec::new();
     let mut previous = surface.clone();
     for (order, layer) in stack.active().enumerate() {
         let layer_id = NodeId::new();
@@ -107,6 +129,23 @@ pub fn append_pattern_layer_nodes(
             .layout
             .positions
             .insert(generator_id.clone(), [700.0 + order as f32 * 260.0, -120.0]);
+
+        let key = TileKey::of(layer);
+        let tessellation_id = match tessellations.iter().find(|(seen, _)| *seen == key) {
+            Some((_, id)) => id.clone(),
+            None => {
+                let id = NodeId::new();
+                graph.nodes.insert(id.clone(), tessellation_node(layer));
+                graph.layout.positions.insert(
+                    id.clone(),
+                    [700.0 + tessellations.len() as f32 * 260.0, -360.0],
+                );
+                tessellations.push((key, id.clone()));
+                id
+            }
+        };
+        connect_tessellation(graph, &tessellation_id, &generator_id);
+
         connect_pattern(graph, &generator_id, &layer_id);
         connect_surface(graph, &previous, &layer_id);
         previous = layer_id;
@@ -155,18 +194,53 @@ pub fn project_pattern_stack(
         let operation = registry
             .find(&generator.node_type)
             .map(|declaration| declaration.operation);
+        let octaves =
+            || property_integer(generator, "octaves").clamp(1, MAX_NOISE_OCTAVES as i64) as u32;
         let pattern_generator = match operation {
             Some(NodeOperation::Material(MaterialNodeOperation::PatternFlat)) => {
                 PatternGenerator::Flat
             }
             Some(NodeOperation::Material(MaterialNodeOperation::PatternNoise)) => {
-                let octaves = property_integer(generator, "octaves")
-                    .clamp(1, MAX_NOISE_OCTAVES as i64) as u32;
-                PatternGenerator::Noise { octaves }
+                PatternGenerator::Noise { octaves: octaves() }
             }
             Some(NodeOperation::Material(MaterialNodeOperation::PatternSpeckle)) => {
                 let density = property_scalar(generator, "density").clamp(0.0, 1.0);
                 PatternGenerator::Speckle { density }
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternPerlin)) => {
+                PatternGenerator::Perlin { octaves: octaves() }
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternSimplex)) => {
+                PatternGenerator::Simplex { octaves: octaves() }
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternRidged)) => {
+                PatternGenerator::Ridged { octaves: octaves() }
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternTurbulence)) => {
+                PatternGenerator::Turbulence { octaves: octaves() }
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternWorley)) => {
+                PatternGenerator::Worley
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternWorleyEdge)) => {
+                PatternGenerator::WorleyEdge
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternWorleySmooth)) => {
+                PatternGenerator::WorleySmooth
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternWave)) => {
+                let distortion = property_scalar(generator, "distortion").max(0.0);
+                PatternGenerator::Wave { distortion }
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternChecker)) => {
+                PatternGenerator::Checker
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternTileTone)) => {
+                PatternGenerator::TileTone
+            }
+            Some(NodeOperation::Material(MaterialNodeOperation::PatternTileEdge)) => {
+                let sharpness = property_scalar(generator, "sharpness").clamp(0.0, 1.0);
+                PatternGenerator::TileEdge { sharpness }
             }
             _ => {
                 return Err(LayerGraphError::InvalidPatternGenerator {
@@ -183,6 +257,7 @@ pub fn project_pattern_stack(
             layer,
             generator,
             pattern_generator,
+            incoming_tessellation(graph, &generator_id),
         ));
     }
     Ok(stack)
@@ -281,6 +356,20 @@ fn incoming_pattern_source(graph: &GraphAsset, layer: &NodeId) -> Result<NodeId,
         })
 }
 
+/// The tessellation wired into a generator node, if any.
+///
+/// Optional by design: only a `tile`-framed layer or a tile generator needs one,
+/// and a layer without one falls back to the tessellation defaults rather than
+/// failing. Those defaults are the identity for every frame that ignores them.
+fn incoming_tessellation<'a>(graph: &'a GraphAsset, generator: &NodeId) -> Option<&'a NodeRecord> {
+    let source = graph
+        .links
+        .values()
+        .find(|link| link.to.node == *generator && link.to.socket.0 == "tessellation")
+        .map(|link| &link.from.node)?;
+    graph.nodes.get(source)
+}
+
 fn connect_surface(graph: &mut GraphAsset, from: &NodeId, to: &NodeId) {
     graph.links.insert(
         LinkId::new(),
@@ -315,6 +404,64 @@ fn connect_pattern(graph: &mut GraphAsset, from: &NodeId, to: &NodeId) {
     );
 }
 
+/// A tiling, compared by bits so two layers authored from the same tessellation
+/// node share one on the way back out. `f32` has no `Eq`, and comparing these with
+/// a tolerance would merge tilings a user deliberately set a hair apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TileKey([u32; 3]);
+
+impl TileKey {
+    fn of(layer: &PatternLayer) -> Self {
+        TileKey([
+            layer.tile_aspect.to_bits(),
+            layer.tile_bond.to_bits(),
+            layer.tile_gap.to_bits(),
+        ])
+    }
+}
+
+fn tessellation_node(layer: &PatternLayer) -> NodeRecord {
+    NodeRecord {
+        node_type: NodeTypeId(TESSELLATION_NODE.into()),
+        node_type_version: 1,
+        properties: [
+            (
+                "tile_aspect".to_string(),
+                PropertyValue::Scalar(layer.tile_aspect),
+            ),
+            (
+                "tile_bond".to_string(),
+                PropertyValue::Scalar(layer.tile_bond),
+            ),
+            (
+                "tile_gap".to_string(),
+                PropertyValue::Scalar(layer.tile_gap),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        socket_defaults: BTreeMap::new(),
+        unknown_payload: None,
+    }
+}
+
+fn connect_tessellation(graph: &mut GraphAsset, from: &NodeId, to: &NodeId) {
+    graph.links.insert(
+        LinkId::new(),
+        LinkRecord {
+            from: OutputPin {
+                node: from.clone(),
+                socket: SocketKey("tessellation".into()),
+            },
+            to: InputPin {
+                node: to.clone(),
+                socket: SocketKey("tessellation".into()),
+            },
+            order: 0,
+        },
+    );
+}
+
 fn pattern_layer_node(layer: &PatternLayer) -> NodeRecord {
     NodeRecord {
         node_type: NodeTypeId(PATTERN_LAYER_NODE.into()),
@@ -330,6 +477,17 @@ fn pattern_generator_node(layer: &PatternLayer) -> NodeRecord {
         PatternGenerator::Flat => PATTERN_FLAT_NODE,
         PatternGenerator::Noise { .. } => PATTERN_NOISE_NODE,
         PatternGenerator::Speckle { .. } => PATTERN_SPECKLE_NODE,
+        PatternGenerator::Perlin { .. } => PATTERN_PERLIN_NODE,
+        PatternGenerator::Simplex { .. } => PATTERN_SIMPLEX_NODE,
+        PatternGenerator::Ridged { .. } => PATTERN_RIDGED_NODE,
+        PatternGenerator::Turbulence { .. } => PATTERN_TURBULENCE_NODE,
+        PatternGenerator::Worley => PATTERN_WORLEY_NODE,
+        PatternGenerator::WorleyEdge => PATTERN_WORLEY_EDGE_NODE,
+        PatternGenerator::WorleySmooth => PATTERN_WORLEY_SMOOTH_NODE,
+        PatternGenerator::Wave { .. } => PATTERN_WAVE_NODE,
+        PatternGenerator::Checker => PATTERN_CHECKER_NODE,
+        PatternGenerator::TileTone => PATTERN_TILE_TONE_NODE,
+        PatternGenerator::TileEdge { .. } => PATTERN_TILE_EDGE_NODE,
     };
     NodeRecord {
         node_type: NodeTypeId(node_type.into()),
@@ -359,18 +517,31 @@ fn pattern_generator_properties(layer: &PatternLayer) -> Vec<(String, PropertyVa
             PropertyValue::Boolean(layer.vary_per_face),
         ),
     ];
+    // The octave count is asked of the generator rather than matched on, so the
+    // fractal family can grow without this function knowing about it.
+    if layer.generator.has_octaves() {
+        properties.push((
+            "octaves".to_string(),
+            PropertyValue::Integer(layer.generator.octaves() as i64),
+        ));
+    }
     match layer.generator {
-        PatternGenerator::Flat => {}
-        PatternGenerator::Noise { octaves } => {
-            properties.push((
-                "octaves".to_string(),
-                PropertyValue::Integer(octaves as i64),
-            ));
-        }
         PatternGenerator::Speckle { density } => {
             properties.push(("density".to_string(), PropertyValue::Scalar(density)));
         }
+        PatternGenerator::Wave { distortion } => {
+            properties.push(("distortion".to_string(), PropertyValue::Scalar(distortion)));
+        }
+        PatternGenerator::TileEdge { sharpness } => {
+            properties.push(("sharpness".to_string(), PropertyValue::Scalar(sharpness)));
+        }
+        _ => {}
     }
+    // Orthogonal to the generator, so every generator node carries it.
+    properties.push((
+        "domain_warp".to_string(),
+        PropertyValue::Scalar(layer.domain_warp),
+    ));
     properties
 }
 
@@ -418,6 +589,7 @@ fn pattern_layer_from_nodes(
     layer: &NodeRecord,
     generator_node: &NodeRecord,
     generator: PatternGenerator,
+    tessellation: Option<&NodeRecord>,
 ) -> PatternLayer {
     let texels = property_integer(generator_node, "texels_per_voxel")
         .clamp(0, MAX_TEXELS_PER_VOXEL as i64) as u32;
@@ -431,6 +603,7 @@ fn pattern_layer_from_nodes(
         frame: match property_text(generator_node, "frame").as_str() {
             "voxel" => PatternFrame::Voxel,
             "face" => PatternFrame::Face,
+            "tile" => PatternFrame::Tile,
             _ => PatternFrame::World,
         },
         period_meters: property_scalar(generator_node, "period_meters").clamp(0.005, 4.0),
@@ -453,6 +626,21 @@ fn pattern_layer_from_nodes(
         },
         texels_per_voxel: texels,
         vary_per_face: property_bool(generator_node, "vary_per_face"),
+        domain_warp: property_scalar(generator_node, "domain_warp").max(0.0),
+        // From the TESSELLATION node when one is wired, so every layer sharing it
+        // gets the same numbers and they cannot drift apart. Defaults otherwise.
+        tile_aspect: tessellation
+            .map(|node| property_scalar(node, "tile_aspect"))
+            .unwrap_or(1.0)
+            .clamp(MINIMUM_TILE_ASPECT, MAXIMUM_TILE_ASPECT),
+        tile_bond: tessellation
+            .map(|node| property_scalar(node, "tile_bond"))
+            .unwrap_or(0.0)
+            .rem_euclid(1.0),
+        tile_gap: tessellation
+            .map(|node| property_scalar(node, "tile_gap"))
+            .unwrap_or(0.0)
+            .clamp(0.0, MAXIMUM_TILE_GAP),
         emission_intensity: property_scalar(layer, "emission_intensity")
             .clamp(0.0, MAX_EMISSION_INTENSITY),
     }
@@ -463,6 +651,7 @@ fn frame_name(frame: PatternFrame) -> &'static str {
         PatternFrame::World => "world",
         PatternFrame::Voxel => "voxel",
         PatternFrame::Face => "face",
+        PatternFrame::Tile => "tile",
     }
 }
 

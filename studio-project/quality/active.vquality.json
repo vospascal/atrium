@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "vx-000000000000000018c777673529e958-0000000000000053",
-  "name": "Active quality",
+  "name": "active",
   "preset": "Balanced",
   "values": {
     "AnyHitShadow": {
@@ -112,6 +112,10 @@
       "type": "flag",
       "value": true
     },
+    "GiEventLight": {
+      "type": "flag",
+      "value": true
+    },
     "GiIterationsPerFrame": {
       "type": "count",
       "value": 2
@@ -152,21 +156,33 @@
       "type": "flag",
       "value": true
     },
+    "MaterialAnimationDeterministic": {
+      "type": "flag",
+      "value": false
+    },
+    "MaterialAnimationSpeed": {
+      "type": "scalar",
+      "value": 1.0
+    },
     "MaterialFaceRoles": {
       "type": "flag",
       "value": true
     },
-    "MaterialPatternMaxLayers": {
-      "type": "count",
-      "value": 4
+    "MaterialPatternFadeEnd": {
+      "type": "scalar",
+      "value": 50.0
     },
     "MaterialPatternFadeStart": {
       "type": "scalar",
       "value": 10.0
     },
-    "MaterialPatternFadeEnd": {
-      "type": "scalar",
-      "value": 50.0
+    "MaterialPatternMaxLayers": {
+      "type": "count",
+      "value": 4
+    },
+    "MaterialPatternOctaveLod": {
+      "type": "flag",
+      "value": false
     },
     "MaterialPatternStrength": {
       "type": "scalar",

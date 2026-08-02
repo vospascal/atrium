@@ -204,7 +204,10 @@ impl Scenario {
             quality.shading_params(),
             quality.gi_params(),
             quality.water_params(),
-            quality.material_params(),
+            // The DISPATCH height — `OUTPUT_HEIGHT` through this variant's render
+            // scale, since section 4 measures presets at their own resolutions and
+            // the octave cutoff is a per-pixel question.
+            quality.material_params((OUTPUT_HEIGHT as f32 * quality.render_scale) as u32),
             // S3: the bench pins the animation clock at zero and ships no world
             // events, so a measured frame is reproducible. This is stated here
             // rather than left to the deterministic lever, because a scenario
@@ -441,6 +444,298 @@ fn main() {
     }
     if runs_section(10) {
         report_emitter_probes(&device, &queue);
+    }
+    if runs_section(11) {
+        report_generator_costs(&device, &queue, &brickmap);
+    }
+    if runs_section(12) {
+        write_generator_swatches(&device, &queue);
+    }
+}
+
+/// Section 12 — what each generator LOOKS like on a real material, as PNGs.
+///
+/// Section 11 prices the generators; this one shows them, and the two answer
+/// different questions. A number tells you simplex is 39% cheaper than value noise;
+/// only a picture tells you whether the surface it produces is the one you wanted.
+/// Switching a material's generator is a re-authoring decision, not a free speedup,
+/// because a different generator is a DIFFERENT PATTERN and not a cheaper rendering
+/// of the same one.
+///
+/// One 4 x 4 m studio wall per (material, generator), framed close enough that the
+/// texel grid is visible — a landscape shot averages the pattern away at exactly the
+/// scale the choice is about. Everything except the generator is pinned: same wall,
+/// same camera, same sun, same period, same texel count, same amount.
+fn write_generator_swatches(device: &wgpu::Device, queue: &wgpu::Queue) {
+    use voxel_core::world::Voxel;
+    use voxel_rt::studio::{orbit_pose, StudioPose, StudioScene};
+
+    println!();
+    println!("== section 12: generator swatches (studio wall, 4 x 4 m) ==");
+
+    let output_directory = std::path::Path::new("target/bench_dda/swatches");
+    std::fs::create_dir_all(output_directory).expect("failed to create the swatch directory");
+
+    let variant = Variant::new("swatch".to_string(), RenderQuality::default());
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+
+    // The materials worth looking at, and why each: lava is the one row that already
+    // authors a layer, stone is the archetypal patterned surface, grass is the row
+    // that authors face roles so the pattern has to compose with them, and sand is
+    // the fine-grained case where a coarse generator will read as blotches.
+    let subjects = [
+        ("lava", Voxel::Lava),
+        ("stone", Voxel::Stone),
+        ("grass", Voxel::Grass),
+        ("sand", Voxel::Sand),
+        ("slate", Voxel::SlateTile),
+    ];
+
+    for (material_name, sample) in subjects {
+        let scene = StudioScene {
+            sample,
+            pose: StudioPose::Wall,
+            plate: None,
+            subject: None,
+        };
+        let brickmap = scene.build();
+        let bindings = WorldBindings::new(device, &brickmap);
+        // NEGATIVE quarter turn, so the camera sees the +Z face. The default sun
+        // points along normalize(0.55, 0.8, 0.35), so the -Z face this pose first
+        // used had `dot(normal, sun) = -0.35` — fully shadowed, and every swatch
+        // came out a flat dark rectangle with the pattern technically present and
+        // visually absent. A swatch has to be LIT to be a swatch.
+        let scenario = Scenario {
+            label: "studio wall",
+            pose: orbit_pose(&scene, -std::f32::consts::FRAC_PI_2, -0.05, 5.0),
+            sun: SunSettings::default(),
+            capture_image: true,
+        };
+        let mut resources =
+            VariantResources::new(device, &bindings, &brickmap, &variant, &target.view);
+
+        // The row EXACTLY as the table authors it, before any swatch override. For
+        // most subjects that is the flat base colour and a useful reference; for
+        // `slate` it is the four-layer tessellated stack, which is the only way to
+        // see the material this section was extended for — every other image here
+        // replaces the row's patterns with a single generator.
+        bindings.write_material_table(queue, &gpu_materials_for_swatches());
+        resources.flood_to_convergence(device, queue, &bindings, &variant, &scenario);
+        render_once(device, queue, &bindings, &resources, &variant, &scenario);
+        let authored = read_back_image(device, queue, &target);
+        write_png(
+            &output_directory.join(format!("{material_name}_AUTHORED.png")),
+            &authored,
+            width,
+            height,
+        );
+        write_downsampled_crop(
+            &output_directory.join(format!("thumb_{material_name}_AUTHORED.png")),
+            &authored,
+            width,
+            height,
+        );
+
+        for generator in PatternGenerator::ALL {
+            for warp in [0.0f32, 0.6] {
+                let rows = swatch_rows(sample, generator, warp);
+                bindings.write_material_table(queue, &rows);
+                resources.flood_to_convergence(device, queue, &bindings, &variant, &scenario);
+                render_once(device, queue, &bindings, &resources, &variant, &scenario);
+                let image = read_back_image(device, queue, &target);
+                let generator_name = generator
+                    .label()
+                    .split('(')
+                    .next()
+                    .unwrap_or("generator")
+                    .trim()
+                    .replace(' ', "-");
+                let suffix = if warp > 0.0 { "-warped" } else { "" };
+                write_png(
+                    &output_directory.join(format!("{material_name}_{generator_name}{suffix}.png")),
+                    &image,
+                    width,
+                    height,
+                );
+                write_downsampled_crop(
+                    &output_directory.join(format!(
+                        "thumb_{material_name}_{generator_name}{suffix}.png"
+                    )),
+                    &image,
+                    width,
+                    height,
+                );
+            }
+        }
+        println!(
+            "  {material_name}: {} generators x warp on/off",
+            PatternGenerator::ALL.len()
+        );
+    }
+    println!("  written to {}", output_directory.display());
+}
+
+/// The compiled table, untouched — what the renderer actually ships.
+fn gpu_materials_for_swatches() -> Vec<GpuMaterial> {
+    MATERIALS.iter().map(|row| row.to_gpu()).collect()
+}
+
+/// One material row carrying one generator, everything else pinned — the swatch
+/// table. Only the named row is patterned, so the surrounding plate and any other
+/// visible material stay flat and the eye has an unpatterned reference in frame.
+fn swatch_rows(
+    sample: voxel_core::world::Voxel,
+    generator: PatternGenerator,
+    domain_warp: f32,
+) -> Vec<GpuMaterial> {
+    let target_row = voxel_rt::material::material_id(sample) as usize;
+    let layer = PatternLayer {
+        generator,
+        // TILE frame with a 2:1 running bond, so the two tile generators have a wall
+        // to divide and every other generator shows what per-tile isolation does to
+        // it — which is the comparison these swatches exist for.
+        frame: PatternFrame::Tile,
+        period_meters: 0.5,
+        target: PatternTarget::Albedo,
+        // MULTIPLY at full amount, which maps the generator's raw 0..1 straight onto
+        // the material: black where the generator reads 0, the row's own albedo
+        // where it reads 1. Two earlier attempts used MixToColor and both failed to
+        // show anything — 0.85 toward near-black crushed every swatch dark, and 0.7
+        // toward light grey barely moved a grey material. Multiply is the only blend
+        // whose output spans the generator's ENTIRE range regardless of what the row
+        // is coloured, which is what a swatch needs.
+        //
+        // It also shows each generator's value DISTRIBUTION honestly rather than
+        // flattering it: worley F1 rarely exceeds ~0.6 of its range, so its swatch
+        // is genuinely darker than perlin's, and that is information rather than a
+        // rendering artefact.
+        blend: PatternBlend::Multiply,
+        amount: 1.0,
+        target_color: [1.0, 1.0, 1.0],
+        faces: PatternFaces::ALL,
+        texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
+        vary_per_face: true,
+        domain_warp,
+        tile_aspect: 2.0,
+        tile_bond: 0.5,
+        tile_gap: 0.06,
+        emission_intensity: 1.0,
+    };
+    MATERIALS
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut patterned = *row;
+            if index == target_row {
+                patterned.patterns = PatternStack::of(&[layer]);
+            }
+            patterned.to_gpu()
+        })
+        .collect()
+}
+
+/// Section 11 — what each pattern generator costs, one layer deep.
+///
+/// **Why this is not a variant table.** Every other section sweeps LEVERS, which
+/// are shader consts, so each column is a different pipeline and the harness builds
+/// one `VariantResources` per column. A generator is not a lever: it is four bits of
+/// an uploaded row. One shader, one pipeline, one bind group — and the sweep is a
+/// buffer write between batches.
+///
+/// That makes this the cleanest measurement in the file, because the usual
+/// confound is absent. Nothing about the compiled code differs between columns, so
+/// a difference cannot be register allocation or a lost fold; it is the generator
+/// doing more or less work. The `gen-checker` column is the floor: it produces a
+/// full-coverage pattern for two floors and a bit-and, so everything above it is
+/// what that generator costs over the cheapest possible one.
+///
+/// The round-robin rotation is kept from `measure_section` for the reason recorded
+/// there — timing columns in sequential blocks showed ~10% drift on identical
+/// shaders, which is the same order as the effects being measured.
+fn report_generator_costs(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: &Brickmap) {
+    println!();
+    println!("== section 11: pattern generator costs (one layer, shipped quality) ==");
+
+    let bindings = WorldBindings::new(device, brickmap);
+    let variant = Variant::new("generators".to_string(), RenderQuality::default());
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    // Ground-level, default sun — scenario C, the one where material detail covers
+    // the whole frame, so a generator's cost is not diluted by sky.
+    //
+    // `build_scenarios` returns ALL FOUR regardless of its argument; the chars only
+    // choose which ones get PNG-captured. Indexing is therefore the selection, and
+    // the index is asserted rather than trusted.
+    let mut scenarios = build_scenarios(&[]);
+    let scenario = scenarios.remove(2);
+    assert!(
+        scenario.label.starts_with("C ground"),
+        "scenario order changed: got `{}`",
+        scenario.label
+    );
+
+    let mut resources = VariantResources::new(device, &bindings, brickmap, &variant, &target.view);
+    let columns = generator_sweep();
+    let tables: Vec<Vec<GpuMaterial>> = columns
+        .iter()
+        .map(|column| {
+            single_generator_rows(
+                column.generator,
+                column.domain_warp,
+                column.frame,
+                column.vary_per_face,
+                column.layers,
+            )
+        })
+        .collect();
+
+    // Flood once: the light volume bakes its own cell attributes and never reads the
+    // material table, so no column can move it and re-flooding per column would only
+    // add noise. Section 9 measured exactly that — CAGI flat across all seven columns.
+    bindings.write_material_table(queue, &tables[0]);
+    resources.flood_to_convergence(device, queue, &bindings, &variant, &scenario);
+
+    let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(BATCH_COUNT); columns.len()];
+    for table in &tables {
+        bindings.write_material_table(queue, table);
+        for _ in 0..WARMUP_BATCHES {
+            time_one_batch(device, queue, &bindings, &resources, &variant, &scenario);
+        }
+    }
+    for round in 0..BATCH_COUNT {
+        for offset in 0..columns.len() {
+            let column = (round + offset) % columns.len();
+            bindings.write_material_table(queue, &tables[column]);
+            samples[column].push(time_one_batch(
+                device, queue, &bindings, &resources, &variant, &scenario,
+            ));
+        }
+    }
+
+    println!(
+        "  scenario: {} — per-dispatch median / p95 ms at {width}x{height}",
+        scenario.label
+    );
+    let mut summarised: Vec<(String, f32, f32)> = columns
+        .iter()
+        .zip(samples.iter_mut())
+        .map(|(column, column_samples)| {
+            let (median, p95) = summarize(column_samples);
+            (column.label.clone(), median, p95)
+        })
+        .collect();
+    let floor = summarised
+        .iter()
+        .find(|(label, _, _)| label == "gen-checker")
+        .map(|(_, median, _)| *median)
+        .unwrap_or(0.0);
+    summarised.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("NaN timing sample"));
+    for (label, median, p95) in &summarised {
+        println!(
+            "  {label:<22} median {median:>7.3} ms   p95 {p95:>7.3} ms   over checker {:>+7.3} ms",
+            median - floor
+        );
     }
 }
 
@@ -718,6 +1013,12 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             // defaulted: this stack is the priced configuration, so every field of it
             // should be visible in it.
             vary_per_face: false,
+            // The warp is priced by its own bench column, not baked into the
+            // saturated stack — that stack has to stay the four-generator slope.
+            domain_warp: 0.0,
+            tile_aspect: 2.0,
+            tile_bond: 0.5,
+            tile_gap: 0.06,
             // Albedo target, so the intensity is not read.
             emission_intensity: 1.0,
         },
@@ -741,6 +1042,10 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             faces: PatternFaces::ALL,
             texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
             vary_per_face: false,
+            domain_warp: 0.0,
+            tile_aspect: 2.0,
+            tile_bond: 0.5,
+            tile_gap: 0.06,
             emission_intensity: 1.0,
         },
         PatternLayer {
@@ -763,6 +1068,145 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             patterned.to_gpu()
         })
         .collect()
+}
+
+/// One layer of exactly one generator on every visible row — the table section 11
+/// sweeps.
+///
+/// A SINGLE layer, not a stack, because the question this section answers is "what
+/// does this generator cost", and section 9 already established that the first
+/// layer carries a fixed entry cost the later ones do not. Holding the layer count
+/// at one puts that entry cost in every column equally, so the differences between
+/// columns are generator differences and nothing else.
+///
+/// Everything except the generator and the warp is pinned: same world frame, same
+/// period, same texel grid, same target, same blend, same amount. A column that
+/// moved two things at once would not be a measurement.
+fn single_generator_rows(
+    generator: PatternGenerator,
+    domain_warp: f32,
+    frame: PatternFrame,
+    vary_per_face: bool,
+    layers: usize,
+) -> Vec<GpuMaterial> {
+    let layer = PatternLayer {
+        generator,
+        frame,
+        period_meters: 0.25,
+        target: PatternTarget::Albedo,
+        blend: PatternBlend::Multiply,
+        amount: 0.6,
+        target_color: [1.0, 1.0, 1.0],
+        faces: PatternFaces::ALL,
+        texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
+        vary_per_face,
+        domain_warp,
+        tile_aspect: 2.0,
+        tile_bond: 0.5,
+        tile_gap: 0.06,
+        emission_intensity: 1.0,
+    };
+    let stack = PatternStack::of(&vec![layer; layers]);
+    MATERIALS
+        .iter()
+        .map(|row| {
+            let mut patterned = *row;
+            if !matches!(row.kind, MaterialKind::Air) {
+                patterned.patterns = stack;
+            }
+            patterned.to_gpu()
+        })
+        .collect()
+}
+
+/// The section 11 sweep: every generator, then the two orthogonal knobs.
+///
+/// The generator is TABLE DATA rather than a lever, which is why this cannot be a
+/// registry-derived variant table like every other section: the shader is identical
+/// across all of these columns and only the uploaded row changes. That is also what
+/// makes the sweep cheap — one pipeline, one bind group, a 6.6 KB buffer write
+/// between batches.
+struct GeneratorColumn {
+    label: String,
+    generator: PatternGenerator,
+    domain_warp: f32,
+    frame: PatternFrame,
+    vary_per_face: bool,
+    layers: usize,
+}
+
+fn generator_sweep() -> Vec<GeneratorColumn> {
+    let mut columns: Vec<GeneratorColumn> = PatternGenerator::ALL
+        .iter()
+        .map(|generator| {
+            // Everything before the parenthesised description, hyphenated — the
+            // first word alone collides, since three generators are called
+            // "worley something".
+            let name = generator
+                .label()
+                .split('(')
+                .next()
+                .unwrap_or("generator")
+                .trim()
+                .replace(' ', "-");
+            GeneratorColumn {
+                label: format!("gen-{name}"),
+                generator: *generator,
+                domain_warp: 0.0,
+                frame: PatternFrame::World,
+                vary_per_face: false,
+                layers: 1,
+            }
+        })
+        .collect();
+    let world_noise = |label: &str, generator, domain_warp, layers| GeneratorColumn {
+        label: label.to_string(),
+        generator,
+        domain_warp,
+        frame: PatternFrame::World,
+        vary_per_face: false,
+        layers,
+    };
+    // The warp priced against its own un-warped column, on the two generators it
+    // changes most: a lattice noise and a cellular one.
+    columns.push(world_noise(
+        "warp-noise",
+        PatternGenerator::Noise { octaves: 3 },
+        0.5,
+        1,
+    ));
+    columns.push(world_noise("warp-worley", PatternGenerator::Worley, 0.5, 1));
+
+    // The FACE-FRAME columns, and the reason they exist: `pattern_variation_salt`
+    // returns zero for every world-frame layer, so every column above folds it away
+    // and none of them can price it. It is only live on a face-frame layer with
+    // variation on — which is what lava authors.
+    //
+    // The hash it computes depends on the SAMPLE alone; the layer argument only
+    // selects whether to compute it. So a four-layer face-frame stack computes the
+    // identical hash four times per hit, which looks like the same redundancy the
+    // row copy was.
+    //
+    // DOCUMENTED NEGATIVE (2026-08-02). It is not. Measured salted against
+    // unsalted: 4.158 vs 4.157 at one layer, 6.680 vs 6.678 at four — 0.002 ms for
+    // four redundant hashes, i.e. nothing. The row copy was 256 bytes forced into
+    // thread-local scratch; this is ~24 ALU ops against a pass doing thousands.
+    // Same shape in the source, different order of magnitude, and hoisting it
+    // would have meant a structural split between two hand-mirrored files for no
+    // gain. These columns stay so the negative keeps its evidence.
+    for (label, vary) in [("face-salted", true), ("face-unsalted", false)] {
+        for layers in [1usize, 4] {
+            columns.push(GeneratorColumn {
+                label: format!("{label}-{layers}L"),
+                generator: PatternGenerator::Noise { octaves: 3 },
+                domain_warp: 0.0,
+                frame: PatternFrame::Face,
+                vary_per_face: vary,
+                layers,
+            });
+        }
+    }
+    columns
 }
 
 /// Section 9: the material model. Baseline = the shipped configuration, which reads
@@ -2732,7 +3176,7 @@ fn scenario_sky_radiance() -> [f32; 3] {
         quality.shading_params(),
         quality.gi_params(),
         quality.water_params(),
-        quality.material_params(),
+        quality.material_params(OUTPUT_HEIGHT),
         animation_params,
         event_params,
     );
@@ -3602,4 +4046,46 @@ fn write_png(path: &std::path::Path, rgba_bytes: &[u8], width: u32, height: u32)
     writer
         .write_image_data(rgba_bytes)
         .expect("PNG data write failed");
+}
+
+/// A centred square crop of a render, box-downsampled to [`SWATCH_THUMBNAIL`] —
+/// what a side-by-side comparison sheet can actually hold.
+///
+/// Box-filtered rather than point-sampled, and that matters here specifically: these
+/// patterns are piecewise constant on a texel grid, and point-sampling a grid at a
+/// non-integer ratio produces moire that looks like a property of the generator
+/// rather than of the downsample.
+const SWATCH_THUMBNAIL: u32 = 220;
+
+fn write_downsampled_crop(path: &std::path::Path, rgba_bytes: &[u8], width: u32, height: u32) {
+    let side = height.min(width);
+    let origin_x = (width - side) / 2;
+    let origin_y = (height - side) / 2;
+    let target = SWATCH_THUMBNAIL.min(side);
+    let mut out = vec![0u8; (target * target * 4) as usize];
+    for out_y in 0..target {
+        for out_x in 0..target {
+            // The source box this output texel averages.
+            let x0 = origin_x + out_x * side / target;
+            let x1 = (origin_x + (out_x + 1) * side / target).max(x0 + 1);
+            let y0 = origin_y + out_y * side / target;
+            let y1 = (origin_y + (out_y + 1) * side / target).max(y0 + 1);
+            let mut sums = [0u32; 4];
+            let mut count = 0u32;
+            for y in y0..y1.min(height) {
+                for x in x0..x1.min(width) {
+                    let index = ((y * width + x) * 4) as usize;
+                    for channel in 0..4 {
+                        sums[channel] += rgba_bytes[index + channel] as u32;
+                    }
+                    count += 1;
+                }
+            }
+            let out_index = ((out_y * target + out_x) * 4) as usize;
+            for channel in 0..4 {
+                out[out_index + channel] = (sums[channel] / count.max(1)) as u8;
+            }
+        }
+    }
+    write_png(path, &out, target, target);
 }

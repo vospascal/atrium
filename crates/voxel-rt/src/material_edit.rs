@@ -915,11 +915,26 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
             .show_ui(ui, |ui| {
                 for generator in PatternGenerator::ALL {
                     let selected = generator.code() == layer.generator.code();
-                    if ui
-                        .selectable_label(selected, generator.label())
-                        .on_hover_text(generator_hint(generator))
-                        .clicked()
-                    {
+                    // Cost pips BESIDE the name rather than only in the hover text:
+                    // the choice is made while scanning this list, and a tooltip you
+                    // have to hover twelve times to read is not informing it.
+                    let cost = generator.cost();
+                    let hint = generator_hint(generator);
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            let clicked = ui
+                                .selectable_label(selected, generator.label())
+                                .on_hover_text(&hint)
+                                .clicked();
+                            // The pips carry the same tooltip: they are the reason
+                            // the row is worth hovering, so hovering them has to
+                            // explain itself rather than doing nothing.
+                            ui.colored_label(cost.color(), cost.pips())
+                                .on_hover_text(&hint);
+                            clicked
+                        })
+                        .inner;
+                    if clicked {
                         layer.generator = generator;
                     }
                 }
@@ -1121,9 +1136,14 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
 
 /// The generator's own parameters, and only its own.
 fn draw_generator_params(ui: &mut egui::Ui, layer: &mut PatternLayer) {
+    // The five fractal families share one octave slider — they differ in the lattice
+    // and the fold, not in how the octaves stack.
     match &mut layer.generator {
-        PatternGenerator::Flat => {}
-        PatternGenerator::Noise { octaves } => {
+        PatternGenerator::Noise { octaves }
+        | PatternGenerator::Perlin { octaves }
+        | PatternGenerator::Simplex { octaves }
+        | PatternGenerator::Ridged { octaves }
+        | PatternGenerator::Turbulence { octaves } => {
             ui.add(
                 egui::Slider::new(octaves, 1..=MAX_NOISE_OCTAVES)
                     .text("octaves")
@@ -1133,7 +1153,7 @@ fn draw_generator_params(ui: &mut egui::Ui, layer: &mut PatternLayer) {
                 "Each octave doubles the frequency and halves the amplitude, and the \
                  sum is normalised — so this changes the texture without changing the \
                  contrast, and the period keeps naming the largest feature. Costs one \
-                 more eight-corner lattice fetch per octave.",
+                 more lattice fetch per octave.",
             );
         }
         PatternGenerator::Speckle { density } => {
@@ -1148,7 +1168,54 @@ fn draw_generator_params(ui: &mut egui::Ui, layer: &mut PatternLayer) {
                  controls how big and this controls how crowded.",
             );
         }
+        PatternGenerator::Wave { distortion } => {
+            ui.add(
+                egui::Slider::new(distortion, 0.0..=2.0)
+                    .text("distortion")
+                    .max_decimals(3),
+            )
+            .on_hover_text(
+                "How far noise bends the bands, in periods. Zero rules perfectly \
+                 straight lines; a quarter is wood grain; past one the bands stop \
+                 reading as bands.",
+            );
+        }
+        PatternGenerator::Flat
+        | PatternGenerator::Worley
+        | PatternGenerator::WorleyEdge
+        | PatternGenerator::WorleySmooth
+        | PatternGenerator::Checker
+        // The tile generators are configured by the TESSELLATION, not by a knob of
+        // their own — that is the point of a shared tessellation, and why their
+        // fields live on the layer rather than here.
+        | PatternGenerator::TileTone => {}
+        PatternGenerator::TileEdge { sharpness } => {
+            ui.add(
+                egui::Slider::new(sharpness, 0.0..=1.0)
+                    .text("edge sharpness")
+                    .max_decimals(3),
+            )
+            .on_hover_text(
+                "How abruptly the joint gives way to the tile face. At zero the \
+                 gradient runs all the way to the tile's centre and the wall reads \
+                 as pillows; toward one it concentrates into a narrow dark line \
+                 around a flat tile, which is what grout actually looks like.",
+            );
+        }
     }
+    // Orthogonal to the generator, so it sits outside the match rather than being
+    // repeated in twelve arms.
+    ui.add(
+        egui::Slider::new(&mut layer.domain_warp, 0.0..=1.0)
+            .text("domain warp")
+            .max_decimals(3),
+    )
+    .on_hover_text(
+        "Pushes the sample point through a noise field before the generator reads it \
+         (iq, 'domain warping'). Warped worley is cracked stone, warped wave is wood \
+         grain, warped checker is a rippled floor. Costs about as much as one extra \
+         octave, so it competes with the octave slider directly.",
+    );
 }
 
 /// What one texel rung means in metres, since "8" is meaningless without the voxel.
@@ -1165,7 +1232,37 @@ fn texel_rung_hint(rung: u32) -> String {
     )
 }
 
-fn generator_hint(generator: PatternGenerator) -> &'static str {
+/// The hover text: what the generator looks like, then what it costs.
+///
+/// The cost is a BAND and a comparison, never a millisecond figure. The measured
+/// number is conditional on one GPU at one resolution
+/// ([`PatternGenerator::measured_reference_milliseconds`]), and a tooltip is exactly
+/// the place a conditional number stops being conditional.
+fn generator_hint(generator: PatternGenerator) -> String {
+    let cost = generator.cost();
+    let reference = PatternGenerator::Noise { octaves: 3 }.measured_reference_milliseconds();
+    let ratio = generator.measured_reference_milliseconds() / reference;
+    let relative = if ratio < 0.05 {
+        "essentially free — at the measurement floor".to_string()
+    } else if ratio < 1.0 {
+        format!("about {:.0}% the cost of value noise", ratio * 100.0)
+    } else if ratio < 1.05 {
+        "about the same as value noise".to_string()
+    } else {
+        format!("about {ratio:.1}x the cost of value noise")
+    };
+    format!(
+        "{}\n\nCost: {} ({}) — {}.",
+        generator_character(generator),
+        cost.label(),
+        cost.pips(),
+        relative
+    )
+}
+
+/// What the generator produces, with no cost claim in it — [`generator_hint`] adds
+/// that, so the two never have to be kept in step by hand.
+fn generator_character(generator: PatternGenerator) -> &'static str {
     match generator {
         PatternGenerator::Flat => {
             "One value per cell of the frame. In the voxel frame this is per-voxel \
@@ -1177,6 +1274,57 @@ fn generator_hint(generator: PatternGenerator) -> &'static str {
         }
         PatternGenerator::Speckle { .. } => {
             "Scattered round specks: pits in stone, grit in sand, lichen."
+        }
+        PatternGenerator::Perlin { .. } => {
+            "Classic Perlin gradient noise on the cubic lattice. Same eight corners \
+             as `noise` but each contributes a gradient dot, so it has no axis bias \
+             — smoother and more organic, for more ALU and no extra hashes."
+        }
+        PatternGenerator::Simplex { .. } => {
+            "Gradient noise on the tetrahedral lattice: FOUR corners instead of \
+             eight. Isotropic like perlin, half the hashes, but it pays for them \
+             with a branch — which of the two wins here is a bench question."
+        }
+        PatternGenerator::Ridged { .. } => {
+            "Ridged multifractal: each octave is folded at its midline so the peaks \
+             become creases. Veins, erosion channels, rock strata."
+        }
+        PatternGenerator::Turbulence { .. } => {
+            "Turbulence: folded at the ZERO crossing rather than the midline, which \
+             is a different look for the same cost as `noise`. Marble, smoke, \
+             weathering streaks."
+        }
+        PatternGenerator::Worley => {
+            "Distance to the nearest scattered feature point. Pebbles, cells, lichen \
+             colonies — the one family with hard boundaries rather than gradients, \
+             and the dearest: 27 cells walked per sample."
+        }
+        PatternGenerator::WorleyEdge => {
+            "Bright exactly on the boundary between two cells. Cracked mud, dried \
+             paint, mortar between irregular stones."
+        }
+        PatternGenerator::WorleySmooth => {
+            "Worley through a smooth minimum, so cell walls swell and merge instead \
+             of meeting at a crease. Organic, blobby, no hard edges."
+        }
+        PatternGenerator::Wave { .. } => {
+            "Bands along the frame's X, bent by noise. Wood grain, geological \
+             strata, brushed metal. The distortion knob is what stops them being \
+             ruled lines."
+        }
+        PatternGenerator::Checker => {
+            "Alternating cells. Tiles and boards — and the cheapest generator there \
+             is, which makes it the reference every other one is priced against."
+        }
+        PatternGenerator::TileTone => {
+            "One flat shade per tile of the tessellation, different from its \
+             neighbours. The most recognisable thing about any masonry surface, and \
+             the reason a stone wall does not read as one painted slab."
+        }
+        PatternGenerator::TileEdge { .. } => {
+            "Distance to the nearest tile edge: zero in the joint, one at the tile's \
+             centre. Grout, and the bevel that makes a block read as raised. Set the \
+             frame to `tile` and the gap on the tessellation."
         }
     }
 }
@@ -1192,6 +1340,14 @@ fn frame_hint(frame: PatternFrame) -> &'static str {
             "Restarts at every voxel: the coordinate is the voxel's own centre, so the \
              generator returns ONE value for the whole voxel. For deliberately \
              per-voxel motifs — tone jitter being the point."
+        }
+        PatternFrame::Tile => {
+            "Subdivides the WALL into tiles and hands the generator a tile-local \
+             coordinate, so the pattern restarts at every tile edge. Period is the \
+             TILE SIZE here, not the feature size. Each tile also gets its own slice \
+             of the generator's field, so the grain in one block is independent of \
+             its neighbour's — which is what the other three frames cannot do, and \
+             what makes a slate wall look like slate rather than like wallpaper."
         }
         PatternFrame::Face => {
             "Voxel-local within the hit face, so the pattern is ABOUT the face: a \

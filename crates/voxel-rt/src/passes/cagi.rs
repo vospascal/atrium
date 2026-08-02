@@ -690,7 +690,9 @@ mod tests {
                 quality.shading_params(),
                 quality.gi_params(),
                 quality.water_params(),
-                quality.material_params(),
+                // Zero height: this helper renders no pixels, so the octave
+                // cutoff has no footprint to compare against and keeps them all.
+                quality.material_params(0),
                 animation_params,
                 event_params,
             );

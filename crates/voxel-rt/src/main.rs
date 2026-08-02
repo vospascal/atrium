@@ -1833,7 +1833,10 @@ impl AppState {
             self.quality.shading_params(),
             self.quality.gi_params(),
             self.quality.water_params(),
-            self.quality.material_params(),
+            // The DISPATCH height, not the window height: the octave cutoff asks
+            // what a shaded pixel can resolve, and a half-scale preset resolves
+            // half as much.
+            self.quality.material_params(self.renderer.resolution().1),
             animation_params,
             event_params,
         );

@@ -26,6 +26,24 @@ pub const DEFAULT_VERTICAL_FOV_RADIANS: f32 = 60.0 * std::f32::consts::PI / 180.
 /// Pitch clamp: just short of straight up/down so the basis never degenerates.
 const MAX_PITCH_RADIANS: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 
+/// World metres one pixel spans at ONE METRE from the eye.
+///
+/// Multiply by a hit distance in metres and the result is that hit's pixel
+/// footprint — the size below which detail cannot be resolved and only aliases.
+/// The shading pass carries it in `MaterialParams` so a fractal generator can
+/// stop summing octaves it cannot show (`PATTERN_OCTAVE_LOD`).
+///
+/// Vertical rather than horizontal because the vertical FOV is the authored one;
+/// square pixels make the two agree anyway. Guards a zero height so a headless
+/// caller with an unset resolution gets a harmless zero footprint (every octave
+/// kept) rather than an infinity that would drop them all.
+pub fn pixel_footprint_at_one_meter(vertical_fov_radians: f32, height_pixels: u32) -> f32 {
+    if height_pixels == 0 {
+        return 0.0;
+    }
+    2.0 * (vertical_fov_radians * 0.5).tan() / height_pixels as f32
+}
+
 /// Per-frame camera data for the DDA compute shader, bindable as a uniform.
 ///
 /// The shader reconstructs each pixel's ray as

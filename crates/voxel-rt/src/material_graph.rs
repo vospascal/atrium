@@ -2126,10 +2126,29 @@ impl<'a> Lowerer<'a> {
             }
             MaterialNodeOperation::Output
             | MaterialNodeOperation::Surface
+            // Every pattern GENERATOR node, and the layer node itself, are read by
+            // `material_graph_layers`'s projection into the uploaded row rather than
+            // lowered into the IR — the stack is table data, not shader expressions.
+            // Reaching one here means a graph wired a generator somewhere a scalar
+            // was expected, which is an authoring error and says so.
             | MaterialNodeOperation::PatternLayer
             | MaterialNodeOperation::PatternFlat
             | MaterialNodeOperation::PatternNoise
-            | MaterialNodeOperation::PatternSpeckle => {
+            | MaterialNodeOperation::PatternSpeckle
+            | MaterialNodeOperation::PatternPerlin
+            | MaterialNodeOperation::PatternSimplex
+            | MaterialNodeOperation::PatternRidged
+            | MaterialNodeOperation::PatternTurbulence
+            | MaterialNodeOperation::PatternWorley
+            | MaterialNodeOperation::PatternWorleyEdge
+            | MaterialNodeOperation::PatternWorleySmooth
+            | MaterialNodeOperation::PatternWave
+            | MaterialNodeOperation::PatternChecker
+            | MaterialNodeOperation::PatternTileTone
+            | MaterialNodeOperation::PatternTileEdge
+            // The tessellation is not a value either — it is where the tiles are,
+            // read by the projection and packed into each layer's row.
+            | MaterialNodeOperation::Tessellation => {
                 return Err(MaterialGraphError::UnsupportedNode(record.node_type.0))
             }
         };

@@ -83,6 +83,10 @@
       "id": "vx-000000000000000018c77767349d31e8-0000000000000050",
       "path": "materials/26-lava.vmat.json"
     },
+    "27": {
+      "id": "vx-000000000000000018c807fa074e2570-000000000000001c",
+      "path": "materials/27-slate-tile.vmat.json"
+    },
     "3": {
       "id": "vx-000000000000000018c777672af9a680-000000000000000b",
       "path": "materials/03-dirt.vmat.json"
@@ -231,6 +235,10 @@
     {
       "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
       "path": "graphs/material-24.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c807fa074e2958-000000000000001d",
+      "path": "graphs/material-27.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",

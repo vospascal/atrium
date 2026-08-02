@@ -1,0 +1,141 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c807fa074e2570-000000000000001c",
+  "name": "slate tile",
+  "voxel_material_slot": 27,
+  "material": {
+    "albedo": [
+      0.44,
+      0.45,
+      0.49
+    ],
+    "roughness": 0.72,
+    "specular": 0.04,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [
+      {
+        "generator": {
+          "kind": "tile_tone"
+        },
+        "frame": "tile",
+        "period_meters": 0.5,
+        "target": "albedo",
+        "blend": "multiply",
+        "amount": 0.45,
+        "target_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "faces": {
+          "top": true,
+          "side": true,
+          "bottom": true
+        },
+        "texels_per_voxel": 0,
+        "vary_per_face": false,
+        "domain_warp": 0.0,
+        "tile_aspect": 2.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0
+      },
+      {
+        "generator": {
+          "kind": "simplex",
+          "octaves": 4
+        },
+        "frame": "tile",
+        "period_meters": 0.5,
+        "target": "albedo",
+        "blend": "multiply",
+        "amount": 0.55,
+        "target_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "faces": {
+          "top": true,
+          "side": true,
+          "bottom": true
+        },
+        "texels_per_voxel": 0,
+        "vary_per_face": false,
+        "domain_warp": 0.0,
+        "tile_aspect": 2.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0
+      },
+      {
+        "generator": {
+          "kind": "worley_edge"
+        },
+        "frame": "tile",
+        "period_meters": 0.5,
+        "target": "albedo",
+        "blend": "multiply",
+        "amount": 0.32,
+        "target_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "faces": {
+          "top": true,
+          "side": true,
+          "bottom": true
+        },
+        "texels_per_voxel": 0,
+        "vary_per_face": false,
+        "domain_warp": 0.45,
+        "tile_aspect": 2.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0
+      },
+      {
+        "generator": {
+          "kind": "tile_edge",
+          "sharpness": 0.72
+        },
+        "frame": "tile",
+        "period_meters": 0.5,
+        "target": "albedo",
+        "blend": "multiply",
+        "amount": 0.85,
+        "target_color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "faces": {
+          "top": true,
+          "side": true,
+          "bottom": true
+        },
+        "texels_per_voxel": 0,
+        "vary_per_face": false,
+        "domain_warp": 0.0,
+        "tile_aspect": 2.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0
+      }
+    ],
+    "acoustic_alpha": [
+      0.02,
+      0.02,
+      0.03,
+      0.03,
+      0.04,
+      0.05
+    ]
+  },
+  "graph": "vx-000000000000000018c807fa074e2958-000000000000001d"
+}

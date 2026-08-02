@@ -41,15 +41,58 @@ const MATERIAL_PATTERN_MAX_LAYERS: u32 = 4u;
 
 // Absolute fade-start distance in metres from the runtime registry.
 
-// Generators. Mirrors `PatternGenerator::code`.
+// Generators. Mirrors `PatternGenerator::code`. FOUR BITS — 16 codes, 12 spent.
+// It was three bits and 8 until the generator library grew past it; widening it
+// shifted every accessor below, which is why they are all written out from the
+// same table rather than derived.
+//
+// Three lattice noises rather than one, deliberately, because they differ in BOTH
+// axes a bench cares about:
+//
+//   noise    value noise    8 hashes/octave, no dots     blobby, slight axis bias
+//   perlin   gradient noise 8 hashes/octave, 8 dots      classic, zero at lattice
+//   simplex  gradient noise 4 hashes/octave, 4 dots, branchy  isotropic
+//
+// Picking between them is a measurement, not a preference, and none of them is
+// obviously the winner on a GPU: simplex halves the hashes and pays for it with a
+// divergent tetrahedron choice, perlin doubles the ALU per corner but stays
+// branchless.
 const PATTERN_GENERATOR_FLAT: u32 = 0u;
 const PATTERN_GENERATOR_NOISE: u32 = 1u;
 const PATTERN_GENERATOR_SPECKLE: u32 = 2u;
+const PATTERN_GENERATOR_PERLIN: u32 = 3u;
+const PATTERN_GENERATOR_SIMPLEX: u32 = 4u;
+const PATTERN_GENERATOR_RIDGED: u32 = 5u;
+const PATTERN_GENERATOR_TURBULENCE: u32 = 6u;
+const PATTERN_GENERATOR_WORLEY: u32 = 7u;
+const PATTERN_GENERATOR_WORLEY_EDGE: u32 = 8u;
+const PATTERN_GENERATOR_WORLEY_SMOOTH: u32 = 9u;
+const PATTERN_GENERATOR_WAVE: u32 = 10u;
+const PATTERN_GENERATOR_CHECKER: u32 = 11u;
+const PATTERN_GENERATOR_TILE_TONE: u32 = 12u;
+const PATTERN_GENERATOR_TILE_EDGE: u32 = 13u;
+
+// Tier 1b — drop octaves whose feature size has fallen below a pixel.
+//
+// An octave contributes detail at `period / 2^octave` metres. Once that projects
+// to under a pixel it cannot be resolved, so summing it adds nothing but aliasing
+// and cost — the same argument mip-mapping makes, applied to a procedural sum.
+// The cutoff is therefore quality-POSITIVE, not a quality trade: it removes the
+// octaves that were only ever contributing shimmer.
+//
+// `lighting.material_params.z` carries metres-per-pixel at one metre (the camera's
+// vertical FOV over the render height), so `distance * that` is the footprint. An
+// octave survives while its feature size exceeds the footprint.
+const PATTERN_OCTAVE_LOD: bool = false;
+// Octaves finer than this many footprints are dropped. Below 1.0 it keeps octaves
+// that are already sub-pixel; above ~4 it starts visibly softening mid-distance.
+const PATTERN_OCTAVE_LOD_SCALE: f32 = 2.0;
 
 // Frames. Mirrors `PatternFrame::code`.
 const PATTERN_FRAME_WORLD: u32 = 0u;
 const PATTERN_FRAME_VOXEL: u32 = 1u;
 const PATTERN_FRAME_FACE: u32 = 2u;
+const PATTERN_FRAME_TILE: u32 = 3u;
 
 // Targets. Mirrors `PatternTarget::code`.
 const PATTERN_TARGET_ALBEDO: u32 = 0u;
@@ -61,17 +104,27 @@ const PATTERN_BLEND_MULTIPLY: u32 = 0u;
 const PATTERN_BLEND_MIX_TO_COLOR: u32 = 1u;
 const PATTERN_BLEND_ADD: u32 = 2u;
 
-fn pattern_generator(layer: PatternLayer) -> u32 { return layer.packed & 0x7u; }
-fn pattern_frame(layer: PatternLayer) -> u32 { return (layer.packed >> 3u) & 0x3u; }
-fn pattern_target(layer: PatternLayer) -> u32 { return (layer.packed >> 5u) & 0x3u; }
-fn pattern_blend(layer: PatternLayer) -> u32 { return (layer.packed >> 7u) & 0x3u; }
-fn pattern_face_mask(layer: PatternLayer) -> u32 { return (layer.packed >> 9u) & 0x7u; }
-fn pattern_octaves(layer: PatternLayer) -> u32 { return (layer.packed >> 12u) & 0x7u; }
-// Texels per voxel edge, 0 = continuous. Bits 15-22, so up to 255 fits even though
+// The packed word, field by field. Mirrors `PatternLayer::packed` in pattern.rs;
+// the two are pinned against each other by a round-trip test there.
+//
+//   0-3   generator (4 bits, 12 of 16 used)
+//   4-5   frame          6-7   target        8-9   blend
+//   10-12 face mask      13-15 octaves       16-23 texels per voxel
+//   24    vary per face  25    domain warp   26-31 free
+fn pattern_generator(layer: PatternLayer) -> u32 { return layer.packed & 0xfu; }
+fn pattern_frame(layer: PatternLayer) -> u32 { return (layer.packed >> 4u) & 0x3u; }
+fn pattern_target(layer: PatternLayer) -> u32 { return (layer.packed >> 6u) & 0x3u; }
+fn pattern_blend(layer: PatternLayer) -> u32 { return (layer.packed >> 8u) & 0x3u; }
+fn pattern_face_mask(layer: PatternLayer) -> u32 { return (layer.packed >> 10u) & 0x7u; }
+fn pattern_octaves(layer: PatternLayer) -> u32 { return (layer.packed >> 13u) & 0x7u; }
+// Texels per voxel edge, 0 = continuous. Bits 16-23, so up to 255 fits even though
 // TEXEL_RUNGS stops at 32.
-fn pattern_texels(layer: PatternLayer) -> u32 { return (layer.packed >> 15u) & 0xffu; }
-// Bit 23: give every face its own draw. Face frame only — see pattern_variation_salt.
-fn pattern_varies_per_face(layer: PatternLayer) -> bool { return (layer.packed & (1u << 23u)) != 0u; }
+fn pattern_texels(layer: PatternLayer) -> u32 { return (layer.packed >> 16u) & 0xffu; }
+// Bit 24: give every face its own draw. Face frame only — see pattern_variation_salt.
+fn pattern_varies_per_face(layer: PatternLayer) -> bool { return (layer.packed & (1u << 24u)) != 0u; }
+// Bit 25: push the sample point through a noise field before the generator reads
+// it (iq, "domain warping"). Strength rides in `param_b`.
+fn pattern_warps(layer: PatternLayer) -> bool { return (layer.packed & (1u << 25u)) != 0u; }
 
 // Where a hit is, in every form the frames need. Built once per hit by
 // `pattern_sample` below, then shared by every layer in the stack — the
@@ -149,6 +202,34 @@ fn pattern_value_noise(point: vec3<f32>, salt: u32) -> f32 {
     return accumulated;
 }
 
+// How many octaves are worth summing at this distance — Tier 1b.
+//
+// `authored` is what the layer asked for; the return is what survives. Always at
+// least one, so a distant layer softens toward its base frequency rather than
+// vanishing (vanishing would pop, and the layer already has `pattern_fade` for
+// disappearing gracefully).
+//
+// The comparison is done in FEATURE SIZE, not frequency, because that is the thing
+// with a pixel to compare against: octave k has features of `period / 2^k` metres,
+// and the pixel footprint at the hit is `distance * metres_per_pixel_at_one_metre`.
+fn pattern_octave_budget(authored: u32, period_meters: f32, distance_meters: f32) -> u32 {
+    if (!PATTERN_OCTAVE_LOD) {
+        return authored;
+    }
+    // The clamp goes AFTER the scale, matching `octave_budget` in pattern.rs — the
+    // two must agree at the degenerate end as well as the useful one.
+    let footprint = max(
+        distance_meters * lighting.material_params.z * PATTERN_OCTAVE_LOD_SCALE, 1e-6);
+    var budget = 1u;
+    for (var octave = 1u; octave < authored; octave = octave + 1u) {
+        if (period_meters / exp2(f32(octave)) < footprint) {
+            break;
+        }
+        budget = octave + 1u;
+    }
+    return budget;
+}
+
 // Fractal value noise, normalised back into 0..1 — so the octave count changes the
 // texture without changing the contrast, and the period always names the LARGEST
 // feature.
@@ -165,6 +246,331 @@ fn pattern_fractal_noise(point: vec3<f32>, octaves: u32, salt_base: u32) -> f32 
         amplitude = amplitude * 0.5;
     }
     return total / normalisation;
+}
+
+// ---- Perlin: gradient noise on the CUBIC lattice ------------------------------
+//
+// Same eight corners value noise reads, but each corner contributes the dot of a
+// pseudo-random gradient with the offset to it, rather than a scalar. Costs eight
+// dot products on top of the eight hashes and stays completely branchless — the
+// opposite trade from simplex below.
+//
+// Perlin's quintic fade `6t^5 - 15t^4 + 10t^3` rather than the cubic ease the value
+// path uses: the cubic has a discontinuous second derivative at the lattice, which
+// value noise gets away with and a gradient field does not (it shows as faint
+// creases along the cell planes).
+fn pattern_quintic(t: f32) -> f32 {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+// One of 12 edge-midpoint gradients — the classic Perlin set. All the same length
+// and evenly spread, so no direction is favoured. Shared with simplex.
+fn pattern_gradient(cell: vec3<i32>, salt: u32) -> vec3<f32> {
+    let mixed = (bitcast<u32>(cell.x) * 0x27d4eb2du)
+        ^ (bitcast<u32>(cell.y) * 0x9e3779b9u)
+        ^ (bitcast<u32>(cell.z) * 0x85ebca6bu)
+        ^ (salt * 0xc2b2ae35u);
+    let index = pattern_hash_u32(mixed) % 12u;
+    let axis = index / 4u;
+    let signs = vec2<f32>(
+        select(1.0, -1.0, (index & 1u) != 0u),
+        select(1.0, -1.0, (index & 2u) != 0u),
+    );
+    if (axis == 0u) { return vec3<f32>(signs.x, signs.y, 0.0); }
+    if (axis == 1u) { return vec3<f32>(signs.x, 0.0, signs.y); }
+    return vec3<f32>(0.0, signs.x, signs.y);
+}
+
+fn pattern_perlin_noise(point: vec3<f32>, salt: u32) -> f32 {
+    let base = floor(point);
+    let cell = vec3<i32>(base);
+    let local = point - base;
+    let fade = vec3<f32>(
+        pattern_quintic(local.x), pattern_quintic(local.y), pattern_quintic(local.z));
+    var accumulated = 0.0;
+    for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+        let offset = vec3<u32>(corner & 1u, (corner >> 1u) & 1u, (corner >> 2u) & 1u);
+        let corner_local = vec3<f32>(offset);
+        let weight_x = select(1.0 - fade.x, fade.x, offset.x == 1u);
+        let weight_y = select(1.0 - fade.y, fade.y, offset.y == 1u);
+        let weight_z = select(1.0 - fade.z, fade.z, offset.z == 1u);
+        let gradient = pattern_gradient(cell + vec3<i32>(offset), salt);
+        accumulated = accumulated
+            + weight_x * weight_y * weight_z * dot(gradient, local - corner_local);
+    }
+    // The 12-gradient set bounds |value| just under 1; map to 0..1 and clamp so the
+    // guarantee every consumer relies on is exact rather than nearly true.
+    return clamp(0.5 + 0.5 * accumulated, 0.0, 1.0);
+}
+
+fn pattern_fractal_perlin(point: vec3<f32>, octaves: u32, salt_base: u32) -> f32 {
+    let count = clamp(octaves, 1u, 4u);
+    var frequency = 1.0;
+    var amplitude = 1.0;
+    var total = 0.0;
+    var normalisation = 0.0;
+    for (var octave = 0u; octave < count; octave = octave + 1u) {
+        total = total + amplitude * pattern_perlin_noise(point * frequency, salt_base ^ octave);
+        normalisation = normalisation + amplitude;
+        frequency = frequency * 2.0;
+        amplitude = amplitude * 0.5;
+    }
+    return total / normalisation;
+}
+
+// ---- Simplex-lattice gradient noise (the four-corner contender) --------------
+//
+// Value noise reads EIGHT cube corners per octave. The simplex lattice skews space
+// so the cell is a tetrahedron, which has FOUR — half the hashes for the same
+// spatial frequency, which is the whole reason this exists as a contender.
+//
+// It is not free of that: the skew costs two dot products, and picking which of the
+// six tetrahedra the point landed in is a comparison chain that DIVERGES inside a
+// warp. Whether four hashes plus a branchy ordering beats eight hashes and no
+// branches is a hardware question, not an arithmetic one, so it ships as a bench
+// column rather than as a replacement.
+//
+// Gradients come from the same `pattern_hash_u32`, so the CPU reference reproduces
+// this bit for bit exactly as it does the value-noise path.
+const PATTERN_SIMPLEX_SKEW: f32 = 0.3333333333;   // 1/3 for 3D
+const PATTERN_SIMPLEX_UNSKEW: f32 = 0.1666666667; // 1/6 for 3D
+
+// One corner's contribution: the classic `(0.6 - r^2)^4` falloff, zero outside the
+// corner's radius of influence so the four contributions sum without a seam.
+fn pattern_simplex_corner(offset: vec3<f32>, cell: vec3<i32>, salt: u32) -> f32 {
+    let falloff = 0.6 - dot(offset, offset);
+    if (falloff <= 0.0) {
+        return 0.0;
+    }
+    let squared = falloff * falloff;
+    return squared * squared * dot(pattern_gradient(cell, salt), offset);
+}
+
+fn pattern_simplex_noise(point: vec3<f32>, salt: u32) -> f32 {
+    // Skew into the lattice where the simplex cell is a unit tetrahedron.
+    let skew = (point.x + point.y + point.z) * PATTERN_SIMPLEX_SKEW;
+    let skewed = floor(point + vec3<f32>(skew));
+    let unskew = (skewed.x + skewed.y + skewed.z) * PATTERN_SIMPLEX_UNSKEW;
+    let origin = skewed - vec3<f32>(unskew);
+    let offset0 = point - origin;
+
+    // Which of the six tetrahedra: rank the components. This is the divergent part.
+    var step1 = vec3<f32>(0.0);
+    var step2 = vec3<f32>(0.0);
+    if (offset0.x >= offset0.y) {
+        if (offset0.y >= offset0.z) {
+            step1 = vec3<f32>(1.0, 0.0, 0.0); step2 = vec3<f32>(1.0, 1.0, 0.0);
+        } else if (offset0.x >= offset0.z) {
+            step1 = vec3<f32>(1.0, 0.0, 0.0); step2 = vec3<f32>(1.0, 0.0, 1.0);
+        } else {
+            step1 = vec3<f32>(0.0, 0.0, 1.0); step2 = vec3<f32>(1.0, 0.0, 1.0);
+        }
+    } else {
+        if (offset0.y < offset0.z) {
+            step1 = vec3<f32>(0.0, 0.0, 1.0); step2 = vec3<f32>(0.0, 1.0, 1.0);
+        } else if (offset0.x < offset0.z) {
+            step1 = vec3<f32>(0.0, 1.0, 0.0); step2 = vec3<f32>(0.0, 1.0, 1.0);
+        } else {
+            step1 = vec3<f32>(0.0, 1.0, 0.0); step2 = vec3<f32>(1.0, 1.0, 0.0);
+        }
+    }
+
+    let cell = vec3<i32>(skewed);
+    let offset1 = offset0 - step1 + vec3<f32>(PATTERN_SIMPLEX_UNSKEW);
+    let offset2 = offset0 - step2 + vec3<f32>(2.0 * PATTERN_SIMPLEX_UNSKEW);
+    let offset3 = offset0 - vec3<f32>(1.0) + vec3<f32>(3.0 * PATTERN_SIMPLEX_UNSKEW);
+    let total = pattern_simplex_corner(offset0, cell, salt)
+        + pattern_simplex_corner(offset1, cell + vec3<i32>(step1), salt)
+        + pattern_simplex_corner(offset2, cell + vec3<i32>(step2), salt)
+        + pattern_simplex_corner(offset3, cell + vec3<i32>(1, 1, 1), salt);
+    // 32 is the conventional 3D scale, which brings the sum to roughly [-1, 1];
+    // the clamp makes "roughly" into a guarantee, since every consumer of a
+    // generator value in this file assumes 0..1.
+    return clamp(0.5 + 16.0 * total, 0.0, 1.0);
+}
+
+fn pattern_fractal_simplex(point: vec3<f32>, octaves: u32, salt_base: u32) -> f32 {
+    let count = clamp(octaves, 1u, 4u);
+    var frequency = 1.0;
+    var amplitude = 1.0;
+    var total = 0.0;
+    var normalisation = 0.0;
+    for (var octave = 0u; octave < count; octave = octave + 1u) {
+        total = total + amplitude * pattern_simplex_noise(point * frequency, salt_base ^ octave);
+        normalisation = normalisation + amplitude;
+        frequency = frequency * 2.0;
+        amplitude = amplitude * 0.5;
+    }
+    return total / normalisation;
+}
+
+// ---- Ridged multifractal ------------------------------------------------------
+//
+// The same value-noise lattice, folded: `1 - |2v - 1|` turns each octave's midline
+// into a crease and its extremes into troughs, and squaring sharpens the crease.
+// Reads as veins, erosion channels and rock strata rather than as grain.
+//
+// Deliberately built on `pattern_value_noise` and not on its own lattice: it costs
+// the SAME eight hashes per octave as `noise`, so a bench column comparing the two
+// isolates the fold — the look changes and the cost does not.
+fn pattern_ridged_noise(point: vec3<f32>, octaves: u32, salt_base: u32) -> f32 {
+    let count = clamp(octaves, 1u, 4u);
+    var frequency = 1.0;
+    var amplitude = 1.0;
+    var total = 0.0;
+    var normalisation = 0.0;
+    for (var octave = 0u; octave < count; octave = octave + 1u) {
+        let folded = 1.0 - abs(2.0 * pattern_value_noise(point * frequency, salt_base ^ octave) - 1.0);
+        total = total + amplitude * folded * folded;
+        normalisation = normalisation + amplitude;
+        frequency = frequency * 2.0;
+        amplitude = amplitude * 0.5;
+    }
+    return clamp(total / normalisation, 0.0, 1.0);
+}
+
+// ---- Turbulence ---------------------------------------------------------------
+//
+// `sum |2v - 1|` — the absolute value of a signed octave, which creases at the
+// ZERO crossing rather than at the midline peak the way ridged does. Smoke, marble
+// veining, weathering streaks. Same eight hashes per octave as `noise`, so it and
+// `ridged` together isolate what the FOLD costs versus what the lattice costs:
+// three generators, one lattice, three looks.
+fn pattern_turbulence(point: vec3<f32>, octaves: u32, salt_base: u32) -> f32 {
+    let count = clamp(octaves, 1u, 4u);
+    var frequency = 1.0;
+    var amplitude = 1.0;
+    var total = 0.0;
+    var normalisation = 0.0;
+    for (var octave = 0u; octave < count; octave = octave + 1u) {
+        total = total + amplitude
+            * abs(2.0 * pattern_value_noise(point * frequency, salt_base ^ octave) - 1.0);
+        normalisation = normalisation + amplitude;
+        frequency = frequency * 2.0;
+        amplitude = amplitude * 0.5;
+    }
+    return clamp(total / normalisation, 0.0, 1.0);
+}
+
+// ---- Wave: bands with a noise distortion --------------------------------------
+//
+// Blender's Wave texture, which is how wood grain and rock strata are actually
+// authored: a 1D band function along one axis, with the coordinate pushed around
+// by noise so the bands bend instead of ruling straight lines.
+//
+// Bands run along X of the sample coordinate, so the FRAME chooses their direction
+// — face frame gives bands across a block face, world frame gives geological
+// strata that continue across voxels. `param_a` is the distortion, in periods.
+fn pattern_wave(point: vec3<f32>, distortion: f32, salt: u32) -> f32 {
+    var coordinate = point.x + point.y * 0.25;
+    if (distortion > 0.0) {
+        coordinate = coordinate
+            + distortion * (2.0 * pattern_value_noise(point, salt ^ 41u) - 1.0);
+    }
+    // Triangle rather than sine: it is two ALU ops instead of a transcendental, and
+    // against a voxel grid the difference in profile is not visible.
+    let phase = fract(coordinate);
+    return 1.0 - abs(2.0 * phase - 1.0);
+}
+
+// ---- Worley / cellular F1 -----------------------------------------------------
+//
+// Distance to the nearest of one jittered feature point per cell. Cracked mud,
+// pebbles, cell walls, lichen — the organic look none of the lattice generators
+// reach, because its features have BOUNDARIES rather than gradients.
+//
+// 27 cells is the textbook neighbourhood. This walks all 27 rather than trying to
+// prune: the jitter is unbounded within the cell, so a correct prune has to keep
+// any cell whose nearest possible point beats the current best, and that test costs
+// about what the distance it replaces costs. It is the dearest generator here by
+// design — its bench column is the point.
+const PATTERN_WORLEY_JITTER_X_SALT: u32 = 21u;
+const PATTERN_WORLEY_JITTER_Y_SALT: u32 = 22u;
+const PATTERN_WORLEY_JITTER_Z_SALT: u32 = 23u;
+
+// All three Worley variants in one walk, because they differ only in what they do
+// with the distances and NOT in how they find them. Three separate functions would
+// have meant three copies of the 27-cell loop and three places to get the jitter
+// salts wrong.
+//
+//   .x  F1              distance to the nearest feature point   — pebbles, cells
+//   .y  F2              distance to the second nearest          — for the edge form
+//   .z  smooth F1       exponential smooth-min over all of them — no hard creases
+//
+// The smooth minimum is iq's `-log(sum exp(-k*d))/k`, which reads as cell walls that
+// swell and merge rather than meeting at a crease. It is accumulated in the same
+// pass because it needs every distance, not just the best two.
+const PATTERN_WORLEY_SMOOTH_K: f32 = 6.0;
+
+fn pattern_worley_distances(point: vec3<f32>, salt_base: u32) -> vec3<f32> {
+    let base = floor(point);
+    let cell = vec3<i32>(base);
+    let local = point - base;
+    var nearest = 1e9;
+    var second = 1e9;
+    var smooth_sum = 0.0;
+    for (var index = 0u; index < 27u; index = index + 1u) {
+        let neighbour = vec3<i32>(
+            i32(index % 3u) - 1,
+            i32((index / 3u) % 3u) - 1,
+            i32(index / 9u) - 1,
+        );
+        let neighbour_cell = cell + neighbour;
+        let feature = vec3<f32>(neighbour) + vec3<f32>(
+            pattern_hash_cell(neighbour_cell, salt_base ^ PATTERN_WORLEY_JITTER_X_SALT),
+            pattern_hash_cell(neighbour_cell, salt_base ^ PATTERN_WORLEY_JITTER_Y_SALT),
+            pattern_hash_cell(neighbour_cell, salt_base ^ PATTERN_WORLEY_JITTER_Z_SALT),
+        );
+        let offset = feature - local;
+        let squared = dot(offset, offset);
+        // Squared distance for the ranking — monotone, so the ordering is the same
+        // and 27 square roots become one at the end.
+        if (squared < nearest) {
+            second = nearest;
+            nearest = squared;
+        } else if (squared < second) {
+            second = squared;
+        }
+        smooth_sum = smooth_sum + exp(-PATTERN_WORLEY_SMOOTH_K * sqrt(squared));
+    }
+    return vec3<f32>(sqrt(nearest), sqrt(second), -log(smooth_sum) / PATTERN_WORLEY_SMOOTH_K);
+}
+
+// The nearest feature point is at most ~1.5 cells away in the worst case, so
+// dividing by that normalises into 0..1 without clipping the tail off the common
+// case.
+const PATTERN_WORLEY_RANGE: f32 = 1.5;
+
+fn pattern_worley(point: vec3<f32>, salt_base: u32) -> f32 {
+    return clamp(pattern_worley_distances(point, salt_base).x / PATTERN_WORLEY_RANGE, 0.0, 1.0);
+}
+
+// F2 - F1: zero exactly on the boundary between two cells and rising away from it,
+// inverted so the BOUNDARY is the bright feature. Cracked mud, dried paint, the
+// mortar between irregular stones — the look no lattice noise produces, because it
+// needs a global "which cell owns me" that only a cellular walk has.
+fn pattern_worley_edge(point: vec3<f32>, salt_base: u32) -> f32 {
+    let distances = pattern_worley_distances(point, salt_base);
+    return clamp(1.0 - (distances.y - distances.x) / PATTERN_WORLEY_RANGE, 0.0, 1.0);
+}
+
+fn pattern_worley_smooth(point: vec3<f32>, salt_base: u32) -> f32 {
+    return clamp(
+        max(pattern_worley_distances(point, salt_base).z, 0.0) / PATTERN_WORLEY_RANGE, 0.0, 1.0);
+}
+
+// ---- Checker ------------------------------------------------------------------
+//
+// Alternating cells of the sampling lattice. Tiles, boards, and — the reason it is
+// worth a generator slot rather than being dismissed as a toy — the bench's COST
+// FLOOR: it produces a full-coverage pattern for two floors and a bit-and, so a
+// column running it measures everything the layer mechanism costs AROUND the
+// generator, with the generator itself at essentially zero. Every other column is
+// read against it.
+fn pattern_checker(point: vec3<f32>) -> f32 {
+    let cell = vec3<i32>(floor(point));
+    let parity = (cell.x + cell.y + cell.z) & 1;
+    return select(0.0, 1.0, parity == 0);
 }
 
 const PATTERN_SPECKLE_PRESENCE_SALT: u32 = 11u;
@@ -213,6 +619,95 @@ fn pattern_snap_to_texels(meters: vec3<f32>, texels: u32,
     let world_voxel_size_meters = voxel_size_meters * BRICK_SIZE;
     let texel = world_voxel_size_meters / f32(texels);
     return floor(meters / texel) * texel + vec3<f32>(texel * 0.5);
+}
+
+// ---- The tessellation ---------------------------------------------------------
+//
+// Divides a face into brick-bonded tiles and reports everything a masonry surface
+// needs from that division. ONE walk, three outputs, for the same reason the three
+// Worley variants share one loop: they differ in what they do with the result, not
+// in how they find it.
+//
+//   .xy  the tile-local coordinate, 0..1 across the tile's interior
+//   .z   a per-tile hash, 0..1 — the tone that makes one block differ from the next
+//   .w   distance to the nearest tile edge, 0..1 of a half-tile — grout and bevel
+//
+// The bond is a per-ROW horizontal shift, which is what separates masonry from a
+// grid: `tile_bond` of 0.5 offsets every other course by half a tile, and the
+// courses stop lining up into continuous vertical joints. A grid of squares reads
+// as tile; a bonded grid reads as a wall.
+//
+// The gap is subtracted from the tile's interior rather than added around it, so
+// changing the grout width does not move the tiles. Dragging that slider should
+// widen the joints, not slide the whole wall.
+fn pattern_tessellate(local: vec2<f32>, aspect: f32, bond: f32, gap: f32) -> vec4<f32> {
+    // Tiles are `aspect` wide for every 1 high, so the horizontal axis is scaled
+    // rather than the tile being described by two sizes.
+    let scaled = vec2<f32>(local.x / max(aspect, 1e-4), local.y);
+    let row = floor(scaled.y);
+    // Every course shifts by `bond` of a tile relative to the one below it, so the
+    // vertical joints stagger instead of running the height of the wall.
+    let shifted_x = scaled.x + row * bond;
+    let column = floor(shifted_x);
+    let cell = vec2<f32>(shifted_x - column, scaled.y - row);
+
+    let hash = pattern_hash_cell(
+        vec3<i32>(i32(column), i32(row), 0), PATTERN_TILE_SALT);
+
+    // Distance to the nearest edge, as a fraction of a half-tile, with the grout
+    // band consuming the outermost `gap`. Zero anywhere inside the joint, rising to
+    // one at the tile's centre.
+    let to_edge = min(min(cell.x, 1.0 - cell.x), min(cell.y, 1.0 - cell.y));
+    let interior = max(0.5 - gap, 1e-4);
+    let edge = clamp((to_edge - gap) / interior, 0.0, 1.0);
+
+    // The tile-local coordinate is renormalised over the INTERIOR, so a generator
+    // sampled in tile frame spans the stone and not the joint.
+    let inner = clamp((cell - vec2<f32>(gap)) / max(1.0 - 2.0 * gap, 1e-4),
+                      vec2<f32>(0.0), vec2<f32>(1.0));
+    return vec4<f32>(inner, hash, edge);
+}
+
+const PATTERN_TILE_SALT: u32 = 61u;
+
+// The edge distance, shaped from a bevel into a joint.
+//
+// The raw distance ramps linearly from the joint to the tile's centre, which reads
+// as a pillow rather than as masonry — the whole face is a gradient and no part of
+// it is flat. `sharpness` pushes the transition toward the joint: at 0 the ramp is
+// the raw bevel, at 1 it is a narrow dark line around a flat tile.
+//
+// Implemented as a power rather than a smoothstep with a width, because a power
+// keeps both endpoints pinned — 0 stays 0 in the joint and 1 stays 1 at the centre
+// at every setting, so dragging the slider changes the profile without changing the
+// grout's colour or the tile's.
+fn pattern_tile_edge_shaped(edge: f32, sharpness: f32) -> f32 {
+    let amount = clamp(sharpness, 0.0, 1.0);
+    if (amount <= 0.0) {
+        return edge;
+    }
+    // 1 -> 1/16 exponent: increasingly abrupt at the joint, flat everywhere else.
+    return pow(edge, 1.0 / (1.0 + 15.0 * amount));
+}
+
+// The two world axes that lie IN a face, given the axis it faces along. The
+// tessellation is 2D and needs to know which plane it is drawn on.
+fn pattern_face_uv(meters: vec3<f32>, axis: u32) -> vec2<f32> {
+    if (axis == 0u) { return vec2<f32>(meters.z, meters.y); }
+    if (axis == 1u) { return vec2<f32>(meters.x, meters.z); }
+    return vec2<f32>(meters.x, meters.y);
+}
+
+// The tessellation for this layer, from WORLD coordinates projected onto the hit
+// face — world and not voxel-local, deliberately. Voxel-local would restart the
+// courses at every block edge and cap the tile size at one metre; a wall of slate
+// blocks bigger than a voxel, or a bond that continues across two, needs the
+// tessellation to be a property of the WALL rather than of each cube in it.
+fn pattern_tile_of(layer: PatternLayer, sample: PatternSample,
+                   drift_meters: vec3<f32>) -> vec4<f32> {
+    let period = max(layer.period_meters, 1e-4);
+    let uv = pattern_face_uv(sample.world_meters - drift_meters, sample.axis) / period;
+    return pattern_tessellate(uv, layer.tile_aspect, layer.tile_bond, layer.tile_gap);
 }
 
 // A layer's sample coordinate, in period units. The whole frame mechanism: put the
@@ -267,6 +762,20 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
         // inputs on a face that happens to be flat in one of them.
         meters = meters - vec3<f32>(world_voxel) * world_voxel_size_meters;
     }
+    else if (frame == PATTERN_FRAME_TILE) {
+        let tile = pattern_tile_of(layer, sample, drift_meters);
+        // The tile-local u,v, with the PER-TILE HASH as the third coordinate.
+        //
+        // That third component is the whole trick. A 3D generator sampled at a
+        // different z is a completely different field, so pushing each tile's hash
+        // into z gives every tile its own independent draw of the grain — which is
+        // exactly what a slate wall looks like and what no other frame produces.
+        // It costs nothing: the hash was already computed for the tone output.
+        //
+        // Scaled well past the generator's own feature size so neighbouring tiles
+        // land in uncorrelated slices rather than in adjacent ones.
+        return vec3<f32>(tile.x, tile.y, tile.z * 64.0);
+    }
     // Otherwise WORLD: a field the world sits in, so it flows across neighbouring
     // voxels and CANNOT tile per voxel. The default, and the continuity argument.
     let snapped = pattern_snap_to_texels(meters, pattern_texels(layer), voxel_size_meters);
@@ -304,16 +813,105 @@ fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
 // The generator's raw value, 0..1, before fade, amount, face mask or blend.
 fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
                            voxel_size_meters: f32, drift_meters: vec3<f32>) -> f32 {
-    let point = pattern_coordinate(layer, sample, voxel_size_meters, drift_meters);
+    let raw_point = pattern_coordinate(layer, sample, voxel_size_meters, drift_meters);
     let salt = pattern_variation_salt(layer, sample);
+    let point = pattern_warp(raw_point, layer, salt);
     let generator = pattern_generator(layer);
+    let octaves = pattern_layer_octaves(layer, sample);
     if (generator == PATTERN_GENERATOR_NOISE) {
-        return pattern_fractal_noise(point, pattern_octaves(layer), salt);
+        return pattern_fractal_noise(point, octaves, salt);
     }
     if (generator == PATTERN_GENERATOR_SPECKLE) {
         return pattern_speckle(point, clamp(layer.param_a, 0.0, 1.0), salt);
     }
+    if (generator == PATTERN_GENERATOR_PERLIN) {
+        return pattern_fractal_perlin(point, octaves, salt);
+    }
+    if (generator == PATTERN_GENERATOR_SIMPLEX) {
+        return pattern_fractal_simplex(point, octaves, salt);
+    }
+    if (generator == PATTERN_GENERATOR_RIDGED) {
+        return pattern_ridged_noise(point, octaves, salt);
+    }
+    if (generator == PATTERN_GENERATOR_TURBULENCE) {
+        return pattern_turbulence(point, octaves, salt);
+    }
+    if (generator == PATTERN_GENERATOR_WORLEY) {
+        return pattern_worley(point, salt);
+    }
+    if (generator == PATTERN_GENERATOR_WORLEY_EDGE) {
+        return pattern_worley_edge(point, salt);
+    }
+    if (generator == PATTERN_GENERATOR_WORLEY_SMOOTH) {
+        return pattern_worley_smooth(point, salt);
+    }
+    if (generator == PATTERN_GENERATOR_WAVE) {
+        return pattern_wave(point, max(layer.param_a, 0.0), salt);
+    }
+    if (generator == PATTERN_GENERATOR_CHECKER) {
+        return pattern_checker(point);
+    }
+    // The two tessellation readouts. They re-walk rather than sharing the walk
+    // `pattern_coordinate` already did, which is a deliberate ~15-op duplication:
+    // threading a vec4 through the coordinate contract would complicate every frame
+    // to save a floor and a hash against generators costing hundreds of ops.
+    if (generator == PATTERN_GENERATOR_TILE_TONE) {
+        return pattern_tile_of(layer, sample, drift_meters).z;
+    }
+    if (generator == PATTERN_GENERATOR_TILE_EDGE) {
+        return pattern_tile_edge_shaped(
+            pattern_tile_of(layer, sample, drift_meters).w, layer.param_a);
+    }
     return pattern_hash_cell(vec3<i32>(floor(point)), salt ^ PATTERN_FLAT_SALT);
+}
+
+// Domain warping (iq, "domain warping"): sample a noise field at the point and
+// displace the point by it before the generator ever sees it. `fbm(p + fbm(p))`.
+//
+// Applies to EVERY generator rather than being a generator of its own, which is the
+// whole reason it earns a packed bit instead of a code: warped Worley is cracked
+// stone, warped wave is wood grain, warped checker is a rippled tile floor. Twelve
+// generators times on/off is a bigger library than twelve plus one.
+//
+// Three offset lattice reads rather than three independent noises: one
+// `pattern_value_noise` per axis, at large fixed offsets so the three components
+// decorrelate.
+//
+// That is 24 hashes, i.e. THREE octaves and not one — measured at +0.73 ms against
+// a 3-octave noise layer's own +0.72 ms, so a warped layer costs about twice an
+// unwarped one. Worth stating plainly because the arithmetic invites the wrong
+// guess: a warp is not a cheap garnish on a generator, it is a second generator's
+// worth of work in front of it.
+const PATTERN_WARP_OFFSET_Y: vec3<f32> = vec3<f32>(31.416, 7.913, 19.264);
+const PATTERN_WARP_OFFSET_Z: vec3<f32> = vec3<f32>(-13.077, 41.502, 5.731);
+const PATTERN_WARP_SALT: u32 = 51u;
+
+fn pattern_warp(point: vec3<f32>, layer: PatternLayer, salt: u32) -> vec3<f32> {
+    if (!pattern_warps(layer)) {
+        return point;
+    }
+    let strength = layer.param_b;
+    if (strength == 0.0) {
+        return point;
+    }
+    let warp_salt = salt ^ PATTERN_WARP_SALT;
+    let displacement = vec3<f32>(
+        pattern_value_noise(point, warp_salt),
+        pattern_value_noise(point + PATTERN_WARP_OFFSET_Y, warp_salt),
+        pattern_value_noise(point + PATTERN_WARP_OFFSET_Z, warp_salt),
+    );
+    // Centre on zero so the warp pushes both ways; an uncentred warp would slide the
+    // whole pattern along the diagonal as strength rises, which reads as a bug.
+    return point + (displacement * 2.0 - vec3<f32>(1.0)) * strength;
+}
+
+// The octave count this layer actually sums here: what it authored, cut down by
+// the distance budget when PATTERN_OCTAVE_LOD is on. Folds to `pattern_octaves`
+// exactly when the lever is off, which is what keeps the shipped output
+// bit-identical.
+fn pattern_layer_octaves(layer: PatternLayer, sample: PatternSample) -> u32 {
+    return pattern_octave_budget(
+        pattern_octaves(layer), layer.period_meters, sample.distance_meters);
 }
 
 // ---- Fade, mask and strength ------------------------------------------------

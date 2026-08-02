@@ -235,15 +235,49 @@ pub struct SavedPatternLayer {
     pub faces: SavedPatternFaces,
     pub texels_per_voxel: u32,
     pub vary_per_face: bool,
+    /// Domain warp strength. `#[serde(default)]` so every project saved before the
+    /// warp existed still loads, and loads with the warp off — which is the value
+    /// that reproduces what those files looked like when they were written.
+    #[serde(default)]
+    pub domain_warp: f32,
+    /// The tessellation, for a `tile`-framed layer. `#[serde(default)]` on all
+    /// three so projects saved before tiles existed still load; the defaults are
+    /// the identity for every frame that ignores them.
+    #[serde(default = "default_tile_aspect")]
+    pub tile_aspect: f32,
+    #[serde(default)]
+    pub tile_bond: f32,
+    #[serde(default)]
+    pub tile_gap: f32,
     pub emission_intensity: f32,
 }
 
+/// One variant per [`PatternGenerator`], tagged by name rather than by index, so
+/// inserting a generator in the middle of the runtime enum cannot silently
+/// reinterpret an existing saved project as a different pattern.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SavedPatternGenerator {
     Flat,
     Noise { octaves: u32 },
     Speckle { density: f32 },
+    Perlin { octaves: u32 },
+    Simplex { octaves: u32 },
+    Ridged { octaves: u32 },
+    Turbulence { octaves: u32 },
+    Worley,
+    WorleyEdge,
+    WorleySmooth,
+    Wave { distortion: f32 },
+    Checker,
+    TileTone,
+    TileEdge { sharpness: f32 },
+}
+
+/// A square tile is the identity, and `serde(default)` on an f32 would give 0 —
+/// which the shader divides by.
+fn default_tile_aspect() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -252,6 +286,7 @@ pub enum SavedPatternFrame {
     World,
     Voxel,
     Face,
+    Tile,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -471,6 +506,10 @@ impl From<&PatternLayer> for SavedPatternLayer {
             faces: SavedPatternFaces::from(layer.faces),
             texels_per_voxel: layer.texels_per_voxel,
             vary_per_face: layer.vary_per_face,
+            domain_warp: layer.domain_warp,
+            tile_aspect: layer.tile_aspect,
+            tile_bond: layer.tile_bond,
+            tile_gap: layer.tile_gap,
             emission_intensity: layer.emission_intensity,
         }
     }
@@ -482,8 +521,16 @@ impl SavedPatternLayer {
         validate_finite("pattern amount", &[self.amount])?;
         validate_finite("pattern target_color", &self.target_color)?;
         validate_finite("pattern emission_intensity", &[self.emission_intensity])?;
+        validate_finite("pattern domain_warp", &[self.domain_warp])?;
+        validate_finite(
+            "pattern tessellation",
+            &[self.tile_aspect, self.tile_bond, self.tile_gap],
+        )?;
         if let SavedPatternGenerator::Speckle { density } = self.generator {
             validate_finite("pattern speckle density", &[density])?;
+        }
+        if let SavedPatternGenerator::Wave { distortion } = self.generator {
+            validate_finite("pattern wave distortion", &[distortion])?;
         }
         Ok(PatternLayer {
             generator: self.generator.clone().into(),
@@ -496,6 +543,10 @@ impl SavedPatternLayer {
             faces: self.faces.clone().into(),
             texels_per_voxel: self.texels_per_voxel,
             vary_per_face: self.vary_per_face,
+            domain_warp: self.domain_warp,
+            tile_aspect: self.tile_aspect,
+            tile_bond: self.tile_bond,
+            tile_gap: self.tile_gap,
             emission_intensity: self.emission_intensity,
         })
     }
@@ -507,6 +558,21 @@ impl From<PatternGenerator> for SavedPatternGenerator {
             PatternGenerator::Flat => SavedPatternGenerator::Flat,
             PatternGenerator::Noise { octaves } => SavedPatternGenerator::Noise { octaves },
             PatternGenerator::Speckle { density } => SavedPatternGenerator::Speckle { density },
+            PatternGenerator::Perlin { octaves } => SavedPatternGenerator::Perlin { octaves },
+            PatternGenerator::Simplex { octaves } => SavedPatternGenerator::Simplex { octaves },
+            PatternGenerator::Ridged { octaves } => SavedPatternGenerator::Ridged { octaves },
+            PatternGenerator::Turbulence { octaves } => {
+                SavedPatternGenerator::Turbulence { octaves }
+            }
+            PatternGenerator::Worley => SavedPatternGenerator::Worley,
+            PatternGenerator::WorleyEdge => SavedPatternGenerator::WorleyEdge,
+            PatternGenerator::WorleySmooth => SavedPatternGenerator::WorleySmooth,
+            PatternGenerator::Wave { distortion } => SavedPatternGenerator::Wave { distortion },
+            PatternGenerator::Checker => SavedPatternGenerator::Checker,
+            PatternGenerator::TileTone => SavedPatternGenerator::TileTone,
+            PatternGenerator::TileEdge { sharpness } => {
+                SavedPatternGenerator::TileEdge { sharpness }
+            }
         }
     }
 }
@@ -517,6 +583,21 @@ impl From<SavedPatternGenerator> for PatternGenerator {
             SavedPatternGenerator::Flat => PatternGenerator::Flat,
             SavedPatternGenerator::Noise { octaves } => PatternGenerator::Noise { octaves },
             SavedPatternGenerator::Speckle { density } => PatternGenerator::Speckle { density },
+            SavedPatternGenerator::Perlin { octaves } => PatternGenerator::Perlin { octaves },
+            SavedPatternGenerator::Simplex { octaves } => PatternGenerator::Simplex { octaves },
+            SavedPatternGenerator::Ridged { octaves } => PatternGenerator::Ridged { octaves },
+            SavedPatternGenerator::Turbulence { octaves } => {
+                PatternGenerator::Turbulence { octaves }
+            }
+            SavedPatternGenerator::Worley => PatternGenerator::Worley,
+            SavedPatternGenerator::WorleyEdge => PatternGenerator::WorleyEdge,
+            SavedPatternGenerator::WorleySmooth => PatternGenerator::WorleySmooth,
+            SavedPatternGenerator::Wave { distortion } => PatternGenerator::Wave { distortion },
+            SavedPatternGenerator::Checker => PatternGenerator::Checker,
+            SavedPatternGenerator::TileTone => PatternGenerator::TileTone,
+            SavedPatternGenerator::TileEdge { sharpness } => {
+                PatternGenerator::TileEdge { sharpness }
+            }
         }
     }
 }
@@ -536,7 +617,7 @@ macro_rules! persisted_enum {
     };
 }
 
-persisted_enum!(SavedPatternFrame, PatternFrame, { World, Voxel, Face });
+persisted_enum!(SavedPatternFrame, PatternFrame, { World, Voxel, Face, Tile });
 persisted_enum!(SavedPatternTarget, PatternTarget, { Albedo, Roughness, Emission });
 persisted_enum!(SavedPatternBlend, PatternBlend, { Multiply, MixToColor, Add });
 
@@ -1736,6 +1817,76 @@ mod tests {
             Some(profile)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every material slot must have a checked-in assignment.
+    ///
+    /// THE GAP THIS CLOSES, because it cost real time: adding a row to `MATERIALS`
+    /// does not create its project files, and nothing failed when slot 27 went
+    /// missing. `compile_active_world_profile` below only checks that what IS
+    /// assigned compiles, so a hole in the assignments is invisible to it. The
+    /// symptom in the studio is not an error either — the material exists on the
+    /// GPU and simply has no graph to open, which reads as a broken editor rather
+    /// than as a stale project.
+    ///
+    /// Fix when this fails: `cargo run -p voxel-rt --example sync_project`.
+    #[test]
+    fn the_checked_in_project_assigns_every_material_slot() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let store = StudioProjectStore::new(root);
+        let manifest = store.load_manifest().unwrap();
+        let missing: Vec<usize> = (0..MATERIAL_COUNT)
+            .filter(|slot| {
+                !manifest
+                    .material_assignments
+                    .contains_key(&slot.to_string())
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "material slots {missing:?} have no project assignment — the table has \
+             {MATERIAL_COUNT} rows and the project assigns {}. Run \
+             `cargo run -p voxel-rt --example sync_project`.",
+            manifest.material_assignments.len()
+        );
+    }
+
+    /// The tessellation must be SHARED, not copied per layer — the invariant the
+    /// `material.tessellation` node exists for, checked against the file that
+    /// actually ships rather than only against an in-memory round trip.
+    #[test]
+    fn the_slate_tile_graph_shares_one_tessellation_between_its_layers() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let store = StudioProjectStore::new(root);
+        let manifest = store.load_manifest().unwrap();
+        let slot = material_id(voxel_core::world::Voxel::SlateTile);
+        let reference = manifest
+            .material_assignments
+            .get(&slot.to_string())
+            .expect("slate tile is assigned");
+        let material = store.load_material(&reference.path).unwrap();
+        let graph_reference = manifest
+            .graph_assets
+            .iter()
+            .find(|asset| asset.id == material.graph)
+            .expect("the slate tile graph is in the manifest");
+        let graph = store.load_graph(&graph_reference.path).unwrap();
+
+        let tessellations = graph
+            .nodes
+            .values()
+            .filter(|node| node.node_type.0 == "material.tessellation")
+            .count();
+        let layers = graph
+            .nodes
+            .values()
+            .filter(|node| node.node_type.0 == "material.pattern_layer")
+            .count();
+        assert_eq!(layers, 4, "slate tile should author four layers");
+        assert_eq!(
+            tessellations, 1,
+            "four layers on one wall must share ONE tessellation, found {tessellations}"
+        );
     }
 
     #[test]

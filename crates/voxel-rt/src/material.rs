@@ -129,7 +129,7 @@ pub const WATER_SCATTERING_PER_METER: [f32; 3] = [0.004, 0.030, 0.045];
 pub const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Number of material ids (== number of `Voxel` variants, Air included).
-pub const MATERIAL_COUNT: usize = 27;
+pub const MATERIAL_COUNT: usize = 28;
 
 /// Air's material id, and the DDA's miss sentinel — the shading path is only ever
 /// called on an occupied voxel, so row 0 is never sampled on a hit.
@@ -173,6 +173,7 @@ pub fn material_id(voxel: Voxel) -> u8 {
         Voxel::GlowBlock => 24,
         Voxel::GlowBerry => 25,
         Voxel::Lava => 26,
+        Voxel::SlateTile => 27,
     }
 }
 
@@ -211,6 +212,7 @@ pub fn material_voxel(material: u8) -> Voxel {
         24 => Voxel::GlowBlock,
         25 => Voxel::GlowBerry,
         26 => Voxel::Lava,
+        27 => Voxel::SlateTile,
         _ => Voxel::Air,
     }
 }
@@ -1205,9 +1207,130 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 faces: PatternFaces::ALL,
                 texels_per_voxel: 8,
                 vary_per_face: true,
+                domain_warp: 0.0,
+                tile_aspect: 1.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
                 emission_intensity: 2.0,
             }]),
             acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
+        },
+        // 27  Slate tile — the tessellation's demonstration row, and the first
+        // material in the table whose look comes from WHERE the tiles are rather
+        // than from a field sampled across a surface.
+        //
+        // Four layers, and the ORDER is the whole thing: each applies over the
+        // previous one's output, so the joint has to be drawn last or the grain
+        // would run straight through it and the wall would read as printed rather
+        // than built.
+        //
+        //   1  tile tone     per-block shade, so no two blocks match
+        //   2  simplex       the slate grain, in TILE frame so it restarts per block
+        //   3  worley edge   fracture lines, warped so they are not lattice-straight
+        //   4  tile edge     the joint, darkening last over everything above
+        //
+        // All four share one tessellation (2:1 running bond, 0.5 m, 6% gap) — the
+        // thing the `material.tessellation` node exists to guarantee. Costed from
+        // bench section 11: 0.010 + 0.432 + 1.111 + 0.041 = ~1.6 ms per layer-stack
+        // at full coverage, which is why it is a demonstration row and not a
+        // terrain one.
+        Material {
+            name: "slate tile",
+            // Lighter than the look aims for, because FOUR multiply layers stack:
+            // each one only darkens, so the wall lands well below its base. Authored
+            // at the value that ends up right, not the value that reads right here.
+            albedo: [0.44, 0.45, 0.49],
+            roughness: 0.72,
+            specular: 0.04,
+            kind: MaterialKind::Solid,
+            emission: None,
+            face_roles: None,
+            patterns: PatternStack::of(&[
+                PatternLayer {
+                    generator: PatternGenerator::TileTone,
+                    frame: PatternFrame::Tile,
+                    period_meters: 0.5,
+                    target: PatternTarget::Albedo,
+                    blend: PatternBlend::Multiply,
+                    // Well short of 1: the tone should read as blocks cut from one
+                    // quarry, not as a chequerboard of unrelated stones.
+                    amount: 0.45,
+                    target_color: [1.0, 1.0, 1.0],
+                    faces: PatternFaces::ALL,
+                    texels_per_voxel: 0,
+                    vary_per_face: false,
+                    domain_warp: 0.0,
+                    tile_aspect: 2.0,
+                    tile_bond: 0.5,
+                    tile_gap: 0.06,
+                    emission_intensity: 1.0,
+                },
+                PatternLayer {
+                    // Four octaves, the ceiling, and it is still coarser than real
+                    // slate grain. In TILE frame the generator sees 0..1 across a
+                    // tile, so the octave count is the ONLY frequency control it
+                    // has: one feature plus three harmonics, about eight across a
+                    // block. Fine grain needs a per-layer detail scale that the
+                    // frame does not currently offer — see `PatternFrame::Tile`.
+                    generator: PatternGenerator::Simplex { octaves: 4 },
+                    frame: PatternFrame::Tile,
+                    period_meters: 0.5,
+                    target: PatternTarget::Albedo,
+                    blend: PatternBlend::Multiply,
+                    amount: 0.55,
+                    target_color: [1.0, 1.0, 1.0],
+                    faces: PatternFaces::ALL,
+                    // Continuous, not snapped: the tile frame already quantises the
+                    // look at the joint, and a texel grid on top of that fights it.
+                    texels_per_voxel: 0,
+                    vary_per_face: false,
+                    domain_warp: 0.0,
+                    tile_aspect: 2.0,
+                    tile_bond: 0.5,
+                    tile_gap: 0.06,
+                    emission_intensity: 1.0,
+                },
+                PatternLayer {
+                    generator: PatternGenerator::WorleyEdge,
+                    frame: PatternFrame::Tile,
+                    period_meters: 0.5,
+                    target: PatternTarget::Albedo,
+                    blend: PatternBlend::Multiply,
+                    // An accent: past about a third the fractures stop reading as
+                    // cracks in stone and become a net thrown over it.
+                    amount: 0.32,
+                    target_color: [1.0, 1.0, 1.0],
+                    faces: PatternFaces::ALL,
+                    texels_per_voxel: 0,
+                    vary_per_face: false,
+                    // Warped, because a cellular field on an unwarped lattice reads
+                    // as bubbles; the warp is what makes the boundaries read as
+                    // fractures. Costs about a second layer — see `domain_warp`.
+                    domain_warp: 0.45,
+                    tile_aspect: 2.0,
+                    tile_bond: 0.5,
+                    tile_gap: 0.06,
+                    emission_intensity: 1.0,
+                },
+                PatternLayer {
+                    generator: PatternGenerator::TileEdge { sharpness: 0.72 },
+                    frame: PatternFrame::Tile,
+                    period_meters: 0.5,
+                    target: PatternTarget::Albedo,
+                    blend: PatternBlend::Multiply,
+                    amount: 0.85,
+                    target_color: [1.0, 1.0, 1.0],
+                    faces: PatternFaces::ALL,
+                    texels_per_voxel: 0,
+                    vary_per_face: false,
+                    domain_warp: 0.0,
+                    tile_aspect: 2.0,
+                    tile_bond: 0.5,
+                    tile_gap: 0.06,
+                    emission_intensity: 1.0,
+                },
+            ]),
+            acoustic_alpha: ACOUSTIC_STONE,
         },
     ]
 };
@@ -1651,6 +1774,26 @@ mod tests {
             scattering_per_meter: [0.0, 0.0, 0.0],
             _pad_scattering: 0.0,
         },
+        // 27  slate tile — APPENDED, not re-authored. The pin's job is that a
+        // structural change moves no pixel; a new row at the end of the table moves
+        // none of the twenty-seven above it, and every one of those entries is
+        // byte-identical to what it was. Its own pre-S1 fields are an ordinary
+        // opaque solid: the tessellation lives entirely in the pattern slots, which
+        // this pin deliberately does not cover.
+        CorePin {
+            albedo: [0.44, 0.45, 0.49],
+            transmittance: 0.0,
+            emission: [0.0, 0.0, 0.0],
+            roughness: 0.72,
+            opacity: 1.0,
+            specular: 0.04,
+            flags: 0,
+            index_of_refraction: 1.0,
+            absorption_per_meter: [0.0, 0.0, 0.0],
+            _pad_absorption: 0.0,
+            scattering_per_meter: [0.0, 0.0, 0.0],
+            _pad_scattering: 0.0,
+        },
     ];
 
     /// The subset of [`GpuMaterial`] that existed before S1 — what [`UPLOAD_PIN`]
@@ -1798,20 +1941,21 @@ mod tests {
     /// scalars.
     #[test]
     fn gpu_row_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 256);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 320);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
         assert_eq!(std::mem::align_of::<GpuMaterial>(), 4);
-        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 256);
+        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 320);
         // Still trivially free against a ~41 MB world: material richness is not the
-        // expensive axis, per-VOXEL state is. The whole S2 layer model costs 3.3 KB
-        // of table, which is the argument for putting detail on the material rather
-        // than on the voxel restated as a number.
-        assert_eq!(MATERIAL_TABLE_BYTES, 6912);
-        // The pattern slots must account for exactly half the row, or the WGSL's
+        // expensive axis, per-VOXEL state is. The whole S2 layer model now costs
+        // 5.4 KB of table (up from 3.3 when the tessellation grew the slot from 32
+        // bytes to 48), which is the argument for putting detail on the material
+        // rather than on the voxel restated as a number.
+        assert_eq!(MATERIAL_TABLE_BYTES, 8960);
+        // The pattern slots must account for three fifths of the row, or the WGSL's
         // fixed-size array has drifted from `MAX_PATTERN_LAYERS`.
         assert_eq!(
             std::mem::size_of::<[GpuPatternLayer; MAX_PATTERN_LAYERS]>(),
-            128
+            192
         );
     }
 
@@ -2270,29 +2414,74 @@ mod tests {
 
     // ---- S2: the pattern stack ---------------------------------------------
 
-    /// Lava is the first intentionally authored patterned material. Every other
-    /// row remains the unpatterned identity with inactive pattern slots.
+    /// Exactly two rows author pattern layers, and this test is the tripwire for a
+    /// third appearing by accident.
+    ///
+    /// The list is spelled out rather than counted so that adding a row is a
+    /// DECISION with a diff, not a number quietly going up: a layer left behind
+    /// from a demo costs every hit that touches the material, and section 11 prices
+    /// the cheapest generator's first layer at over a millisecond of entry.
     #[test]
-    fn lava_is_the_first_authored_pattern_layer() {
+    fn only_lava_and_slate_tile_author_pattern_layers() {
         let authored: Vec<&str> = MATERIALS
             .iter()
             .filter(|row| !row.patterns.is_empty())
             .map(|row| row.name)
             .collect();
-        assert_eq!(authored, vec!["lava"]);
+        assert_eq!(authored, vec!["lava", "slate tile"]);
+
+        let expected_counts = [("lava", 1u32), ("slate tile", 4)];
         for row in &MATERIALS {
-            if row.name == "lava" {
-                assert!(row.flags().contains(MaterialFlags::PATTERNS));
-                assert_eq!(row.flags().pattern_count(), 1);
-                assert_eq!(row.patterns.layers[0].unwrap().faces, PatternFaces::ALL);
-                continue;
-            }
-            assert!(!row.flags().contains(MaterialFlags::PATTERNS));
-            assert_eq!(row.flags().pattern_count(), 0);
-            for slot in row.to_gpu().patterns {
-                assert_eq!(slot, GpuPatternLayer::INACTIVE);
+            match expected_counts.iter().find(|(name, _)| *name == row.name) {
+                Some((_, count)) => {
+                    assert!(
+                        row.flags().contains(MaterialFlags::PATTERNS),
+                        "{}",
+                        row.name
+                    );
+                    assert_eq!(row.flags().pattern_count(), *count, "{}", row.name);
+                    for layer in row.patterns.active() {
+                        assert_eq!(layer.faces, PatternFaces::ALL, "{}", row.name);
+                    }
+                }
+                None => {
+                    assert!(!row.flags().contains(MaterialFlags::PATTERNS));
+                    assert_eq!(row.flags().pattern_count(), 0);
+                    for slot in row.to_gpu().patterns {
+                        assert_eq!(slot, GpuPatternLayer::INACTIVE);
+                    }
+                }
             }
         }
+    }
+
+    /// Every layer of the slate tile shares ONE tessellation.
+    ///
+    /// This is the invariant the `material.tessellation` node exists to guarantee,
+    /// and the table is where it can be checked without a graph: four layers that
+    /// disagreed about where the tiles are would draw a tone grid, a grain grid and
+    /// a grout grid that do not line up, which looks like a rendering bug rather
+    /// than like an authoring mistake.
+    #[test]
+    fn every_slate_tile_layer_shares_one_tessellation() {
+        let row = MATERIALS
+            .iter()
+            .find(|row| row.name == "slate tile")
+            .expect("the slate tile row");
+        let layers: Vec<_> = row.patterns.active().collect();
+        assert_eq!(layers.len(), 4);
+        for layer in &layers {
+            assert_eq!(layer.frame, PatternFrame::Tile);
+            assert_eq!(layer.tile_aspect, layers[0].tile_aspect);
+            assert_eq!(layer.tile_bond, layers[0].tile_bond);
+            assert_eq!(layer.tile_gap, layers[0].tile_gap);
+            assert_eq!(layer.period_meters, layers[0].period_meters);
+        }
+        // And the joint is drawn LAST, or the grain would run through it.
+        assert!(matches!(
+            layers[3].generator,
+            PatternGenerator::TileEdge { .. }
+        ));
     }
 
     /// The PATTERNS flag and the layer count must both be derived from the stack, so
