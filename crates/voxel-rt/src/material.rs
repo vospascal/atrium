@@ -1345,8 +1345,102 @@ pub fn gpu_materials() -> Vec<GpuMaterial> {
     MATERIALS.iter().map(Material::to_gpu).collect()
 }
 
+/// Which generators an authored material table can actually reach, as a bitmask
+/// for `MATERIAL_PATTERN_GENERATOR_MASK`.
+///
+/// The table alone is authoritative, which is worth stating because a material
+/// GRAPH looks like it should count too. It does not: a graph's authored layers are
+/// projected into the row's [`PatternStack`] and uploaded like any other row, and
+/// all a graph supplies at runtime is per-slot gain and drift — the shader reads
+/// every layer from `materials[material].patterns[slot]`. So a generator the shader
+/// can reach is a generator some row carries.
+///
+/// The flat bit is always set. It is the generator switch's FALL-THROUGH rather
+/// than a masked branch, so clearing it could not remove any code, and seeding it
+/// keeps the empty-table mask meaningful instead of zero.
+pub fn generator_mask(rows: &[Material]) -> u32 {
+    let mut mask = PatternGenerator::Flat.mask_bit();
+    for row in rows {
+        mask |= row.patterns.generator_mask();
+    }
+    mask
+}
+
 #[cfg(test)]
 mod tests {
+    /// Every generator's bit is its own, and inside the 14-bit field the shader
+    /// masks with. A collision here would silently prune a generator that shares a
+    /// bit with one the table uses.
+    #[test]
+    fn every_generator_owns_a_distinct_mask_bit() {
+        let mut seen = 0u32;
+        for generator in PatternGenerator::ALL {
+            let bit = generator.mask_bit();
+            assert_eq!(bit.count_ones(), 1, "{generator:?} is not a single bit");
+            assert_eq!(bit, 1 << generator.code(), "{generator:?} bit != 1 << code");
+            assert_eq!(seen & bit, 0, "{generator:?} collides with an earlier bit");
+            assert!(
+                bit <= crate::variants::PATTERN_GENERATOR_MASK_ALL,
+                "{generator:?} falls outside the all-bits mask the shader patches"
+            );
+            seen |= bit;
+        }
+        assert_eq!(
+            seen,
+            crate::variants::PATTERN_GENERATOR_MASK_ALL,
+            "PATTERN_GENERATOR_MASK_ALL must be exactly the union of every bit"
+        );
+    }
+
+    /// THE SAFETY PROPERTY, stated as a test rather than as a comment: the derived
+    /// mask contains a bit for every generator any row actually authors.
+    ///
+    /// This is the direction that matters. A mask with a spare bit set only leaves
+    /// dead code compiled in and costs a little speed; a mask MISSING a bit makes
+    /// that material render silently flat, which is the footgun a hand-set mask
+    /// would have been. Run over the shipped table, so authoring a new generator
+    /// into a row cannot quietly break the derivation.
+    #[test]
+    fn the_derived_mask_covers_every_generator_the_shipped_table_authors() {
+        let mask = generator_mask(&MATERIALS);
+        for row in MATERIALS {
+            for layer in row.patterns.layers.iter().flatten() {
+                assert_ne!(
+                    mask & layer.generator.mask_bit(),
+                    0,
+                    "{:?} authors {:?}, which the derived mask would compile out",
+                    row.kind,
+                    layer.generator
+                );
+            }
+        }
+        assert_ne!(
+            mask & PatternGenerator::Flat.mask_bit(),
+            0,
+            "flat is the generator switch's fall-through and must always be set"
+        );
+    }
+
+    /// An empty table prunes everything except the fall-through, and a table using
+    /// one generator compiles in exactly two bits. Pins that the mask really is
+    /// derived from content rather than defaulting to all-bits.
+    #[test]
+    fn the_derived_mask_tracks_what_the_table_uses() {
+        assert_eq!(generator_mask(&[]), PatternGenerator::Flat.mask_bit());
+
+        let mut row = MATERIALS[1];
+        row.patterns = PatternStack::of(&[PatternLayer {
+            generator: PatternGenerator::Worley,
+            ..PatternLayer::IDENTITY
+        }]);
+        let mask = generator_mask(&[row]);
+        assert_eq!(
+            mask,
+            PatternGenerator::Flat.mask_bit() | PatternGenerator::Worley.mask_bit(),
+            "one worley layer should compile in worley and the fall-through, nothing else"
+        );
+    }
+
     use super::*;
 
     /// The **upload pin**: the exact 26 GPU rows this table produced before the

@@ -238,6 +238,17 @@ impl GeneratorCost {
 }
 
 impl PatternGenerator {
+    /// This generator's bit in a [`generator_mask`], which is simply `1 << code`.
+    ///
+    /// The mask exists because EVERY generator's body is resident in one function
+    /// inlined into the shading pass, and that pass is latency-bound: their
+    /// registers cost occupancy whether or not any material reaches them. Measured
+    /// 2026-08-03, pruning the nine generators bench section 9's table never uses
+    /// took 3.5-6.2% off the pattern path with the frames bit-identical.
+    pub const fn mask_bit(&self) -> u32 {
+        1u32 << self.code()
+    }
+
     /// The discriminant the GPU row carries. Mirrors the
     /// `PATTERN_GENERATOR_*` consts in `shaders/pattern.wgsl`; a four-bit field,
     /// so 15 is the last usable code.
@@ -944,6 +955,24 @@ pub const NO_PATTERNS: PatternStack = PatternStack {
 };
 
 impl PatternStack {
+    /// Which generators this stack can reach, as bits for
+    /// `MATERIAL_PATTERN_GENERATOR_MASK`.
+    ///
+    /// DERIVED RATHER THAN DIALLED, and that distinction is the point. Set by hand,
+    /// the mask is a footgun: clear the bit for a generator some material does use
+    /// and that material renders silently flat. Computed from the stack, it cannot
+    /// disagree with the stack.
+    ///
+    /// Errs toward MORE code, never less — an empty stack contributes nothing, and
+    /// the table-level [`crate::material::generator_mask`] seeds the flat bit.
+    pub fn generator_mask(&self) -> u32 {
+        let mut mask = 0u32;
+        for layer in self.layers.iter().flatten() {
+            mask |= layer.generator.mask_bit();
+        }
+        mask
+    }
+
     /// A stack holding exactly the layers given, in order.
     ///
     /// `const` so authored rows can build one, and it **compacts**: the shader

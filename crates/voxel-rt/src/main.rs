@@ -438,6 +438,12 @@ impl AppState {
         // Renderer::new starts from the source's unpatched shader and native
         // render scale. A restored quality recipe must be installed before the
         // first visible frame rather than waiting for a future UI edit.
+        // S3 — the generator mask is DERIVED, never authored: it must be installed
+        // before the first pipeline is built, or the first frame compiles a shader
+        // holding all fourteen generator bodies and then recompiles once anything
+        // else moves. `requires_pipeline_rebuild` already compares the mask, so
+        // every later change is picked up by the ordinary rebuild path.
+        quality.materials.pattern_generator_mask = material::generator_mask(material_table.rows());
         renderer.set_dda_shader_source(
             &gpu_context.device,
             &dda::build_shader_source_with_material_graphs(&quality, &material_graph_shaders),
@@ -672,13 +678,7 @@ impl AppState {
                     .collect::<Vec<_>>()
                     .join("; ")
                 };
-                self.renderer.set_dda_shader_source(
-                    &self.gpu_context.device,
-                    &dda::build_shader_source_with_material_graphs(
-                        &self.quality,
-                        &self.material_graph_shaders,
-                    ),
-                );
+                self.rebuild_dda_shader();
             }
             Err(error) => {
                 self.studio_assets.status = format!("Load failed; kept current project: {error}");
@@ -765,13 +765,15 @@ impl AppState {
     fn compile_graph_editor(&mut self) {
         let registry = NodeRegistry;
         let slot = self.graph_editor.material_slot;
-        let graph = &self.graph_editor.graph;
-        match compile_material_graph(graph, &registry) {
+        // Cloned rather than borrowed: `rebuild_dda_shader` below needs `&mut
+        // self`, and an editor compile is a keystroke-rate path, not a frame one.
+        let graph = self.graph_editor.graph.clone();
+        match compile_material_graph(&graph, &registry) {
             Ok(program) => {
                 let pattern_changed = self
                     .material_table
                     .row_mut(slot)
-                    .map(|row| sync_pattern_layers_from_graph(graph, row))
+                    .map(|row| sync_pattern_layers_from_graph(&graph, row))
                     .transpose();
                 match pattern_changed {
                     Ok(_) => {
@@ -795,13 +797,7 @@ impl AppState {
                 let cache = program.cache.clone();
                 self.material_graph_shaders
                     .insert(self.graph_editor.material_slot, program);
-                self.renderer.set_dda_shader_source(
-                    &self.gpu_context.device,
-                    &dda::build_shader_source_with_material_graphs(
-                        &self.quality,
-                        &self.material_graph_shaders,
-                    ),
-                );
+                self.rebuild_dda_shader();
                 // Cacheability warnings ride along with the resolve diagnostics
                 // rather than in a panel of their own: an author wants one list
                 // of "things worth knowing about this graph", and a layer that
@@ -1345,6 +1341,28 @@ impl AppState {
             self.edit_at_crosshair(Some(selected));
         }
     }
+    /// Rebuild the shading pipeline from the current quality, graphs and material
+    /// table — THE ONLY WAY the app builds that source, and the reason it is a
+    /// method rather than four call sites.
+    ///
+    /// The generator mask is derived, not authored, so it has to be refreshed from
+    /// the table immediately before the source is assembled. Two of the four
+    /// original call sites got that wrong in the obvious way: loading a project and
+    /// compiling a graph both rewrite pattern layers and then build a pipeline, so
+    /// a project introducing a generator no previous table used would have compiled
+    /// a shader without it and rendered those materials silently flat. Deriving
+    /// here makes that unrepresentable rather than remembered.
+    fn rebuild_dda_shader(&mut self) {
+        self.quality.materials.pattern_generator_mask =
+            material::generator_mask(self.material_table.rows());
+        self.renderer.set_dda_shader_source(
+            &self.gpu_context.device,
+            &dda::build_shader_source_with_material_graphs(
+                &self.quality,
+                &self.material_graph_shaders,
+            ),
+        );
+    }
 
     /// S0 — push the frame's material edits to the GPU, and service a requested
     /// CAGI re-pack.
@@ -1366,6 +1384,15 @@ impl AppState {
         if let Some(rows) = self.material_table.take_dirty() {
             self.renderer
                 .write_material_table(&self.gpu_context.queue, &rows);
+            // Re-derive the generator mask from what the edited table can now
+            // reach. Authoring a generator no row used before is the one edit that
+            // needs a new pipeline, and it is rare — the mask only ever grows
+            // within a session, so this recompiles once per newly-used generator
+            // rather than once per slider tick. The assignment is all that is
+            // needed: `requires_pipeline_rebuild` compares the mask and the
+            // ordinary rebuild path does the rest.
+            self.quality.materials.pattern_generator_mask =
+                material::generator_mask(self.material_table.rows());
             // E5b emission lives in the per-cell buffer. A material emission edit
             // reaches GI when the explicit attribute re-pack below is requested;
             // direct shading still updates immediately through the material table.
@@ -2045,13 +2072,7 @@ impl AppState {
         {
             // A prewarmed permutation (every preset) is a hash lookup here; an
             // arbitrary Custom combination compiles once and stays cached.
-            self.renderer.set_dda_shader_source(
-                &self.gpu_context.device,
-                &dda::build_shader_source_with_material_graphs(
-                    &self.quality,
-                    &self.material_graph_shaders,
-                ),
-            );
+            self.rebuild_dda_shader();
             self.renderer.set_cagi_shader_source(
                 &self.gpu_context.device,
                 &cagi::build_shader_source(&self.quality),

@@ -140,7 +140,15 @@ fn pattern_animation_identity() -> PatternAnimation {
     );
 }
 
+// S3 — patched by `MaterialSettings::patch_shader_source`. Off collapses both
+// accessors below to their identity, which lets the whole `PatternAnimation`
+// value fold away: it is passed BY VALUE into the per-hit layer loop, so its
+// `array<vec4<f32>, 4>` otherwise keeps 16 registers live across every shaded hit
+// to hold zeroes that only an authored material graph ever writes.
+const MATERIAL_PATTERN_ANIMATION: bool = true;
+
 fn pattern_animation_gain(animation: PatternAnimation, slot: u32) -> f32 {
+    if (!MATERIAL_PATTERN_ANIMATION) { return 1.0; }
     if (slot == 0u) { return animation.gain.x; }
     if (slot == 1u) { return animation.gain.y; }
     if (slot == 2u) { return animation.gain.z; }
@@ -156,6 +164,7 @@ fn pattern_animation_gain(animation: PatternAnimation, slot: u32) -> f32 {
 // no address, which is precisely why `gain` was written this way and why leaving its
 // neighbour on a dynamic index undid the care.
 fn pattern_animation_drift(animation: PatternAnimation, slot: u32) -> vec3<f32> {
+    if (!MATERIAL_PATTERN_ANIMATION) { return vec3<f32>(0.0); }
     if (slot == 0u) { return animation.drift_velocity[0].xyz; }
     if (slot == 1u) { return animation.drift_velocity[1].xyz; }
     if (slot == 2u) { return animation.drift_velocity[2].xyz; }

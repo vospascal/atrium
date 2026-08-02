@@ -120,6 +120,72 @@ settings defaults, the registry or the sweep drift apart.
   rows, which no capture precedes, are reproducible to ~1%. See the correction
   note in the E1 section.
 
+## S3 materials — pattern path re-record (M3 Max, 2560x1440, 2026-08-03)
+
+**Shipped defaults moved.** The pattern field cache and the texel LOD are now **on**
+(ledger 6.34), and two fixes landed on top: the `log2` in `pattern_texels_at` became
+an exponent-bit read (6.36) and the generator mask compiles out generators the
+material table cannot reach (6.35). Every S3 number recorded before this date
+describes a renderer that no longer exists.
+
+Read the pattern path as **rung 0 minus rung 11** of the entry probe, not as a raw
+column: it subtracts the layers-off floor, so machine drift between runs cancels.
+
+| scenario | pattern path, before | after `log2` fix | after generator mask |
+|---|---|---|---|
+| A top-down, default sun | 2.218 | 2.073 | **2.003** |
+| B top-down, low sun 5° | 2.261 | 2.141 | **1.991** |
+| C ground, default sun | 2.215 | 2.061 | **1.999** |
+| D ground, low sun 5° | — | 2.057 | **1.939** |
+
+The generator-mask column is **bit-identical** to the unmasked one in all four
+scenarios — same differing-pixel count, same max channel delta — because a cleared
+bit is a generator no row authors.
+
+### The entry-cost probe (`MATERIAL_PATTERN_ENTRY_PROBE`)
+
+Twelve cumulative rungs, innermost first; `entry-N-<name>` columns in section 9.
+Scenario C, before the two fixes:
+
+| rung | ms | Δ | stage |
+|---|---|---|---|
+| 0 shipped | 4.352 | | |
+| 1 no-generator | 3.879 | 0.473 | generator + cache |
+| 2 no-fade | 3.865 | 0.014 | `pattern_fade` |
+| 3 no-salt | 3.705 | 0.160 | `pattern_variation_salt` |
+| 4 no-snap | 3.585 | 0.120 | `pattern_snap_to_texels` |
+| 5 no-period | 3.614 | ~0 | the period divide |
+| 6 no-tile-frame | 3.468 | 0.146 | the tile branch's **presence** |
+| 7 no-frames | 3.165 | 0.303 | voxel/face branches + the integer divide |
+| 8 no-drift | 2.399 | 0.766 | see the attribution warning below |
+| 9 no-coordinate | 2.406 | ~0 | the hit position |
+| 10 no-strength | 2.349 | 0.057 | face mask + gain |
+| 11 no-layers | 2.137 | 0.212 | row load + target branch + blend + loop |
+
+Rung 11 landed on the independent `material-patterns-0-layers` column at 2.135 —
+**0.001 ms apart**. That closure is what makes the decomposition trustworthy.
+
+> **⚠ Rungs 4 and 8 are ONE item, not two.** A cumulative ladder charges shared work
+> to whichever rung removes its last consumer. With the snap stubbed at rung 4, drift
+> became the final reader of `pattern_texels_at`, so rung 8 collected the whole
+> texel-grid computation. Drift itself is cheap. See ledger 7.20.
+
+Every rung above 0 renders **deliberately wrong output**; only rung 0 passes the
+pixel gates, and the default is 0, pinned by `registry_defaults_match_shader_source`.
+The rungs are shader consts, so they fold away entirely — the shipped pipeline is
+byte-identical to one built without them. Kept in the tree deliberately: they are the
+only instrument that can find the next finding of this kind.
+
+### ⚠ Section 5 cannot be fully recorded on this world
+
+`gi-cells2` fails validation — the CAGI volume at 2-voxel cells needs **188 MB**
+against wgpu's `max_storage_buffer_binding_size` of **128 MiB** on this adapter. The
+run does not stop: the invalid bind group's dispatches are dropped and the column
+times at **0.005 ms**, reading as 700× faster than the coarser grid rather than as
+broken. The harness now counts GPU errors and prints a banner on stdout (ledger
+7.22), but the underlying sweep needs re-sizing before section 5's finest rung means
+anything. Pre-existing, and a consequence of the larger post-lattice world.
+
 ## Recorded baseline — Apple M3 Max, 2560x1440, 2026-07-30
 
 > **⚠ STALE BY ~5× AS OF 2026-08-02 — DO NOT COMPARE AGAINST THIS TABLE.**

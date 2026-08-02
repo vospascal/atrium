@@ -54,7 +54,17 @@ pub const VOXELS_PER_METER: f32 = 8.0;
 /// shader for the same reason `pattern_max_layers` is: a value past the top would
 /// still compile, silently pick the top rung's behaviour, and label a column with
 /// a rung that does not exist.
-pub const PATTERN_ENTRY_PROBE_TOP: u32 = 7;
+pub const PATTERN_ENTRY_PROBE_TOP: u32 = 11;
+
+/// Every generator bit set — the shipped default, mirroring
+/// `MATERIAL_PATTERN_GENERATOR_MASK` in `shaders/pattern.wgsl`. Fourteen codes.
+pub const PATTERN_GENERATOR_MASK_ALL: u32 = (1 << 14) - 1;
+
+/// The three generators bench section 9's saturated table actually authors: flat,
+/// noise and speckle. Pruning to this must leave the frame BIT-IDENTICAL, which is
+/// what makes the pixel gate a self-check on the measurement rather than a
+/// formality.
+pub const PATTERN_GENERATOR_MASK_SECTION_NINE: u32 = 0b111;
 
 // ---- Lever identity ----------------------------------------------------------
 
@@ -126,6 +136,8 @@ pub enum LeverId {
     MaterialPatternCache,
     MaterialPatternTexelLod,
     MaterialPatternEntryProbe,
+    MaterialPatternAnimation,
+    MaterialPatternGeneratorMask,
     MaterialPatternStrength,
     MaterialPatternMaxLayers,
     MaterialPatternOctaveLod,
@@ -437,6 +449,12 @@ impl LeverId {
             LeverId::MaterialPatternEntryProbe => {
                 LeverValue::Mode(quality.materials.pattern_entry_probe)
             }
+            LeverId::MaterialPatternAnimation => {
+                LeverValue::Flag(quality.materials.pattern_animation)
+            }
+            LeverId::MaterialPatternGeneratorMask => {
+                LeverValue::Count(quality.materials.pattern_generator_mask)
+            }
             LeverId::MaterialPatternStrength => {
                 LeverValue::Scalar(quality.materials.pattern_strength)
             }
@@ -595,6 +613,12 @@ impl LeverId {
             }
             LeverId::MaterialPatternEntryProbe => {
                 quality.materials.pattern_entry_probe = value.expect_mode(self);
+            }
+            LeverId::MaterialPatternAnimation => {
+                quality.materials.pattern_animation = value.expect_flag(self);
+            }
+            LeverId::MaterialPatternGeneratorMask => {
+                quality.materials.pattern_generator_mask = value.expect_count(self);
             }
             LeverId::MaterialPatternStrength => {
                 quality.materials.pattern_strength = value.expect_scalar(self).clamp(0.0, 1.0);
@@ -2291,14 +2315,54 @@ pub const REGISTRY: &[Lever] = &[
             },
             ModeOption {
                 value: 5,
-                label: "no-coordinate",
-                verdict: "+ `pattern_coordinate` folded to a constant. Takes the \
-                          frame branch, the hit position, the world-voxel divide, \
-                          the period divide, and `pattern_drift_meters` with them \
-                          — this function is drift's only consumer.",
+                label: "no-period",
+                verdict: "+ the final `snapped / period`. The first of five rungs \
+                          splitting `pattern_coordinate`, which the first pass \
+                          through this ladder measured at 49-59% of the whole \
+                          pattern path — more than the generator, and the same \
+                          absolute cost aerial as at ground level, which is why \
+                          neither the cache nor the texel LOD touches it.",
             },
             ModeOption {
                 value: 6,
+                label: "no-tile-frame",
+                verdict: "+ the tile frame collapsed to world. Prices the tile \
+                          branch's PRESENCE, not its use: the frame is runtime data, \
+                          so `pattern_tile_of` — the face projection, the bonded \
+                          tessellation and a per-tile hash, the largest block in the \
+                          function — is resident and register-allocated on every \
+                          layer whether or not anything authors a tile. A large \
+                          delta here means the fix is to get the tessellation out of \
+                          the hot function, not to make it faster.",
+            },
+            ModeOption {
+                value: 7,
+                label: "no-frames",
+                verdict: "+ the voxel and face frames collapsed to world, which is \
+                          what kills the `sample.voxel / vec3<i32>(8)` SIGNED \
+                          INTEGER VECTOR DIVIDE — those two branches are its only \
+                          readers. Conflates the branch with the divide on purpose: \
+                          stubbing the index alone lets both branches fold to \
+                          constants and over-credits the divide.",
+            },
+            ModeOption {
+                value: 8,
+                label: "no-drift",
+                verdict: "+ the drift subtraction, and `pattern_drift_meters` with \
+                          it — this is that function's only consumer, and with the \
+                          texel LOD on it carries a `log2` of its own.",
+            },
+            ModeOption {
+                value: 9,
+                label: "no-coordinate",
+                verdict: "+ the hit position itself. `sample.world_meters` becomes \
+                          dead, so `pattern_sample`'s position reconstruct and clamp \
+                          go too — which is why this rung is 'the coordinate stage \
+                          including producing what it reads', not the function body \
+                          alone.",
+            },
+            ModeOption {
+                value: 10,
                 label: "no-strength",
                 verdict: "+ `pattern_strength` folded to the authored amount. Loses \
                           the face-mask test and the animation gain but stays \
@@ -2307,12 +2371,12 @@ pub const REGISTRY: &[Lever] = &[
                           instead of pricing them.",
             },
             ModeOption {
-                value: 7,
+                value: 11,
                 label: "no-layers",
                 verdict: "+ the slot loop never runs. The floor and the closure \
                           check: this must land on the layers-off measurement, and \
-                          what rung 6 costs over it is the per-slot row load, the \
-                          target branch and the blend.",
+                          what the rung below costs over it is the per-slot row \
+                          load, the target branch and the blend.",
             },
         ],
         bench: &[
@@ -2350,7 +2414,7 @@ pub const REGISTRY: &[Lever] = &[
             },
             BenchPoint {
                 section: BenchSection::Materials,
-                label: "entry-5-no-coordinate",
+                label: "entry-5-no-period",
                 overrides: &[
                     (LeverId::MaterialPatterns, LeverValue::Flag(true)),
                     (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(5)),
@@ -2358,7 +2422,7 @@ pub const REGISTRY: &[Lever] = &[
             },
             BenchPoint {
                 section: BenchSection::Materials,
-                label: "entry-6-no-strength",
+                label: "entry-6-no-tile-frame",
                 overrides: &[
                     (LeverId::MaterialPatterns, LeverValue::Flag(true)),
                     (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(6)),
@@ -2366,13 +2430,124 @@ pub const REGISTRY: &[Lever] = &[
             },
             BenchPoint {
                 section: BenchSection::Materials,
-                label: "entry-7-no-layers",
+                label: "entry-7-no-frames",
                 overrides: &[
                     (LeverId::MaterialPatterns, LeverValue::Flag(true)),
                     (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(7)),
                 ],
             },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-8-no-drift",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(8)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-9-no-coordinate",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(9)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-10-no-strength",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(10)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-11-no-layers",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(11)),
+                ],
+            },
         ],
+    },
+    Lever {
+        id: LeverId::MaterialPatternAnimation,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_ANIMATION"),
+        label: "pattern animation (gain + drift)",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "LOSER, stays ON (2026-08-03): folding the whole animation value \
+                  away costs +0.060 / +0.053 / +0.004 / +0.010 ms. The register- \
+                  residency theory was wrong — naga already folds \
+                  `pattern_animation_identity()` through the call, so there was \
+                  never an `array<vec4<f32>, 4>` live on the no-graph path to \
+                  reclaim, and the const only adds a branch the optimiser then has \
+                  to see through. Kept as a lever because it is the switch a \
+                  derived per-graph const would flip if a future backend stops \
+                  folding, and because the negative is worth keeping its evidence. \
+                  IT ALSO CORRECTED THE PROBE: rung 7->8 reads 0.63-0.87 ms not \
+                  because drift is expensive but because, with the snap already \
+                  stubbed at rung 4, drift is the LAST consumer of \
+                  `pattern_texels_at` — so the ladder charges the texel-grid \
+                  computation to whichever rung removes its final reader. Read \
+                  rungs 4 and 8 together as one ~0.8 ms item.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-patterns-no-animation",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialPatternAnimation, LeverValue::Flag(false)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialPatternGeneratorMask,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_GENERATOR_MASK"),
+        label: "generator mask (compiled-in generators)",
+        default_value: LeverValue::Count(PATTERN_GENERATOR_MASK_ALL),
+        // Two rungs, not a free bitmask field: the panel offers "everything" and
+        // "only what the bench table authors", because those are the two values a
+        // measurement compares. A derived mask would be computed, never dialled.
+        range: LeverRange::Rungs(&[
+            PATTERN_GENERATOR_MASK_SECTION_NINE,
+            PATTERN_GENERATOR_MASK_ALL,
+        ]),
+        verdict: "WINNER (2026-08-03), and the proof that this pass is \
+                  RESIDENCY-bound rather than ALU-bound. Pruning the nine \
+                  generators bench section 9's table never reaches cut the pattern \
+                  path by 6.0 / 5.5 / 3.5 / 6.2 percent (A/B/C/D) while leaving all \
+                  four frames BIT-IDENTICAL — same differing-pixel count, same max \
+                  channel delta — so this is speed for nothing, not a quality \
+                  trade. All fourteen generators are resident in one function \
+                  inlined into the shading pass, and the pass is latency-bound, so \
+                  their register footprint becomes milliseconds through occupancy. \
+                  Two earlier readings pointed here and are now explained: entry \
+                  rung 6 charged 0.146 ms to the tile FRAME merely being present, \
+                  and the whole pattern path costs ~4000 lane-ops per pixel for a \
+                  few hundred ops of arithmetic. It also explains a NEGATIVE — \
+                  folding the animation value away won nothing because naga had \
+                  already folded it, so there were no registers there to reclaim. \
+                  NEXT: make the mask DERIVED from the authored table and the \
+                  material graphs, the way the cacheability analysis reads the node \
+                  declarations. Shipping it as a hand-set lever would be a footgun; \
+                  computed, it is free and cannot go stale.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-patterns-pruned-generators",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (
+                    LeverId::MaterialPatternGeneratorMask,
+                    LeverValue::Count(PATTERN_GENERATOR_MASK_SECTION_NINE),
+                ),
+            ],
+        }],
     },
     Lever {
         id: LeverId::MaterialPatternStrength,
@@ -2755,6 +2930,16 @@ pub struct MaterialSettings {
     /// S3 — halve the texel grid per doubling of distance, so distant pixels
     /// share texels and the cache has something to hit.
     pub pattern_texel_lod: bool,
+    /// S3 — evaluate per-slot animation gain and drift. Off folds the whole
+    /// `PatternAnimation` value away, which is what a material with no graph
+    /// wants: its drift array is 16 registers of zeroes held live across the
+    /// layer loop.
+    pub pattern_animation: bool,
+    /// S3 — one bit per generator code; a clear bit compiles that generator's
+    /// body out of the shading pass. Derivable from the authored table and the
+    /// material graphs, so it never trades detail for speed. All bits set is the
+    /// shipped renderer.
+    pub pattern_generator_mask: u32,
     /// S3 — the entry-cost bisection rung. A MEASUREMENT INSTRUMENT: anything
     /// above zero renders deliberately wrong output, and only zero ships.
     pub pattern_entry_probe: u32,
@@ -2798,6 +2983,8 @@ impl MaterialSettings {
             || self.pattern_cache != applied.pattern_cache
             || self.pattern_texel_lod != applied.pattern_texel_lod
             || self.pattern_entry_probe != applied.pattern_entry_probe
+            || self.pattern_animation != applied.pattern_animation
+            || self.pattern_generator_mask != applied.pattern_generator_mask
             || self.pattern_strength != applied.pattern_strength
             || self.pattern_max_layers != applied.pattern_max_layers
             || self.pattern_octave_lod != applied.pattern_octave_lod
@@ -2836,8 +3023,25 @@ impl MaterialSettings {
             "MATERIAL_PATTERN_ENTRY_PROBE",
             &format!("{}u", self.pattern_entry_probe.min(PATTERN_ENTRY_PROBE_TOP)),
         );
-        let strength = patch_shader_const(
+        let animation = patch_shader_const(
             &entry_probe,
+            "MATERIAL_PATTERN_ANIMATION",
+            if self.pattern_animation {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        let generator_mask = patch_shader_const(
+            &animation,
+            "MATERIAL_PATTERN_GENERATOR_MASK",
+            &format!(
+                "{}u",
+                self.pattern_generator_mask & PATTERN_GENERATOR_MASK_ALL
+            ),
+        );
+        let strength = patch_shader_const(
+            &generator_mask,
             "MATERIAL_PATTERN_STRENGTH",
             &float_literal(self.pattern_strength),
         );
@@ -2871,6 +3075,8 @@ impl Default for MaterialSettings {
             pattern_cache: true,
             pattern_texel_lod: true,
             pattern_entry_probe: 0,
+            pattern_animation: true,
+            pattern_generator_mask: PATTERN_GENERATOR_MASK_ALL,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
             pattern_octave_lod: false,
@@ -3481,6 +3687,8 @@ mod tests {
             pattern_cache,
             pattern_texel_lod,
             pattern_entry_probe,
+            pattern_animation,
+            pattern_generator_mask,
             pattern_strength,
             pattern_max_layers,
             pattern_octave_lod,
@@ -3678,6 +3886,14 @@ mod tests {
             (
                 LeverId::MaterialPatternEntryProbe,
                 LeverValue::Mode(pattern_entry_probe),
+            ),
+            (
+                LeverId::MaterialPatternAnimation,
+                LeverValue::Flag(pattern_animation),
+            ),
+            (
+                LeverId::MaterialPatternGeneratorMask,
+                LeverValue::Count(pattern_generator_mask),
             ),
             (
                 LeverId::MaterialPatternStrength,

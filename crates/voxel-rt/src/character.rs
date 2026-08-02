@@ -485,8 +485,19 @@ impl CharacterController {
         };
 
         let was_grounded = self.grounded;
-        let may_step = was_grounded && self.submersion != Submersion::Swimming;
-        self.sweep_with_step_up(brickmap, AXIS_X, horizontal.x, may_step);
+        // A swimmer floats with their feet well below the surface.  Without a
+        // special exit lift, a solid whose top is level with the water looks
+        // like a 1.5 m wall, even though it is a perfectly ordinary shore.
+        // Only offer that extra lift while a local surface is in reach; it
+        // therefore cannot be used to climb a wall above the waterline.
+        let step_up_meters = if was_grounded {
+            self.settings.step_up_meters
+        } else if self.submersion == Submersion::Swimming {
+            self.swim_exit_step_up(brickmap).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        self.sweep_with_step_up(brickmap, AXIS_X, horizontal.x, step_up_meters);
 
         let mut feet = self.feet_position.to_array();
         let vertical_delta = self.vertical_velocity * seconds;
@@ -497,7 +508,7 @@ impl CharacterController {
             self.vertical_velocity = 0.0;
         }
 
-        self.sweep_with_step_up(brickmap, AXIS_Z, horizontal.z, may_step);
+        self.sweep_with_step_up(brickmap, AXIS_Z, horizontal.z, step_up_meters);
 
         self.grounded = self.ground_is_below(brickmap);
         if !self.grounded
@@ -603,6 +614,17 @@ impl CharacterController {
             .map(|layer| layer as f32 * VOXEL_SIZE - shoulder)
     }
 
+    /// Height to lift a floating swimmer in order to try stepping onto a shore
+    /// whose top is flush with the local water surface.  The normal sweep and
+    /// settle still validate the move, so this is not a general swim climb.
+    fn swim_exit_step_up(&self, brickmap: &Brickmap) -> Option<f32> {
+        let shoulder =
+            self.feet_position.y + self.settings.body_height_meters * SWIM_SUBMERSION_FRACTION;
+        let depth = self.shoulder_depth_below_surface(brickmap)?;
+        let surface = shoulder + depth;
+        Some((surface - self.feet_position.y + COLLISION_SKIN_METERS).max(0.0))
+    }
+
     /// Move along a horizontal axis; if a wall stops it, retry the move lifted
     /// by up to `step_up_meters` and settle back down onto whatever that found.
     /// Returns whether the body ended up blocked.
@@ -611,7 +633,7 @@ impl CharacterController {
         brickmap: &Brickmap,
         axis: usize,
         delta: f32,
-        may_step: bool,
+        step_up_meters: f32,
     ) -> bool {
         let before = self.feet_position.to_array();
         let mut feet = before;
@@ -619,8 +641,8 @@ impl CharacterController {
             self.feet_position = Vec3::from_array(feet);
             return false;
         }
-        let lift = self.settings.step_up_meters;
-        if !may_step || lift <= 0.0 {
+        let lift = step_up_meters;
+        if lift <= 0.0 {
             self.feet_position = Vec3::from_array(feet);
             return true;
         }
@@ -1371,6 +1393,12 @@ mod tests {
             body.step(&brickmap, &walking_forward(), 1.0 / 60.0);
             saw_wading |= body.submersion() == Submersion::Wading;
             saw_swimming |= body.submersion() == Submersion::Swimming;
+            // Reaching swimming is the behavior under test. Continuing to
+            // hold forward would now correctly let the swimmer leave over the
+            // opposite water-level rim.
+            if saw_swimming {
+                break;
+            }
             assert!(!body_overlaps_solid(
                 &brickmap,
                 body.feet_position,
@@ -1406,6 +1434,53 @@ mod tests {
             "a resting swimmer's eye must be clear of the water: eye {:.3} m, surface {:.3} m",
             body.eye_position().y,
             water_surface
+        );
+    }
+
+    /// A shore block whose top meets the water surface must be usable without
+    /// switching to fly mode.  At the float line the body's feet are roughly
+    /// 1.5 m below that top, so ordinary walk step-up cannot handle this case.
+    #[test]
+    fn a_swimmer_can_exit_onto_a_water_level_ledge() {
+        let mut brickmap = island();
+        let pool = carve_test_pool(&mut brickmap);
+        let water_surface = (WATER_LEVEL + 1) as f32 * VOXEL_SIZE;
+        let ledge_x = pool.centre_voxel_x + 12;
+        fill_box(
+            &mut brickmap,
+            [ledge_x, WATER_LEVEL - 24, pool.centre_voxel_z - 12],
+            [ledge_x + 9, WATER_LEVEL, pool.centre_voxel_z + 12],
+            Voxel::Stone,
+        );
+
+        let mut body = CharacterController::from_eye(
+            Vec3::new(
+                (pool.centre_voxel_x as f32 + 0.5) * VOXEL_SIZE,
+                water_surface + 1.0,
+                (pool.centre_voxel_z as f32 + 0.5) * VOXEL_SIZE,
+            ),
+            0.0,
+            0.0,
+        );
+        for _ in 0..240 {
+            body.step(&brickmap, &CameraInput::default(), 1.0 / 60.0);
+        }
+        assert_eq!(body.submersion(), Submersion::Swimming);
+
+        for _ in 0..45 {
+            body.step(&brickmap, &walking_forward(), 1.0 / 60.0);
+        }
+        assert!(
+            body.feet_position.x
+                > (ledge_x as f32 * VOXEL_SIZE) + body.settings.body_width_meters * 0.5,
+            "the swimmer did not get onto the ledge: feet at {:?}",
+            body.feet_position
+        );
+        assert!(body.grounded(), "the swimmer must stand on the ledge");
+        assert!(
+            (body.feet_position.y - water_surface).abs() < 0.02,
+            "feet at {:.3} m, expected water-level ledge at {water_surface:.3} m",
+            body.feet_position.y
         );
     }
 

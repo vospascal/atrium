@@ -84,6 +84,7 @@
 //!
 //! All PNGs land in `target/bench_dda/`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use std::path::PathBuf;
@@ -287,6 +288,9 @@ impl Section {
 
 /// Timing table of one section: `[variant][scenario] = (median, p95)` ms.
 type TimingTable = Vec<Vec<(f32, f32)>>;
+
+/// Uncaptured GPU errors seen during the run. See the handler in `gpu()`.
+static GPU_ERRORS: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
     // Optional section filter: `-- 1 3` runs sections 1 and 3 only. No
@@ -503,6 +507,18 @@ fn main() {
     }
     if runs_section(13) {
         report_material_costs(&device, &queue, use_project);
+    }
+
+    // Last word, so it is the thing still on screen when a run ends and cannot be
+    // lost above a thousand lines of tables.
+    let gpu_errors = GPU_ERRORS.load(Ordering::Relaxed);
+    if gpu_errors > 0 {
+        println!();
+        println!(
+            "!! {gpu_errors} GPU VALIDATION ERROR(S) DURING THIS RUN — do not record these \
+             numbers without reading stderr first. A dropped dispatch times as fast, not as \
+             broken."
+        );
     }
 }
 
@@ -3804,6 +3820,19 @@ fn create_headless_device() -> (wgpu::Device, wgpu::Queue) {
     // baffling "no timestamps" panic instead of the real cause.
     device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
         eprintln!("wgpu uncaptured error: {error}");
+        // ALSO on stdout, and counted. A validation error does not stop the run:
+        // the invalid bind group's dispatches are dropped and the section still
+        // prints a timing table, so the column reads as very FAST rather than as
+        // broken. That is how `gi-cells2` came back at 0.005 ms — a finer light
+        // volume apparently 700x quicker than a coarser one — while stderr, which
+        // nobody pastes into a document, held the reason. The numbers and the
+        // warning have to travel together.
+        if GPU_ERRORS.fetch_add(1, Ordering::Relaxed) == 0 {
+            println!();
+            println!("!! GPU VALIDATION ERROR — timings below this line are NOT TRUSTWORTHY");
+            println!("!! {error}");
+            println!();
+        }
     }));
     println!("adapter: {}", adapter.get_info().name);
     (device, queue)

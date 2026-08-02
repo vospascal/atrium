@@ -62,16 +62,27 @@ const MATERIAL_PATTERN_TEXEL_LOD: bool = true;
 // every rung above measures the entry path cache-free. That is the right split:
 // the cache is its own lever with its own verdict, and mixing it in would make
 // each rung's delta depend on a hit rate rather than on work.
+// Rungs 5-8 are the SECOND cut. The first pass through this ladder put 49-59% of
+// the whole pattern path inside `pattern_coordinate` alone — an order of magnitude
+// more than the fade, the salt or the snap, and more than the generator itself —
+// so that one rung was split into the five things it actually does.
 const PATTERN_ENTRY_ALL: u32 = 0u;
 const PATTERN_ENTRY_NO_GENERATOR: u32 = 1u;
 const PATTERN_ENTRY_NO_FADE: u32 = 2u;
 const PATTERN_ENTRY_NO_SALT: u32 = 3u;
 const PATTERN_ENTRY_NO_SNAP: u32 = 4u;
-const PATTERN_ENTRY_NO_COORDINATE: u32 = 5u;
-const PATTERN_ENTRY_NO_STRENGTH: u32 = 6u;
-const PATTERN_ENTRY_NO_LAYERS: u32 = 7u;
+const PATTERN_ENTRY_NO_PERIOD: u32 = 5u;
+const PATTERN_ENTRY_NO_TILE_FRAME: u32 = 6u;
+const PATTERN_ENTRY_NO_FRAMES: u32 = 7u;
+const PATTERN_ENTRY_NO_DRIFT: u32 = 8u;
+const PATTERN_ENTRY_NO_COORDINATE: u32 = 9u;
+const PATTERN_ENTRY_NO_STRENGTH: u32 = 10u;
+const PATTERN_ENTRY_NO_LAYERS: u32 = 11u;
 
 const MATERIAL_PATTERN_ENTRY_PROBE: u32 = 0u;
+
+// One bit per generator code, all set. See `pattern_generator_enabled`.
+const MATERIAL_PATTERN_GENERATOR_MASK: u32 = 16383u;
 
 // Global scale on every layer's amount, 0..1. The tier knob: it turns detail down
 // everywhere without editing 26 rows, which is what a Quest preset needs.
@@ -682,7 +693,24 @@ fn pattern_texels_at(layer: PatternLayer, distance_meters: f32) -> u32 {
     if (start <= 0.0 || distance_meters <= start) {
         return texels;
     }
-    let steps = u32(floor(log2(distance_meters / start)));
+    // `floor(log2(ratio))` for `ratio > 1` IS the IEEE-754 biased exponent minus
+    // the bias, so the step count is a shift and a subtract rather than a
+    // transcendental. Exact, not approximate: the mantissa cannot change which
+    // power of two a value falls in, which is the entire content of `floor(log2)`.
+    //
+    // This is not a micro-optimization. Rung 8 of the entry probe measured the LAST
+    // consumer of this function at 0.77-0.97 ms — the largest single item in the
+    // pattern path, bigger than the generator — because with the snap stubbed the
+    // drift path still needed it, and one `log2` per layer per pixel is a
+    // transcendental in the middle of the shading loop.
+    //
+    // The guard above proves `ratio > 1`, so the biased exponent is at least 127 and
+    // the subtraction cannot underflow. A denormal `start` sends `ratio` to infinity
+    // and a NaN distance falls through the `<=` test; both land on exponent 255,
+    // which `min(steps, 7u)` clamps to the coarsest grid — the right answer for
+    // "unreasonably far away" either way.
+    let ratio = distance_meters / start;
+    let steps = (bitcast<u32>(ratio) >> 23u) - 127u;
     return max(texels >> min(steps, 7u), 1u);
 }
 
@@ -825,10 +853,33 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
         return vec3<f32>(0.5);
     }
     let period = max(layer.period_meters, 1e-4);
-    let frame = pattern_frame(layer);
+    // Rung 7 collapses the frame to WORLD, which is what kills the world-voxel
+    // divide: only the voxel and face branches read it. Written as a comparison
+    // against a probe const rather than as an early return so the WORLD path below
+    // stays the single implementation.
+    var frame = pattern_frame(layer);
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_FRAMES) {
+        frame = PATTERN_FRAME_WORLD;
+    } else if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_TILE_FRAME
+               && frame == PATTERN_FRAME_TILE) {
+        // Rung 6 prices the TILE branch's mere PRESENCE. It is by far the largest
+        // block in this function — `pattern_tile_of` pulls in the face projection,
+        // the bonded tessellation and a per-tile hash — and the frame is runtime
+        // data, so that code is resident and its registers are allocated on every
+        // layer whether or not any material authors a tile frame. If this rung is
+        // expensive, the fix is to get the tessellation out of the hot function,
+        // not to make it faster.
+        frame = PATTERN_FRAME_WORLD;
+    }
     let world_voxel_size_meters = voxel_size_meters * BRICK_SIZE;
     let world_voxel = sample.voxel / vec3<i32>(i32(BRICK_SIZE));
-    var meters = sample.world_meters - drift_meters;
+    var meters = sample.world_meters;
+    if (MATERIAL_PATTERN_ENTRY_PROBE < PATTERN_ENTRY_NO_DRIFT) {
+        // Rung 8 takes the subtraction and `pattern_drift_meters` with it — this
+        // is that function's only consumer, and with the texel LOD on it carries a
+        // `log2` of its own.
+        meters = meters - drift_meters;
+    }
     if (frame == PATTERN_FRAME_VOXEL) {
         // Quantised to the voxel's own centre, so the generator returns ONE value
         // for the whole voxel without any generator knowing about voxels — and why
@@ -865,6 +916,11 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
     // voxels and CANNOT tile per voxel. The default, and the continuity argument.
     let snapped = pattern_snap_to_texels(
         meters, pattern_texels_at(layer, sample.distance_meters), voxel_size_meters);
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_PERIOD) {
+        // Rung 5: the reciprocal and three multiplies that put the coordinate in
+        // units of the authored period. `period` itself dies with it.
+        return snapped;
+    }
     return snapped / period;
 }
 
@@ -1013,52 +1069,72 @@ fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
 
 /// The generator itself, with the coordinate and salt already resolved so the
 /// caching wrapper above can key on them.
+/// Whether this build compiles the given generator's body at all.
+///
+/// EVERY generator's code is resident in `pattern_generator_at`, which is one
+/// function inlined into the shading pass, so a project that authors two of them
+/// still pays the register footprint of all fourteen. The entry probe measured
+/// that effect directly and it is not small: rung 6 charged 0.146 ms to the tile
+/// FRAME's mere presence on a table where nothing authors a tile frame. Code that
+/// never executes cannot cost time unless it is costing registers, and this pass is
+/// latency-bound, so occupancy is what converts registers into milliseconds.
+///
+/// The mask is not a quality knob and never trades detail for speed: a generator
+/// outside it is one the material set does not use, so the output is bit-identical.
+/// It is DERIVABLE — the authored table and the material graphs between them name
+/// every generator a project can reach — which is the same move the cacheability
+/// analysis already makes over the node declarations. The default is every bit set,
+/// so an underived build is exactly the shipped renderer.
+fn pattern_generator_enabled(generator: u32) -> bool {
+    return (MATERIAL_PATTERN_GENERATOR_MASK & (1u << generator)) != 0u;
+}
+
 fn pattern_generator_at(layer: PatternLayer, sample: PatternSample,
                         drift_meters: vec3<f32>, raw_point: vec3<f32>, salt: u32,
                         octaves: u32) -> f32 {
     let point = pattern_warp(raw_point, layer, salt);
     let generator = pattern_generator(layer);
-    if (generator == PATTERN_GENERATOR_NOISE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_NOISE) && generator == PATTERN_GENERATOR_NOISE) {
         return pattern_fractal_noise(point, octaves, salt);
     }
-    if (generator == PATTERN_GENERATOR_SPECKLE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_SPECKLE) && generator == PATTERN_GENERATOR_SPECKLE) {
         return pattern_speckle(point, clamp(layer.param_a, 0.0, 1.0), salt);
     }
-    if (generator == PATTERN_GENERATOR_PERLIN) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_PERLIN) && generator == PATTERN_GENERATOR_PERLIN) {
         return pattern_fractal_perlin(point, octaves, salt);
     }
-    if (generator == PATTERN_GENERATOR_SIMPLEX) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_SIMPLEX) && generator == PATTERN_GENERATOR_SIMPLEX) {
         return pattern_fractal_simplex(point, octaves, salt);
     }
-    if (generator == PATTERN_GENERATOR_RIDGED) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_RIDGED) && generator == PATTERN_GENERATOR_RIDGED) {
         return pattern_ridged_noise(point, octaves, salt);
     }
-    if (generator == PATTERN_GENERATOR_TURBULENCE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_TURBULENCE) && generator == PATTERN_GENERATOR_TURBULENCE) {
         return pattern_turbulence(point, octaves, salt);
     }
-    if (generator == PATTERN_GENERATOR_WORLEY) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_WORLEY) && generator == PATTERN_GENERATOR_WORLEY) {
         return pattern_worley(point, salt);
     }
-    if (generator == PATTERN_GENERATOR_WORLEY_EDGE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_WORLEY_EDGE) && generator == PATTERN_GENERATOR_WORLEY_EDGE) {
         return pattern_worley_edge(point, salt);
     }
-    if (generator == PATTERN_GENERATOR_WORLEY_SMOOTH) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_WORLEY_SMOOTH) && generator == PATTERN_GENERATOR_WORLEY_SMOOTH) {
         return pattern_worley_smooth(point, salt);
     }
-    if (generator == PATTERN_GENERATOR_WAVE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_WAVE) && generator == PATTERN_GENERATOR_WAVE) {
         return pattern_wave(point, max(layer.param_a, 0.0), salt);
     }
-    if (generator == PATTERN_GENERATOR_CHECKER) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_CHECKER) && generator == PATTERN_GENERATOR_CHECKER) {
         return pattern_checker(point);
     }
     // The two tessellation readouts. They re-walk rather than sharing the walk
     // `pattern_coordinate` already did, which is a deliberate ~15-op duplication:
     // threading a vec4 through the coordinate contract would complicate every frame
     // to save a floor and a hash against generators costing hundreds of ops.
-    if (generator == PATTERN_GENERATOR_TILE_TONE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_TILE_TONE) && generator == PATTERN_GENERATOR_TILE_TONE) {
         return pattern_tile_of(layer, sample, drift_meters).z;
     }
-    if (generator == PATTERN_GENERATOR_TILE_EDGE) {
+    if (pattern_generator_enabled(PATTERN_GENERATOR_TILE_EDGE) && generator == PATTERN_GENERATOR_TILE_EDGE) {
         return pattern_tile_edge_shaped(
             pattern_tile_of(layer, sample, drift_meters).w, layer.param_a);
     }
