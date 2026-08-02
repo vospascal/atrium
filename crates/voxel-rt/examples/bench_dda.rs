@@ -86,6 +86,7 @@
 
 use std::time::Instant;
 
+use voxel_rt::animation_clock::AnimationClockSample;
 use voxel_rt::ao::{AoMode, AoSettings};
 use voxel_rt::brickmap::{
     Brickmap, ClearanceUpdate, BRICK_SIZE, MATERIAL_WORDS_PER_BRICK, OCCUPANCY_WORDS_PER_BRICK,
@@ -111,6 +112,7 @@ use voxel_rt::variants::{
 };
 use voxel_rt::voxel_dda;
 use voxel_rt::world_edit::{VoxelEdit, WorldEditSettings};
+use voxel_rt::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
 use glam::Vec3;
@@ -198,6 +200,12 @@ impl Scenario {
             quality.gi_params(),
             quality.water_params(),
             quality.material_params(),
+            // S3: the bench pins the animation clock at zero and ships no world
+            // events, so a measured frame is reproducible. This is stated here
+            // rather than left to the deterministic lever, because a scenario
+            // sweeping presets would otherwise inherit whatever that preset
+            // happened to set — and a bench that animates is not a bench.
+            quality.animation_params(AnimationClockSample::FROZEN, 0),
         )
     }
 }
@@ -2072,6 +2080,7 @@ fn run_edit_storm(
             queue,
             &mut encoder,
             &scenario.camera_uniform((width, height)),
+            &BENCH_WORLD_EVENTS,
             resources.light_volume.front(),
             width,
             height,
@@ -2674,6 +2683,13 @@ fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
     );
 }
 
+/// S3: the bench ships an EMPTY world-event field, so no material sensor can
+/// fire and a measured frame stays reproducible. Paired with the frozen clock
+/// in `Scenario::lighting_uniform`; the two together are what the deterministic
+/// animation lever does in the app.
+const BENCH_WORLD_EVENTS: [GpuWorldEvent; MAX_WORLD_EVENTS] =
+    [GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS];
+
 /// The sky radiance the CA injects — the hemisphere constants of `lighting.rs`,
 /// mirrored here for the CPU cross-check's out-of-volume neighbour values.
 fn scenario_sky_radiance() -> [f32; 3] {
@@ -2682,6 +2698,7 @@ fn scenario_sky_radiance() -> [f32; 3] {
         RenderQuality::default().gi_params(),
         RenderQuality::default().water_params(),
         RenderQuality::default().material_params(),
+        RenderQuality::default().animation_params(AnimationClockSample::FROZEN, 0),
     );
     [
         uniform.sky_ambient[0] * uniform.sky_ambient[3],
@@ -3146,6 +3163,7 @@ fn time_one_batch(
             queue,
             &mut encoder,
             &camera_uniform,
+            &BENCH_WORLD_EVENTS,
             resources.light_volume.front(),
             width,
             height,
@@ -3219,6 +3237,7 @@ fn render_once(
         queue,
         &mut encoder,
         &scenario.camera_uniform((width, height)),
+        &BENCH_WORLD_EVENTS,
         resources.light_volume.front(),
         width,
         height,

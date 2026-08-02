@@ -120,10 +120,7 @@ impl MaterialGraphAssetService {
                 let _ = material_table.apply_graph_sample(
                     slot,
                     &program,
-                    MaterialSampleContext {
-                        position: [0.0; 3],
-                        normal: [0.0, 1.0, 0.0],
-                    },
+                    MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
                 );
                 shaders.insert(slot, program);
                 Ok(())
@@ -221,6 +218,129 @@ mod tests {
             MaterialGraphAssetService::load_shader_set(&root, &project, &MaterialTable::default())
                 .unwrap();
         assert_eq!(shaders.len(), project.manifest.material_assignments.len());
+    }
+
+    /// The authored lava must actually MOVE, and the authored glow block must
+    /// actually react. Compiling is not the same as animating: a drift socket
+    /// left at zero, or a gain wired to the wrong layer, compiles perfectly and
+    /// renders a still surface. This walks the real checked-in assets.
+    #[test]
+    fn the_authored_lava_drifts_and_the_authored_glow_block_reacts() {
+        use crate::animation_clock::AnimationClock;
+        use crate::material_graph::MaterialSampleContext;
+        use crate::pattern::{LayerAnimationSample, PatternSample};
+        use crate::world_event::{GpuWorldEvent, CHANNEL_PRESENCE};
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let store = StudioProjectStore::new(&root);
+        let project = StudioProject {
+            manifest: store.load_manifest().unwrap(),
+        };
+        let shaders =
+            MaterialGraphAssetService::load_shader_set(&root, &project, &MaterialTable::default())
+                .unwrap();
+
+        // ---- lava: the crust creeps ----------------------------------------
+        let program = shaders.program(26).expect("lava has a compiled graph");
+        // Evaluated, not pattern-matched: the drift may be authored as a bare
+        // vector, a direction node or an oscillated one, and none of that is
+        // this test's business — only that the surface ends up moving.
+        let animation = program
+            .evaluate_layer_animation(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .first()
+            .copied()
+            .expect("lava authors a pattern layer");
+        let drift_velocity = animation.drift_velocity;
+        assert_ne!(
+            drift_velocity, [0.0; 3],
+            "lava authors no drift, so its crust cannot creep"
+        );
+        // Direction is deliberately NOT pinned. Which way lava runs is a taste
+        // decision that gets retuned per look — down a wall, level across a
+        // lake — and a test that fails when someone dials an angle is a test
+        // that trains people to edit tests. That it MOVES is the contract.
+
+        // The layer as PROJECTED FROM THE GRAPH, not the compiled const table.
+        // The graph is what the renderer uploads, and the two differ the moment
+        // anyone re-authors — a test reading the const would keep passing while
+        // the shipped material changed underneath it.
+        let lava_graph = store
+            .load_graph(std::path::Path::new("graphs/material-26.vgraph.json"))
+            .expect("lava's graph loads");
+        let layer = crate::material_graph_layers::project_pattern_stack(
+            &lava_graph,
+            &NodeRegistry::builtin(),
+        )
+        .expect("lava's pattern chain projects")
+        .active()
+        .next()
+        .copied()
+        .expect("lava authors a pattern layer");
+        let sample = PatternSample {
+            world_meters: [12.3, 4.5, 6.7],
+            voxel: [98, 36, 53],
+            axis: 1,
+            axis_sign: -1.0,
+            distance_meters: 3.0,
+        };
+        let at = |seconds: f32| {
+            layer.generator_value_animated(
+                &sample,
+                LayerAnimationSample {
+                    gain: 1.0,
+                    drift_velocity,
+                    time_seconds: seconds,
+                },
+            )
+        };
+        let still = at(0.0);
+        assert!(
+            (0..40).any(|step| (at(step as f32 * 0.5) - still).abs() > 1e-6),
+            "lava's pattern never changed over 20 seconds of drift"
+        );
+
+        // ---- glow block: dim at rest, brighter with something near ----------
+        let program = shaders
+            .program(24)
+            .expect("the glow block has a compiled graph");
+        let mut clock = AnimationClock::new();
+        clock.advance(4.0, 1.0);
+
+        let resting = program
+            .evaluate(MaterialSampleContext {
+                clock: clock.sample(),
+                ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+            })
+            .emission;
+        assert!(
+            resting[0] > 0.0,
+            "the glow block went dark with nothing near — it must keep a resting \
+             glow, or it stops being an emitter for GI entirely"
+        );
+
+        let nearby = [GpuWorldEvent {
+            position_meters: [0.0, 0.0, 1.0],
+            radius_meters: 12.0,
+            started_epoch: 0.0,
+            started_remainder_seconds: 0.0,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: CHANNEL_PRESENCE,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        }];
+        let lit = program
+            .evaluate(MaterialSampleContext {
+                clock: clock.sample(),
+                events: &nearby,
+                ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+            })
+            .emission;
+        assert!(
+            lit[0] > resting[0] * 1.5,
+            "the glow block barely reacted: resting {resting:?} vs lit {lit:?}"
+        );
     }
 
     #[test]

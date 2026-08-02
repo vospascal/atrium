@@ -18,6 +18,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use voxel_rt::animation_clock::AnimationClock;
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
@@ -50,6 +51,7 @@ use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
 use voxel_rt::world_edit::VoxelEdit;
+use voxel_rt::world_event::{EventKey, EventSpec, WorldEventField, CHANNEL_PRESENCE};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 use voxel_rt::world_profile::CompiledWorldProfile;
 use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
@@ -85,6 +87,14 @@ const STUDIO_MAX_DISTANCE_METERS: f32 = 8.0;
 /// `forward x Y` basis is degenerate, which would collapse the frame.
 const STUDIO_MIN_PITCH_RADIANS: f32 = -1.5;
 const STUDIO_MAX_PITCH_RADIANS: f32 = 1.5;
+
+/// S3 — how far the player's presence reaches, world metres.
+///
+/// A per-entity reach rather than a global constant in the shader: a sensor
+/// intersects its own authored radius with this, so a large creature can be
+/// felt further away than a person without every material being re-authored.
+/// Generous, because a sensor that wants a tight radius simply says so.
+const PRESENCE_RADIUS_METERS: f32 = 12.0;
 
 /// S2 — the voxel the studio should be showing, or `None` to leave it alone.
 ///
@@ -322,6 +332,13 @@ struct AppState {
     /// A fresh material-attribute upload needs a short CAGI catch-up burst so
     /// world lighting follows Graph Studio edits instead of visibly trailing it.
     gi_settle_frames: u8,
+    /// S3 — the animation clock every oscillator and envelope reads. Advanced
+    /// once per frame by the scaled frame delta; see `animation_clock.rs` for
+    /// why it is a split epoch/remainder rather than one float.
+    animation_clock: AnimationClock,
+    /// S3 — what materials can react to. The active eye is raised into it each
+    /// frame as the presence entity; a mob system later raises alongside.
+    world_events: WorldEventField,
 }
 
 impl AppState {
@@ -540,6 +557,8 @@ impl AppState {
             saved_project_fingerprint: None,
             autosave_due_at: None,
             gi_settle_frames: 0,
+            animation_clock: AnimationClock::new(),
+            world_events: WorldEventField::new(),
         }
     }
 
@@ -567,7 +586,11 @@ impl AppState {
                 } else {
                     format!("Saved project to {}", project_path.display())
                 };
-                self.studio_assets.autosave_enabled = true;
+                // Saving does NOT arm autosave. It used to, which meant one
+                // manual save quietly turned on a writer that then overwrote
+                // the project files from memory every two idle seconds — and
+                // anything edited on disk meanwhile lost the race. Autosave is
+                // opt-in from the checkbox, and stays where the user put it.
                 self.studio_assets.recovery_available = false;
                 self.saved_project_fingerprint =
                     live_state_fingerprint(&self.material_table, &self.quality).ok();
@@ -756,10 +779,7 @@ impl AppState {
                         let _ = self.material_table.apply_graph_sample(
                             slot,
                             &program,
-                            MaterialSampleContext {
-                                position: [0.0; 3],
-                                normal: [0.0, 1.0, 0.0],
-                            },
+                            MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
                         );
                         self.material_panel.repack_gi_requested = true;
                     }
@@ -984,6 +1004,40 @@ impl AppState {
 
     /// The eye pose the active movement model produces — what the frame's rays,
     /// the edit ray and (at E8) the audio listener are built from.
+    /// Advance the S3 animation clock and refresh the world-event field.
+    ///
+    /// Deterministic mode is resolved HERE rather than at the uniform, because
+    /// it has two halves and both must happen: the clock is pinned AND the
+    /// event field is emptied. A frozen clock alone is not a stable frame — a
+    /// sensor's nearness still tracks the camera — which is exactly why the
+    /// speed lever and this one are separate.
+    fn advance_animation(&mut self, frame_time_seconds: f32) {
+        if self.quality.materials.animation_deterministic {
+            self.animation_clock.reset();
+            self.world_events.clear();
+            return;
+        }
+        self.animation_clock
+            .advance(frame_time_seconds, self.quality.materials.animation_speed);
+        let clock = self.animation_clock.sample();
+        // The active eye is an entity like any other. It raises a presence
+        // event and no sensor node ever learns which entity it was, so a mob
+        // system later raises alongside it without the renderer, the shader or
+        // any authored graph changing.
+        let pose = self.active_pose();
+        self.world_events.raise(
+            EventKey::CAMERA,
+            EventSpec {
+                position_meters: pose.position.to_array(),
+                radius_meters: PRESENCE_RADIUS_METERS,
+                channel: CHANNEL_PRESENCE,
+                strength: 1.0,
+            },
+            clock,
+        );
+        self.world_events.retire_expired(clock);
+    }
+
     fn active_pose(&self) -> CameraPose {
         match self.control_mode {
             ControlMode::Fly => self.fly_camera.pose(),
@@ -1579,6 +1633,7 @@ impl AppState {
         };
         self.sun_settings.advance_day_cycle(frame_time_seconds);
         self.environment_runtime.day_phase = self.sun_settings.day_phase;
+        self.advance_animation(frame_time_seconds);
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
         // imperceptible.
@@ -1587,6 +1642,8 @@ impl AppState {
             self.quality.gi_params(),
             self.quality.water_params(),
             self.quality.material_params(),
+            self.quality
+                .animation_params(self.animation_clock.sample(), self.world_events.len()),
         );
         // A moved sun invalidates the whole light volume (E4: the world is
         // static, the sun is not). Dragging the slider therefore re-floods every
@@ -1655,6 +1712,7 @@ impl AppState {
             &self.gpu_context.queue,
             &mut encoder,
             &camera_uniform,
+            &self.world_events.upload_array(),
             &target_view,
             self.frame_timers.as_ref(),
         );

@@ -30,6 +30,8 @@
 //   0  uniform  Camera        — camera.rs CameraUniform (80 bytes; position
 //                               in world meters, ray basis vectors, resolution)
 //   6  texture  output        — rgba8unorm storage texture, write-only
+//   16 uniform  world_events  — world_event.rs GpuWorldEvent[16] (48 bytes
+//                               each; positions in world meters)
 
 struct Camera {
     position: vec3<f32>,      // eye, world METERS
@@ -46,6 +48,36 @@ struct Camera {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(6) var output: texture_storage_2d<rgba8unorm, write>;
+
+// ---- S3: the world-event field -----------------------------------------------
+// Something that happened somewhere, at a time, with a reach. A material's
+// event sensor reads these; nothing else does. See src/world_event.rs for the
+// lifecycle — in particular why re-raising an event preserves its start stamp,
+// which is what lets an envelope exist without per-voxel history.
+//
+// Bound HERE and not in world.wgsl because the CAGI pass shares that file and
+// has neither a camera nor an event field.
+//
+// Three explicit 16-byte rows, matching the Rust `#[repr(C)]` struct: a WGSL
+// uniform-array element is 16-byte aligned and therefore strides 48, so a
+// 40-byte Rust struct would desynchronise from element 1 onward.
+struct WorldEvent {
+    position_meters: vec3<f32>,
+    radius_meters: f32,
+    started_epoch: f32,
+    started_remainder_seconds: f32,
+    ended_epoch: f32,           // meaningless while `open` is 1.0
+    ended_remainder_seconds: f32,
+    channel: u32,
+    strength: f32,              // [0, 1], multiplies the sensor's signal only
+    open: f32,                  // 1.0 ongoing, 0.0 closed
+    _pad_row2: f32,
+}
+
+// The literal 16 must equal MAX_WORLD_EVENTS in graph_prelude.wgsl and
+// src/world_event.rs. It cannot reference the const: the prelude is
+// concatenated after this file.
+@group(0) @binding(16) var<uniform> world_events: array<WorldEvent, 16>;
 
 // ---- E1/E1b: ambient occlusion levers ----------------------------------------
 // Ambient occlusion attenuates the hemisphere-ambient term only (never the
@@ -304,9 +336,16 @@ fn shadow_ray_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 // estimators reuse `voxel_occupied` — no forked index math.
 
 // Interleaved gradient noise (Jimenez 2014): a fixed per-pixel dither in
-// [0, 1) from pixel coordinates ONLY. Deterministic across frames — a still
-// camera shows an identical image every frame, matching the engine's
-// noiseless identity (no temporal accumulation, no per-frame randomness).
+// [0, 1) from pixel coordinates ONLY. Deterministic across frames, matching
+// the engine's noiseless identity: no temporal accumulation, no per-frame
+// randomness, and every value in a frame derived from that frame's inputs.
+//
+// S3 amended what "identical every frame" means, and the amendment is narrow.
+// Material animation reads a clock and a world-event field from the frame
+// uniform, so a still camera no longer implies a still image — but the pass
+// remains a pure function OF those inputs. Freeze them (the deterministic
+// animation lever pins the clock at zero and empties the event field) and
+// frame-to-frame stability returns exactly. Nothing here accumulates history.
 fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
 }
@@ -692,7 +731,7 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
             graph_base = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
         }
         albedo = srgb_decode(material_pattern_albedo_from_base(
-            hit.material, pattern, graph_base));
+            hit.material, pattern, graph_base, graph_material.animation));
     }
 
     var sun_visibility = 0.0;
@@ -727,7 +766,8 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     var emission = material_pattern_emission(hit.material, pattern) * lighting.gi_params.w;
     if (graph_material.graph_active) {
         emission = material_pattern_emission_from_base(
-            hit.material, pattern, graph_material.emission.rgb) * lighting.gi_params.w;
+            hit.material, pattern, graph_material.emission.rgb,
+            graph_material.animation) * lighting.gi_params.w;
     }
     return albedo * (sun + indirect) + emission;
 }

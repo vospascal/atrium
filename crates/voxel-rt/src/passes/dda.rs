@@ -14,12 +14,20 @@
 use crate::camera::CameraUniform;
 use crate::material_graph::MaterialGraphShaderSet;
 use crate::variants::RenderQuality;
+use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 
 use super::cagi::LightVolume;
 use super::world_bindings::WorldBindings;
 use super::ComputePipelineCache;
 
 const WORKGROUP_SIZE: u32 = 8;
+
+/// Where the S3 world-event field binds in group 0.
+///
+/// 16 is the first free index: `world.wgsl` owns 1-5, 7-10 and 15,
+/// `cagi_volume.wgsl` owns 11, 13 and 14, `cagi.wgsl` owns 12, and this pass
+/// already owns 0 (camera) and 6 (the output texture).
+const WORLD_EVENT_BINDING: u32 = 16;
 
 /// The shading pass's shader source: the shared traversal core, the shared
 /// light-volume half, E6's water optics, then the shading pass itself. Exposed so
@@ -37,6 +45,10 @@ pub const SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/cagi_volume.wgsl"),
     include_str!("../../shaders/water.wgsl"),
     include_str!("../../shaders/dda.wgsl"),
+    // The graph ABI and its shared helpers, then the dispatch the generated
+    // functions are injected into. The prelude comes AFTER dda.wgsl because it
+    // reads `world_events`, which that file declares.
+    include_str!("../../shaders/graph_prelude.wgsl"),
     include_str!("../../shaders/material_graph.wgsl"),
 );
 
@@ -79,6 +91,11 @@ pub struct DdaPass {
     /// [`LightVolume::front`] instead of rebuilding a bind group per frame.
     bind_groups: [wgpu::BindGroup; 2],
     camera_uniform_buffer: wgpu::Buffer,
+    /// S3 — the world events materials can sense. Lives on THIS pass rather
+    /// than in `WorldBindings` because the CAGI pass shares that layout and has
+    /// neither a camera nor an event field; putting it there would force a
+    /// binding the CA shader never reads.
+    world_event_buffer: wgpu::Buffer,
 }
 
 impl DdaPass {
@@ -122,12 +139,19 @@ impl DdaPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let world_event_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dda world events"),
+            size: (std::mem::size_of::<GpuWorldEvent>() * MAX_WORLD_EVENTS) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let bind_groups = create_bind_groups(
             device,
             &bind_group_layout,
             world_bindings,
             light_volume,
             &camera_uniform_buffer,
+            &world_event_buffer,
             output_view,
         );
 
@@ -136,6 +160,7 @@ impl DdaPass {
             bind_group_layout,
             bind_groups,
             camera_uniform_buffer,
+            world_event_buffer,
         }
     }
 
@@ -178,6 +203,7 @@ impl DdaPass {
             world_bindings,
             light_volume,
             &self.camera_uniform_buffer,
+            &self.world_event_buffer,
             output_view,
         );
     }
@@ -191,6 +217,7 @@ impl DdaPass {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         camera_uniform: &CameraUniform,
+        world_events: &[GpuWorldEvent; MAX_WORLD_EVENTS],
         light_volume_front: usize,
         output_width: u32,
         output_height: u32,
@@ -200,6 +227,14 @@ impl DdaPass {
             &self.camera_uniform_buffer,
             0,
             bytemuck::bytes_of(camera_uniform),
+        );
+        // Written unconditionally alongside the camera: 768 bytes, and the
+        // alternative is a dirty flag guarding a write smaller than the flag's
+        // own cache line.
+        queue.write_buffer(
+            &self.world_event_buffer,
+            0,
+            bytemuck::cast_slice(world_events.as_slice()),
         );
 
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -233,6 +268,16 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         count: None,
     });
     entries.push(wgpu::BindGroupLayoutEntry {
+        binding: WORLD_EVENT_BINDING,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    });
+    entries.push(wgpu::BindGroupLayoutEntry {
         binding: 6,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::StorageTexture {
@@ -254,6 +299,7 @@ fn create_bind_groups(
     world_bindings: &WorldBindings,
     light_volume: &LightVolume,
     camera_uniform_buffer: &wgpu::Buffer,
+    world_event_buffer: &wgpu::Buffer,
     output_view: &wgpu::TextureView,
 ) -> [wgpu::BindGroup; 2] {
     let bind_group = |volume_index: usize| {
@@ -262,6 +308,10 @@ fn create_bind_groups(
         entries.push(wgpu::BindGroupEntry {
             binding: 0,
             resource: camera_uniform_buffer.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: WORLD_EVENT_BINDING,
+            resource: world_event_buffer.as_entire_binding(),
         });
         entries.push(wgpu::BindGroupEntry {
             binding: 6,

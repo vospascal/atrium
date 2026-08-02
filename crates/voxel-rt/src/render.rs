@@ -28,6 +28,7 @@ use crate::passes::dda::DdaPass;
 use crate::passes::world_bindings::WorldBindings;
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
+use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 
 /// Format of the compute-written intermediate texture. Srgb formats cannot be
 /// storage textures, so the DDA pass writes display-ready (sRGB-encoded)
@@ -319,6 +320,7 @@ impl Renderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         camera_uniform: &CameraUniform,
+        world_events: &[GpuWorldEvent; MAX_WORLD_EVENTS],
         target_view: &wgpu::TextureView,
         frame_timers: Option<&GpuFrameTimers>,
     ) {
@@ -326,6 +328,7 @@ impl Renderer {
             queue,
             encoder,
             camera_uniform,
+            world_events,
             self.light_volume.front(),
             self.storage_width,
             self.storage_height,

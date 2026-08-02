@@ -403,6 +403,15 @@ pub enum MaterialNodeOperation {
     PositionComponent,
     NormalComponent,
     PassthroughScalar,
+    /// S3 — monotone seconds since start.
+    Time,
+    /// S3 — a periodic wave with an authored sync/de-sync source.
+    Oscillator,
+    /// S3 — "did something happen within X metres of me, and how long ago?"
+    EventSensor,
+    MultiplyScalar,
+    /// S3 — speed + angles to a velocity vector.
+    Direction,
     RerouteScalar,
     RerouteColor,
     RerouteVector,
@@ -1360,10 +1369,15 @@ const COLOR_STRENGTH_IN: &[SocketDeclarationStatic] = &[
         rate: EvaluationRate::PerSample,
         cardinality: Cardinality::OPTIONAL_SINGLE,
     },
+    // PER SAMPLE, not uniform. It was declared uniform when nothing in the
+    // catalog could vary within a material — but an oscillator or an event
+    // sensor is exactly a per-sample scalar, and "pulse this emitter" is the
+    // first thing anyone reaches for. A rate declaration only constrains what
+    // may FEED a socket, so widening it rejects nothing that used to be legal.
     SocketDeclarationStatic {
         key: "strength",
         value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
+        rate: EvaluationRate::PerSample,
         cardinality: Cardinality::OPTIONAL_SINGLE,
     },
 ];
@@ -1417,6 +1431,83 @@ const FACE_SCALAR_IN: &[SocketDeclarationStatic] = &[
         value_type: SocketType::Scalar,
         rate: EvaluationRate::Uniform,
         cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+];
+/// The event sensor's three outputs. All read from ONE winning event, so the
+/// three are mutually consistent — see the lowering for why an independent
+/// per-output maximum would report a combination that never existed.
+/// The oscillator's numeric controls, all connectable.
+/// Speed and angles, all connectable so a flow can itself be animated.
+const DIRECTION_IN: &[SocketDeclarationStatic] = &[
+    SocketDeclarationStatic {
+        key: "speed",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "azimuth_degrees",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "elevation_degrees",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+];
+const OSCILLATOR_IN: &[SocketDeclarationStatic] = &[
+    SocketDeclarationStatic {
+        key: "rate_hz",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "phase",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "duty",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "low",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "high",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+];
+const EVENT_SENSOR_OUT: &[SocketDeclarationStatic] = &[
+    SocketDeclarationStatic {
+        key: "signal",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::ANY,
+    },
+    SocketDeclarationStatic {
+        key: "nearness",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::ANY,
+    },
+    SocketDeclarationStatic {
+        key: "envelope",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::ANY,
     },
 ];
 const SCALAR_BINARY_IN: &[SocketDeclarationStatic] = &[
@@ -1517,6 +1608,20 @@ const PATTERN_LAYER_IN: &[SocketDeclarationStatic] = &[
         value_type: SocketType::MaskField,
         rate: EvaluationRate::PerSample,
         cardinality: Cardinality::REQUIRED_SINGLE,
+    },
+    // S3 — animation. Optional, and identity when unconnected, so every graph
+    // authored before S3 keeps its exact behaviour.
+    SocketDeclarationStatic {
+        key: "animation_gain",
+        value_type: SocketType::Scalar,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
+    },
+    SocketDeclarationStatic {
+        key: "drift_velocity",
+        value_type: SocketType::Vector3,
+        rate: EvaluationRate::PerSample,
+        cardinality: Cardinality::OPTIONAL_SINGLE,
     },
 ];
 const PATTERN_GENERATOR_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
@@ -1685,6 +1790,311 @@ const ADD_SCALAR_FIELDS: &[FieldDeclarationStatic] = &[
         WIDE,
         SIGNED,
         Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+];
+const MULTIPLY_SCALAR_FIELDS: &[FieldDeclarationStatic] = &[
+    field(
+        "a",
+        "A",
+        "First operand.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(1.0),
+        WIDE,
+        SIGNED,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "b",
+        "B",
+        "Second operand.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(1.0),
+        WIDE,
+        SIGNED,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+];
+/// The oscillator's shape. Every numeric control is an input socket, so a
+/// sensor can drive the rate or the range and "trigger a pulse" composes out of
+/// nodes rather than needing a mode on this one.
+/// Azimuth is measured around the vertical axis with 0 degrees along +X and 90
+/// along +Z; elevation is the angle above horizontal. That is the same meaning
+/// `SunSettings` already gives those words (`lighting.rs`) — reused so the
+/// codebase has ONE definition of an angle pair, not because a flow has
+/// anything to do with the sun.
+const DIRECTION_FIELDS: &[FieldDeclarationStatic] = &[
+    field(
+        "speed",
+        "Speed",
+        "Length of the resulting vector. For a pattern drift this is metres per \
+         second; a texel is 1 m / texels-per-voxel, so 0.25 m/s at 8 texels is \
+         two rows a second.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(0.25),
+        WIDE,
+        Some(NumericRange::new(0.0, 4.0)),
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "azimuth_degrees",
+        "Azimuth",
+        "Heading around the vertical axis: 0 points along +X, 90 along +Z. \
+         \n\nAT AN ELEVATION OF -90 OR +90 THIS DOES NOTHING: straight down has \
+         no horizontal part to steer, so the slider will appear dead. For a \
+         diagonal, back the elevation off the pole first — -45 splits the \
+         motion evenly between downward and sideways, and the azimuth then \
+         chooses which way sideways.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(0.0),
+        Some(NumericRange::new(-360.0, 360.0)),
+        Some(NumericRange::new(0.0, 360.0)),
+        Some(1.0),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "elevation_degrees",
+        "Elevation",
+        "Angle above horizontal. -90 is straight down a wall, 0 is level across \
+         a floor or a lake, and anything between is a diagonal. Note that -90 \
+         and +90 are poles where the azimuth stops having any effect.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(-90.0),
+        Some(NumericRange::new(-90.0, 90.0)),
+        Some(NumericRange::new(-90.0, 90.0)),
+        Some(1.0),
+        EMPTY_CHOICES,
+        false,
+    ),
+];
+const OSCILLATOR_FIELDS: &[FieldDeclarationStatic] = &[
+    field(
+        "enabled",
+        "Enabled",
+        "Turn the node off. A disabled oscillator is not merely held still — it \
+         is removed from the graph, so whatever it feeds falls back to that \
+         socket's own default, exactly as if the link were not there. That is \
+         why there is no 'value while disabled' setting: the neutral value \
+         belongs to the consumer, and a layer's gain, an emission strength and \
+         a mix factor do not share one.",
+        FieldTarget::Property,
+        FieldDefault::Boolean(true),
+        NONE,
+        NONE,
+        None,
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "wave",
+        "Wave",
+        "Waveform. `pulse` is the interval/blink shape (see Duty); `flicker` is \
+         sample-and-hold — it SNAPS to a new random level each step, which is what \
+         reads as a failing lamp rather than a wobbly sine. There is no `square`: \
+         that is Pulse at duty 0.5.",
+        FieldTarget::Property,
+        FieldDefault::Text("sine"),
+        NONE,
+        NONE,
+        None,
+        &["sine", "triangle", "saw", "pulse", "flicker"],
+        false,
+    ),
+    field(
+        "rate_hz",
+        "Rate (Hz)",
+        "Cycles per second.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(1.0),
+        Some(NumericRange::new(0.01, 20.0)),
+        Some(NumericRange::new(0.05, 4.0)),
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "phase",
+        "Phase",
+        "Offset in turns, before the sync offset is added.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(0.0),
+        UNIT,
+        UNIT,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "duty",
+        "Duty",
+        "Pulse only: the fraction of each cycle spent high. A low duty gives long \
+         dark and a short flash — the fade-in-intervals control.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(0.5),
+        UNIT,
+        UNIT,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "low",
+        "Low",
+        "Output at the bottom of the wave. Lands directly on an amount or an \
+         emission strength without a remap.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(0.0),
+        WIDE,
+        SIGNED,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "high",
+        "High",
+        "Output at the top of the wave.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(1.0),
+        WIDE,
+        SIGNED,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "sync",
+        "Sync",
+        "Whether blocks of this material beat together. `global` is one heartbeat \
+         across the whole material; `per_voxel` offsets each authored one-metre \
+         block; `per_face` offsets each face of each block; `per_material` uses \
+         Seed alone, so two materials can be deliberately out of step.",
+        FieldTarget::Property,
+        FieldDefault::Text("global"),
+        NONE,
+        NONE,
+        None,
+        &["global", "per_voxel", "per_face", "per_material"],
+        false,
+    ),
+    field(
+        "seed",
+        "Seed",
+        "The per-material offset, and the flicker sequence.",
+        FieldTarget::Property,
+        FieldDefault::Integer(0),
+        Some(NumericRange::new(0.0, 65535.0)),
+        Some(NumericRange::new(0.0, 64.0)),
+        Some(1.0),
+        EMPTY_CHOICES,
+        false,
+    ),
+];
+/// The event sensor's configuration.
+///
+/// Every field is a PROPERTY rather than an input socket, and deliberately: the
+/// hold + release budget is validated at compile time against
+/// `MAX_EVENT_LIFETIME_SECONDS`, and a socket-driven value could not be checked
+/// there. Authoring catches an over-long envelope; the runtime never has to.
+const EVENT_SENSOR_FIELDS: &[FieldDeclarationStatic] = &[
+    field(
+        "channel",
+        "Channel",
+        "Which kind of event to listen for. 0 is presence — an entity simply being \
+         somewhere. The player is one entity; a mob is another, and this node \
+         cannot tell them apart.",
+        FieldTarget::Property,
+        FieldDefault::Integer(0),
+        Some(NumericRange::new(0.0, 255.0)),
+        Some(NumericRange::new(0.0, 8.0)),
+        Some(1.0),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "radius_meters",
+        "Radius (m)",
+        "Detection radius, intersected with each event's own reach — so a large \
+         creature is felt further away without re-authoring the material.",
+        FieldTarget::Property,
+        FieldDefault::Scalar(6.0),
+        Some(NumericRange::new(0.0, 256.0)),
+        Some(NumericRange::new(0.5, 32.0)),
+        Some(0.1),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "falloff",
+        "Falloff",
+        "How nearness falls off across the radius.",
+        FieldTarget::Property,
+        FieldDefault::Text("smoothstep"),
+        NONE,
+        NONE,
+        None,
+        &["smoothstep", "linear", "inverse_square", "step"],
+        false,
+    ),
+    field(
+        "attack_seconds",
+        "Attack (s)",
+        "Ramp up after the event starts. This is the part a distance-only sensor \
+         cannot do: it runs off the event's timestamp, not off how far away the \
+         entity is, so standing still holds the value steady instead of freezing \
+         it mid-ramp.",
+        FieldTarget::Property,
+        FieldDefault::Scalar(0.25),
+        Some(NumericRange::new(0.0, 8.0)),
+        Some(NumericRange::new(0.0, 2.0)),
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "hold_seconds",
+        "Hold (s)",
+        "Stay at full for this long AFTER the event closes, before releasing. \
+         Hold + Release must not exceed the 8 s event lifetime, or the event is \
+         reclaimed while the sensor is still fading — the graph reports that.",
+        FieldTarget::Property,
+        FieldDefault::Scalar(0.0),
+        Some(NumericRange::new(0.0, 8.0)),
+        Some(NumericRange::new(0.0, 4.0)),
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "release_seconds",
+        "Release (s)",
+        "Ramp down once the hold expires. Capped with Hold at the event lifetime.",
+        FieldTarget::Property,
+        FieldDefault::Scalar(1.0),
+        Some(NumericRange::new(0.0, 8.0)),
+        Some(NumericRange::new(0.0, 4.0)),
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "invert",
+        "Invert",
+        "Fire when NOTHING is near. Affects Signal only — Nearness and Envelope \
+         keep their literal meanings so they stay usable as diagnostics.",
+        FieldTarget::Property,
+        FieldDefault::Boolean(false),
+        NONE,
+        NONE,
+        None,
         EMPTY_CHOICES,
         false,
     ),
@@ -2333,6 +2743,37 @@ const PATTERN_SPECKLE_FIELDS: &[FieldDeclarationStatic] = &[
 ];
 const PATTERN_LAYER_FIELDS: &[FieldDeclarationStatic] = &[
     field(
+        "animation_gain",
+        "Animation Gain",
+        "Multiplies this layer's Amount. Wire an oscillator here to blink one \
+         noise layer on its own without touching the base surface. It is a \
+         SEPARATE value from Amount rather than a second way to set it, so \
+         leaving it unconnected is plainly the identity.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(1.0),
+        Some(NumericRange::new(0.0, 16.0)),
+        UNIT,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "drift_velocity",
+        "Drift (m/s)",
+        "How fast this layer's pattern travels, in metres per second, world \
+         space. A VELOCITY, not an offset: the shader applies the clock, so a \
+         constant vector wired straight in makes the pattern flow. This is what \
+         makes lava creep. For a flow that itself varies, scale a vector by an \
+         oscillator.",
+        FieldTarget::InputSocket,
+        FieldDefault::Vector3([0.0; 3]),
+        NONE,
+        NONE,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
         "enabled",
         "Enabled",
         "Include this layer in the material stack.",
@@ -2692,6 +3133,77 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         PATTERN_LAYER_IN,
         MATERIAL_SURFACE_OUT,
         PATTERN_LAYER_FIELDS
+    ),
+    node!(
+        "material.multiply_scalar",
+        NodeOperation::Material(MaterialNodeOperation::MultiplyScalar),
+        "Multiply",
+        "Multiplies two scalar values. This is how a trigger GATES something: \
+         an event sensor's signal times an oscillator is a pulse that only runs \
+         while the sensor is firing.",
+        NodeCategory::Utilities,
+        NodePreview::Value,
+        MATERIAL,
+        SCALAR_BINARY_IN,
+        SCALAR_PER_SAMPLE_OUT,
+        MULTIPLY_SCALAR_FIELDS
+    ),
+    node!(
+        "material.direction",
+        NodeOperation::Material(MaterialNodeOperation::Direction),
+        "Direction",
+        "Speed and two angles to a velocity vector — the authoring form for a \
+         pattern drift, where dialling an angle beats editing three components. \
+         Every input is connectable, so an oscillator on the azimuth swirls the \
+         flow and one on the speed makes it surge.",
+        NodeCategory::Coordinates,
+        NodePreview::Value,
+        MATERIAL,
+        DIRECTION_IN,
+        VECTOR_PER_SAMPLE_OUT,
+        DIRECTION_FIELDS
+    ),
+    node!(
+        "material.time",
+        NodeOperation::Material(MaterialNodeOperation::Time),
+        "Time",
+        "Monotone seconds since the session started. Never steps backwards. \
+         Pattern drift does not need this — a layer's drift socket is a VELOCITY \
+         and applies the clock itself.",
+        NodeCategory::Animation,
+        NodePreview::Value,
+        MATERIAL,
+        &[],
+        SCALAR_PER_SAMPLE_OUT,
+        &[]
+    ),
+    node!(
+        "material.oscillator",
+        NodeOperation::Material(MaterialNodeOperation::Oscillator),
+        "Oscillator",
+        "A periodic wave between Low and High. Drive an emission strength for a \
+         pulsing block, a mix factor to travel between two colours, or a pattern \
+         layer's gain to blink one noise layer on its own.",
+        NodeCategory::Animation,
+        NodePreview::Value,
+        MATERIAL,
+        OSCILLATOR_IN,
+        SCALAR_PER_SAMPLE_OUT,
+        OSCILLATOR_FIELDS
+    ),
+    node!(
+        "material.event_sensor",
+        NodeOperation::Material(MaterialNodeOperation::EventSensor),
+        "Event Sensor",
+        "Did something happen within Radius of me, and how long ago? Signal is \
+         falloff x envelope x strength and is what most graphs use; Nearness and \
+         Envelope expose the two halves separately.",
+        NodeCategory::Animation,
+        NodePreview::Value,
+        MATERIAL,
+        &[],
+        EVENT_SENSOR_OUT,
+        EVENT_SENSOR_FIELDS
     ),
     node!(
         "material.remap_scalar",

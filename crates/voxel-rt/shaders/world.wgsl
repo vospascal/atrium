@@ -108,6 +108,40 @@ struct BrickmapMeta {
     _pad7: u32,
 }
 
+// S3 — the per-layer animation values a material graph supplies to the pattern
+// stack. One entry per pattern slot, in surface-chain order.
+//
+// It lives HERE, in the first concatenated file, so both pattern.wgsl and
+// graph_prelude.wgsl can name it without depending on out-of-order module-scope
+// resolution. The values ride in registers rather than the material row, so
+// GpuPatternLayer stays 32 bytes and the table upload is unchanged.
+struct PatternAnimation {
+    // Multiplies each slot's authored amount. The authored `amount` keeps its
+    // single meaning: this is a SEPARATE gain, so an unconnected socket is
+    // plainly the identity rather than a second copy of the same number.
+    gain: vec4<f32>,
+    // Metres per second, world space, per slot. A velocity and not an offset —
+    // the shader applies the clock — so a constant vector wired straight in is
+    // a flow rather than a static displacement that merely looks like one.
+    drift_velocity: array<vec4<f32>, 4>,
+}
+
+fn pattern_animation_identity() -> PatternAnimation {
+    return PatternAnimation(
+        vec4<f32>(1.0, 1.0, 1.0, 1.0),
+        array<vec4<f32>, 4>(
+            vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)
+        ),
+    );
+}
+
+fn pattern_animation_gain(animation: PatternAnimation, slot: u32) -> f32 {
+    if (slot == 0u) { return animation.gain.x; }
+    if (slot == 1u) { return animation.gain.y; }
+    if (slot == 2u) { return animation.gain.z; }
+    return animation.gain.w;
+}
+
 struct Lighting {
     sun_direction: vec3<f32>,       // unit vector, surface -> sun
     _pad0: f32,
@@ -154,6 +188,17 @@ struct Lighting {
     sky_zenith: vec4<f32>,     // rgb radiance, w star rotation
     sky_horizon: vec4<f32>,    // rgb radiance, w moonlight
     material_params: vec4<f32>, // x/y = absolute pattern fade start/end, metres
+    // The S3 animation clock (lighting.rs AnimationParams). Split into whole
+    // epochs and a remainder inside one, rather than one monotonic second
+    // count: a single f32 loses the fraction an oscillator needs within hours
+    // of uptime, and any wrapped single clock steps every rate that is not
+    // harmonic with the wrap. src/animation_clock.rs carries the argument.
+    //   x = seconds within the current epoch, [0, ANIMATION_EPOCH_SECONDS)
+    //   y = whole epochs elapsed
+    //   z = live world-event count — sensors loop to THIS, never to the
+    //       array capacity, so a world with no entities costs one comparison
+    //   w = reserved (the wind arc's global flow vector)
+    animation_params: vec4<f32>,
 }
 
 @group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;

@@ -157,7 +157,7 @@ impl MaterialTable {
         &mut self,
         material: u8,
         program: &MaterialGraphProgram,
-        context: MaterialSampleContext,
+        context: MaterialSampleContext<'_>,
     ) -> bool {
         let Some(row) = self.rows.get_mut(material as usize) else {
             return false;
@@ -288,10 +288,7 @@ mod tests {
         assert!(table.apply_graph_sample(
             stone,
             &program,
-            crate::material_graph::MaterialSampleContext {
-                position: [0.0; 3],
-                normal: [0.0, 1.0, 0.0],
-            },
+            crate::material_graph::MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
         ));
         assert_eq!(table.row(stone).unwrap().albedo, [0.9, 0.1, 0.2]);
         assert_eq!(table.row(stone).unwrap().roughness, 0.2);

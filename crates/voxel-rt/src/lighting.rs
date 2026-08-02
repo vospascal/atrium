@@ -57,6 +57,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 160    | `sky_zenith`          | `vec4<f32>` | zenith radiance + star rotation |
 /// | 176    | `sky_horizon`         | `vec4<f32>` | horizon radiance + moonlight |
 /// | 192    | `material_params`     | `vec4<f32>` | runtime material knobs |
+/// | 208    | `animation_params`    | `vec4<f32>` | the animation clock — see [`AnimationParams`] |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -79,6 +80,8 @@ pub struct LightingUniform {
     pub sky_horizon: [f32; 4],
     /// x = absolute pattern fade start distance in metres.
     pub material_params: [f32; 4],
+    /// The animation clock and event count — see [`AnimationParams`].
+    pub animation_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -164,6 +167,38 @@ impl MaterialParams {
             self.pattern_fade_end_meters.max(0.0),
             0.0,
             0.0,
+        ]
+    }
+}
+
+/// The animation clock as the shader receives it, packed into
+/// `Lighting.animation_params` (S3).
+///
+/// The clock is split into whole epochs and a remainder rather than shipped as
+/// one monotonic float, because a single f32 second count loses the fraction
+/// an oscillator needs within hours of uptime, and any wrapped single clock
+/// steps every non-harmonic rate. See [`crate::animation_clock`] for the full
+/// argument — this struct only carries the result.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AnimationParams {
+    /// `x` — seconds within the current epoch, `[0, EPOCH_SECONDS)`.
+    pub remainder_seconds: f32,
+    /// `y` — whole epochs elapsed, integer-exact to 2^24.
+    pub epoch: f32,
+    /// `z` — how many world events are live. Sensors loop to this, never to
+    /// the array capacity, so an empty world costs one comparison.
+    pub event_count: f32,
+    /// `w` — reserved for a global flow vector (the wind arc).
+    pub reserved_flow: f32,
+}
+
+impl AnimationParams {
+    fn to_array(self) -> [f32; 4] {
+        [
+            self.remainder_seconds,
+            self.epoch,
+            self.event_count.max(0.0),
+            self.reserved_flow,
         ]
     }
 }
@@ -445,6 +480,7 @@ impl SunSettings {
         gi_params: GiParams,
         water_params: WaterParams,
         material_params: MaterialParams,
+        animation_params: AnimationParams,
     ) -> LightingUniform {
         let celestial = self.celestial_state();
         LightingUniform {
@@ -497,6 +533,7 @@ impl SunSettings {
                 celestial.moonlight,
             ],
             material_params: material_params.to_array(),
+            animation_params: animation_params.to_array(),
         }
     }
 }
@@ -514,6 +551,16 @@ mod tests {
     /// The same, for a chosen sun — so a test about the sun's own knobs shares this
     /// construction rather than writing a second one that could drift from it.
     fn probe_uniform_for(sun: SunSettings, shadow_penumbra_scale: f32) -> LightingUniform {
+        probe_uniform_full(sun, shadow_penumbra_scale, AnimationParams::default())
+    }
+
+    /// The one construction every probe funnels through, so a new vector cannot
+    /// be added to the uniform without every existing component test seeing it.
+    fn probe_uniform_full(
+        sun: SunSettings,
+        shadow_penumbra_scale: f32,
+        animation_params: AnimationParams,
+    ) -> LightingUniform {
         sun.lighting_uniform(
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
@@ -538,13 +585,45 @@ mod tests {
                 pattern_fade_start_meters: crate::pattern::PATTERN_FADE_START_METERS,
                 pattern_fade_end_meters: crate::pattern::PATTERN_FADE_END_METERS,
             },
+            animation_params,
         )
     }
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 208);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 224);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
+        assert_eq!(std::mem::size_of::<LightingUniform>() % 16, 0);
+    }
+
+    /// The clock must land in its own slots: swapping epoch and remainder
+    /// would make every oscillator jump once a second instead of once an epoch.
+    #[test]
+    fn animation_params_keep_their_vector_components() {
+        let uniform = probe_uniform(115.0);
+        assert_eq!(uniform.animation_params, [0.0, 0.0, 0.0, 0.0]);
+
+        let animated = probe_uniform_full(
+            SunSettings::default(),
+            115.0,
+            AnimationParams {
+                remainder_seconds: 12.5,
+                epoch: 3.0,
+                event_count: 2.0,
+                reserved_flow: 0.0,
+            },
+        );
+        assert_eq!(animated.animation_params, [12.5, 3.0, 2.0, 0.0]);
+        // ...and the material knobs must be untouched by the new vector.
+        assert_eq!(
+            animated.material_params,
+            [
+                crate::pattern::PATTERN_FADE_START_METERS,
+                crate::pattern::PATTERN_FADE_END_METERS,
+                0.0,
+                0.0
+            ]
+        );
     }
 
     /// The E4 knobs must land in their own slots of `gi_params` — swapping two

@@ -729,6 +729,30 @@ pub struct PatternSample {
     pub distance_meters: f32,
 }
 
+/// The per-layer animation values a material graph supplies, as the reference
+/// evaluator takes them. Mirrors one slot of `PatternAnimation` in
+/// `shaders/world.wgsl` plus the clock the shader reads from its uniform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerAnimationSample {
+    /// Multiplies the layer's authored `amount`. Separate from it, so 1.0 is
+    /// plainly the identity and the authored number keeps its one meaning.
+    pub gain: f32,
+    /// Metres per second, world space.
+    pub drift_velocity: [f32; 3],
+    /// Monotone seconds, from the animation clock.
+    pub time_seconds: f32,
+}
+
+impl LayerAnimationSample {
+    /// The un-animated case: unit gain, no drift. What every pre-S3 call site
+    /// means, and what the identity of the whole feature is.
+    pub const STILL: Self = Self {
+        gain: 1.0,
+        drift_velocity: [0.0; 3],
+        time_seconds: 0.0,
+    };
+}
+
 /// The integer hash both sides use: Chris Wellons' `lowbias32`.
 ///
 /// Chosen because it is three multiplies and three shifts with no lookup, has
@@ -870,7 +894,7 @@ impl PatternLayer {
     /// `Voxel` quantises to the voxel centre, which is what makes the generator return
     /// one value for the whole voxel without any generator knowing about voxels — and
     /// is also why the texel snap is a no-op there, a centre already being one point.
-    fn coordinate(&self, sample: &PatternSample) -> [f32; 3] {
+    fn coordinate_animated(&self, sample: &PatternSample, drift_meters: [f32; 3]) -> [f32; 3] {
         let period = self.period_meters.max(MINIMUM_PERIOD_METERS);
         let detail_per_world = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
         let world_voxel = [
@@ -878,8 +902,13 @@ impl PatternLayer {
             sample.voxel[1].div_euclid(detail_per_world),
             sample.voxel[2].div_euclid(detail_per_world),
         ];
+        let drifted = [
+            sample.world_meters[0] - drift_meters[0],
+            sample.world_meters[1] - drift_meters[1],
+            sample.world_meters[2] - drift_meters[2],
+        ];
         let meters = match self.frame {
-            PatternFrame::World => sample.world_meters,
+            PatternFrame::World => drifted,
             PatternFrame::Voxel => [
                 (world_voxel[0] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
                 (world_voxel[1] as f32 + 0.5) * WORLD_VOXEL_SIZE_METERS,
@@ -887,10 +916,15 @@ impl PatternLayer {
             ],
             // Local to the containing one-metre block. DDA's 0.125 m cell is an
             // implementation detail here, not a material-pattern boundary.
+            // Drift applies HERE too, and it has to: lava is face-framed, so a
+            // face frame that ignored drift would leave the one material this
+            // feature exists for perfectly still. The block origin is not
+            // re-derived from the drifted position, so the coordinate simply
+            // scrolls out of the 0..1 tile rather than wrapping at the edge.
             PatternFrame::Face => [
-                sample.world_meters[0] - world_voxel[0] as f32 * WORLD_VOXEL_SIZE_METERS,
-                sample.world_meters[1] - world_voxel[1] as f32 * WORLD_VOXEL_SIZE_METERS,
-                sample.world_meters[2] - world_voxel[2] as f32 * WORLD_VOXEL_SIZE_METERS,
+                drifted[0] - world_voxel[0] as f32 * WORLD_VOXEL_SIZE_METERS,
+                drifted[1] - world_voxel[1] as f32 * WORLD_VOXEL_SIZE_METERS,
+                drifted[2] - world_voxel[2] as f32 * WORLD_VOXEL_SIZE_METERS,
             ],
         };
         let snapped = self.snap_to_texels(meters);
@@ -924,10 +958,45 @@ impl PatternLayer {
         ]
     }
 
+    /// How far this layer's pattern has drifted, in metres.
+    ///
+    /// Mirrors `pattern_drift_meters` in `shaders/pattern.wgsl`.
+    ///
+    /// The offset is QUANTISED TO THE TEXEL GRID, and there is deliberately no
+    /// opt-out. The snap is applied to the coordinate AFTER the drift is
+    /// subtracted, so the sampled value steps a whole texel at a time whether
+    /// or not the offset itself was quantised — an un-quantised offset produces
+    /// byte-identical output, and only costs the grid its alignment to world
+    /// voxel boundaries. Genuinely continuous motion is what
+    /// `texels_per_voxel = 0` already means: no texel grid, no snap, and drift
+    /// falls through untouched by the branch above.
+    pub fn drift_meters(&self, animation: LayerAnimationSample) -> [f32; 3] {
+        if animation.drift_velocity == [0.0; 3] {
+            return [0.0; 3];
+        }
+        let offset = animation
+            .drift_velocity
+            .map(|axis| axis * animation.time_seconds);
+        if self.texels_per_voxel == 0 {
+            return offset;
+        }
+        let texel = WORLD_VOXEL_SIZE_METERS / self.texels_per_voxel as f32;
+        offset.map(|axis| (axis / texel).floor() * texel)
+    }
+
     /// The generator's raw value at this sample, `0.0..=1.0`, before fade, amount,
     /// face mask or blend.
     pub fn generator_value(&self, sample: &PatternSample) -> f32 {
-        let point = self.coordinate(sample);
+        self.generator_value_animated(sample, LayerAnimationSample::STILL)
+    }
+
+    /// The same, with the layer's pattern drifted by an animation sample.
+    pub fn generator_value_animated(
+        &self,
+        sample: &PatternSample,
+        animation: LayerAnimationSample,
+    ) -> f32 {
+        let point = self.coordinate_animated(sample, self.drift_meters(animation));
         let salt = self.variation_salt(sample);
         match self.generator {
             PatternGenerator::Flat => hash_cell(
@@ -1001,10 +1070,31 @@ impl PatternLayer {
         fade_start_meters: f32,
         fade_end_meters: f32,
     ) -> f32 {
+        self.strength_animated(
+            sample,
+            fade_start_meters,
+            fade_end_meters,
+            LayerAnimationSample::STILL,
+        )
+    }
+
+    /// The same, scaled by a graph's animation gain.
+    ///
+    /// The gain MULTIPLIES the authored amount rather than replacing it, and is
+    /// a separate value from it: an unconnected socket is 1.0, so nothing is
+    /// applied twice and the authored number keeps its single meaning.
+    pub fn strength_animated(
+        &self,
+        sample: &PatternSample,
+        fade_start_meters: f32,
+        fade_end_meters: f32,
+        animation: LayerAnimationSample,
+    ) -> f32 {
         if !self.faces.includes(sample.axis, sample.axis_sign) {
             return 0.0;
         }
         self.amount.clamp(0.0, 1.0)
+            * animation.gain.max(0.0)
             * self.fade(sample.distance_meters, fade_start_meters, fade_end_meters)
     }
 
@@ -1016,11 +1106,30 @@ impl PatternLayer {
         fade_start_meters: f32,
         fade_end_meters: f32,
     ) -> [f32; 3] {
-        let strength = self.strength(sample, fade_start_meters, fade_end_meters);
+        self.apply_color_animated(
+            base,
+            sample,
+            fade_start_meters,
+            fade_end_meters,
+            LayerAnimationSample::STILL,
+        )
+    }
+
+    /// The same, with a graph's animation gain and drift.
+    pub fn apply_color_animated(
+        &self,
+        base: [f32; 3],
+        sample: &PatternSample,
+        fade_start_meters: f32,
+        fade_end_meters: f32,
+        animation: LayerAnimationSample,
+    ) -> [f32; 3] {
+        let strength =
+            self.strength_animated(sample, fade_start_meters, fade_end_meters, animation);
         if strength <= 0.0 {
             return base;
         }
-        let value = self.generator_value(sample);
+        let value = self.generator_value_animated(sample, animation);
         let target = self.target_value();
         let mut out = base;
         for channel in 0..3 {
@@ -1048,11 +1157,30 @@ impl PatternLayer {
         fade_start_meters: f32,
         fade_end_meters: f32,
     ) -> f32 {
-        let strength = self.strength(sample, fade_start_meters, fade_end_meters);
+        self.apply_scalar_animated(
+            base,
+            sample,
+            fade_start_meters,
+            fade_end_meters,
+            LayerAnimationSample::STILL,
+        )
+    }
+
+    /// The same, with a graph's animation gain and drift.
+    pub fn apply_scalar_animated(
+        &self,
+        base: f32,
+        sample: &PatternSample,
+        fade_start_meters: f32,
+        fade_end_meters: f32,
+        animation: LayerAnimationSample,
+    ) -> f32 {
+        let strength =
+            self.strength_animated(sample, fade_start_meters, fade_end_meters, animation);
         if strength <= 0.0 {
             return base;
         }
-        let value = self.generator_value(sample);
+        let value = self.generator_value_animated(sample, animation);
         let target = self.target_value();
         match self.blend {
             PatternBlend::Multiply => base * (1.0 - strength * (1.0 - value)),
@@ -1111,6 +1239,372 @@ pub fn apply_stack_scalar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- S3: animation -------------------------------------------------------
+
+    fn drift_sample(world_meters: [f32; 3]) -> PatternSample {
+        PatternSample {
+            world_meters,
+            voxel: [0, 0, 0],
+            axis: 1,
+            axis_sign: -1.0,
+            distance_meters: 0.0,
+        }
+    }
+
+    /// The parity claim, stated as an equality rather than an eyeball: after one
+    /// second at one texel per second, the drifted pattern equals the un-drifted
+    /// pattern sampled one texel back.
+    #[test]
+    fn drifting_one_texel_per_second_shifts_the_pattern_by_exactly_one_texel() {
+        let layer = PatternLayer {
+            texels_per_voxel: 8,
+            frame: PatternFrame::World,
+            ..PatternLayer::IDENTITY
+        };
+        let texel = WORLD_VOXEL_SIZE_METERS / 8.0;
+        let animation = LayerAnimationSample {
+            gain: 1.0,
+            drift_velocity: [texel, 0.0, 0.0],
+            time_seconds: 1.0,
+        };
+        for step in 0..12 {
+            let point = [0.3 + step as f32 * texel * 0.37, 0.5, 0.75];
+            let drifted = layer.generator_value_animated(&drift_sample(point), animation);
+            let shifted =
+                layer.generator_value(&drift_sample([point[0] - texel, point[1], point[2]]));
+            assert!(
+                (drifted - shifted).abs() < 1e-6,
+                "drifted {drifted} != shifted {shifted} at {point:?}"
+            );
+        }
+    }
+
+    /// Drift MARCHES in whole texels, and `texels_per_voxel = 0` is how you ask
+    /// for continuous motion instead.
+    ///
+    /// There is no `smooth_drift` flag, and there was one until this test was
+    /// written: `pattern_coordinate` snaps AFTER subtracting the offset, so an
+    /// un-quantised offset produced byte-identical output. The flag cost a
+    /// packed bit, a serde field and a shader branch to change nothing.
+    #[test]
+    fn drift_steps_by_whole_texels_and_a_continuous_field_moves_smoothly() {
+        let texel = WORLD_VOXEL_SIZE_METERS / 8.0;
+        let sample = drift_sample([12.3, 4.5, 6.7]);
+        let velocity = [texel, 0.0, 0.0];
+        let over_two_seconds = |layer: &PatternLayer| {
+            let values: Vec<f32> = (0..=40)
+                .map(|step| {
+                    layer.generator_value_animated(
+                        &sample,
+                        LayerAnimationSample {
+                            gain: 1.0,
+                            drift_velocity: velocity,
+                            time_seconds: step as f32 * 0.05,
+                        },
+                    )
+                })
+                .collect();
+            let mut distinct = values.clone();
+            distinct.dedup();
+            distinct.len()
+        };
+
+        let snapped = PatternLayer {
+            texels_per_voxel: 8,
+            frame: PatternFrame::World,
+            ..PatternLayer::IDENTITY
+        };
+        // Two seconds at one texel per second: a handful of steps, not a ramp.
+        let steps = over_two_seconds(&snapped);
+        assert!(
+            (2..=4).contains(&steps),
+            "expected a few whole-texel steps, got {steps} distinct values"
+        );
+
+        // The continuous field has no grid to snap to, so it moves every frame.
+        let continuous = PatternLayer {
+            texels_per_voxel: 0,
+            ..snapped
+        };
+        assert_eq!(
+            over_two_seconds(&continuous),
+            41,
+            "a continuous field must move on every sample"
+        );
+
+        // And the quantised offset is exactly a texel multiple.
+        let quarter = LayerAnimationSample {
+            gain: 1.0,
+            drift_velocity: velocity,
+            time_seconds: 0.25,
+        };
+        assert_eq!(snapped.drift_meters(quarter), [0.0; 3]);
+        let full = LayerAnimationSample {
+            time_seconds: 1.0,
+            ..quarter
+        };
+        assert!((snapped.drift_meters(full)[0] - texel).abs() < 1e-7);
+    }
+
+    /// The lava contract, as an equality rather than an eyeball: after one
+    /// texel of downward drift, every row holds the value the row ABOVE it held
+    /// before. The texture is not regenerated, it is translated — which is what
+    /// "keeping the same texture, just getting a new row" means.
+    #[test]
+    fn downward_drift_shifts_every_row_down_by_exactly_one() {
+        let texel = WORLD_VOXEL_SIZE_METERS / 8.0;
+        let layer = PatternLayer {
+            frame: PatternFrame::World,
+            texels_per_voxel: 8,
+            period_meters: 0.25,
+            ..PatternLayer::IDENTITY
+        };
+        let at = |height: f32, seconds: f32| {
+            layer.generator_value_animated(
+                &PatternSample {
+                    world_meters: [3.3, height, 7.7],
+                    voxel: [26, (height / WORLD_VOXEL_SIZE_METERS * 8.0) as i32, 61],
+                    axis: 0,
+                    axis_sign: 1.0,
+                    distance_meters: 0.0,
+                },
+                LayerAnimationSample {
+                    gain: 1.0,
+                    // 0.25 m/s downward: exactly two texel rows per second, so
+                    // one row per half second.
+                    drift_velocity: [0.0, -0.25, 0.0],
+                    time_seconds: seconds,
+                },
+            )
+        };
+        // A column of rows, one step apart in time and one texel apart in space.
+        let mut moved = 0;
+        for row in 0..12 {
+            let height = 4.0 + row as f32 * texel;
+            assert!(
+                (at(height, 0.5) - at(height + texel, 0.0)).abs() < 1e-6,
+                "row at {height} did not inherit the row above it"
+            );
+            if (at(height, 0.5) - at(height, 0.0)).abs() > 1e-6 {
+                moved += 1;
+            }
+        }
+        // ...and it genuinely moved. Without this the equality above would hold
+        // just as well for a pattern that never changes.
+        assert!(
+            moved >= 8,
+            "only {moved} of 12 rows changed — the pattern is barely moving"
+        );
+    }
+
+    /// ...and the row scrolling in comes from the NEIGHBOURING block, not from
+    /// a fresh per-block tile.
+    ///
+    /// This is what the world frame buys and the face frame cannot: the face
+    /// frame is voxel-local and salts every face differently, so each block
+    /// draws an unrelated pattern and a flow crossing a block boundary would
+    /// visibly reset.
+    #[test]
+    fn the_world_frame_is_continuous_across_a_block_boundary() {
+        let texel = WORLD_VOXEL_SIZE_METERS / 8.0;
+        let world = PatternLayer {
+            frame: PatternFrame::World,
+            texels_per_voxel: 8,
+            period_meters: 0.25,
+            ..PatternLayer::IDENTITY
+        };
+        let face = PatternLayer {
+            frame: PatternFrame::Face,
+            vary_per_face: true,
+            ..world
+        };
+        // The same world position, reached as the bottom row of the upper block
+        // and as the top row of the lower one.
+        let boundary = 5.0;
+        let sample_in_block = |layer: &PatternLayer, block_y: i32, height: f32| {
+            layer.generator_value(&PatternSample {
+                world_meters: [3.3, height, 7.7],
+                voxel: [26, block_y * 8, 61],
+                axis: 0,
+                axis_sign: 1.0,
+                distance_meters: 0.0,
+            })
+        };
+        // World frame: the block index does not enter the coordinate at all, so
+        // the field is one field.
+        assert_eq!(
+            sample_in_block(&world, 4, boundary - texel * 0.5),
+            sample_in_block(&world, 5, boundary - texel * 0.5),
+        );
+        // Face frame: the same position reads differently depending on which
+        // block claims it — which is exactly why lava moved off it.
+        assert_ne!(
+            sample_in_block(&face, 4, boundary - texel * 0.5),
+            sample_in_block(&face, 5, boundary - texel * 0.5),
+        );
+    }
+
+    /// What a drift does to a face depends on how it lies RELATIVE to that
+    /// face, and this is the table that says so.
+    ///
+    /// The drift translates a 3D field, so on any given face the component
+    /// lying IN the face slides the pattern across it, while the component
+    /// along the normal walks to a different slice of the field — which reads
+    /// as the surface churning, not flowing. One world vector therefore cannot
+    /// be a clean flow on every face at once.
+    #[test]
+    fn a_drift_slides_a_face_it_lies_in_and_churns_one_it_points_through() {
+        let layer = PatternLayer {
+            frame: PatternFrame::World,
+            texels_per_voxel: 0, // continuous, so the check is about direction
+            period_meters: 0.25,
+            ..PatternLayer::IDENTITY
+        };
+        let value = |point: [f32; 3], velocity: [f32; 3], seconds: f32| {
+            layer.generator_value_animated(
+                &PatternSample {
+                    world_meters: point,
+                    voxel: [
+                        (point[0] * 8.0) as i32,
+                        (point[1] * 8.0) as i32,
+                        (point[2] * 8.0) as i32,
+                    ],
+                    axis: 0,
+                    axis_sign: 1.0,
+                    distance_meters: 0.0,
+                },
+                LayerAnimationSample {
+                    gain: 1.0,
+                    drift_velocity: velocity,
+                    time_seconds: seconds,
+                },
+            )
+        };
+
+        // Is the change over `dt` reproducible as a pure slide WITHIN the face
+        // whose normal is `normal_axis`? It is exactly when the velocity has no
+        // component along that normal.
+        let slides_cleanly = |velocity: [f32; 3], normal_axis: usize| {
+            let dt = 0.7;
+            let mut in_plane = velocity;
+            in_plane[normal_axis] = 0.0;
+            (0..8).all(|step| {
+                let mut point = [3.3, 4.4, 5.5];
+                // Walk across the face, in one of its two in-plane axes.
+                let across = (normal_axis + 1) % 3;
+                point[across] += step as f32 * 0.11;
+                let moved = [
+                    point[0] - in_plane[0] * dt,
+                    point[1] - in_plane[1] * dt,
+                    point[2] - in_plane[2] * dt,
+                ];
+                (value(point, velocity, dt) - value(moved, velocity, 0.0)).abs() < 1e-6
+            })
+        };
+
+        // Level flow along +Z: slides the top face and the X-facing walls,
+        // churns the Z-facing walls it points straight through.
+        let level_z = [0.0, 0.0, 0.25];
+        assert!(slides_cleanly(level_z, 1), "top face should slide");
+        assert!(slides_cleanly(level_z, 0), "X-facing wall should slide");
+        assert!(!slides_cleanly(level_z, 2), "Z-facing wall should churn");
+
+        // Straight down: slides both wall orientations, churns the top face —
+        // which is why a lava LAKE wants a level flow and a lava FALL does not.
+        let straight_down = [0.0, -0.25, 0.0];
+        assert!(slides_cleanly(straight_down, 0));
+        assert!(slides_cleanly(straight_down, 2));
+        assert!(!slides_cleanly(straight_down, 1), "top face should churn");
+
+        // The authored lava: down and across +Z. It lies entirely in the
+        // X-facing walls, so those get a clean diagonal; the other two faces
+        // each get a component through them.
+        let diagonal = [0.0, -0.177, 0.177];
+        assert!(
+            slides_cleanly(diagonal, 0),
+            "the X-facing wall is the face this setting is clean on"
+        );
+        assert!(!slides_cleanly(diagonal, 1));
+        assert!(!slides_cleanly(diagonal, 2));
+    }
+
+    /// The double-apply regression. `animation_gain` is a SEPARATE value from
+    /// the authored `amount`; an unconnected socket is 1.0, so the authored
+    /// number must survive end to end rather than being squared.
+    #[test]
+    fn an_identity_animation_gain_leaves_the_authored_amount_untouched() {
+        let layer = PatternLayer {
+            amount: 0.5,
+            target: PatternTarget::Albedo,
+            blend: PatternBlend::Multiply,
+            ..PatternLayer::IDENTITY
+        };
+        let sample = drift_sample([0.3, 0.5, 0.75]);
+        assert_eq!(
+            layer.strength_animated(&sample, 0.0, 0.0, LayerAnimationSample::STILL),
+            layer.strength(&sample, 0.0, 0.0)
+        );
+        assert_eq!(layer.strength(&sample, 0.0, 0.0), 0.5);
+        // Half the gain halves the strength — once, not twice.
+        let halved = LayerAnimationSample {
+            gain: 0.5,
+            ..LayerAnimationSample::STILL
+        };
+        assert_eq!(layer.strength_animated(&sample, 0.0, 0.0, halved), 0.25);
+    }
+
+    /// Drift must work in the FACE frame, which is where it originally did not:
+    /// the Rust mirror applied it in the world frame only, and lava — the one
+    /// material this feature exists for — is face-framed, so the authored asset
+    /// sat perfectly still while every synthetic test passed.
+    #[test]
+    fn drift_moves_a_face_framed_pattern() {
+        let layer = PatternLayer {
+            frame: PatternFrame::Face,
+            texels_per_voxel: 8,
+            ..PatternLayer::IDENTITY
+        };
+        let sample = PatternSample {
+            world_meters: [12.3, 4.5, 6.7],
+            voxel: [98, 36, 53],
+            axis: 1,
+            axis_sign: -1.0,
+            distance_meters: 0.0,
+        };
+        let still = layer.generator_value(&sample);
+        let drifted = layer.generator_value_animated(
+            &sample,
+            LayerAnimationSample {
+                gain: 1.0,
+                drift_velocity: [0.06, 0.0, 0.02],
+                time_seconds: 8.0,
+            },
+        );
+        assert_ne!(still, drifted, "a face-framed pattern did not drift");
+    }
+
+    /// The voxel frame quantises to one point per voxel, so there is no
+    /// coordinate for drift to move. Documented as ignored rather than silently
+    /// doing something surprising, and pinned so it stays that way.
+    #[test]
+    fn drift_is_inert_in_the_voxel_frame() {
+        let layer = PatternLayer {
+            frame: PatternFrame::Voxel,
+            texels_per_voxel: 8,
+            ..PatternLayer::IDENTITY
+        };
+        let sample = drift_sample([0.3, 0.5, 0.75]);
+        let moving = LayerAnimationSample {
+            gain: 1.0,
+            drift_velocity: [1.0, 0.0, 0.0],
+            time_seconds: 3.0,
+        };
+        assert_eq!(
+            layer.generator_value_animated(&sample, moving),
+            layer.generator_value(&sample)
+        );
+    }
 
     /// A sample looking at the top face of the voxel at the origin-ish, from 1 m.
     fn sample_at(world_meters: [f32; 3], voxel: [i32; 3]) -> PatternSample {

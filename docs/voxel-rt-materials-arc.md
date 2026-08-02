@@ -29,13 +29,66 @@ current; leave the rest alone unless it stops being true.
 | **S2d** | Sun/ambient dimming + emission colour x intensity, so S2c is judgeable | ⏳ built, awaiting the S2c gate |
 | — | Embedded-emitter fix, **step 1**: sticky emitter index in the cell sweep | ✅ landed (CAGI, not this arc) |
 | — | Step 2 (area-weighted per-cell radiance) → became **E5b**, see the plan | ✅ implemented + CPU-gated; visual/GPU gate pending |
-| **S3** | Animation — value oscillation + pattern drift | ⬜ not started |
+| **S3** | Animation — clock, oscillators, world events, pattern drift | ✅ landed, **visual gate pending** |
 | **S4** | Template library | ⬜ not started |
 | **S5** | Sub-voxel models (the only stage that touches traversal) | ⬜ not started |
 | **S6** | Apply to real materials, re-author roughness/specular | ⬜ not started |
 
-**254 library tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
+**359 library tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
 `cargo clippy --all-targets` clean.
+
+### S3 — animation, as landed
+
+Four node types in `NodeCategory::Animation`, plus the scalar multiply that
+makes gating expressible at all:
+
+| node | outputs | what it is for |
+|---|---|---|
+| `material.time` | `value` | Monotone seconds. Never steps backwards. |
+| `material.oscillator` | `value` | sine / triangle / saw / pulse / flicker, with `low`..`high`, an `enabled` toggle, and a **sync** source: `global`, `per_voxel`, `per_face`, `per_material`. |
+| `material.event_sensor` | `signal`, `nearness`, `envelope` | "Did something happen within X metres of me, and how long ago?" Attack / hold / release. |
+| `material.direction` | `vector` | Speed + azimuth + elevation to a velocity vector, so a flow is dialled as an angle rather than three components. Every input connectable: an oscillator on the azimuth swirls, one on the speed surges. |
+| `material.multiply_scalar` | `value` | Gating. `sensor.signal x oscillator` is the whole "pulse only when something is near" mechanism. |
+
+Pattern layers gained two input sockets: `animation_gain` (multiplies the
+authored `amount`, identity at 1.0) and `drift_velocity` (metres per second).
+Drift is quantised to the texel grid, so a pattern MARCHES a whole texel at a
+time. There is **no** smooth-drift flag — there was briefly, and it did nothing:
+`pattern_coordinate` snaps after subtracting the offset, so an un-quantised
+offset gives byte-identical output and only costs the grid its alignment to
+world voxel boundaries. Continuous motion is what `texels_per_voxel = 0` already
+means.
+
+Four things worth knowing before touching it:
+
+- **A disabled oscillator is removed, not frozen.** `enabled: false` makes the
+  lowering ignore the link, so the consumer falls through to its own socket
+  default exactly as if nothing were connected — a layer gain returns to 1.0 and
+  the material looks as it did before the node existed. There is deliberately no
+  authored value-while-disabled: the neutral value belongs to the consumer, and
+  a layer gain (1.0) and a mix factor (0.0) do not share one. The bypass happens
+  at compile time, so a disabled node emits no shader code at all.
+- **`drift_velocity` is a velocity, not an offset.** The shader applies the
+  clock, so a bare `Vector3` wired in is a flow. An offset socket would have
+  made the obvious graph a static displacement that merely looked animated.
+- **The event field is entity-shaped, not camera-shaped.** The camera raises a
+  presence event like anything else would; `crates/voxel-rt/src/world_event.rs`
+  is where a mob system plugs in, and no shader or node changes when it does.
+  Re-raising an open event PRESERVES its start timestamp — that one rule is what
+  lets an envelope exist without per-voxel history.
+- **GI does not follow the animation.** The material table bakes one still
+  sample for the light volume, so a pulsing emitter's *surface* pulses while the
+  light it throws stays at the resting value. Closing that loop is its own arc:
+  the volume has no bounded re-flood (`LightVolume::mark_dirty` clears both
+  buffers and floods the whole grid), so an event-driven light needs either
+  regional CAGI propagation or a separate transient-light mechanism. Measure
+  before choosing.
+- **Determinism narrowed.** `MaterialAnimationSpeed = 0` freezes the clock but
+  NOT event sensors, whose inputs still move with the camera.
+  `MaterialAnimationDeterministic` freezes both and is what the bench sets. It
+  buys frame-to-frame stability, not equality with an un-animated material — a
+  frozen oscillator still returns a value, so animated scenes carry their own
+  pixel baselines.
 
 ### Next action
 

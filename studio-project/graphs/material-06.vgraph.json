@@ -221,6 +221,43 @@
       "properties": {},
       "socket_defaults": {},
       "unknown_payload": null
+    },
+    "animation-stone-blink": {
+      "node_type": "material.oscillator",
+      "node_type_version": 1,
+      "properties": {
+        "wave": {
+          "type": "text",
+          "value": "pulse"
+        },
+        "sync": {
+          "type": "text",
+          "value": "per_face"
+        },
+        "seed": {
+          "type": "integer",
+          "value": 3
+        }
+      },
+      "socket_defaults": {
+        "rate_hz": {
+          "type": "scalar",
+          "value": 0.4
+        },
+        "duty": {
+          "type": "scalar",
+          "value": 0.12
+        },
+        "low": {
+          "type": "scalar",
+          "value": 0.0
+        },
+        "high": {
+          "type": "scalar",
+          "value": 1.0
+        }
+      },
+      "unknown_payload": null
     }
   },
   "links": {
@@ -311,6 +348,17 @@
         "socket": "emission"
       },
       "order": 0
+    },
+    "animation-stone-blink-gain": {
+      "from": {
+        "node": "animation-stone-blink",
+        "socket": "value"
+      },
+      "to": {
+        "node": "g-000000000000000a",
+        "socket": "animation_gain"
+      },
+      "order": 0
     }
   },
   "layout": {
@@ -350,6 +398,10 @@
       "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d": [
         439.9112,
         159.91118
+      ],
+      "animation-stone-blink": [
+        520.0,
+        -420.0
       ]
     }
   }
