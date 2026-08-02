@@ -31,7 +31,9 @@
 use crate::animation_clock::AnimationClockSample;
 use crate::ao::{float_literal, patch_shader_const, AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
-use crate::lighting::{AnimationParams, GiParams, MaterialParams, ShadingParams, WaterParams};
+use crate::lighting::{
+    AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams, WaterParams,
+};
 use crate::pattern::{MAX_PATTERN_LAYERS, PATTERN_FADE_END_METERS, PATTERN_FADE_START_METERS};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
@@ -2665,18 +2667,26 @@ impl RenderQuality {
     /// clock is visible in one place rather than inferred from a lever.
     pub fn animation_params(
         &self,
-        clock: AnimationClockSample,
+        material_clock: AnimationClockSample,
+        world_clock: AnimationClockSample,
         event_count: usize,
-    ) -> AnimationParams {
+    ) -> (AnimationParams, EventParams) {
         if self.materials.animation_deterministic {
-            return AnimationParams::default();
+            return (AnimationParams::default(), EventParams::default());
         }
-        AnimationParams {
-            remainder_seconds: clock.remainder_seconds,
-            epoch: clock.epoch,
-            event_count: event_count as f32,
-            reserved_flow: 0.0,
-        }
+        (
+            AnimationParams {
+                remainder_seconds: material_clock.remainder_seconds,
+                epoch: material_clock.epoch,
+                reserved_flow: 0.0,
+                reserved: 0.0,
+            },
+            EventParams {
+                remainder_seconds: world_clock.remainder_seconds,
+                epoch: world_clock.epoch,
+                event_count: event_count as f32,
+            },
+        )
     }
 
     /// The runtime water knobs, for this frame's lighting uniform (E6).

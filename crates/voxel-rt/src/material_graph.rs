@@ -253,7 +253,6 @@ pub enum MaterialInstruction {
         high: ValueId,
     },
     EventSensor {
-        output: SensorOutput,
         config: EventSensorConfig,
     },
 }
@@ -273,7 +272,6 @@ impl MaterialInstruction {
             | Self::MultiplyScalar(..)
             | Self::Time
             | Self::Oscillator { .. }
-            | Self::EventSensor { .. }
             | Self::PassthroughScalar(_) => ValueType::Scalar,
             Self::Color(_)
             | Self::MixColor { .. }
@@ -288,6 +286,7 @@ impl MaterialInstruction {
             | Self::VectorAdd(..)
             | Self::VectorScale { .. }
             | Self::Direction { .. }
+            | Self::EventSensor { .. }
             | Self::NormalizeVector(_)
             | Self::PassthroughVector(_) => ValueType::Vector3,
         }
@@ -344,7 +343,7 @@ const GRAPH_PRELUDE: &str = include_str!("../shaders/graph_prelude.wgsl");
 const GRAPH_HOST_STUBS: &str = concat!(
     "// ---- validation-only stubs; stripped before injection ----\n",
     "const BRICK_SIZE: f32 = 8.0;\n",
-    "struct Lighting { animation_params: vec4<f32>, };\n",
+    "struct Lighting { animation_params: vec4<f32>, event_params: vec4<f32>, };\n",
     "var<private> lighting: Lighting;\n",
     "struct BrickmapMeta { voxel_size_meters: f32, };\n",
     "var<private> brickmap: BrickmapMeta;\n",
@@ -801,7 +800,7 @@ fn graph_phase_offset(sync: PhaseSync, seed: u32, position: [f32; 3], normal: [f
 }
 
 /// Mirrors `graph_wave`. Returns `[0, 1]` before the low/high remap.
-fn graph_wave(wave: OscillatorWave, phase: f32, duty: f32) -> f32 {
+fn graph_wave(wave: OscillatorWave, phase: f32, duty: f32, salt: u32) -> f32 {
     let cycle = fract(phase);
     match wave {
         OscillatorWave::Triangle => 1.0 - (cycle * 2.0 - 1.0).abs(),
@@ -813,7 +812,9 @@ fn graph_wave(wave: OscillatorWave, phase: f32, duty: f32) -> f32 {
                 0.0
             }
         }
-        OscillatorWave::Flicker => graph_hash_to_unit((phase.floor() as i32) as u32 ^ 0x9e37_79b9),
+        OscillatorWave::Flicker => {
+            graph_hash_to_unit((phase.floor() as i32) as u32 ^ salt ^ 0x9e37_79b9)
+        }
         OscillatorWave::Sine => 0.5 - 0.5 * (cycle * std::f32::consts::TAU).cos(),
     }
 }
@@ -879,6 +880,7 @@ fn graph_event_sensor(
         .position
         .map(|axis| axis * context.voxel_size_meters);
     let mut best = (0.0_f32, 0.0_f32, 0.0_f32);
+    let mut found = false;
     for event in context.events {
         if event.channel != config.channel {
             continue;
@@ -900,8 +902,9 @@ fn graph_event_sensor(
         let nearness = graph_falloff(config.falloff, distance_squared.sqrt() / reach);
         let envelope = graph_event_envelope(event, context.clock, config);
         let signal = nearness * envelope * event.strength.clamp(0.0, 1.0);
-        if signal > best.0 {
+        if !found || signal > best.0 {
             best = (signal, nearness, envelope);
+            found = true;
         }
     }
     let signal = if config.invert { 1.0 - best.0 } else { best.0 };
@@ -1128,18 +1131,14 @@ impl MaterialGraphProgram {
                     let total_phase = context.clock.oscillator_phase(rate_hz)
                         + values[phase.0].scalar()
                         + sync_offset;
-                    let shape = graph_wave(wave, total_phase, values[duty.0].scalar());
+                    let shape = graph_wave(wave, total_phase, values[duty.0].scalar(), seed);
                     let low = values[low.0].scalar();
                     let high = values[high.0].scalar();
                     RuntimeValue::Scalar(low + (high - low) * shape)
                 }
-                MaterialInstruction::EventSensor { output, config } => {
+                MaterialInstruction::EventSensor { config } => {
                     let (signal, nearness, envelope) = graph_event_sensor(&config, &context);
-                    RuntimeValue::Scalar(match output {
-                        SensorOutput::Signal => signal,
-                        SensorOutput::Nearness => nearness,
-                        SensorOutput::Envelope => envelope,
-                    })
+                    RuntimeValue::Vector3([signal, nearness, envelope])
                 }
                 MaterialInstruction::Position => RuntimeValue::Vector3(context.position),
                 MaterialInstruction::Normal => RuntimeValue::Vector3(context.normal),
@@ -1302,6 +1301,7 @@ pub fn compile(
         registry,
         values: Vec::new(),
         cache: BTreeMap::new(),
+        event_sensors: BTreeMap::new(),
     };
     let base_color = lowerer.input(&surface_chain.surface, "base_color")?;
     let roughness = lowerer.input(&surface_chain.surface, "roughness")?;
@@ -1351,6 +1351,7 @@ struct Lowerer<'a> {
     registry: &'a NodeRegistry,
     values: Vec<MaterialInstruction>,
     cache: BTreeMap<(NodeId, SocketKey), ValueId>,
+    event_sensors: BTreeMap<NodeId, ValueId>,
 }
 impl<'a> Lowerer<'a> {
     fn push(&mut self, value: MaterialInstruction) -> ValueId {
@@ -1419,7 +1420,9 @@ impl<'a> Lowerer<'a> {
             self.registry
                 .find(&record.node_type)
                 .map(|declaration| declaration.operation),
-            Some(NodeOperation::Material(MaterialNodeOperation::Oscillator))
+            Some(NodeOperation::Material(
+                MaterialNodeOperation::Oscillator | MaterialNodeOperation::EventSensor,
+            ))
         );
         if !bypassable {
             return false;
@@ -1530,7 +1533,21 @@ impl<'a> Lowerer<'a> {
                     "envelope" => SensorOutput::Envelope,
                     _ => SensorOutput::Signal,
                 };
-                self.push(MaterialInstruction::EventSensor { output, config })
+                let sensor = if let Some(value) = self.event_sensors.get(node) {
+                    *value
+                } else {
+                    let value = self.push(MaterialInstruction::EventSensor { config });
+                    self.event_sensors.insert(node.clone(), value);
+                    value
+                };
+                self.push(MaterialInstruction::Component {
+                    vector: sensor,
+                    axis: match output {
+                        SensorOutput::Signal => 0,
+                        SensorOutput::Nearness => 1,
+                        SensorOutput::Envelope => 2,
+                    },
+                })
             }
             MaterialNodeOperation::AddScalar => {
                 let a = self.input(node, "a")?;
@@ -1905,14 +1922,9 @@ fn emit_wgsl(values: &[MaterialInstruction], output: &MaterialOutput) -> String 
                 value_name(*low),
                 value_name(*high)
             ),
-            MaterialInstruction::EventSensor { output, config } => {
-                let component = match output {
-                    SensorOutput::Signal => "x",
-                    SensorOutput::Nearness => "y",
-                    SensorOutput::Envelope => "z",
-                };
+            MaterialInstruction::EventSensor { config } => {
                 format!(
-                    "graph_event_sensor({}u, {}, {}u, {}, {}, {}, {}, position).{}",
+                    "graph_event_sensor({}u, {}, {}u, {}, {}, {}, {}, position)",
                     config.channel,
                     format_float(config.radius_meters),
                     config.falloff.shader_value(),
@@ -1920,7 +1932,6 @@ fn emit_wgsl(values: &[MaterialInstruction], output: &MaterialOutput) -> String 
                     format_float(config.hold_seconds),
                     format_float(config.release_seconds),
                     config.invert,
-                    component
                 )
             }
             MaterialInstruction::RemapScalar {

@@ -237,7 +237,9 @@ fn pattern_drift_meters(layer: PatternLayer, velocity: vec3<f32>,
         return offset;
     }
     let texel = (voxel_size_meters * BRICK_SIZE) / f32(texels);
-    return floor(offset / texel) * texel;
+    // WGSL `trunc` mirrors the CPU path: quantise symmetrically toward zero
+    // so negative motion does not take an immediate one-texel step.
+    return trunc(offset / texel) * texel;
 }
 
 fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,

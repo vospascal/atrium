@@ -195,6 +195,11 @@ impl Scenario {
     /// penumbra scale, fade ramp, the E4 GI knobs) — the levers that need no
     /// pipeline rebuild are swept exactly the way the app applies them.
     fn lighting_uniform(&self, quality: &RenderQuality) -> LightingUniform {
+        let (animation_params, event_params) = quality.animation_params(
+            AnimationClockSample::FROZEN,
+            AnimationClockSample::FROZEN,
+            0,
+        );
         self.sun.lighting_uniform(
             quality.shading_params(),
             quality.gi_params(),
@@ -205,7 +210,8 @@ impl Scenario {
             // rather than left to the deterministic lever, because a scenario
             // sweeping presets would otherwise inherit whatever that preset
             // happened to set — and a bench that animates is not a bench.
-            quality.animation_params(AnimationClockSample::FROZEN, 0),
+            animation_params,
+            event_params,
         )
     }
 }
@@ -2693,12 +2699,19 @@ const BENCH_WORLD_EVENTS: [GpuWorldEvent; MAX_WORLD_EVENTS] =
 /// The sky radiance the CA injects — the hemisphere constants of `lighting.rs`,
 /// mirrored here for the CPU cross-check's out-of-volume neighbour values.
 fn scenario_sky_radiance() -> [f32; 3] {
+    let quality = RenderQuality::default();
+    let (animation_params, event_params) = quality.animation_params(
+        AnimationClockSample::FROZEN,
+        AnimationClockSample::FROZEN,
+        0,
+    );
     let uniform = SunSettings::default().lighting_uniform(
-        RenderQuality::default().shading_params(),
-        RenderQuality::default().gi_params(),
-        RenderQuality::default().water_params(),
-        RenderQuality::default().material_params(),
-        RenderQuality::default().animation_params(AnimationClockSample::FROZEN, 0),
+        quality.shading_params(),
+        quality.gi_params(),
+        quality.water_params(),
+        quality.material_params(),
+        animation_params,
+        event_params,
     );
     [
         uniform.sky_ambient[0] * uniform.sky_ambient[3],

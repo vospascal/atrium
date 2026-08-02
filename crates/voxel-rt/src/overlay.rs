@@ -211,7 +211,7 @@ pub struct Overlay {
     gpu_frame_time_samples: VecDeque<f32>,
     /// `collect` returns its most recent result on frames where no new map has
     /// landed. Keep it from entering the smoothing window more than once.
-    last_gpu_frame_time_milliseconds: Option<f32>,
+    last_gpu_frame_sample_sequence: Option<u64>,
 }
 
 impl Overlay {
@@ -241,7 +241,7 @@ impl Overlay {
             renderer,
             frame_time_samples: VecDeque::with_capacity(FRAME_TIME_SAMPLE_COUNT),
             gpu_frame_time_samples: VecDeque::with_capacity(GPU_FRAME_TIME_SAMPLE_COUNT),
-            last_gpu_frame_time_milliseconds: None,
+            last_gpu_frame_sample_sequence: None,
         }
     }
 
@@ -275,14 +275,17 @@ impl Overlay {
         );
     }
 
-    fn record_gpu_frame_time(&mut self, gpu_frame_time_milliseconds: Option<f32>) {
-        let Some(gpu_frame_time_milliseconds) = gpu_frame_time_milliseconds else {
+    fn record_gpu_frame_time(&mut self, timings: Option<FrameTimings>) {
+        let Some(timings) = timings else {
             return;
         };
-        if self.last_gpu_frame_time_milliseconds == Some(gpu_frame_time_milliseconds) {
+        let Some(gpu_frame_time_milliseconds) = timings.frame_milliseconds() else {
+            return;
+        };
+        if self.last_gpu_frame_sample_sequence == Some(timings.sample_sequence) {
             return;
         }
-        self.last_gpu_frame_time_milliseconds = Some(gpu_frame_time_milliseconds);
+        self.last_gpu_frame_sample_sequence = Some(timings.sample_sequence);
         push_rolling_sample(
             &mut self.gpu_frame_time_samples,
             GPU_FRAME_TIME_SAMPLE_COUNT,
@@ -307,12 +310,7 @@ impl Overlay {
         studio_assets: &mut StudioAssetPanelState,
         graph_editor: &mut GraphEditorState,
     ) {
-        self.record_gpu_frame_time(
-            frame_data
-                .gpu_timings
-                .as_ref()
-                .and_then(FrameTimings::frame_milliseconds),
-        );
+        self.record_gpu_frame_time(frame_data.gpu_timings);
         let average_frame_time_seconds = rolling_average(&self.frame_time_samples).unwrap_or(0.0);
         let frame_time_milliseconds = average_frame_time_seconds * 1000.0;
         // This measures how quickly the application enters its frame function,

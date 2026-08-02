@@ -981,7 +981,10 @@ impl PatternLayer {
             return offset;
         }
         let texel = WORLD_VOXEL_SIZE_METERS / self.texels_per_voxel as f32;
-        offset.map(|axis| (axis / texel).floor() * texel)
+        // Quantise toward zero so a newly-started negative drift does not
+        // jump backwards by one whole texel while an equally small positive
+        // drift remains at rest.
+        offset.map(|axis| (axis / texel).trunc() * texel)
     }
 
     /// The generator's raw value at this sample, `0.0..=1.0`, before fade, amount,

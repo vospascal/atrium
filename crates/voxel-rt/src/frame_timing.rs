@@ -59,6 +59,9 @@ struct ReadbackSlot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameTimings {
     pub span_milliseconds: [Option<f32>; SPAN_COUNT],
+    /// Increments for every completed readback, even when two frames take the
+    /// same number of milliseconds.
+    pub sample_sequence: u64,
 }
 
 impl FrameTimings {
@@ -254,6 +257,7 @@ impl GpuFrameTimers {
             }
             slot.buffer.unmap();
             slot.state.store(SLOT_FREE, Ordering::Release);
+            self.latest.sample_sequence = self.latest.sample_sequence.wrapping_add(1);
         }
         self.latest
     }
@@ -267,12 +271,14 @@ mod tests {
     fn gpu_fps_uses_all_measured_passes_and_never_a_partial_frame() {
         let complete = FrameTimings {
             span_milliseconds: [Some(2.0), Some(1.0), Some(2.0)],
+            sample_sequence: 1,
         };
         assert_eq!(complete.frame_milliseconds(), Some(5.0));
         assert_eq!(complete.gpu_frames_per_second(), Some(200.0));
 
         let incomplete = FrameTimings {
             span_milliseconds: [Some(2.0), None, Some(2.0)],
+            sample_sequence: 1,
         };
         assert_eq!(incomplete.frame_milliseconds(), None);
         assert_eq!(incomplete.gpu_frames_per_second(), None);

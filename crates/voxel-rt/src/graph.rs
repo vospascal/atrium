@@ -1867,7 +1867,7 @@ const DIRECTION_FIELDS: &[FieldDeclarationStatic] = &[
          a floor or a lake, and anything between is a diagonal. Note that -90 \
          and +90 are poles where the azimuth stops having any effect.",
         FieldTarget::InputSocket,
-        FieldDefault::Scalar(-90.0),
+        FieldDefault::Scalar(0.0),
         Some(NumericRange::new(-90.0, 90.0)),
         Some(NumericRange::new(-90.0, 90.0)),
         Some(1.0),
@@ -2005,6 +2005,20 @@ const OSCILLATOR_FIELDS: &[FieldDeclarationStatic] = &[
 /// `MAX_EVENT_LIFETIME_SECONDS`, and a socket-driven value could not be checked
 /// there. Authoring catches an over-long envelope; the runtime never has to.
 const EVENT_SENSOR_FIELDS: &[FieldDeclarationStatic] = &[
+    field(
+        "enabled",
+        "Enabled",
+        "Turn the node off. A disabled sensor is removed from the compiled graph, so
+         anything it feeds falls back to that input's own default just as if the
+         link were absent.",
+        FieldTarget::Property,
+        FieldDefault::Boolean(true),
+        NONE,
+        NONE,
+        None,
+        EMPTY_CHOICES,
+        false,
+    ),
     field(
         "channel",
         "Channel",

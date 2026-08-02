@@ -8,7 +8,8 @@
 //
 // Host values these helpers read, declared elsewhere in the DDA source and
 // stubbed by material_graph.rs for standalone validation:
-//   lighting.animation_params  — the S3 clock (world.wgsl)
+//   lighting.animation_params  — scaled material clock (world.wgsl)
+//   lighting.event_params      — unscaled world clock and event count
 //   world_events               — the S3 event field (dda.wgsl)
 //   brickmap.voxel_size_meters — voxel units to metres (world.wgsl)
 //   BRICK_SIZE                 — detail cells per authored block (world.wgsl)
@@ -113,7 +114,7 @@ fn graph_oscillator_phase(rate_hz: f32) -> f32 {
 // How many world events are live. Sensors loop to THIS, never to the array
 // capacity, so a world with no entities costs one comparison per sensor.
 fn graph_world_event_count() -> u32 {
-    return min(u32(max(lighting.animation_params.z, 0.0)), MAX_WORLD_EVENTS);
+    return min(u32(max(lighting.event_params.z, 0.0)), MAX_WORLD_EVENTS);
 }
 
 // Speed and two angles to a velocity vector.
@@ -200,7 +201,7 @@ fn graph_phase_offset(sync: u32, seed: u32, position: vec3<f32>, normal: vec3<f3
 }
 
 // One cycle of the wave, normalised to [0, 1] before the low/high remap.
-fn graph_wave(wave: u32, phase: f32, duty: f32) -> f32 {
+fn graph_wave(wave: u32, phase: f32, duty: f32, salt: u32) -> f32 {
     let cycle = fract(phase);
     if (wave == GRAPH_WAVE_TRIANGLE) {
         return 1.0 - abs(cycle * 2.0 - 1.0);
@@ -217,7 +218,7 @@ fn graph_wave(wave: u32, phase: f32, duty: f32) -> f32 {
         // Sample-and-hold: one random level per cycle, HELD until the next.
         // It snaps, which is what reads as a failing lamp. Interpolated noise
         // over time is just a wobblier sine and is deliberately not offered.
-        return graph_hash_to_unit(u32(i32(floor(phase))) ^ 0x9e3779b9u);
+        return graph_hash_to_unit(u32(i32(floor(phase))) ^ salt ^ 0x9e3779b9u);
     }
     return 0.5 - 0.5 * cos(cycle * 6.283185307179586);
 }
@@ -236,7 +237,7 @@ fn graph_oscillator(
 ) -> f32 {
     let sync_offset = graph_phase_offset(sync, seed, position, normal);
     let phase = graph_oscillator_phase(rate_hz) + phase_offset + sync_offset;
-    return low + (high - low) * graph_wave(wave, phase, duty);
+    return low + (high - low) * graph_wave(wave, phase, duty, seed);
 }
 
 // ---- S3: the event sensor ----------------------------------------------------
@@ -285,8 +286,8 @@ fn graph_event_envelope(
     release_seconds: f32,
 ) -> f32 {
     let event = world_events[event_index];
-    let now_remainder = lighting.animation_params.x;
-    let now_epoch = lighting.animation_params.y;
+    let now_remainder = lighting.event_params.x;
+    let now_epoch = lighting.event_params.y;
     let since_start = (now_epoch - event.started_epoch) * ANIMATION_EPOCH_SECONDS
         + (now_remainder - event.started_remainder_seconds);
     let attack_factor = graph_ramp(since_start, attack_seconds);
@@ -322,6 +323,7 @@ fn graph_event_sensor(
     var best_signal = 0.0;
     var best_nearness = 0.0;
     var best_envelope = 0.0;
+    var found = false;
     for (var index = 0u; index < count; index = index + 1u) {
         let event = world_events[index];
         if (event.channel != channel) {
@@ -344,10 +346,11 @@ fn graph_event_sensor(
         let envelope = graph_event_envelope(
             index, attack_seconds, hold_seconds, release_seconds);
         let signal = nearness * envelope * clamp(event.strength, 0.0, 1.0);
-        if (signal > best_signal) {
+        if (!found || signal > best_signal) {
             best_signal = signal;
             best_nearness = nearness;
             best_envelope = envelope;
+            found = true;
         }
     }
     // Invert applies to the SIGNAL only. Nearness and envelope keep their

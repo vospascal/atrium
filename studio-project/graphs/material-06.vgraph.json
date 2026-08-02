@@ -8,6 +8,47 @@
     "outputs": {}
   },
   "nodes": {
+    "animation-stone-blink": {
+      "node_type": "material.oscillator",
+      "node_type_version": 1,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "seed": {
+          "type": "integer",
+          "value": 3
+        },
+        "sync": {
+          "type": "text",
+          "value": "per_face"
+        },
+        "wave": {
+          "type": "text",
+          "value": "sine"
+        }
+      },
+      "socket_defaults": {
+        "duty": {
+          "type": "scalar",
+          "value": 0.12
+        },
+        "high": {
+          "type": "scalar",
+          "value": 1.0
+        },
+        "low": {
+          "type": "scalar",
+          "value": 0.0
+        },
+        "rate_hz": {
+          "type": "scalar",
+          "value": 0.4
+        }
+      },
+      "unknown_payload": null
+    },
     "g-0000000000000004": {
       "node_type": "material.pattern_layer",
       "node_type_version": 1,
@@ -221,46 +262,20 @@
       "properties": {},
       "socket_defaults": {},
       "unknown_payload": null
-    },
-    "animation-stone-blink": {
-      "node_type": "material.oscillator",
-      "node_type_version": 1,
-      "properties": {
-        "wave": {
-          "type": "text",
-          "value": "pulse"
-        },
-        "sync": {
-          "type": "text",
-          "value": "per_face"
-        },
-        "seed": {
-          "type": "integer",
-          "value": 3
-        }
-      },
-      "socket_defaults": {
-        "rate_hz": {
-          "type": "scalar",
-          "value": 0.4
-        },
-        "duty": {
-          "type": "scalar",
-          "value": 0.12
-        },
-        "low": {
-          "type": "scalar",
-          "value": 0.0
-        },
-        "high": {
-          "type": "scalar",
-          "value": 1.0
-        }
-      },
-      "unknown_payload": null
     }
   },
   "links": {
+    "animation-stone-blink-gain": {
+      "from": {
+        "node": "animation-stone-blink",
+        "socket": "value"
+      },
+      "to": {
+        "node": "g-000000000000000a",
+        "socket": "animation_gain"
+      },
+      "order": 0
+    },
     "g-0000000000000005": {
       "from": {
         "node": "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d",
@@ -348,21 +363,14 @@
         "socket": "emission"
       },
       "order": 0
-    },
-    "animation-stone-blink-gain": {
-      "from": {
-        "node": "animation-stone-blink",
-        "socket": "value"
-      },
-      "to": {
-        "node": "g-000000000000000a",
-        "socket": "animation_gain"
-      },
-      "order": 0
     }
   },
   "layout": {
     "positions": {
+      "animation-stone-blink": [
+        520.0,
+        -420.0
+      ],
       "g-0000000000000004": [
         807.5808,
         170.5424
@@ -398,10 +406,6 @@
       "surface-vx-000000000000000018c7af1e33d85fc8-000000000000005d": [
         439.9112,
         159.91118
-      ],
-      "animation-stone-blink": [
-        520.0,
-        -420.0
       ]
     }
   }

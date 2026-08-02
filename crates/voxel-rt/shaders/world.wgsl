@@ -199,6 +199,10 @@ struct Lighting {
     //       array capacity, so a world with no entities costs one comparison
     //   w = reserved (the wind arc's global flow vector)
     animation_params: vec4<f32>,
+    // x/y = unscaled simulation clock, z = event count. Event envelopes use
+    // this rather than material animation time, so the art-speed slider never
+    // changes their lifetime.
+    event_params: vec4<f32>,
 }
 
 @group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;

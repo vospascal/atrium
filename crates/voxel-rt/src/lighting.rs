@@ -57,7 +57,8 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 160    | `sky_zenith`          | `vec4<f32>` | zenith radiance + star rotation |
 /// | 176    | `sky_horizon`         | `vec4<f32>` | horizon radiance + moonlight |
 /// | 192    | `material_params`     | `vec4<f32>` | runtime material knobs |
-/// | 208    | `animation_params`    | `vec4<f32>` | the animation clock — see [`AnimationParams`] |
+/// | 208    | `animation_params`    | `vec4<f32>` | the scaled material clock — see [`AnimationParams`] |
+/// | 224    | `event_params`        | `vec4<f32>` | the unscaled world clock + event count |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -82,6 +83,8 @@ pub struct LightingUniform {
     pub material_params: [f32; 4],
     /// The animation clock and event count — see [`AnimationParams`].
     pub animation_params: [f32; 4],
+    /// The unscaled simulation clock used by world-event envelopes.
+    pub event_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -185,11 +188,9 @@ pub struct AnimationParams {
     pub remainder_seconds: f32,
     /// `y` — whole epochs elapsed, integer-exact to 2^24.
     pub epoch: f32,
-    /// `z` — how many world events are live. Sensors loop to this, never to
-    /// the array capacity, so an empty world costs one comparison.
-    pub event_count: f32,
-    /// `w` — reserved for a global flow vector (the wind arc).
+    /// `z/w` — reserved for future material-wide values.
     pub reserved_flow: f32,
+    pub reserved: f32,
 }
 
 impl AnimationParams {
@@ -197,8 +198,28 @@ impl AnimationParams {
         [
             self.remainder_seconds,
             self.epoch,
-            self.event_count.max(0.0),
             self.reserved_flow,
+            self.reserved,
+        ]
+    }
+}
+
+/// The unscaled clock for event timestamps and release tails. Material speed
+/// deliberately cannot pause or accelerate the world simulation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EventParams {
+    pub remainder_seconds: f32,
+    pub epoch: f32,
+    pub event_count: f32,
+}
+
+impl EventParams {
+    fn to_array(self) -> [f32; 4] {
+        [
+            self.remainder_seconds,
+            self.epoch,
+            self.event_count.max(0.0),
+            0.0,
         ]
     }
 }
@@ -481,6 +502,7 @@ impl SunSettings {
         water_params: WaterParams,
         material_params: MaterialParams,
         animation_params: AnimationParams,
+        event_params: EventParams,
     ) -> LightingUniform {
         let celestial = self.celestial_state();
         LightingUniform {
@@ -534,6 +556,7 @@ impl SunSettings {
             ],
             material_params: material_params.to_array(),
             animation_params: animation_params.to_array(),
+            event_params: event_params.to_array(),
         }
     }
 }
@@ -551,7 +574,12 @@ mod tests {
     /// The same, for a chosen sun — so a test about the sun's own knobs shares this
     /// construction rather than writing a second one that could drift from it.
     fn probe_uniform_for(sun: SunSettings, shadow_penumbra_scale: f32) -> LightingUniform {
-        probe_uniform_full(sun, shadow_penumbra_scale, AnimationParams::default())
+        probe_uniform_full(
+            sun,
+            shadow_penumbra_scale,
+            AnimationParams::default(),
+            EventParams::default(),
+        )
     }
 
     /// The one construction every probe funnels through, so a new vector cannot
@@ -560,6 +588,7 @@ mod tests {
         sun: SunSettings,
         shadow_penumbra_scale: f32,
         animation_params: AnimationParams,
+        event_params: EventParams,
     ) -> LightingUniform {
         sun.lighting_uniform(
             ShadingParams {
@@ -586,12 +615,13 @@ mod tests {
                 pattern_fade_end_meters: crate::pattern::PATTERN_FADE_END_METERS,
             },
             animation_params,
+            event_params,
         )
     }
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 224);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 240);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
         assert_eq!(std::mem::size_of::<LightingUniform>() % 16, 0);
     }
@@ -609,11 +639,17 @@ mod tests {
             AnimationParams {
                 remainder_seconds: 12.5,
                 epoch: 3.0,
-                event_count: 2.0,
                 reserved_flow: 0.0,
+                reserved: 0.0,
+            },
+            EventParams {
+                remainder_seconds: 7.5,
+                epoch: 4.0,
+                event_count: 2.0,
             },
         );
-        assert_eq!(animated.animation_params, [12.5, 3.0, 2.0, 0.0]);
+        assert_eq!(animated.animation_params, [12.5, 3.0, 0.0, 0.0]);
+        assert_eq!(animated.event_params, [7.5, 4.0, 2.0, 0.0]);
         // ...and the material knobs must be untouched by the new vector.
         assert_eq!(
             animated.material_params,

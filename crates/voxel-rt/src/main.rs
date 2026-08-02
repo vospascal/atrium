@@ -336,6 +336,9 @@ struct AppState {
     /// once per frame by the scaled frame delta; see `animation_clock.rs` for
     /// why it is a split epoch/remainder rather than one float.
     animation_clock: AnimationClock,
+    /// S3 — unscaled simulation time. Events are stamped and retired against
+    /// this clock, so animation speed affects artwork only.
+    world_clock: AnimationClock,
     /// S3 — what materials can react to. The active eye is raised into it each
     /// frame as the presence entity; a mob system later raises alongside.
     world_events: WorldEventField,
@@ -558,6 +561,7 @@ impl AppState {
             autosave_due_at: None,
             gi_settle_frames: 0,
             animation_clock: AnimationClock::new(),
+            world_clock: AnimationClock::new(),
             world_events: WorldEventField::new(),
         }
     }
@@ -1014,12 +1018,14 @@ impl AppState {
     fn advance_animation(&mut self, frame_time_seconds: f32) {
         if self.quality.materials.animation_deterministic {
             self.animation_clock.reset();
+            self.world_clock.reset();
             self.world_events.clear();
             return;
         }
         self.animation_clock
             .advance(frame_time_seconds, self.quality.materials.animation_speed);
-        let clock = self.animation_clock.sample();
+        self.world_clock.advance(frame_time_seconds, 1.0);
+        let clock = self.world_clock.sample();
         // The active eye is an entity like any other. It raises a presence
         // event and no sensor node ever learns which entity it was, so a mob
         // system later raises alongside it without the renderer, the shader or
@@ -1637,13 +1643,18 @@ impl AppState {
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
         // imperceptible.
+        let (animation_params, event_params) = self.quality.animation_params(
+            self.animation_clock.sample(),
+            self.world_clock.sample(),
+            self.world_events.len(),
+        );
         let lighting_uniform = self.sun_settings.lighting_uniform(
             self.quality.shading_params(),
             self.quality.gi_params(),
             self.quality.water_params(),
             self.quality.material_params(),
-            self.quality
-                .animation_params(self.animation_clock.sample(), self.world_events.len()),
+            animation_params,
+            event_params,
         );
         // A moved sun invalidates the whole light volume (E4: the world is
         // static, the sun is not). Dragging the slider therefore re-floods every
