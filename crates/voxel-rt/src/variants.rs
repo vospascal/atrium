@@ -116,6 +116,8 @@ pub enum LeverId {
     // Materials (S1, S2).
     MaterialFaceRoles,
     MaterialPatterns,
+    MaterialPatternCache,
+    MaterialPatternTexelLod,
     MaterialPatternStrength,
     MaterialPatternMaxLayers,
     MaterialPatternOctaveLod,
@@ -420,6 +422,10 @@ impl LeverId {
             LeverId::EditGiReflood => LeverValue::Flag(quality.world_edit.gi_reflood),
             LeverId::MaterialFaceRoles => LeverValue::Flag(quality.materials.face_roles),
             LeverId::MaterialPatterns => LeverValue::Flag(quality.materials.patterns),
+            LeverId::MaterialPatternCache => LeverValue::Flag(quality.materials.pattern_cache),
+            LeverId::MaterialPatternTexelLod => {
+                LeverValue::Flag(quality.materials.pattern_texel_lod)
+            }
             LeverId::MaterialPatternStrength => {
                 LeverValue::Scalar(quality.materials.pattern_strength)
             }
@@ -569,6 +575,12 @@ impl LeverId {
             }
             LeverId::MaterialPatterns => {
                 quality.materials.patterns = value.expect_flag(self);
+            }
+            LeverId::MaterialPatternCache => {
+                quality.materials.pattern_cache = value.expect_flag(self);
+            }
+            LeverId::MaterialPatternTexelLod => {
+                quality.materials.pattern_texel_lod = value.expect_flag(self);
             }
             LeverId::MaterialPatternStrength => {
                 quality.materials.pattern_strength = value.expect_scalar(self).clamp(0.0, 1.0);
@@ -2143,6 +2155,71 @@ pub const REGISTRY: &[Lever] = &[
         }],
     },
     Lever {
+        id: LeverId::MaterialPatternCache,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_CACHE"),
+        label: "pattern field cache",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "S3, ships OFF until measured. A direct-mapped cache over the \
+                  texel lattice, filled by the shading pass itself: \
+                  `pattern_snap_to_texels` already quantises the coordinate, so \
+                  every pixel on a 1.56 cm texel asks the generator the same \
+                  question — about a hundred of them at 2 m from a wall. It needs \
+                  no extension, because only read_write storage TEXTURES are \
+                  gated and this is a read_write storage BUFFER. Entries are one \
+                  u32, a 16-bit tag over a 16-bit value, so a store cannot tear \
+                  and no atomics are needed; two threads racing a slot write the \
+                  same bits. NOT bit-exact: the value is quantised to 16 bits, so \
+                  the pixel gates move by design and the comparison to make is \
+                  against the uncached frame at a tolerance, not at zero.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-pattern-cache",
+            // BOTH, and the first version of this row had only the second.
+            // Section 9's baseline is `materials_off`, so a point that enables
+            // the cache alone renders an UNPATTERNED frame — it came back 60%
+            // faster than `material-patterns` and 0 differing pixels against
+            // `material-flat`, which is what gave it away.
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialPatternCache, LeverValue::Flag(true)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialPatternTexelLod,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_TEXEL_LOD"),
+        label: "pattern texel LOD",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "S3, and it exists to make the pattern cache work AT RANGE. The \
+                  cache pays in proportion to how many pixels land on one texel — \
+                  about a hundred at 2 m, fewer than one far away — which is why \
+                  it removes 37% of the pattern path on ground views and nothing \
+                  at all on aerial ones. Halving the grid per doubling of distance \
+                  manufactures the reuse that distance destroys, and anti-aliases \
+                  while doing it, since what it removes is detail finer than a \
+                  pixel. NOT octave LOD, which lost at ground level (+0.24 ms) \
+                  because per-pixel octave counts are divergence: a coarser grid \
+                  makes neighbouring pixels agree MORE. Powers of two so the grids \
+                  nest and the pattern does not swim across an LOD change.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-pattern-cache-lod",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialPatternCache, LeverValue::Flag(true)),
+                (LeverId::MaterialPatternTexelLod, LeverValue::Flag(true)),
+            ],
+        }],
+    },
+    Lever {
         id: LeverId::MaterialPatternStrength,
         subsystem: LeverSubsystem::Materials,
         kind: LeverKind::ShaderConst,
@@ -2517,6 +2594,12 @@ pub struct MaterialSettings {
     pub face_roles: bool,
     /// S2 — run the row's pattern layer stack.
     pub patterns: bool,
+    /// S3 — reuse a generator's answer for every pixel that lands on the same
+    /// texel, through a lazily-filled direct-mapped cache.
+    pub pattern_cache: bool,
+    /// S3 — halve the texel grid per doubling of distance, so distant pixels
+    /// share texels and the cache has something to hit.
+    pub pattern_texel_lod: bool,
     /// S2 — global scale on every layer's amount, `0.0..=1.0`. The taste knob.
     pub pattern_strength: f32,
     /// S2 — layers evaluated per hit, whatever the row authored. The tier knob, and
@@ -2554,6 +2637,7 @@ impl MaterialSettings {
     pub fn requires_pipeline_rebuild(&self, applied: &MaterialSettings) -> bool {
         self.face_roles != applied.face_roles
             || self.patterns != applied.patterns
+            || self.pattern_cache != applied.pattern_cache
             || self.pattern_strength != applied.pattern_strength
             || self.pattern_max_layers != applied.pattern_max_layers
             || self.pattern_octave_lod != applied.pattern_octave_lod
@@ -2573,8 +2657,13 @@ impl MaterialSettings {
             "MATERIAL_PATTERNS",
             if self.patterns { "true" } else { "false" },
         );
-        let strength = patch_shader_const(
+        let cache = patch_shader_const(
             &patterns,
+            "MATERIAL_PATTERN_CACHE",
+            if self.pattern_cache { "true" } else { "false" },
+        );
+        let strength = patch_shader_const(
+            &cache,
             "MATERIAL_PATTERN_STRENGTH",
             &float_literal(self.pattern_strength),
         );
@@ -2605,6 +2694,8 @@ impl Default for MaterialSettings {
         MaterialSettings {
             face_roles: true,
             patterns: true,
+            pattern_cache: false,
+            pattern_texel_lod: false,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
             pattern_octave_lod: false,
@@ -3107,6 +3198,8 @@ mod tests {
         let MaterialSettings {
             face_roles,
             patterns,
+            pattern_cache,
+            pattern_texel_lod,
             pattern_strength,
             pattern_max_layers,
             pattern_octave_lod,
@@ -3293,6 +3386,14 @@ mod tests {
             (LeverId::EditGiReflood, LeverValue::Flag(gi_reflood)),
             (LeverId::MaterialFaceRoles, LeverValue::Flag(face_roles)),
             (LeverId::MaterialPatterns, LeverValue::Flag(patterns)),
+            (
+                LeverId::MaterialPatternCache,
+                LeverValue::Flag(pattern_cache),
+            ),
+            (
+                LeverId::MaterialPatternTexelLod,
+                LeverValue::Flag(pattern_texel_lod),
+            ),
             (
                 LeverId::MaterialPatternStrength,
                 LeverValue::Scalar(pattern_strength),
@@ -3547,6 +3648,19 @@ mod tests {
         assert!(!edited.requires_pipeline_rebuild(&applied));
         assert_eq!(edited.material_params(1440).pattern_fade_start_meters, 40.0);
         assert_eq!(edited.material_params(1440).pattern_fade_end_meters, 90.0);
+    }
+
+    #[test]
+    fn pattern_cache_patches_the_shader_and_rebuilds_the_pipeline() {
+        let applied = RenderQuality::default();
+        let mut edited = applied;
+        edited.materials.pattern_cache = true;
+
+        assert!(edited.requires_pipeline_rebuild(&applied));
+        assert!(
+            build_shader_source(&applied).contains("const MATERIAL_PATTERN_CACHE: bool = false;")
+        );
+        assert!(build_shader_source(&edited).contains("const MATERIAL_PATTERN_CACHE: bool = true;"));
     }
 
     #[test]

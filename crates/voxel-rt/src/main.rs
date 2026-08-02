@@ -792,6 +792,7 @@ impl AppState {
                         return;
                     }
                 }
+                let cache = program.cache.clone();
                 self.material_graph_shaders
                     .insert(self.graph_editor.material_slot, program);
                 self.renderer.set_dda_shader_source(
@@ -801,11 +802,30 @@ impl AppState {
                         &self.material_graph_shaders,
                     ),
                 );
-                self.graph_editor.diagnostics = graph.resolve(&registry).diagnostics;
-                self.graph_editor.status = format!(
-                    "Compiled graph for material slot {}",
-                    self.graph_editor.material_slot
-                );
+                // Cacheability warnings ride along with the resolve diagnostics
+                // rather than in a panel of their own: an author wants one list
+                // of "things worth knowing about this graph", and a layer that
+                // cannot be cached is exactly that — valid, renderable, and
+                // costing its full price every frame instead of once.
+                let mut diagnostics = graph.resolve(&registry).diagnostics;
+                diagnostics.extend(cache.diagnostics());
+                self.graph_editor.diagnostics = diagnostics;
+                let live = cache.live_layers().count();
+                self.graph_editor.status = if live == 0 {
+                    format!(
+                        "Compiled graph for material slot {} — {} pattern layer(s), all cacheable",
+                        self.graph_editor.material_slot,
+                        cache.layers.len()
+                    )
+                } else {
+                    format!(
+                        "Compiled graph for material slot {} — {} of {} pattern layer(s) NOT \
+                         cacheable",
+                        self.graph_editor.material_slot,
+                        live,
+                        cache.layers.len()
+                    )
+                };
             }
             Err(error) => {
                 self.graph_editor.diagnostics = graph.resolve(&registry).diagnostics;

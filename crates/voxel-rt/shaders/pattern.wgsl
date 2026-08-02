@@ -29,6 +29,10 @@
 // The shipped path evaluates authored layers; Potato patches this const off for
 // the deliberately flat fallback tier.
 const MATERIAL_PATTERNS: bool = true;
+// Lazily-filled texel cache for the generators. Ships OFF until measured.
+const MATERIAL_PATTERN_CACHE: bool = false;
+// Coarsen the texel grid with distance. Ships OFF until measured.
+const MATERIAL_PATTERN_TEXEL_LOD: bool = false;
 
 // Global scale on every layer's amount, 0..1. The tier knob: it turns detail down
 // everywhere without editing 26 rows, which is what a Quest preset needs.
@@ -609,6 +613,40 @@ fn pattern_speckle(point: vec3<f32>, density: f32, salt_base: u32) -> f32 {
 // variant of each. The grid is anchored at world zero and its size divides the voxel
 // exactly, so a texel never straddles a voxel edge and the blocky look survives
 // cross-voxel continuity.
+
+/// The texel grid this layer samples on at a given distance — the layer's authored
+/// count up close, halved once per doubling of distance beyond the fade start.
+///
+/// **This exists to make the pattern cache work at range, and it is not octave
+/// LOD.** The cache pays off in proportion to how many pixels land on the same
+/// texel: about a hundred at 2 m, and fewer than one further out, where each pixel
+/// straddles several texels and every lookup misses. Measured, the cache removes
+/// 37% of the pattern path on ground views and *nothing* on aerial ones, for
+/// exactly that reason. Coarsening the grid with distance manufactures the reuse
+/// that distance destroys.
+///
+/// Octave LOD tried to buy the same thing by dropping octaves per pixel and LOST at
+/// ground level (+0.24 ms), because neighbouring pixels disagreeing about the
+/// octave count is divergence. This is the opposite shape: a coarser grid makes
+/// neighbouring pixels agree MORE, and the generator's work per sample is
+/// unchanged. It also anti-aliases, since the thing being removed is detail finer
+/// than a pixel.
+///
+/// The step is a power of two so the grid nests: a coarse texel is exactly a block
+/// of fine ones, so the pattern does not swim as the LOD changes.
+fn pattern_texels_at(layer: PatternLayer, distance_meters: f32) -> u32 {
+    let texels = pattern_texels(layer);
+    if (!MATERIAL_PATTERN_TEXEL_LOD || texels == 0u) {
+        return texels;
+    }
+    let start = lighting.material_params.x;
+    if (start <= 0.0 || distance_meters <= start) {
+        return texels;
+    }
+    let steps = u32(floor(log2(distance_meters / start)));
+    return max(texels >> min(steps, 7u), 1u);
+}
+
 fn pattern_snap_to_texels(meters: vec3<f32>, texels: u32,
                           voxel_size_meters: f32) -> vec3<f32> {
     if (texels == 0u) {
@@ -722,12 +760,14 @@ fn pattern_tile_of(layer: PatternLayer, sample: PatternSample,
 // continuous motion is what `texels_per_voxel = 0` already means — no grid, no
 // snap, and the early return below hands the raw offset straight back.
 fn pattern_drift_meters(layer: PatternLayer, velocity: vec3<f32>,
-                        voxel_size_meters: f32) -> vec3<f32> {
+                        voxel_size_meters: f32, distance_meters: f32) -> vec3<f32> {
     if (all(velocity == vec3<f32>(0.0))) {
         return vec3<f32>(0.0);
     }
     let offset = velocity * graph_animation_seconds();
-    let texels = pattern_texels(layer);
+    // The SAME grid the coordinate snaps to, or the drift steps off it and the
+    // pattern shimmers as it moves.
+    let texels = pattern_texels_at(layer, distance_meters);
     if (texels == 0u) {
         return offset;
     }
@@ -778,7 +818,8 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
     }
     // Otherwise WORLD: a field the world sits in, so it flows across neighbouring
     // voxels and CANNOT tile per voxel. The default, and the continuity argument.
-    let snapped = pattern_snap_to_texels(meters, pattern_texels(layer), voxel_size_meters);
+    let snapped = pattern_snap_to_texels(
+        meters, pattern_texels_at(layer, sample.distance_meters), voxel_size_meters);
     return snapped / period;
 }
 
@@ -811,13 +852,105 @@ fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
 }
 
 // The generator's raw value, 0..1, before fade, amount, face mask or blend.
+
+// ---- Pattern field cache -----------------------------------------------------
+//
+// A direct-mapped cache over the TEXEL LATTICE, filled lazily by the shading pass
+// itself. It exists because `pattern_generator_value` is a pure function of the
+// layer's configuration and the SNAPPED sample point: `pattern_snap_to_texels`
+// quantises the coordinate, so every pixel landing on the same 1.56 cm texel asks
+// the same question and gets the same answer. At 2 m from a wall that is roughly
+// a hundred pixels per texel.
+//
+// It is generic by construction. Nothing here names a material, a slot or a
+// generator — the key is built from the layer's own words, so two layers with
+// identical configuration correctly share entries and a layer nobody has authored
+// yet participates the day it is added.
+//
+// ANIMATION NEEDS NO SPECIAL CASE, which is the part worth understanding. Drift is
+// applied to the coordinate BEFORE this point and is quantised to whole texels, so
+// a drifting pattern simply asks about a different texel each step — the cached
+// contents stay valid and the lookup moves. Gain is applied AFTER, outside the
+// generator. So an animated surface hits the same cache as a still one, and no
+// entry is ever invalidated by the clock.
+const PATTERN_CACHE_MASK: u32 = 16777216u - 1u;
+
+@group(0) @binding(17) var<storage, read_write> pattern_cache: array<atomic<u32>>;
+
+/// Hash of everything the generator's answer depends on: the snapped coordinate,
+/// the per-face salt, the octave count, and the layer's generator configuration.
+///
+/// The coordinate goes in as RAW BITS rather than as a rounded lattice index. It
+/// is already quantised — that is the precondition checked by the caller — so its
+/// bit pattern is exact and identical for every pixel on the texel, and hashing
+/// the bits needs no knowledge of the units or the frame the coordinate is in.
+fn pattern_cache_hashes(layer: PatternLayer, point: vec3<f32>, salt: u32,
+                        octaves: u32) -> vec2<u32> {
+    // Two INDEPENDENT folds over the original inputs: one chooses the slot and
+    // the other supplies the tag. Rehashing the 32-bit slot hash cannot create
+    // more entropy — after fixing its low 22 bits, only 10 bits remain — so that
+    // version silently gave the nominally 16-bit tag only 10 effective bits.
+    // These chains are independent and can be scheduled in parallel.
+    var key = bitcast<u32>(point.x);
+    key = key * 0x9e3779b9u ^ bitcast<u32>(point.y);
+    key = key * 0x85ebca6bu ^ bitcast<u32>(point.z);
+    key = key * 0xc2b2ae35u ^ salt;
+    key = key * 0x27d4eb2fu ^ (octaves | (layer.packed << 3u));
+    key = key * 0x165667b1u ^ bitcast<u32>(layer.period_meters);
+
+    var tag_key = bitcast<u32>(point.z);
+    tag_key = tag_key * 0x85ebca77u ^ bitcast<u32>(point.x);
+    tag_key = tag_key * 0xc2b2ae3du ^ bitcast<u32>(point.y);
+    tag_key = tag_key * 0x27d4eb4fu ^ salt;
+    tag_key = tag_key * 0x165667c5u ^ (layer.packed | (octaves << 26u));
+    tag_key = tag_key * 0xd3a2646du ^ bitcast<u32>(layer.period_meters);
+
+    // `param_a` is density, distortion or edge sharpness depending on the
+    // generator; `param_b` is domain-warp strength. Both affect the raw answer,
+    // and omitting them would leave stale entries behind after an authored edit.
+    key = key * 0xd3a2646du ^ bitcast<u32>(layer.param_a);
+    key = key * 0xfd7046c5u ^ bitcast<u32>(layer.param_b);
+    tag_key = tag_key * 0xfd7046d7u ^ bitcast<u32>(layer.param_b);
+    tag_key = tag_key * 0xb55a4f0du ^ bitcast<u32>(layer.param_a);
+    return vec2<u32>(pattern_hash_u32(key), pattern_hash_u32(tag_key));
+}
+
 fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
                            voxel_size_meters: f32, drift_meters: vec3<f32>) -> f32 {
     let raw_point = pattern_coordinate(layer, sample, voxel_size_meters, drift_meters);
     let salt = pattern_variation_salt(layer, sample);
+    let octaves = pattern_layer_octaves(layer, sample);
+    if (!MATERIAL_PATTERN_CACHE || pattern_texels_at(layer, sample.distance_meters) == 0u) {
+        // Without the texel snap the coordinate is continuous, so no two pixels
+        // ever agree on a key and the cache would be pure overhead. That is a
+        // property of the LAYER, read from its own configuration — no material,
+        // slot or generator is named anywhere in this path.
+        return pattern_generator_at(layer, sample, drift_meters, raw_point, salt, octaves);
+    }
+    let hashes = pattern_cache_hashes(layer, raw_point, salt, octaves);
+    let slot = hashes.x & PATTERN_CACHE_MASK;
+    // Forced non-zero: the buffer starts zeroed, so zero means empty.
+    let tag = max(hashes.y >> 16u, 1u);
+    let stored = atomicLoad(&pattern_cache[slot]);
+    if ((stored >> 16u) == tag) {
+        return f32(stored & 0xffffu) * (1.0 / 65535.0);
+    }
+    let value = pattern_generator_at(layer, sample, drift_meters, raw_point, salt, octaves);
+    let quantised = u32(clamp(value, 0.0, 1.0) * 65535.0 + 0.5);
+    // ONE atomic 32-bit store, so an entry can never be seen half-written and
+    // concurrent invocations cannot data-race. Same-key writers store the same
+    // bits; colliding keys leave one complete, tag-checked entry behind.
+    atomicStore(&pattern_cache[slot], (tag << 16u) | quantised);
+    return value;
+}
+
+/// The generator itself, with the coordinate and salt already resolved so the
+/// caching wrapper above can key on them.
+fn pattern_generator_at(layer: PatternLayer, sample: PatternSample,
+                        drift_meters: vec3<f32>, raw_point: vec3<f32>, salt: u32,
+                        octaves: u32) -> f32 {
     let point = pattern_warp(raw_point, layer, salt);
     let generator = pattern_generator(layer);
-    let octaves = pattern_layer_octaves(layer, sample);
     if (generator == PATTERN_GENERATOR_NOISE) {
         return pattern_fractal_noise(point, octaves, salt);
     }
@@ -972,7 +1105,7 @@ fn pattern_apply_color(layer: PatternLayer, base: vec3<f32>, sample: PatternSamp
     if (strength <= 0.0) {
         return base;
     }
-    let drift_meters = pattern_drift_meters(layer, drift_velocity, voxel_size_meters);
+    let drift_meters = pattern_drift_meters(layer, drift_velocity, voxel_size_meters, sample.distance_meters);
     let value = pattern_generator_value(layer, sample, voxel_size_meters, drift_meters);
     let blend = pattern_blend(layer);
     if (blend == PATTERN_BLEND_MIX_TO_COLOR) {
@@ -994,7 +1127,7 @@ fn pattern_apply_scalar(layer: PatternLayer, base: f32, sample: PatternSample,
     if (strength <= 0.0) {
         return base;
     }
-    let drift_meters = pattern_drift_meters(layer, drift_velocity, voxel_size_meters);
+    let drift_meters = pattern_drift_meters(layer, drift_velocity, voxel_size_meters, sample.distance_meters);
     let value = pattern_generator_value(layer, sample, voxel_size_meters, drift_meters);
     let blend = pattern_blend(layer);
     if (blend == PATTERN_BLEND_MIX_TO_COLOR) {

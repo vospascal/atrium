@@ -16,7 +16,7 @@ use crate::material_graph::MaterialGraphShaderSet;
 use crate::variants::RenderQuality;
 
 use super::cagi::LightVolume;
-use super::world_bindings::WorldBindings;
+use super::world_bindings::{WorldBindings, PATTERN_CACHE_BINDING};
 use super::ComputePipelineCache;
 
 const WORKGROUP_SIZE: u32 = 8;
@@ -226,6 +226,7 @@ impl DdaPass {
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let mut entries = WorldBindings::layout_entries();
     entries.extend(LightVolume::layout_entries(false));
+    entries.push(WorldBindings::pattern_cache_layout_entry());
     entries.push(wgpu::BindGroupLayoutEntry {
         binding: 0,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -264,6 +265,10 @@ fn create_bind_groups(
         let mut entries = world_bindings.bind_group_entries();
         entries.extend(light_volume.bind_group_entries(volume_index, false));
         entries.push(wgpu::BindGroupEntry {
+            binding: PATTERN_CACHE_BINDING,
+            resource: world_bindings.pattern_cache_buffer().as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
             binding: 0,
             resource: camera_uniform_buffer.as_entire_binding(),
         });
@@ -286,6 +291,7 @@ pub(crate) mod tests {
     use crate::ao::{AoDirectionMode, AoMode, AoSettings};
     use crate::cagi::{CagiSampleMode, CagiSettings};
     use crate::passes::create_compute_pipeline;
+    use crate::passes::world_bindings::PATTERN_CACHE_ENTRIES;
     use crate::shadows::{ShadowMode, ShadowSettings};
     use crate::traversal::TraversalSettings;
     use crate::variants::{QualityPreset, QUALITY_PRESETS};
@@ -297,6 +303,18 @@ pub(crate) mod tests {
         assert_eq!(
             build_shader_source(&RenderQuality::default()),
             SHADER_SOURCE
+        );
+    }
+
+    #[test]
+    fn pattern_cache_buffer_size_matches_the_shader_mask() {
+        let declaration = format!(
+            "const PATTERN_CACHE_MASK: u32 = {}u - 1u;",
+            PATTERN_CACHE_ENTRIES
+        );
+        assert!(
+            SHADER_SOURCE.contains(&declaration),
+            "Rust allocates {PATTERN_CACHE_ENTRIES} entries but WGSL does not declare `{declaration}`"
         );
     }
 

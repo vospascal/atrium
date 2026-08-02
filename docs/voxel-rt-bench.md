@@ -907,6 +907,21 @@ count, which is why it barely moves with resolution.
 > full `get` calls — on a fully-solid world nearly every probe returns "solid" and
 > the answer is zero. This is a startup/preset cost, not a per-frame one, which is
 > why it has not been visible in any frame-time table.
+>
+> **And it is single-threaded, on a loop that needs no synchronisation to
+> parallelise.** The engine has exactly one worker thread (the E2 world authority in
+> `world_host.rs`) and **no data parallelism anywhere** — no `rayon`, no `par_iter`,
+> not in the dependency list. This loop writes cells indexed by
+> `(brick * BRICK_SIZE + local) / cell_voxels`, and every shipped `cell_voxels`
+> (2, 4, 8) divides `BRICK_SIZE = 8`, so **each brick maps to a disjoint set of
+> cells** — at the shipped tier brick_x writes only cells `brick_x*2` and
+> `brick_x*2 + 1`. No two bricks touch the same cell, and `exposed_face_weight` only
+> reads neighbours. So it parallelises over bricks with **no locks, no atomics and no
+> per-thread merge**.
+>
+> Two caveats before anyone builds it: the disjointness above is established by
+> reading the indexing, **not** by a test, so it needs one; and it breaks the moment
+> `cell_voxels` exceeds `BRICK_SIZE`, which the assertion should say out loud.
 
 2 voxels is rejected on both axes at once: 258 MB against the brickmap's own ~30 MB,
 and 5.8-7.9 ms per frame *for the CA alone*. 8 voxels is the Quest configuration —

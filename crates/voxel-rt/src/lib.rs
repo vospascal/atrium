@@ -33,6 +33,7 @@ pub mod gpu;
 pub mod graph;
 pub mod lighting;
 pub mod material;
+pub mod material_cacheability;
 pub mod material_edit;
 pub mod material_graph;
 pub mod material_graph_assets;

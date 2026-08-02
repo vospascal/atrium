@@ -14,6 +14,7 @@ use crate::graph::{
     NodeRegistry, NodeTypeId, OutputPin, PropertyValue, SocketKey,
 };
 use crate::material::Material;
+use crate::material_cacheability::{analyse, CacheReport};
 use crate::material_graph_layers::{
     project_pattern_stack, resolve_material_surface_chain, LayerGraphError, PATTERN_LAYER_NODE,
     PATTERN_NOISE_NODE,
@@ -500,6 +501,16 @@ pub struct MaterialGraphProgram {
     pub instructions: Vec<MaterialInstruction>,
     pub output: MaterialOutput,
     pub wgsl: String,
+    /// Which of this graph's pattern layers could have their field evaluated
+    /// once instead of per pixel per frame.
+    ///
+    /// Carried on the program rather than recomputed by each caller: it is
+    /// derived from the same graph the program was compiled from, so computing
+    /// it anywhere else risks answering for a graph that has since changed. The
+    /// editor turns [`CacheReport::diagnostics`] into author-facing warnings;
+    /// `cargo run --release -p voxel-rt --example cache_report` prints it for the
+    /// whole checked-in project.
+    pub cache: CacheReport,
 }
 
 /// The prefix every generated program carries: the graph ABI plus the shared
@@ -1717,6 +1728,7 @@ pub fn compile(
         instructions: lowerer.values,
         output,
         wgsl,
+        cache: analyse(graph, registry),
     })
 }
 
@@ -3717,6 +3729,9 @@ mod tests {
                 layer_animation: Vec::new(),
             },
             wgsl: String::new(),
+            // Hand-built IR fixture: there is no graph to analyse, and these
+            // tests are about evaluation, not caching.
+            cache: CacheReport::default(),
         }
     }
 
@@ -3794,6 +3809,9 @@ mod tests {
                 layer_animation: Vec::new(),
             },
             wgsl: String::new(),
+            // Hand-built IR fixture: there is no graph to analyse, and these
+            // tests are about evaluation, not caching.
+            cache: CacheReport::default(),
         };
 
         let response = program
@@ -4806,6 +4824,7 @@ mod tests {
             category: crate::graph::NodeCategory::Inputs,
             preview: crate::graph::NodePreview::Value,
             operation: NodeOperation::Material(MaterialNodeOperation::ConstantScalar),
+            temporal: crate::graph::TemporalDependence::Inherited,
             kinds: &[GraphKind::Material],
             inputs: &[crate::graph::SocketDeclarationStatic {
                 key: "gloss",
@@ -4814,6 +4833,7 @@ mod tests {
                 value_type: crate::graph::SocketType::Scalar,
                 rate: crate::graph::EvaluationRate::Uniform,
                 cardinality: crate::graph::Cardinality::OPTIONAL_SINGLE,
+                separable: crate::graph::Separable::None,
             }],
             outputs: &[crate::graph::SocketDeclarationStatic {
                 key: "value",
@@ -4822,6 +4842,7 @@ mod tests {
                 value_type: crate::graph::SocketType::Scalar,
                 rate: crate::graph::EvaluationRate::Uniform,
                 cardinality: crate::graph::Cardinality::ANY,
+                separable: crate::graph::Separable::None,
             }],
             fields: &[],
         }];

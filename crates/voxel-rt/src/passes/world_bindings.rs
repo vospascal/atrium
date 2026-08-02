@@ -55,12 +55,43 @@ use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 /// pass owns 0 (camera) and 6 (the output texture).
 pub const WORLD_EVENT_BINDING: u32 = 16;
 
+/// The pattern field cache — 17, the next free index after the event field.
+///
+/// **It is bound by the SHADING pass alone, not by the shared layout**, and that
+/// is a hard constraint rather than tidiness: `max_storage_buffers_per_shader_stage`
+/// is 11 on this device — the WebGPU default is only 8, so the engine already asks
+/// for more than the spec guarantees — and the CA pass's layout is the shared set
+/// plus its own three. Adding a twelfth storage buffer to the shared layout makes
+/// `create_bind_group_layout` fail outright for the CA pass, which is exactly what
+/// the first version of this did. The CA pass has no patterns to cache anyway.
+///
+/// READ_WRITE, and that is the point: the shading pass both looks entries up and
+/// fills them in, in ONE dispatch, so a texel is evaluated the first time a ray
+/// lands on it and reused by every ray after. That shape needs no WebGPU
+/// extension — only read/read_write *storage textures* are gated
+/// (`readonly_and_readwrite_storage_textures`); a read_write storage BUFFER is
+/// core. Declared in `shaders/pattern.wgsl`, which only the shading pass
+/// includes; the CA pass carries the binding in its layout and never names it.
+pub const PATTERN_CACHE_BINDING: u32 = 17;
+
+/// Entries in the direct-mapped pattern cache. 16 Mi entries x 4 bytes = 64 MiB.
+///
+/// Sized by SCREEN PIXELS TIMES LAYERS, not by the world: one pixel can request
+/// one distinct field value from every active layer. At 2560x1440 the four-layer
+/// ceiling is 14.75 M primary samples, so the next power of two is 16 Mi. This
+/// excludes secondary hits by design; they may evict entries, but a primary-only
+/// frame now fits instead of thrashing as soon as it authors a second layer.
+pub const PATTERN_CACHE_ENTRIES: u64 = 16 * 1024 * 1024;
+
 pub struct WorldBindings {
     metadata_uniform_buffer: wgpu::Buffer,
     brick_indices_buffer: wgpu::Buffer,
     occupancy_words_buffer: wgpu::Buffer,
     material_words_buffer: wgpu::Buffer,
     material_table_buffer: wgpu::Buffer,
+    /// Direct-mapped pattern field cache; see [`PATTERN_CACHE_BINDING`].
+    pattern_cache_buffer: wgpu::Buffer,
+
     lighting_uniform_buffer: wgpu::Buffer,
     column_max_buffer: wgpu::Buffer,
     brick_occupancy_bits_buffer: wgpu::Buffer,
@@ -106,6 +137,14 @@ impl WorldBindings {
             // the compiled defaults, which is exactly what
             // `MaterialTable::default()` holds, so the CPU and GPU agree before
             // the first edit without the two having to be wired together here.
+            pattern_cache_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pattern field cache"),
+                size: PATTERN_CACHE_ENTRIES * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                // Zeroed means "every entry empty": entry 0 can never be a valid
+                // hit because the stored tag is forced non-zero.
+                mapped_at_creation: false,
+            }),
             material_table_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("world material table"),
                 contents: bytemuck::cast_slice(&crate::material::gpu_materials()),
@@ -172,6 +211,26 @@ impl WorldBindings {
             storage_entry(15),                  // AADF directional bounds (11-14 are CAGI's)
             uniform_entry(WORLD_EVENT_BINDING), // the world event field
         ]
+    }
+
+    /// The pattern cache buffer, bound by the shading pass's own entries.
+    pub fn pattern_cache_buffer(&self) -> &wgpu::Buffer {
+        &self.pattern_cache_buffer
+    }
+
+    /// The layout entry for [`PATTERN_CACHE_BINDING`], for the shading pass to
+    /// append to the shared set.
+    pub fn pattern_cache_layout_entry() -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding: PATTERN_CACHE_BINDING,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
     }
 
     /// The shared bind-group entries, to be concatenated with a pass's own.
@@ -259,6 +318,7 @@ impl WorldBindings {
             + self.occupancy_words_buffer.size()
             + self.material_words_buffer.size()
             + self.material_table_buffer.size()
+            + self.pattern_cache_buffer.size()
             + self.lighting_uniform_buffer.size()
             + self.column_max_buffer.size()
             + self.brick_occupancy_bits_buffer.size()

@@ -86,6 +86,7 @@
 
 use std::time::Instant;
 
+use std::path::PathBuf;
 use voxel_rt::animation_clock::AnimationClockSample;
 use voxel_rt::ao::{AoMode, AoSettings};
 use voxel_rt::brickmap::{
@@ -106,6 +107,10 @@ use voxel_rt::pattern::{
     PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
     PatternTarget, DEFAULT_TEXELS_PER_VOXEL,
 };
+
+use voxel_rt::material_graph_assets::MaterialGraphAssetService;
+use voxel_rt::material_table::MaterialTable;
+use voxel_rt::studio_assets::{StudioProject, StudioProjectStore};
 use voxel_rt::variants::{
     bench_points_of, BenchSection, LeverId, LeverValue, QualityPreset, RenderQuality,
     QUALITY_PRESETS,
@@ -297,9 +302,10 @@ fn main() {
     // normal run against the `current` column of a --no-collapse run, and take
     // several of each, because cross-run noise is the same order as the effect.
     let collapse_uniform = !std::env::args().any(|argument| argument == "--no-collapse");
+    let use_project = std::env::args().any(|argument| argument == "--project");
     let selected_sections: Vec<usize> = std::env::args()
         .skip(1)
-        .filter(|argument| argument != "--no-collapse")
+        .filter(|argument| argument != "--no-collapse" && argument != "--project")
         .map(|argument| {
             argument
                 .parse()
@@ -343,6 +349,50 @@ fn main() {
     // raises an event, so a per-batch write would re-upload the same 768 zero
     // bytes into every measured section.
     world_bindings.write_world_events(&queue, &BENCH_WORLD_EVENTS);
+
+    // `--project` uploads the CHECKED-IN PROJECT's material table over the
+    // compiled one, through the same `load_live_state` call the app's startup
+    // uses.
+    //
+    // WHY THIS FLAG EXISTS. The two tables are not the same, and the difference
+    // is not cosmetic: the compiled table authors pattern layers only on `lava`
+    // and `slate tile`, and the generated island contains NEITHER — it is grass,
+    // dirt, sediment, stone and water. So a default bench run measures pattern
+    // layers that nothing on screen carries, and reports patterns as free. The
+    // project puts two layers on `stone`, which is 83,979 voxels and most of
+    // what the camera sees. Measure the shipped look with this flag; without it,
+    // the material columns are measuring the compiled table's authoring, which
+    // the app replaces at startup.
+    if use_project {
+        let project_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let store = StudioProjectStore::new(&project_path);
+        let mut table = MaterialTable::default();
+        let mut project_quality = RenderQuality::default();
+        match StudioProject::load_live_state(&store, &mut table, &mut project_quality) {
+            Ok((project, warnings)) => {
+                // `load_live_state` applies the authored material ROWS only. The
+                // pattern layers live in the graphs and reach the table through
+                // this second call, exactly as the app's startup does — without
+                // it the "project" table still has zero layers on stone and this
+                // flag measures nothing, which is how the first version of it was
+                // wrong.
+                let (_graphs, diagnostics) = MaterialGraphAssetService::load_shader_set_for_editing(
+                    &project_path,
+                    &project,
+                    &mut table,
+                );
+                world_bindings.write_material_table(&queue, &table.gpu_rows());
+                println!(
+                    "material table: LOADED FROM PROJECT ({} warning(s), {} graph diagnostic(s))",
+                    warnings.len(),
+                    diagnostics.len()
+                );
+            }
+            Err(error) => panic!("--project asked for the checked-in project: {error}"),
+        }
+    } else {
+        println!("material table: compiled defaults (pass --project for the shipped authoring)");
+    }
 
     if runs_section(1) {
         run_section(
@@ -450,6 +500,153 @@ fn main() {
     }
     if runs_section(12) {
         write_generator_swatches(&device, &queue);
+    }
+    if runs_section(13) {
+        report_material_costs(&device, &queue, use_project);
+    }
+}
+
+/// Section 13 — what each MATERIAL costs, measured on a wall of nothing else.
+///
+/// **Why this exists, and why the preset table could not answer it.** Sections 1-9
+/// measure the generated island, and the island is made of five materials: grass,
+/// dirt, sediment, stone and water. The compiled table authors pattern layers on
+/// `lava` and `slate tile` — NEITHER of which the island contains. So a default run
+/// prices pattern layers that nothing on screen carries and reports them as free,
+/// which is true and useless.
+///
+/// This section removes the world from the question. One studio wall, filled with a
+/// single material, camera square on to a lit face — so the measured number is that
+/// material's cost per pixel at full coverage, which is the worst case a surface can
+/// present and the one worth budgeting against.
+///
+/// Each material is timed twice on the SAME scene and the same pipeline: once with
+/// its row exactly as authored, once with that row's pattern stack emptied. The
+/// difference is the layer stack's cost, isolated from the base shading, the
+/// geometry and the lighting — all of which are identical between the two columns
+/// because only the uploaded table changes.
+fn report_material_costs(device: &wgpu::Device, queue: &wgpu::Queue, use_project: bool) {
+    use std::f32::consts::FRAC_PI_2;
+    use voxel_core::world::Voxel;
+    use voxel_rt::material::{material_voxel, MATERIAL_COUNT};
+    use voxel_rt::pattern::PatternStack;
+    use voxel_rt::studio::{orbit_pose, StudioPose, StudioScene};
+
+    println!();
+    println!("== section 13: per-material cost (studio wall, one material, full coverage) ==");
+
+    let mut table = MaterialTable::default();
+    if use_project {
+        let project_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let store = StudioProjectStore::new(&project_path);
+        let mut project_quality = RenderQuality::default();
+        let (project, _warnings) =
+            StudioProject::load_live_state(&store, &mut table, &mut project_quality)
+                .expect("the checked-in project");
+        // See the `--project` flag: the pattern layers arrive with the GRAPHS, not
+        // with the rows.
+        let _ = MaterialGraphAssetService::load_shader_set_for_editing(
+            &project_path,
+            &project,
+            &mut table,
+        );
+    }
+    println!(
+        "  table: {}",
+        if use_project {
+            "the checked-in project"
+        } else {
+            "compiled defaults"
+        }
+    );
+
+    let authored = table.gpu_rows();
+    let variant = Variant::new("material".to_string(), RenderQuality::default());
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    println!("  per-dispatch median ms at {width}x{height}");
+
+    let mut rows: Vec<(String, usize, f32, f32)> = Vec::new();
+    for id in 0..MATERIAL_COUNT {
+        let material = id as u8;
+        let voxel = material_voxel(material);
+        if voxel == Voxel::Air {
+            continue;
+        }
+        let layer_count = table
+            .rows()
+            .get(id)
+            .map(|row| row.patterns.layers.iter().flatten().count())
+            .unwrap_or(0);
+
+        let scene = StudioScene {
+            sample: voxel,
+            pose: StudioPose::Wall,
+            plate: None,
+            subject: None,
+        };
+        let brickmap = scene.build();
+        let bindings = WorldBindings::new(device, &brickmap);
+        // Same framing as the section 12 swatches: the +Z face, which is the LIT
+        // one under the default sun. A shadowed wall measures shadow, not material.
+        let scenario = Scenario {
+            label: "studio wall",
+            pose: orbit_pose(&scene, -FRAC_PI_2, -0.05, 5.0),
+            sun: SunSettings::default(),
+            capture_image: false,
+        };
+        let mut resources =
+            VariantResources::new(device, &bindings, &brickmap, &variant, &target.view);
+
+        let mut stripped = table.clone();
+        if let Some(row) = stripped.row_mut(material) {
+            row.patterns = PatternStack::of(&[]);
+        }
+        let tables = [authored.clone(), stripped.gpu_rows()];
+
+        bindings.write_material_table(queue, &tables[0]);
+        resources.flood_to_convergence(device, queue, &bindings, &variant, &scenario);
+        for table_variant in &tables {
+            bindings.write_material_table(queue, table_variant);
+            for _ in 0..WARMUP_BATCHES {
+                time_one_batch(device, queue, &bindings, &resources, &variant, &scenario);
+            }
+        }
+
+        let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(BATCH_COUNT); tables.len()];
+        for round in 0..BATCH_COUNT {
+            for offset in 0..tables.len() {
+                let column = (round + offset) % tables.len();
+                bindings.write_material_table(queue, &tables[column]);
+                samples[column].push(time_one_batch(
+                    device, queue, &bindings, &resources, &variant, &scenario,
+                ));
+            }
+        }
+        let (authored_median, _) = summarize(&mut samples[0]);
+        let (stripped_median, _) = summarize(&mut samples[1]);
+        let name = table
+            .rows()
+            .get(id)
+            .map(|row| row.name.to_string())
+            .unwrap_or_default();
+        rows.push((name, layer_count, authored_median, stripped_median));
+    }
+
+    rows.sort_by(|a, b| {
+        (b.2 - b.3)
+            .partial_cmp(&(a.2 - a.3))
+            .expect("NaN timing sample")
+    });
+    println!(
+        "  {:<18} {:>6} {:>10} {:>10} {:>10}",
+        "material", "layers", "authored", "no-pattern", "delta"
+    );
+    for (name, layers, authored_median, stripped_median) in &rows {
+        println!(
+            "  {name:<18} {layers:>6} {authored_median:>10.3} {stripped_median:>10.3} {:>+10.3}",
+            authored_median - stripped_median
+        );
     }
 }
 

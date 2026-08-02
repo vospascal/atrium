@@ -122,6 +122,64 @@ impl SocketType {
     }
 }
 
+/// How a node's OWN operation depends on the clock — the axis
+/// [`EvaluationRate`] does not have.
+///
+/// **Why this is a second axis and not another rung of the rate ladder.**
+/// `EvaluationRate` is purely SPATIAL and it is ORDERED: `can_feed` is
+/// `self <= destination`, so a coarser value may feed a finer one. Time is not
+/// comparable with that. An oscillator is spatially [`EvaluationRate::Uniform`]
+/// — the same value at every point in the world — and yet it changes every
+/// frame. Folding time into the ladder would either break the ordering or
+/// force every animated value to claim `PerSample`, which would be a lie about
+/// where it can be evaluated.
+///
+/// Declared on every node rather than defaulted, because the safe answer is not
+/// obvious from a node's other metadata and a wrong one silently claims that a
+/// surface can be cached when it cannot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalDependence {
+    /// Time-invariant in itself: the output changes over time only if an input
+    /// does. Every pure math, mix, ramp and pattern-generator node.
+    Inherited,
+    /// Reads the animation clock. The output changes every frame regardless of
+    /// its inputs.
+    Clock,
+    /// Reads the world-event field. Changes when an entity moves or an event is
+    /// raised, which is not the clock but is equally not cacheable.
+    Events,
+}
+
+impl TemporalDependence {
+    /// Whether this node introduces time-dependence on its own, i.e. whether a
+    /// taint pass should SEED at it rather than merely propagate through it.
+    pub fn is_source(self) -> bool {
+        !matches!(self, TemporalDependence::Inherited)
+    }
+}
+
+/// How a time-varying value entering a socket combines with the cacheable
+/// spatial field the node owns — the question that decides whether an ANIMATED
+/// material can still be cached.
+///
+/// Only meaningful on a node that owns such a field; everywhere else the
+/// conservative [`Separable::None`] is correct and is what `socket!` produces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Separable {
+    /// Time here changes the field itself, so nothing about it can be cached.
+    None,
+    /// Time here multiplies the field's contribution AFTER it is sampled, so the
+    /// field caches and the scalar is applied per pixel.
+    Scale,
+    /// Time here translates the sample COORDINATE, so the field caches and the
+    /// clock only moves where it is read. Exact for a pattern layer, because
+    /// `pattern_drift_meters` quantises the offset to a whole number of texels —
+    /// an integer index shift in the cache's own address space.
+    Translate,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvaluationRate {
@@ -1145,6 +1203,9 @@ pub struct NodeDeclaration {
     pub category: NodeCategory,
     pub preview: NodePreview,
     pub operation: NodeOperation,
+    /// How this node's own operation depends on the clock. Declared explicitly on
+    /// every node — see [`TemporalDependence`] for why it is not defaulted.
+    pub temporal: TemporalDependence,
     pub kinds: &'static [GraphKind],
     pub inputs: &'static [SocketDeclarationStatic],
     pub outputs: &'static [SocketDeclarationStatic],
@@ -1159,6 +1220,10 @@ pub struct SocketDeclarationStatic {
     pub value_type: SocketType,
     pub rate: EvaluationRate,
     pub cardinality: Cardinality,
+    /// How a time-varying value arriving here combines with the node's cacheable
+    /// field. `socket!` produces [`Separable::None`]; `socket_separable!` is the
+    /// opt-in, and only a node that owns such a field may use it.
+    pub separable: Separable,
 }
 
 impl SocketDeclarationStatic {
@@ -1274,13 +1339,32 @@ macro_rules! socket {
             value_type: $value_type,
             rate: $rate,
             cardinality: $cardinality,
+            separable: Separable::None,
+        }
+    };
+}
+
+/// A socket whose time-varying input can be lifted OUT of a cached field. The
+/// default is deliberately the conservative one, so forgetting to reach for this
+/// macro under-claims cacheability rather than over-claiming it.
+macro_rules! socket_separable {
+    ($key:literal, $label:literal, $description:literal, $value_type:expr, $rate:expr,
+     $cardinality:expr, $separable:expr $(,)?) => {
+        SocketDeclarationStatic {
+            key: $key,
+            label: $label,
+            description: $description,
+            value_type: $value_type,
+            rate: $rate,
+            cardinality: $cardinality,
+            separable: $separable,
         }
     };
 }
 
 macro_rules! node {
     ($id:literal, $operation:expr, $title:literal, $description:literal, $category:expr, $preview:expr,
-     $kinds:expr, $inputs:expr, $outputs:expr, $fields:expr) => {
+     $kinds:expr, $inputs:expr, $outputs:expr, $fields:expr, $temporal:expr $(,)?) => {
         NodeDeclaration {
             id: $id,
             version: 1,
@@ -1289,6 +1373,7 @@ macro_rules! node {
             category: $category,
             preview: $preview,
             operation: $operation,
+            temporal: $temporal,
             kinds: $kinds,
             inputs: $inputs,
             outputs: $outputs,
@@ -1411,23 +1496,29 @@ const PATTERN_LAYER_IN: &[SocketDeclarationStatic] = &[
     ),
     // S3 — animation. Optional, and identity when unconnected, so every graph
     // authored before S3 keeps its exact behaviour.
-    socket!(
+    socket_separable!(
         "animation_gain",
         "Animation Gain",
         "Multiplies this layer's Amount, 0 off to 1 as authored; unconnected it is \
          the identity.",
         SocketType::Scalar,
         EvaluationRate::PerSample,
-        Cardinality::OPTIONAL_SINGLE
+        Cardinality::OPTIONAL_SINGLE,
+        // Applied AFTER the field is sampled, so an oscillator here leaves the
+        // cached field untouched.
+        Separable::Scale
     ),
-    socket!(
+    socket_separable!(
         "drift_velocity",
         "Drift",
         "How fast the pattern travels through world space, in metres per second; \
          the shader applies the clock itself.",
         SocketType::Vector3,
         EvaluationRate::PerSample,
-        Cardinality::OPTIONAL_SINGLE
+        Cardinality::OPTIONAL_SINGLE,
+        // Moves WHERE the field is read, not what it contains, and
+        // `pattern_drift_meters` quantises that to whole texels.
+        Separable::Translate
     ),
 ];
 const PATTERN_LAYER_OUT: &[SocketDeclarationStatic] = &[socket!(
@@ -3933,7 +4024,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         CONSTANT_SCALAR_OUT,
-        CONSTANT_SCALAR_FIELDS
+        CONSTANT_SCALAR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.output",
@@ -3945,7 +4037,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         MATERIAL_OUTPUT_IN,
         &[],
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.surface",
@@ -3957,7 +4050,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         MATERIAL_SURFACE_IN,
         MATERIAL_SURFACE_OUT,
-        MATERIAL_OUTPUT_FIELDS
+        MATERIAL_OUTPUT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.constant_color",
@@ -3969,7 +4063,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         CONSTANT_COLOR_OUT,
-        CONSTANT_COLOR_FIELDS
+        CONSTANT_COLOR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.add_scalar",
@@ -3981,7 +4076,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         ADD_SCALAR_IN,
         ADD_SCALAR_OUT,
-        ADD_SCALAR_FIELDS
+        ADD_SCALAR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.mix_color",
@@ -3993,7 +4089,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         COLOR_MIX_IN,
         MIX_COLOR_OUT,
-        MIX_COLOR_FIELDS
+        MIX_COLOR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.clamp_scalar",
@@ -4005,7 +4102,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         SCALAR_CLAMP_IN,
         CLAMP_SCALAR_OUT,
-        CLAMP_SCALAR_FIELDS
+        CLAMP_SCALAR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.position",
@@ -4017,7 +4115,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         POSITION_OUT,
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.normal",
@@ -4029,7 +4128,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         NORMAL_OUT,
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.base_color",
@@ -4041,7 +4141,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         BASE_COLOR_OUT,
-        BASE_COLOR_FIELDS
+        BASE_COLOR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.roughness",
@@ -4053,7 +4154,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         ROUGHNESS_OUT,
-        ROUGHNESS_FIELDS
+        ROUGHNESS_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.emission",
@@ -4065,7 +4167,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         EMISSION_OUT,
-        EMISSION_FIELDS
+        EMISSION_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.emission_strength",
@@ -4077,7 +4180,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         COLOR_STRENGTH_IN,
         EMISSION_STRENGTH_OUT,
-        COLOR_STRENGTH_FIELDS
+        COLOR_STRENGTH_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.face_color",
@@ -4089,7 +4193,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         FACE_COLOR_IN,
         FACE_COLOR_OUT,
-        FACE_COLOR_FIELDS
+        FACE_COLOR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.face_roughness",
@@ -4101,7 +4206,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         FACE_SCALAR_IN,
         FACE_ROUGHNESS_OUT,
-        FACE_ROUGHNESS_FIELDS
+        FACE_ROUGHNESS_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_flat",
@@ -4113,7 +4219,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_FLAT_OUT,
-        PATTERN_FLAT_FIELDS
+        PATTERN_FLAT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_noise",
@@ -4125,7 +4232,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_NOISE_OUT,
-        PATTERN_NOISE_FIELDS
+        PATTERN_NOISE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_speckle",
@@ -4137,7 +4245,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_SPECKLE_OUT,
-        PATTERN_SPECKLE_FIELDS
+        PATTERN_SPECKLE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_perlin",
@@ -4149,7 +4258,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_PERLIN_OUT,
-        PATTERN_PERLIN_FIELDS
+        PATTERN_PERLIN_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_simplex",
@@ -4161,7 +4271,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_SIMPLEX_OUT,
-        PATTERN_SIMPLEX_FIELDS
+        PATTERN_SIMPLEX_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_ridged",
@@ -4173,7 +4284,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_RIDGED_OUT,
-        PATTERN_RIDGED_FIELDS
+        PATTERN_RIDGED_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_turbulence",
@@ -4185,7 +4297,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_TURBULENCE_OUT,
-        PATTERN_TURBULENCE_FIELDS
+        PATTERN_TURBULENCE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_worley",
@@ -4197,7 +4310,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_WORLEY_OUT,
-        PATTERN_WORLEY_FIELDS
+        PATTERN_WORLEY_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_worley_edge",
@@ -4209,7 +4323,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_WORLEY_EDGE_OUT,
-        PATTERN_WORLEY_EDGE_FIELDS
+        PATTERN_WORLEY_EDGE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_worley_smooth",
@@ -4221,7 +4336,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_WORLEY_SMOOTH_OUT,
-        PATTERN_WORLEY_SMOOTH_FIELDS
+        PATTERN_WORLEY_SMOOTH_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_wave",
@@ -4233,7 +4349,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_WAVE_OUT,
-        PATTERN_WAVE_FIELDS
+        PATTERN_WAVE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_checker",
@@ -4245,7 +4362,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_CHECKER_OUT,
-        PATTERN_CHECKER_FIELDS
+        PATTERN_CHECKER_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_tile_tone",
@@ -4257,7 +4375,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_TILE_TONE_OUT,
-        PATTERN_TILE_TONE_FIELDS
+        PATTERN_TILE_TONE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_tile_edge",
@@ -4269,7 +4388,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         TESSELLATION_IN,
         PATTERN_TILE_EDGE_OUT,
-        PATTERN_TILE_EDGE_FIELDS
+        PATTERN_TILE_EDGE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.tessellation",
@@ -4282,7 +4402,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         TESSELLATION_OUT,
-        TESSELLATION_FIELDS
+        TESSELLATION_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.pattern_layer",
@@ -4294,7 +4415,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         PATTERN_LAYER_IN,
         PATTERN_LAYER_OUT,
-        PATTERN_LAYER_FIELDS
+        PATTERN_LAYER_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.multiply_scalar",
@@ -4308,7 +4430,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         MULTIPLY_SCALAR_IN,
         MULTIPLY_SCALAR_OUT,
-        MULTIPLY_SCALAR_FIELDS
+        MULTIPLY_SCALAR_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.direction",
@@ -4323,7 +4446,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         DIRECTION_IN,
         DIRECTION_OUT,
-        DIRECTION_FIELDS
+        DIRECTION_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.time",
@@ -4337,7 +4461,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         TIME_OUT,
-        &[]
+        &[],
+        TemporalDependence::Clock,
     ),
     node!(
         "material.oscillator",
@@ -4351,7 +4476,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         OSCILLATOR_IN,
         OSCILLATOR_OUT,
-        OSCILLATOR_FIELDS
+        OSCILLATOR_FIELDS,
+        TemporalDependence::Clock,
     ),
     node!(
         "material.event_sensor",
@@ -4365,7 +4491,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         EVENT_SENSOR_OUT,
-        EVENT_SENSOR_FIELDS
+        EVENT_SENSOR_FIELDS,
+        TemporalDependence::Events,
     ),
     node!(
         "material.remap_scalar",
@@ -4377,7 +4504,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         REMAP_IN,
         REMAP_SCALAR_OUT,
-        REMAP_FIELDS
+        REMAP_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.noise",
@@ -4389,7 +4517,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         PROCEDURAL_SCALAR_IN,
         NOISE_OUT,
-        NOISE_FIELDS
+        NOISE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.fbm",
@@ -4401,7 +4530,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         FBM_IN,
         FBM_OUT,
-        FBM_FIELDS
+        FBM_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.color_ramp",
@@ -4413,7 +4543,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         COLOR_RAMP_IN,
         COLOR_RAMP_OUT,
-        COLOR_RAMP_FIELDS
+        COLOR_RAMP_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.vector_add",
@@ -4425,7 +4556,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         VECTOR_ADD_IN,
         VECTOR_ADD_OUT,
-        VECTOR_BINARY_FIELDS
+        VECTOR_BINARY_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.vector_scale",
@@ -4437,7 +4569,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         VECTOR_SCALE_IN,
         VECTOR_SCALE_OUT,
-        VECTOR_SCALE_FIELDS
+        VECTOR_SCALE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.normalize_vector",
@@ -4449,7 +4582,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         NORMALIZE_VECTOR_IN,
         NORMALIZE_VECTOR_OUT,
-        VECTOR_INPUT_FIELDS
+        VECTOR_INPUT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.dot_vector",
@@ -4461,7 +4595,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         VECTOR_DOT_IN,
         VECTOR_DOT_OUT,
-        VECTOR_BINARY_FIELDS
+        VECTOR_BINARY_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.position_component",
@@ -4473,7 +4608,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         POSITION_COMPONENT_OUT,
-        COMPONENT_FIELDS
+        COMPONENT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.normal_component",
@@ -4485,7 +4621,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         &[],
         NORMAL_COMPONENT_OUT,
-        COMPONENT_FIELDS
+        COMPONENT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.passthrough_scalar",
@@ -4497,7 +4634,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         PASSTHROUGH_SCALAR_IN,
         PASSTHROUGH_SCALAR_OUT,
-        SCALAR_INPUT_FIELDS
+        SCALAR_INPUT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.reroute_scalar",
@@ -4509,7 +4647,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         REROUTE_SCALAR_IN,
         REROUTE_SCALAR_OUT,
-        SCALAR_INPUT_FIELDS
+        SCALAR_INPUT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.reroute_color",
@@ -4521,7 +4660,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         REROUTE_COLOR_IN,
         REROUTE_COLOR_OUT,
-        COLOR_INPUT_FIELDS
+        COLOR_INPUT_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "material.reroute_vector",
@@ -4533,7 +4673,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         MATERIAL,
         REROUTE_VECTOR_IN,
         REROUTE_VECTOR_OUT,
-        VECTOR_REROUTE_FIELDS
+        VECTOR_REROUTE_FIELDS,
+        TemporalDependence::Inherited,
     ),
     node!(
         "world.generated_terrain",
@@ -4545,7 +4686,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         WORLD,
         &[],
         GENERATED_TERRAIN_OUT,
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
     node!(
         "world.compose",
@@ -4557,7 +4699,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         WORLD,
         WORLD_COMPOSE_IN,
         WORLD_COMPOSE_OUT,
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
     node!(
         "world.output",
@@ -4569,7 +4712,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         WORLD,
         VOXEL_FIELD_IN,
         &[],
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
     node!(
         "world.studio_preview",
@@ -4581,7 +4725,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         WORLD,
         &[],
         STUDIO_PREVIEW_OUT,
-        &[]
+        &[],
+        TemporalDependence::Inherited,
     ),
 ];
 
@@ -6074,5 +6219,199 @@ mod tests {
         let json = serde_json::to_string(&graph).unwrap();
         let restored: GraphAsset = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, graph);
+    }
+
+    /// The declared temporal axis must agree with what the node ACTUALLY reads.
+    ///
+    /// This is the test that keeps the new axis honest, and it is deliberately a
+    /// cross-check against the BACKEND rather than a restatement of the
+    /// declaration: a node is a time source exactly when its lowering emits an
+    /// instruction that reads the clock or the event field. Declaring
+    /// `Inherited` on a node that reads the clock would silently tell the
+    /// cacheability analysis that an animated surface can be baked.
+    #[test]
+    fn the_declared_temporal_axis_matches_what_each_node_lowers_to() {
+        use crate::graph::MaterialNodeOperation;
+        for declaration in BUILTIN_NODES {
+            let NodeOperation::Material(operation) = declaration.operation else {
+                assert_eq!(
+                    declaration.temporal,
+                    TemporalDependence::Inherited,
+                    "{} is not a material node and cannot read the clock",
+                    declaration.id
+                );
+                continue;
+            };
+            // The ONLY three operations whose evaluation reads something outside
+            // the graph. Kept as a match rather than a list so that adding a
+            // `MaterialNodeOperation` forces a decision here.
+            let expected = match operation {
+                MaterialNodeOperation::Time | MaterialNodeOperation::Oscillator => {
+                    TemporalDependence::Clock
+                }
+                MaterialNodeOperation::EventSensor => TemporalDependence::Events,
+                _ => TemporalDependence::Inherited,
+            };
+            assert_eq!(
+                declaration.temporal, expected,
+                "{} declares {:?} but its operation is {:?}",
+                declaration.id, declaration.temporal, operation
+            );
+        }
+    }
+
+    /// Exactly three nodes may be time sources, and they are the three the
+    /// analysis seeds from. A fourth appearing without this test being updated
+    /// means the taint pass has a source it does not know about.
+    #[test]
+    fn exactly_the_known_nodes_are_time_sources() {
+        let mut sources: Vec<&str> = BUILTIN_NODES
+            .iter()
+            .filter(|declaration| declaration.temporal.is_source())
+            .map(|declaration| declaration.id)
+            .collect();
+        sources.sort_unstable();
+        assert_eq!(
+            sources,
+            [
+                "material.event_sensor",
+                "material.oscillator",
+                "material.time"
+            ]
+        );
+    }
+
+    /// Separability is an opt-in that only means something on a node owning a
+    /// cacheable spatial field. Anywhere else it must stay `None`, because the
+    /// analysis reads it as "a time-varying value here can be lifted out of the
+    /// cache" — a claim that is only safe where there IS a cache.
+    #[test]
+    fn only_the_pattern_layers_animation_sockets_are_separable() {
+        let mut separable: Vec<(&str, &str, Separable)> = Vec::new();
+        for declaration in BUILTIN_NODES {
+            for socket in declaration.inputs.iter().chain(declaration.outputs) {
+                if socket.separable != Separable::None {
+                    separable.push((declaration.id, socket.key, socket.separable));
+                }
+            }
+        }
+        separable.sort_unstable_by_key(|entry| (entry.0, entry.1));
+        assert_eq!(
+            separable,
+            vec![
+                ("material.pattern_layer", "animation_gain", Separable::Scale),
+                (
+                    "material.pattern_layer",
+                    "drift_velocity",
+                    Separable::Translate
+                ),
+            ]
+        );
+    }
+
+    /// Nothing a time-varying value can reach may shape a cacheable pattern
+    /// field — the structural fact the whole cacheability story rests on.
+    ///
+    /// Stated as a general invariant rather than a list, because the first
+    /// version of this test WAS a list of field names and it immediately caught
+    /// the wrong node: `material.fbm.octaves` is an input socket, so an
+    /// oscillator can drive it. That turned out to be safe for a different
+    /// reason — `material.fbm` outputs a `Scalar` while `pattern` demands a
+    /// `MaskField`, so `can_feed` rejects the connection and the only pattern
+    /// socket it can reach is `animation_gain`, which is separable. The real
+    /// rule is therefore about the nodes that PRODUCE a pattern field:
+    ///
+    /// a field-producing node's parameters must be authored properties, unless
+    /// the matching socket declares how a time-varying value there lifts out of
+    /// the cache.
+    ///
+    /// Promoting a generator's period or warp to a socket is a legitimate thing
+    /// to want. It just makes non-cacheable graphs expressible, so it has to be
+    /// a deliberate change here and not a quiet one.
+    #[test]
+    fn nothing_time_varying_can_shape_a_cacheable_pattern_field() {
+        for declaration in BUILTIN_NODES {
+            let produces_field = declaration
+                .outputs
+                .iter()
+                .any(|socket| socket.value_type == SocketType::MaskField);
+            if !produces_field {
+                continue;
+            }
+            for field in declaration.fields {
+                if field.target != FieldTarget::InputSocket {
+                    continue;
+                }
+                let socket = declaration
+                    .inputs
+                    .iter()
+                    .find(|socket| socket.key == field.key)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}.{} is an InputSocket field with no socket",
+                            declaration.id, field.key
+                        )
+                    });
+                assert_ne!(
+                    socket.separable,
+                    Separable::None,
+                    "{}.{} produces a pattern field and exposes {} as a socket, so a \
+                     time-varying value can reach it — declare how it separates from \
+                     the cached field, or make it a Property",
+                    declaration.id,
+                    field.key,
+                    field.key
+                );
+            }
+        }
+    }
+
+    /// The exact set of nodes that produce a pattern field, pinned so that adding
+    /// one is a deliberate act.
+    ///
+    /// This is the tripwire for the invariant above being SUFFICIENT rather than
+    /// merely necessary: it holds only because every producer of a `MaskField` is
+    /// in this list and every one of them keeps its shaping parameters as
+    /// properties. A new field producer — especially one that took its parameters
+    /// from sockets, the way `material.fbm` does on the scalar side — would make
+    /// non-cacheable pattern graphs expressible.
+    ///
+    /// Note `material.tessellation` is in here and is not named `pattern_*`: the
+    /// first version of this test asserted the naming convention instead of the
+    /// set and failed on exactly that. The family is defined by what a node
+    /// produces, not by what it is called.
+    #[test]
+    fn the_set_of_pattern_field_producers_is_pinned() {
+        let mut producers: Vec<&str> = BUILTIN_NODES
+            .iter()
+            .filter(|declaration| {
+                declaration
+                    .outputs
+                    .iter()
+                    .any(|socket| socket.value_type == SocketType::MaskField)
+            })
+            .map(|declaration| declaration.id)
+            .collect();
+        producers.sort_unstable();
+        assert_eq!(
+            producers,
+            [
+                "material.pattern_checker",
+                "material.pattern_flat",
+                "material.pattern_noise",
+                "material.pattern_perlin",
+                "material.pattern_ridged",
+                "material.pattern_simplex",
+                "material.pattern_speckle",
+                "material.pattern_tile_edge",
+                "material.pattern_tile_tone",
+                "material.pattern_turbulence",
+                "material.pattern_wave",
+                "material.pattern_worley",
+                "material.pattern_worley_edge",
+                "material.pattern_worley_smooth",
+                "material.tessellation",
+            ]
+        );
     }
 }
