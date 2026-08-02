@@ -2700,11 +2700,18 @@ const PATTERN_VARIATION_FIELD: FieldDeclarationStatic = field(
 const PATTERN_OCTAVES_FIELD: FieldDeclarationStatic = field(
     "octaves",
     "Octaves",
-    "Noise octave count.",
+    "Noise octave count. The renderer evaluates at most MAX_NOISE_OCTAVES of \
+     them, so this range is bounded by that rather than by taste.",
     FieldTarget::Property,
     FieldDefault::Integer(3),
-    Some(NumericRange::new(1.0, 8.0)),
-    Some(NumericRange::new(1.0, 8.0)),
+    Some(NumericRange::new(
+        1.0,
+        crate::pattern::MAX_NOISE_OCTAVES as f32,
+    )),
+    Some(NumericRange::new(
+        1.0,
+        crate::pattern::MAX_NOISE_OCTAVES as f32,
+    )),
     Some(1.0),
     EMPTY_CHOICES,
     false,
@@ -4283,6 +4290,28 @@ mod tests {
                     .is_none_or(|maximum| constraint.cardinality.minimum <= maximum));
             }
         }
+    }
+
+    /// A field must not offer a value the renderer throws away.
+    ///
+    /// The octave range said 1-8 while the generator clamps at
+    /// `MAX_NOISE_OCTAVES` (4), so dialling 5 through 8 in the inspector did
+    /// nothing at all and the saved project recorded a number that never
+    /// rendered — the checked-in lava had `octaves: 8`.
+    #[test]
+    fn the_octave_range_offers_only_octaves_the_renderer_evaluates() {
+        let declaration = NodeRegistry
+            .find(&NodeTypeId("material.pattern_noise".into()))
+            .expect("the noise generator is registered");
+        let octaves = declaration
+            .field(FieldTarget::Property, "octaves")
+            .expect("the generator declares an octave count");
+        let range = octaves.hard_range.expect("octaves are bounded");
+        assert_eq!(
+            range.max,
+            crate::pattern::MAX_NOISE_OCTAVES as f32,
+            "the inspector offers octaves the generator will clamp away"
+        );
     }
 
     #[test]

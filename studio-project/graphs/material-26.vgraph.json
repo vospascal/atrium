@@ -41,18 +41,6 @@
       },
       "unknown_payload": null
     },
-    "g-0000000000000006": {
-      "node_type": "material.constant_scalar",
-      "node_type_version": 1,
-      "properties": {
-        "value": {
-          "type": "scalar",
-          "value": 0.2
-        }
-      },
-      "socket_defaults": {},
-      "unknown_payload": null
-    },
     "g-0000000000000099": {
       "node_type": "material.output",
       "node_type_version": 1,
@@ -170,7 +158,7 @@
         },
         "speed": {
           "type": "scalar",
-          "value": 0.25
+          "value": 0.2
         }
       },
       "unknown_payload": null
@@ -185,7 +173,7 @@
         },
         "octaves": {
           "type": "integer",
-          "value": 8
+          "value": 4
         },
         "period_meters": {
           "type": "scalar",
@@ -220,17 +208,6 @@
       "to": {
         "node": "g-00000000000000a1",
         "socket": "animation_gain"
-      },
-      "order": 0
-    },
-    "g-0000000000000007": {
-      "from": {
-        "node": "g-0000000000000006",
-        "socket": "value"
-      },
-      "to": {
-        "node": "lava-flow-direction",
-        "socket": "speed"
       },
       "order": 0
     },
@@ -317,10 +294,6 @@
       "animation-lava-glow": [
         443.34766,
         -423.02734
-      ],
-      "g-0000000000000006": [
-        -168.27734,
-        -302.71484
       ],
       "g-0000000000000099": [
         960.0,
