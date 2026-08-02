@@ -49,6 +49,13 @@ pub const MAX_RENDER_SCALE: f32 = 1.0;
 /// sliders labelled) in meters.
 pub const VOXELS_PER_METER: f32 = 8.0;
 
+/// The highest rung of the pattern entry-cost probe, mirroring
+/// `PATTERN_ENTRY_NO_LAYERS` in `shaders/pattern.wgsl`. Clamped on the way to the
+/// shader for the same reason `pattern_max_layers` is: a value past the top would
+/// still compile, silently pick the top rung's behaviour, and label a column with
+/// a rung that does not exist.
+pub const PATTERN_ENTRY_PROBE_TOP: u32 = 7;
+
 // ---- Lever identity ----------------------------------------------------------
 
 /// Every lever the renderer has, as one identifier. [`LeverId::read`] and
@@ -118,6 +125,7 @@ pub enum LeverId {
     MaterialPatterns,
     MaterialPatternCache,
     MaterialPatternTexelLod,
+    MaterialPatternEntryProbe,
     MaterialPatternStrength,
     MaterialPatternMaxLayers,
     MaterialPatternOctaveLod,
@@ -426,6 +434,9 @@ impl LeverId {
             LeverId::MaterialPatternTexelLod => {
                 LeverValue::Flag(quality.materials.pattern_texel_lod)
             }
+            LeverId::MaterialPatternEntryProbe => {
+                LeverValue::Mode(quality.materials.pattern_entry_probe)
+            }
             LeverId::MaterialPatternStrength => {
                 LeverValue::Scalar(quality.materials.pattern_strength)
             }
@@ -581,6 +592,9 @@ impl LeverId {
             }
             LeverId::MaterialPatternTexelLod => {
                 quality.materials.pattern_texel_lod = value.expect_flag(self);
+            }
+            LeverId::MaterialPatternEntryProbe => {
+                quality.materials.pattern_entry_probe = value.expect_mode(self);
             }
             LeverId::MaterialPatternStrength => {
                 quality.materials.pattern_strength = value.expect_scalar(self).clamp(0.0, 1.0);
@@ -2160,18 +2174,17 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::ShaderConst,
         shader_const: Some("MATERIAL_PATTERN_CACHE"),
         label: "pattern field cache",
-        default_value: LeverValue::Flag(false),
+        default_value: LeverValue::Flag(true),
         range: LeverRange::Discrete,
-        verdict: "S3, ships OFF until measured. A direct-mapped cache over the \
+        verdict: "WINNER, on with texel LOD. A direct-mapped cache over the \
                   texel lattice, filled by the shading pass itself: \
                   `pattern_snap_to_texels` already quantises the coordinate, so \
                   every pixel on a 1.56 cm texel asks the generator the same \
                   question — about a hundred of them at 2 m from a wall. It needs \
                   no extension, because only read_write storage TEXTURES are \
                   gated and this is a read_write storage BUFFER. Entries are one \
-                  u32, a 16-bit tag over a 16-bit value, so a store cannot tear \
-                  and no atomics are needed; two threads racing a slot write the \
-                  same bits. NOT bit-exact: the value is quantised to 16 bits, so \
+                  atomic u32, a 16-bit tag over a 16-bit value. NOT bit-exact: the \
+                  value is quantised to 16 bits, so \
                   the pixel gates move by design and the comparison to make is \
                   against the uncached frame at a tolerance, not at zero.",
         mode_options: &[],
@@ -2195,13 +2208,14 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::ShaderConst,
         shader_const: Some("MATERIAL_PATTERN_TEXEL_LOD"),
         label: "pattern texel LOD",
-        default_value: LeverValue::Flag(false),
+        default_value: LeverValue::Flag(true),
         range: LeverRange::Discrete,
-        verdict: "S3, and it exists to make the pattern cache work AT RANGE. The \
+        verdict: "WINNER, on with the pattern cache. It makes the cache work AT RANGE. The \
                   cache pays in proportion to how many pixels land on one texel — \
                   about a hundred at 2 m, fewer than one far away — which is why \
-                  it removes 37% of the pattern path on ground views and nothing \
-                  at all on aerial ones. Halving the grid per doubling of distance \
+                  it removed nothing on aerial views until its shader switch was wired. \
+                  Now it cuts A from 5.124 to 4.507 ms and B from 6.242 to 5.518 ms. \
+                  Halving the grid per doubling of distance \
                   manufactures the reuse that distance destroys, and anti-aliases \
                   while doing it, since what it removes is detail finer than a \
                   pixel. NOT octave LOD, which lost at ground level (+0.24 ms) \
@@ -2218,6 +2232,147 @@ pub const REGISTRY: &[Lever] = &[
                 (LeverId::MaterialPatternTexelLod, LeverValue::Flag(true)),
             ],
         }],
+    },
+    Lever {
+        id: LeverId::MaterialPatternEntryProbe,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PATTERN_ENTRY_PROBE"),
+        label: "entry-cost probe (measurement only)",
+        default_value: LeverValue::Mode(0),
+        range: LeverRange::Discrete,
+        verdict: "AN INSTRUMENT, NOT A TIER. Every rung above 0 renders wrong \
+                  output on purpose, so the pixel gates only pass at 0 and this \
+                  never belongs in a preset. It exists because the cached ground \
+                  residual is dominated by a layer whose GENERATOR COMPUTES \
+                  NOTHING — ~1.47 ms for the first layer against ~0.15 ms for the \
+                  second — which rules out both the noise and the layer count and \
+                  leaves the per-layer scaffolding, unattributed. The rungs are \
+                  cumulative and removed innermost first, so consecutive deltas \
+                  sum to the total and the top rung lands on the layers-off floor: \
+                  a decomposition the hardware itself closes. The cache is \
+                  deliberately outside the ladder — rung 1 takes it with the \
+                  generator, so every rung above prices the entry path cache-free.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "off",
+                verdict: "The shipped path. The reference every rung is read against.",
+            },
+            ModeOption {
+                value: 1,
+                label: "no-generator",
+                verdict: "The generator and the cache lookup replaced by \
+                          `pattern_entry_sink`, which consumes the coordinate, salt \
+                          and octave count so naga cannot delete the entry path \
+                          along with its consumer. THIS RUNG IS THE ENTRY COST — \
+                          everything above decomposes it.",
+            },
+            ModeOption {
+                value: 2,
+                label: "no-fade",
+                verdict: "+ `pattern_fade` folded to 1.0. Prices two uniform \
+                          component reads, two compares and the ease curve.",
+            },
+            ModeOption {
+                value: 3,
+                label: "no-salt",
+                verdict: "+ `pattern_variation_salt` folded to 0. Only live on a \
+                          face-frame layer with variation on, so a world-frame \
+                          sweep should read zero here — which makes this rung a \
+                          control as much as a measurement.",
+            },
+            ModeOption {
+                value: 4,
+                label: "no-snap",
+                verdict: "+ `pattern_snap_to_texels` folded to identity. Prices the \
+                          texel divide, the floor and the half-texel recentre — the \
+                          quantisation the cache depends on.",
+            },
+            ModeOption {
+                value: 5,
+                label: "no-coordinate",
+                verdict: "+ `pattern_coordinate` folded to a constant. Takes the \
+                          frame branch, the hit position, the world-voxel divide, \
+                          the period divide, and `pattern_drift_meters` with them \
+                          — this function is drift's only consumer.",
+            },
+            ModeOption {
+                value: 6,
+                label: "no-strength",
+                verdict: "+ `pattern_strength` folded to the authored amount. Loses \
+                          the face-mask test and the animation gain but stays \
+                          per-layer and non-zero, so the blend cannot fold and the \
+                          `strength <= 0` early-out cannot start deleting layers \
+                          instead of pricing them.",
+            },
+            ModeOption {
+                value: 7,
+                label: "no-layers",
+                verdict: "+ the slot loop never runs. The floor and the closure \
+                          check: this must land on the layers-off measurement, and \
+                          what rung 6 costs over it is the per-slot row load, the \
+                          target branch and the blend.",
+            },
+        ],
+        bench: &[
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-1-no-generator",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(1)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-2-no-fade",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(2)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-3-no-salt",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(3)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-4-no-snap",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(4)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-5-no-coordinate",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(5)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-6-no-strength",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(6)),
+                ],
+            },
+            BenchPoint {
+                section: BenchSection::Materials,
+                label: "entry-7-no-layers",
+                overrides: &[
+                    (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                    (LeverId::MaterialPatternEntryProbe, LeverValue::Mode(7)),
+                ],
+            },
+        ],
     },
     Lever {
         id: LeverId::MaterialPatternStrength,
@@ -2600,6 +2755,9 @@ pub struct MaterialSettings {
     /// S3 — halve the texel grid per doubling of distance, so distant pixels
     /// share texels and the cache has something to hit.
     pub pattern_texel_lod: bool,
+    /// S3 — the entry-cost bisection rung. A MEASUREMENT INSTRUMENT: anything
+    /// above zero renders deliberately wrong output, and only zero ships.
+    pub pattern_entry_probe: u32,
     /// S2 — global scale on every layer's amount, `0.0..=1.0`. The taste knob.
     pub pattern_strength: f32,
     /// S2 — layers evaluated per hit, whatever the row authored. The tier knob, and
@@ -2638,6 +2796,8 @@ impl MaterialSettings {
         self.face_roles != applied.face_roles
             || self.patterns != applied.patterns
             || self.pattern_cache != applied.pattern_cache
+            || self.pattern_texel_lod != applied.pattern_texel_lod
+            || self.pattern_entry_probe != applied.pattern_entry_probe
             || self.pattern_strength != applied.pattern_strength
             || self.pattern_max_layers != applied.pattern_max_layers
             || self.pattern_octave_lod != applied.pattern_octave_lod
@@ -2662,8 +2822,22 @@ impl MaterialSettings {
             "MATERIAL_PATTERN_CACHE",
             if self.pattern_cache { "true" } else { "false" },
         );
-        let strength = patch_shader_const(
+        let texel_lod = patch_shader_const(
             &cache,
+            "MATERIAL_PATTERN_TEXEL_LOD",
+            if self.pattern_texel_lod {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        let entry_probe = patch_shader_const(
+            &texel_lod,
+            "MATERIAL_PATTERN_ENTRY_PROBE",
+            &format!("{}u", self.pattern_entry_probe.min(PATTERN_ENTRY_PROBE_TOP)),
+        );
+        let strength = patch_shader_const(
+            &entry_probe,
             "MATERIAL_PATTERN_STRENGTH",
             &float_literal(self.pattern_strength),
         );
@@ -2694,8 +2868,9 @@ impl Default for MaterialSettings {
         MaterialSettings {
             face_roles: true,
             patterns: true,
-            pattern_cache: false,
-            pattern_texel_lod: false,
+            pattern_cache: true,
+            pattern_texel_lod: true,
+            pattern_entry_probe: 0,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
             pattern_octave_lod: false,
@@ -2982,6 +3157,111 @@ mod tests {
         REGISTRY.iter().map(|lever| lever.id).collect()
     }
 
+    /// A value for this lever that is NOT its default, chosen inside whatever
+    /// bounds the lever declares so `apply` cannot clamp it straight back.
+    fn moved_off_default(lever: &Lever) -> LeverValue {
+        match lever.default_value {
+            LeverValue::Flag(value) => LeverValue::Flag(!value),
+            LeverValue::Mode(value) => {
+                let other = lever
+                    .mode_options
+                    .iter()
+                    .find(|option| option.value != value)
+                    .unwrap_or_else(|| panic!("mode lever {:?} offers no second option", lever.id));
+                LeverValue::Mode(other.value)
+            }
+            // DOWN, not up. `pattern_max_layers` is clamped to the array length on
+            // the way to the shader, so a default-plus-one would patch the default
+            // back in and the assertion below would fail on a correctly wired lever.
+            LeverValue::Count(value) => LeverValue::Count(value.saturating_sub(1)),
+            LeverValue::VoxelDistance(value) => LeverValue::VoxelDistance(value.saturating_sub(1)),
+            LeverValue::Scalar(value) => match lever.range {
+                LeverRange::Continuous {
+                    minimum, maximum, ..
+                } => {
+                    let midpoint = (minimum + maximum) * 0.5;
+                    let moved = if (midpoint - value).abs() > 1e-4 {
+                        midpoint
+                    } else {
+                        (minimum + midpoint) * 0.5
+                    };
+                    LeverValue::Scalar(moved)
+                }
+                _ => LeverValue::Scalar(value * 0.5 - 0.25),
+            },
+        }
+    }
+
+    /// REGISTRY -> shader: moving a compile-time lever off its default must
+    /// actually CHANGE the source the pipeline is built from.
+    ///
+    /// The gap this closes was shipped once and cost a full measurement session.
+    /// `MATERIAL_PATTERN_TEXEL_LOD` had a registry row, a settings field, a shader
+    /// const and a bench point — everything except a line in
+    /// `MaterialSettings::patch_shader_source`. Flipping it therefore rebuilt a
+    /// pipeline from byte-identical source, the feature measured as "no effect",
+    /// and the natural next suspicion was the feature rather than the wiring.
+    ///
+    /// No per-lever test could have caught it, and that is the point: a per-lever
+    /// test is written alongside the wiring it checks, so whatever made someone
+    /// forget the wiring makes them forget the test. This one is generic over the
+    /// registry, so it covers levers nobody has written yet.
+    ///
+    /// `registry_defaults_match_shader_source` is the other half — that the
+    /// UNPATCHED file is the shipped configuration. Together they pin both ends:
+    /// the default is what ships, and every other value can be reached.
+    #[test]
+    fn every_shader_const_lever_reaches_the_built_source() {
+        for lever in REGISTRY {
+            let Some(constant_name) = lever.shader_const else {
+                continue;
+            };
+            let moved = moved_off_default(lever);
+            assert_ne!(
+                moved, lever.default_value,
+                "{:?}: the test picked the default as its off-default value",
+                lever.id
+            );
+            let literal = moved
+                .wgsl_literal()
+                .unwrap_or_else(|| panic!("{:?} has no WGSL literal", lever.id));
+
+            let mut quality = RenderQuality::default();
+            lever.id.apply(&mut quality, moved);
+            assert_eq!(
+                lever.id.read(&quality),
+                moved,
+                "{:?} did not survive an apply/read round trip, so the assertion \
+                 below would be checking the default",
+                lever.id
+            );
+
+            let built = [
+                build_shader_source(&quality),
+                crate::passes::cagi::build_shader_source(&quality),
+            ];
+            // AT LEAST ONE, not all, and the difference is deliberate.
+            // `world.wgsl` is concatenated in front of both passes, so a const it
+            // declares exists in the CAGI source too — but CAGI shades nothing and
+            // calls neither `material_face_albedo` nor the pattern stack, so
+            // `MATERIAL_FACE_ROLES` sitting at its default there is dead, not
+            // wrong, and patching it would only mean recompiling the CA pass
+            // whenever a shading lever moves. What this test is for is a lever that
+            // reaches NO source at all, which is the failure that actually happened.
+            let reached = built.iter().any(|source| {
+                source.contains(&format!("const {constant_name}:"))
+                    && patch_shader_const(source, constant_name, &literal) == *source
+            });
+            assert!(
+                reached,
+                "{:?} was set to {literal}, but no built source holds \
+                 `{constant_name}` at that value — the lever has no line in its \
+                 group's `patch_shader_source`",
+                lever.id
+            );
+        }
+    }
+
     /// REGISTRY -> shader: every compile-time row's default must already BE the
     /// shipped shader's value (patching it in is the identity), which also
     /// proves the const exists — `patch_shader_const` panics otherwise.
@@ -3200,6 +3480,7 @@ mod tests {
             patterns,
             pattern_cache,
             pattern_texel_lod,
+            pattern_entry_probe,
             pattern_strength,
             pattern_max_layers,
             pattern_octave_lod,
@@ -3393,6 +3674,10 @@ mod tests {
             (
                 LeverId::MaterialPatternTexelLod,
                 LeverValue::Flag(pattern_texel_lod),
+            ),
+            (
+                LeverId::MaterialPatternEntryProbe,
+                LeverValue::Mode(pattern_entry_probe),
             ),
             (
                 LeverId::MaterialPatternStrength,
@@ -3654,13 +3939,28 @@ mod tests {
     fn pattern_cache_patches_the_shader_and_rebuilds_the_pipeline() {
         let applied = RenderQuality::default();
         let mut edited = applied;
-        edited.materials.pattern_cache = true;
+        edited.materials.pattern_cache = false;
 
         assert!(edited.requires_pipeline_rebuild(&applied));
         assert!(
-            build_shader_source(&applied).contains("const MATERIAL_PATTERN_CACHE: bool = false;")
+            build_shader_source(&applied).contains("const MATERIAL_PATTERN_CACHE: bool = true;")
         );
-        assert!(build_shader_source(&edited).contains("const MATERIAL_PATTERN_CACHE: bool = true;"));
+        assert!(
+            build_shader_source(&edited).contains("const MATERIAL_PATTERN_CACHE: bool = false;")
+        );
+    }
+
+    #[test]
+    fn pattern_texel_lod_patches_the_shader_and_rebuilds_the_pipeline() {
+        let applied = RenderQuality::default();
+        let mut edited = applied;
+        edited.materials.pattern_texel_lod = false;
+
+        assert!(edited.requires_pipeline_rebuild(&applied));
+        assert!(build_shader_source(&applied)
+            .contains("const MATERIAL_PATTERN_TEXEL_LOD: bool = true;"));
+        assert!(build_shader_source(&edited)
+            .contains("const MATERIAL_PATTERN_TEXEL_LOD: bool = false;"));
     }
 
     #[test]

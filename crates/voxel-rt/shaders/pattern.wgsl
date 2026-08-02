@@ -29,10 +29,49 @@
 // The shipped path evaluates authored layers; Potato patches this const off for
 // the deliberately flat fallback tier.
 const MATERIAL_PATTERNS: bool = true;
-// Lazily-filled texel cache for the generators. Ships OFF until measured.
-const MATERIAL_PATTERN_CACHE: bool = false;
-// Coarsen the texel grid with distance. Ships OFF until measured.
-const MATERIAL_PATTERN_TEXEL_LOD: bool = false;
+// Lazily-filled texel cache for the generators.
+const MATERIAL_PATTERN_CACHE: bool = true;
+// Coarsen the texel grid with distance so aerial pixels share cache entries.
+const MATERIAL_PATTERN_TEXEL_LOD: bool = true;
+
+// ---- The entry-cost bisection ------------------------------------------------
+//
+// A MEASUREMENT INSTRUMENT, not a quality knob. Every value above 0 renders
+// deliberately wrong output; the shipped path is 0 and the pixel gates only pass
+// there.
+//
+// It exists because the cached ground residual is dominated by a layer whose
+// generator computes nothing: a one-layer stack costs ~1.47 ms with the generator
+// stubbed out, and the second layer only adds ~0.15 ms. So the cost is not the
+// noise — it is the per-layer scaffolding around it, and no single reading tells
+// you which part.
+//
+// The ladder is CUMULATIVE: each value stubs everything the value below it stubs,
+// plus one more stage. That is what makes it a bisection rather than a set of
+// opinions — the deltas between neighbours sum to the total, and the top rung
+// lands on the layers-off floor, so the decomposition has a closure check the
+// hardware itself enforces.
+//
+// Stages are removed INNERMOST FIRST, because the generator has to go before
+// anything upstream of it can be priced: with the generator live it dominates,
+// and with it stubbed to a constant naga would fold the entire entry path away as
+// dead code. `pattern_entry_sink` is what prevents that — see its comment.
+//
+// The cache is deliberately absent from the ladder. It lives inside
+// `pattern_generator_value`, so rung 1 removes it along with the generator, and
+// every rung above measures the entry path cache-free. That is the right split:
+// the cache is its own lever with its own verdict, and mixing it in would make
+// each rung's delta depend on a hit rate rather than on work.
+const PATTERN_ENTRY_ALL: u32 = 0u;
+const PATTERN_ENTRY_NO_GENERATOR: u32 = 1u;
+const PATTERN_ENTRY_NO_FADE: u32 = 2u;
+const PATTERN_ENTRY_NO_SALT: u32 = 3u;
+const PATTERN_ENTRY_NO_SNAP: u32 = 4u;
+const PATTERN_ENTRY_NO_COORDINATE: u32 = 5u;
+const PATTERN_ENTRY_NO_STRENGTH: u32 = 6u;
+const PATTERN_ENTRY_NO_LAYERS: u32 = 7u;
+
+const MATERIAL_PATTERN_ENTRY_PROBE: u32 = 0u;
 
 // Global scale on every layer's amount, 0..1. The tier knob: it turns detail down
 // everywhere without editing 26 rows, which is what a Quest preset needs.
@@ -649,7 +688,7 @@ fn pattern_texels_at(layer: PatternLayer, distance_meters: f32) -> u32 {
 
 fn pattern_snap_to_texels(meters: vec3<f32>, texels: u32,
                           voxel_size_meters: f32) -> vec3<f32> {
-    if (texels == 0u) {
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_SNAP || texels == 0u) {
         return meters;
     }
     // The brick is the authoritative one-metre world voxel. The smaller value in
@@ -779,6 +818,12 @@ fn pattern_drift_meters(layer: PatternLayer, velocity: vec3<f32>,
 
 fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
                       voxel_size_meters: f32, drift_meters: vec3<f32>) -> vec3<f32> {
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_COORDINATE) {
+        // Everything the frame branch reads goes with it: the hit position, the
+        // world-voxel divide, the period divide — and `pattern_drift_meters`,
+        // whose only consumer is this function. That is the rung's delta.
+        return vec3<f32>(0.5);
+    }
     let period = max(layer.period_meters, 1e-4);
     let frame = pattern_frame(layer);
     let world_voxel_size_meters = voxel_size_meters * BRICK_SIZE;
@@ -834,6 +879,9 @@ fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
 // the continuity that is the point of it) and the voxel frame does not need one. Zero is
 // exactly the unvaried behaviour, since every generator mixes this with `^`.
 fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_SALT) {
+        return 0u;
+    }
     if (!pattern_varies_per_face(layer) || pattern_frame(layer) != PATTERN_FRAME_FACE) {
         return 0u;
     }
@@ -915,11 +963,30 @@ fn pattern_cache_hashes(layer: PatternLayer, point: vec3<f32>, salt: u32,
     return vec2<u32>(pattern_hash_u32(key), pattern_hash_u32(tag_key));
 }
 
+/// The probe's stand-in for a generator, and the reason the ladder can measure
+/// anything above rung 1.
+///
+/// A stub that simply returned a constant would let naga prove the coordinate, the
+/// salt and the octave count unused and delete all three — the entry path would
+/// vanish with the generator and every rung above would read the same number. This
+/// CONSUMES all three instead, for three adds and a `fract`, which is about as
+/// close to free as a consumer that cannot be folded gets.
+///
+/// `salt` is masked to a byte before the convert so the f32 conversion is exact and
+/// the sink stays deterministic frame over frame like everything else in the pass.
+fn pattern_entry_sink(raw_point: vec3<f32>, salt: u32, octaves: u32) -> f32 {
+    return fract(raw_point.x + raw_point.y + raw_point.z
+                 + f32(salt & 0xffu) + f32(octaves));
+}
+
 fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
                            voxel_size_meters: f32, drift_meters: vec3<f32>) -> f32 {
     let raw_point = pattern_coordinate(layer, sample, voxel_size_meters, drift_meters);
     let salt = pattern_variation_salt(layer, sample);
     let octaves = pattern_layer_octaves(layer, sample);
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_GENERATOR) {
+        return pattern_entry_sink(raw_point, salt, octaves);
+    }
     if (!MATERIAL_PATTERN_CACHE || pattern_texels_at(layer, sample.distance_meters) == 0u) {
         // Without the texel snap the coordinate is continuous, so no two pixels
         // ever agree on a key and the cache would be pure overhead. That is a
@@ -1052,6 +1119,9 @@ fn pattern_layer_octaves(layer: PatternLayer, sample: PatternSample) -> u32 {
 // How much of this layer survives at this distance, 0..1. Applied to the AMOUNT, so
 // a faded layer converges on the material's unpatterned base rather than on grey.
 fn pattern_fade(layer: PatternLayer, distance_meters: f32) -> f32 {
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_FADE) {
+        return 1.0;
+    }
     let fade_start_meters = lighting.material_params.x;
     let fade_end_meters = lighting.material_params.y;
     if (fade_end_meters <= 0.0) {
@@ -1084,6 +1154,13 @@ fn pattern_covers_face(layer: PatternLayer, axis: u32, axis_sign: f32) -> bool {
 // The layer's effective strength at this sample: its amount, globally scaled,
 // faded, and zero on a face the mask excludes.
 fn pattern_strength(layer: PatternLayer, sample: PatternSample, gain: f32) -> f32 {
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_STRENGTH) {
+        // Still per-layer and still non-zero, so the blend below cannot fold and
+        // the `strength <= 0.0` early-out cannot start firing — which would
+        // silently delete the rest of the layer instead of pricing it. What goes
+        // is the face-mask test and the animation gain.
+        return clamp(layer.amount, 0.0, 1.0);
+    }
     if (!pattern_covers_face(layer, sample.axis, sample.axis_sign)) {
         return 0.0;
     }
@@ -1215,10 +1292,17 @@ fn material_pattern_surface_from_base(material: u32, sample: PatternSample,
     if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
         return surface;
     }
-    let count = min(
+    var count = min(
         min(material_pattern_count(flags), MATERIAL_PATTERN_MAX_LAYERS),
         MAX_PATTERN_LAYERS,
     );
+    if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_LAYERS) {
+        // The ladder's floor, and its closure check: everything that survives here
+        // is the flags read and the loop that never runs, so this rung must land on
+        // the layers-off measurement. What the rung below it costs over this one is
+        // the per-slot row load, the target branch and the blend.
+        count = 0u;
+    }
     let voxel_size_meters = brickmap.voxel_size_meters;
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let layer = materials[material].patterns[slot];
