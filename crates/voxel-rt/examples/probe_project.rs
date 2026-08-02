@@ -6,9 +6,13 @@
 //! "the asset did not load" from "the asset loaded and the lighting ignores it".
 //!
 //! It loads through the SAME calls the app's startup uses
-//! (`StudioProject::load_live_state`, `compile_active_world_profile`,
-//! `apply_initial_generation_profile`), so a divergence here is a real one and not
-//! an artefact of a second loading path.
+//! (`StudioProject::load_live_state`,
+//! `MaterialGraphAssetService::load_shader_set_for_editing`,
+//! `compile_active_world_profile`, `apply_initial_generation_profile`), so a
+//! divergence here is a real one and not an artefact of a second loading path.
+//! The graph compile is part of that list deliberately: without it the probe
+//! reported the authored material ROWS while the app was running graph-derived
+//! ones, which is the exact class of "loaded but ignored" this exists to catch.
 //!
 //! Run: `cargo run --release -p voxel-rt --example probe_project [project_path]`
 
@@ -21,6 +25,7 @@ use voxel_core::world::{
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::material::{material_voxel, Material, MATERIALS, MATERIAL_COUNT};
+use voxel_rt::material_graph_assets::MaterialGraphAssetService;
 use voxel_rt::material_table::MaterialTable;
 use voxel_rt::studio_assets::{StudioProject, StudioProjectStore};
 use voxel_rt::variants::RenderQuality;
@@ -60,6 +65,17 @@ fn main() {
     };
     println!("  loaded, {} warning(s): {warnings:?}", warnings.len());
 
+    // Compile the material graphs into the table, exactly as the app's startup
+    // does (`engine_runtime.rs`). `load_live_state` alone applies only the
+    // authored material ROWS — before this call the probe reported a table one
+    // step behind the running app, which for S3b meant every event-gated emitter
+    // looked like a plain constant one.
+    let (_graphs, graph_diagnostics) =
+        MaterialGraphAssetService::load_shader_set_for_editing(&project_path, &project, &mut table);
+    if !graph_diagnostics.is_empty() {
+        println!("  graph diagnostics: {graph_diagnostics:?}");
+    }
+
     println!();
     println!("== rows the project CHANGED vs the compiled table ==");
     let mut changed = 0;
@@ -82,21 +98,43 @@ fn main() {
     // ---- 2. which rows can light anything ---------------------------------------
     println!();
     println!("== rows CAGI will treat as emitters (after load) ==");
+    // The value the VOLUME will hold, not the row's own mean. Since S3b they can
+    // differ: a row whose graph gates emission on an event stores the channel-wise
+    // PEAK of its resting and triggered ends and scales down, so reading the row
+    // here would have quietly reported the resting value as "what CAGI sees".
+    let attributes = table.cagi_attributes();
+    let responses = table.emission_event_responses();
     let mut emitters = 0;
     for slot in 0..MATERIAL_COUNT {
         let row = table.row(slot as u8).expect("slot in range");
-        if !row.is_emissive() {
+        if !row.is_emissive() && responses.get(slot).copied().flatten().is_none() {
             continue;
         }
         emitters += 1;
-        println!(
-            "  {slot:>2} {:<16} mean {:?}",
-            row.name,
-            row.mean_emitted_radiance()
-        );
+        let stored = attributes.emission(slot as u8);
+        match responses.get(slot).copied().flatten() {
+            Some(response) => println!(
+                "  {slot:>2} {:<16} stored {stored:?}  (event-gated on channel {}, \
+                 radius {} m: resting {:?} -> triggered {:?})",
+                row.name,
+                response.sensor.channel,
+                response.sensor.radius_meters,
+                response.resting,
+                response.triggered,
+            ),
+            None => println!("  {slot:>2} {:<16} stored {stored:?}", row.name),
+        }
     }
     if emitters == 0 {
         println!("  NONE — nothing in this project contributes light to the volume.");
+    }
+    let overflow = attributes.event_response_overflow();
+    if overflow > 0 {
+        println!(
+            "  {overflow} row(s) wanted an event response and the volume holds only \
+             {} — those keep their peak emission and stop reacting.",
+            voxel_rt::cagi::EVENT_RESPONSE_SLOTS - 1
+        );
     }
 
     // ---- 3. does the world profile reach the generated world? -------------------

@@ -335,6 +335,11 @@ fn main() {
     // variant's shading and CAGI passes (E4's WorldBindings seam) — a section
     // with a dozen variants would otherwise upload ~30 MB a dozen times.
     let world_bindings = WorldBindings::new(&device, &brickmap);
+    // ...including the event field, which the bench keeps EMPTY for the whole
+    // run. One write at setup rather than one per batch: nothing here ever
+    // raises an event, so a per-batch write would re-upload the same 768 zero
+    // bytes into every measured section.
+    world_bindings.write_world_events(&queue, &BENCH_WORLD_EVENTS);
 
     if runs_section(1) {
         run_section(
@@ -1221,7 +1226,7 @@ fn report_preset_pipeline_cache(
         device,
         brickmap,
         &CagiSettings::default(),
-        &voxel_rt::material::MATERIALS,
+        &voxel_rt::cagi::MaterialAttributes::compiled(),
     );
     let mut pass = DdaPass::new(device, world_bindings, &light_volume, &target.view);
     println!();
@@ -2086,7 +2091,6 @@ fn run_edit_storm(
             queue,
             &mut encoder,
             &scenario.camera_uniform((width, height)),
-            &BENCH_WORLD_EVENTS,
             resources.light_volume.front(),
             width,
             height,
@@ -2659,7 +2663,7 @@ fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
         device,
         brickmap,
         &CagiSettings::default(),
-        &voxel_rt::material::MATERIALS,
+        &voxel_rt::cagi::MaterialAttributes::compiled(),
     );
     let headroom_bytes = (brickmap.brick_capacity() - brickmap.occupied_brick_count()) as usize
         * (OCCUPANCY_WORDS_PER_BRICK + MATERIAL_WORDS_PER_BRICK)
@@ -2693,6 +2697,10 @@ fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
 /// fire and a measured frame stays reproducible. Paired with the frozen clock
 /// in `Scenario::lighting_uniform`; the two together are what the deterministic
 /// animation lever does in the app.
+///
+/// S3b made this the CA pass's input too — with no events live, every cell's
+/// event gate reads its material's RESTING emission, which is the un-animated
+/// value the recorded baselines were measured against.
 const BENCH_WORLD_EVENTS: [GpuWorldEvent; MAX_WORLD_EVENTS] =
     [GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS];
 
@@ -3053,7 +3061,7 @@ impl VariantResources {
             device,
             brickmap,
             &variant.quality.global_illumination,
-            &voxel_rt::material::MATERIALS,
+            &voxel_rt::cagi::MaterialAttributes::compiled(),
         );
         VariantResources {
             cagi_pass: CagiPass::new_with_shader_source(
@@ -3176,7 +3184,6 @@ fn time_one_batch(
             queue,
             &mut encoder,
             &camera_uniform,
-            &BENCH_WORLD_EVENTS,
             resources.light_volume.front(),
             width,
             height,
@@ -3250,7 +3257,6 @@ fn render_once(
         queue,
         &mut encoder,
         &scenario.camera_uniform((width, height)),
-        &BENCH_WORLD_EVENTS,
         resources.light_volume.front(),
         width,
         height,

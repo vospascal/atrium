@@ -30,8 +30,6 @@
 //   0  uniform  Camera        — camera.rs CameraUniform (80 bytes; position
 //                               in world meters, ray basis vectors, resolution)
 //   6  texture  output        — rgba8unorm storage texture, write-only
-//   16 uniform  world_events  — world_event.rs GpuWorldEvent[16] (48 bytes
-//                               each; positions in world meters)
 
 struct Camera {
     position: vec3<f32>,      // eye, world METERS
@@ -48,36 +46,6 @@ struct Camera {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(6) var output: texture_storage_2d<rgba8unorm, write>;
-
-// ---- S3: the world-event field -----------------------------------------------
-// Something that happened somewhere, at a time, with a reach. A material's
-// event sensor reads these; nothing else does. See src/world_event.rs for the
-// lifecycle — in particular why re-raising an event preserves its start stamp,
-// which is what lets an envelope exist without per-voxel history.
-//
-// Bound HERE and not in world.wgsl because the CAGI pass shares that file and
-// has neither a camera nor an event field.
-//
-// Three explicit 16-byte rows, matching the Rust `#[repr(C)]` struct: a WGSL
-// uniform-array element is 16-byte aligned and therefore strides 48, so a
-// 40-byte Rust struct would desynchronise from element 1 onward.
-struct WorldEvent {
-    position_meters: vec3<f32>,
-    radius_meters: f32,
-    started_epoch: f32,
-    started_remainder_seconds: f32,
-    ended_epoch: f32,           // meaningless while `open` is 1.0
-    ended_remainder_seconds: f32,
-    channel: u32,
-    strength: f32,              // [0, 1], multiplies the sensor's signal only
-    open: f32,                  // 1.0 ongoing, 0.0 closed
-    _pad_row2: f32,
-}
-
-// The literal 16 must equal MAX_WORLD_EVENTS in graph_prelude.wgsl and
-// src/world_event.rs. It cannot reference the const: the prelude is
-// concatenated after this file.
-@group(0) @binding(16) var<uniform> world_events: array<WorldEvent, 16>;
 
 // ---- E1/E1b: ambient occlusion levers ----------------------------------------
 // Ambient occlusion attenuates the hemisphere-ambient term only (never the

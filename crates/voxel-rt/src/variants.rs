@@ -91,6 +91,7 @@ pub enum LeverId {
     GiTransmission,
     GiEmissive,
     GiEmitterBounce,
+    GiEventLight,
     GiEmissiveScale,
     GiSampleMode,
     GiIterationsPerFrame,
@@ -385,6 +386,7 @@ impl LeverId {
             LeverId::GiTransmission => LeverValue::Flag(global_illumination.transmission),
             LeverId::GiEmissive => LeverValue::Flag(global_illumination.emissive),
             LeverId::GiEmitterBounce => LeverValue::Flag(global_illumination.emitter_bounce),
+            LeverId::GiEventLight => LeverValue::Flag(global_illumination.event_light),
             LeverId::GiEmissiveScale => LeverValue::Scalar(global_illumination.emissive_scale),
             LeverId::GiSampleMode => {
                 LeverValue::Mode(global_illumination.sample_mode.shader_value())
@@ -507,6 +509,7 @@ impl LeverId {
             LeverId::GiEmitterBounce => {
                 global_illumination.emitter_bounce = value.expect_flag(self)
             }
+            LeverId::GiEventLight => global_illumination.event_light = value.expect_flag(self),
             LeverId::GiEmissiveScale => {
                 global_illumination.emissive_scale = value.expect_scalar(self);
             }
@@ -1440,6 +1443,39 @@ pub const REGISTRY: &[Lever] = &[
             section: BenchSection::Cagi,
             label: "gi-no-emitter-bounce",
             overrides: &[(LeverId::GiEmitterBounce, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiEventLight,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_EVENT_LIGHT"),
+        label: "event light (emission follows the world event field)",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "S3b, ON by default. Without it a material whose emission answers an \
+                  event sensor is a decal: the wall brightens as you walk up to it and \
+                  the floor in front of it does not, because the volume only ever saw \
+                  the row's resting emission. With it on, a cell carrying a response \
+                  index in attribute bits 29-31 senses the same event field the surface \
+                  does and interpolates between the material's resting and triggered \
+                  emission. What made this cheap is a fact the arc's plan had WRONG: the \
+                  CA is not a one-shot flood — it dispatches iterations_per_frame steps \
+                  every frame and neither rule reads a cell's own previous value, so the \
+                  field brightens and darkens on its own and a time-varying emitter \
+                  needs NO re-flood. The global re-flood exists only to clear the pinned \
+                  sun-source flag when the sun moves. The shipped-world benchmark covers \
+                  only the no-response fast path; it does NOT price a live gated emitter. \
+                  That remaining scenario must use representative gated surface area and \
+                  0/1/4/16 events before the default's cost is treated as accepted. DDA \
+                  remains unchanged, as it must: the shading pass never reads the response \
+                  table. Off is a complete look — every gated cell injects its stored peak \
+                  — and the Quest-tier fallback.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-no-event-light",
+            overrides: &[(LeverId::GiEventLight, LeverValue::Flag(false))],
         }],
     },
     Lever {
@@ -2747,6 +2783,7 @@ mod tests {
         "CAGI_CELL_DATA_WORDS",
         "CAGI_TRANSMITTANCE_SHIFT",
         "CAGI_TRANSMITTANCE_LEVELS",
+        "CAGI_EVENT_RESPONSE_SHIFT",
         "CAGI_CHANNEL_MASK",
         "CAGI_CHANNEL_MAX",
         "CAGI_SUN_SOURCE_FLAG",
@@ -3051,6 +3088,7 @@ mod tests {
             transmission,
             emissive,
             emitter_bounce,
+            event_light,
             iterations_per_frame,
             strength: gi_strength,
             ambient_floor,
@@ -3140,6 +3178,7 @@ mod tests {
             (LeverId::GiTransmission, LeverValue::Flag(transmission)),
             (LeverId::GiEmissive, LeverValue::Flag(emissive)),
             (LeverId::GiEmitterBounce, LeverValue::Flag(emitter_bounce)),
+            (LeverId::GiEventLight, LeverValue::Flag(event_light)),
             (LeverId::GiEmissiveScale, LeverValue::Scalar(emissive_scale)),
             (
                 LeverId::GiSampleMode,

@@ -10,7 +10,9 @@
 // stubbed by material_graph.rs for standalone validation:
 //   lighting.animation_params  — scaled material clock (world.wgsl)
 //   lighting.event_params      — unscaled world clock and event count
-//   world_events               — the S3 event field (dda.wgsl)
+//   world_event_sense          — the S3 event field and its falloff/envelope,
+//                                shared with the CA pass's gate (world.wgsl)
+//   ANIMATION_EPOCH_SECONDS    — one epoch of the split clock (world.wgsl)
 //   brickmap.voxel_size_meters — voxel units to metres (world.wgsl)
 //   BRICK_SIZE                 — detail cells per authored block (world.wgsl)
 struct GraphMaterial {
@@ -87,13 +89,9 @@ fn graph_face_scalar(normal: vec3<f32>, base: f32, top: f32, side: f32, bottom: 
 // epochs and a remainder inside one, because a single f32 second count loses
 // the fraction an oscillator needs within hours of uptime, and any wrapped
 // single clock steps every rate that is not harmonic with the wrap.
-const ANIMATION_EPOCH_SECONDS: f32 = 64.0;
-
-// Capacity of the event field. Kept in step with the `array<WorldEvent, 16>`
-// binding in dda.wgsl and MAX_WORLD_EVENTS in src/world_event.rs; the array
-// size there must stay a literal because this file is concatenated after it.
-const MAX_WORLD_EVENTS: u32 = 16u;
-
+// `ANIMATION_EPOCH_SECONDS` and the whole event field live in `world.wgsl`,
+// which every pass shares — the CA pass senses the same events these nodes do.
+//
 // Monotone seconds since start. What `material.time` returns; never steps back.
 fn graph_animation_seconds() -> f32 {
     return lighting.animation_params.y * ANIMATION_EPOCH_SECONDS
@@ -109,12 +107,6 @@ fn graph_oscillator_phase(rate_hz: f32) -> f32 {
     let per_epoch = fract(rate_hz * ANIMATION_EPOCH_SECONDS);
     return fract(rate_hz * lighting.animation_params.x
         + per_epoch * lighting.animation_params.y);
-}
-
-// How many world events are live. Sensors loop to THIS, never to the array
-// capacity, so a world with no entities costs one comparison per sensor.
-fn graph_world_event_count() -> u32 {
-    return min(u32(max(lighting.event_params.z, 0.0)), MAX_WORLD_EVENTS);
 }
 
 // Speed and two angles to a velocity vector.
@@ -241,71 +233,13 @@ fn graph_oscillator(
 }
 
 // ---- S3: the event sensor ----------------------------------------------------
-
-const GRAPH_FALLOFF_SMOOTHSTEP: u32 = 0u;
-const GRAPH_FALLOFF_LINEAR: u32 = 1u;
-const GRAPH_FALLOFF_INVERSE_SQUARE: u32 = 2u;
-const GRAPH_FALLOFF_STEP: u32 = 3u;
-
-fn graph_falloff(kind: u32, normalised_distance: f32) -> f32 {
-    let t = clamp(normalised_distance, 0.0, 1.0);
-    if (kind == GRAPH_FALLOFF_LINEAR) {
-        return 1.0 - t;
-    }
-    if (kind == GRAPH_FALLOFF_INVERSE_SQUARE) {
-        // Normalised so it still reaches 0 at the radius, rather than trailing
-        // a long invisible tail that never quite ends.
-        let falloff = 1.0 / (1.0 + 8.0 * t * t);
-        let edge = 1.0 / 9.0;
-        return clamp((falloff - edge) / (1.0 - edge), 0.0, 1.0);
-    }
-    if (kind == GRAPH_FALLOFF_STEP) {
-        return select(0.0, 1.0, t < 1.0);
-    }
-    let smooth_t = 1.0 - t;
-    return smooth_t * smooth_t * (3.0 - 2.0 * smooth_t);
-}
-
-fn graph_ramp(value: f32, length_seconds: f32) -> f32 {
-    if (length_seconds <= 0.0) {
-        return select(0.0, 1.0, value >= 0.0);
-    }
-    return clamp(value / length_seconds, 0.0, 1.0);
-}
-
-// The attack/hold/release envelope of one event.
 //
-// Attack and release are MULTIPLIED rather than switched between, and that is
-// what makes an impulse continuous: an event that opens and closes inside one
-// frame ramps up and down simultaneously and yields a smooth shortened blip
-// instead of a step. Switching on a phase would have produced the step.
-fn graph_event_envelope(
-    event_index: u32,
-    attack_seconds: f32,
-    hold_seconds: f32,
-    release_seconds: f32,
-) -> f32 {
-    let event = world_events[event_index];
-    let now_remainder = lighting.event_params.x;
-    let now_epoch = lighting.event_params.y;
-    let since_start = (now_epoch - event.started_epoch) * ANIMATION_EPOCH_SECONDS
-        + (now_remainder - event.started_remainder_seconds);
-    let attack_factor = graph_ramp(since_start, attack_seconds);
-    if (event.open > 0.5) {
-        return attack_factor;
-    }
-    let since_end = (now_epoch - event.ended_epoch) * ANIMATION_EPOCH_SECONDS
-        + (now_remainder - event.ended_remainder_seconds);
-    let release_factor = 1.0 - graph_ramp(since_end - hold_seconds, release_seconds);
-    return attack_factor * release_factor;
-}
+// The sensing itself is `world_event_sense` in `world.wgsl`, shared with the CA
+// pass's emission gate. All this node adds is the unit conversion and `invert`:
+// keeping the loop in one place is what stops a surface from lighting up while
+// the light volume it should be feeding stays dark.
 
 // Sense the world-event field. Returns (signal, nearness, envelope).
-//
-// ONE winning event supplies all three components. Taking an independent
-// maximum per output could report a nearness from one event and an envelope
-// from another — a combination that never existed — and would break the
-// `signal == nearness * envelope * strength` invariant callers rely on.
 //
 // `position` arrives in traversal voxel units; event positions are in metres.
 fn graph_event_sensor(
@@ -318,43 +252,17 @@ fn graph_event_sensor(
     invert: bool,
     position: vec3<f32>,
 ) -> vec3<f32> {
-    let point_meters = position * brickmap.voxel_size_meters;
-    let count = graph_world_event_count();
-    var best_signal = 0.0;
-    var best_nearness = 0.0;
-    var best_envelope = 0.0;
-    var found = false;
-    for (var index = 0u; index < count; index = index + 1u) {
-        let event = world_events[index];
-        if (event.channel != channel) {
-            continue;
-        }
-        // The sensor's own radius intersected with the event's reach, so a
-        // large creature is felt further away without re-authoring anything.
-        let reach = min(radius_meters, event.radius_meters);
-        if (reach <= 0.0) {
-            continue;
-        }
-        // Squared-distance reject before any envelope maths: this loop runs per
-        // sensor per shaded hit, including secondary rays.
-        let offset = event.position_meters - point_meters;
-        let distance_squared = dot(offset, offset);
-        if (distance_squared >= reach * reach) {
-            continue;
-        }
-        let nearness = graph_falloff(falloff, sqrt(distance_squared) / reach);
-        let envelope = graph_event_envelope(
-            index, attack_seconds, hold_seconds, release_seconds);
-        let signal = nearness * envelope * clamp(event.strength, 0.0, 1.0);
-        if (!found || signal > best_signal) {
-            best_signal = signal;
-            best_nearness = nearness;
-            best_envelope = envelope;
-            found = true;
-        }
-    }
+    let sensed = world_event_sense(
+        position * brickmap.voxel_size_meters,
+        channel,
+        radius_meters,
+        falloff,
+        attack_seconds,
+        hold_seconds,
+        release_seconds,
+    );
     // Invert applies to the SIGNAL only. Nearness and envelope keep their
     // literal meanings so they stay usable as diagnostics.
-    let signal = select(best_signal, 1.0 - best_signal, invert);
-    return vec3<f32>(signal, best_nearness, best_envelope);
+    let signal = select(sensed.x, 1.0 - sensed.x, invert);
+    return vec3<f32>(signal, sensed.y, sensed.z);
 }

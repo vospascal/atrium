@@ -24,17 +24,16 @@
 //! | 11 | storage (read)       front light volume |
 //! | 12 | storage (read_write) back light volume — CA pass only |
 //! | 13 | storage (read)       per-cell attributes + E5b emission (5 u32 words) |
-//! | 14 | uniform              grid dimensions + transport coefficients |
+//! | 14 | uniform              grid dimensions, transport coefficients and the S3b event-response table |
 //! | 15 | storage (read)       shared AADF directional bounds |
 
 use wgpu::util::DeviceExt;
 
 use crate::brickmap::Brickmap;
 use crate::cagi::{
-    build_cell_attributes_with_emission, material_attribute_table, CagiGrid, CagiSettings,
-    LightCellUpdate, CELL_DATA_WORDS,
+    build_cell_attributes_with_emission, CagiGrid, CagiSettings, GpuEventResponse, LightCellUpdate,
+    MaterialAttributes, CELL_DATA_WORDS, EVENT_RESPONSE_SLOTS,
 };
-use crate::material::Material;
 use crate::variants::RenderQuality;
 
 use super::world_bindings::WorldBindings;
@@ -126,9 +125,15 @@ impl LightVolume {
         device: &wgpu::Device,
         brickmap: &Brickmap,
         settings: &CagiSettings,
-        rows: &[Material],
+        attributes: &MaterialAttributes,
     ) -> Self {
-        Self::new_with_attributes(device, brickmap, settings, AttributeSource::BuildNow, rows)
+        Self::new_with_attributes(
+            device,
+            brickmap,
+            settings,
+            AttributeSource::BuildNow,
+            attributes,
+        )
     }
 
     /// The same, with a choice about the ~0.5 s CPU attribute build (release bench
@@ -144,15 +149,13 @@ impl LightVolume {
         brickmap: &Brickmap,
         settings: &CagiSettings,
         attribute_source: AttributeSource,
-        rows: &[Material],
+        material_attributes: &MaterialAttributes,
     ) -> Self {
         let grid = settings.grid(brickmap);
         let (attributes, emissions) = match (settings.enabled, attribute_source) {
-            (true, AttributeSource::BuildNow) => build_cell_attributes_with_emission(
-                brickmap,
-                &grid,
-                &material_attribute_table(rows),
-            ),
+            (true, AttributeSource::BuildNow) => {
+                build_cell_attributes_with_emission(brickmap, &grid, material_attributes)
+            }
             _ => (
                 vec![0_u32; grid.cell_count()],
                 vec![[0.0_f32; 4]; grid.cell_count()],
@@ -184,8 +187,11 @@ impl LightVolume {
             }),
             uniform_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cagi volume uniform"),
-                contents: bytemuck::bytes_of(&grid.uniform()),
-                usage: wgpu::BufferUsages::UNIFORM,
+                contents: bytemuck::bytes_of(&grid.uniform(material_attributes)),
+                // COPY_DST since S3b: the geometry half is fixed for the volume's
+                // lifetime, but the event-response table follows the material
+                // graphs and is re-uploaded whenever they recompile.
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }),
             front: 0,
             // A fresh volume is uninitialized GPU memory: the first encode must
@@ -292,6 +298,15 @@ impl LightVolume {
     /// `grid` is the grid the cell INDICES were computed for: a mismatch means the
     /// volume was reallocated at another resolution while the edit was in flight, so
     /// the indices mean nothing here and a full rebuild is already on its way.
+    ///
+    /// S3b leaves one narrow window open here, knowingly. The response slots
+    /// packed into these words come from the edit's own `MaterialAttributes`; if
+    /// a graph recompiled since the last full repack, that table may allocate
+    /// slots differently from the rows the volume currently holds, so an edited
+    /// cell can point at a stale response for the frame or two before the repack
+    /// (which a recompile always requests) lands. Closing it would mean sending
+    /// the 384-byte table alongside every 4-byte cell patch. The symptom is one
+    /// voxel briefly at the wrong brightness; the settle burst erases it.
     pub fn write_cell_attributes(
         &self,
         queue: &wgpu::Queue,
@@ -341,6 +356,7 @@ impl LightVolume {
         grid: &CagiGrid,
         attributes: &[u32],
         emissions: &[[f32; 4]],
+        responses: &[GpuEventResponse; EVENT_RESPONSE_SLOTS],
     ) -> bool {
         if *grid != self.grid
             || attributes.len() != self.grid.cell_count()
@@ -350,9 +366,31 @@ impl LightVolume {
         }
         let cell_data = pack_cell_data(attributes, emissions);
         queue.write_buffer(&self.cell_data_buffer, 0, bytemuck::cast_slice(&cell_data));
+        // The response rows and the slot indices packed into the attribute words
+        // are ONE table: installing the words without the rows would point a
+        // cell at a response the volume does not hold yet.
+        self.write_event_responses(queue, responses);
         // The volume was flooded against zeroed attributes; start over.
         self.mark_dirty();
         true
+    }
+
+    /// Re-upload the S3b event-response rows alone.
+    ///
+    /// A partial write at the table's own offset rather than a whole new
+    /// uniform: the geometry half is derived from the grid this volume was
+    /// allocated for, and rebuilding it here would be a second place that could
+    /// disagree with `CagiGrid::uniform`.
+    fn write_event_responses(
+        &self,
+        queue: &wgpu::Queue,
+        responses: &[GpuEventResponse; EVENT_RESPONSE_SLOTS],
+    ) {
+        queue.write_buffer(
+            &self.uniform_buffer,
+            std::mem::offset_of!(crate::cagi::CagiVolumeUniform, event_responses) as u64,
+            bytemuck::cast_slice(responses.as_slice()),
+        );
     }
 
     /// GPU bytes: both ping-pong buffers, the attributes and the uniform.
@@ -603,6 +641,12 @@ mod tests {
                         // reads entirely. Pairing it with `rule` is the useful axis —
                         // the whole point of the lever is that it makes the rules agree.
                         let emitter_bounce = rule != CagiRule::MaxDecrement;
+                        // S3b pairs with the sample mode rather than getting its
+                        // own nesting level: `cagi_cell_emission_live` is called
+                        // from three sites and with the lever OFF naga must
+                        // delete the `world_event_sense` call and the response
+                        // table read entirely, which is the shape that can break.
+                        let event_light = sample_mode == CagiSampleMode::Trilinear;
                         let quality = RenderQuality {
                             global_illumination: CagiSettings {
                                 rule,
@@ -610,6 +654,7 @@ mod tests {
                                 sun_cache,
                                 sample_mode,
                                 emitter_bounce,
+                                event_light,
                                 ..CagiSettings::default()
                             },
                             ..RenderQuality::default()
@@ -626,8 +671,8 @@ mod tests {
                         assert!(
                             validation_error.is_none(),
                             "CAGI {rule:?} / {sky_test:?} / cache {sun_cache} / \
-                             {sample_mode:?} / bounce {emitter_bounce} failed wgpu \
-                             validation: {validation_error:?}"
+                             {sample_mode:?} / bounce {emitter_bounce} / event light \
+                             {event_light} failed wgpu validation: {validation_error:?}"
                         );
                     }
                 }

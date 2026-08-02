@@ -44,7 +44,21 @@ use crate::pattern::{
 };
 use crate::studio::StudioPose;
 use crate::vox_material::VoxImportRow;
-use voxel_core::world::WORLD_VOXEL_SIZE_METERS;
+use voxel_core::world::{Voxel, WORLD_VOXEL_SIZE_METERS};
+
+/// The nine quick-access blocks in the in-world test bar. The bar is for fast
+/// construction; its "more" picker still exposes every material row.
+pub const WORLD_HOTBAR_BLOCKS: [Voxel; 9] = [
+    Voxel::Grass,
+    Voxel::Dirt,
+    Voxel::Sand,
+    Voxel::Stone,
+    Voxel::Trunk,
+    Voxel::Leaves,
+    Voxel::Snow,
+    Voxel::GlowBlock,
+    Voxel::Lava,
+];
 
 /// The panel's own UI state — what is selected and what it has asked for.
 #[derive(Clone, Debug, Default, PartialEq)]

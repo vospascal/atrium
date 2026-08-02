@@ -24,6 +24,7 @@
 //! sky by definition, so allocating it would be paying to store a constant.
 //! Measured footprints are in the bench doc's E4 section.
 
+use crate::animation_clock::AnimationClockSample;
 use crate::ao::patch_shader_const;
 use crate::brickmap::{
     brick_is_uniform, brick_slot, brick_uniform_material, Brickmap, BRICK_GRID_X, BRICK_GRID_Y,
@@ -31,6 +32,10 @@ use crate::brickmap::{
     OCCUPANCY_WORDS_PER_BRICK,
 };
 use crate::material::{Material, MATERIALS, MATERIAL_COUNT};
+use crate::material_graph::{
+    sense_world_events, EmissionEventResponse, EventSensorConfig, SensorFalloff,
+};
+use crate::world_event::GpuWorldEvent;
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 /// Cell attribute bit 24: the cell absorbs light (see [`SOLID_FILL_DIVISOR`]).
@@ -52,6 +57,22 @@ pub const CELL_SOLID: u32 = 0x0100_0000;
 pub const CELL_TRANSMITTANCE_SHIFT: u32 = 25;
 pub const CELL_TRANSMITTANCE_LEVELS: u32 = 15;
 pub const CELL_TRANSMITTANCE_MASK: u32 = 0xf << CELL_TRANSMITTANCE_SHIFT;
+
+/// Cell attribute bits 29-31 (S3b): which row of the volume's event-response
+/// table this cell's emission follows. `0` means "none" — the cell's emission is
+/// constant in time, which is every cell in a world nobody has authored an event
+/// sensor into, so the un-animated volume is unchanged bit for bit.
+///
+/// Three bits, i.e. seven usable responses, is what was FREE. It is also enough:
+/// a response is one (channel, radius, falloff, envelope) SHAPE, shared by every
+/// material that senses the same way, not one per material. Overflow past seven
+/// distinct shapes is reported by [`MaterialAttributes::event_response_overflow`]
+/// rather than silently dropping a material's reaction.
+pub const CELL_EVENT_RESPONSE_SHIFT: u32 = 29;
+pub const CELL_EVENT_RESPONSE_MASK: u32 = 0x7 << CELL_EVENT_RESPONSE_SHIFT;
+
+/// Rows in the volume's event-response table, INCLUDING row 0 ("no response").
+pub const EVENT_RESPONSE_SLOTS: usize = 8;
 
 /// `u32`s per cell in the binding-13 storage buffer: the packed attribute word
 /// followed by E5b's 10:10:10 emission. Mirrors `CAGI_CELL_DATA_WORDS` in
@@ -237,6 +258,12 @@ pub struct CagiSettings {
     pub sun_cache: bool,
     /// `CAGI_EMISSIVE` (E5): let emissive materials inject their radiance.
     pub emissive: bool,
+    /// `CAGI_EVENT_LIGHT` (S3b): let a cell whose material answers the world
+    /// event field modulate the emission it injects, so a surface that lights
+    /// up as you approach also lights the room. Off makes every gated cell
+    /// inject its stored peak unconditionally — a complete look, and the
+    /// Quest-tier fallback.
+    pub event_light: bool,
     /// `CAGI_EMITTER_BOUNCE` (E5c): let an air cell read its emissive solid
     /// neighbours' radiance directly instead of waiting for the stencil. Off
     /// restores E5's rule-dependent behaviour, where a point light only survived
@@ -272,6 +299,7 @@ impl Default for CagiSettings {
             sun_cache: true,
             emissive: true,
             emitter_bounce: true,
+            event_light: true,
             transmission: false,
             iterations_per_frame: 2,
             strength: 1.0,
@@ -309,10 +337,15 @@ impl CagiSettings {
             boolean_literal(self.transmission),
         );
         patched = patch_shader_const(&patched, "CAGI_EMISSIVE", boolean_literal(self.emissive));
-        patch_shader_const(
+        patched = patch_shader_const(
             &patched,
             "CAGI_EMITTER_BOUNCE",
             boolean_literal(self.emitter_bounce),
+        );
+        patch_shader_const(
+            &patched,
+            "CAGI_EVENT_LIGHT",
+            boolean_literal(self.event_light),
         )
     }
 
@@ -326,6 +359,7 @@ impl CagiSettings {
             || self.transmission != applied.transmission
             || self.emissive != applied.emissive
             || self.emitter_bounce != applied.emitter_bounce
+            || self.event_light != applied.event_light
     }
 
     /// Whether switching from `applied` to `self` needs the GPU volume rebuilt
@@ -450,11 +484,13 @@ impl CagiGrid {
             .round() as u32
     }
 
-    /// The GPU uniform describing this volume.
+    /// The GPU uniform describing this volume, with the S3b response table the
+    /// caller's material set produced.
     ///
-    /// Material-dependent emission lives in the per-cell buffer; this uniform only
-    /// carries geometry and transport coefficients.
-    pub fn uniform(&self) -> CagiVolumeUniform {
+    /// Material-dependent emission lives in the per-cell buffer; this uniform
+    /// carries geometry, transport coefficients and the handful of event
+    /// responses a cell's attribute word indexes into.
+    pub fn uniform(&self, attributes: &MaterialAttributes) -> CagiVolumeUniform {
         CagiVolumeUniform {
             grid_size: self.size,
             cell_voxels: self.cell_voxels,
@@ -462,25 +498,91 @@ impl CagiGrid {
             attenuation: self.attenuation(),
             diffusion_numerator: self.diffusion_numerator(),
             diffusion_26_numerator: self.diffusion_26_numerator(),
+            event_responses: attributes.responses,
         }
     }
 }
 
-/// Volume geometry + transport coefficients for the GPU, bindable as a uniform.
+/// S3b — one row of the volume's event-response table: how a cell that carries
+/// this row's index in [`CELL_EVENT_RESPONSE_MASK`] modulates its stored
+/// emission as an event comes and goes.
 ///
-/// `#[repr(C)]` layout (32 bytes, 16-byte aligned — matches the WGSL
-/// `CagiVolumeMeta` struct in `shaders/cagi_volume.wgsl`):
+/// THREE EXPLICIT 16-BYTE ROWS, the discipline
+/// [`crate::world_event::GpuWorldEvent`] already follows. The natural field set
+/// is 40 bytes under `#[repr(C)]`, but a WGSL uniform-array element is 16-byte
+/// aligned and therefore strides 48, so the upload would desynchronise from
+/// element 1 onward.
 ///
-/// | offset | field                    | WGSL type   |
-/// |--------|--------------------------|-------------|
-/// | 0      | `grid_size`              | `vec3<u32>` |
-/// | 12     | `cell_voxels`            | `u32`       |
-/// | 16     | `cell_size_voxels`       | `f32`       |
-/// | 20     | `attenuation`            | `u32`       |
-/// | 24     | `diffusion_numerator`    | `u32`       |
-/// | 28     | `diffusion_26_numerator` | `u32`       |
-/// Per-cell attributes and E5b emission are carried in the storage buffer at
-/// binding 13; this uniform remains geometry and transport metadata only.
+/// `invert` is deliberately absent. The two scales already carry it: an inverted
+/// sensor simply produces a resting value ABOVE its triggered one, and the CA's
+/// `mix(resting, triggered, gate)` is right either way. Sending the flag as well
+/// would make it possible to describe the inversion twice and disagree.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuEventResponse {
+    // ---- row 0 ----
+    pub radius_meters: f32,
+    pub attack_seconds: f32,
+    pub hold_seconds: f32,
+    pub release_seconds: f32,
+    // ---- row 1 ----
+    /// Fraction of the cell's STORED emission that survives with no event in
+    /// range. Zero for a surface that is dark until something arrives.
+    pub resting_scale: [f32; 3],
+    /// [`EventSensorConfig::channel`], as f32 so the row stays four equal lanes.
+    pub channel: f32,
+    // ---- row 2 ----
+    /// Fraction that survives with the event at full signal.
+    pub triggered_scale: [f32; 3],
+    /// [`SensorFalloff::shader_value`], as f32.
+    pub falloff: f32,
+}
+
+impl GpuEventResponse {
+    /// Row 0 of the table, and the value every unresponsive cell reads: both
+    /// scales at 1, so `mix` returns the stored emission whatever the gate says
+    /// and a world with no sensors renders exactly as it did before S3b.
+    pub const IDENTITY: Self = Self {
+        radius_meters: 0.0,
+        attack_seconds: 0.0,
+        hold_seconds: 0.0,
+        release_seconds: 0.0,
+        resting_scale: [1.0; 3],
+        channel: 0.0,
+        triggered_scale: [1.0; 3],
+        falloff: 0.0,
+    };
+}
+
+unsafe impl bytemuck::Zeroable for GpuEventResponse {}
+unsafe impl bytemuck::Pod for GpuEventResponse {}
+
+/// Volume geometry + transport coefficients + the S3b event-response table, for
+/// the GPU, bindable as a uniform.
+///
+/// `#[repr(C)]` layout (matches the WGSL `CagiVolumeMeta` struct in
+/// `shaders/cagi_volume.wgsl`):
+///
+/// | offset | field                    | WGSL type                     |
+/// |--------|--------------------------|-------------------------------|
+/// | 0      | `grid_size`              | `vec3<u32>`                   |
+/// | 12     | `cell_voxels`            | `u32`                         |
+/// | 16     | `cell_size_voxels`       | `f32`                         |
+/// | 20     | `attenuation`            | `u32`                         |
+/// | 24     | `diffusion_numerator`    | `u32`                         |
+/// | 28     | `diffusion_26_numerator` | `u32`                         |
+/// | 32     | `event_responses`        | `array<CagiEventResponse, 8>` |
+///
+/// No padding between the two halves, and that is worth stating because it is
+/// exactly the thing one adds defensively and gets wrong: a `GpuEventResponse`
+/// is 16-byte aligned, so WGSL rounds the array's start up to a multiple of 16 —
+/// and the geometry half already ends at exactly 32. A pad here would move the
+/// Rust array to 40 while the shader kept reading it at 32.
+///
+/// Per-cell attributes and E5b emission stay in the storage buffer at binding
+/// 13. The response table is here instead because it is indexed by three bits of
+/// a cell's attribute word rather than stored per cell: 384 bytes shared by
+/// 2.25 M cells.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CagiVolumeUniform {
@@ -490,6 +592,7 @@ pub struct CagiVolumeUniform {
     pub attenuation: u32,
     pub diffusion_numerator: u32,
     pub diffusion_26_numerator: u32,
+    pub event_responses: [GpuEventResponse; EVENT_RESPONSE_SLOTS],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -549,17 +652,112 @@ fn packed_albedo(albedo: [f32; 3]) -> u32 {
 /// so a cell's transmittance and emitter always describe the same surface its
 /// bounce colour does. Coarse (one voxel stands for up to 512), and deliberately
 /// the same coarseness the albedo has had since E4.
-pub fn material_attribute_table(rows: &[Material]) -> MaterialAttributes {
+pub fn material_attribute_table(
+    rows: &[Material],
+    emission_responses: &[Option<EmissionEventResponse>],
+) -> MaterialAttributes {
     let mut table = MaterialAttributes {
         words: [0; MATERIAL_COUNT],
         emissions: [[0.0; 3]; MATERIAL_COUNT],
+        resting_emissions: [[0.0; 3]; MATERIAL_COUNT],
+        responses: [GpuEventResponse::IDENTITY; EVENT_RESPONSE_SLOTS],
+        response_overflow: 0,
     };
+    // Slot 0 is "no response" and is never allocated; the first real response
+    // takes slot 1.
+    let mut next_slot = 1_usize;
     for (slot, material) in rows.iter().enumerate().take(MATERIAL_COUNT) {
         table.words[slot] =
             packed_albedo(material.albedo) | quantize_transmittance(material.transmittance());
-        table.emissions[slot] = material.mean_emitted_radiance();
+        let Some(response) = emission_responses.get(slot).copied().flatten() else {
+            table.emissions[slot] = material.mean_emitted_radiance();
+            table.resting_emissions[slot] = table.emissions[slot];
+            continue;
+        };
+        // The volume stores the channel-wise MAX of the two ends and scales
+        // DOWN. Storing the resting value and scaling UP could never light a
+        // surface that is black until something arrives, which is the whole
+        // case S3b exists for.
+        let peak = [
+            response.resting[0].max(response.triggered[0]),
+            response.resting[1].max(response.triggered[1]),
+            response.resting[2].max(response.triggered[2]),
+        ];
+        // Every magnitude here is a pattern-aware MEAN, like every other row's:
+        // a speckled emissive layer's cell value is its average, not a point
+        // sample.
+        //
+        // All THREE ends are re-meaned rather than one being scaled by a ratio
+        // of point samples. That ratio is exact only while the emission stack is
+        // linear in the base — `add`, `multiply` and `mix` are, `replace` is
+        // not, and a clamp anywhere is not either. Taking the mean at each end
+        // makes `stored * resting_scale == mean(resting)` true by construction
+        // for any stack, which is the property that keeps a material with no
+        // event in range injecting exactly what it injected before S3b.
+        //
+        // Three calls instead of one, and it costs nothing on the rows that
+        // matter: `mean_emitted_radiance` returns immediately unless the row
+        // authors an emission LAYER, so only a material that both senses events
+        // and speckles its emission pays for the extra two.
+        let mean_at = |emission: [f32; 3]| {
+            let mut row = *material;
+            row.emission = emission
+                .iter()
+                .any(|value| *value != 0.0)
+                .then_some(emission);
+            row.mean_emitted_radiance()
+        };
+        let peak_mean = mean_at(peak);
+        table.emissions[slot] = peak_mean;
+        let gpu = GpuEventResponse {
+            radius_meters: response.sensor.radius_meters,
+            attack_seconds: response.sensor.attack_seconds,
+            hold_seconds: response.sensor.hold_seconds,
+            release_seconds: response.sensor.release_seconds,
+            resting_scale: scale_against(mean_at(response.resting), peak_mean),
+            channel: response.sensor.channel as f32,
+            triggered_scale: scale_against(mean_at(response.triggered), peak_mean),
+            falloff: response.sensor.falloff.shader_value() as f32,
+        };
+        // Two materials sensing the same way share one row. Seven SHAPES goes a
+        // good deal further than seven materials would.
+        let existing = table.responses[1..next_slot]
+            .iter()
+            .position(|candidate| *candidate == gpu)
+            .map(|index| index + 1);
+        let assigned = match existing {
+            Some(index) => index,
+            None if next_slot < EVENT_RESPONSE_SLOTS => {
+                table.responses[next_slot] = gpu;
+                next_slot += 1;
+                next_slot - 1
+            }
+            None => {
+                // Refuse rather than evict. With no response row the cell must
+                // keep its stored peak; using the resting endpoint here would
+                // make the overflow material silently dark instead.
+                table.resting_emissions[slot] = peak_mean;
+                table.response_overflow += 1;
+                continue;
+            }
+        };
+        table.resting_emissions[slot] = mean_at(response.resting);
+        table.words[slot] |= (assigned as u32) << CELL_EVENT_RESPONSE_SHIFT;
     }
     table
+}
+
+/// One endpoint's mean as a fraction of the peak mean the cell stores. A zero
+/// peak channel means neither end emits on it, so the fraction is meaningless
+/// and 1.0 keeps the shader's `mix` a no-op there.
+fn scale_against(value: [f32; 3], peak: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|channel| {
+        if peak[channel] > 0.0 {
+            value[channel] / peak[channel]
+        } else {
+            1.0
+        }
+    })
 }
 
 /// The material table reduced to exactly what the attribute sweep needs: one packed
@@ -578,14 +776,40 @@ pub fn material_attribute_table(rows: &[Material]) -> MaterialAttributes {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialAttributes {
     words: [u32; MATERIAL_COUNT],
+    /// The peak endpoint for response-bearing rows, or the ordinary mean for
+    /// static rows. This is the emission a cell stores when it can carry one
+    /// response index.
     emissions: [[f32; 3]; MATERIAL_COUNT],
+    /// The emission that is correct with no event in range. A cell containing
+    /// multiple response identities cannot represent them with one 3-bit index,
+    /// so it falls back to this value rather than applying one material's gate to
+    /// another material's light.
+    resting_emissions: [[f32; 3]; MATERIAL_COUNT],
+    /// S3b — the response shapes the words above index into. Row 0 is identity.
+    responses: [GpuEventResponse; EVENT_RESPONSE_SLOTS],
+    /// Materials that wanted a response after all seven rows were taken.
+    response_overflow: u32,
 }
 
 impl MaterialAttributes {
     /// The compiled table's attributes — what the world starts with and what every
     /// test that does not care about live edits should use.
+    ///
+    /// No responses: [`MATERIALS`] is the graph-free table, and an event response
+    /// only ever comes from a compiled graph.
     pub fn compiled() -> MaterialAttributes {
-        material_attribute_table(&MATERIALS)
+        material_attribute_table(&MATERIALS, &[])
+    }
+
+    /// The S3b response table this material set produced, for the volume uniform.
+    pub fn responses(&self) -> &[GpuEventResponse; EVENT_RESPONSE_SLOTS] {
+        &self.responses
+    }
+
+    /// How many materials wanted an event response and could not have one.
+    /// Nonzero means the world authors more than seven distinct sensor shapes.
+    pub fn event_response_overflow(&self) -> u32 {
+        self.response_overflow
     }
 
     /// The packed word for one material id. Ids past the table read zero, matching the
@@ -598,6 +822,13 @@ impl MaterialAttributes {
     /// exposed-area weighting is applied.
     pub fn emission(&self, material: u8) -> [f32; 3] {
         self.emissions
+            .get(material as usize)
+            .copied()
+            .unwrap_or([0.0; 3])
+    }
+
+    fn resting_emission(&self, material: u8) -> [f32; 3] {
+        self.resting_emissions
             .get(material as usize)
             .copied()
             .unwrap_or([0.0; 3])
@@ -637,6 +868,12 @@ pub fn build_cell_attributes_with_emission(
     let mut fill_counts = vec![0_u16; grid.cell_count()];
     let mut exposed_areas = vec![0.0_f32; grid.cell_count()];
     let mut emitted_areas = vec![[0.0_f32; 3]; grid.cell_count()];
+    let mut resting_emitted_areas = vec![[0.0_f32; 3]; grid.cell_count()];
+    // A volume cell has one response-index field. Track the response identity
+    // of every material that actually contributes emission so we never apply a
+    // single gate to an aggregate made from incompatible emitters.
+    let mut emission_response = vec![None::<u32>; grid.cell_count()];
+    let mut mixed_emission_response = vec![false; grid.cell_count()];
 
     for brick_z in 0..BRICK_GRID_Z {
         for brick_y in 0..BRICK_GRID_Y {
@@ -703,8 +940,23 @@ pub fn build_cell_attributes_with_emission(
                             );
                             exposed_areas[index] += exposed;
                             let emission = attribute_table.emission(material as u8);
+                            let resting_emission = attribute_table.resting_emission(material as u8);
+                            if emission.iter().any(|value| *value > 0.0) {
+                                let response = (attribute_table.word(material as u8)
+                                    & CELL_EVENT_RESPONSE_MASK)
+                                    >> CELL_EVENT_RESPONSE_SHIFT;
+                                match emission_response[index] {
+                                    Some(existing) if existing != response => {
+                                        mixed_emission_response[index] = true;
+                                    }
+                                    None => emission_response[index] = Some(response),
+                                    _ => {}
+                                }
+                            }
                             for channel in 0..3 {
                                 emitted_areas[index][channel] += emission[channel] * exposed;
+                                resting_emitted_areas[index][channel] +=
+                                    resting_emission[channel] * exposed;
                             }
                         }
                     }
@@ -718,14 +970,24 @@ pub fn build_cell_attributes_with_emission(
         if *fill >= solid_threshold {
             attributes[index] |= CELL_SOLID;
         }
+        let response = if mixed_emission_response[index] {
+            0
+        } else {
+            emission_response[index].unwrap_or(0)
+        };
+        attributes[index] = (attributes[index] & !CELL_EVENT_RESPONSE_MASK)
+            | (response << CELL_EVENT_RESPONSE_SHIFT);
     }
     let emissions = emitted_areas
         .into_iter()
+        .zip(resting_emitted_areas)
         .zip(exposed_areas)
-        .map(|(area, exposed)| {
+        .zip(mixed_emission_response)
+        .map(|(((area, resting_area), exposed), mixed)| {
             if exposed == 0.0 {
                 return [0.0; 4];
             }
+            let area = if mixed { resting_area } else { area };
             [area[0] / exposed, area[1] / exposed, area[2] / exposed, 0.0]
         })
         .collect();
@@ -785,6 +1047,9 @@ pub fn cell_attribute(
     let mut albedo = 0_u32;
     let mut exposed_area = 0.0_f32;
     let mut emitted_area = [0.0_f32; 3];
+    let mut resting_emitted_area = [0.0_f32; 3];
+    let mut emission_response = None;
+    let mut mixed_emission_response = false;
     for local_y in 0..cell_voxels {
         for local_z in 0..cell_voxels {
             for local_x in 0..cell_voxels {
@@ -806,8 +1071,19 @@ pub fn cell_attribute(
                 );
                 exposed_area += exposed;
                 let emission = attribute_table.emission(material);
+                let resting_emission = attribute_table.resting_emission(material);
+                if emission.iter().any(|value| *value > 0.0) {
+                    let response = (attribute_table.word(material) & CELL_EVENT_RESPONSE_MASK)
+                        >> CELL_EVENT_RESPONSE_SHIFT;
+                    match emission_response {
+                        Some(existing) if existing != response => mixed_emission_response = true,
+                        None => emission_response = Some(response),
+                        _ => {}
+                    }
+                }
                 for channel in 0..3 {
                     emitted_area[channel] += emission[channel] * exposed;
+                    resting_emitted_area[channel] += resting_emission[channel] * exposed;
                 }
             }
         }
@@ -816,13 +1092,31 @@ pub fn cell_attribute(
     if fill_count >= solid_threshold {
         albedo |= CELL_SOLID;
     }
+    let response = if mixed_emission_response {
+        0
+    } else {
+        emission_response.unwrap_or(0)
+    };
+    albedo = (albedo & !CELL_EVENT_RESPONSE_MASK) | (response << CELL_EVENT_RESPONSE_SHIFT);
     let emission = if exposed_area == 0.0 {
         [0.0; 4]
     } else {
         [
-            emitted_area[0] / exposed_area,
-            emitted_area[1] / exposed_area,
-            emitted_area[2] / exposed_area,
+            (if mixed_emission_response {
+                resting_emitted_area[0]
+            } else {
+                emitted_area[0]
+            }) / exposed_area,
+            (if mixed_emission_response {
+                resting_emitted_area[1]
+            } else {
+                emitted_area[1]
+            }) / exposed_area,
+            (if mixed_emission_response {
+                resting_emitted_area[2]
+            } else {
+                emitted_area[2]
+            }) / exposed_area,
             0.0,
         ]
     };
@@ -998,6 +1292,64 @@ pub fn cell_sees_sky_by_column(
     let brick_z = (cell[2] * grid.cell_voxels) as usize / BRICK_SIZE;
     let column = brick_x + brick_z * BRICK_GRID_X;
     brick_y as i32 > column_max_brick_y[column] as i32
+}
+
+/// The CPU twin of `cagi_cell_emission_live` in `shaders/cagi.wgsl` (S3b): the
+/// emission a cell actually injects, given the live event field.
+///
+/// `stored_emission` is what the cell holds in binding 13 — the channel-wise
+/// PEAK of its material's resting and triggered ends. `attributes` supplies the
+/// response index and `cell_center_meters` the point the field is sensed at.
+///
+/// Exists for the same reason [`emitter_bounce_reference`] does: the bench
+/// cross-checks the volume against a CPU evaluation, and a tier the CPU cannot
+/// reproduce is a tier nothing verifies.
+pub fn event_gated_emission(
+    stored_emission: [f32; 3],
+    attributes: u32,
+    cell_center_meters: [f32; 3],
+    responses: &[GpuEventResponse; EVENT_RESPONSE_SLOTS],
+    clock: AnimationClockSample,
+    events: &[GpuWorldEvent],
+) -> [f32; 3] {
+    let response_index =
+        ((attributes & CELL_EVENT_RESPONSE_MASK) >> CELL_EVENT_RESPONSE_SHIFT) as usize;
+    if response_index == 0 {
+        return stored_emission;
+    }
+    let response = responses[response_index];
+    // The volume's response carries no `invert`: `sense_world_events` returns
+    // the raw signal and the two scales say which way round the material reacts.
+    let (signal, _, _) = sense_world_events(
+        &EventSensorConfig {
+            channel: response.channel as u32,
+            radius_meters: response.radius_meters,
+            falloff: falloff_from_shader_value(response.falloff),
+            attack_seconds: response.attack_seconds,
+            hold_seconds: response.hold_seconds,
+            release_seconds: response.release_seconds,
+            invert: false,
+        },
+        cell_center_meters,
+        clock,
+        events,
+    );
+    std::array::from_fn(|channel| {
+        let scale = response.resting_scale[channel]
+            + (response.triggered_scale[channel] - response.resting_scale[channel]) * signal;
+        stored_emission[channel] * scale
+    })
+}
+
+/// Inverse of [`SensorFalloff::shader_value`], for reading a packed response row
+/// back. Out of range reads as smoothstep, matching the shader's final `else`.
+fn falloff_from_shader_value(value: f32) -> SensorFalloff {
+    match value as u32 {
+        1 => SensorFalloff::Linear,
+        2 => SensorFalloff::InverseSquare,
+        3 => SensorFalloff::Step,
+        _ => SensorFalloff::Smoothstep,
+    }
 }
 
 #[cfg(test)]
@@ -1393,6 +1745,285 @@ mod tests {
         assert_eq!(table.emission(stone), [0.0; 3]);
     }
 
+    // ---- S3b: event-driven emission in the volume ------------------------------
+
+    /// One authored response, for the slot-allocation tests below.
+    fn probe_response(radius_meters: f32, resting: [f32; 3]) -> EmissionEventResponse {
+        EmissionEventResponse {
+            sensor: EventSensorConfig {
+                channel: 0,
+                radius_meters,
+                falloff: SensorFalloff::Smoothstep,
+                attack_seconds: 0.4,
+                hold_seconds: 0.0,
+                release_seconds: 1.5,
+                invert: false,
+            },
+            resting,
+            triggered: [4.0, 4.0, 4.0],
+        }
+    }
+
+    fn open_event_at(position_meters: [f32; 3], radius_meters: f32) -> GpuWorldEvent {
+        GpuWorldEvent {
+            position_meters,
+            radius_meters,
+            started_epoch: 0.0,
+            started_remainder_seconds: 0.0,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: 0,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        }
+    }
+
+    /// The Rust upload and the WGSL `CagiVolumeMeta` must agree byte for byte,
+    /// and the response array must start where WGSL puts it.
+    ///
+    /// The offset is the interesting half. A `CagiEventResponse` is 16-byte
+    /// aligned, so WGSL rounds the array's start up to a multiple of 16 — and the
+    /// geometry half already ends at exactly 32. An "obviously harmless" pad here
+    /// would move the Rust array to 40 and leave the shader reading geometry
+    /// words as a response row, which renders as garbage rather than crashing.
+    #[test]
+    fn the_volume_uniform_matches_the_shader_struct() {
+        assert_eq!(std::mem::size_of::<GpuEventResponse>(), 48);
+        assert_eq!(std::mem::size_of::<GpuEventResponse>() % 16, 0);
+        assert_eq!(
+            std::mem::offset_of!(CagiVolumeUniform, event_responses),
+            32,
+            "the response array must start at 32 — see the doc comment"
+        );
+        assert_eq!(
+            std::mem::size_of::<CagiVolumeUniform>(),
+            32 + 48 * EVENT_RESPONSE_SLOTS
+        );
+        assert_eq!(std::mem::size_of::<CagiVolumeUniform>() % 16, 0);
+    }
+
+    /// The claim S3b rests on: a world nobody authored a sensor into is unchanged.
+    #[test]
+    fn a_world_without_responses_packs_no_response_bits() {
+        let table = MaterialAttributes::compiled();
+        for id in 0..MATERIAL_COUNT as u8 {
+            assert_eq!(
+                table.word(id) & CELL_EVENT_RESPONSE_MASK,
+                0,
+                "material {id} claimed a response slot without a graph"
+            );
+        }
+        assert!(table
+            .responses()
+            .iter()
+            .all(|row| *row == GpuEventResponse::IDENTITY));
+        assert_eq!(table.event_response_overflow(), 0);
+    }
+
+    /// Slots are per SHAPE, not per material: two rows that sense the same way
+    /// share one row of a table that only holds seven.
+    #[test]
+    fn materials_sensing_the_same_way_share_one_response_row() {
+        let rows = MATERIALS.to_vec();
+        let mut responses = vec![None; MATERIAL_COUNT];
+        responses[1] = Some(probe_response(6.0, [0.0; 3]));
+        responses[2] = Some(probe_response(6.0, [0.0; 3]));
+        responses[3] = Some(probe_response(3.0, [0.0; 3]));
+        let table = material_attribute_table(&rows, &responses);
+
+        let slot_of = |id: usize| {
+            (table.word(id as u8) & CELL_EVENT_RESPONSE_MASK) >> CELL_EVENT_RESPONSE_SHIFT
+        };
+        assert_eq!(slot_of(1), 1);
+        assert_eq!(slot_of(2), 1, "an identical shape must reuse its row");
+        assert_eq!(slot_of(3), 2, "a different radius is a different shape");
+        assert_eq!(slot_of(4), 0);
+        assert_eq!(table.event_response_overflow(), 0);
+    }
+
+    /// Past seven shapes the eighth is REFUSED and counted. Refusing rather than
+    /// evicting is the point: an eviction would reassign a row a currently lit
+    /// surface is using, and that surface would start answering someone else's
+    /// events.
+    #[test]
+    fn an_eighth_distinct_response_is_refused_and_counted() {
+        let rows = MATERIALS.to_vec();
+        let mut responses = vec![None; MATERIAL_COUNT];
+        for (index, slot) in (1..=9).enumerate() {
+            responses[slot] = Some(probe_response(1.0 + index as f32, [0.0; 3]));
+        }
+        let table = material_attribute_table(&rows, &responses);
+
+        for slot in 1..=7_u8 {
+            assert_ne!(table.word(slot) & CELL_EVENT_RESPONSE_MASK, 0);
+        }
+        for slot in 8..=9_u8 {
+            assert_eq!(
+                table.word(slot) & CELL_EVENT_RESPONSE_MASK,
+                0,
+                "slot {slot} took a response row the table does not have"
+            );
+        }
+        assert_eq!(table.event_response_overflow(), 2);
+        // The refused rows keep their peak emission: they stop REACTING, they do
+        // not stop emitting. "Always lit" is visible; "silently dark" is not.
+        assert!(table.emission(8)[0] > 0.0);
+    }
+
+    /// The cell stores the PEAK and the two scales bracket it — which is what
+    /// lets a surface that is black at rest light the room when triggered, and
+    /// the reason the volume does not store the resting value and scale up.
+    #[test]
+    fn the_stored_emission_is_the_peak_and_the_scales_bracket_it() {
+        let rows = MATERIALS.to_vec();
+        let mut responses = vec![None; MATERIAL_COUNT];
+        let dark_until_near = probe_response(6.0, [0.0; 3]);
+        responses[1] = Some(dark_until_near);
+        let table = material_attribute_table(&rows, &responses);
+
+        assert_eq!(table.emission(1), dark_until_near.triggered);
+        assert_eq!(table.responses()[1].resting_scale, [0.0; 3]);
+        assert_eq!(table.responses()[1].triggered_scale, [1.0; 3]);
+
+        // ...and the other direction: a surface that goes DARK as you approach.
+        let mut inverted = probe_response(6.0, [4.0, 4.0, 4.0]);
+        inverted.triggered = [0.0; 3];
+        responses[1] = Some(inverted);
+        let table = material_attribute_table(&rows, &responses);
+        assert_eq!(table.emission(1), inverted.resting);
+        assert_eq!(table.responses()[1].resting_scale, [1.0; 3]);
+        assert_eq!(table.responses()[1].triggered_scale, [0.0; 3]);
+    }
+
+    /// The CPU twin of the CA's gate, at both ends of one event's reach.
+    #[test]
+    fn the_gate_reads_resting_far_away_and_triggered_on_top_of_the_event() {
+        let rows = MATERIALS.to_vec();
+        let mut responses = vec![None; MATERIAL_COUNT];
+        responses[1] = Some(probe_response(6.0, [0.0; 3]));
+        let table = material_attribute_table(&rows, &responses);
+        let stored = table.emission(1);
+        let attributes = table.word(1);
+        // One epoch on, so the 0.4 s attack has long completed.
+        let clock = AnimationClockSample {
+            epoch: 1.0,
+            remainder_seconds: 0.0,
+        };
+        let event = open_event_at([10.0, 0.0, 0.0], 6.0);
+
+        let gate = |point: [f32; 3]| {
+            event_gated_emission(
+                stored,
+                attributes,
+                point,
+                table.responses(),
+                clock,
+                std::slice::from_ref(&event),
+            )
+        };
+        assert_eq!(gate([10.0, 0.0, 0.0]), stored, "on top of it: fully lit");
+        assert_eq!(gate([40.0, 0.0, 0.0]), [0.0; 3], "out of reach: dark");
+        let halfway = gate([13.0, 0.0, 0.0])[0];
+        assert!(
+            halfway > 0.0 && halfway < stored[0],
+            "half a radius away must be between the two ends, was {halfway}"
+        );
+
+        // With NO events the cell falls back to its resting scale, which is the
+        // deterministic-mode reading too (that lever forces event_count to 0).
+        assert_eq!(
+            event_gated_emission(
+                stored,
+                attributes,
+                [10.0, 0.0, 0.0],
+                table.responses(),
+                clock,
+                &[]
+            ),
+            [0.0; 3]
+        );
+    }
+
+    /// With nothing in range, a responsive material injects EXACTLY what it
+    /// injected before S3b.
+    ///
+    /// This is the property the whole design turns on, and it is why all three
+    /// endpoints are re-meaned rather than one being scaled by a ratio of point
+    /// samples: `stored * resting_scale == mean(resting)` has to hold through a
+    /// `replace` blend and a clamp, not only through a linear stack. It is also
+    /// what makes `AnimationDeterministic` (which forces `event_count` to 0) a
+    /// meaningful baseline rather than a third distinct rendering.
+    #[test]
+    fn with_no_event_in_range_a_responsive_material_injects_its_pre_s4_value() {
+        let mut rows = MATERIALS.to_vec();
+        let glow = crate::material::material_id(Voxel::GlowBlock) as usize;
+        // A REPLACE-blended emission layer, so `mean_emitted_radiance` is both
+        // doing real work and non-linear in the base — the case a ratio of point
+        // samples gets wrong.
+        rows[glow].patterns.layers[0] = Some(crate::pattern::PatternLayer {
+            generator: crate::pattern::PatternGenerator::Speckle { density: 0.3 },
+            target: crate::pattern::PatternTarget::Emission,
+            blend: crate::pattern::PatternBlend::Add,
+            amount: 0.8,
+            emission_intensity: 6.0,
+            ..crate::pattern::PatternLayer::IDENTITY
+        });
+        let resting = [0.4, 0.3, 0.2];
+        rows[glow].emission = Some(resting);
+        let before = material_attribute_table(&rows, &[]).emission(glow as u8);
+        assert!(before[0] > 0.0, "the baseline must not be trivially zero");
+
+        let mut responses = vec![None; MATERIAL_COUNT];
+        responses[glow] = Some(EmissionEventResponse {
+            resting,
+            triggered: [4.0, 3.0, 2.0],
+            ..probe_response(6.0, resting)
+        });
+        let after = material_attribute_table(&rows, &responses);
+        let stored = after.emission(glow as u8);
+        assert!(
+            stored[0] > before[0],
+            "the cell must store the PEAK, not the resting value"
+        );
+
+        let at_rest = event_gated_emission(
+            stored,
+            after.word(glow as u8),
+            [0.0; 3],
+            after.responses(),
+            AnimationClockSample::FROZEN,
+            &[],
+        );
+        for channel in 0..3 {
+            assert!(
+                (at_rest[channel] - before[channel]).abs() <= before[channel].abs() * 1e-4,
+                "channel {channel} drifted from its pre-S3b value: {at_rest:?} vs {before:?}"
+            );
+        }
+    }
+
+    /// A cell with no response ignores the field entirely — the identity path
+    /// that keeps an un-authored world unchanged.
+    #[test]
+    fn a_cell_without_a_response_ignores_the_event_field() {
+        let table = MaterialAttributes::compiled();
+        let glow = crate::material::material_id(Voxel::GlowBlock);
+        let stored = table.emission(glow);
+        let event = open_event_at([0.0; 3], 100.0);
+        assert_eq!(
+            event_gated_emission(
+                stored,
+                table.word(glow),
+                [0.0; 3],
+                table.responses(),
+                AnimationClockSample::FROZEN,
+                std::slice::from_ref(&event),
+            ),
+            stored
+        );
+    }
+
     #[test]
     fn placeholder_grid_is_one_cell() {
         let disabled = CagiSettings {
@@ -1424,7 +2055,7 @@ mod tests {
 
         let mut rows = MATERIALS.to_vec();
         rows[stone as usize].albedo = [1.0, 0.0, 0.0];
-        let edited = material_attribute_table(&rows);
+        let edited = material_attribute_table(&rows, &[]);
 
         assert_ne!(
             compiled.word(stone),
@@ -1480,7 +2111,7 @@ mod tests {
                     vary_per_face: true,
                     emission_intensity: 16.0,
                 }]);
-                let mean = material_attribute_table(&rows).emission(stone);
+                let mean = material_attribute_table(&rows, &[]).emission(stone);
                 assert!(
                     mean[0] > 0.0,
                     "{generator:?} at a {period_meters} m period injects {mean:?} — a \
@@ -1512,7 +2143,7 @@ mod tests {
         };
         rows[stone as usize].patterns = PatternStack::of(&[specks]);
 
-        let injected = material_attribute_table(&rows).emission(stone);
+        let injected = material_attribute_table(&rows, &[]).emission(stone);
         assert!(
             injected[0] > 0.0 && injected[0] < 4.0,
             "the injected red {} is not a mean of 0 and 4",

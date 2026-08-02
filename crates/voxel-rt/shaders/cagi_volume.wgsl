@@ -17,8 +17,9 @@
 //  13  storage  cagi_cell_data — two u32 words per cell: the bounce attribute
 //                                    word followed by E5b's packed 10:10:10
 //                                    exposed-area-weighted emission.
-//  14  uniform  CagiVolumeMeta      — grid dimensions + the integer transport
-//                                    coefficients (cagi.rs CagiVolumeUniform)
+//  14  uniform  CagiVolumeMeta      — grid dimensions, the integer transport
+//                                    coefficients and the S3b event-response
+//                                    table (cagi.rs CagiVolumeUniform)
 //
 // PACKING (the "pure integer" property the dossier's CA GI depends on — no
 // float accumulation anywhere in the transport, so the volume is deterministic
@@ -37,6 +38,26 @@
 // error shows up as banding in a long flood. A channel value of 1023 means
 // linear radiance 1.0; injected values (sky ambient ~0.4, sun bounce ~0.5) sit
 // well under that, so saturation is not a practical concern.
+
+// S3b — one row of the event-response table: how a cell whose attribute word
+// carries this row's index modulates its stored emission as an event comes and
+// goes. Mirrors `GpuEventResponse` in src/cagi.rs (48 bytes, three 16-byte rows).
+//
+// The stored emission is the channel-wise MAX of the material's resting and
+// triggered ends, and both scales are fractions of it — so a surface that is
+// black until something arrives has resting_scale 0, and one that goes dark on
+// approach has triggered_scale 0. There is no `invert` flag: the two scales
+// already say which way round it is.
+struct CagiEventResponse {
+    radius_meters: f32,
+    attack_seconds: f32,
+    hold_seconds: f32,
+    release_seconds: f32,
+    resting_scale: vec3<f32>,
+    channel: f32,
+    triggered_scale: vec3<f32>,
+    falloff: f32,
+}
 
 struct CagiVolumeMeta {
     // Cells along each axis. Y is CLAMPED to the world's occupied height plus a
@@ -57,6 +78,13 @@ struct CagiVolumeMeta {
     // Diffusion rule, 26-neighbour variant: the weighted sum (face 4, edge 2,
     // corner 1) times this, >> 12.
     diffusion_26_numerator: u32,
+    // S3b — row 0 is identity ("this cell does not answer events"); rows 1-7 are
+    // allocated by src/cagi.rs and indexed by CAGI_CELL_EVENT_RESPONSE_MASK.
+    //
+    // Starts at offset 32 with no padding before it: the geometry half above
+    // ends there, and 32 already satisfies the 16-byte alignment an array of
+    // 16-byte-aligned elements demands. Do not "helpfully" insert a pad.
+    event_responses: array<CagiEventResponse, 8>,
 }
 
 @group(0) @binding(11) var<storage, read> light_volume: array<u32>;
@@ -99,10 +127,11 @@ const CAGI_SAMPLE_TRILINEAR: u32 = 1u;
 const CAGI_SAMPLE_MODE: u32 = 1u;
 
 // Cell attribute bits (see the header): albedo in the low 24, solid flag at 24,
-// and the M2 transmittance in bits 25-28.
+// the M2 transmittance in bits 25-28, and the S3b event-response index in 29-31.
 const CAGI_CELL_SOLID: u32 = 0x01000000u;
 const CAGI_TRANSMITTANCE_SHIFT: u32 = 25u;
 const CAGI_TRANSMITTANCE_LEVELS: f32 = 15.0;
+const CAGI_EVENT_RESPONSE_SHIFT: u32 = 29u;
 // Light word bits.
 const CAGI_CHANNEL_MASK: u32 = 0x3ffu;
 const CAGI_CHANNEL_MAX: u32 = 1023u;
@@ -176,6 +205,12 @@ fn cagi_cell_is_solid(cell: vec3<i32>) -> bool {
 fn cagi_cell_transmittance(attributes: u32) -> f32 {
     let quantized = (attributes >> CAGI_TRANSMITTANCE_SHIFT) & 0xfu;
     return f32(quantized) * (1.0 / CAGI_TRANSMITTANCE_LEVELS);
+}
+
+// S3b: which row of `event_responses` this cell's emission follows. 0 = none,
+// which is every cell of a world nobody has authored an event sensor into.
+fn cagi_cell_event_response(attributes: u32) -> u32 {
+    return (attributes >> CAGI_EVENT_RESPONSE_SHIFT) & 0x7u;
 }
 
 // The cell's bounce albedo, decoded to linear. Zero for cells with no occupied

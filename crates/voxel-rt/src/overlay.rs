@@ -31,6 +31,8 @@ use crate::graph::{
     PropertyValue, SocketKey, SocketType,
 };
 use crate::lighting::SunSettings;
+use crate::material::{self, MATERIAL_COUNT};
+use crate::material_edit::{MaterialPanelState, WORLD_HOTBAR_BLOCKS};
 use crate::material_graph::{ConnectorDrag, GraphEditorState};
 use crate::material_table::MaterialTable;
 use crate::shadows::ShadowMode;
@@ -162,6 +164,19 @@ pub struct OverlayFrameData {
     /// E2b — which movement model is driving the view, and what the body is
     /// doing.
     pub movement: MovementReadout,
+    /// The editable face currently under the crosshair, projected to the overlay
+    /// so the player gets a precise placement preview before editing it.
+    pub target: Option<TargetHighlightReadout>,
+}
+
+/// Read-only target data prepared by the platform layer. Keeping screen-space
+/// corners here lets the overlay draw a world-aligned face without owning a
+/// camera or touching the world lock.
+pub struct TargetHighlightReadout {
+    pub material: u8,
+    pub voxel: [i32; 3],
+    pub distance_meters: f32,
+    pub screen_corners: Option<[[f32; 2]; 4]>,
 }
 
 /// What the overlay shows about movement (E2b). Flat and pre-read so the panel
@@ -307,6 +322,7 @@ impl Overlay {
         sun_settings: &mut SunSettings,
         quality: &mut RenderQuality,
         material_table: &mut MaterialTable,
+        material_panel: &mut MaterialPanelState,
         studio_assets: &mut StudioAssetPanelState,
         graph_editor: &mut GraphEditorState,
     ) {
@@ -336,6 +352,14 @@ impl Overlay {
         let raw_input = self.winit_state.take_egui_input(window);
         let full_output = self.context.run_ui(raw_input, |root_ui| {
             draw_graph_drawer(root_ui, graph_editor, material_table);
+            draw_target_highlight(root_ui, frame_data.target.as_ref(), material_table);
+            let drawer_height = graph_drawer_height(root_ui, graph_editor);
+            draw_block_hotbar(
+                root_ui,
+                material_table,
+                material_panel,
+                drawer_height,
+            );
             egui::Area::new(egui::Id::new("fps_overlay"))
                 .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
                 .show(root_ui.ctx(), |ui| {
@@ -562,6 +586,139 @@ impl Overlay {
         for texture_id in &full_output.textures_delta.free {
             self.renderer.free_texture(texture_id);
         }
+    }
+}
+
+/// Draw a bright outline around the precise face the edit ray will affect.
+/// The target comes from the same CPU DDA cast as placement/removal, so the
+/// outline and the next click cannot disagree about which block is selected.
+fn draw_target_highlight(
+    ui: &mut egui::Ui,
+    target: Option<&TargetHighlightReadout>,
+    material_table: &MaterialTable,
+) {
+    let Some(target) = target else {
+        return;
+    };
+    let Some(corners) = target.screen_corners else {
+        return;
+    };
+    let points = corners.map(|point| egui::pos2(point[0], point[1]));
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("voxel_target_highlight"),
+    ));
+    let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 226, 92));
+    for (from, to) in [(0, 1), (1, 3), (3, 2), (2, 0)] {
+        painter.line_segment([points[from], points[to]], stroke);
+    }
+    let name = material_table
+        .row(target.material)
+        .map_or("unknown", |row| row.name);
+    let label_position = points
+        .iter()
+        .copied()
+        .reduce(|nearest, point| if point.y < nearest.y { point } else { nearest })
+        .unwrap_or(points[0]);
+    painter.text(
+        label_position + egui::vec2(4.0, -4.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!(
+            "{name} · {}, {}, {} · {:.1} m",
+            target.voxel[0], target.voxel[1], target.voxel[2], target.distance_meters
+        ),
+        egui::TextStyle::Small.resolve(ui.style()),
+        egui::Color32::from_rgb(255, 239, 167),
+    );
+}
+
+fn material_swatch(table: &MaterialTable, id: u8) -> egui::Color32 {
+    let color = table.row(id).map_or([0.2, 0.2, 0.2], |row| row.albedo);
+    egui::Color32::from_rgb(
+        (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+    )
+}
+
+/// The in-world palette: a short bar for common test materials plus a complete
+/// picker for the rest. It deliberately shares `MaterialPanelState::selected`
+/// with the editor, so bar selection, keyboard selection, eyedropper picks, and
+/// placement are one state rather than four subtly different choices.
+fn draw_block_hotbar(
+    ui: &mut egui::Ui,
+    material_table: &MaterialTable,
+    material_panel: &mut MaterialPanelState,
+    graph_drawer_height: f32,
+) {
+    egui::Area::new(egui::Id::new("world_block_hotbar"))
+        // This is the bottom of the RENDERED viewport, not of the whole
+        // window. Graph Studio owns the bottom panel and may resize it, so an
+        // absolute "bottom of window" overlay would inevitably cover its
+        // nodes; reserve the drawer's exact current height first.
+        .anchor(
+            egui::Align2::CENTER_BOTTOM,
+            egui::vec2(0.0, -(graph_drawer_height + 8.0)),
+        )
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, voxel) in WORLD_HOTBAR_BLOCKS.iter().enumerate() {
+                        let id = material::material_id(*voxel);
+                        let name = material_table.row(id).map_or("unknown", |row| row.name);
+                        let swatch = material_swatch(material_table, id);
+                        let luma = 0.2126 * f32::from(swatch.r())
+                            + 0.7152 * f32::from(swatch.g())
+                            + 0.0722 * f32::from(swatch.b());
+                        let text = if luma > 145.0 {
+                            egui::Color32::BLACK
+                        } else {
+                            egui::Color32::WHITE
+                        };
+                        let button = egui::Button::new(
+                            egui::RichText::new(format!("{}\n{name}", index + 1)).color(text),
+                        )
+                        .fill(swatch.gamma_multiply(0.82))
+                        .stroke(if material_panel.selected == id {
+                            egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 226, 92))
+                        } else {
+                            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110))
+                        });
+                        if ui.add_sized(egui::vec2(64.0, 42.0), button).clicked() {
+                            material_panel.selected = id;
+                        }
+                    }
+                    let selected_name = material_table
+                        .row(material_panel.selected)
+                        .map_or("more", |row| row.name);
+                    egui::ComboBox::from_id_salt("world_hotbar_more_materials")
+                        .selected_text(format!("{selected_name} ▾"))
+                        .width(104.0)
+                        .show_ui(ui, |ui| {
+                            for id in 1..MATERIAL_COUNT as u8 {
+                                let name = material_table.row(id).map_or("unknown", |row| row.name);
+                                ui.selectable_value(
+                                    &mut material_panel.selected,
+                                    id,
+                                    format!("{id:>2}  {name}"),
+                                );
+                            }
+                        });
+                });
+                ui.label("Right-click: place selected · Left-click: remove · Middle-click: pick");
+            });
+        });
+}
+
+/// Keep overlay controls aligned with the same panel geometry that reserves the
+/// Graph Studio drawer. `draw_graph_drawer` clamps expanded panels to 80% of
+/// the window, so the palette must use that clamped value too.
+fn graph_drawer_height(ui: &egui::Ui, state: &GraphEditorState) -> f32 {
+    if state.visible {
+        let maximum = (ui.ctx().viewport_rect().height() * 0.8).max(320.0);
+        state.drawer_height.clamp(120.0, maximum)
+    } else {
+        34.0
     }
 }
 

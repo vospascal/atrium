@@ -8,6 +8,72 @@
     "outputs": {}
   },
   "nodes": {
+    "event-emission": {
+      "node_type": "material.emission_strength",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "event-gate": {
+      "node_type": "material.multiply_scalar",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "event-rest": {
+      "node_type": "material.add_scalar",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {
+        "a": {
+          "type": "scalar",
+          "value": 0.0
+        }
+      },
+      "unknown_payload": null
+    },
+    "event-sensor": {
+      "node_type": "material.event_sensor",
+      "node_type_version": 1,
+      "properties": {
+        "attack_seconds": {
+          "type": "scalar",
+          "value": 0.4
+        },
+        "channel": {
+          "type": "integer",
+          "value": 0
+        },
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "falloff": {
+          "type": "text",
+          "value": "smoothstep"
+        },
+        "hold_seconds": {
+          "type": "scalar",
+          "value": 0.0
+        },
+        "invert": {
+          "type": "boolean",
+          "value": false
+        },
+        "radius_meters": {
+          "type": "scalar",
+          "value": 8.0
+        },
+        "release_seconds": {
+          "type": "scalar",
+          "value": 1.5
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
     "g-0000000000000089": {
       "node_type": "material.output",
       "node_type_version": 1,
@@ -51,9 +117,9 @@
         "value": {
           "type": "color",
           "value": [
-            3.0,
-            2.8,
-            2.4,
+            0.94082206,
+            0.936011,
+            0.9401331,
             1.0
           ]
         }
@@ -68,103 +134,64 @@
       "socket_defaults": {},
       "unknown_payload": null
     },
-    "event-sensor": {
-      "node_type": "material.event_sensor",
-      "node_type_version": 1,
-      "properties": {
-        "channel": {
-          "type": "integer",
-          "value": 0
-        },
-        "radius_meters": {
-          "type": "scalar",
-          "value": 6.0
-        },
-        "falloff": {
-          "type": "text",
-          "value": "smoothstep"
-        },
-        "attack_seconds": {
-          "type": "scalar",
-          "value": 0.4
-        },
-        "hold_seconds": {
-          "type": "scalar",
-          "value": 0.0
-        },
-        "release_seconds": {
-          "type": "scalar",
-          "value": 1.5
-        },
-        "invert": {
-          "type": "boolean",
-          "value": false
-        }
-      },
-      "socket_defaults": {},
-      "unknown_payload": null
-    },
-    "event-pulse": {
-      "node_type": "material.oscillator",
-      "node_type_version": 1,
-      "properties": {
-        "wave": {
-          "type": "text",
-          "value": "sine"
-        },
-        "sync": {
-          "type": "text",
-          "value": "per_voxel"
-        },
-        "seed": {
-          "type": "integer",
-          "value": 11
-        }
-      },
-      "socket_defaults": {
-        "rate_hz": {
-          "type": "scalar",
-          "value": 1.4
-        },
-        "low": {
-          "type": "scalar",
-          "value": 0.45
-        },
-        "high": {
-          "type": "scalar",
-          "value": 1.25
-        }
-      },
-      "unknown_payload": null
-    },
-    "event-gate": {
+    "event-amount": {
       "node_type": "material.multiply_scalar",
       "node_type_version": 1,
       "properties": {},
-      "socket_defaults": {},
-      "unknown_payload": null
-    },
-    "event-emission": {
-      "node_type": "material.emission_strength",
-      "node_type_version": 1,
-      "properties": {},
-      "socket_defaults": {},
-      "unknown_payload": null
-    },
-    "event-rest": {
-      "node_type": "material.add_scalar",
-      "node_type_version": 1,
-      "properties": {},
       "socket_defaults": {
-        "a": {
+        "b": {
           "type": "scalar",
-          "value": 0.35
+          "value": 25.0
         }
       },
       "unknown_payload": null
     }
   },
   "links": {
+    "event-emission-color": {
+      "from": {
+        "node": "g-000000000000008c",
+        "socket": "color"
+      },
+      "to": {
+        "node": "event-emission",
+        "socket": "color"
+      },
+      "order": 0
+    },
+    "event-emission-surface": {
+      "from": {
+        "node": "event-emission",
+        "socket": "color"
+      },
+      "to": {
+        "node": "surface-vx-000000000000000018c7af1e2c154c60-0000000000000045",
+        "socket": "emission"
+      },
+      "order": 0
+    },
+    "event-gate-rest": {
+      "from": {
+        "node": "event-gate",
+        "socket": "value"
+      },
+      "to": {
+        "node": "event-rest",
+        "socket": "b"
+      },
+      "order": 0
+    },
+    "event-sensor-gate": {
+      "from": {
+        "node": "event-sensor",
+        "socket": "signal"
+      },
+      "to": {
+        "node": "event-gate",
+        "socket": "a"
+      },
+      "order": 0
+    },
     "g-000000000000008d": {
       "from": {
         "node": "g-000000000000008a",
@@ -198,42 +225,20 @@
       },
       "order": 0
     },
-    "event-sensor-gate": {
+    "event-amount-a": {
       "from": {
-        "node": "event-sensor",
-        "socket": "signal"
+        "node": "event-rest",
+        "socket": "value"
       },
       "to": {
-        "node": "event-gate",
+        "node": "event-amount",
         "socket": "a"
       },
       "order": 0
     },
-    "event-osc-gate": {
+    "event-amount-strength": {
       "from": {
-        "node": "event-pulse",
-        "socket": "value"
-      },
-      "to": {
-        "node": "event-gate",
-        "socket": "b"
-      },
-      "order": 0
-    },
-    "event-emission-color": {
-      "from": {
-        "node": "g-000000000000008c",
-        "socket": "color"
-      },
-      "to": {
-        "node": "event-emission",
-        "socket": "color"
-      },
-      "order": 0
-    },
-    "event-gate-strength": {
-      "from": {
-        "node": "event-rest",
+        "node": "event-amount",
         "socket": "value"
       },
       "to": {
@@ -241,35 +246,29 @@
         "socket": "strength"
       },
       "order": 0
-    },
-    "event-emission-surface": {
-      "from": {
-        "node": "event-emission",
-        "socket": "color"
-      },
-      "to": {
-        "node": "surface-vx-000000000000000018c7af1e2c154c60-0000000000000045",
-        "socket": "emission"
-      },
-      "order": 0
-    },
-    "event-gate-rest": {
-      "from": {
-        "node": "event-gate",
-        "socket": "value"
-      },
-      "to": {
-        "node": "event-rest",
-        "socket": "b"
-      },
-      "order": 0
     }
   },
   "layout": {
     "positions": {
+      "event-emission": [
+        373.4667,
+        507.9613
+      ],
+      "event-gate": [
+        -580.6162,
+        385.11676
+      ],
+      "event-rest": [
+        -282.33728,
+        466.57715
+      ],
+      "event-sensor": [
+        -1018.2196,
+        168.46759
+      ],
       "g-0000000000000089": [
-        700.0,
-        160.0
+        1141.1117,
+        148.20396
       ],
       "g-000000000000008a": [
         80.0,
@@ -280,32 +279,16 @@
         220.0
       ],
       "g-000000000000008c": [
-        80.0,
-        420.0
+        74.36319,
+        353.36987
       ],
       "surface-vx-000000000000000018c7af1e2c154c60-0000000000000045": [
-        440.0,
-        160.0
+        728.9758,
+        158.4537
       ],
-      "event-sensor": [
-        80.0,
-        -420.0
-      ],
-      "event-pulse": [
-        80.0,
-        -240.0
-      ],
-      "event-gate": [
-        300.0,
-        -330.0
-      ],
-      "event-emission": [
-        300.0,
-        420.0
-      ],
-      "event-rest": [
-        300.0,
-        -180.0
+      "event-amount": [
+        40.0,
+        487.0
       ]
     }
   }

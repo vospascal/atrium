@@ -312,10 +312,14 @@ mod tests {
                 ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
             })
             .emission;
-        assert!(
-            resting[0] > 0.0,
-            "the glow block went dark with nothing near — it must keep a resting \
-             glow, or it stops being an emitter for GI entirely"
+        assert_eq!(
+            [resting[0], resting[1], resting[2]],
+            [0.0; 3],
+            "the glow block is authored OFF at rest — the look Pascal asked for on \
+             2026-08-02. It is only safe because of S3b: the volume stores the \
+             TRIGGERED peak and scales down, so a row resting at zero is still an \
+             emitter and still lights the room on approach. Before S3b this same \
+             graph would have handed the volume a black emitter and lit nothing"
         );
 
         let nearby = [GpuWorldEvent {
@@ -338,9 +342,62 @@ mod tests {
             })
             .emission;
         assert!(
-            lit[0] > resting[0] * 1.5,
-            "the glow block barely reacted: resting {resting:?} vs lit {lit:?}"
+            lit[0] > 0.0,
+            "the glow block did not light up with something 1 m away: resting \
+             {resting:?} vs lit {lit:?}. The likeliest cause is a channel with no \
+             producer — the camera raises presence on CHANNEL_PRESENCE and nothing \
+             else raises anything, so a sensor on any other channel is inert"
         );
+
+        // ---- S3b: and the room reacts with it -------------------------------
+        // The surface brightening is P2. What this asserts is P4: that the
+        // brightening reaches the LIGHT VOLUME, so the floor in front of the
+        // block lifts too instead of the block being a decal.
+        let response = program
+            .emission_event_response(MaterialSampleContext {
+                clock: clock.sample(),
+                ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+            })
+            .expect("the glow block gates its emission on an event sensor");
+        assert!(
+            response.triggered[0] > response.resting[0],
+            "the response's two ends do not bracket the surface's: {response:?}"
+        );
+        // The authored amount reaches the response INTACT, past 16.
+        //
+        // 16 is not an arbitrary number to test against: it is
+        // `pattern::MAX_EMISSION_INTENSITY`, the hard clamp an emission pattern
+        // layer applies in `target_value()`. The graph route has no such clamp —
+        // `ColorScale` is a bare multiply — so a `multiply_scalar` in the chain
+        // is how a material asks for more emission than a pattern layer can
+        // express. The exact figure is deliberately not pinned; that it clears
+        // the pattern ceiling is the contract.
+        assert!(
+            response.triggered[0] > crate::pattern::MAX_EMISSION_INTENSITY,
+            "the glow block's authored amount did not survive to the response, or \
+             it no longer demonstrates the uncapped graph route: {response:?}"
+        );
+
+        let mut table = MaterialTable::default();
+        assert!(table.apply_graph_sample(
+            24,
+            program,
+            MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
+        ));
+        let attributes = table.cagi_attributes();
+        let slot = (attributes.word(24) & crate::cagi::CELL_EVENT_RESPONSE_MASK)
+            >> crate::cagi::CELL_EVENT_RESPONSE_SHIFT;
+        assert_ne!(
+            slot, 0,
+            "the glow block reached the volume with no response slot, so its \
+             cells would inject a constant emission and the room would not follow"
+        );
+        let row = attributes.responses()[slot as usize];
+        assert!(
+            row.resting_scale[0] < row.triggered_scale[0],
+            "the volume's response is the wrong way round: {row:?}"
+        );
+        assert_eq!(attributes.event_response_overflow(), 0);
     }
 
     #[test]

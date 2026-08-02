@@ -185,10 +185,6 @@
       "path": "graphs/material-23.vgraph.json"
     },
     {
-      "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
-      "path": "graphs/material-24.vgraph.json"
-    },
-    {
       "id": "vx-000000000000000018c7af1e2d5de190-0000000000000049",
       "path": "graphs/material-25.vgraph.json"
     },
@@ -231,6 +227,10 @@
     {
       "id": "vx-000000000000000018c7af1e33d85fc8-000000000000005d",
       "path": "graphs/material-06.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
+      "path": "graphs/material-24.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",

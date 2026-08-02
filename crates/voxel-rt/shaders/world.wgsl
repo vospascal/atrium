@@ -41,6 +41,11 @@
 //                               packed like material_words: chebyshev
 //                               distance in bricks to the nearest occupied
 //                               brick (0 = occupied, saturated at 255)
+//  16  uniform  world_events  — world_event.rs GpuWorldEvent[16] (48 bytes
+//                               each; positions in world METERS). Shared since
+//                               S3b: the shading pass senses it to light a
+//                               surface and the CA pass senses it to decide
+//                               what that surface injects into the volume.
 //
 // All traversal happens in VOXEL-space units: a world-meter position must be
 // divided by BrickmapMeta.voxel_size_meters before it enters `trace`.
@@ -345,6 +350,164 @@ fn material_face_roughness(material: u32, axis: u32, axis_sign: f32) -> f32 {
 @group(0) @binding(9) var<storage, read> brick_occupancy_bits: array<u32>;
 @group(0) @binding(10) var<storage, read> brick_skip_distances: array<u32>;
 @group(0) @binding(15) var<storage, read> brick_bounds: array<u32>;
+
+// ---- S3/S3b: the world event field --------------------------------------------
+// Something that happened somewhere, at a time, with a reach: an entity's
+// presence, an impact, a footstep. Written once per frame by src/world_event.rs.
+//
+// SHARED, not the shading pass's own, because two consumers sense the same
+// field and must agree to the bit: `graph_prelude.wgsl`'s `material.event_sensor`
+// node shades the SURFACE, and `cagi.wgsl`'s event gate decides what that
+// surface INJECTS INTO THE LIGHT VOLUME. Splitting the maths would let a wall
+// light up while the room around it stayed dark, and no test would name it.
+//
+// Three explicit 16-byte rows, matching the Rust `#[repr(C)]` struct: a WGSL
+// uniform-array element is 16-byte aligned and therefore strides 48, so a
+// 40-byte Rust struct would desynchronise from element 1 onward.
+struct WorldEvent {
+    position_meters: vec3<f32>,
+    radius_meters: f32,
+    started_epoch: f32,
+    started_remainder_seconds: f32,
+    ended_epoch: f32,           // meaningless while `open` is 1.0
+    ended_remainder_seconds: f32,
+    channel: u32,
+    strength: f32,              // [0, 1], multiplies the sensor's signal only
+    open: f32,                  // 1.0 ongoing, 0.0 closed
+    _pad_row2: f32,
+}
+
+// The literal 16 must equal MAX_WORLD_EVENTS below and in src/world_event.rs.
+// It cannot reference the const: a WGSL array size must be declared before use
+// and this is the first file concatenated into every pass.
+@group(0) @binding(16) var<uniform> world_events: array<WorldEvent, 16>;
+
+const MAX_WORLD_EVENTS: u32 = 16u;
+
+// One epoch of the split animation clock. Mirrors src/animation_clock.rs: a
+// single f32 second count loses the fraction an oscillator needs within hours
+// of uptime, and any wrapped single clock steps every rate not harmonic with
+// the wrap. Lives here rather than in the graph prelude because the event
+// envelope below needs it and the CA pass never sees that file.
+const ANIMATION_EPOCH_SECONDS: f32 = 64.0;
+
+// How many world events are live. Every sensor loops to THIS, never to the
+// array capacity, so a world with no entities costs one comparison per sensor.
+fn world_event_count() -> u32 {
+    return min(u32(max(lighting.event_params.z, 0.0)), MAX_WORLD_EVENTS);
+}
+
+const WORLD_EVENT_FALLOFF_SMOOTHSTEP: u32 = 0u;
+const WORLD_EVENT_FALLOFF_LINEAR: u32 = 1u;
+const WORLD_EVENT_FALLOFF_INVERSE_SQUARE: u32 = 2u;
+const WORLD_EVENT_FALLOFF_STEP: u32 = 3u;
+
+fn world_event_falloff(kind: u32, normalised_distance: f32) -> f32 {
+    let t = clamp(normalised_distance, 0.0, 1.0);
+    if (kind == WORLD_EVENT_FALLOFF_LINEAR) {
+        return 1.0 - t;
+    }
+    if (kind == WORLD_EVENT_FALLOFF_INVERSE_SQUARE) {
+        // Normalised so it still reaches 0 at the radius, rather than trailing
+        // a long invisible tail that never quite ends.
+        let falloff = 1.0 / (1.0 + 8.0 * t * t);
+        let edge = 1.0 / 9.0;
+        return clamp((falloff - edge) / (1.0 - edge), 0.0, 1.0);
+    }
+    if (kind == WORLD_EVENT_FALLOFF_STEP) {
+        return select(0.0, 1.0, t < 1.0);
+    }
+    let smooth_t = 1.0 - t;
+    return smooth_t * smooth_t * (3.0 - 2.0 * smooth_t);
+}
+
+fn world_event_ramp(value: f32, length_seconds: f32) -> f32 {
+    if (length_seconds <= 0.0) {
+        return select(0.0, 1.0, value >= 0.0);
+    }
+    return clamp(value / length_seconds, 0.0, 1.0);
+}
+
+// The attack/hold/release envelope of one event.
+//
+// Attack and release are MULTIPLIED rather than switched between, and that is
+// what makes an impulse continuous: an event that opens and closes inside one
+// frame ramps up and down simultaneously and yields a smooth shortened blip
+// instead of a step. Switching on a phase would have produced the step.
+fn world_event_envelope(
+    event_index: u32,
+    attack_seconds: f32,
+    hold_seconds: f32,
+    release_seconds: f32,
+) -> f32 {
+    let event = world_events[event_index];
+    let now_remainder = lighting.event_params.x;
+    let now_epoch = lighting.event_params.y;
+    let since_start = (now_epoch - event.started_epoch) * ANIMATION_EPOCH_SECONDS
+        + (now_remainder - event.started_remainder_seconds);
+    let attack_factor = world_event_ramp(since_start, attack_seconds);
+    if (event.open > 0.5) {
+        return attack_factor;
+    }
+    let since_end = (now_epoch - event.ended_epoch) * ANIMATION_EPOCH_SECONDS
+        + (now_remainder - event.ended_remainder_seconds);
+    let release_factor = 1.0 - world_event_ramp(since_end - hold_seconds, release_seconds);
+    return attack_factor * release_factor;
+}
+
+// Sense the field at a point given in METRES. Returns (signal, nearness,
+// envelope), before any inversion.
+//
+// ONE winning event supplies all three components. Taking an independent
+// maximum per output could report a nearness from one event and an envelope
+// from another — a combination that never existed — and would break the
+// `signal == nearness * envelope * strength` invariant callers rely on.
+fn world_event_sense(
+    point_meters: vec3<f32>,
+    channel: u32,
+    radius_meters: f32,
+    falloff: u32,
+    attack_seconds: f32,
+    hold_seconds: f32,
+    release_seconds: f32,
+) -> vec3<f32> {
+    let count = world_event_count();
+    var best_signal = 0.0;
+    var best_nearness = 0.0;
+    var best_envelope = 0.0;
+    var found = false;
+    for (var index = 0u; index < count; index = index + 1u) {
+        let event = world_events[index];
+        if (event.channel != channel) {
+            continue;
+        }
+        // The sensor's own radius intersected with the event's reach, so a
+        // large creature is felt further away without re-authoring anything.
+        let reach = min(radius_meters, event.radius_meters);
+        if (reach <= 0.0) {
+            continue;
+        }
+        // Squared-distance reject before any envelope maths: this loop runs per
+        // sensor per shaded hit (including secondary rays) and per gated cell
+        // per CA iteration.
+        let offset = event.position_meters - point_meters;
+        let distance_squared = dot(offset, offset);
+        if (distance_squared >= reach * reach) {
+            continue;
+        }
+        let nearness = world_event_falloff(falloff, sqrt(distance_squared) / reach);
+        let envelope = world_event_envelope(
+            index, attack_seconds, hold_seconds, release_seconds);
+        let signal = nearness * envelope * clamp(event.strength, 0.0, 1.0);
+        if (!found || signal > best_signal) {
+            best_signal = signal;
+            best_nearness = nearness;
+            best_envelope = envelope;
+            found = true;
+        }
+    }
+    return vec3<f32>(best_signal, best_nearness, best_envelope);
+}
 
 // AADF field layout — mirrors BOUND_BITS / BOUND_DIRECTIONS in src/brickmap.rs.
 // Six 5-bit bounds per brick cell in order -x, +x, -y, +y, -z, +z: how many

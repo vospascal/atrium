@@ -115,6 +115,25 @@ const CAGI_EMISSIVE: bool = true;
 // Off restores that rule-dependent behaviour exactly, which is what makes the
 // before/after measurable.
 const CAGI_EMITTER_BOUNCE: bool = true;
+// CAGI_EVENT_LIGHT (S3b) — whether a cell whose material answers the world event
+// field modulates the emission it injects, so a surface that lights up when you
+// walk toward it also LIGHTS THE ROOM instead of being a decal.
+//
+// ON by default, and this one comes with an argument rather than a measurement,
+// like CAGI_EMISSIVE did: with no event-responsive material in the world every
+// cell's response index is 0 and this costs one shift-and-mask per emission
+// read, changing nothing. What it costs when a material DOES respond is one
+// `world_event_sense` per gated cell per iteration — bounded by the emitter's
+// own surface area, not by the grid — and the bench row is the honest place to
+// price it.
+//
+// The reason this works at all, and the reason S3b needed no re-flood: the CA is
+// not a one-shot flood. It dispatches `iterations_per_frame` steps EVERY frame,
+// and neither propagation rule reads a cell's own previous value, so the field
+// both brightens and darkens on its own. A time-varying emitter is therefore
+// just an emitter whose value changed; the global re-flood exists only to clear
+// the pinned sun-source flag (bit 30) when the SUN moves.
+const CAGI_EVENT_LIGHT: bool = true;
 // Fixed-point shift of both diffusion numerators (see CagiVolumeMeta).
 const CAGI_DIFFUSION_SHIFT: u32 = 12u;
 
@@ -199,6 +218,48 @@ fn cagi_propagate(cell: vec3<i32>) -> vec3<u32> {
 // The center of a cell, in voxel units — the origin of its sun / sky rays.
 fn cagi_cell_center_voxels(cell: vec3<i32>) -> vec3<f32> {
     return (vec3<f32>(cell) + vec3<f32>(0.5)) * cagi_volume_meta.cell_size_voxels;
+}
+
+// S3b: the emission this cell actually injects THIS iteration.
+//
+// Every read of a cell's emission goes through here — the solid-emitter pin, the
+// thin-cover injection and the neighbour bounce — because a surface that lights
+// up must do so consistently in all three, or the wall would brighten while the
+// air in front of it did not.
+//
+// `attributes` is passed in rather than re-read: all three call sites already
+// hold the word (they had to test CAGI_CELL_SOLID with it), and the emission
+// read is the hot part of this pass.
+//
+// The interpolation is between the material's two ENDPOINTS, which is the
+// documented approximation: the CA cannot run a material graph, so a graph of
+// arbitrary shape between its sensor and its emission reaches the volume as the
+// straight line through resting and triggered. The surface still shades the
+// real curve. See `EmissionEventResponse` in src/material_graph.rs.
+fn cagi_cell_emission_live(cell_index: u32, attributes: u32, cell: vec3<i32>) -> vec3<f32> {
+    let stored = cagi_cell_emission(cell_index);
+    if (!CAGI_EVENT_LIGHT) {
+        return stored;
+    }
+    let response_index = cagi_cell_event_response(attributes);
+    if (response_index == 0u) {
+        return stored;
+    }
+    let response = cagi_volume_meta.event_responses[response_index];
+    // The cell CENTRE, in metres — the same quantity the surface sensor uses,
+    // one tier coarser. Sensing at the cell rather than at the voxel is what
+    // makes this affordable: 0.5 m of position error against a light whose
+    // radius is metres.
+    let sensed = world_event_sense(
+        cagi_cell_center_voxels(cell) * brickmap.voxel_size_meters,
+        u32(response.channel),
+        response.radius_meters,
+        u32(response.falloff),
+        response.attack_seconds,
+        response.hold_seconds,
+        response.release_seconds,
+    );
+    return stored * mix(response.resting_scale, response.triggered_scale, vec3<f32>(sensed.x));
 }
 
 // Whether this cell sees the sky (CAGI_SKY_TEST).
@@ -306,10 +367,13 @@ fn cagi_emitter_bounce(cell: vec3<i32>) -> vec3<f32> {
                 continue;
             }
             let index = cagi_cell_index(vec3<u32>(neighbour));
-            if ((cagi_cell_attribute(index) & CAGI_CELL_SOLID) == 0u) {
+            let attributes = cagi_cell_attribute(index);
+            if ((attributes & CAGI_CELL_SOLID) == 0u) {
                 continue; // not a surface: whatever light it holds the stencil carries
             }
-            brightest = max(brightest, cagi_cell_emission(index));
+            // The NEIGHBOUR's own gate, not this cell's: the neighbour is the
+            // surface that lights up, and its centre is half a cell away.
+            brightest = max(brightest, cagi_cell_emission_live(index, attributes, neighbour));
         }
     }
     return brightest;
@@ -332,7 +396,7 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
         // lit-looking but light nothing, because the CA only ever reads
         // neighbours' light words.
         if (CAGI_EMISSIVE) {
-            let emission = cagi_cell_emission(index);
+            let emission = cagi_cell_emission_live(index, attributes, cell);
             if (any(emission > vec3<f32>(0.0))) {
                 light_volume_out[index] = cagi_pack(cagi_quantize(emission));
                 return;
@@ -369,7 +433,7 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     // threshold, so it lands here instead: same injection, clamped from below
     // exactly like the sky term.
     if (CAGI_EMISSIVE) {
-        emission = max(emission, cagi_quantize(cagi_cell_emission(index)));
+        emission = max(emission, cagi_quantize(cagi_cell_emission_live(index, attributes, cell)));
         // E5c: and the emission of any emissive SOLID next door, which the stencil
         // cannot be relied on to carry — a lone bright neighbour survives
         // max-decrement but loses 84% per step under the shipped diffusion rule.

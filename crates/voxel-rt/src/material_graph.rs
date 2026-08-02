@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::animation_clock::{fract, AnimationClockSample};
+use crate::animation_clock::{fract, AnimationClockSample, EPOCH_SECONDS};
 use crate::graph::{
     Diagnostic, DiagnosticSeverity, FieldTarget, GraphAsset, GraphCommand, GraphHistory, GraphKind,
     InputPin, LinkId, LinkRecord, MaterialNodeOperation, NodeId, NodeOperation, NodeRecord,
@@ -109,7 +109,9 @@ pub enum SensorFalloff {
 }
 
 impl SensorFalloff {
-    fn shader_value(self) -> u32 {
+    /// The `WORLD_EVENT_FALLOFF_*` value `world.wgsl` switches on. Public
+    /// because the light volume's per-material response table carries it too.
+    pub fn shader_value(self) -> u32 {
         match self {
             Self::Smoothstep => 0,
             Self::Linear => 1,
@@ -258,6 +260,152 @@ pub enum MaterialInstruction {
 }
 
 impl MaterialInstruction {
+    /// Every value this instruction reads. The one place the operand shape of
+    /// each variant is written down, so a dataflow walk cannot silently miss an
+    /// edge when a variant gains an input — the compiler names the new field.
+    fn for_each_operand(&self, mut visit: impl FnMut(ValueId)) {
+        match *self {
+            Self::Scalar(_)
+            | Self::Color(_)
+            | Self::Vector3(_)
+            | Self::Position
+            | Self::Normal
+            | Self::Time
+            | Self::EventSensor { .. } => {}
+            Self::PassthroughScalar(value)
+            | Self::PassthroughColor(value)
+            | Self::PassthroughVector(value)
+            | Self::NormalizeVector(value)
+            | Self::Component { vector: value, .. } => visit(value),
+            Self::AddScalar(a, b)
+            | Self::VectorAdd(a, b)
+            | Self::DotVector(a, b)
+            | Self::MultiplyScalar(a, b) => {
+                visit(a);
+                visit(b);
+            }
+            Self::RemapScalar {
+                value,
+                from_min,
+                from_max,
+                to_min,
+                to_max,
+                clamp: _,
+            } => {
+                visit(value);
+                visit(from_min);
+                visit(from_max);
+                visit(to_min);
+                visit(to_max);
+            }
+            Self::MixColor { a, b, factor } => {
+                visit(a);
+                visit(b);
+                visit(factor);
+            }
+            Self::ColorScale { color, strength } => {
+                visit(color);
+                visit(strength);
+            }
+            Self::FaceColor {
+                base,
+                top,
+                side,
+                bottom,
+            }
+            | Self::FaceScalar {
+                base,
+                top,
+                side,
+                bottom,
+            } => {
+                visit(base);
+                visit(top);
+                visit(side);
+                visit(bottom);
+            }
+            Self::ColorRamp {
+                factor,
+                color_a,
+                color_b,
+                position_a,
+                position_b,
+            } => {
+                visit(factor);
+                visit(color_a);
+                visit(color_b);
+                visit(position_a);
+                visit(position_b);
+            }
+            Self::ClampScalar {
+                value,
+                minimum,
+                maximum,
+            } => {
+                visit(value);
+                visit(minimum);
+                visit(maximum);
+            }
+            Self::Noise {
+                position,
+                scale,
+                detail,
+                roughness,
+            }
+            | Self::NoiseColor {
+                position,
+                scale,
+                detail,
+                roughness,
+            } => {
+                visit(position);
+                visit(scale);
+                visit(detail);
+                visit(roughness);
+            }
+            Self::Fbm {
+                position,
+                scale,
+                octaves,
+                roughness,
+            } => {
+                visit(position);
+                visit(scale);
+                visit(octaves);
+                visit(roughness);
+            }
+            Self::VectorScale { vector, scale } => {
+                visit(vector);
+                visit(scale);
+            }
+            Self::Direction {
+                speed,
+                azimuth_degrees,
+                elevation_degrees,
+            } => {
+                visit(speed);
+                visit(azimuth_degrees);
+                visit(elevation_degrees);
+            }
+            Self::Oscillator {
+                wave: _,
+                sync: _,
+                seed: _,
+                rate_hz,
+                phase,
+                duty,
+                low,
+                high,
+            } => {
+                visit(rate_hz);
+                visit(phase);
+                visit(duty);
+                visit(low);
+                visit(high);
+            }
+        }
+    }
+
     fn value_type(&self) -> ValueType {
         match self {
             Self::Scalar(_)
@@ -305,12 +453,45 @@ pub struct MaterialOutput {
     pub layer_animation: Vec<LayerAnimation>,
 }
 
+/// S3b — how a compiled program's EMISSION answers the world event field,
+/// reduced to the two things the light volume can act on: which sensor gates it,
+/// and what the emission is at each end of that sensor's range.
+///
+/// ## Why two endpoints rather than the graph itself
+///
+/// The CA cannot run a material graph — it has one thread per cell and no
+/// surface, no face, no pattern coordinate. What it *can* do is evaluate one
+/// sensor per cell and interpolate. So a graph of arbitrary shape between the
+/// sensor and the emission output is reduced to the straight line through its
+/// two endpoints. That is an approximation, and a named one: a graph that is
+/// non-monotone in between (emission peaking at half signal, say) reaches the
+/// volume as the linear blend, while the SURFACE still shades the real curve.
+///
+/// It is well inside the error the volume already carries — half-metre cells, a
+/// quarter-fill solidity threshold, one representative voxel per cell — and it
+/// buys the property that matters: the room brightens and dims with the wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmissionEventResponse {
+    /// The first sensor on the emission output's dataflow path. A graph with
+    /// several is reduced to this one; the others hold at their resting value.
+    pub sensor: EventSensorConfig,
+    /// Emission with no event in range.
+    pub resting: [f32; 3],
+    /// Emission with a saturating event of this sensor's channel at the sample
+    /// point.
+    pub triggered: [f32; 3],
+}
+
 /// The two animation values a pattern layer's sockets supply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayerAnimation {
     pub gain: ValueId,
     pub drift_velocity: ValueId,
 }
+
+/// Deterministic samples per oscillator period when averaging a response
+/// endpoint. See [`MaterialGraphProgram::emission_oscillator_window`].
+const EMISSION_RESPONSE_PHASES: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct MaterialGraphProgram {
@@ -352,19 +533,15 @@ const GRAPH_HOST_STUBS: &str = concat!(
     "    return PatternAnimation(vec4<f32>(1.0), array<vec4<f32>, 4>(\n",
     "        vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)));\n",
     "}\n",
-    "struct WorldEvent {\n",
-    "    position_meters: vec3<f32>,\n",
-    "    radius_meters: f32,\n",
-    "    started_epoch: f32,\n",
-    "    started_remainder_seconds: f32,\n",
-    "    ended_epoch: f32,\n",
-    "    ended_remainder_seconds: f32,\n",
-    "    channel: u32,\n",
-    "    strength: f32,\n",
-    "    open: f32,\n",
-    "    _pad_row2: f32,\n",
-    "};\n",
-    "var<private> world_events: array<WorldEvent, 16>;\n",
+    "const ANIMATION_EPOCH_SECONDS: f32 = 64.0;\n",
+    // S3b moved the event field and its sensing into `world.wgsl`, shared with
+    // the CA pass. The prelude no longer names the buffer at all — only this
+    // one function — so the stub shrank to the seam that actually crosses.
+    "fn world_event_sense(point_meters: vec3<f32>, channel: u32,\n",
+    "    radius_meters: f32, falloff: u32, attack_seconds: f32,\n",
+    "    hold_seconds: f32, release_seconds: f32) -> vec3<f32> {\n",
+    "    return vec3<f32>(0.0);\n",
+    "}\n",
 );
 
 fn graph_program_prefix() -> String {
@@ -819,8 +996,8 @@ fn graph_wave(wave: OscillatorWave, phase: f32, duty: f32, salt: u32) -> f32 {
     }
 }
 
-/// Mirrors `graph_falloff`.
-fn graph_falloff(kind: SensorFalloff, normalised_distance: f32) -> f32 {
+/// Mirrors `world_event_falloff`.
+pub fn world_event_falloff(kind: SensorFalloff, normalised_distance: f32) -> f32 {
     let t = normalised_distance.clamp(0.0, 1.0);
     match kind {
         SensorFalloff::Linear => 1.0 - t,
@@ -843,45 +1020,54 @@ fn graph_falloff(kind: SensorFalloff, normalised_distance: f32) -> f32 {
     }
 }
 
-/// Mirrors `graph_ramp`.
-fn graph_ramp(value: f32, length_seconds: f32) -> f32 {
+/// Mirrors `world_event_ramp`.
+fn world_event_ramp(value: f32, length_seconds: f32) -> f32 {
     if length_seconds <= 0.0 {
         return if value >= 0.0 { 1.0 } else { 0.0 };
     }
     (value / length_seconds).clamp(0.0, 1.0)
 }
 
-/// Mirrors `graph_event_envelope`.
+/// Mirrors `world_event_envelope`.
 ///
 /// Attack and release are MULTIPLIED, not switched between: an event that opens
 /// and closes inside one frame then ramps up and down at once and yields a
 /// smooth shortened blip rather than a step.
-fn graph_event_envelope(
+fn world_event_envelope(
     event: &GpuWorldEvent,
     clock: AnimationClockSample,
     config: &EventSensorConfig,
 ) -> f32 {
-    let attack_factor = graph_ramp(event.elapsed_since_start(clock), config.attack_seconds);
+    let attack_factor = world_event_ramp(event.elapsed_since_start(clock), config.attack_seconds);
     if event.is_open() {
         return attack_factor;
     }
     let since_end = event.elapsed_since_end(clock);
-    let release_factor = 1.0 - graph_ramp(since_end - config.hold_seconds, config.release_seconds);
+    let release_factor =
+        1.0 - world_event_ramp(since_end - config.hold_seconds, config.release_seconds);
     attack_factor * release_factor
 }
 
-/// Mirrors `graph_event_sensor`. Returns `(signal, nearness, envelope)`, all
-/// three from ONE winning event so they describe a state that actually existed.
-fn graph_event_sensor(
+/// Mirrors `world_event_sense` in `world.wgsl`. Returns
+/// `(signal, nearness, envelope)`, all three from ONE winning event so they
+/// describe a state that actually existed.
+///
+/// Takes a point in METRES and the raw field, not a `MaterialSampleContext`,
+/// because the light volume senses the same field from a cell centre and there
+/// is no surface, no normal and no pattern coordinate there. One definition,
+/// two tiers — exactly the split the WGSL side makes.
+///
+/// `invert` is NOT applied here: it belongs to the sensor node, and the volume's
+/// response carries the inversion in its two scales instead.
+pub fn sense_world_events(
     config: &EventSensorConfig,
-    context: &MaterialSampleContext<'_>,
+    point_meters: [f32; 3],
+    clock: AnimationClockSample,
+    events: &[GpuWorldEvent],
 ) -> (f32, f32, f32) {
-    let point_meters = context
-        .position
-        .map(|axis| axis * context.voxel_size_meters);
     let mut best = (0.0_f32, 0.0_f32, 0.0_f32);
     let mut found = false;
-    for event in context.events {
+    for event in events {
         if event.channel != config.channel {
             continue;
         }
@@ -899,16 +1085,15 @@ fn graph_event_sensor(
         if distance_squared >= reach * reach {
             continue;
         }
-        let nearness = graph_falloff(config.falloff, distance_squared.sqrt() / reach);
-        let envelope = graph_event_envelope(event, context.clock, config);
+        let nearness = world_event_falloff(config.falloff, distance_squared.sqrt() / reach);
+        let envelope = world_event_envelope(event, clock, config);
         let signal = nearness * envelope * event.strength.clamp(0.0, 1.0);
         if !found || signal > best.0 {
             best = (signal, nearness, envelope);
             found = true;
         }
     }
-    let signal = if config.invert { 1.0 - best.0 } else { best.0 };
-    (signal, best.1, best.2)
+    best
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -937,6 +1122,183 @@ impl MaterialGraphProgram {
             roughness: values[self.output.roughness.0].scalar(),
             emission: values[self.output.emission.0].color(),
         }
+    }
+
+    /// S3b — how this program's emission answers events, or `None` when it does
+    /// not answer them at all.
+    ///
+    /// `None` is decided by BEHAVIOUR, not by topology: the program is evaluated
+    /// once with an empty field and once with a saturating event, and a graph
+    /// whose emission comes out identical does not get a response even if it
+    /// holds a sensor. A sensor wired only into base colour is exactly that case,
+    /// and the light volume has only seven response slots to spend.
+    ///
+    /// The probe event sits AT the sample point with the sensor's own radius and
+    /// full strength, started one epoch ago so any authored attack has completed.
+    /// The clock is `context`'s, unchanged, so oscillators read the same value in
+    /// both evaluations and cannot pollute the comparison.
+    pub fn emission_event_response(
+        &self,
+        context: MaterialSampleContext<'_>,
+    ) -> Option<EmissionEventResponse> {
+        let sensor = self.emission_event_sensor()?;
+        let probe = [GpuWorldEvent {
+            position_meters: [
+                context.position[0] * context.voxel_size_meters,
+                context.position[1] * context.voxel_size_meters,
+                context.position[2] * context.voxel_size_meters,
+            ],
+            radius_meters: sensor.radius_meters,
+            started_epoch: context.clock.epoch - 1.0,
+            started_remainder_seconds: context.clock.remainder_seconds,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: sensor.channel,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        }];
+        let window = self.emission_oscillator_window(&self.emission_reachable());
+        let endpoint = |events: &[GpuWorldEvent]| -> [f32; 3] {
+            let Some((period_seconds, phases)) = window else {
+                let emission = self
+                    .evaluate(MaterialSampleContext { events, ..context })
+                    .emission;
+                return [emission[0], emission[1], emission[2]];
+            };
+            let mut total = [0.0_f64; 3];
+            for phase in 0..phases {
+                let seconds = context.clock.remainder_seconds
+                    + period_seconds * (phase as f32 + 0.5) / phases as f32;
+                let epochs = (seconds / EPOCH_SECONDS).floor();
+                let emission = self
+                    .evaluate(MaterialSampleContext {
+                        events,
+                        clock: AnimationClockSample {
+                            epoch: context.clock.epoch + epochs,
+                            remainder_seconds: seconds - epochs * EPOCH_SECONDS,
+                        },
+                        ..context
+                    })
+                    .emission;
+                for (channel, total) in total.iter_mut().enumerate() {
+                    *total += f64::from(emission[channel]);
+                }
+            }
+            std::array::from_fn(|channel| (total[channel] / phases as f64) as f32)
+        };
+        let resting = endpoint(&[]);
+        let triggered = endpoint(&probe);
+        if resting == triggered {
+            return None;
+        }
+        Some(EmissionEventResponse {
+            sensor,
+            resting,
+            triggered,
+        })
+    }
+
+    /// The sole event sensor on the emission output's dataflow path.
+    ///
+    /// A reachability walk rather than a scan of every instruction: a sensor
+    /// that drives base colour or a pattern drift must not claim one of the
+    /// volume's response slots, and only the edges say which output it feeds.
+    /// Multiple reachable sensors deliberately return `None`: the volume has
+    /// one response index per cell and cannot faithfully choose an arbitrary
+    /// lowering-order sensor while the surface responds to both.
+    fn emission_event_sensor(&self) -> Option<EventSensorConfig> {
+        let reached = self.emission_reachable();
+        let mut sensors =
+            self.instructions
+                .iter()
+                .zip(&reached)
+                .filter_map(|(instruction, &reached)| match instruction {
+                    MaterialInstruction::EventSensor { config } if reached => Some(*config),
+                    _ => None,
+                });
+        let sensor = sensors.next()?;
+        sensors.next().is_none().then_some(sensor)
+    }
+
+    /// Which values the emission output actually depends on.
+    fn emission_reachable(&self) -> Vec<bool> {
+        let mut reached = vec![false; self.instructions.len()];
+        let mut pending = vec![self.output.emission];
+        while let Some(value) = pending.pop() {
+            if reached[value.0] {
+                continue;
+            }
+            reached[value.0] = true;
+            self.instructions[value.0].for_each_operand(|operand| pending.push(operand));
+        }
+        reached
+    }
+
+    /// The window an endpoint must be AVERAGED over, or `None` when emission
+    /// holds no oscillator and one sample is the whole answer.
+    ///
+    /// ## Why an average, and why this was a real defect
+    ///
+    /// An endpoint sampled at one instant reports the oscillator at whatever
+    /// phase that instant happens to be. `MaterialSampleContext::still` freezes
+    /// the clock at zero, and a sine at phase 0 sits at its TROUGH — so the
+    /// authored glow block, whose surface swings 0.45..1.25, handed the light
+    /// volume a flat 0.45 and lit the room at 56% of what the block looked like.
+    /// Not a rounding error: a visible mismatch between an emitter and its light.
+    ///
+    /// The mean is the honest stand-in. The CA cannot follow a 1.4 Hz pulse — it
+    /// has no clock and no oscillator — so the only question is WHICH constant it
+    /// holds, and the time-average of the surface is the one that conserves the
+    /// light leaving it.
+    ///
+    /// Returns `(period, phases)`:
+    ///
+    /// * **period** — one cycle of the SLOWEST reachable oscillator, so the sweep
+    ///   covers the longest thing present. A rate that is not a constant (an
+    ///   oscillator driving another oscillator's rate) falls back to 1 Hz: one
+    ///   period of a plausible rate still beats one arbitrary instant. Genuinely
+    ///   incommensurate rates are not covered by any single period, and that
+    ///   limit is inherent rather than a shortcut taken here.
+    /// * **phases** — [`EMISSION_RESPONSE_PHASES`], raised for a narrow pulse. A
+    ///   `duty` of 0.05 occupies a twentieth of the period, and 16 evenly spaced
+    ///   samples would miss it entirely and report the emitter dark.
+    fn emission_oscillator_window(&self, reached: &[bool]) -> Option<(f32, usize)> {
+        let constant = |value: ValueId| match self.instructions[value.0] {
+            MaterialInstruction::Scalar(scalar) => Some(scalar),
+            _ => None,
+        };
+        let mut slowest_period_seconds: Option<f32> = None;
+        let mut phases = EMISSION_RESPONSE_PHASES;
+        for (instruction, _) in self
+            .instructions
+            .iter()
+            .zip(reached)
+            .filter(|(_, reached)| **reached)
+        {
+            let MaterialInstruction::Oscillator {
+                wave,
+                rate_hz,
+                duty,
+                ..
+            } = *instruction
+            else {
+                continue;
+            };
+            let period_seconds = constant(rate_hz)
+                .filter(|rate| *rate > 0.0)
+                .map_or(1.0, |rate| 1.0 / rate);
+            slowest_period_seconds = Some(
+                slowest_period_seconds
+                    .map_or(period_seconds, |slowest: f32| slowest.max(period_seconds)),
+            );
+            if wave == OscillatorWave::Pulse {
+                if let Some(duty) = constant(duty).filter(|duty| *duty > 0.0) {
+                    phases = phases.max((4.0 / duty).ceil() as usize);
+                }
+            }
+        }
+        slowest_period_seconds.map(|period_seconds| (period_seconds, phases))
     }
 
     /// The per-slot animation values this program produces, in the same slot
@@ -1137,7 +1499,19 @@ impl MaterialGraphProgram {
                     RuntimeValue::Scalar(low + (high - low) * shape)
                 }
                 MaterialInstruction::EventSensor { config } => {
-                    let (signal, nearness, envelope) = graph_event_sensor(&config, &context);
+                    let (signal, nearness, envelope) = sense_world_events(
+                        &config,
+                        context
+                            .position
+                            .map(|axis| axis * context.voxel_size_meters),
+                        context.clock,
+                        context.events,
+                    );
+                    // Invert applies to the SIGNAL only. Nearness and envelope
+                    // keep their literal meanings so they stay usable as
+                    // diagnostics — and so the volume's two scales, which are
+                    // where inversion lives one tier down, cannot double-apply it.
+                    let signal = if config.invert { 1.0 - signal } else { signal };
                     RuntimeValue::Vector3([signal, nearness, envelope])
                 }
                 MaterialInstruction::Position => RuntimeValue::Vector3(context.position),
@@ -3238,6 +3612,170 @@ mod tests {
         // And a tight radius rejects an event that a wide one accepted, which
         // is the per-sensor radius doing its job.
         assert_eq!(evaluate(0, 1.0, &events), 0.0);
+    }
+
+    /// S3b — the light volume's view of a program, built straight from IR so the
+    /// dataflow walk is tested rather than a graph editor's plumbing.
+    ///
+    /// `emission_drives_the_sensor` decides whether the sensor's signal reaches
+    /// the emission output or only the roughness one. That is the whole question
+    /// [`MaterialGraphProgram::emission_event_sensor`] answers, and the reason it
+    /// is a reachability walk instead of a scan.
+    fn sensing_program(emission_drives_the_sensor: bool) -> MaterialGraphProgram {
+        let config = EventSensorConfig {
+            channel: 0,
+            radius_meters: 8.0,
+            falloff: SensorFalloff::Linear,
+            attack_seconds: 0.0,
+            hold_seconds: 0.0,
+            release_seconds: 0.0,
+            invert: false,
+        };
+        let instructions = vec![
+            MaterialInstruction::Color([1.0, 1.0, 1.0, 1.0]),
+            MaterialInstruction::EventSensor { config },
+            MaterialInstruction::Component {
+                vector: ValueId(1),
+                axis: 0,
+            },
+            MaterialInstruction::ColorScale {
+                color: ValueId(0),
+                strength: ValueId(2),
+            },
+        ];
+        MaterialGraphProgram {
+            graph_id: AssetId("sensing".into()),
+            semantic_hash: 0,
+            instructions,
+            output: MaterialOutput {
+                base_color: ValueId(0),
+                // The sensor drives ONE of these two, never both.
+                roughness: ValueId(2),
+                emission: if emission_drives_the_sensor {
+                    ValueId(3)
+                } else {
+                    ValueId(0)
+                },
+                layer_animation: Vec::new(),
+            },
+            wgsl: String::new(),
+        }
+    }
+
+    /// The positive case: a sensor on the emission path yields both endpoints.
+    #[test]
+    fn an_emission_gating_sensor_reports_both_ends_of_its_range() {
+        let response = sensing_program(true)
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .expect("a sensor feeding emission must produce a response");
+        assert_eq!(response.sensor.radius_meters, 8.0);
+        assert_eq!(response.resting, [0.0; 3], "no event means no signal");
+        assert_eq!(
+            response.triggered, [1.0; 3],
+            "the probe sits ON the sample point, so the signal must saturate"
+        );
+    }
+
+    /// An oscillator on the emission path must reach the volume as its MEAN, not
+    /// as whatever phase the sampling clock happened to sit at.
+    ///
+    /// This is a regression test for a real defect, not a formality. The endpoint
+    /// used to be one sample at `MaterialSampleContext::still`, whose clock is
+    /// frozen at zero — and a sine at phase 0 is at its TROUGH. The authored glow
+    /// block swings 0.45..1.25 on the surface and handed the light volume a flat
+    /// 0.45, so the room read at 56% of what the block looked like. Nothing caught
+    /// it until the emitter was actually looked at.
+    #[test]
+    fn an_oscillator_on_the_emission_path_reaches_the_volume_as_its_mean() {
+        let config = EventSensorConfig {
+            channel: 0,
+            radius_meters: 8.0,
+            falloff: SensorFalloff::Linear,
+            attack_seconds: 0.0,
+            hold_seconds: 0.0,
+            release_seconds: 0.0,
+            invert: false,
+        };
+        // white x (sensor.signal x sine[0.4 .. 1.2] @ 1.4 Hz)
+        let instructions = vec![
+            MaterialInstruction::Color([1.0, 1.0, 1.0, 1.0]),
+            MaterialInstruction::EventSensor { config },
+            MaterialInstruction::Component {
+                vector: ValueId(1),
+                axis: 0,
+            },
+            MaterialInstruction::Scalar(1.4),
+            MaterialInstruction::Scalar(0.0),
+            MaterialInstruction::Scalar(0.5),
+            MaterialInstruction::Scalar(0.4),
+            MaterialInstruction::Scalar(1.2),
+            MaterialInstruction::Oscillator {
+                wave: OscillatorWave::Sine,
+                sync: PhaseSync::Global,
+                seed: 0,
+                rate_hz: ValueId(3),
+                phase: ValueId(4),
+                duty: ValueId(5),
+                low: ValueId(6),
+                high: ValueId(7),
+            },
+            MaterialInstruction::MultiplyScalar(ValueId(2), ValueId(8)),
+            MaterialInstruction::ColorScale {
+                color: ValueId(0),
+                strength: ValueId(9),
+            },
+        ];
+        let program = MaterialGraphProgram {
+            graph_id: AssetId("oscillating".into()),
+            semantic_hash: 0,
+            instructions,
+            output: MaterialOutput {
+                base_color: ValueId(0),
+                roughness: ValueId(4),
+                emission: ValueId(10),
+                layer_animation: Vec::new(),
+            },
+            wgsl: String::new(),
+        };
+
+        let response = program
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .expect("an oscillator behind a sensor still gates emission");
+        assert_eq!(
+            response.resting, [0.0; 3],
+            "no event means no signal at all"
+        );
+        // The sine's mean over one period is the midpoint of its range. The old
+        // one-sample form returned `low` (0.4) here, which is what this pins.
+        let mean = 0.5 * (0.4 + 1.2);
+        assert!(
+            (response.triggered[0] - mean).abs() < 0.01,
+            "expected the sine's mean {mean}, got {:?} — a value near 0.4 means the \
+             endpoint went back to a single frozen-clock sample",
+            response.triggered
+        );
+    }
+
+    /// The negative case, and the reason the walk exists: a sensor wired only
+    /// into roughness must NOT claim one of the volume's seven response slots.
+    /// A scan of every instruction would hand it one.
+    #[test]
+    fn a_sensor_that_drives_only_roughness_claims_no_emission_response() {
+        assert!(sensing_program(false)
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .is_none());
+    }
+
+    /// A graph with no sensor at all has no response — the case every shipped
+    /// material is in, and the one that keeps the volume bit-identical.
+    #[test]
+    fn a_graph_without_a_sensor_has_no_emission_response() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_with_output();
+        assert!(compile(&graph, &registry)
+            .unwrap()
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .is_none());
     }
 
     /// `invert` must touch the signal only. Nearness and envelope keep their
