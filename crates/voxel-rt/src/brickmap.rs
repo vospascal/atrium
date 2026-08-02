@@ -2551,11 +2551,22 @@ mod tests {
                 unique += 1;
             }
         }
-        // Measured at 58.6% of occupied bricks; assert the ORDER, not the exact
-        // figure, so terrain tuning does not fail the build.
-        assert!(
-            uniform > unique / 2,
-            "collapse barely fired: {uniform} uniform vs {unique} unique"
+        // The generated world now authors one material per 1 m block and each such
+        // block IS one 8³ brick, so the collapse fires on every occupied brick and
+        // there are no survivors at all — the same fact
+        // `brickmap_round_trips_generated_world` pins as `occupied_brick_count() == 0`.
+        //
+        // This assertion used to read `uniform > unique / 2`, chosen when the measured
+        // rate was 58.6%. That predicate is VACUOUSLY TRUE once `unique` reaches zero,
+        // so it stopped testing anything the moment the world went to block authoring
+        // and said nothing while it happened. Assert both sides explicitly instead.
+        assert!(uniform > 0, "the collapse did not fire at all");
+        assert_eq!(
+            unique, 0,
+            "{unique} sculpted brick(s) survived. That is not a failure in itself — it \
+             means the world grew sub-block detail — but it invalidates \
+             `brickmap_round_trips_generated_world`'s `occupied_brick_count() == 0` and \
+             the ledger's 1.12 collapse rate, so re-measure both."
         );
 
         // No survivor may be fully solid AND single-material — that is the exact

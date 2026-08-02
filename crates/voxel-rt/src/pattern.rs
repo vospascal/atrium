@@ -309,9 +309,16 @@ impl PatternGenerator {
     /// generator. It is a per-layer marginal cost on a saturated table, not a frame
     /// budget, and it does not transfer to another GPU or another resolution.
     ///
-    /// `flat` measured -0.023 and is recorded as zero: it is at the floor, and a
-    /// negative marginal cost is run-to-run noise rather than a generator that
-    /// makes the frame faster.
+    /// **MEDIAN OF THREE RUNS**, which the first version of this table was not, and
+    /// the difference mattered. A single run spreads +-0.07 ms on the dear rows and
+    /// +-0.02 on the cheap ones — noise that changes no band except at a threshold,
+    /// where it changes the answer. `TileEdge` read 0.041 on the first run and
+    /// 0.065 on the next, i.e. Free and then Cheap, purely from run-to-run drift.
+    /// Take three samples before touching a number here.
+    ///
+    /// `flat` measures within noise of zero (-0.009 / -0.004 / 0.000 across the
+    /// three) and is recorded as zero: it is at the floor, and a negative marginal
+    /// cost is noise rather than a generator that makes the frame faster.
     ///
     /// This doubles as the bake-payoff table. A stage evaluated at voxel rate and
     /// cached returns exactly its own number here, which is why there is nothing to
@@ -320,24 +327,26 @@ impl PatternGenerator {
         match self {
             PatternGenerator::Flat => 0.000,
             PatternGenerator::Checker => 0.000,
-            PatternGenerator::Speckle { .. } => 0.022,
-            PatternGenerator::Wave { .. } => 0.220,
-            PatternGenerator::Simplex { .. } => 0.432,
-            PatternGenerator::Turbulence { .. } => 0.655,
-            PatternGenerator::Ridged { .. } => 0.689,
-            PatternGenerator::Noise { .. } => 0.710,
-            PatternGenerator::Perlin { .. } => 0.952,
-            // Measured 2026-08-02, and the headline of the tessellation arc: the
-            // entire masonry model is FREE. The walk is a floor, a hash and four
-            // min/max, so it lands in the same band as `checker` — and it is what
-            // separates a wall of blocks from a painted slab. The edge costs four
-            // times the tone and is still a twentieth of one noise layer, the `pow`
-            // that sharpens the joint being the whole difference.
-            PatternGenerator::TileTone => 0.010,
-            PatternGenerator::TileEdge { .. } => 0.041,
-            PatternGenerator::Worley => 1.058,
-            PatternGenerator::WorleySmooth => 1.110,
-            PatternGenerator::WorleyEdge => 1.111,
+            PatternGenerator::Speckle { .. } => 0.041,
+            PatternGenerator::Wave { .. } => 0.210,
+            PatternGenerator::Simplex { .. } => 0.383,
+            PatternGenerator::Turbulence { .. } => 0.656,
+            PatternGenerator::Ridged { .. } => 0.656,
+            PatternGenerator::Noise { .. } => 0.661,
+            PatternGenerator::Perlin { .. } => 1.012,
+            // The headline of the tessellation arc: the entire masonry model is
+            // effectively free. The walk is a floor, a hash and four min/max, so the
+            // tone lands in the same band as `checker` — and it is what separates a
+            // wall of blocks from a painted slab. The edge costs roughly twice the
+            // tone and is still a twentieth of one noise layer, the `pow` that
+            // sharpens the joint being the whole difference. The edge is the one row
+            // whose band is not robust: 0.052 median sits just over the 0.05 Free
+            // threshold, so it reads Cheap, but a quiet machine will call it Free.
+            PatternGenerator::TileTone => 0.029,
+            PatternGenerator::TileEdge { .. } => 0.052,
+            PatternGenerator::Worley => 1.003,
+            PatternGenerator::WorleySmooth => 1.114,
+            PatternGenerator::WorleyEdge => 1.076,
         }
     }
 

@@ -122,6 +122,17 @@ settings defaults, the registry or the sweep drift apart.
 
 ## Recorded baseline — Apple M3 Max, 2560x1440, 2026-07-30
 
+> **⚠ STALE BY ~5× AS OF 2026-08-02 — DO NOT COMPARE AGAINST THIS TABLE.**
+> The generated world changed to one material per authored 1 m block, and each such
+> block is exactly one uniform 8³ brick, so the uniform collapse now fires on **100%**
+> of occupied bricks and level-1 descent has disappeared from the island. Section 1
+> `current` now measures **0.915 / 1.472 / 0.968 / 1.020 ms** against the
+> 4.709 / 6.609 / 4.385 / 4.937 below, and scenario B's pixel gate reads **125**
+> differing pixels rather than 19. Nothing regressed and nothing was optimized — it
+> is a different world. **Every section in this file recorded before that change is
+> on the old world and every section after it is on the new one; a full re-record is
+> owed.** Details and the diagnosis in the S3 section at the end.
+
 Commit state: Stage 2 traversal optimization round (branchless `dda_step`,
 chebyshev distance skip; column-ff / descend-ff / any-hit / bit-grid
 defaulted OFF as measured losses). These are the **section 1** (AO off)
@@ -2451,3 +2462,254 @@ claimed as clean here.
 differing pixels on B, 0 on D, `with-descend-ff` 12 — the same known float-tie set
 recorded through E1, E2 and E6. The traversal core is bit-identical with a 256-byte
 material row.
+
+---
+
+## Materials arc S3 — the scratch spill, generator prices, tessellation (M3 Max, 2560x1440, 2026-08-02)
+
+Three things landed together: a **-56% optimization of the pattern path**, a new
+**section 11** that prices every generator, and a new **section 12** that shows what
+each one looks like. All numbers here are scenario C (ground, default sun) at
+2560x1440 on an Apple M3 Max, on the saturated four-layer bench table.
+
+### The optimization — 6.713 -> 2.972 ms of pattern cost
+
+Measured back to back on one tree, so the deltas are the trustworthy part:
+
+| step | DDA pass | pattern cost | delta |
+|---|---|---|---|
+| start (with the anchor fixed) | 8.792 | 6.713 | — |
+| drift index -> if-chain | 7.430 | 5.357 | **-1.36** |
+| stop copying the material row | ~5.5 (contended) | ~3.3 | **-1.9** |
+| fuse three surface loops into one | **5.002** | **2.972** | **-0.51** |
+
+**Pattern cost -56%, whole DDA pass -43%.** The entry cost — the 0 -> 1 layer step
+that S2's verdict C is about — went **5.55 -> 1.32 ms**.
+
+### One root cause wearing three hats: arrays copied by value, then indexed dynamically
+
+Every one of the three wins is the same defect. A **by-value array that is then
+indexed by a non-constant** cannot live in registers, so the backend spills the whole
+thing to thread-local scratch and every access becomes a memory round trip.
+
+1. **`PatternAnimation.drift_velocity`** — an `array<vec4<f32>, 4>` indexed by the
+   loop variable. 64 bytes per invocation, for a value that is almost always zero.
+   Replaced by an if-chain over the four constant indices.
+2. **`let row = materials[material]`** — copied the entire **256-byte** `Material`
+   struct, including its 128-byte `patterns` array, and then indexed the copy.
+   Reading through the storage binding instead (`materials[material].patterns[slot]`)
+   is an ordinary buffer access. **This was the single biggest win**, and it is a
+   one-line change.
+3. **Three separate surface loops** (albedo, roughness, emission), each re-reading the
+   row and re-testing the flag: 12 slot iterations to do 4 slots of work. Now one
+   loop, one row read.
+
+The call site was also evaluating the whole stack **twice** on graph-active
+materials — computing a row-base albedo, discarding it, and recomputing from the
+graph base. Fixed with the fuse.
+
+Operationally: **`let row = big_struct_array[i]` is a performance bug in WGSL**, not a
+readability preference, whenever the struct contains an array the code then indexes.
+Read through the binding.
+
+### Correctness — this optimization changed nothing visible
+
+**All 28 bench PNGs byte-identical to the pre-optimization tree: 0 differing pixels,
+max channel delta 0.** `material-patterns-0-layers` still reads 0 differing pixels
+against `material-flat`, so S2's verdict-B bit-identity survives intact.
+
+The naga full-source validation test earned its keep here: it caught `target` being a
+[WGSL reserved word](https://gpuweb.github.io/gpuweb/wgsl/#reserved-words) before it
+reached a driver.
+
+### Three DOCUMENTED NEGATIVES — measured, rejected, recorded so nobody re-litigates
+
+| hypothesis | measured | verdict |
+|---|---|---|
+| The animation plumbing is the cost. Stub it out entirely | 7.431 vs **7.430** | **0.00 ms.** It was never the animation system |
+| Unused generators cost something; specialise the switch | 1-layer column 6.106 vs **6.140** | **0.00 ms.** Dead switch arms are free — naga and the driver already drop them |
+| Hoisting the four redundant per-layer salt hashes will pay, by analogy with the row-copy win | **0.002 ms** | Reasoning by analogy from a real win produced a non-win. Not implemented |
+
+The third is the instructive one: the row-copy fix was worth 1.9 ms, and the salt
+hoist *looks* like the same shape — redundant work in a loop. It is not. The row copy
+was expensive because of **where the data lived** (scratch), not because it was
+repeated; four extra ALU hashes repeat but never leave registers.
+
+### Section 11 — what each generator costs, one layer deep
+
+New section, and it is not a variant table: every other section sweeps levers, this
+one sweeps a **field of the authored material**. One layer, world frame, 0.5 m period,
+8 texels per voxel, measured as a marginal delta **over the `checker` column**, which
+stands in for everything the layer mechanism costs *around* a generator.
+
+**Median of three runs** — see the stability note below, it matters.
+
+| generator | ms over checker | band |
+|---|---|---|
+| `flat` | 0.000 | free |
+| `checker` | 0.000 | free |
+| `tile-tone` | **0.029** | free |
+| `speckle` | 0.041 | free |
+| `tile-edge` | **0.052** | cheap (boundary — see below) |
+| `wave` | 0.210 | cheap |
+| `simplex` | 0.383 | cheap |
+| `ridged` | 0.656 | moderate |
+| `turbulence` | 0.656 | moderate |
+| `noise` | 0.661 | moderate |
+| `worley-F1` | 1.003 | expensive |
+| `perlin` | 1.012 | expensive |
+| `worley-edge` | 1.076 | expensive |
+| `worley-smooth` | 1.114 | expensive |
+| `warp-noise` (noise + domain warp) | 1.419 | — |
+| `warp-worley` (worley + domain warp) | 1.809 | — |
+| `face-unsalted-4L` / `face-salted-4L` | 3.153 / 3.175 | — |
+
+Three things fall out of it:
+
+- **The domain warp costs about three octaves, not one.** `warp-noise` at 1.419 against
+  `noise` at 0.661 is **+0.758** — the warp evaluates a second full field to perturb
+  the first. An earlier comment in the source claimed it was "the same order as an
+  octave"; that was wrong and is corrected in `pattern.rs`.
+- **The per-face salt is free**: 3.175 vs 3.153 at four layers is 0.7%, inside noise.
+- **This doubles as the bake-payoff table.** A stage evaluated at voxel rate and cached
+  returns exactly its own row here — so there is nothing to win below `wave`, and
+  about a millisecond on each of the Worley three.
+
+#### The bands are only as stable as the run — take three samples
+
+The first version of this table was a single run, and one row's **band** was wrong
+because of it. Spread across three runs is +-0.07 ms on the dear rows and +-0.02 on
+the cheap ones. That changes no band anywhere except at a threshold, where it changes
+the answer:
+
+| run | `tile-edge` | band |
+|---|---|---|
+| 1 | 0.065 | cheap |
+| 2 | 0.052 | cheap |
+| 3 | 0.046 | free |
+
+0.05 is the Free/Cheap boundary, and `tile-edge` sits on it. It is recorded as the
+median (0.052, cheap) with the instability written on the constant. Every other
+generator kept its band across all three runs.
+
+### Tessellation is effectively free, which is the headline of that arc
+
+`tile-tone` at **0.029 ms** lands in the same band as `checker`. The masonry walk is a
+floor, a hash and four min/max — and it is the whole difference between a wall of
+blocks and a painted slab. `tile-edge` costs roughly twice the tone and is still a
+twentieth of one noise layer; the `pow` that sharpens the joint is the entire delta.
+
+### Section 12 — generator swatches
+
+`bench_dda 12` renders one 4x4 m studio wall per generator to
+`target/bench_dda/`, so section 11's prices have a picture beside them. Getting a
+*readable* swatch took three attempts, all the same class of error — the image was
+technically correct and visually useless:
+
+- an 85% mix landed the pattern on near-black;
+- the camera sat on the shadowed face (sun `(0.55, 0.8, 0.35)`, viewing -Z, dot -0.35);
+- a `MixToColor` toward light grey on a grey wall produced almost no contrast.
+
+Final recipe: **`Multiply` blend at full amount, viewed from +Z.**
+
+### Section 9 re-recorded on this tree
+
+| variant | A | B | C | D |
+|---|---|---|---|---|
+| `material-flat` | 2.236 | 3.212 | 2.029 | 2.059 |
+| `material-face-roles` | 2.277 | 3.247 | 2.031 | 2.075 |
+| `material-patterns` | 4.963 | 6.007 | 5.163 | 5.169 |
+| `material-patterns-half-strength` | 4.959 | 5.981 | 5.149 | 5.164 |
+| `material-patterns-1-layer` | 3.748 | 4.709 | 3.499 | 3.503 |
+| `material-patterns-2-layers` | 3.904 | 4.882 | 3.678 | 3.696 |
+| `material-patterns-0-layers` | 2.239 | 3.193 | 2.030 | 2.032 |
+| `material-patterns-octave-lod` | 4.761 | 5.802 | 5.400 | 5.413 |
+
+- **The flag test is still free and still bit-identical.** `0-layers` matches `flat`
+  within 0.1% and at 0 differing pixels in all four scenarios.
+- **The layer slope is still front-loaded** (S2's verdict C). At C: layer 1 costs
+  **+1.470 ms**, layer 2 only **+0.179**, layers 3-4 **+1.485** together.
+- **`MATERIAL_PATTERN_STRENGTH` still costs nothing**: half strength is within 0.3% of
+  full everywhere, while changing 56.8% of the frame's pixels.
+- Pattern cost at C reads **3.134 ms** here against the **2.972** recorded at the end
+  of the optimization above. The gap is run variation plus the material table growing
+  a row (`slate tile`), not a regression — but it is why the optimization's own
+  deltas, measured back to back, are the number to quote.
+
+#### Octave LOD is a split verdict, and the earlier prediction was backwards
+
+| scenario | `material-patterns` | `octave-lod` | delta |
+|---|---|---|---|
+| A top-down | 4.963 | 4.761 | **-0.202** |
+| B top-down low sun | 6.007 | 5.802 | **-0.205** |
+| C ground | 5.163 | 5.400 | **+0.237** |
+| D ground low sun | 5.169 | 5.413 | **+0.244** |
+
+It **helps top-down and costs at ground level** — the opposite of the prediction that
+it would pay most where surfaces are seen at grazing distance. A plausible reading is
+that dropping octaves per-pixel costs more in divergence than it saves in ALU when
+neighbouring pixels disagree about the octave count, which is exactly the ground-level
+case; that is a **hypothesis, not a measurement**. Ships off.
+
+### The section 1 anchor is dead, and it is not this arc's doing
+
+This arc grew `GpuMaterial` from **256 to 320 bytes** (the pattern row went 32 -> 48 to
+carry tessellation), and the S1+S2 section above set the precedent of re-running
+section 1 to answer whether a wider stride costs a cache miss. **That check can no
+longer be made against the recorded baseline**, because the baseline's world no longer
+exists:
+
+| scenario | recorded 2026-07-30 | 2026-08-02 |
+|---|---|---|
+| A top-down | 4.709 | **0.915** |
+| B top-down low sun | 6.609 | **1.472** |
+| C ground | 4.385 | **0.968** |
+| D ground low sun | 4.937 | **1.020** |
+
+The run prints **`0 occupied bricks`**, against the 71,941 the ledger's 1.12 row
+records at a 57.9% collapse rate. That reads like a broken world and is not one:
+`brickmap_round_trips_generated_world` already asserts `occupied_brick_count() == 0`,
+because **one generated world voxel now maps to exactly one uniform 8³ brick**. Every
+occupied brick is fully solid and single-material, the collapse fires on 100% of them,
+and level-1 descent has disappeared from the island entirely. That is where the ~5x
+went.
+
+Consequences, all owed:
+
+- **The headline baseline table at the top of this file is stale by 5x** and needs a
+  full re-record. Every section measured before the lattice change is on a different
+  world than every section measured after it.
+- **The pixel gate moved too.** Scenario B now reads **125** differing pixels against
+  `stage2-baseline`, not the 19 recorded throughout this file, and
+  `with-directional-skip` reads 281. `no-dist-skip` is still bit-identical to
+  `stage2-baseline`, so the traversal core is consistent — the known float-tie set
+  simply got bigger with the new world.
+- **`uniform_bricks_collapse_and_the_survivors_are_all_sculpted` had gone vacuous.**
+  Its `uniform > unique / 2` predicate is trivially true once `unique == 0`, so it said
+  nothing while the world changed underneath it. Now asserts both sides explicitly.
+### The 320-byte row costs nothing — answered by a slope, not by an anchor
+
+With the recorded baseline dead, the stride question was settled the way it should
+have been in the first place: a **controlled same-tree comparison**. `GpuMaterial` was
+temporarily padded **320 -> 384 bytes** (a dummy `[f32; 16]`, mirrored in
+`struct Material`, table 8,960 -> 10,752 bytes) and section 9 re-run — section 9, not
+section 1, because that is where the row read actually dominates. The probe was
+reverted after measuring.
+
+`material-patterns`, per-dispatch median ms:
+
+| scenario | 320 B | 384 B | delta |
+|---|---|---|---|
+| A top-down | 4.963 | 4.926 | **-0.7%** |
+| B top-down low sun | 6.007 | 5.969 | **-0.6%** |
+| C ground | 5.163 | 5.177 | **+0.3%** |
+| D ground low sun | 5.169 | 5.175 | **+0.1%** |
+
+`material-flat` behaves the same way (0.000 / -0.017 / +0.027 / -0.006).
+
+**A further 20% of row width is free, and the deltas do not even share a sign** — two
+scenarios got faster, two slower, all inside the +-1% noise floor. Since +64 bytes on
+top of 320 produces no signal, the earlier +64 that took the row from 256 to 320
+cannot have produced one either. The row width is not a cache-miss concern at this
+table size, and the way to keep it that way is the table size, not the row: 28 rows
+fit in any L1.
