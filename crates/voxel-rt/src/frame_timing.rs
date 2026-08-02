@@ -73,6 +73,29 @@ impl FrameTimings {
     pub fn post_milliseconds(&self) -> Option<f32> {
         self.span_milliseconds[SPAN_POST]
     }
+
+    /// Total GPU time spent on the measured frame work. This deliberately
+    /// excludes swapchain acquisition and presentation, so it remains useful
+    /// when a window system paces a no-vsync surface to the display refresh.
+    ///
+    /// The three spans cover the entire submitted workload: DDA, CAGI, then
+    /// blit and egui. They are submitted to the same queue in that order, so
+    /// their sum is the GPU-side frame budget.
+    pub fn frame_milliseconds(&self) -> Option<f32> {
+        let [Some(dda), Some(cagi), Some(post)] = self.span_milliseconds else {
+            return None;
+        };
+        Some(dda + cagi + post)
+    }
+
+    /// The GPU-only frame-rate ceiling implied by [`Self::frame_milliseconds`].
+    /// This is not a present rate: a 120 Hz display still presents at most 120
+    /// complete frames a second, even if the GPU can render more.
+    pub fn gpu_frames_per_second(&self) -> Option<f32> {
+        self.frame_milliseconds()
+            .filter(|milliseconds| *milliseconds > 0.0)
+            .map(|milliseconds| 1_000.0 / milliseconds)
+    }
 }
 
 pub struct GpuFrameTimers {
@@ -239,6 +262,21 @@ impl GpuFrameTimers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_fps_uses_all_measured_passes_and_never_a_partial_frame() {
+        let complete = FrameTimings {
+            span_milliseconds: [Some(2.0), Some(1.0), Some(2.0)],
+        };
+        assert_eq!(complete.frame_milliseconds(), Some(5.0));
+        assert_eq!(complete.gpu_frames_per_second(), Some(200.0));
+
+        let incomplete = FrameTimings {
+            span_milliseconds: [Some(2.0), None, Some(2.0)],
+        };
+        assert_eq!(incomplete.frame_milliseconds(), None);
+        assert_eq!(incomplete.gpu_frames_per_second(), None);
+    }
 
     /// Graceful degradation: a device created WITHOUT the timestamp feature
     /// must yield `None`, never panic. Skips when no GPU adapter exists.

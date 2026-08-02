@@ -1,5 +1,5 @@
-//! egui overlay: stats panel (window/render sizes, moving-average frame time,
-//! FPS, per-pass GPU times), the vsync lever, a collapsible sun-position
+//! egui overlay: stats panel (window/render sizes, moving-average frame-loop
+//! FPS, GPU-only FPS, per-pass GPU times), the vsync lever, a collapsible sun-position
 //! section, the E1c **Quality** section — preset selector plus every lever
 //! grouped by subsystem, each carrying its measured verdict as hover text so
 //! "why is this off?" is answerable in-app — and a **Debug tools** section for
@@ -44,7 +44,110 @@ use crate::world_edit::ClearanceUpdateMode;
 use crate::world_host::WorldEditStats;
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
+/// Timestamp readback lands a few frames late, so a moderate window keeps the
+/// GPU number readable without hiding a sustained regression.
+const GPU_FRAME_TIME_SAMPLE_COUNT: usize = 60;
+const FPS_GRAPH_MAX_WIDTH: f32 = 240.0;
+const FPS_GRAPH_HEIGHT: f32 = 60.0;
 const GRAPH_NODE_CONTROL_ZOOM: f32 = 0.95;
+
+const FRAME_LOOP_GRAPH_COLOR: egui::Color32 = egui::Color32::from_rgb(117, 180, 255);
+const GPU_GRAPH_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 220, 155);
+
+fn push_rolling_sample(samples: &mut VecDeque<f32>, capacity: usize, sample: f32) {
+    if samples.len() == capacity {
+        samples.pop_front();
+    }
+    samples.push_back(sample);
+}
+
+fn rolling_average(samples: &VecDeque<f32>) -> Option<f32> {
+    (!samples.is_empty()).then(|| samples.iter().sum::<f32>() / samples.len() as f32)
+}
+
+/// A compact history chart without a separate plotting dependency. The source
+/// samples remain frame times, so changing the graph never changes the moving
+/// averages shown beside it.
+fn draw_fps_history(
+    ui: &mut egui::Ui,
+    frame_time_samples: &VecDeque<f32>,
+    gpu_frame_time_samples: &VecDeque<f32>,
+) {
+    let frame_loop_fps: Vec<f32> = frame_time_samples
+        .iter()
+        .filter(|seconds| **seconds > 0.0)
+        .map(|seconds| 1.0 / seconds)
+        .collect();
+    let gpu_fps: Vec<f32> = gpu_frame_time_samples
+        .iter()
+        .filter(|milliseconds| **milliseconds > 0.0)
+        .map(|milliseconds| 1_000.0 / milliseconds)
+        .collect();
+    let peak_fps = frame_loop_fps
+        .iter()
+        .chain(gpu_fps.iter())
+        .copied()
+        .fold(60.0_f32, f32::max);
+    // Hold a readable 30-FPS grid step for the whole history window rather
+    // than rescaling every sample as a line wiggles.
+    let graph_ceiling_fps = (peak_fps / 30.0).ceil() * 30.0;
+
+    ui.horizontal(|ui| {
+        ui.colored_label(FRAME_LOOP_GRAPH_COLOR, "— frame loop");
+        ui.colored_label(GPU_GRAPH_COLOR, "— GPU work");
+        ui.label(format!("history · 0–{graph_ceiling_fps:.0} FPS"));
+    });
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(
+            ui.available_width().min(FPS_GRAPH_MAX_WIDTH),
+            FPS_GRAPH_HEIGHT,
+        ),
+        egui::Sense::hover(),
+    );
+    let rect = response.rect;
+    let plot = rect.shrink2(egui::vec2(4.0, 4.0));
+    painter.rect_filled(plot, 3.0, ui.visuals().faint_bg_color);
+
+    for fraction in [0.0, 0.5, 1.0] {
+        let y = egui::lerp(plot.bottom()..=plot.top(), fraction);
+        painter.line_segment(
+            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+    }
+
+    draw_fps_history_line(
+        &painter,
+        plot,
+        &frame_loop_fps,
+        graph_ceiling_fps,
+        FRAME_LOOP_GRAPH_COLOR,
+    );
+    draw_fps_history_line(&painter, plot, &gpu_fps, graph_ceiling_fps, GPU_GRAPH_COLOR);
+}
+
+fn draw_fps_history_line(
+    painter: &egui::Painter,
+    plot: egui::Rect,
+    samples: &[f32],
+    ceiling_fps: f32,
+    color: egui::Color32,
+) {
+    if samples.len() < 2 {
+        return;
+    }
+    let last_index = (samples.len() - 1) as f32;
+    let points = samples
+        .iter()
+        .enumerate()
+        .map(|(index, fps)| {
+            let x = egui::remap(index as f32, 0.0..=last_index, plot.left()..=plot.right());
+            let y = egui::remap_clamp(*fps, 0.0..=ceiling_fps, plot.bottom()..=plot.top());
+            egui::pos2(x, y)
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+}
 
 /// Read-only per-frame display data for the stats panel.
 pub struct OverlayFrameData {
@@ -103,6 +206,12 @@ pub struct Overlay {
     winit_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
     frame_time_samples: VecDeque<f32>,
+    /// Completed GPU-frame timings only — never frame-loop timing. A rolling
+    /// average makes the asynchronous timestamp readback useful at a glance.
+    gpu_frame_time_samples: VecDeque<f32>,
+    /// `collect` returns its most recent result on frames where no new map has
+    /// landed. Keep it from entering the smoothing window more than once.
+    last_gpu_frame_time_milliseconds: Option<f32>,
 }
 
 impl Overlay {
@@ -131,6 +240,8 @@ impl Overlay {
             winit_state,
             renderer,
             frame_time_samples: VecDeque::with_capacity(FRAME_TIME_SAMPLE_COUNT),
+            gpu_frame_time_samples: VecDeque::with_capacity(GPU_FRAME_TIME_SAMPLE_COUNT),
+            last_gpu_frame_time_milliseconds: None,
         }
     }
 
@@ -157,10 +268,26 @@ impl Overlay {
     }
 
     pub fn record_frame_time(&mut self, frame_time_seconds: f32) {
-        if self.frame_time_samples.len() == FRAME_TIME_SAMPLE_COUNT {
-            self.frame_time_samples.pop_front();
+        push_rolling_sample(
+            &mut self.frame_time_samples,
+            FRAME_TIME_SAMPLE_COUNT,
+            frame_time_seconds,
+        );
+    }
+
+    fn record_gpu_frame_time(&mut self, gpu_frame_time_milliseconds: Option<f32>) {
+        let Some(gpu_frame_time_milliseconds) = gpu_frame_time_milliseconds else {
+            return;
+        };
+        if self.last_gpu_frame_time_milliseconds == Some(gpu_frame_time_milliseconds) {
+            return;
         }
-        self.frame_time_samples.push_back(frame_time_seconds);
+        self.last_gpu_frame_time_milliseconds = Some(gpu_frame_time_milliseconds);
+        push_rolling_sample(
+            &mut self.gpu_frame_time_samples,
+            GPU_FRAME_TIME_SAMPLE_COUNT,
+            gpu_frame_time_milliseconds,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -180,17 +307,27 @@ impl Overlay {
         studio_assets: &mut StudioAssetPanelState,
         graph_editor: &mut GraphEditorState,
     ) {
-        let average_frame_time_seconds = if self.frame_time_samples.is_empty() {
-            0.0
-        } else {
-            self.frame_time_samples.iter().sum::<f32>() / self.frame_time_samples.len() as f32
-        };
+        self.record_gpu_frame_time(
+            frame_data
+                .gpu_timings
+                .as_ref()
+                .and_then(FrameTimings::frame_milliseconds),
+        );
+        let average_frame_time_seconds = rolling_average(&self.frame_time_samples).unwrap_or(0.0);
         let frame_time_milliseconds = average_frame_time_seconds * 1000.0;
-        let frames_per_second = if average_frame_time_seconds > 0.0 {
+        // This measures how quickly the application enters its frame function,
+        // which often tracks the display while FIFO is active. It is *not*
+        // OS-confirmed scanout timing: presentation is asynchronous. GPU FPS
+        // below is the separate answer to "how fast can the renderer do this
+        // frame's work?".
+        let frame_loop_frames_per_second = if average_frame_time_seconds > 0.0 {
             1.0 / average_frame_time_seconds
         } else {
             0.0
         };
+        let gpu_frames_per_second = rolling_average(&self.gpu_frame_time_samples)
+            .filter(|milliseconds| *milliseconds > 0.0)
+            .map(|milliseconds| 1_000.0 / milliseconds);
 
         // Surface the Retina trap: on macOS the swapchain is PHYSICAL pixels,
         // which can be 4x the logical window area at scale factor 2.0.
@@ -218,8 +355,32 @@ impl Overlay {
                             frame_data.render_resolution.0, frame_data.render_resolution.1
                         ));
                         ui.label(format!(
-                            "{frame_time_milliseconds:.2} ms  |  {frames_per_second:.0} FPS"
+                            "frame loop {frame_time_milliseconds:.2} ms  |  {frame_loop_frames_per_second:.0} FPS"
                         ));
+                        match gpu_frames_per_second {
+                            Some(frames_per_second) => {
+                                ui.label(format!(
+                                    "GPU work (60-sample avg)  |  {frames_per_second:.0} FPS"
+                                ))
+                                    .on_hover_text(
+                                        "The measured DDA + CAGI + blit/UI GPU work, excluding \
+                                         swapchain acquisition and presentation. This shows renderer \
+                                         throughput even when macOS paces a window to its display.",
+                                    );
+                            }
+                            None => {
+                                ui.label(if frame_data.gpu_timings.is_some() {
+                                    "GPU work  |  waiting for timestamp data"
+                                } else {
+                                    "GPU work  |  timestamp queries unavailable"
+                                });
+                            }
+                        }
+                        draw_fps_history(
+                            ui,
+                            &self.frame_time_samples,
+                            &self.gpu_frame_time_samples,
+                        );
                         match &frame_data.gpu_timings {
                             Some(timings) => {
                                 ui.label(format!(
@@ -263,6 +424,11 @@ impl Overlay {
                         ));
                         draw_movement_readout(ui, &frame_data.movement);
                         ui.checkbox(vsync_enabled, "VSync");
+                        ui.label(if *vsync_enabled {
+                            "VSync on: Frame loop normally tracks the display."
+                        } else {
+                            "VSync off: Compare GPU FPS; the frame loop can run ahead of the GPU."
+                        });
                         draw_studio_assets_section(ui, studio_assets);
                         draw_quality_section(ui, quality);
                         ui.label("Material authoring is defined by nodes in Graph Studio.");
@@ -512,8 +678,11 @@ fn draw_studio_assets_section(ui: &mut egui::Ui, state: &mut StudioAssetPanelSta
         });
         ui.checkbox(&mut state.autosave_enabled, "Autosave after 2 seconds idle")
             .on_hover_text(
-                "Writes the same portable project assets after authored material or quality values stop changing. \
-                 The first manual save enables this automatically.",
+                "OFF by default, and saving does not turn it on. Writes the same portable project \
+                 assets after authored material or quality values stop changing.\n\n\
+                 Leave it off if anything else edits the project files — a script, an editor, \
+                 another tool. Autosave writes from memory, so it will overwrite whatever \
+                 arrived on disk since the project was loaded.",
             );
         if state.recovery_available {
             ui.separator();
@@ -521,14 +690,18 @@ fn draw_studio_assets_section(ui: &mut egui::Ui, state: &mut StudioAssetPanelSta
             ui.horizontal(|ui| {
                 if ui
                     .button("Restore recovery")
-                    .on_hover_text("Restores the complete pre-commit snapshot, then saves it normally.")
+                    .on_hover_text(
+                        "Restores the complete pre-commit snapshot, then saves it normally.",
+                    )
                     .clicked()
                 {
                     state.restore_recovery_requested = true;
                 }
                 if ui
                     .button("Discard recovery")
-                    .on_hover_text("Deletes only the interrupted-save journal; normal project assets remain.")
+                    .on_hover_text(
+                        "Deletes only the interrupted-save journal; normal project assets remain.",
+                    )
                     .clicked()
                 {
                     state.discard_recovery_requested = true;
@@ -3107,5 +3280,22 @@ fn format_pass_milliseconds(milliseconds: Option<f32>) -> String {
     match milliseconds {
         Some(value) => format!("{value:.2} ms"),
         None => "-- ms".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rolling_samples_keep_the_newest_values() {
+        let mut samples = VecDeque::new();
+        for sample in [1.0, 2.0, 3.0] {
+            push_rolling_sample(&mut samples, 2, sample);
+        }
+
+        assert_eq!(samples, VecDeque::from([2.0, 3.0]));
+        assert_eq!(rolling_average(&samples), Some(2.5));
+        assert_eq!(rolling_average(&VecDeque::new()), None);
     }
 }
