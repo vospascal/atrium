@@ -194,7 +194,10 @@ pub struct BrickmapMetadata {
     /// Highest occupied brick Y anywhere in the world ([`EMPTY_COLUMN`] when
     /// no bricks exist). Upward rays above this height can never hit.
     pub max_occupied_brick_y: u32,
-    /// Explicit tail padding to the 16-byte uniform stride.
+    /// Explicit tail padding. Not an array-stride concern — this uniform is a
+    /// lone struct — but WGSL rounds a struct's size up to its own alignment,
+    /// which the `vec3<u32>` members make 16. Rust would otherwise stop at 36
+    /// and create a buffer the shader rejects as too small.
     pub _pad: [u32; 3],
 }
 

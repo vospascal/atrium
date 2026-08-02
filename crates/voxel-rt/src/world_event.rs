@@ -69,11 +69,21 @@ pub struct EventSpec {
 /// CPU material backend evaluates, so a preview and a rendered pixel cannot
 /// drift apart.
 ///
-/// **Three explicit 16-byte rows.** The natural field set totals 40 bytes under
-/// `#[repr(C)]`, but a WGSL uniform-array element is 16-byte aligned and
-/// therefore strides 48 — the Rust upload would desynchronise from element 1
-/// onward. The padding is a named field, the discipline `GpuMaterial` and
-/// `GpuPatternLayer` already follow.
+/// **Three explicit 16-byte rows.** The natural field set is 44 bytes at align 4
+/// under `#[repr(C)]`; the WGSL struct is 48, because in the uniform address
+/// space array elements stride to a multiple of 16. Without the named pad the
+/// Rust upload desynchronises from element 1 onward. Same discipline as
+/// `GpuMaterial` and `GpuPatternLayer`.
+///
+/// The rule is [WGSL § Address Space Layout
+/// Constraints](https://gpuweb.github.io/gpuweb/wgsl/#address-space-layout-constraints),
+/// and it is worth reading rather than recalling: it applies only when the
+/// `uniform_buffer_standard_layout` language extension is ABSENT (with it,
+/// uniform buffers lay out like storage ones). It is optional, so we never
+/// assume it and always pad explicitly. The same section carries the companion
+/// rule that catches people out — a struct-typed member must be followed by at
+/// least `roundUp(16, SizeOf(S))` bytes, which is a minimum SPACING requirement,
+/// not an alignment one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuWorldEvent {
@@ -436,9 +446,10 @@ mod tests {
         assert_eq!(field.active()[0].strength, 1.0);
     }
 
-    /// The Rust upload must match the WGSL uniform-array stride, which is 48
-    /// because the struct is 16-byte aligned in WGSL. A 40-byte Rust struct
-    /// would desynchronise from element 1 onward.
+    /// The Rust upload must match the WGSL uniform-array stride of 48. The
+    /// natural `#[repr(C)]` field set is 44 at align 4, so without `_pad_row2`
+    /// every element from 1 onward would be read shifted. Spec rule and its
+    /// conditions are on the type's doc comment.
     #[test]
     fn gpu_event_matches_the_wgsl_uniform_array_stride() {
         assert_eq!(std::mem::size_of::<GpuWorldEvent>(), 48);

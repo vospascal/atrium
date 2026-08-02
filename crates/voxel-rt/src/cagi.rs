@@ -507,11 +507,12 @@ impl CagiGrid {
 /// this row's index in [`CELL_EVENT_RESPONSE_MASK`] modulates its stored
 /// emission as an event comes and goes.
 ///
-/// THREE EXPLICIT 16-BYTE ROWS, the discipline
-/// [`crate::world_event::GpuWorldEvent`] already follows. The natural field set
-/// is 40 bytes under `#[repr(C)]`, but a WGSL uniform-array element is 16-byte
-/// aligned and therefore strides 48, so the upload would desynchronise from
-/// element 1 onward.
+/// THREE EXPLICIT 16-BYTE ROWS, the layout discipline
+/// [`crate::world_event::GpuWorldEvent`] documents. Unlike that type this one
+/// needs no pad field: three `vec3` + trailing scalar rows are already 48 bytes
+/// under `#[repr(C)]`, which is exactly the WGSL uniform-array stride. The rows
+/// are a contract to keep, not a mismatch to patch — putting each scalar in the
+/// `w` its `vec3` leaves free is what makes the padding unnecessary.
 ///
 /// `invert` is deliberately absent. The two scales already carry it: an inverted
 /// sensor simply produces a resting value ABOVE its triggered one, and the CA's
@@ -574,10 +575,12 @@ unsafe impl bytemuck::Pod for GpuEventResponse {}
 /// | 32     | `event_responses`        | `array<CagiEventResponse, 8>` |
 ///
 /// No padding between the two halves, and that is worth stating because it is
-/// exactly the thing one adds defensively and gets wrong: a `GpuEventResponse`
-/// is 16-byte aligned, so WGSL rounds the array's start up to a multiple of 16 —
-/// and the geometry half already ends at exactly 32. A pad here would move the
-/// Rust array to 40 while the shader kept reading it at 32.
+/// exactly the thing one adds defensively and gets wrong. A uniform-space array
+/// is aligned to `roundUp(16, AlignOf(element))` ([WGSL § Address Space Layout
+/// Constraints](https://gpuweb.github.io/gpuweb/wgsl/#address-space-layout-constraints)),
+/// which is 16 here — and the geometry half already ends at exactly 32, so it
+/// needs nothing. A defensive `[u32; 2]` would move the Rust array to 40 while
+/// the shader kept reading it at 32.
 ///
 /// Per-cell attributes and E5b emission stay in the storage buffer at binding
 /// 13. The response table is here instead because it is indexed by three bits of
