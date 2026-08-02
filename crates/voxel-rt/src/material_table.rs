@@ -39,12 +39,21 @@
 //! with a story for those predicates, not just a combo box.
 
 use crate::material::{GpuMaterial, Material, MATERIALS, MATERIAL_COUNT};
-use crate::material_graph::{MaterialGraphProgram, MaterialSampleContext};
+use crate::material_graph::{EmissionEventResponse, MaterialGraphProgram, MaterialSampleContext};
 
 /// The live material table plus its upload gate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialTable {
     rows: Vec<Material>,
+    /// S3b — per row, how its graph's emission answers the world event field.
+    ///
+    /// A SIDE table rather than a column on [`Material`], deliberately. It is
+    /// derived from a compiled graph, not authored: nothing saves it, nothing
+    /// edits it, and the panel must keep showing the row's RESTING emission
+    /// while the light volume injects the triggered one. A column would have
+    /// made those two the same number and put a derived value in the file
+    /// format. Indexed by material id, like `rows`.
+    emission_event_responses: Vec<Option<EmissionEventResponse>>,
     dirty: bool,
 }
 
@@ -54,6 +63,7 @@ impl Default for MaterialTable {
     fn default() -> Self {
         Self {
             rows: MATERIALS.to_vec(),
+            emission_event_responses: vec![None; MATERIAL_COUNT],
             dirty: false,
         }
     }
@@ -83,12 +93,14 @@ impl MaterialTable {
         Some(row)
     }
 
-    /// Restore one row to what the binary was compiled with.
+    /// Restore one row to what the binary was compiled with. The compiled table
+    /// is graph-free, so the row's S3b event response goes with it.
     pub fn reset_row(&mut self, material: u8) {
         let Some(default) = MATERIALS.get(material as usize) else {
             return;
         };
-        if self.rows[material as usize] != *default {
+        let response = self.emission_event_responses[material as usize].take();
+        if self.rows[material as usize] != *default || response.is_some() {
             self.rows[material as usize] = *default;
             self.dirty = true;
         }
@@ -96,7 +108,12 @@ impl MaterialTable {
 
     /// Restore the whole table to the compiled defaults.
     pub fn reset_all(&mut self) {
-        if self.rows != MATERIALS {
+        let had_responses = self
+            .emission_event_responses
+            .iter()
+            .any(std::option::Option::is_some);
+        self.emission_event_responses = vec![None; MATERIAL_COUNT];
+        if self.rows != MATERIALS || had_responses {
             self.rows = MATERIALS.to_vec();
             self.dirty = true;
         }
@@ -141,7 +158,12 @@ impl MaterialTable {
     /// material edit. 416 bytes and `Copy`, so it rides in a `VoxelEdit` across the
     /// world-thread boundary — see [`crate::cagi::MaterialAttributes`].
     pub fn cagi_attributes(&self) -> crate::cagi::MaterialAttributes {
-        crate::cagi::material_attribute_table(&self.rows)
+        crate::cagi::material_attribute_table(&self.rows, &self.emission_event_responses)
+    }
+
+    /// S3b — how each row's emission answers events, in material-id order.
+    pub fn emission_event_responses(&self) -> &[Option<EmissionEventResponse>] {
+        &self.emission_event_responses
     }
 
     pub fn gpu_rows(&self) -> Vec<GpuMaterial> {
@@ -157,7 +179,7 @@ impl MaterialTable {
         &mut self,
         material: u8,
         program: &MaterialGraphProgram,
-        context: MaterialSampleContext,
+        context: MaterialSampleContext<'_>,
     ) -> bool {
         let Some(row) = self.rows.get_mut(material as usize) else {
             return false;
@@ -174,6 +196,11 @@ impl MaterialTable {
         row.roughness = sample.roughness.clamp(0.0, 1.0);
         let emission = [sample.emission[0], sample.emission[1], sample.emission[2]];
         row.emission = (emission.iter().any(|value| *value != 0.0)).then_some(emission);
+        // S3b: the same seam, one tier down. `row.emission` is what a pixel falls
+        // back to and what the panel shows; the response is what the light
+        // volume needs in order to follow the surface instead of freezing at
+        // whatever `context` happened to sample.
+        self.emission_event_responses[material as usize] = program.emission_event_response(context);
         self.dirty = true;
         true
     }
@@ -288,10 +315,7 @@ mod tests {
         assert!(table.apply_graph_sample(
             stone,
             &program,
-            crate::material_graph::MaterialSampleContext {
-                position: [0.0; 3],
-                normal: [0.0, 1.0, 0.0],
-            },
+            crate::material_graph::MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
         ));
         assert_eq!(table.row(stone).unwrap().albedo, [0.9, 0.1, 0.2]);
         assert_eq!(table.row(stone).unwrap().roughness, 0.2);

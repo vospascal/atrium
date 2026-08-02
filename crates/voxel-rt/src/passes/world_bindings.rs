@@ -22,9 +22,16 @@
 //! | 8  | storage  per-XZ-column max occupied brick Y |
 //! | 9  | storage  1-bit-per-brick occupancy grid |
 //! | 10 | storage  chebyshev skip-distance bytes |
+//! | 16 | uniform  the world event field |
 //!
 //! Bindings 0 and 6 are deliberately absent: they belong to the shading pass
 //! (camera, output texture) and stay free for a consumer that has no camera.
+//!
+//! S3b moved the event field here from the shading pass. It lived there while a
+//! material's event sensor was the only consumer; once the CA pass had to gate a
+//! cell's injected emission on the same events, "shared world state" became the
+//! honest description — and the alternative, a second buffer written with the
+//! same bytes, is two chances for the surface and the light it casts to disagree.
 //!
 //! E2 made these buffers WRITABLE from the CPU side (`COPY_DST`): a voxel edit
 //! patches the words it touched ([`WorldBindings::apply_array_write`]) instead of
@@ -39,6 +46,14 @@ use crate::brickmap::{Brickmap, BrickmapArray, BrickmapMetadata};
 use crate::lighting::LightingUniform;
 use crate::material::{GpuMaterial, MATERIAL_COUNT};
 use crate::world_edit::ArrayWrite;
+use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
+
+/// Where the world event field binds in group 0.
+///
+/// 16 is the first free index: `world.wgsl` owns 1-5, 7-10 and this,
+/// `cagi_volume.wgsl` owns 11, 13 and 14, `cagi.wgsl` owns 12, and the shading
+/// pass owns 0 (camera) and 6 (the output texture).
+pub const WORLD_EVENT_BINDING: u32 = 16;
 
 pub struct WorldBindings {
     metadata_uniform_buffer: wgpu::Buffer,
@@ -51,6 +66,7 @@ pub struct WorldBindings {
     brick_occupancy_bits_buffer: wgpu::Buffer,
     skip_distance_buffer: wgpu::Buffer,
     bound_buffer: wgpu::Buffer,
+    world_event_buffer: wgpu::Buffer,
 }
 
 impl WorldBindings {
@@ -112,6 +128,12 @@ impl WorldBindings {
                 "world brick directional bounds",
                 &brickmap.brick_bound_words,
             ),
+            world_event_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("world events"),
+                size: (std::mem::size_of::<GpuWorldEvent>() * MAX_WORLD_EVENTS) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
         }
     }
 
@@ -138,16 +160,17 @@ impl WorldBindings {
             count: None,
         };
         vec![
-            uniform_entry(1),  // brickmap metadata
-            storage_entry(2),  // brick indices
-            storage_entry(3),  // occupancy words
-            storage_entry(4),  // material words
-            storage_entry(5),  // material table
-            uniform_entry(7),  // lighting
-            storage_entry(8),  // per-XZ-column max occupied brick Y
-            storage_entry(9),  // 1-bit-per-brick occupancy grid
-            storage_entry(10), // chebyshev skip-distance bytes
-            storage_entry(15), // AADF directional bounds (11-14 are CAGI's)
+            uniform_entry(1),                   // brickmap metadata
+            storage_entry(2),                   // brick indices
+            storage_entry(3),                   // occupancy words
+            storage_entry(4),                   // material words
+            storage_entry(5),                   // material table
+            uniform_entry(7),                   // lighting
+            storage_entry(8),                   // per-XZ-column max occupied brick Y
+            storage_entry(9),                   // 1-bit-per-brick occupancy grid
+            storage_entry(10),                  // chebyshev skip-distance bytes
+            storage_entry(15),                  // AADF directional bounds (11-14 are CAGI's)
+            uniform_entry(WORLD_EVENT_BINDING), // the world event field
         ]
     }
 
@@ -170,6 +193,7 @@ impl WorldBindings {
             entry(9, &self.brick_occupancy_bits_buffer),
             entry(10, &self.skip_distance_buffer),
             entry(15, &self.bound_buffer),
+            entry(WORLD_EVENT_BINDING, &self.world_event_buffer),
         ]
     }
 
@@ -240,6 +264,7 @@ impl WorldBindings {
             + self.brick_occupancy_bits_buffer.size()
             + self.skip_distance_buffer.size()
             + self.bound_buffer.size()
+            + self.world_event_buffer.size()
     }
 
     /// Upload this frame's lighting uniform. Written ONCE per frame by the frame
@@ -251,6 +276,25 @@ impl WorldBindings {
             &self.lighting_uniform_buffer,
             0,
             bytemuck::bytes_of(lighting_uniform),
+        );
+    }
+
+    /// Upload this frame's event field. Written ONCE per frame beside the
+    /// lighting uniform, for the same reason: the CA pass gates a cell's
+    /// injected emission on exactly the events the shading pass senses on the
+    /// surface, and two writes inside one frame would be two chances to disagree.
+    ///
+    /// Unconditional rather than behind a dirty flag: 768 bytes, and the flag
+    /// would occupy more of a cache line than the write it saves.
+    pub fn write_world_events(
+        &self,
+        queue: &wgpu::Queue,
+        world_events: &[GpuWorldEvent; MAX_WORLD_EVENTS],
+    ) {
+        queue.write_buffer(
+            &self.world_event_buffer,
+            0,
+            bytemuck::cast_slice(world_events.as_slice()),
         );
     }
 }

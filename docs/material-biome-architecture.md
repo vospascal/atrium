@@ -131,6 +131,23 @@ order, or which neighboring chunk generated first.
 Adding a material node requires a declaration and its backend execution. No UI
 branch or creation-default branch is permitted.
 
+An **animated** node adds one obligation to that: the shared helper it lowers to
+must exist exactly once, in `shaders/graph_prelude.wgsl`, and be mirrored in
+`material_graph.rs` for the CPU backend. The prelude is the same file the DDA
+source concatenates and the compiler embeds as a standalone validation prefix,
+so the two cannot drift into a silent CPU/GPU mismatch. A node that reads host
+state the prelude does not already stub — the clock, the event field, the voxel
+size — must extend `GRAPH_HOST_STUBS` alongside it, or a compiled graph will
+validate on its own and fail once injected.
+
+Animation reaches the packed pattern stack through the graph's RETURN VALUE, not
+through the material row: a layer's `animation_gain` and `drift_velocity`
+sockets lower into per-slot entries the generated function hands back, indexed by
+the layer's position in the surface chain **after disabled layers are skipped**,
+which is the same rule `project_pattern_stack` uses to assign upload slots. A
+per-layer animation field on the row would have grown `GpuPatternLayer` and made
+every animated value a table upload.
+
 Adding a biome normally requires only a biome selector and references to
 existing profiles. New palettes, surface profiles, modifiers, feature sets,
 audio profiles, and animation profiles are reusable independently.

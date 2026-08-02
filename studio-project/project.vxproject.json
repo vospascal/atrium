@@ -185,16 +185,8 @@
       "path": "graphs/material-23.vgraph.json"
     },
     {
-      "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
-      "path": "graphs/material-24.vgraph.json"
-    },
-    {
       "id": "vx-000000000000000018c7af1e2d5de190-0000000000000049",
       "path": "graphs/material-25.vgraph.json"
-    },
-    {
-      "id": "vx-000000000000000018c7af1e2e9f8568-000000000000004d",
-      "path": "graphs/material-26.vgraph.json"
     },
     {
       "id": "vx-000000000000000018c7af1e328e1518-0000000000000059",
@@ -225,12 +217,20 @@
       "path": "graphs/material-04.vgraph.json"
     },
     {
+      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
+      "path": "graphs/material-01.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c7af1e2e9f8568-000000000000004d",
+      "path": "graphs/material-26.vgraph.json"
+    },
+    {
       "id": "vx-000000000000000018c7af1e33d85fc8-000000000000005d",
       "path": "graphs/material-06.vgraph.json"
     },
     {
-      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
-      "path": "graphs/material-01.vgraph.json"
+      "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
+      "path": "graphs/material-24.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",

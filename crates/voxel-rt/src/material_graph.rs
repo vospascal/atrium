@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::animation_clock::{fract, AnimationClockSample, EPOCH_SECONDS};
 use crate::graph::{
     Diagnostic, DiagnosticSeverity, FieldTarget, GraphAsset, GraphCommand, GraphHistory, GraphKind,
     InputPin, LinkId, LinkRecord, MaterialNodeOperation, NodeId, NodeOperation, NodeRecord,
@@ -19,6 +20,7 @@ use crate::material_graph_layers::{
 };
 use crate::pattern::MAX_PATTERN_LAYERS;
 use crate::studio_assets::AssetId;
+use crate::world_event::{GpuWorldEvent, MAX_EVENT_LIFETIME_SECONDS};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueType {
@@ -28,6 +30,129 @@ pub enum ValueType {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ValueId(pub usize);
+
+/// The oscillator's waveform. There is deliberately no `Square`: it would be
+/// `Pulse` at duty 0.5, i.e. a second name for one behaviour.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OscillatorWave {
+    Sine,
+    Triangle,
+    Saw,
+    Pulse,
+    /// Sample-and-hold: one random level per cycle, HELD until the next. It
+    /// snaps, which is what reads as a failing lamp; interpolated noise over
+    /// time is just a wobblier sine.
+    Flicker,
+}
+
+impl OscillatorWave {
+    fn shader_value(self) -> u32 {
+        match self {
+            Self::Sine => 0,
+            Self::Triangle => 1,
+            Self::Saw => 2,
+            Self::Pulse => 3,
+            Self::Flicker => 4,
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "sine" => Self::Sine,
+            "triangle" => Self::Triangle,
+            "saw" => Self::Saw,
+            "pulse" => Self::Pulse,
+            "flicker" => Self::Flicker,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether two blocks of one material beat together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhaseSync {
+    Global,
+    /// Offset per authored ONE-METRE block, not per traversal voxel.
+    PerVoxel,
+    PerFace,
+    PerMaterial,
+}
+
+impl PhaseSync {
+    fn shader_value(self) -> u32 {
+        match self {
+            Self::Global => 0,
+            Self::PerVoxel => 1,
+            Self::PerFace => 2,
+            Self::PerMaterial => 3,
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "global" => Self::Global,
+            "per_voxel" => Self::PerVoxel,
+            "per_face" => Self::PerFace,
+            "per_material" => Self::PerMaterial,
+            _ => return None,
+        })
+    }
+}
+
+/// How a sensor's nearness falls off across its radius.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SensorFalloff {
+    Smoothstep,
+    Linear,
+    InverseSquare,
+    Step,
+}
+
+impl SensorFalloff {
+    /// The `WORLD_EVENT_FALLOFF_*` value `world.wgsl` switches on. Public
+    /// because the light volume's per-material response table carries it too.
+    pub fn shader_value(self) -> u32 {
+        match self {
+            Self::Smoothstep => 0,
+            Self::Linear => 1,
+            Self::InverseSquare => 2,
+            Self::Step => 3,
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "smoothstep" => Self::Smoothstep,
+            "linear" => Self::Linear,
+            "inverse_square" => Self::InverseSquare,
+            "step" => Self::Step,
+            _ => return None,
+        })
+    }
+}
+
+/// Which of the sensor's three outputs an instruction selects. All three come
+/// from ONE winning event, so they stay mutually consistent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SensorOutput {
+    Signal,
+    Nearness,
+    Envelope,
+}
+
+/// A sensor's authored configuration. Every value is a property rather than a
+/// socket, which is what lets the `hold + release` budget be validated at
+/// compile time against [`MAX_EVENT_LIFETIME_SECONDS`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EventSensorConfig {
+    pub channel: u32,
+    pub radius_meters: f32,
+    pub falloff: SensorFalloff,
+    pub attack_seconds: f32,
+    pub hold_seconds: f32,
+    pub release_seconds: f32,
+    pub invert: bool,
+}
 
 #[derive(Clone, Debug)]
 pub enum MaterialInstruction {
@@ -110,9 +235,177 @@ pub enum MaterialInstruction {
         vector: ValueId,
         axis: u8,
     },
+    MultiplyScalar(ValueId, ValueId),
+    /// Speed and two angles to a velocity vector.
+    Direction {
+        speed: ValueId,
+        azimuth_degrees: ValueId,
+        elevation_degrees: ValueId,
+    },
+    /// Monotone seconds since start.
+    Time,
+    Oscillator {
+        wave: OscillatorWave,
+        sync: PhaseSync,
+        seed: u32,
+        rate_hz: ValueId,
+        phase: ValueId,
+        duty: ValueId,
+        low: ValueId,
+        high: ValueId,
+    },
+    EventSensor {
+        config: EventSensorConfig,
+    },
 }
 
 impl MaterialInstruction {
+    /// Every value this instruction reads. The one place the operand shape of
+    /// each variant is written down, so a dataflow walk cannot silently miss an
+    /// edge when a variant gains an input — the compiler names the new field.
+    fn for_each_operand(&self, mut visit: impl FnMut(ValueId)) {
+        match *self {
+            Self::Scalar(_)
+            | Self::Color(_)
+            | Self::Vector3(_)
+            | Self::Position
+            | Self::Normal
+            | Self::Time
+            | Self::EventSensor { .. } => {}
+            Self::PassthroughScalar(value)
+            | Self::PassthroughColor(value)
+            | Self::PassthroughVector(value)
+            | Self::NormalizeVector(value)
+            | Self::Component { vector: value, .. } => visit(value),
+            Self::AddScalar(a, b)
+            | Self::VectorAdd(a, b)
+            | Self::DotVector(a, b)
+            | Self::MultiplyScalar(a, b) => {
+                visit(a);
+                visit(b);
+            }
+            Self::RemapScalar {
+                value,
+                from_min,
+                from_max,
+                to_min,
+                to_max,
+                clamp: _,
+            } => {
+                visit(value);
+                visit(from_min);
+                visit(from_max);
+                visit(to_min);
+                visit(to_max);
+            }
+            Self::MixColor { a, b, factor } => {
+                visit(a);
+                visit(b);
+                visit(factor);
+            }
+            Self::ColorScale { color, strength } => {
+                visit(color);
+                visit(strength);
+            }
+            Self::FaceColor {
+                base,
+                top,
+                side,
+                bottom,
+            }
+            | Self::FaceScalar {
+                base,
+                top,
+                side,
+                bottom,
+            } => {
+                visit(base);
+                visit(top);
+                visit(side);
+                visit(bottom);
+            }
+            Self::ColorRamp {
+                factor,
+                color_a,
+                color_b,
+                position_a,
+                position_b,
+            } => {
+                visit(factor);
+                visit(color_a);
+                visit(color_b);
+                visit(position_a);
+                visit(position_b);
+            }
+            Self::ClampScalar {
+                value,
+                minimum,
+                maximum,
+            } => {
+                visit(value);
+                visit(minimum);
+                visit(maximum);
+            }
+            Self::Noise {
+                position,
+                scale,
+                detail,
+                roughness,
+            }
+            | Self::NoiseColor {
+                position,
+                scale,
+                detail,
+                roughness,
+            } => {
+                visit(position);
+                visit(scale);
+                visit(detail);
+                visit(roughness);
+            }
+            Self::Fbm {
+                position,
+                scale,
+                octaves,
+                roughness,
+            } => {
+                visit(position);
+                visit(scale);
+                visit(octaves);
+                visit(roughness);
+            }
+            Self::VectorScale { vector, scale } => {
+                visit(vector);
+                visit(scale);
+            }
+            Self::Direction {
+                speed,
+                azimuth_degrees,
+                elevation_degrees,
+            } => {
+                visit(speed);
+                visit(azimuth_degrees);
+                visit(elevation_degrees);
+            }
+            Self::Oscillator {
+                wave: _,
+                sync: _,
+                seed: _,
+                rate_hz,
+                phase,
+                duty,
+                low,
+                high,
+            } => {
+                visit(rate_hz);
+                visit(phase);
+                visit(duty);
+                visit(low);
+                visit(high);
+            }
+        }
+    }
+
     fn value_type(&self) -> ValueType {
         match self {
             Self::Scalar(_)
@@ -124,6 +417,9 @@ impl MaterialInstruction {
             | Self::DotVector(..)
             | Self::Component { .. }
             | Self::FaceScalar { .. }
+            | Self::MultiplyScalar(..)
+            | Self::Time
+            | Self::Oscillator { .. }
             | Self::PassthroughScalar(_) => ValueType::Scalar,
             Self::Color(_)
             | Self::MixColor { .. }
@@ -137,18 +433,65 @@ impl MaterialInstruction {
             | Self::Vector3(_)
             | Self::VectorAdd(..)
             | Self::VectorScale { .. }
+            | Self::Direction { .. }
+            | Self::EventSensor { .. }
             | Self::NormalizeVector(_)
             | Self::PassthroughVector(_) => ValueType::Vector3,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialOutput {
     pub base_color: ValueId,
     pub roughness: ValueId,
     pub emission: ValueId,
+    /// S3 — one entry per ACTIVE pattern slot, in surface-chain order, matching
+    /// the slot order the material row uploads. Disabled layers occupy no slot,
+    /// exactly as `project_pattern_stack` skips them, so the indices line up
+    /// with `materials[m].patterns[slot]` on the GPU.
+    pub layer_animation: Vec<LayerAnimation>,
 }
+
+/// S3b — how a compiled program's EMISSION answers the world event field,
+/// reduced to the two things the light volume can act on: which sensor gates it,
+/// and what the emission is at each end of that sensor's range.
+///
+/// ## Why two endpoints rather than the graph itself
+///
+/// The CA cannot run a material graph — it has one thread per cell and no
+/// surface, no face, no pattern coordinate. What it *can* do is evaluate one
+/// sensor per cell and interpolate. So a graph of arbitrary shape between the
+/// sensor and the emission output is reduced to the straight line through its
+/// two endpoints. That is an approximation, and a named one: a graph that is
+/// non-monotone in between (emission peaking at half signal, say) reaches the
+/// volume as the linear blend, while the SURFACE still shades the real curve.
+///
+/// It is well inside the error the volume already carries — half-metre cells, a
+/// quarter-fill solidity threshold, one representative voxel per cell — and it
+/// buys the property that matters: the room brightens and dims with the wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmissionEventResponse {
+    /// The first sensor on the emission output's dataflow path. A graph with
+    /// several is reduced to this one; the others hold at their resting value.
+    pub sensor: EventSensorConfig,
+    /// Emission with no event in range.
+    pub resting: [f32; 3],
+    /// Emission with a saturating event of this sensor's channel at the sample
+    /// point.
+    pub triggered: [f32; 3],
+}
+
+/// The two animation values a pattern layer's sockets supply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerAnimation {
+    pub gain: ValueId,
+    pub drift_velocity: ValueId,
+}
+
+/// Deterministic samples per oscillator period when averaging a response
+/// endpoint. See [`MaterialGraphProgram::emission_oscillator_window`].
+const EMISSION_RESPONSE_PHASES: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct MaterialGraphProgram {
@@ -159,58 +502,51 @@ pub struct MaterialGraphProgram {
     pub wgsl: String,
 }
 
-const GRAPH_MATERIAL_STRUCT: &str = concat!(
-    "struct GraphMaterial { base_color: vec4<f32>, roughness: f32, emission: vec4<f32>, graph_active: bool, face_color_active: bool, face_roughness_active: bool, };\n",
-    "\nfn graph_hash3(point: vec3<f32>) -> f32 {\n",
-    "    return fract(sin(dot(point, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453);\n",
-    "}\n\n",
-    "fn graph_value_noise(point: vec3<f32>) -> f32 {\n",
-    "    let cell = floor(point);\n",
-    "    let local = fract(point);\n",
-    "    let blend = local * local * (vec3<f32>(3.0, 3.0, 3.0) - 2.0 * local);\n",
-    "    let n000 = graph_hash3(cell + vec3<f32>(0.0, 0.0, 0.0));\n",
-    "    let n100 = graph_hash3(cell + vec3<f32>(1.0, 0.0, 0.0));\n",
-    "    let n010 = graph_hash3(cell + vec3<f32>(0.0, 1.0, 0.0));\n",
-    "    let n110 = graph_hash3(cell + vec3<f32>(1.0, 1.0, 0.0));\n",
-    "    let n001 = graph_hash3(cell + vec3<f32>(0.0, 0.0, 1.0));\n",
-    "    let n101 = graph_hash3(cell + vec3<f32>(1.0, 0.0, 1.0));\n",
-    "    let n011 = graph_hash3(cell + vec3<f32>(0.0, 1.0, 1.0));\n",
-    "    let n111 = graph_hash3(cell + vec3<f32>(1.0, 1.0, 1.0));\n",
-    "    let x00 = mix(n000, n100, blend.x);\n",
-    "    let x10 = mix(n010, n110, blend.x);\n",
-    "    let x01 = mix(n001, n101, blend.x);\n",
-    "    let x11 = mix(n011, n111, blend.x);\n",
-    "    return mix(mix(x00, x10, blend.y), mix(x01, x11, blend.y), blend.z);\n",
-    "}\n\n",
-    "fn graph_fbm(point: vec3<f32>, octaves: f32, roughness: f32) -> f32 {\n",
-    "    var total = 0.0;\n",
-    "    var amplitude = 1.0;\n",
-    "    var frequency = 1.0;\n",
-    "    var normalisation = 0.0;\n",
-    "    for (var octave = 0u; octave < 8u; octave = octave + 1u) {\n",
-    "        let enabled = select(0.0, 1.0, f32(octave) < max(octaves, 1.0));\n",
-    "        total = total + graph_value_noise(point * frequency) * amplitude * enabled;\n",
-    "        normalisation = normalisation + amplitude * enabled;\n",
-    "        frequency = frequency * 2.0;\n",
-    "        amplitude = amplitude * clamp(roughness, 0.0, 1.0);\n",
-    "    }\n",
-    "    return select(0.0, total / normalisation, normalisation > 0.0);\n",
-    "}\n\n",
-    "fn graph_safe_normalize(vector: vec3<f32>) -> vec3<f32> {\n",
-    "    let magnitude = length(vector);\n",
-    "    return select(vec3<f32>(0.0, 1.0, 0.0), vector / magnitude, magnitude > 0.000001);\n",
-    "}\n\n",
-    "fn graph_face_color(normal: vec3<f32>, base: vec4<f32>, top: vec4<f32>, side: vec4<f32>, bottom: vec4<f32>) -> vec4<f32> {\n",
-    "    if (normal.y > 0.5) { return top; }\n",
-    "    if (normal.y < -0.5) { return bottom; }\n",
-    "    return side;\n",
-    "}\n\n",
-    "fn graph_face_scalar(normal: vec3<f32>, base: f32, top: f32, side: f32, bottom: f32) -> f32 {\n",
-    "    if (normal.y > 0.5) { return top; }\n",
-    "    if (normal.y < -0.5) { return bottom; }\n",
-    "    return side;\n",
-    "}\n"
+/// The prefix every generated program carries: the graph ABI plus the shared
+/// helpers, taken from the SAME file the DDA source concatenates.
+///
+/// It was a hand-maintained duplicate of `shaders/graph_prelude.wgsl` until S3;
+/// the two would have had to be edited in lockstep forever, and a silent
+/// divergence between them is a CPU/GPU mismatch that no test would name.
+/// [`MaterialGraphProgram::wgsl_function`] strips this prefix before injecting a
+/// function into the DDA source, where the real definitions already exist.
+const GRAPH_PRELUDE: &str = include_str!("../shaders/graph_prelude.wgsl");
+
+/// Host declarations the prelude reads, restated so a compiled program can be
+/// validated by `naga` on its own — without the brickmap, the lighting uniform
+/// or the event field the renderer supplies.
+///
+/// These are stubs, and they are stripped along with the prelude, so they never
+/// reach the GPU. Their only contract is to match the real declarations' SHAPE:
+/// if one drifts, standalone validation passes and the injected build fails,
+/// which is exactly the failure the assembled-source test at the bottom of this
+/// module exists to catch.
+const GRAPH_HOST_STUBS: &str = concat!(
+    "// ---- validation-only stubs; stripped before injection ----\n",
+    "const BRICK_SIZE: f32 = 8.0;\n",
+    "struct Lighting { animation_params: vec4<f32>, event_params: vec4<f32>, };\n",
+    "var<private> lighting: Lighting;\n",
+    "struct BrickmapMeta { voxel_size_meters: f32, };\n",
+    "var<private> brickmap: BrickmapMeta;\n",
+    "struct PatternAnimation { gain: vec4<f32>, drift_velocity: array<vec4<f32>, 4>, };\n",
+    "fn pattern_animation_identity() -> PatternAnimation {\n",
+    "    return PatternAnimation(vec4<f32>(1.0), array<vec4<f32>, 4>(\n",
+    "        vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)));\n",
+    "}\n",
+    "const ANIMATION_EPOCH_SECONDS: f32 = 64.0;\n",
+    // S3b moved the event field and its sensing into `world.wgsl`, shared with
+    // the CA pass. The prelude no longer names the buffer at all — only this
+    // one function — so the stub shrank to the seam that actually crosses.
+    "fn world_event_sense(point_meters: vec3<f32>, channel: u32,\n",
+    "    radius_meters: f32, falloff: u32, attack_seconds: f32,\n",
+    "    hold_seconds: f32, release_seconds: f32) -> vec3<f32> {\n",
+    "    return vec3<f32>(0.0);\n",
+    "}\n",
 );
+
+fn graph_program_prefix() -> String {
+    format!("{GRAPH_HOST_STUBS}{GRAPH_PRELUDE}")
+}
 
 /// Runtime activation is deliberately separate from editing and compilation.
 /// A failed candidate leaves the last working program installed.
@@ -235,6 +571,10 @@ impl MaterialGraphShaderSet {
 
     pub fn len(&self) -> usize {
         self.programs.len()
+    }
+
+    pub fn program(&self, material_slot: u8) -> Option<&MaterialGraphProgram> {
+        self.programs.get(&material_slot)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -282,10 +622,41 @@ impl MaterialGraphLibrary {
     }
 }
 
+/// Everything a material program is evaluated against.
+///
+/// It carries the RAW inputs — the clock and the live event list — rather than
+/// a precomputed answer, because a graph may hold several sensors on different
+/// channels with different radii and envelopes, and no single scalar can stand
+/// for all of them. Each sensor instruction evaluates its own configuration,
+/// exactly as the shader does.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MaterialSampleContext {
+pub struct MaterialSampleContext<'a> {
+    /// TRAVERSAL VOXEL units — the same units the shader's `position` argument
+    /// carries, so both backends do identical arithmetic. Parity is the point:
+    /// the CPU backend exists to be comparable with the generated WGSL, so it
+    /// takes the shader's arguments and makes the shader's conversions rather
+    /// than a pre-converted variant.
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    /// Traversal voxel size in metres, for the conversions that need it.
+    pub voxel_size_meters: f32,
+    pub clock: AnimationClockSample,
+    /// The live events, in upload order — the same slice the GPU sees.
+    pub events: &'a [GpuWorldEvent],
+}
+
+impl MaterialSampleContext<'_> {
+    /// The still, empty world: a frozen clock and no events. What a preview,
+    /// a parity test and the material table's representative GI sample all use.
+    pub fn still(position: [f32; 3], normal: [f32; 3]) -> Self {
+        Self {
+            position,
+            normal,
+            voxel_size_meters: voxel_core::world::VOXEL_SIZE,
+            clock: AnimationClockSample::FROZEN,
+            events: &[],
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialSample {
@@ -525,6 +896,206 @@ pub fn graph_from_material(material: &Material) -> GraphAsset {
     graph
 }
 
+/// Chris Wellons' lowbias32 — the mirror of `graph_hash_u32` in
+/// `shaders/graph_prelude.wgsl`. Rust's `wrapping_mul` and WGSL's `u32`
+/// multiply are both mod 2^32 and `>>` is logical in both, so the two agree bit
+/// for bit. `pattern.rs` picked this hash for the same reason.
+fn graph_hash_u32(value: u32) -> u32 {
+    let mut hashed = value;
+    hashed ^= hashed >> 16;
+    hashed = hashed.wrapping_mul(0x7feb_352d);
+    hashed ^= hashed >> 15;
+    hashed = hashed.wrapping_mul(0x846c_a68b);
+    hashed ^= hashed >> 16;
+    hashed
+}
+
+fn graph_hash_to_unit(value: u32) -> f32 {
+    (graph_hash_u32(value) >> 8) as f32 / 16_777_216.0
+}
+
+/// Mirrors `graph_direction` in `shaders/graph_prelude.wgsl`.
+///
+/// Azimuth around the vertical axis, 0 along +X and 90 along +Z; elevation
+/// above horizontal. The same meaning `SunSettings` gives those words, reused
+/// so there is one definition of an angle pair in the codebase.
+fn graph_direction(speed: f32, azimuth_degrees: f32, elevation_degrees: f32) -> [f32; 3] {
+    let azimuth = azimuth_degrees.to_radians();
+    let elevation = elevation_degrees.to_radians();
+    let (sin_elevation, cos_elevation) = elevation.sin_cos();
+    let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+    [
+        cos_elevation * cos_azimuth * speed,
+        sin_elevation * speed,
+        cos_elevation * sin_azimuth * speed,
+    ]
+}
+
+/// Detail cells per authored one-metre block. Mirrors `BRICK_SIZE` in
+/// `shaders/world.wgsl`.
+const GRAPH_BRICK_SIZE: f32 = 8.0;
+
+/// Mirrors `graph_phase_offset`. `position` is in traversal voxel units, so
+/// `PerVoxel` divides by the brick size first — hashing the raw coordinate
+/// would de-sync each 12.5 cm detail cell instead of each authored block.
+fn graph_phase_offset(sync: PhaseSync, seed: u32, position: [f32; 3], normal: [f32; 3]) -> f32 {
+    match sync {
+        PhaseSync::Global => 0.0,
+        // The golden-ratio conjugate, written to the SAME number of digits as
+        // the WGSL literal so both parse to the identical f32. Successive seeds
+        // land far apart in phase rather than marching in a visible progression.
+        PhaseSync::PerMaterial => fract(seed as f32 * 0.618_034),
+        PhaseSync::PerVoxel | PhaseSync::PerFace => {
+            let block = position.map(|axis| (axis / GRAPH_BRICK_SIZE).floor() as i32);
+            let mut mixed = (block[0] as u32).wrapping_mul(0x27d4_eb2d)
+                ^ (block[1] as u32).wrapping_mul(0x9e37_79b9)
+                ^ (block[2] as u32).wrapping_mul(0x85eb_ca6b)
+                ^ seed.wrapping_mul(0xc2b2_ae35);
+            if sync == PhaseSync::PerFace {
+                let face = if normal[1].abs() > 0.5 {
+                    if normal[1] > 0.0 {
+                        3
+                    } else {
+                        2
+                    }
+                } else if normal[0].abs() > 0.5 {
+                    if normal[0] > 0.0 {
+                        1
+                    } else {
+                        0
+                    }
+                } else if normal[2] > 0.0 {
+                    5
+                } else {
+                    4
+                };
+                mixed ^= (face as u32 + 1).wrapping_mul(0x1656_67b1);
+            }
+            graph_hash_to_unit(mixed)
+        }
+    }
+}
+
+/// Mirrors `graph_wave`. Returns `[0, 1]` before the low/high remap.
+fn graph_wave(wave: OscillatorWave, phase: f32, duty: f32, salt: u32) -> f32 {
+    let cycle = fract(phase);
+    match wave {
+        OscillatorWave::Triangle => 1.0 - (cycle * 2.0 - 1.0).abs(),
+        OscillatorWave::Saw => cycle,
+        OscillatorWave::Pulse => {
+            if cycle < duty.clamp(0.0, 1.0) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        OscillatorWave::Flicker => {
+            graph_hash_to_unit((phase.floor() as i32) as u32 ^ salt ^ 0x9e37_79b9)
+        }
+        OscillatorWave::Sine => 0.5 - 0.5 * (cycle * std::f32::consts::TAU).cos(),
+    }
+}
+
+/// Mirrors `world_event_falloff`.
+pub fn world_event_falloff(kind: SensorFalloff, normalised_distance: f32) -> f32 {
+    let t = normalised_distance.clamp(0.0, 1.0);
+    match kind {
+        SensorFalloff::Linear => 1.0 - t,
+        SensorFalloff::InverseSquare => {
+            let falloff = 1.0 / (1.0 + 8.0 * t * t);
+            let edge = 1.0 / 9.0;
+            ((falloff - edge) / (1.0 - edge)).clamp(0.0, 1.0)
+        }
+        SensorFalloff::Step => {
+            if t < 1.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        SensorFalloff::Smoothstep => {
+            let smooth = 1.0 - t;
+            smooth * smooth * (3.0 - 2.0 * smooth)
+        }
+    }
+}
+
+/// Mirrors `world_event_ramp`.
+fn world_event_ramp(value: f32, length_seconds: f32) -> f32 {
+    if length_seconds <= 0.0 {
+        return if value >= 0.0 { 1.0 } else { 0.0 };
+    }
+    (value / length_seconds).clamp(0.0, 1.0)
+}
+
+/// Mirrors `world_event_envelope`.
+///
+/// Attack and release are MULTIPLIED, not switched between: an event that opens
+/// and closes inside one frame then ramps up and down at once and yields a
+/// smooth shortened blip rather than a step.
+fn world_event_envelope(
+    event: &GpuWorldEvent,
+    clock: AnimationClockSample,
+    config: &EventSensorConfig,
+) -> f32 {
+    let attack_factor = world_event_ramp(event.elapsed_since_start(clock), config.attack_seconds);
+    if event.is_open() {
+        return attack_factor;
+    }
+    let since_end = event.elapsed_since_end(clock);
+    let release_factor =
+        1.0 - world_event_ramp(since_end - config.hold_seconds, config.release_seconds);
+    attack_factor * release_factor
+}
+
+/// Mirrors `world_event_sense` in `world.wgsl`. Returns
+/// `(signal, nearness, envelope)`, all three from ONE winning event so they
+/// describe a state that actually existed.
+///
+/// Takes a point in METRES and the raw field, not a `MaterialSampleContext`,
+/// because the light volume senses the same field from a cell centre and there
+/// is no surface, no normal and no pattern coordinate there. One definition,
+/// two tiers — exactly the split the WGSL side makes.
+///
+/// `invert` is NOT applied here: it belongs to the sensor node, and the volume's
+/// response carries the inversion in its two scales instead.
+pub fn sense_world_events(
+    config: &EventSensorConfig,
+    point_meters: [f32; 3],
+    clock: AnimationClockSample,
+    events: &[GpuWorldEvent],
+) -> (f32, f32, f32) {
+    let mut best = (0.0_f32, 0.0_f32, 0.0_f32);
+    let mut found = false;
+    for event in events {
+        if event.channel != config.channel {
+            continue;
+        }
+        let reach = config.radius_meters.min(event.radius_meters);
+        if reach <= 0.0 {
+            continue;
+        }
+        let offset = [
+            event.position_meters[0] - point_meters[0],
+            event.position_meters[1] - point_meters[1],
+            event.position_meters[2] - point_meters[2],
+        ];
+        let distance_squared =
+            offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2];
+        if distance_squared >= reach * reach {
+            continue;
+        }
+        let nearness = world_event_falloff(config.falloff, distance_squared.sqrt() / reach);
+        let envelope = world_event_envelope(event, clock, config);
+        let signal = nearness * envelope * event.strength.clamp(0.0, 1.0);
+        if !found || signal > best.0 {
+            best = (signal, nearness, envelope);
+            found = true;
+        }
+    }
+    best
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RuntimeValue {
     Scalar(f32),
@@ -539,12 +1110,221 @@ impl MaterialGraphProgram {
     /// graphs.
     pub fn wgsl_function(&self, name: &str) -> String {
         self.wgsl
-            .strip_prefix(GRAPH_MATERIAL_STRUCT)
+            .strip_prefix(&graph_program_prefix())
             .unwrap_or(&self.wgsl)
             .replacen("fn graph_material(", &format!("fn {name}("), 1)
     }
 
-    pub fn evaluate(&self, context: MaterialSampleContext) -> MaterialSample {
+    pub fn evaluate(&self, context: MaterialSampleContext<'_>) -> MaterialSample {
+        let values = self.run(context);
+        MaterialSample {
+            base_color: values[self.output.base_color.0].color(),
+            roughness: values[self.output.roughness.0].scalar(),
+            emission: values[self.output.emission.0].color(),
+        }
+    }
+
+    /// S3b — how this program's emission answers events, or `None` when it does
+    /// not answer them at all.
+    ///
+    /// `None` is decided by BEHAVIOUR, not by topology: the program is evaluated
+    /// once with an empty field and once with a saturating event, and a graph
+    /// whose emission comes out identical does not get a response even if it
+    /// holds a sensor. A sensor wired only into base colour is exactly that case,
+    /// and the light volume has only seven response slots to spend.
+    ///
+    /// The probe event sits AT the sample point with the sensor's own radius and
+    /// full strength, started one epoch ago so any authored attack has completed.
+    /// The clock is `context`'s, unchanged, so oscillators read the same value in
+    /// both evaluations and cannot pollute the comparison.
+    pub fn emission_event_response(
+        &self,
+        context: MaterialSampleContext<'_>,
+    ) -> Option<EmissionEventResponse> {
+        let sensor = self.emission_event_sensor()?;
+        let probe = [GpuWorldEvent {
+            position_meters: [
+                context.position[0] * context.voxel_size_meters,
+                context.position[1] * context.voxel_size_meters,
+                context.position[2] * context.voxel_size_meters,
+            ],
+            radius_meters: sensor.radius_meters,
+            started_epoch: context.clock.epoch - 1.0,
+            started_remainder_seconds: context.clock.remainder_seconds,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: sensor.channel,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        }];
+        let window = self.emission_oscillator_window(&self.emission_reachable());
+        let endpoint = |events: &[GpuWorldEvent]| -> [f32; 3] {
+            let Some((period_seconds, phases)) = window else {
+                let emission = self
+                    .evaluate(MaterialSampleContext { events, ..context })
+                    .emission;
+                return [emission[0], emission[1], emission[2]];
+            };
+            let mut total = [0.0_f64; 3];
+            for phase in 0..phases {
+                let seconds = context.clock.remainder_seconds
+                    + period_seconds * (phase as f32 + 0.5) / phases as f32;
+                let epochs = (seconds / EPOCH_SECONDS).floor();
+                let emission = self
+                    .evaluate(MaterialSampleContext {
+                        events,
+                        clock: AnimationClockSample {
+                            epoch: context.clock.epoch + epochs,
+                            remainder_seconds: seconds - epochs * EPOCH_SECONDS,
+                        },
+                        ..context
+                    })
+                    .emission;
+                for (channel, total) in total.iter_mut().enumerate() {
+                    *total += f64::from(emission[channel]);
+                }
+            }
+            std::array::from_fn(|channel| (total[channel] / phases as f64) as f32)
+        };
+        let resting = endpoint(&[]);
+        let triggered = endpoint(&probe);
+        if resting == triggered {
+            return None;
+        }
+        Some(EmissionEventResponse {
+            sensor,
+            resting,
+            triggered,
+        })
+    }
+
+    /// The sole event sensor on the emission output's dataflow path.
+    ///
+    /// A reachability walk rather than a scan of every instruction: a sensor
+    /// that drives base colour or a pattern drift must not claim one of the
+    /// volume's response slots, and only the edges say which output it feeds.
+    /// Multiple reachable sensors deliberately return `None`: the volume has
+    /// one response index per cell and cannot faithfully choose an arbitrary
+    /// lowering-order sensor while the surface responds to both.
+    fn emission_event_sensor(&self) -> Option<EventSensorConfig> {
+        let reached = self.emission_reachable();
+        let mut sensors =
+            self.instructions
+                .iter()
+                .zip(&reached)
+                .filter_map(|(instruction, &reached)| match instruction {
+                    MaterialInstruction::EventSensor { config } if reached => Some(*config),
+                    _ => None,
+                });
+        let sensor = sensors.next()?;
+        sensors.next().is_none().then_some(sensor)
+    }
+
+    /// Which values the emission output actually depends on.
+    fn emission_reachable(&self) -> Vec<bool> {
+        let mut reached = vec![false; self.instructions.len()];
+        let mut pending = vec![self.output.emission];
+        while let Some(value) = pending.pop() {
+            if reached[value.0] {
+                continue;
+            }
+            reached[value.0] = true;
+            self.instructions[value.0].for_each_operand(|operand| pending.push(operand));
+        }
+        reached
+    }
+
+    /// The window an endpoint must be AVERAGED over, or `None` when emission
+    /// holds no oscillator and one sample is the whole answer.
+    ///
+    /// ## Why an average, and why this was a real defect
+    ///
+    /// An endpoint sampled at one instant reports the oscillator at whatever
+    /// phase that instant happens to be. `MaterialSampleContext::still` freezes
+    /// the clock at zero, and a sine at phase 0 sits at its TROUGH — so the
+    /// authored glow block, whose surface swings 0.45..1.25, handed the light
+    /// volume a flat 0.45 and lit the room at 56% of what the block looked like.
+    /// Not a rounding error: a visible mismatch between an emitter and its light.
+    ///
+    /// The mean is the honest stand-in. The CA cannot follow a 1.4 Hz pulse — it
+    /// has no clock and no oscillator — so the only question is WHICH constant it
+    /// holds, and the time-average of the surface is the one that conserves the
+    /// light leaving it.
+    ///
+    /// Returns `(period, phases)`:
+    ///
+    /// * **period** — one cycle of the SLOWEST reachable oscillator, so the sweep
+    ///   covers the longest thing present. A rate that is not a constant (an
+    ///   oscillator driving another oscillator's rate) falls back to 1 Hz: one
+    ///   period of a plausible rate still beats one arbitrary instant. Genuinely
+    ///   incommensurate rates are not covered by any single period, and that
+    ///   limit is inherent rather than a shortcut taken here.
+    /// * **phases** — [`EMISSION_RESPONSE_PHASES`], raised for a narrow pulse. A
+    ///   `duty` of 0.05 occupies a twentieth of the period, and 16 evenly spaced
+    ///   samples would miss it entirely and report the emitter dark.
+    fn emission_oscillator_window(&self, reached: &[bool]) -> Option<(f32, usize)> {
+        let constant = |value: ValueId| match self.instructions[value.0] {
+            MaterialInstruction::Scalar(scalar) => Some(scalar),
+            _ => None,
+        };
+        let mut slowest_period_seconds: Option<f32> = None;
+        let mut phases = EMISSION_RESPONSE_PHASES;
+        for (instruction, _) in self
+            .instructions
+            .iter()
+            .zip(reached)
+            .filter(|(_, reached)| **reached)
+        {
+            let MaterialInstruction::Oscillator {
+                wave,
+                rate_hz,
+                duty,
+                ..
+            } = *instruction
+            else {
+                continue;
+            };
+            let period_seconds = constant(rate_hz)
+                .filter(|rate| *rate > 0.0)
+                .map_or(1.0, |rate| 1.0 / rate);
+            slowest_period_seconds = Some(
+                slowest_period_seconds
+                    .map_or(period_seconds, |slowest: f32| slowest.max(period_seconds)),
+            );
+            if wave == OscillatorWave::Pulse {
+                if let Some(duty) = constant(duty).filter(|duty| *duty > 0.0) {
+                    phases = phases.max((4.0 / duty).ceil() as usize);
+                }
+            }
+        }
+        slowest_period_seconds.map(|period_seconds| (period_seconds, phases))
+    }
+
+    /// The per-slot animation values this program produces, in the same slot
+    /// order the material row uploads its pattern layers.
+    ///
+    /// The pattern reference evaluator takes these directly, which is what lets
+    /// a CPU consumer reproduce an animated surface without re-deriving how a
+    /// gain or a drift was authored — it may be a constant, an oscillator, or a
+    /// direction node, and none of that is its business.
+    pub fn evaluate_layer_animation(
+        &self,
+        context: MaterialSampleContext<'_>,
+    ) -> Vec<crate::pattern::LayerAnimationSample> {
+        let values = self.run(context);
+        self.output
+            .layer_animation
+            .iter()
+            .map(|animation| crate::pattern::LayerAnimationSample {
+                gain: values[animation.gain.0].scalar(),
+                drift_velocity: values[animation.drift_velocity.0].vector(),
+                time_seconds: context.clock.monotone_seconds(),
+            })
+            .collect()
+    }
+
+    fn run(&self, context: MaterialSampleContext<'_>) -> Vec<RuntimeValue> {
         let mut values: Vec<RuntimeValue> = Vec::with_capacity(self.instructions.len());
         for instruction in &self.instructions {
             let value = match *instruction {
@@ -684,6 +1464,56 @@ impl MaterialGraphProgram {
                 MaterialInstruction::PassthroughScalar(value) => values[value.0],
                 MaterialInstruction::PassthroughColor(value) => values[value.0],
                 MaterialInstruction::PassthroughVector(value) => values[value.0],
+                MaterialInstruction::MultiplyScalar(a, b) => {
+                    RuntimeValue::Scalar(values[a.0].scalar() * values[b.0].scalar())
+                }
+                MaterialInstruction::Direction {
+                    speed,
+                    azimuth_degrees,
+                    elevation_degrees,
+                } => RuntimeValue::Vector3(graph_direction(
+                    values[speed.0].scalar(),
+                    values[azimuth_degrees.0].scalar(),
+                    values[elevation_degrees.0].scalar(),
+                )),
+                MaterialInstruction::Time => RuntimeValue::Scalar(context.clock.monotone_seconds()),
+                MaterialInstruction::Oscillator {
+                    wave,
+                    sync,
+                    seed,
+                    rate_hz,
+                    phase,
+                    duty,
+                    low,
+                    high,
+                } => {
+                    let rate_hz = values[rate_hz.0].scalar();
+                    let sync_offset =
+                        graph_phase_offset(sync, seed, context.position, context.normal);
+                    let total_phase = context.clock.oscillator_phase(rate_hz)
+                        + values[phase.0].scalar()
+                        + sync_offset;
+                    let shape = graph_wave(wave, total_phase, values[duty.0].scalar(), seed);
+                    let low = values[low.0].scalar();
+                    let high = values[high.0].scalar();
+                    RuntimeValue::Scalar(low + (high - low) * shape)
+                }
+                MaterialInstruction::EventSensor { config } => {
+                    let (signal, nearness, envelope) = sense_world_events(
+                        &config,
+                        context
+                            .position
+                            .map(|axis| axis * context.voxel_size_meters),
+                        context.clock,
+                        context.events,
+                    );
+                    // Invert applies to the SIGNAL only. Nearness and envelope
+                    // keep their literal meanings so they stay usable as
+                    // diagnostics — and so the volume's two scales, which are
+                    // where inversion lives one tier down, cannot double-apply it.
+                    let signal = if config.invert { 1.0 - signal } else { signal };
+                    RuntimeValue::Vector3([signal, nearness, envelope])
+                }
                 MaterialInstruction::Position => RuntimeValue::Vector3(context.position),
                 MaterialInstruction::Normal => RuntimeValue::Vector3(context.normal),
                 MaterialInstruction::VectorAdd(a, b) => {
@@ -713,11 +1543,7 @@ impl MaterialGraphProgram {
             };
             values.push(value);
         }
-        MaterialSample {
-            base_color: values[self.output.base_color.0].color(),
-            roughness: values[self.output.roughness.0].scalar(),
-            emission: values[self.output.emission.0].color(),
-        }
+        values
     }
 }
 
@@ -849,16 +1675,41 @@ pub fn compile(
         registry,
         values: Vec::new(),
         cache: BTreeMap::new(),
+        event_sensors: BTreeMap::new(),
     };
+    let base_color = lowerer.input(&surface_chain.surface, "base_color")?;
+    let roughness = lowerer.input(&surface_chain.surface, "roughness")?;
+    let emission = lowerer.input(&surface_chain.surface, "emission")?;
+    // Slot order must match the uploaded row, and a DISABLED layer occupies no
+    // slot — `project_pattern_stack` skips it — so this walk skips it too. Any
+    // other rule here would silently animate the wrong layer.
+    let mut layer_animation = Vec::new();
+    for layer_id in &surface_chain.layers {
+        if !layer_is_enabled(graph, layer_id) {
+            continue;
+        }
+        if layer_animation.len() >= MAX_PATTERN_LAYERS {
+            break;
+        }
+        let gain = lowerer.input(layer_id, "animation_gain")?;
+        let drift_velocity = lowerer.input(layer_id, "drift_velocity")?;
+        lowerer.expect(gain, ValueType::Scalar)?;
+        lowerer.expect(drift_velocity, ValueType::Vector3)?;
+        layer_animation.push(LayerAnimation {
+            gain,
+            drift_velocity,
+        });
+    }
     let output = MaterialOutput {
-        base_color: lowerer.input(&surface_chain.surface, "base_color")?,
-        roughness: lowerer.input(&surface_chain.surface, "roughness")?,
-        emission: lowerer.input(&surface_chain.surface, "emission")?,
+        base_color,
+        roughness,
+        emission,
+        layer_animation,
     };
     lowerer.expect(output.base_color, ValueType::Color)?;
     lowerer.expect(output.roughness, ValueType::Scalar)?;
     lowerer.expect(output.emission, ValueType::Color)?;
-    let wgsl = emit_wgsl(&lowerer.values, output);
+    let wgsl = emit_wgsl(&lowerer.values, &output);
     validate_wgsl(&wgsl)?;
     Ok(MaterialGraphProgram {
         graph_id: graph.id.clone(),
@@ -874,6 +1725,7 @@ struct Lowerer<'a> {
     registry: &'a NodeRegistry,
     values: Vec<MaterialInstruction>,
     cache: BTreeMap<(NodeId, SocketKey), ValueId>,
+    event_sensors: BTreeMap<NodeId, ValueId>,
 }
 impl<'a> Lowerer<'a> {
     fn push(&mut self, value: MaterialInstruction) -> ValueId {
@@ -894,6 +1746,15 @@ impl<'a> Lowerer<'a> {
             .links
             .values()
             .find(|link| link.to.node == *node && link.to.socket == key)
+            // A disabled node is REMOVED, not held still: the link is ignored
+            // and the socket falls through to its own default below, exactly as
+            // if nothing were connected. That is what makes a per-node toggle
+            // mean "as it was before I added this" without anyone having to
+            // author a neutral value — the neutral value belongs to the
+            // consumer, and a layer gain, an emission strength and a mix factor
+            // do not share one. It also costs nothing at runtime: the bypass
+            // happens here, at lowering, so no code is emitted for the node.
+            .filter(|link| !self.node_is_disabled(&link.from.node))
         {
             return self.output(&link.from.node, &link.from.socket);
         }
@@ -917,6 +1778,33 @@ impl<'a> Lowerer<'a> {
                 socket: key.clone(),
             })?;
         self.property_value(value)
+    }
+
+    /// Whether a node has been switched off by its `enabled` property.
+    ///
+    /// Scoped to the nodes that DECLARE the property, which today is the
+    /// oscillator. Pattern layers carry an `enabled` of their own with a
+    /// different meaning — out of the uploaded stack rather than out of the
+    /// value graph — and `project_pattern_stack` owns that one.
+    fn node_is_disabled(&self, node: &NodeId) -> bool {
+        let Some(record) = self.graph.nodes.get(node) else {
+            return false;
+        };
+        let bypassable = matches!(
+            self.registry
+                .find(&record.node_type)
+                .map(|declaration| declaration.operation),
+            Some(NodeOperation::Material(
+                MaterialNodeOperation::Oscillator | MaterialNodeOperation::EventSensor,
+            ))
+        );
+        if !bypassable {
+            return false;
+        }
+        matches!(
+            record.properties.get("enabled"),
+            Some(PropertyValue::Boolean(false))
+        )
     }
 
     fn field_value(
@@ -965,6 +1853,75 @@ impl<'a> Lowerer<'a> {
             MaterialNodeOperation::ConstantScalar | MaterialNodeOperation::ConstantColor => {
                 let value = self.field_value(&record, FieldTarget::Property, "value")?;
                 self.property_value(value)?
+            }
+            MaterialNodeOperation::MultiplyScalar => {
+                let a = self.input(node, "a")?;
+                let b = self.input(node, "b")?;
+                self.expect(a, ValueType::Scalar)?;
+                self.expect(b, ValueType::Scalar)?;
+                self.push(MaterialInstruction::MultiplyScalar(a, b))
+            }
+            MaterialNodeOperation::Direction => {
+                let speed = self.input(node, "speed")?;
+                let azimuth_degrees = self.input(node, "azimuth_degrees")?;
+                let elevation_degrees = self.input(node, "elevation_degrees")?;
+                for input in [speed, azimuth_degrees, elevation_degrees] {
+                    self.expect(input, ValueType::Scalar)?;
+                }
+                self.push(MaterialInstruction::Direction {
+                    speed,
+                    azimuth_degrees,
+                    elevation_degrees,
+                })
+            }
+            MaterialNodeOperation::Time => self.push(MaterialInstruction::Time),
+            MaterialNodeOperation::Oscillator => {
+                let rate_hz = self.input(node, "rate_hz")?;
+                let phase = self.input(node, "phase")?;
+                let duty = self.input(node, "duty")?;
+                let low = self.input(node, "low")?;
+                let high = self.input(node, "high")?;
+                for input in [rate_hz, phase, duty, low, high] {
+                    self.expect(input, ValueType::Scalar)?;
+                }
+                let wave = self.choice(&record, "wave", OscillatorWave::parse)?;
+                let sync = self.choice(&record, "sync", PhaseSync::parse)?;
+                let seed = self
+                    .integer_field(&record, "seed")?
+                    .clamp(0, u32::MAX as i64) as u32;
+                self.push(MaterialInstruction::Oscillator {
+                    wave,
+                    sync,
+                    seed,
+                    rate_hz,
+                    phase,
+                    duty,
+                    low,
+                    high,
+                })
+            }
+            MaterialNodeOperation::EventSensor => {
+                let config = self.event_sensor_config(&record)?;
+                let output = match socket.0.as_str() {
+                    "nearness" => SensorOutput::Nearness,
+                    "envelope" => SensorOutput::Envelope,
+                    _ => SensorOutput::Signal,
+                };
+                let sensor = if let Some(value) = self.event_sensors.get(node) {
+                    *value
+                } else {
+                    let value = self.push(MaterialInstruction::EventSensor { config });
+                    self.event_sensors.insert(node.clone(), value);
+                    value
+                };
+                self.push(MaterialInstruction::Component {
+                    vector: sensor,
+                    axis: match output {
+                        SensorOutput::Signal => 0,
+                        SensorOutput::Nearness => 1,
+                        SensorOutput::Envelope => 2,
+                    },
+                })
             }
             MaterialNodeOperation::AddScalar => {
                 let a = self.input(node, "a")?;
@@ -1194,6 +2151,78 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Read a text field and map it through a declared choice set.
+    fn choice<T>(
+        &self,
+        record: &NodeRecord,
+        key: &str,
+        parse: fn(&str) -> Option<T>,
+    ) -> Result<T, MaterialGraphError> {
+        match self.field_value(record, FieldTarget::Property, key)? {
+            PropertyValue::Text(text) => parse(&text).ok_or(MaterialGraphError::InvalidProperty(
+                PropertyValue::Text(text),
+            )),
+            value => Err(MaterialGraphError::InvalidProperty(value)),
+        }
+    }
+
+    fn integer_field(&self, record: &NodeRecord, key: &str) -> Result<i64, MaterialGraphError> {
+        match self.field_value(record, FieldTarget::Property, key)? {
+            PropertyValue::Integer(value) => Ok(value),
+            value => Err(MaterialGraphError::InvalidProperty(value)),
+        }
+    }
+
+    fn scalar_field(&self, record: &NodeRecord, key: &str) -> Result<f32, MaterialGraphError> {
+        match self.field_value(record, FieldTarget::Property, key)? {
+            PropertyValue::Scalar(value) if value.is_finite() => Ok(value),
+            value => Err(MaterialGraphError::InvalidProperty(value)),
+        }
+    }
+
+    fn boolean_field(&self, record: &NodeRecord, key: &str) -> Result<bool, MaterialGraphError> {
+        match self.field_value(record, FieldTarget::Property, key)? {
+            PropertyValue::Boolean(value) => Ok(value),
+            value => Err(MaterialGraphError::InvalidProperty(value)),
+        }
+    }
+
+    /// A sensor's authored configuration, with the one cross-field rule the
+    /// runtime cannot recover from.
+    ///
+    /// `hold + release` bounds how long after an event CLOSES a sensor is still
+    /// fading, but the event field reclaims a closed slot after
+    /// [`MAX_EVENT_LIFETIME_SECONDS`] and cannot know any sensor's envelope.
+    /// Exceed the budget and the surface would snap dark mid-fade when the
+    /// event vanished underneath it. Capping each field on its own is not
+    /// enough — it is the SUM that matters — so it is checked here, at
+    /// authoring time, and the runtime never has to.
+    fn event_sensor_config(
+        &self,
+        record: &NodeRecord,
+    ) -> Result<EventSensorConfig, MaterialGraphError> {
+        let hold_seconds = self.scalar_field(record, "hold_seconds")?.max(0.0);
+        let release_seconds = self.scalar_field(record, "release_seconds")?.max(0.0);
+        if hold_seconds + release_seconds > MAX_EVENT_LIFETIME_SECONDS {
+            return Err(MaterialGraphError::EventEnvelopeTooLong {
+                hold_seconds,
+                release_seconds,
+                budget_seconds: MAX_EVENT_LIFETIME_SECONDS,
+            });
+        }
+        Ok(EventSensorConfig {
+            channel: self
+                .integer_field(record, "channel")?
+                .clamp(0, u32::MAX as i64) as u32,
+            radius_meters: self.scalar_field(record, "radius_meters")?.max(0.0),
+            falloff: self.choice(record, "falloff", SensorFalloff::parse)?,
+            attack_seconds: self.scalar_field(record, "attack_seconds")?.max(0.0),
+            hold_seconds,
+            release_seconds,
+            invert: self.boolean_field(record, "invert")?,
+        })
+    }
+
     fn component_axis(&self, record: &NodeRecord) -> Result<u8, MaterialGraphError> {
         match self.field_value(record, FieldTarget::Property, "axis")? {
             PropertyValue::Integer(value) => Ok(value.clamp(0, 2) as u8),
@@ -1202,7 +2231,7 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-fn emit_wgsl(values: &[MaterialInstruction], output: MaterialOutput) -> String {
+fn emit_wgsl(values: &[MaterialInstruction], output: &MaterialOutput) -> String {
     let face_color_active = values
         .iter()
         .any(|value| matches!(value, MaterialInstruction::FaceColor { .. }));
@@ -1210,7 +2239,8 @@ fn emit_wgsl(values: &[MaterialInstruction], output: MaterialOutput) -> String {
         .iter()
         .any(|value| matches!(value, MaterialInstruction::FaceScalar { .. }));
     let mut source = format!(
-        "{GRAPH_MATERIAL_STRUCT}fn graph_material(position: vec3<f32>, normal: vec3<f32>) -> GraphMaterial {{\n"
+        "{}fn graph_material(position: vec3<f32>, normal: vec3<f32>) -> GraphMaterial {{\n",
+        graph_program_prefix()
     );
     for (index, value) in values.iter().enumerate() {
         let value_name = |value: ValueId| format!("v{}", value.0);
@@ -1231,6 +2261,52 @@ fn emit_wgsl(values: &[MaterialInstruction], output: MaterialOutput) -> String {
             ),
             MaterialInstruction::AddScalar(a, b) => {
                 format!("{} + {}", value_name(*a), value_name(*b))
+            }
+            MaterialInstruction::MultiplyScalar(a, b) => {
+                format!("{} * {}", value_name(*a), value_name(*b))
+            }
+            MaterialInstruction::Direction {
+                speed,
+                azimuth_degrees,
+                elevation_degrees,
+            } => format!(
+                "graph_direction({}, {}, {})",
+                value_name(*speed),
+                value_name(*azimuth_degrees),
+                value_name(*elevation_degrees)
+            ),
+            MaterialInstruction::Time => "graph_animation_seconds()".to_string(),
+            MaterialInstruction::Oscillator {
+                wave,
+                sync,
+                seed,
+                rate_hz,
+                phase,
+                duty,
+                low,
+                high,
+            } => format!(
+                "graph_oscillator({}u, {}u, {}u, {}, {}, {}, {}, {}, position, normal)",
+                wave.shader_value(),
+                sync.shader_value(),
+                seed,
+                value_name(*rate_hz),
+                value_name(*phase),
+                value_name(*duty),
+                value_name(*low),
+                value_name(*high)
+            ),
+            MaterialInstruction::EventSensor { config } => {
+                format!(
+                    "graph_event_sensor({}u, {}, {}u, {}, {}, {}, {}, position)",
+                    config.channel,
+                    format_float(config.radius_meters),
+                    config.falloff.shader_value(),
+                    format_float(config.attack_seconds),
+                    format_float(config.hold_seconds),
+                    format_float(config.release_seconds),
+                    config.invert,
+                )
             }
             MaterialInstruction::RemapScalar {
                 value,
@@ -1392,8 +2468,29 @@ fn emit_wgsl(values: &[MaterialInstruction], output: MaterialOutput) -> String {
         };
         source.push_str(&format!("  let v{index}: {ty} = {expression};\n"));
     }
+    // Per-slot animation, padded to the fixed array the GPU struct carries.
+    // Unused slots are the identity (gain 1, no drift), so a row with fewer
+    // layers than the maximum behaves exactly as it did before S3.
+    let gains: Vec<String> = (0..MAX_PATTERN_LAYERS)
+        .map(|slot| match output.layer_animation.get(slot) {
+            Some(animation) => format!("v{}", animation.gain.0),
+            None => "1.0".to_string(),
+        })
+        .collect();
+    let drifts: Vec<String> = (0..MAX_PATTERN_LAYERS)
+        .map(|slot| match output.layer_animation.get(slot) {
+            Some(animation) => format!("vec4<f32>(v{}, 0.0)", animation.drift_velocity.0),
+            None => "vec4<f32>(0.0)".to_string(),
+        })
+        .collect();
     source.push_str(&format!(
-        "  return GraphMaterial(v{}, v{}, v{}, true, {}, {});\n}}\n",
+        "  let animation = PatternAnimation(vec4<f32>({}), array<vec4<f32>, {}>({}));\n",
+        gains.join(", "),
+        MAX_PATTERN_LAYERS,
+        drifts.join(", ")
+    ));
+    source.push_str(&format!(
+        "  return GraphMaterial(v{}, v{}, v{}, true, {}, {}, animation);\n}}\n",
         output.base_color.0,
         output.roughness.0,
         output.emission.0,
@@ -1401,6 +2498,17 @@ fn emit_wgsl(values: &[MaterialInstruction], output: MaterialOutput) -> String {
         face_roughness_active,
     ));
     source
+}
+
+/// Whether a pattern layer occupies an uploaded slot. Mirrors the `enabled`
+/// test in `project_pattern_stack`, so animation indices and row slots agree.
+fn layer_is_enabled(graph: &GraphAsset, layer: &NodeId) -> bool {
+    graph
+        .nodes
+        .get(layer)
+        .and_then(|record| record.properties.get("enabled"))
+        .map(|value| matches!(value, PropertyValue::Boolean(true)))
+        .unwrap_or(true)
 }
 fn format_float(value: f32) -> String {
     if value.fract() == 0.0 {
@@ -1442,6 +2550,14 @@ pub enum MaterialGraphError {
         found: ValueType,
     },
     InvalidProperty(PropertyValue),
+    /// An event sensor would still be fading after its event had been
+    /// reclaimed. See `Lowerer::event_sensor_config` for why the SUM is the
+    /// thing that has to be bounded.
+    EventEnvelopeTooLong {
+        hold_seconds: f32,
+        release_seconds: f32,
+        budget_seconds: f32,
+    },
     Wgsl(String),
 }
 
@@ -1461,6 +2577,47 @@ struct GraphClipboardFragment {
     positions: BTreeMap<NodeId, [f32; 2]>,
     links: Vec<LinkRecord>,
     anchor: [f32; 2],
+}
+
+/// Case-insensitive substring test that never allocates.
+///
+/// The palette runs this once per searchable field per node per keystroke, so
+/// lowercasing a fresh `String` for every field would be pure garbage churn.
+/// `needle_lowercase` must already be lowercased by the caller.
+fn contains_ignore_ascii_case(haystack: &str, needle_lowercase: &str) -> bool {
+    if needle_lowercase.is_empty() {
+        return true;
+    }
+    let haystack_bytes = haystack.as_bytes();
+    let needle_bytes = needle_lowercase.as_bytes();
+    if needle_bytes.len() > haystack_bytes.len() {
+        return false;
+    }
+    haystack_bytes
+        .windows(needle_bytes.len())
+        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+}
+
+/// Does this node type match a palette search term?
+///
+/// The haystack is everything the node exposes in prose: its identifier, title,
+/// category, description, and the label and description of every input and
+/// output socket. Searching the sockets is the point — typing "roughness"
+/// surfaces nodes that merely *expose* a roughness socket, not only the handful
+/// with "roughness" in their title.
+///
+/// `search_lowercase` must already be lowercased by the caller.
+fn node_matches_search(node: &crate::graph::NodeDeclaration, search_lowercase: &str) -> bool {
+    let matches = |haystack: &str| contains_ignore_ascii_case(haystack, search_lowercase);
+    matches(node.id)
+        || matches(node.title)
+        || matches(node.description)
+        || matches(node.category.label())
+        || node
+            .inputs
+            .iter()
+            .chain(node.outputs.iter())
+            .any(|socket| matches(socket.label) || matches(socket.description))
 }
 
 pub struct GraphEditorState {
@@ -1881,6 +3038,7 @@ impl GraphEditorState {
         &self,
         registry: &NodeRegistry,
     ) -> Vec<&'static crate::graph::NodeDeclaration> {
+        let search_lowercase = self.search.to_ascii_lowercase();
         registry
             .declarations()
             .iter()
@@ -1889,10 +3047,7 @@ impl GraphEditorState {
                     && self
                         .graph
                         .can_add_node_type(registry, &NodeTypeId(node.id.into()))
-                    && (self.search.is_empty()
-                        || format!("{} {} {}", node.id, node.title, node.category.label())
-                            .to_ascii_lowercase()
-                            .contains(&self.search.to_ascii_lowercase()))
+                    && (search_lowercase.is_empty() || node_matches_search(node, &search_lowercase))
             })
             .collect()
     }
@@ -2039,7 +3194,19 @@ impl GraphEditorState {
 }
 impl fmt::Display for MaterialGraphError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "material graph compilation failed: {self:?}")
+        match self {
+            Self::EventEnvelopeTooLong {
+                hold_seconds,
+                release_seconds,
+                budget_seconds,
+            } => write!(
+                formatter,
+                "event sensor hold ({hold_seconds}s) + release ({release_seconds}s) exceeds the \
+                 {budget_seconds}s event lifetime, so the event would be reclaimed while the \
+                 sensor is still fading"
+            ),
+            _ => write!(formatter, "material graph compilation failed: {self:?}"),
+        }
     }
 }
 impl std::error::Error for MaterialGraphError {}
@@ -2111,10 +3278,10 @@ mod tests {
             .socket_defaults
             .insert(SocketKey("roughness".into()), PropertyValue::Scalar(0.25));
         let program = compile(&graph, &registry).unwrap();
-        let sample = program.evaluate(MaterialSampleContext {
-            position: [1.0, 2.0, 3.0],
-            normal: [0.0, 1.0, 0.0],
-        });
+        let sample = program.evaluate(MaterialSampleContext::still(
+            [1.0, 2.0, 3.0],
+            [0.0, 1.0, 0.0],
+        ));
         assert_eq!(sample.base_color, [0.2, 0.4, 0.6, 1.0]);
         assert_eq!(sample.roughness, 0.25);
         assert!(program.wgsl.contains("fn graph_material"));
@@ -2168,13 +3335,1135 @@ mod tests {
         let program = compile(&graph, &registry).unwrap();
         assert_eq!(
             program
-                .evaluate(MaterialSampleContext {
-                    position: [0.0; 3],
-                    normal: [0.0; 3]
-                })
+                .evaluate(MaterialSampleContext::still([0.0; 3], [0.0; 3]))
                 .roughness,
             0.5
         );
+    }
+
+    // ---- S3: animation -------------------------------------------------------
+
+    /// Build a graph whose roughness is driven by `node_type`, so a single
+    /// helper covers every animation node's lowering path.
+    fn graph_driving_roughness(
+        node_type: &str,
+        socket: &str,
+        properties: &[(&str, PropertyValue)],
+    ) -> (GraphAsset, NodeId) {
+        let registry = NodeRegistry;
+        let (mut graph, output) = graph_with_output();
+        let mut history = GraphHistory::default();
+        let driver = node("driver");
+        history
+            .apply(
+                &mut graph,
+                &registry,
+                GraphCommand::AddNode {
+                    id: driver.clone(),
+                    node_type: NodeTypeId(node_type.into()),
+                    position: [0.0, 0.0],
+                },
+            )
+            .unwrap();
+        for (key, value) in properties {
+            graph
+                .nodes
+                .get_mut(&driver)
+                .unwrap()
+                .properties
+                .insert((*key).to_string(), value.clone());
+        }
+        history
+            .apply(
+                &mut graph,
+                &registry,
+                GraphCommand::Connect {
+                    id: crate::graph::LinkId("drive".into()),
+                    from: OutputPin {
+                        node: driver.clone(),
+                        socket: SocketKey(socket.into()),
+                    },
+                    to: crate::graph::InputPin {
+                        node: output,
+                        socket: SocketKey("roughness".into()),
+                    },
+                },
+            )
+            .unwrap();
+        (graph, driver)
+    }
+
+    fn event_at(position: [f32; 3], radius_meters: f32) -> GpuWorldEvent {
+        GpuWorldEvent {
+            position_meters: position,
+            radius_meters,
+            started_epoch: 0.0,
+            started_remainder_seconds: 0.0,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: 0,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        }
+    }
+
+    fn clock_at(seconds: f32) -> AnimationClockSample {
+        let mut clock = crate::animation_clock::AnimationClock::new();
+        clock.advance(seconds, 1.0);
+        clock.sample()
+    }
+
+    /// The highest-value test in this module: every animation node must survive
+    /// injection into the WHOLE assembled DDA source, because a codegen slip is
+    /// otherwise a runtime-only failure with no test to name it.
+    #[test]
+    fn animation_nodes_lower_to_naga_valid_wgsl_in_the_full_dda_source() {
+        let registry = NodeRegistry;
+        for (index, (node_type, socket)) in [
+            ("material.time", "value"),
+            ("material.oscillator", "value"),
+            ("material.event_sensor", "signal"),
+            ("material.event_sensor", "nearness"),
+            ("material.event_sensor", "envelope"),
+            ("material.multiply_scalar", "value"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (graph, _) = graph_driving_roughness(node_type, socket, &[]);
+            let program = compile(&graph, &registry)
+                .unwrap_or_else(|error| panic!("{node_type}.{socket} failed to compile: {error}"));
+            let slot = 6 + index as u8;
+            let mut set = MaterialGraphShaderSet::default();
+            set.insert(slot, program);
+            let source = crate::passes::dda::build_shader_source_with_material_graphs(
+                &crate::variants::RenderQuality::default(),
+                &set,
+            );
+            let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
+                panic!("{node_type}.{socket}: {}", error.emit_to_string(&source))
+            });
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{node_type}.{socket}: {error}"));
+        }
+    }
+
+    /// A project with no animation nodes must generate byte-identical source.
+    /// This is the ONLY byte-identity S3 claims — a frozen oscillator still
+    /// returns a value, so an animated scene needs its own pixel baseline.
+    #[test]
+    fn a_project_without_animation_nodes_generates_unchanged_shader_source() {
+        let quality = crate::variants::RenderQuality::default();
+        let empty = MaterialGraphShaderSet::default();
+        assert_eq!(
+            crate::passes::dda::build_shader_source_with_material_graphs(&quality, &empty),
+            crate::passes::dda::build_shader_source(&quality)
+        );
+    }
+
+    /// Deterministic mode is a frozen clock and an empty event field. It buys
+    /// repeatability, and that is what gets asserted — NOT equality with "the
+    /// same graph without the animation nodes", which is not a well-defined
+    /// comparison: removing a linked node also changes topology and socket
+    /// fallback, so the two graphs differ by construction.
+    #[test]
+    fn a_frozen_clock_and_no_events_make_evaluation_repeatable() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_driving_roughness(
+            "material.oscillator",
+            "value",
+            &[("sync", PropertyValue::Text("per_voxel".into()))],
+        );
+        let program = compile(&graph, &registry).unwrap();
+        let context = MaterialSampleContext::still([3.5, 1.5, 9.25], [0.0, 1.0, 0.0]);
+        let first = program.evaluate(context).roughness;
+        for _ in 0..8 {
+            assert_eq!(program.evaluate(context).roughness, first);
+        }
+    }
+
+    /// `material.time` must be monotone. Returning the clock's remainder would
+    /// have made it jump backwards every epoch, quietly breaking any graph
+    /// doing arithmetic on it — a lava drift snapping to its origin every 64 s.
+    #[test]
+    fn time_is_monotone_across_an_epoch_boundary() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_driving_roughness("material.time", "value", &[]);
+        let program = compile(&graph, &registry).unwrap();
+        let epoch_seconds = crate::animation_clock::EPOCH_SECONDS;
+        let before = program
+            .evaluate(MaterialSampleContext {
+                clock: clock_at(epoch_seconds - 0.5),
+                ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+            })
+            .roughness;
+        let after = program
+            .evaluate(MaterialSampleContext {
+                clock: clock_at(epoch_seconds + 0.5),
+                ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+            })
+            .roughness;
+        assert!(
+            after > before,
+            "time stepped backwards: {before} -> {after}"
+        );
+    }
+
+    /// `per_voxel` must de-sync AUTHORED BLOCKS, not traversal cells.
+    ///
+    /// The graph's `position` is in 12.5 cm traversal units, so hashing it
+    /// directly would give every detail cell of one block its own phase — a
+    /// visible fizz instead of a block-level heartbeat. This pins the
+    /// BRICK_SIZE conversion that `pattern_coordinate` also makes.
+    #[test]
+    fn per_voxel_sync_offsets_whole_blocks_not_detail_cells() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_driving_roughness(
+            "material.oscillator",
+            "value",
+            &[("sync", PropertyValue::Text("per_voxel".into()))],
+        );
+        let program = compile(&graph, &registry).unwrap();
+        let sample = |position: [f32; 3]| {
+            program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(1.0),
+                    ..MaterialSampleContext::still(position, [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        // Eight traversal cells inside ONE authored block (BRICK_SIZE = 8).
+        let inside = sample([0.5, 0.5, 0.5]);
+        for cell in 1..8 {
+            assert_eq!(
+                sample([cell as f32 + 0.5, 0.5, 0.5]),
+                inside,
+                "detail cell {cell} de-synced from its own block"
+            );
+        }
+        // The neighbouring block must be somewhere else in the cycle.
+        assert_ne!(sample([8.5, 0.5, 0.5]), inside);
+    }
+
+    /// A `global` oscillator must NOT vary with position — the single-heartbeat
+    /// case a lava lake needs.
+    #[test]
+    fn global_sync_is_identical_everywhere() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_driving_roughness("material.oscillator", "value", &[]);
+        let program = compile(&graph, &registry).unwrap();
+        let sample = |position: [f32; 3]| {
+            program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(0.3),
+                    ..MaterialSampleContext::still(position, [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        assert_eq!(sample([0.5, 0.5, 0.5]), sample([812.5, 40.5, 3.5]));
+    }
+
+    /// The invariant the single-winner rule exists to protect. Taking an
+    /// independent maximum per output could pair one event's nearness with
+    /// another's envelope — a combination that never existed.
+    #[test]
+    fn sensor_outputs_all_describe_one_winning_event() {
+        let registry = NodeRegistry;
+        let mut outputs = Vec::new();
+        for socket in ["signal", "nearness", "envelope"] {
+            let (graph, _) = graph_driving_roughness(
+                "material.event_sensor",
+                socket,
+                &[
+                    ("radius_meters", PropertyValue::Scalar(10.0)),
+                    ("attack_seconds", PropertyValue::Scalar(0.0)),
+                    ("falloff", PropertyValue::Text("linear".into())),
+                ],
+            );
+            let program = compile(&graph, &registry).unwrap();
+            let mut near = event_at([0.0, 0.0, 1.0], 10.0);
+            near.strength = 0.5;
+            let mut far = event_at([0.0, 0.0, 6.0], 10.0);
+            far.strength = 1.0;
+            let events = [near, far];
+            outputs.push(
+                program
+                    .evaluate(MaterialSampleContext {
+                        clock: clock_at(4.0),
+                        events: &events,
+                        ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                    })
+                    .roughness,
+            );
+        }
+        let (signal, nearness, envelope) = (outputs[0], outputs[1], outputs[2]);
+        assert!(signal > 0.0 && nearness > 0.0 && envelope > 0.0);
+        // The winner is the nearer, weaker event: 0.5 strength beats the far
+        // one's 1.0 because nearness dominates here.
+        assert!(
+            (signal - nearness * envelope * 0.5).abs() < 1e-5,
+            "signal {signal} is not nearness {nearness} * envelope {envelope} * strength"
+        );
+    }
+
+    /// Several sensors with different channels and radii must each evaluate
+    /// their OWN configuration. A single precomputed scalar on the context
+    /// could not have represented this, which is why the context carries the
+    /// raw event list instead.
+    #[test]
+    fn two_sensors_on_different_channels_evaluate_independently() {
+        let registry = NodeRegistry;
+        let evaluate = |channel: i64, radius: f32, events: &[GpuWorldEvent]| {
+            let (graph, _) = graph_driving_roughness(
+                "material.event_sensor",
+                "nearness",
+                &[
+                    ("channel", PropertyValue::Integer(channel)),
+                    ("radius_meters", PropertyValue::Scalar(radius)),
+                    ("attack_seconds", PropertyValue::Scalar(0.0)),
+                    ("falloff", PropertyValue::Text("linear".into())),
+                ],
+            );
+            compile(&graph, &registry)
+                .unwrap()
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(4.0),
+                    events,
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        let mut other_channel = event_at([0.0, 0.0, 2.0], 10.0);
+        other_channel.channel = 7;
+        let events = [event_at([0.0, 0.0, 2.0], 10.0), other_channel];
+
+        // Channel 0 at a generous radius sees the presence event.
+        assert!(evaluate(0, 10.0, &events) > 0.0);
+        // Channel 7 sees its own, at the same distance.
+        assert!(evaluate(7, 10.0, &events) > 0.0);
+        // Channel 3 sees neither.
+        assert_eq!(evaluate(3, 10.0, &events), 0.0);
+        // And a tight radius rejects an event that a wide one accepted, which
+        // is the per-sensor radius doing its job.
+        assert_eq!(evaluate(0, 1.0, &events), 0.0);
+    }
+
+    /// S3b — the light volume's view of a program, built straight from IR so the
+    /// dataflow walk is tested rather than a graph editor's plumbing.
+    ///
+    /// `emission_drives_the_sensor` decides whether the sensor's signal reaches
+    /// the emission output or only the roughness one. That is the whole question
+    /// [`MaterialGraphProgram::emission_event_sensor`] answers, and the reason it
+    /// is a reachability walk instead of a scan.
+    fn sensing_program(emission_drives_the_sensor: bool) -> MaterialGraphProgram {
+        let config = EventSensorConfig {
+            channel: 0,
+            radius_meters: 8.0,
+            falloff: SensorFalloff::Linear,
+            attack_seconds: 0.0,
+            hold_seconds: 0.0,
+            release_seconds: 0.0,
+            invert: false,
+        };
+        let instructions = vec![
+            MaterialInstruction::Color([1.0, 1.0, 1.0, 1.0]),
+            MaterialInstruction::EventSensor { config },
+            MaterialInstruction::Component {
+                vector: ValueId(1),
+                axis: 0,
+            },
+            MaterialInstruction::ColorScale {
+                color: ValueId(0),
+                strength: ValueId(2),
+            },
+        ];
+        MaterialGraphProgram {
+            graph_id: AssetId("sensing".into()),
+            semantic_hash: 0,
+            instructions,
+            output: MaterialOutput {
+                base_color: ValueId(0),
+                // The sensor drives ONE of these two, never both.
+                roughness: ValueId(2),
+                emission: if emission_drives_the_sensor {
+                    ValueId(3)
+                } else {
+                    ValueId(0)
+                },
+                layer_animation: Vec::new(),
+            },
+            wgsl: String::new(),
+        }
+    }
+
+    /// The positive case: a sensor on the emission path yields both endpoints.
+    #[test]
+    fn an_emission_gating_sensor_reports_both_ends_of_its_range() {
+        let response = sensing_program(true)
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .expect("a sensor feeding emission must produce a response");
+        assert_eq!(response.sensor.radius_meters, 8.0);
+        assert_eq!(response.resting, [0.0; 3], "no event means no signal");
+        assert_eq!(
+            response.triggered, [1.0; 3],
+            "the probe sits ON the sample point, so the signal must saturate"
+        );
+    }
+
+    /// An oscillator on the emission path must reach the volume as its MEAN, not
+    /// as whatever phase the sampling clock happened to sit at.
+    ///
+    /// This is a regression test for a real defect, not a formality. The endpoint
+    /// used to be one sample at `MaterialSampleContext::still`, whose clock is
+    /// frozen at zero — and a sine at phase 0 is at its TROUGH. The authored glow
+    /// block swings 0.45..1.25 on the surface and handed the light volume a flat
+    /// 0.45, so the room read at 56% of what the block looked like. Nothing caught
+    /// it until the emitter was actually looked at.
+    #[test]
+    fn an_oscillator_on_the_emission_path_reaches_the_volume_as_its_mean() {
+        let config = EventSensorConfig {
+            channel: 0,
+            radius_meters: 8.0,
+            falloff: SensorFalloff::Linear,
+            attack_seconds: 0.0,
+            hold_seconds: 0.0,
+            release_seconds: 0.0,
+            invert: false,
+        };
+        // white x (sensor.signal x sine[0.4 .. 1.2] @ 1.4 Hz)
+        let instructions = vec![
+            MaterialInstruction::Color([1.0, 1.0, 1.0, 1.0]),
+            MaterialInstruction::EventSensor { config },
+            MaterialInstruction::Component {
+                vector: ValueId(1),
+                axis: 0,
+            },
+            MaterialInstruction::Scalar(1.4),
+            MaterialInstruction::Scalar(0.0),
+            MaterialInstruction::Scalar(0.5),
+            MaterialInstruction::Scalar(0.4),
+            MaterialInstruction::Scalar(1.2),
+            MaterialInstruction::Oscillator {
+                wave: OscillatorWave::Sine,
+                sync: PhaseSync::Global,
+                seed: 0,
+                rate_hz: ValueId(3),
+                phase: ValueId(4),
+                duty: ValueId(5),
+                low: ValueId(6),
+                high: ValueId(7),
+            },
+            MaterialInstruction::MultiplyScalar(ValueId(2), ValueId(8)),
+            MaterialInstruction::ColorScale {
+                color: ValueId(0),
+                strength: ValueId(9),
+            },
+        ];
+        let program = MaterialGraphProgram {
+            graph_id: AssetId("oscillating".into()),
+            semantic_hash: 0,
+            instructions,
+            output: MaterialOutput {
+                base_color: ValueId(0),
+                roughness: ValueId(4),
+                emission: ValueId(10),
+                layer_animation: Vec::new(),
+            },
+            wgsl: String::new(),
+        };
+
+        let response = program
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .expect("an oscillator behind a sensor still gates emission");
+        assert_eq!(
+            response.resting, [0.0; 3],
+            "no event means no signal at all"
+        );
+        // The sine's mean over one period is the midpoint of its range. The old
+        // one-sample form returned `low` (0.4) here, which is what this pins.
+        let mean = 0.5 * (0.4 + 1.2);
+        assert!(
+            (response.triggered[0] - mean).abs() < 0.01,
+            "expected the sine's mean {mean}, got {:?} — a value near 0.4 means the \
+             endpoint went back to a single frozen-clock sample",
+            response.triggered
+        );
+    }
+
+    /// The negative case, and the reason the walk exists: a sensor wired only
+    /// into roughness must NOT claim one of the volume's seven response slots.
+    /// A scan of every instruction would hand it one.
+    #[test]
+    fn a_sensor_that_drives_only_roughness_claims_no_emission_response() {
+        assert!(sensing_program(false)
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .is_none());
+    }
+
+    /// A graph with no sensor at all has no response — the case every shipped
+    /// material is in, and the one that keeps the volume bit-identical.
+    #[test]
+    fn a_graph_without_a_sensor_has_no_emission_response() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_with_output();
+        assert!(compile(&graph, &registry)
+            .unwrap()
+            .emission_event_response(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+            .is_none());
+    }
+
+    /// `invert` must touch the signal only. Nearness and envelope keep their
+    /// literal meanings so they stay usable as diagnostics.
+    #[test]
+    fn invert_flips_the_signal_and_leaves_the_diagnostics_literal() {
+        let registry = NodeRegistry;
+        let read = |socket: &str, invert: bool| {
+            let (graph, _) = graph_driving_roughness(
+                "material.event_sensor",
+                socket,
+                &[
+                    ("invert", PropertyValue::Boolean(invert)),
+                    ("radius_meters", PropertyValue::Scalar(10.0)),
+                    ("attack_seconds", PropertyValue::Scalar(0.0)),
+                ],
+            );
+            let events = [event_at([0.0, 0.0, 2.0], 10.0)];
+            compile(&graph, &registry)
+                .unwrap()
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(4.0),
+                    events: &events,
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        assert!((read("signal", false) + read("signal", true) - 1.0).abs() < 1e-5);
+        assert_eq!(read("nearness", false), read("nearness", true));
+        assert_eq!(read("envelope", false), read("envelope", true));
+    }
+
+    /// The envelope must be continuous — including the awkward case the
+    /// multiplied-factor form exists for: an event that opens and closes inside
+    /// one frame while its attack is still ramping.
+    #[test]
+    fn the_envelope_is_continuous_including_an_impulse_that_closes_during_attack() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_driving_roughness(
+            "material.event_sensor",
+            "envelope",
+            &[
+                ("radius_meters", PropertyValue::Scalar(10.0)),
+                ("attack_seconds", PropertyValue::Scalar(0.4)),
+                ("hold_seconds", PropertyValue::Scalar(0.2)),
+                ("release_seconds", PropertyValue::Scalar(1.0)),
+            ],
+        );
+        let program = compile(&graph, &registry).unwrap();
+        // An impulse: opened and closed at t = 0.
+        let mut impulse = event_at([0.0, 0.0, 1.0], 10.0);
+        impulse.open = 0.0;
+        let events = [impulse];
+        let sample = |seconds: f32| {
+            program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(seconds),
+                    events: &events,
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        let mut previous = sample(0.0);
+        let mut peak: f32 = 0.0;
+        let steps = 400;
+        for step in 1..=steps {
+            let value = sample(step as f32 * 0.005);
+            assert!(
+                (value - previous).abs() < 0.05,
+                "envelope stepped at t={}: {previous} -> {value}",
+                step as f32 * 0.005
+            );
+            peak = peak.max(value);
+            previous = value;
+        }
+        // A shortened blip: it rises, but the release eats it before the attack
+        // ever completes, so it never reaches full.
+        assert!(peak > 0.0 && peak < 1.0, "impulse peak was {peak}");
+        assert!(
+            previous < 1e-3,
+            "impulse never released, ended at {previous}"
+        );
+    }
+
+    /// An ongoing event ramps up over its attack and holds there — the "walk
+    /// up and stop" case. This is what a distance-only sensor could not do.
+    #[test]
+    fn an_ongoing_event_ramps_over_the_attack_then_holds() {
+        let registry = NodeRegistry;
+        let (graph, _) = graph_driving_roughness(
+            "material.event_sensor",
+            "envelope",
+            &[
+                ("radius_meters", PropertyValue::Scalar(10.0)),
+                ("attack_seconds", PropertyValue::Scalar(0.4)),
+            ],
+        );
+        let program = compile(&graph, &registry).unwrap();
+        let events = [event_at([0.0, 0.0, 1.0], 10.0)];
+        let sample = |seconds: f32| {
+            program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(seconds),
+                    events: &events,
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        assert!((sample(0.0) - 0.0).abs() < 1e-5);
+        assert!(
+            (sample(0.2) - 0.5).abs() < 1e-3,
+            "midway was {}",
+            sample(0.2)
+        );
+        assert!((sample(0.4) - 1.0).abs() < 1e-5);
+        // Standing still holds it at full rather than freezing it mid-ramp.
+        assert!((sample(30.0) - 1.0).abs() < 1e-5);
+    }
+
+    /// The one cross-field rule: a sensor may not still be fading after its
+    /// event has been reclaimed. Capping each field alone would not catch this
+    /// — it is the SUM that has to fit the budget.
+    #[test]
+    fn a_sensor_envelope_longer_than_the_event_lifetime_is_a_compile_error() {
+        let registry = NodeRegistry;
+        let budget = MAX_EVENT_LIFETIME_SECONDS;
+        let (graph, _) = graph_driving_roughness(
+            "material.event_sensor",
+            "signal",
+            &[
+                ("hold_seconds", PropertyValue::Scalar(budget * 0.75)),
+                ("release_seconds", PropertyValue::Scalar(budget * 0.75)),
+            ],
+        );
+        assert!(matches!(
+            compile(&graph, &registry),
+            Err(MaterialGraphError::EventEnvelopeTooLong { .. })
+        ));
+
+        // Each field is individually legal at three quarters of the budget —
+        // proof the check is on the sum and not on either one.
+        let (legal, _) = graph_driving_roughness(
+            "material.event_sensor",
+            "signal",
+            &[
+                ("hold_seconds", PropertyValue::Scalar(budget * 0.75)),
+                ("release_seconds", PropertyValue::Scalar(budget * 0.25)),
+            ],
+        );
+        assert!(compile(&legal, &registry).is_ok());
+    }
+
+    /// Gating: a sensor's signal times an oscillator. The composition the whole
+    /// "trigger a pulse" feature is made of, and the reason multiply exists.
+    #[test]
+    fn a_sensor_gates_an_oscillator_through_multiply() {
+        let registry = NodeRegistry;
+        let (mut graph, output) = graph_with_output();
+        let mut history = GraphHistory::default();
+        let sensor = node("sensor");
+        let oscillator = node("oscillator");
+        let gate = node("gate");
+        for (id, node_type) in [
+            (&sensor, "material.event_sensor"),
+            (&oscillator, "material.oscillator"),
+            (&gate, "material.multiply_scalar"),
+        ] {
+            history
+                .apply(
+                    &mut graph,
+                    &registry,
+                    GraphCommand::AddNode {
+                        id: id.clone(),
+                        node_type: NodeTypeId(node_type.into()),
+                        position: [0.0, 0.0],
+                    },
+                )
+                .unwrap();
+        }
+        let sensor_record = graph.nodes.get_mut(&sensor).unwrap();
+        sensor_record
+            .properties
+            .insert("radius_meters".into(), PropertyValue::Scalar(10.0));
+        sensor_record
+            .properties
+            .insert("attack_seconds".into(), PropertyValue::Scalar(0.0));
+        for (from, socket, to, input) in [
+            (&sensor, "signal", &gate, "a"),
+            (&oscillator, "value", &gate, "b"),
+        ] {
+            history
+                .apply(
+                    &mut graph,
+                    &registry,
+                    GraphCommand::Connect {
+                        id: crate::graph::LinkId(format!("{socket}-{input}")),
+                        from: OutputPin {
+                            node: from.clone(),
+                            socket: SocketKey(socket.into()),
+                        },
+                        to: crate::graph::InputPin {
+                            node: to.clone(),
+                            socket: SocketKey(input.into()),
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        history
+            .apply(
+                &mut graph,
+                &registry,
+                GraphCommand::Connect {
+                    id: crate::graph::LinkId("gate-roughness".into()),
+                    from: OutputPin {
+                        node: gate,
+                        socket: SocketKey("value".into()),
+                    },
+                    to: crate::graph::InputPin {
+                        node: output,
+                        socket: SocketKey("roughness".into()),
+                    },
+                },
+            )
+            .unwrap();
+        let program = compile(&graph, &registry).unwrap();
+        let near = [event_at([0.0, 0.0, 1.0], 10.0)];
+
+        // Nothing nearby: the gate is shut, whatever the oscillator is doing.
+        for step in 0..16 {
+            let value = program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(step as f32 * 0.1),
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness;
+            assert_eq!(value, 0.0, "the gate leaked with no event present");
+        }
+
+        // Something nearby: the oscillator comes through and actually moves.
+        let mut minimum = f32::MAX;
+        let mut maximum = f32::MIN;
+        for step in 0..32 {
+            let value = program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(step as f32 * 0.05),
+                    events: &near,
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness;
+            minimum = minimum.min(value);
+            maximum = maximum.max(value);
+        }
+        assert!(
+            maximum - minimum > 0.1,
+            "gated oscillator did not move: {minimum}..{maximum}"
+        );
+    }
+
+    /// Animation must land on the layer the author connected it to, at the slot
+    /// the material row uploads it in. Getting the index wrong would animate a
+    /// different layer and look like a working feature.
+    #[test]
+    fn layer_animation_lands_on_the_slot_its_layer_occupies() {
+        let registry = NodeRegistry;
+        let graph = graph_from_material(&crate::material::MATERIALS[6]);
+        let mut editor = GraphEditorState::new(6);
+        editor.open_graph(6, graph);
+        let first = editor.add_pattern_layer(&registry).expect("first layer");
+        let second = editor.add_pattern_layer(&registry).expect("second layer");
+        assert_eq!(
+            resolve_material_surface_chain(&editor.graph, &registry)
+                .unwrap()
+                .layers,
+            vec![first.clone(), second.clone()]
+        );
+
+        // Drive the SECOND layer's gain with a distinctive constant.
+        editor
+            .graph
+            .nodes
+            .get_mut(&second)
+            .unwrap()
+            .socket_defaults
+            .insert(
+                SocketKey("animation_gain".into()),
+                PropertyValue::Scalar(0.375),
+            );
+        editor
+            .graph
+            .nodes
+            .get_mut(&second)
+            .unwrap()
+            .socket_defaults
+            .insert(
+                SocketKey("drift_velocity".into()),
+                PropertyValue::Vector3([0.25, 0.0, 0.0]),
+            );
+
+        let program = compile(&editor.graph, &registry).unwrap();
+        assert_eq!(program.output.layer_animation.len(), 2);
+        let gains: Vec<_> = program
+            .output
+            .layer_animation
+            .iter()
+            .map(|animation| match program.instructions[animation.gain.0] {
+                MaterialInstruction::Scalar(value) => value,
+                _ => panic!("gain should have lowered to a constant"),
+            })
+            .collect();
+        assert_eq!(gains, vec![1.0, 0.375], "gain landed on the wrong slot");
+
+        // ...and the emitted function builds the struct in slot order. Checked
+        // against the STRIPPED function, not the whole program: the prefix
+        // carries `pattern_animation_identity`, whose body would otherwise
+        // satisfy a naive text match.
+        let body = program.wgsl_function("graph_material_6");
+        let built = body
+            .lines()
+            .find(|line| line.contains("let animation = PatternAnimation("))
+            .expect("the generated function builds a PatternAnimation");
+        let gain_slots: Vec<&str> = built
+            .split("vec4<f32>(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("gain vector")
+            .split(", ")
+            .collect();
+        assert_eq!(gain_slots.len(), 4);
+        assert_eq!(
+            gain_slots[0],
+            format!("v{}", program.output.layer_animation[0].gain.0)
+        );
+        assert_eq!(
+            gain_slots[1],
+            format!("v{}", program.output.layer_animation[1].gain.0)
+        );
+        assert_eq!(gain_slots[2], "1.0", "unused slots must be the identity");
+        assert_eq!(gain_slots[3], "1.0");
+    }
+
+    /// A DISABLED layer occupies no uploaded slot, so it must occupy no
+    /// animation slot either — otherwise every layer after it animates from the
+    /// wrong index.
+    #[test]
+    fn a_disabled_layer_consumes_no_animation_slot() {
+        let registry = NodeRegistry;
+        let graph = graph_from_material(&crate::material::MATERIALS[6]);
+        let mut editor = GraphEditorState::new(6);
+        editor.open_graph(6, graph);
+        let first = editor.add_pattern_layer(&registry).expect("first layer");
+        let second = editor.add_pattern_layer(&registry).expect("second layer");
+        editor
+            .graph
+            .nodes
+            .get_mut(&second)
+            .unwrap()
+            .socket_defaults
+            .insert(
+                SocketKey("animation_gain".into()),
+                PropertyValue::Scalar(0.375),
+            );
+        editor
+            .graph
+            .nodes
+            .get_mut(&first)
+            .unwrap()
+            .properties
+            .insert("enabled".into(), PropertyValue::Boolean(false));
+
+        let program = compile(&editor.graph, &registry).unwrap();
+        let stack =
+            crate::material_graph_layers::project_pattern_stack(&editor.graph, &registry).unwrap();
+        assert_eq!(stack.active_count(), 1, "the disabled layer still uploaded");
+        assert_eq!(
+            program.output.layer_animation.len(),
+            1,
+            "the disabled layer still claimed an animation slot"
+        );
+        match program.instructions[program.output.layer_animation[0].gain.0] {
+            MaterialInstruction::Scalar(value) => assert_eq!(
+                value, 0.375,
+                "the surviving layer's gain shifted to the wrong slot"
+            ),
+            _ => panic!("gain should have lowered to a constant"),
+        }
+    }
+
+    /// An un-animated graph must emit the identity, so a material authored
+    /// before S3 behaves exactly as it did.
+    #[test]
+    fn a_graph_without_animation_sockets_emits_the_identity() {
+        let registry = NodeRegistry;
+        let graph = graph_from_material(&crate::material::MATERIALS[26]);
+        let program = compile(&graph, &registry).unwrap();
+        assert_eq!(
+            program.output.layer_animation.len(),
+            1,
+            "lava authors exactly one pattern layer"
+        );
+        for animation in &program.output.layer_animation {
+            assert!(
+                matches!(
+                    program.instructions[animation.gain.0],
+                    MaterialInstruction::Scalar(value) if value == 1.0
+                ),
+                "an unconnected gain must lower to exactly 1.0"
+            );
+            assert!(
+                matches!(
+                    program.instructions[animation.drift_velocity.0],
+                    MaterialInstruction::Vector3(value) if value == [0.0; 3]
+                ),
+                "an unconnected drift must lower to zero"
+            );
+        }
+    }
+
+    /// A disabled oscillator is REMOVED, not frozen: whatever it fed falls back
+    /// to that socket's own default. That is what makes the toggle mean "as it
+    /// was before I added this", and it is why there is no authored
+    /// value-while-disabled — the neutral value belongs to the consumer, and a
+    /// layer gain (1.0) and a mix factor (0.0) do not share one.
+    #[test]
+    fn a_disabled_oscillator_leaves_its_consumer_on_the_socket_default() {
+        let registry = NodeRegistry;
+        let build = |enabled: bool| {
+            let (graph, _) = graph_driving_roughness(
+                "material.oscillator",
+                "value",
+                // `low`/`high` are input SOCKETS, not properties; their
+                // declared defaults are already 0.0 and 1.0.
+                &[("enabled", PropertyValue::Boolean(enabled))],
+            );
+            compile(&graph, &registry).unwrap()
+        };
+
+        // Enabled, the roughness moves with the clock.
+        let running = build(true);
+        let sample = |program: &MaterialGraphProgram, seconds: f32| {
+            program
+                .evaluate(MaterialSampleContext {
+                    clock: clock_at(seconds),
+                    ..MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0])
+                })
+                .roughness
+        };
+        assert!(
+            (0..16).any(|step| sample(&running, step as f32 * 0.05) != sample(&running, 0.0)),
+            "an enabled oscillator did not animate"
+        );
+
+        // Disabled, the surface's roughness socket falls back to its default
+        // and stops moving entirely.
+        let stopped = build(false);
+        let held = sample(&stopped, 0.0);
+        for step in 0..16 {
+            assert_eq!(sample(&stopped, step as f32 * 0.37), held);
+        }
+        // ...and the node is gone from the emitted code, so it costs nothing.
+        assert!(
+            !stopped
+                .wgsl_function("graph_material_6")
+                .contains("graph_oscillator("),
+            "a disabled oscillator still emitted shader code"
+        );
+    }
+
+    /// The case that matters for the authored lava: disabling the oscillator on
+    /// a layer's gain must leave the layer at its AUTHORED amount, not at the
+    /// bottom of the oscillator's range.
+    #[test]
+    fn disabling_a_layer_gain_oscillator_restores_the_authored_amount() {
+        let registry = NodeRegistry;
+        let build = |enabled: bool| {
+            let graph = graph_from_material(&crate::material::MATERIALS[6]);
+            let mut editor = GraphEditorState::new(6);
+            editor.open_graph(6, graph);
+            let layer = editor.add_pattern_layer(&registry).expect("layer");
+            let oscillator = node("oscillator");
+            let mut history = GraphHistory::default();
+            history
+                .apply(
+                    &mut editor.graph,
+                    &registry,
+                    GraphCommand::AddNode {
+                        id: oscillator.clone(),
+                        node_type: NodeTypeId("material.oscillator".into()),
+                        position: [0.0, 0.0],
+                    },
+                )
+                .unwrap();
+            let record = editor.graph.nodes.get_mut(&oscillator).unwrap();
+            record
+                .properties
+                .insert("enabled".into(), PropertyValue::Boolean(enabled));
+            record
+                .socket_defaults
+                .insert(SocketKey("low".into()), PropertyValue::Scalar(0.7));
+            record
+                .socket_defaults
+                .insert(SocketKey("high".into()), PropertyValue::Scalar(1.15));
+            history
+                .apply(
+                    &mut editor.graph,
+                    &registry,
+                    GraphCommand::Connect {
+                        id: crate::graph::LinkId("gain".into()),
+                        from: OutputPin {
+                            node: oscillator,
+                            socket: SocketKey("value".into()),
+                        },
+                        to: crate::graph::InputPin {
+                            node: layer,
+                            socket: SocketKey("animation_gain".into()),
+                        },
+                    },
+                )
+                .unwrap();
+            compile(&editor.graph, &registry).unwrap()
+        };
+
+        let disabled = build(false);
+        let gain = disabled.output.layer_animation[0].gain;
+        assert!(
+            matches!(
+                disabled.instructions[gain.0],
+                MaterialInstruction::Scalar(value) if value == 1.0
+            ),
+            "a disabled gain oscillator must leave the layer at unit gain, not \
+             at the bottom of its own range"
+        );
+
+        // Sanity: enabled, the gain is a live expression rather than a constant.
+        let enabled = build(true);
+        let gain = enabled.output.layer_animation[0].gain;
+        assert!(!matches!(
+            enabled.instructions[gain.0],
+            MaterialInstruction::Scalar(_)
+        ));
+    }
+
+    /// Speed and angles must mean what the field descriptions say, in both
+    /// backends. -90 elevation is straight down; azimuth 0 is +X and 90 is +Z.
+    #[test]
+    fn direction_turns_speed_and_angles_into_the_documented_vector() {
+        let registry = NodeRegistry;
+        let read = |azimuth: f32, elevation: f32, speed: f32| {
+            let (mut graph, output) = graph_with_output();
+            let mut history = GraphHistory::default();
+            let direction = node("direction");
+            // `position_component` reads the POSITION, not an arbitrary vector,
+            // so a dot with a unit basis vector is how a component is read out.
+            let component = node("component");
+            for (id, node_type) in [
+                (&direction, "material.direction"),
+                (&component, "material.dot_vector"),
+            ] {
+                history
+                    .apply(
+                        &mut graph,
+                        &registry,
+                        GraphCommand::AddNode {
+                            id: id.clone(),
+                            node_type: NodeTypeId(node_type.into()),
+                            position: [0.0, 0.0],
+                        },
+                    )
+                    .unwrap();
+            }
+            let record = graph.nodes.get_mut(&direction).unwrap();
+            for (key, value) in [
+                ("azimuth_degrees", azimuth),
+                ("elevation_degrees", elevation),
+                ("speed", speed),
+            ] {
+                record
+                    .socket_defaults
+                    .insert(SocketKey(key.into()), PropertyValue::Scalar(value));
+            }
+            // Read each axis out through a component node.
+            let mut axes = [0.0_f32; 3];
+            for (axis, slot) in axes.iter_mut().enumerate() {
+                let mut probe = graph.clone();
+                let mut basis = [0.0_f32; 3];
+                basis[axis] = 1.0;
+                probe
+                    .nodes
+                    .get_mut(&component)
+                    .unwrap()
+                    .socket_defaults
+                    .insert(SocketKey("b".into()), PropertyValue::Vector3(basis));
+                let mut history = GraphHistory::default();
+                history
+                    .apply(
+                        &mut probe,
+                        &registry,
+                        GraphCommand::Connect {
+                            id: crate::graph::LinkId("dir".into()),
+                            from: OutputPin {
+                                node: direction.clone(),
+                                socket: SocketKey("vector".into()),
+                            },
+                            to: crate::graph::InputPin {
+                                node: component.clone(),
+                                socket: SocketKey("a".into()),
+                            },
+                        },
+                    )
+                    .unwrap();
+                history
+                    .apply(
+                        &mut probe,
+                        &registry,
+                        GraphCommand::Connect {
+                            id: crate::graph::LinkId("out".into()),
+                            from: OutputPin {
+                                node: component.clone(),
+                                socket: SocketKey("value".into()),
+                            },
+                            to: crate::graph::InputPin {
+                                node: output.clone(),
+                                socket: SocketKey("roughness".into()),
+                            },
+                        },
+                    )
+                    .unwrap();
+                *slot = compile(&probe, &registry)
+                    .unwrap()
+                    .evaluate(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
+                    .roughness;
+            }
+            axes
+        };
+
+        let close = |got: [f32; 3], want: [f32; 3]| {
+            assert!(
+                (0..3).all(|axis| (got[axis] - want[axis]).abs() < 1e-4),
+                "got {got:?}, want {want:?}"
+            );
+        };
+        // Straight down at 0.25 m/s — the lava case.
+        close(read(0.0, -90.0, 0.25), [0.0, -0.25, 0.0]);
+        // Level, azimuth 0 is +X.
+        close(read(0.0, 0.0, 1.0), [1.0, 0.0, 0.0]);
+        // Level, azimuth 90 is +Z.
+        close(read(90.0, 0.0, 1.0), [0.0, 0.0, 1.0]);
+        // Zero speed is a standstill whatever the angles say.
+        close(read(37.0, 12.0, 0.0), [0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -2195,10 +4484,7 @@ mod tests {
             library
                 .active(&graph.id)
                 .unwrap()
-                .evaluate(MaterialSampleContext {
-                    position: [0.0; 3],
-                    normal: [0.0; 3]
-                })
+                .evaluate(MaterialSampleContext::still([0.0; 3], [0.0; 3]))
                 .roughness,
             0.2
         );
@@ -2376,10 +4662,10 @@ mod tests {
             ),
         ]);
         let program = compile(&graph, &registry).unwrap();
-        let sample = program.evaluate(MaterialSampleContext {
-            position: [1.25, 2.5, -0.75],
-            normal: [0.0, 1.0, 0.0],
-        });
+        let sample = program.evaluate(MaterialSampleContext::still(
+            [1.25, 2.5, -0.75],
+            [0.0, 1.0, 0.0],
+        ));
         assert!(sample.base_color.iter().all(|value| value.is_finite()));
         assert!((0.0..=1.0).contains(&sample.roughness));
         assert!(program.wgsl.contains("graph_fbm"));
@@ -2414,14 +4700,8 @@ mod tests {
             Some(true)
         );
         let program = compile(&graph, &registry).unwrap();
-        let top = program.evaluate(MaterialSampleContext {
-            position: [0.0; 3],
-            normal: [0.0, 1.0, 0.0],
-        });
-        let side = program.evaluate(MaterialSampleContext {
-            position: [0.0; 3],
-            normal: [1.0, 0.0, 0.0],
-        });
+        let top = program.evaluate(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]));
+        let side = program.evaluate(MaterialSampleContext::still([0.0; 3], [1.0, 0.0, 0.0]));
         let roles = material.face_roles.unwrap();
         assert_eq!(top.base_color[0], roles.top.albedo[0]);
         assert_eq!(side.base_color[0], roles.side.albedo[0]);
@@ -2437,10 +4717,10 @@ mod tests {
             let program = compile(&graph, &registry).unwrap_or_else(|error| {
                 panic!("material slot {slot} ({}) failed: {error}", material.name)
             });
-            let sample = program.evaluate(MaterialSampleContext {
-                position: [0.25, 0.5, -0.75],
-                normal: [0.0, 1.0, 0.0],
-            });
+            let sample = program.evaluate(MaterialSampleContext::still(
+                [0.25, 0.5, -0.75],
+                [0.0, 1.0, 0.0],
+            ));
             assert!(sample.base_color.iter().all(|value| value.is_finite()));
             assert!(sample.roughness.is_finite());
             assert!(sample.emission.iter().all(|value| value.is_finite()));
@@ -2493,6 +4773,63 @@ mod tests {
         assert!(!visible.contains("material.output"));
         assert!(!visible.contains("material.surface"));
         assert!(visible.contains("material.pattern_layer"));
+    }
+
+    /// A node type whose only occurrence of "gloss" and "hemisphere" is on its
+    /// sockets — the id, title, description and category deliberately avoid
+    /// both words, so a match can only come from socket prose.
+    static SOCKET_PROSE_NODES: &[crate::graph::NodeDeclaration] =
+        &[crate::graph::NodeDeclaration {
+            id: "test.socket_prose",
+            version: 1,
+            title: "Widget",
+            description: "A node declared only for palette search tests.",
+            category: crate::graph::NodeCategory::Inputs,
+            preview: crate::graph::NodePreview::Value,
+            operation: NodeOperation::Material(MaterialNodeOperation::ConstantScalar),
+            kinds: &[GraphKind::Material],
+            inputs: &[crate::graph::SocketDeclarationStatic {
+                key: "gloss",
+                label: "Gloss",
+                description: "How tight the specular highlight stays.",
+                value_type: crate::graph::SocketType::Scalar,
+                rate: crate::graph::EvaluationRate::Uniform,
+                cardinality: crate::graph::Cardinality::OPTIONAL_SINGLE,
+            }],
+            outputs: &[crate::graph::SocketDeclarationStatic {
+                key: "value",
+                label: "Result",
+                description: "Sampled over the hemisphere above the surface.",
+                value_type: crate::graph::SocketType::Scalar,
+                rate: crate::graph::EvaluationRate::Uniform,
+                cardinality: crate::graph::Cardinality::ANY,
+            }],
+            fields: &[],
+        }];
+
+    #[test]
+    fn node_palette_search_matches_socket_label_and_description() {
+        let registry = NodeRegistry::new(SOCKET_PROSE_NODES);
+        let mut editor = GraphEditorState::new(6);
+
+        // "Gloss" is only an input socket label; "hemisphere" is only inside an
+        // output socket description. Both must still surface the node, and the
+        // match must be case-insensitive.
+        for term in ["gloss", "Hemisphere"] {
+            editor.search = term.to_string();
+            let visible = editor
+                .visible_node_types(&registry)
+                .into_iter()
+                .map(|declaration| declaration.id)
+                .collect::<Vec<_>>();
+            assert_eq!(visible, vec!["test.socket_prose"], "search term {term:?}");
+        }
+
+        editor.search = "unrelated".to_string();
+        assert!(
+            editor.visible_node_types(&registry).is_empty(),
+            "an unrelated term must match nothing"
+        );
     }
 
     #[test]
@@ -2644,10 +4981,7 @@ mod tests {
         let program = compile(&graph, &registry).unwrap();
         assert_eq!(
             program
-                .evaluate(MaterialSampleContext {
-                    position: [0.0; 3],
-                    normal: [0.0, 1.0, 0.0],
-                })
+                .evaluate(MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]))
                 .base_color,
             [0.15, 0.35, 0.75, 1.0]
         );

@@ -37,6 +37,10 @@ pub const SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/cagi_volume.wgsl"),
     include_str!("../../shaders/water.wgsl"),
     include_str!("../../shaders/dda.wgsl"),
+    // The graph ABI and its shared helpers, then the dispatch the generated
+    // functions are injected into. The prelude comes AFTER dda.wgsl because it
+    // reads `world_events`, which that file declares.
+    include_str!("../../shaders/graph_prelude.wgsl"),
     include_str!("../../shaders/material_graph.wgsl"),
 );
 

@@ -24,17 +24,16 @@
 //! | 11 | storage (read)       front light volume |
 //! | 12 | storage (read_write) back light volume — CA pass only |
 //! | 13 | storage (read)       per-cell attributes + E5b emission (5 u32 words) |
-//! | 14 | uniform              grid dimensions + transport coefficients |
+//! | 14 | uniform              grid dimensions, transport coefficients and the S3b event-response table |
 //! | 15 | storage (read)       shared AADF directional bounds |
 
 use wgpu::util::DeviceExt;
 
 use crate::brickmap::Brickmap;
 use crate::cagi::{
-    build_cell_attributes_with_emission, material_attribute_table, CagiGrid, CagiSettings,
-    LightCellUpdate, CELL_DATA_WORDS,
+    build_cell_attributes_with_emission, CagiGrid, CagiSettings, GpuEventResponse, LightCellUpdate,
+    MaterialAttributes, CELL_DATA_WORDS, EVENT_RESPONSE_SLOTS,
 };
-use crate::material::Material;
 use crate::variants::RenderQuality;
 
 use super::world_bindings::WorldBindings;
@@ -126,9 +125,15 @@ impl LightVolume {
         device: &wgpu::Device,
         brickmap: &Brickmap,
         settings: &CagiSettings,
-        rows: &[Material],
+        attributes: &MaterialAttributes,
     ) -> Self {
-        Self::new_with_attributes(device, brickmap, settings, AttributeSource::BuildNow, rows)
+        Self::new_with_attributes(
+            device,
+            brickmap,
+            settings,
+            AttributeSource::BuildNow,
+            attributes,
+        )
     }
 
     /// The same, with a choice about the ~0.5 s CPU attribute build (release bench
@@ -144,15 +149,13 @@ impl LightVolume {
         brickmap: &Brickmap,
         settings: &CagiSettings,
         attribute_source: AttributeSource,
-        rows: &[Material],
+        material_attributes: &MaterialAttributes,
     ) -> Self {
         let grid = settings.grid(brickmap);
         let (attributes, emissions) = match (settings.enabled, attribute_source) {
-            (true, AttributeSource::BuildNow) => build_cell_attributes_with_emission(
-                brickmap,
-                &grid,
-                &material_attribute_table(rows),
-            ),
+            (true, AttributeSource::BuildNow) => {
+                build_cell_attributes_with_emission(brickmap, &grid, material_attributes)
+            }
             _ => (
                 vec![0_u32; grid.cell_count()],
                 vec![[0.0_f32; 4]; grid.cell_count()],
@@ -184,8 +187,11 @@ impl LightVolume {
             }),
             uniform_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("cagi volume uniform"),
-                contents: bytemuck::bytes_of(&grid.uniform()),
-                usage: wgpu::BufferUsages::UNIFORM,
+                contents: bytemuck::bytes_of(&grid.uniform(material_attributes)),
+                // COPY_DST since S3b: the geometry half is fixed for the volume's
+                // lifetime, but the event-response table follows the material
+                // graphs and is re-uploaded whenever they recompile.
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }),
             front: 0,
             // A fresh volume is uninitialized GPU memory: the first encode must
@@ -292,6 +298,15 @@ impl LightVolume {
     /// `grid` is the grid the cell INDICES were computed for: a mismatch means the
     /// volume was reallocated at another resolution while the edit was in flight, so
     /// the indices mean nothing here and a full rebuild is already on its way.
+    ///
+    /// S3b leaves one narrow window open here, knowingly. The response slots
+    /// packed into these words come from the edit's own `MaterialAttributes`; if
+    /// a graph recompiled since the last full repack, that table may allocate
+    /// slots differently from the rows the volume currently holds, so an edited
+    /// cell can point at a stale response for the frame or two before the repack
+    /// (which a recompile always requests) lands. Closing it would mean sending
+    /// the 384-byte table alongside every 4-byte cell patch. The symptom is one
+    /// voxel briefly at the wrong brightness; the settle burst erases it.
     pub fn write_cell_attributes(
         &self,
         queue: &wgpu::Queue,
@@ -341,6 +356,7 @@ impl LightVolume {
         grid: &CagiGrid,
         attributes: &[u32],
         emissions: &[[f32; 4]],
+        responses: &[GpuEventResponse; EVENT_RESPONSE_SLOTS],
     ) -> bool {
         if *grid != self.grid
             || attributes.len() != self.grid.cell_count()
@@ -350,9 +366,31 @@ impl LightVolume {
         }
         let cell_data = pack_cell_data(attributes, emissions);
         queue.write_buffer(&self.cell_data_buffer, 0, bytemuck::cast_slice(&cell_data));
+        // The response rows and the slot indices packed into the attribute words
+        // are ONE table: installing the words without the rows would point a
+        // cell at a response the volume does not hold yet.
+        self.write_event_responses(queue, responses);
         // The volume was flooded against zeroed attributes; start over.
         self.mark_dirty();
         true
+    }
+
+    /// Re-upload the S3b event-response rows alone.
+    ///
+    /// A partial write at the table's own offset rather than a whole new
+    /// uniform: the geometry half is derived from the grid this volume was
+    /// allocated for, and rebuilding it here would be a second place that could
+    /// disagree with `CagiGrid::uniform`.
+    fn write_event_responses(
+        &self,
+        queue: &wgpu::Queue,
+        responses: &[GpuEventResponse; EVENT_RESPONSE_SLOTS],
+    ) {
+        queue.write_buffer(
+            &self.uniform_buffer,
+            std::mem::offset_of!(crate::cagi::CagiVolumeUniform, event_responses) as u64,
+            bytemuck::cast_slice(responses.as_slice()),
+        );
     }
 
     /// GPU bytes: both ping-pong buffers, the attributes and the uniform.
@@ -556,6 +594,181 @@ mod tests {
         }
     }
 
+    /// THE gate S3b exists for: an event-gated emitter must change the light in
+    /// the cells AROUND it, not only on its own face.
+    ///
+    /// Runs the real CA on a real device against a real brickmap and reads the
+    /// volume back, because every other S3b test stops at the CPU. Between "the
+    /// response reaches the material table" and "the room gets brighter" sit the
+    /// attribute pack, the uniform upload, the bind group and three shader read
+    /// sites, and none of those had a test that would notice them failing.
+    #[test]
+    fn an_event_gated_emitter_lights_its_neighbours_only_when_triggered() {
+        use crate::animation_clock::AnimationClockSample;
+        use crate::cagi::material_attribute_table;
+        use crate::lighting::SunSettings;
+        use crate::material::{material_id, MATERIALS, MATERIAL_COUNT};
+        use crate::material_graph::{EmissionEventResponse, EventSensorConfig, SensorFalloff};
+        use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
+        use voxel_core::world::Voxel;
+
+        let Some((device, queue)) = crate::passes::dda::tests::headless_device() else {
+            return;
+        };
+
+        // One 1 m glow block (8^3 traversal voxels) in an otherwise empty world,
+        // so nothing but the emitter can put light into the cells beside it.
+        let glow = material_id(Voxel::GlowBlock);
+        let origin = [64_i32, 64, 64];
+        let mut brickmap = Brickmap::empty();
+        for offset_z in 0..8 {
+            for offset_y in 0..8 {
+                for offset_x in 0..8 {
+                    brickmap.set_voxel(
+                        origin[0] + offset_x,
+                        origin[1] + offset_y,
+                        origin[2] + offset_z,
+                        Voxel::GlowBlock,
+                        crate::brickmap::ClearanceUpdate::FullRebuild,
+                    );
+                }
+            }
+        }
+
+        // Dark at rest, bright when something is within 8 m — the authored glow
+        // block's shape, stated here rather than loaded so the gate does not
+        // start failing because someone retuned an asset.
+        let mut rows = MATERIALS.to_vec();
+        rows[glow as usize].emission = None;
+        let mut responses = vec![None; MATERIAL_COUNT];
+        responses[glow as usize] = Some(EmissionEventResponse {
+            sensor: EventSensorConfig {
+                channel: 0,
+                radius_meters: 8.0,
+                falloff: SensorFalloff::Smoothstep,
+                attack_seconds: 0.0,
+                hold_seconds: 0.0,
+                release_seconds: 0.0,
+                invert: false,
+            },
+            resting: [0.0; 3],
+            triggered: [1.0, 0.9, 0.8],
+        });
+        let attributes = material_attribute_table(&rows, &responses);
+        assert_ne!(
+            attributes.word(glow) & crate::cagi::CELL_EVENT_RESPONSE_MASK,
+            0,
+            "the emitter did not get a response slot, so nothing below can pass"
+        );
+
+        let settings = CagiSettings::default();
+        let world_bindings = WorldBindings::new(&device, &brickmap);
+        let mut light_volume = LightVolume::new(&device, &brickmap, &settings, &attributes);
+        let cagi_pass = CagiPass::new(&device, &world_bindings, &light_volume);
+        let grid = light_volume.grid();
+
+        // The cell just above the block: air, touching an emissive face, and the
+        // one `cagi_emitter_bounce` is supposed to carry the emission into.
+        let neighbour = [
+            (origin[0] as u32 + 4) / settings.cell_voxels,
+            (origin[1] as u32 + 8) / settings.cell_voxels,
+            (origin[2] as u32 + 4) / settings.cell_voxels,
+        ];
+        let neighbour_index = grid.cell_index(neighbour);
+
+        let quality = RenderQuality::default();
+        let mut run = |events: &[GpuWorldEvent; MAX_WORLD_EVENTS], count: usize| -> u32 {
+            let (animation_params, event_params) = quality.animation_params(
+                AnimationClockSample::FROZEN,
+                AnimationClockSample::FROZEN,
+                count,
+            );
+            // Sun and sky OFF: the emitter must be the only thing in the volume,
+            // or its contribution is a rounding error against daylight — which is
+            // exactly why this is measured here and not judged by eye.
+            let mut lighting = SunSettings::default().lighting_uniform(
+                quality.shading_params(),
+                quality.gi_params(),
+                quality.water_params(),
+                quality.material_params(),
+                animation_params,
+                event_params,
+            );
+            lighting.sun_color_intensity[3] = 0.0;
+            lighting.sky_ambient[3] = 0.0;
+            world_bindings.write_lighting(&queue, &lighting);
+            world_bindings.write_world_events(&queue, events);
+            light_volume.mark_dirty();
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("s3b gate"),
+            });
+            cagi_pass.encode(&mut encoder, &mut light_volume, 24, None);
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("s3b gate readback"),
+                size: light_volume.front_buffer().size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(
+                light_volume.front_buffer(),
+                0,
+                &readback,
+                0,
+                readback.size(),
+            );
+            queue.submit([encoder.finish()]);
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |result| result.expect("map failed"));
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .expect("poll failed");
+            let words =
+                bytemuck::cast_slice::<u8, u32>(&readback.slice(..).get_mapped_range()).to_vec();
+            readback.unmap();
+            crate::cagi::unpack_light(words[neighbour_index])[0]
+        };
+
+        let dark = run(&[GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS], 0);
+
+        let mut events = [GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS];
+        events[0] = GpuWorldEvent {
+            // Standing right at the block, in METRES.
+            position_meters: [
+                (origin[0] as f32 + 4.0) * voxel_core::world::VOXEL_SIZE,
+                (origin[1] as f32 + 12.0) * voxel_core::world::VOXEL_SIZE,
+                (origin[2] as f32 + 4.0) * voxel_core::world::VOXEL_SIZE,
+            ],
+            radius_meters: 12.0,
+            started_epoch: 0.0,
+            started_remainder_seconds: 0.0,
+            ended_epoch: 0.0,
+            ended_remainder_seconds: 0.0,
+            channel: 0,
+            strength: 1.0,
+            open: 1.0,
+            _pad_row2: 0.0,
+        };
+        let lit = run(&events, 1);
+
+        println!("neighbour cell above the emitter: rest {dark}/1023, lit {lit}/1023");
+        assert_eq!(
+            dark, 0,
+            "the emitter is authored dark at rest, so the cell above it must hold \
+             no light with nothing near — got {dark}/1023"
+        );
+        assert!(
+            lit > 0,
+            "THE S3b GATE FAILED: with an event on top of the emitter the cell \
+             above it is still {lit}/1023. The surface lights up (that is the DDA \
+             graph) but the light volume never saw it, so nothing around the block \
+             changes"
+        );
+    }
+
     #[test]
     fn default_settings_build_the_shipped_shader() {
         assert_eq!(
@@ -603,6 +816,12 @@ mod tests {
                         // reads entirely. Pairing it with `rule` is the useful axis —
                         // the whole point of the lever is that it makes the rules agree.
                         let emitter_bounce = rule != CagiRule::MaxDecrement;
+                        // S3b pairs with the sample mode rather than getting its
+                        // own nesting level: `cagi_cell_emission_live` is called
+                        // from three sites and with the lever OFF naga must
+                        // delete the `world_event_sense` call and the response
+                        // table read entirely, which is the shape that can break.
+                        let event_light = sample_mode == CagiSampleMode::Trilinear;
                         let quality = RenderQuality {
                             global_illumination: CagiSettings {
                                 rule,
@@ -610,6 +829,7 @@ mod tests {
                                 sun_cache,
                                 sample_mode,
                                 emitter_bounce,
+                                event_light,
                                 ..CagiSettings::default()
                             },
                             ..RenderQuality::default()
@@ -626,8 +846,8 @@ mod tests {
                         assert!(
                             validation_error.is_none(),
                             "CAGI {rule:?} / {sky_test:?} / cache {sun_cache} / \
-                             {sample_mode:?} / bounce {emitter_bounce} failed wgpu \
-                             validation: {validation_error:?}"
+                             {sample_mode:?} / bounce {emitter_bounce} / event light \
+                             {event_light} failed wgpu validation: {validation_error:?}"
                         );
                     }
                 }

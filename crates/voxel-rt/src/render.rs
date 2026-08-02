@@ -17,17 +17,20 @@
 //! command buffers for the overlay's per-pass readout to survive.
 
 use crate::brickmap::Brickmap;
-use crate::cagi::{CagiGrid, CagiSettings};
+use crate::cagi::{
+    CagiGrid, CagiSettings, GpuEventResponse, MaterialAttributes, EVENT_RESPONSE_SLOTS,
+};
 use crate::camera::CameraUniform;
 use crate::frame_timing::{GpuFrameTimers, SPAN_CAGI, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
-use crate::material::{GpuMaterial, Material};
+use crate::material::GpuMaterial;
 use crate::passes::blit::BlitPass;
 use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
 use crate::passes::dda::DdaPass;
 use crate::passes::world_bindings::WorldBindings;
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
+use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 
 /// Format of the compute-written intermediate texture. Srgb formats cannot be
 /// storage textures, so the DDA pass writes display-ready (sRGB-encoded)
@@ -60,13 +63,14 @@ impl Renderer {
         height: u32,
         brickmap: &Brickmap,
         global_illumination: &CagiSettings,
-        materials: &[Material],
+        material_attributes: &MaterialAttributes,
     ) -> Self {
         let render_scale = MAX_RENDER_SCALE;
         let (storage_view, storage_width, storage_height) =
             create_storage_texture(device, width, height, render_scale);
         let world_bindings = WorldBindings::new(device, brickmap);
-        let light_volume = LightVolume::new(device, brickmap, global_illumination, materials);
+        let light_volume =
+            LightVolume::new(device, brickmap, global_illumination, material_attributes);
         let cagi_pass = CagiPass::new(device, &world_bindings, &light_volume);
         let dda_pass = DdaPass::new(device, &world_bindings, &light_volume, &storage_view);
         let blit_pass = BlitPass::new(device, surface_format, &storage_view);
@@ -151,14 +155,14 @@ impl Renderer {
         brickmap: &Brickmap,
         global_illumination: &CagiSettings,
         attribute_source: AttributeSource,
-        materials: &[Material],
+        material_attributes: &MaterialAttributes,
     ) {
         self.light_volume = LightVolume::new_with_attributes(
             device,
             brickmap,
             global_illumination,
             attribute_source,
-            materials,
+            material_attributes,
         );
         self.cagi_pass
             .rebind(device, &self.world_bindings, &self.light_volume);
@@ -178,9 +182,10 @@ impl Renderer {
         grid: &CagiGrid,
         attributes: &[u32],
         emissions: &[[f32; 4]],
+        responses: &[GpuEventResponse; EVENT_RESPONSE_SLOTS],
     ) -> bool {
         self.light_volume
-            .write_all_attributes(queue, grid, attributes, emissions)
+            .write_all_attributes(queue, grid, attributes, emissions, responses)
     }
 
     /// Apply one edit's GPU delta (E2): the touched brickmap words, the touched
@@ -289,19 +294,26 @@ impl Renderer {
         );
     }
 
-    /// Record this frame's CAGI iterations and upload the lighting uniform BOTH
-    /// passes read (once per frame, so the CA cannot inject a different sun than
-    /// the shading pass shades with). Must go into a separate command buffer from
-    /// [`Renderer::encode_frame`] — see the module docs on Metal's timestamps.
+    /// Record this frame's CAGI iterations and upload the two buffers BOTH
+    /// passes read: the lighting uniform (so the CA cannot inject a different
+    /// sun than the shading pass shades with) and the world event field (so a
+    /// surface cannot light up from an event the volume has not seen yet).
+    ///
+    /// Both are written HERE rather than in [`Renderer::encode_frame`] because
+    /// this pass runs first and consumes them; writing them later would give the
+    /// CA the previous frame's events. Must go into a separate command buffer
+    /// from `encode_frame` — see the module docs on Metal's timestamps.
     pub fn encode_light_volume(
         &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         lighting_uniform: &LightingUniform,
+        world_events: &[GpuWorldEvent; MAX_WORLD_EVENTS],
         iterations: u32,
         frame_timers: Option<&GpuFrameTimers>,
     ) {
         self.world_bindings.write_lighting(queue, lighting_uniform);
+        self.world_bindings.write_world_events(queue, world_events);
         self.cagi_pass.encode(
             encoder,
             &mut self.light_volume,

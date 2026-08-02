@@ -29,13 +29,122 @@ current; leave the rest alone unless it stops being true.
 | **S2d** | Sun/ambient dimming + emission colour x intensity, so S2c is judgeable | ⏳ built, awaiting the S2c gate |
 | — | Embedded-emitter fix, **step 1**: sticky emitter index in the cell sweep | ✅ landed (CAGI, not this arc) |
 | — | Step 2 (area-weighted per-cell radiance) → became **E5b**, see the plan | ✅ implemented + CPU-gated; visual/GPU gate pending |
-| **S3** | Animation — value oscillation + pattern drift | ⬜ not started |
+| **S3** | Animation — clock, oscillators, world events, pattern drift | ✅ landed, **visual gate pending** |
+| **S3b** | Event-driven emission reaches the LIGHT VOLUME | ✅ landed, **visual gate pending** |
 | **S4** | Template library | ⬜ not started |
 | **S5** | Sub-voxel models (the only stage that touches traversal) | ⬜ not started |
 | **S6** | Apply to real materials, re-author roughness/specular | ⬜ not started |
 
-**254 library tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
+**378 library tests** in voxel-rt (+5 bin), **51** in voxel-core. `cargo fmt` and
 `cargo clippy --all-targets` clean.
+
+### S3 — animation, as landed
+
+Four node types in `NodeCategory::Animation`, plus the scalar multiply that
+makes gating expressible at all:
+
+| node | outputs | what it is for |
+|---|---|---|
+| `material.time` | `value` | Monotone seconds. Never steps backwards. |
+| `material.oscillator` | `value` | sine / triangle / saw / pulse / flicker, with `low`..`high`, an `enabled` toggle, and a **sync** source: `global`, `per_voxel`, `per_face`, `per_material`. |
+| `material.event_sensor` | `signal`, `nearness`, `envelope` | "Did something happen within X metres of me, and how long ago?" Attack / hold / release. |
+| `material.direction` | `vector` | Speed + azimuth + elevation to a velocity vector, so a flow is dialled as an angle rather than three components. Every input connectable: an oscillator on the azimuth swirls, one on the speed surges. |
+| `material.multiply_scalar` | `value` | Gating. `sensor.signal x oscillator` is the whole "pulse only when something is near" mechanism. |
+
+Pattern layers gained two input sockets: `animation_gain` (multiplies the
+authored `amount`, identity at 1.0) and `drift_velocity` (metres per second).
+Drift is quantised to the texel grid, so a pattern MARCHES a whole texel at a
+time. There is **no** smooth-drift flag — there was briefly, and it did nothing:
+`pattern_coordinate` snaps after subtracting the offset, so an un-quantised
+offset gives byte-identical output and only costs the grid its alignment to
+world voxel boundaries. Continuous motion is what `texels_per_voxel = 0` already
+means.
+
+Four things worth knowing before touching it:
+
+- **A disabled oscillator is removed, not frozen.** `enabled: false` makes the
+  lowering ignore the link, so the consumer falls through to its own socket
+  default exactly as if nothing were connected — a layer gain returns to 1.0 and
+  the material looks as it did before the node existed. There is deliberately no
+  authored value-while-disabled: the neutral value belongs to the consumer, and
+  a layer gain (1.0) and a mix factor (0.0) do not share one. The bypass happens
+  at compile time, so a disabled node emits no shader code at all.
+- **`drift_velocity` is a velocity, not an offset.** The shader applies the
+  clock, so a bare `Vector3` wired in is a flow. An offset socket would have
+  made the obvious graph a static displacement that merely looked animated.
+- **The event field is entity-shaped, not camera-shaped.** The camera raises a
+  presence event like anything else would; `crates/voxel-rt/src/world_event.rs`
+  is where a mob system plugs in, and no shader or node changes when it does.
+  Re-raising an open event PRESERVES its start timestamp — that one rule is what
+  lets an envelope exist without per-voxel history.
+- **GI follows an EVENT, not an oscillator.** S3b (below) closed the event half.
+  A continuously oscillating emitter still throws a steady light: its response
+  would have to be re-evaluated per cell per iteration against a clock rather
+  than against a bounded set of events, which is a different and much less
+  bounded cost. That is deliberate, not pending.
+- **Determinism narrowed.** `MaterialAnimationSpeed = 0` freezes the clock but
+  NOT event sensors, whose inputs still move with the camera.
+  `MaterialAnimationDeterministic` freezes both and is what the bench sets. It
+  buys frame-to-frame stability, not equality with an un-animated material — a
+  frozen oscillator still returns a value, so animated scenes carry their own
+  pixel baselines.
+
+### S3b — the triggered light bounces
+
+S3 left a surface that lit up when you walked toward it and a floor in front of
+it that did not: the light volume only ever saw the material row's one still
+sample. S3b closes that.
+
+**The finding that made it cheap, and that the plan had wrong.** The plan
+budgeted for a re-flood, on the reading that `LightVolume::mark_dirty` clears
+both ping-pong buffers and floods the whole grid — which it does. But the CA is
+**not a one-shot flood**: `CagiPass::encode` dispatches `iterations_per_frame`
+steps *every frame*, forever, and neither propagation rule reads a cell's own
+previous value, so the field brightens *and* darkens on its own. A time-varying
+emitter is therefore just an emitter whose value changed, and needs **no
+re-flood at all**. The global re-flood exists only to clear the pinned
+sun-source flag (light word bit 30) when the SUN moves. None of the plan's three
+options — capped-cadence re-flood, regional propagation, analytic transient
+light — was needed.
+
+What landed instead:
+
+| piece | where |
+|---|---|
+| The event field became a WORLD binding (16), shared by both passes | `passes/world_bindings.rs` |
+| `world_event_sense` — falloff, envelope and winner selection, one definition | `shaders/world.wgsl` |
+| `EmissionEventResponse` — the sensor gating a graph's emission, plus the emission at both ends of its range | `material_graph.rs` |
+| Response index in cell attribute bits **29-31**, seven shapes plus "none" | `cagi.rs` |
+| The response table in the volume uniform, 384 bytes for 2.25 M cells | `cagi.rs`, `shaders/cagi_volume.wgsl` |
+| `cagi_cell_emission_live` at all three emission read sites, behind `CAGI_EVENT_LIGHT` | `shaders/cagi.wgsl` |
+
+Four things worth knowing:
+
+- **The CA cannot run a material graph**, so a graph of arbitrary shape between
+  its sensor and its emission reaches the volume as the **straight line through
+  its two endpoints**. The surface still shades the real curve. Well inside the
+  error the volume already carries (half-metre cells, quarter-fill solidity, one
+  representative voxel per cell).
+- **The cell stores the PEAK and scales down.** Storing the resting value and
+  scaling up could never light a surface that is black until something arrives,
+  which is the case the feature exists for. All three magnitudes are re-meaned
+  through `mean_emitted_radiance` rather than one being scaled by a ratio of
+  point samples — that ratio is exact only while the emission stack is linear in
+  the base, and `replace` and any clamp are not.
+- **With no event in range a responsive material injects exactly what it
+  injected before S3b.** Pinned by test; it is also what makes
+  `AnimationDeterministic` a baseline rather than a third rendering.
+- **Seven response shapes, and overflow is refused, not evicted.** Evicting
+  would reassign a row a currently-lit surface is using and make it answer
+  someone else's events. A refused material keeps its peak emission and stops
+  reacting — "always lit" is visible; "silently dark" is not.
+- **Mixed-response cells stay at rest.** A CAGI cell can encode only one response
+  index. If exposed emitters in that cell do not share one response, it stores
+  their resting aggregate and response index zero rather than applying one
+  material's event gate to another material's light.
+- **Performance is not accepted yet.** The current benchmark covers the
+  no-response fast path only. A gated-emitter scenario with 0/1/4/16 live events
+  is still required before the default-on cost is claimed.
 
 ### Next action
 

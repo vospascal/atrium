@@ -18,6 +18,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use voxel_rt::animation_clock::AnimationClock;
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
@@ -29,7 +30,7 @@ use voxel_rt::graph::GraphAsset;
 use voxel_rt::graph::NodeRegistry;
 use voxel_rt::lighting::SunSettings;
 use voxel_rt::material;
-use voxel_rt::material_edit::{MaterialPanelState, VoxImportState};
+use voxel_rt::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
 use voxel_rt::material_graph::{
     compile as compile_material_graph, GraphEditorState, MaterialGraphShaderSet,
     MaterialSampleContext,
@@ -37,7 +38,9 @@ use voxel_rt::material_graph::{
 use voxel_rt::material_graph_assets::MaterialGraphAssetService;
 use voxel_rt::material_graph_layers::sync_pattern_layers_from_graph;
 use voxel_rt::material_table::MaterialTable;
-use voxel_rt::overlay::{MovementReadout, Overlay, OverlayFrameData, WorldEditReadout};
+use voxel_rt::overlay::{
+    MovementReadout, Overlay, OverlayFrameData, TargetHighlightReadout, WorldEditReadout,
+};
 use voxel_rt::passes::cagi::AttributeSource;
 use voxel_rt::passes::{cagi, dda};
 use voxel_rt::render::Renderer;
@@ -50,6 +53,7 @@ use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
 use voxel_rt::world_edit::VoxelEdit;
+use voxel_rt::world_event::{EventKey, EventSpec, WorldEventField, CHANNEL_PRESENCE};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 use voxel_rt::world_profile::CompiledWorldProfile;
 use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
@@ -86,6 +90,14 @@ const STUDIO_MAX_DISTANCE_METERS: f32 = 8.0;
 const STUDIO_MIN_PITCH_RADIANS: f32 = -1.5;
 const STUDIO_MAX_PITCH_RADIANS: f32 = 1.5;
 
+/// S3 — how far the player's presence reaches, world metres.
+///
+/// A per-entity reach rather than a global constant in the shader: a sensor
+/// intersects its own authored radius with this, so a large creature can be
+/// felt further away than a person without every material being re-authored.
+/// Generous, because a sensor that wants a tight radius simply says so.
+const PRESENCE_RADIUS_METERS: f32 = 12.0;
+
 /// S2 — the voxel the studio should be showing, or `None` to leave it alone.
 ///
 /// Pulled out of [`AppState::follow_selected_row_in_the_studio`] so the decision is
@@ -121,9 +133,6 @@ fn studio_sample_to_follow(
     }
     Some(sample)
 }
-
-/// What a right click places — the default building block.
-const PLACE_MATERIAL: Voxel = Voxel::Stone;
 
 /// What the L key places (M1b): a plain light-emitting block, so the emissive
 /// table rows are reachable in the app and not only from tests.
@@ -322,6 +331,16 @@ struct AppState {
     /// A fresh material-attribute upload needs a short CAGI catch-up burst so
     /// world lighting follows Graph Studio edits instead of visibly trailing it.
     gi_settle_frames: u8,
+    /// S3 — the animation clock every oscillator and envelope reads. Advanced
+    /// once per frame by the scaled frame delta; see `animation_clock.rs` for
+    /// why it is a split epoch/remainder rather than one float.
+    animation_clock: AnimationClock,
+    /// S3 — unscaled simulation time. Events are stamped and retired against
+    /// this clock, so animation speed affects artwork only.
+    world_clock: AnimationClock,
+    /// S3 — what materials can react to. The active eye is raised into it each
+    /// frame as the presence entity; a mob system later raises alongside.
+    world_events: WorldEventField,
 }
 
 impl AppState {
@@ -410,7 +429,7 @@ impl AppState {
             gpu_context.surface_config.height,
             &brickmap,
             &quality.global_illumination,
-            material_table.rows(),
+            &material_table.cagi_attributes(),
         );
         // WorldBindings starts from compiled defaults for its standalone path;
         // the project asset may have restored overrides before the renderer was
@@ -540,6 +559,9 @@ impl AppState {
             saved_project_fingerprint: None,
             autosave_due_at: None,
             gi_settle_frames: 0,
+            animation_clock: AnimationClock::new(),
+            world_clock: AnimationClock::new(),
+            world_events: WorldEventField::new(),
         }
     }
 
@@ -567,7 +589,11 @@ impl AppState {
                 } else {
                     format!("Saved project to {}", project_path.display())
                 };
-                self.studio_assets.autosave_enabled = true;
+                // Saving does NOT arm autosave. It used to, which meant one
+                // manual save quietly turned on a writer that then overwrote
+                // the project files from memory every two idle seconds — and
+                // anything edited on disk meanwhile lost the race. Autosave is
+                // opt-in from the checkbox, and stays where the user put it.
                 self.studio_assets.recovery_available = false;
                 self.saved_project_fingerprint =
                     live_state_fingerprint(&self.material_table, &self.quality).ok();
@@ -756,10 +782,7 @@ impl AppState {
                         let _ = self.material_table.apply_graph_sample(
                             slot,
                             &program,
-                            MaterialSampleContext {
-                                position: [0.0; 3],
-                                normal: [0.0, 1.0, 0.0],
-                            },
+                            MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
                         );
                         self.material_panel.repack_gi_requested = true;
                     }
@@ -884,6 +907,24 @@ impl AppState {
     }
 
     fn handle_keyboard(&mut self, key_code: KeyCode, pressed: bool) {
+        if pressed {
+            let hotbar_index = match key_code {
+                KeyCode::Digit1 => Some(0),
+                KeyCode::Digit2 => Some(1),
+                KeyCode::Digit3 => Some(2),
+                KeyCode::Digit4 => Some(3),
+                KeyCode::Digit5 => Some(4),
+                KeyCode::Digit6 => Some(5),
+                KeyCode::Digit7 => Some(6),
+                KeyCode::Digit8 => Some(7),
+                KeyCode::Digit9 => Some(8),
+                _ => None,
+            };
+            if let Some(index) = hotbar_index {
+                self.material_panel.selected = material::material_id(WORLD_HOTBAR_BLOCKS[index]);
+                return;
+            }
+        }
         match key_code {
             KeyCode::KeyW => self.input_state.forward_held = pressed,
             KeyCode::KeyS => self.input_state.backward_held = pressed,
@@ -984,6 +1025,42 @@ impl AppState {
 
     /// The eye pose the active movement model produces — what the frame's rays,
     /// the edit ray and (at E8) the audio listener are built from.
+    /// Advance the S3 animation clock and refresh the world-event field.
+    ///
+    /// Deterministic mode is resolved HERE rather than at the uniform, because
+    /// it has two halves and both must happen: the clock is pinned AND the
+    /// event field is emptied. A frozen clock alone is not a stable frame — a
+    /// sensor's nearness still tracks the camera — which is exactly why the
+    /// speed lever and this one are separate.
+    fn advance_animation(&mut self, frame_time_seconds: f32) {
+        if self.quality.materials.animation_deterministic {
+            self.animation_clock.reset();
+            self.world_clock.reset();
+            self.world_events.clear();
+            return;
+        }
+        self.animation_clock
+            .advance(frame_time_seconds, self.quality.materials.animation_speed);
+        self.world_clock.advance(frame_time_seconds, 1.0);
+        let clock = self.world_clock.sample();
+        // The active eye is an entity like any other. It raises a presence
+        // event and no sensor node ever learns which entity it was, so a mob
+        // system later raises alongside it without the renderer, the shader or
+        // any authored graph changing.
+        let pose = self.active_pose();
+        self.world_events.raise(
+            EventKey::CAMERA,
+            EventSpec {
+                position_meters: pose.position.to_array(),
+                radius_meters: PRESENCE_RADIUS_METERS,
+                channel: CHANNEL_PRESENCE,
+                strength: 1.0,
+            },
+            clock,
+        );
+        self.world_events.retire_expired(clock);
+    }
+
     fn active_pose(&self) -> CameraPose {
         match self.control_mode {
             ControlMode::Fly => self.fly_camera.pose(),
@@ -995,6 +1072,108 @@ impl AppState {
                 self.studio_distance_meters,
             ),
         }
+    }
+
+    /// The current edit face, projected into logical window coordinates for the
+    /// overlay. This deliberately asks the exact same DDA question as
+    /// place/remove, so the outline is a promise of where the next block will
+    /// attach rather than a separate visual approximation.
+    fn target_highlight(&self) -> Option<TargetHighlightReadout> {
+        let pose = self.active_pose();
+        let hit = {
+            let brickmap = self.world_host.read();
+            voxel_dda::cast(
+                &brickmap,
+                pose.position.to_array(),
+                pose.forward.to_array(),
+                EDIT_REACH_METERS,
+                voxel_dda::CastTarget::EditableVoxel,
+            )
+        }?;
+        let voxel = WorldVoxelCoord::from_detail_cell(hit.voxel);
+        let physical_size = self.window.inner_size();
+        let viewport_height = self.rendered_viewport_height();
+        let scale = self.window.scale_factor() as f32;
+        let logical_width = physical_size.width as f32 / scale;
+        let logical_height = viewport_height as f32 / scale;
+        let aspect = physical_size.width as f32 / viewport_height.max(1) as f32;
+        let half_tangent = (self.fly_camera.vertical_fov_radians * 0.5).tan();
+        let origin = glam::Vec3::new(voxel.x as f32, voxel.y as f32, voxel.z as f32);
+        let face = match hit.face_normal {
+            [1, 0, 0] => Some([
+                origin + glam::vec3(1.0, 0.0, 0.0),
+                origin + glam::vec3(1.0, 1.0, 0.0),
+                origin + glam::vec3(1.0, 0.0, 1.0),
+                origin + glam::vec3(1.0, 1.0, 1.0),
+            ]),
+            [-1, 0, 0] => Some([
+                origin,
+                origin + glam::vec3(0.0, 1.0, 0.0),
+                origin + glam::vec3(0.0, 0.0, 1.0),
+                origin + glam::vec3(0.0, 1.0, 1.0),
+            ]),
+            [0, 1, 0] => Some([
+                origin + glam::vec3(0.0, 1.0, 0.0),
+                origin + glam::vec3(1.0, 1.0, 0.0),
+                origin + glam::vec3(0.0, 1.0, 1.0),
+                origin + glam::vec3(1.0, 1.0, 1.0),
+            ]),
+            [0, -1, 0] => Some([
+                origin,
+                origin + glam::vec3(1.0, 0.0, 0.0),
+                origin + glam::vec3(0.0, 0.0, 1.0),
+                origin + glam::vec3(1.0, 0.0, 1.0),
+            ]),
+            [0, 0, 1] => Some([
+                origin + glam::vec3(0.0, 0.0, 1.0),
+                origin + glam::vec3(1.0, 0.0, 1.0),
+                origin + glam::vec3(0.0, 1.0, 1.0),
+                origin + glam::vec3(1.0, 1.0, 1.0),
+            ]),
+            [0, 0, -1] => Some([
+                origin,
+                origin + glam::vec3(1.0, 0.0, 0.0),
+                origin + glam::vec3(0.0, 1.0, 0.0),
+                origin + glam::vec3(1.0, 1.0, 0.0),
+            ]),
+            // The eye is inside this voxel, so DDA has no crossed face to show.
+            _ => None,
+        };
+        let Some(face) = face else {
+            return Some(TargetHighlightReadout {
+                material: hit.material,
+                voxel: [voxel.x, voxel.y, voxel.z],
+                distance_meters: hit.distance_meters,
+                screen_corners: None,
+            });
+        };
+        let mut corners = [[0.0; 2]; 4];
+        for (index, point) in face.into_iter().enumerate() {
+            let offset = point - pose.position;
+            let depth = offset.dot(pose.forward);
+            // A box containing the eye has no stable screen-space outline. It
+            // can still be removed/picked; only its preview is suppressed.
+            if depth <= 0.02 {
+                return Some(TargetHighlightReadout {
+                    material: hit.material,
+                    voxel: [voxel.x, voxel.y, voxel.z],
+                    distance_meters: hit.distance_meters,
+                    screen_corners: None,
+                });
+            }
+            let ndc_x = offset.dot(pose.right) / (depth * half_tangent * aspect);
+            let ndc_y = offset.dot(pose.up) / (depth * half_tangent);
+            corners[index] = [
+                (ndc_x + 1.0) * 0.5 * logical_width,
+                (1.0 - ndc_y) * 0.5 * logical_height,
+            ];
+        }
+        Some(TargetHighlightReadout {
+            material: hit.material,
+            voxel: [voxel.x, voxel.y, voxel.z],
+            distance_meters: hit.distance_meters,
+            screen_corners: Some(corners),
+        })
     }
 
     fn rendered_viewport_height(&self) -> u32 {
@@ -1067,12 +1246,7 @@ impl AppState {
         // hole in the thing you were trying to inspect. One-shot, so the next click
         // is an ordinary edit again.
         if std::mem::take(&mut self.material_panel.eyedropper_armed) {
-            self.material_panel.selected = hit.material;
-            let name = self
-                .material_table
-                .row(hit.material)
-                .map_or("<none>", |row| row.name);
-            println!("eyedropper: material {} ({name})", hit.material);
+            self.select_picked_material(hit.material);
             return;
         }
         // Checked AFTER the eyedropper on purpose: a pick is a read, and it is the
@@ -1112,6 +1286,46 @@ impl AppState {
         );
     }
 
+    /// Select the material under the crosshair without changing the world.
+    /// Middle-click uses this directly; the existing eyedropper calls the same
+    /// selection path after consuming its next edit click.
+    fn pick_material_at_crosshair(&mut self) {
+        let pose = self.active_pose();
+        let material = {
+            let brickmap = self.world_host.read();
+            voxel_dda::cast(
+                &brickmap,
+                pose.position.to_array(),
+                pose.forward.to_array(),
+                EDIT_REACH_METERS,
+                voxel_dda::CastTarget::EditableVoxel,
+            )
+            .map(|hit| hit.material)
+        };
+        if let Some(material) = material {
+            self.select_picked_material(material);
+        }
+    }
+
+    fn select_picked_material(&mut self, material: u8) {
+        self.material_panel.selected = material;
+        let name = self
+            .material_table
+            .row(material)
+            .map_or("<none>", |row| row.name);
+        println!("picked material {material} ({name})");
+    }
+
+    /// Right-click always builds with the active hotbar material. Air is a
+    /// sentinel rather than a placeable block, so choosing it can never turn a
+    /// place click into an unexpected removal.
+    fn place_selected_block(&mut self) {
+        let selected = material::material_voxel(self.material_panel.selected);
+        if selected != Voxel::Air {
+            self.edit_at_crosshair(Some(selected));
+        }
+    }
+
     /// S0 — push the frame's material edits to the GPU, and service a requested
     /// CAGI re-pack.
     ///
@@ -1139,10 +1353,21 @@ impl AppState {
         if std::mem::take(&mut self.material_panel.repack_gi_requested)
             && self.quality.global_illumination.enabled
         {
-            self.world_host.request_light_attributes(
-                self.renderer.light_volume_grid(),
-                self.material_table.cagi_attributes(),
-            );
+            let attributes = self.material_table.cagi_attributes();
+            // S3b: the response table holds seven shapes. Say so when a material
+            // wanted an eighth, because the symptom otherwise is one emitter
+            // quietly refusing to react while every other one does.
+            let overflow = attributes.event_response_overflow();
+            if overflow > 0 {
+                println!(
+                    "{overflow} material(s) want an event response and the light \
+                     volume has only {} slots — they keep their peak emission and \
+                     stop reacting",
+                    voxel_rt::cagi::EVENT_RESPONSE_SLOTS - 1
+                );
+            }
+            self.world_host
+                .request_light_attributes(self.renderer.light_volume_grid(), attributes);
             // Attribute generation is asynchronous when world editing is
             // threaded.  The burst starts when its result is installed below.
         }
@@ -1368,6 +1593,12 @@ impl AppState {
     /// A mouse button changed: enter mouse-look, or start/stop a hold-to-repeat
     /// edit. All winit types stay in this file (platform-layer rule).
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, egui_consumed: bool) {
+        if button == MouseButton::Middle {
+            if pressed && !egui_consumed && self.cursor_grabbed {
+                self.pick_material_at_crosshair();
+            }
+            return;
+        }
         let place = match button {
             MouseButton::Left => false,
             MouseButton::Right => true,
@@ -1398,7 +1629,11 @@ impl AppState {
             true => self.input_state.place_held = true,
             false => self.input_state.remove_held = true,
         }
-        self.edit_at_crosshair(place.then_some(PLACE_MATERIAL));
+        if place {
+            self.place_selected_block();
+        } else {
+            self.edit_at_crosshair(None);
+        }
         self.input_state.next_repeat_edit =
             Some(Instant::now() + Duration::from_secs_f32(1.0 / EDIT_REPEAT_HZ));
     }
@@ -1415,7 +1650,11 @@ impl AppState {
         if now < due {
             return;
         }
-        self.edit_at_crosshair(self.input_state.place_held.then_some(PLACE_MATERIAL));
+        if self.input_state.place_held {
+            self.place_selected_block();
+        } else {
+            self.edit_at_crosshair(None);
+        }
         self.input_state.next_repeat_edit =
             Some(now + Duration::from_secs_f32(1.0 / EDIT_REPEAT_HZ));
     }
@@ -1447,6 +1686,7 @@ impl AppState {
                     grid,
                     attributes,
                     emissions,
+                    responses,
                     build_micros,
                 } => {
                     let installed = self.renderer.write_light_volume_attributes(
@@ -1454,6 +1694,7 @@ impl AppState {
                         grid,
                         attributes,
                         emissions,
+                        responses.as_ref(),
                     );
                     println!(
                         "CAGI attributes rebuilt off-frame in {:.1} ms ({}installed)",
@@ -1579,14 +1820,22 @@ impl AppState {
         };
         self.sun_settings.advance_day_cycle(frame_time_seconds);
         self.environment_runtime.day_phase = self.sun_settings.day_phase;
+        self.advance_animation(frame_time_seconds);
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
         // imperceptible.
+        let (animation_params, event_params) = self.quality.animation_params(
+            self.animation_clock.sample(),
+            self.world_clock.sample(),
+            self.world_events.len(),
+        );
         let lighting_uniform = self.sun_settings.lighting_uniform(
             self.quality.shading_params(),
             self.quality.gi_params(),
             self.quality.water_params(),
             self.quality.material_params(),
+            animation_params,
+            event_params,
         );
         // A moved sun invalidates the whole light volume (E4: the world is
         // static, the sun is not). Dragging the slider therefore re-floods every
@@ -1647,6 +1896,7 @@ impl AppState {
             &self.gpu_context.queue,
             &mut light_volume_encoder,
             &lighting_uniform,
+            &self.world_events.upload_array(),
             gi_iterations,
             self.frame_timers.as_ref(),
         );
@@ -1689,6 +1939,7 @@ impl AppState {
                 eye_submerged,
                 step_micros: self.character_step_micros,
             },
+            target: self.target_highlight(),
         };
         self.overlay.render(
             &self.window,
@@ -1704,6 +1955,7 @@ impl AppState {
             &mut self.sun_settings,
             &mut self.quality,
             &mut self.material_table,
+            &mut self.material_panel,
             &mut self.studio_assets,
             &mut self.graph_editor,
         );
@@ -1809,7 +2061,7 @@ impl AppState {
                     &brickmap,
                     &self.quality.global_illumination,
                     attribute_source,
-                    self.material_table.rows(),
+                    &self.material_table.cagi_attributes(),
                 );
             }
             if attribute_source == AttributeSource::Deferred

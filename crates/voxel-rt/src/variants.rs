@@ -28,9 +28,12 @@
 //! patching, and `crate::passes::dda::build_shader_source` remains the single
 //! place a shader source is assembled.
 
+use crate::animation_clock::AnimationClockSample;
 use crate::ao::{float_literal, patch_shader_const, AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
-use crate::lighting::{GiParams, MaterialParams, ShadingParams, WaterParams};
+use crate::lighting::{
+    AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams, WaterParams,
+};
 use crate::pattern::{MAX_PATTERN_LAYERS, PATTERN_FADE_END_METERS, PATTERN_FADE_START_METERS};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
@@ -88,6 +91,7 @@ pub enum LeverId {
     GiTransmission,
     GiEmissive,
     GiEmitterBounce,
+    GiEventLight,
     GiEmissiveScale,
     GiSampleMode,
     GiIterationsPerFrame,
@@ -116,6 +120,8 @@ pub enum LeverId {
     MaterialPatternMaxLayers,
     MaterialPatternFadeStart,
     MaterialPatternFadeEnd,
+    MaterialAnimationSpeed,
+    MaterialAnimationDeterministic,
     // Resolution (S0).
     RenderScale,
 }
@@ -380,6 +386,7 @@ impl LeverId {
             LeverId::GiTransmission => LeverValue::Flag(global_illumination.transmission),
             LeverId::GiEmissive => LeverValue::Flag(global_illumination.emissive),
             LeverId::GiEmitterBounce => LeverValue::Flag(global_illumination.emitter_bounce),
+            LeverId::GiEventLight => LeverValue::Flag(global_illumination.event_light),
             LeverId::GiEmissiveScale => LeverValue::Scalar(global_illumination.emissive_scale),
             LeverId::GiSampleMode => {
                 LeverValue::Mode(global_illumination.sample_mode.shader_value())
@@ -423,6 +430,12 @@ impl LeverId {
             }
             LeverId::MaterialPatternFadeEnd => {
                 LeverValue::Scalar(quality.materials.pattern_fade_end_meters)
+            }
+            LeverId::MaterialAnimationSpeed => {
+                LeverValue::Scalar(quality.materials.animation_speed)
+            }
+            LeverId::MaterialAnimationDeterministic => {
+                LeverValue::Flag(quality.materials.animation_deterministic)
             }
             LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
         }
@@ -496,6 +509,7 @@ impl LeverId {
             LeverId::GiEmitterBounce => {
                 global_illumination.emitter_bounce = value.expect_flag(self)
             }
+            LeverId::GiEventLight => global_illumination.event_light = value.expect_flag(self),
             LeverId::GiEmissiveScale => {
                 global_illumination.emissive_scale = value.expect_scalar(self);
             }
@@ -566,6 +580,12 @@ impl LeverId {
             }
             LeverId::MaterialPatternFadeEnd => {
                 quality.materials.pattern_fade_end_meters = value.expect_scalar(self).max(0.0);
+            }
+            LeverId::MaterialAnimationSpeed => {
+                quality.materials.animation_speed = value.expect_scalar(self).max(0.0);
+            }
+            LeverId::MaterialAnimationDeterministic => {
+                quality.materials.animation_deterministic = value.expect_flag(self);
             }
             LeverId::RenderScale => {
                 quality.render_scale = value
@@ -1426,6 +1446,39 @@ pub const REGISTRY: &[Lever] = &[
         }],
     },
     Lever {
+        id: LeverId::GiEventLight,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_EVENT_LIGHT"),
+        label: "event light (emission follows the world event field)",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "S3b, ON by default. Without it a material whose emission answers an \
+                  event sensor is a decal: the wall brightens as you walk up to it and \
+                  the floor in front of it does not, because the volume only ever saw \
+                  the row's resting emission. With it on, a cell carrying a response \
+                  index in attribute bits 29-31 senses the same event field the surface \
+                  does and interpolates between the material's resting and triggered \
+                  emission. What made this cheap is a fact the arc's plan had WRONG: the \
+                  CA is not a one-shot flood — it dispatches iterations_per_frame steps \
+                  every frame and neither rule reads a cell's own previous value, so the \
+                  field brightens and darkens on its own and a time-varying emitter \
+                  needs NO re-flood. The global re-flood exists only to clear the pinned \
+                  sun-source flag when the sun moves. The shipped-world benchmark covers \
+                  only the no-response fast path; it does NOT price a live gated emitter. \
+                  That remaining scenario must use representative gated surface area and \
+                  0/1/4/16 events before the default's cost is treated as accepted. DDA \
+                  remains unchanged, as it must: the shading pass never reads the response \
+                  table. Off is a complete look — every gated cell injects its stored peak \
+                  — and the Quest-tier fallback.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-no-event-light",
+            overrides: &[(LeverId::GiEventLight, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
         id: LeverId::GiEmissiveScale,
         subsystem: LeverSubsystem::GlobalIllumination,
         kind: LeverKind::Runtime,
@@ -2195,6 +2248,42 @@ pub const REGISTRY: &[Lever] = &[
         mode_options: &[],
         bench: &[],
     },
+    Lever {
+        id: LeverId::MaterialAnimationSpeed,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "animation speed",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 4.0,
+            logarithmic: false,
+        },
+        verdict: "Scales how fast the animation clock advances. It scales the DELTA, \
+                  not the total, so dragging changes tempo without the wave jumping. \
+                  Zero holds every oscillator still but does NOT freeze event sensors, \
+                  whose inputs still move with the camera — see the deterministic \
+                  lever for that. Runtime-only, no shader rebuild.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::MaterialAnimationDeterministic,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "deterministic animation",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "Pins the animation clock at zero AND empties the world-event field, \
+                  so every sensor reads zero and a still camera renders identically \
+                  frame over frame. This is what the pixel-diff bench sets. It does \
+                  not reproduce an un-animated material: a frozen oscillator still \
+                  returns a value, so animated scenes carry their own baselines.",
+        mode_options: &[],
+        bench: &[],
+    },
     // ---- Resolution (S0) ----
     Lever {
         id: LeverId::RenderScale,
@@ -2395,6 +2484,14 @@ pub struct MaterialSettings {
     pub pattern_fade_start_meters: f32,
     /// Absolute camera distance in metres where detail has fully faded out.
     pub pattern_fade_end_meters: f32,
+    /// S3 — how fast the animation clock advances. Scales the per-frame delta,
+    /// never the accumulated total, so changing it mid-drag alters tempo rather
+    /// than teleporting every wave.
+    pub animation_speed: f32,
+    /// S3 — pin the clock at zero and empty the world-event field. The bench
+    /// mode: it buys frame-to-frame stability, NOT parity with an un-animated
+    /// material.
+    pub animation_deterministic: bool,
 }
 
 impl MaterialSettings {
@@ -2455,6 +2552,8 @@ impl Default for MaterialSettings {
             patterns: true,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
+            animation_speed: 1.0,
+            animation_deterministic: false,
             pattern_fade_start_meters: PATTERN_FADE_START_METERS,
             pattern_fade_end_meters: PATTERN_FADE_END_METERS,
         }
@@ -2596,6 +2695,36 @@ impl RenderQuality {
         }
     }
 
+    /// The animation clock, for this frame's lighting uniform (S3).
+    ///
+    /// Deterministic mode pins the reading here as well as clearing the event
+    /// field, so the two halves of the guarantee cannot drift apart: a caller
+    /// that forgets to clear events still gets a frozen clock, and the frozen
+    /// clock is visible in one place rather than inferred from a lever.
+    pub fn animation_params(
+        &self,
+        material_clock: AnimationClockSample,
+        world_clock: AnimationClockSample,
+        event_count: usize,
+    ) -> (AnimationParams, EventParams) {
+        if self.materials.animation_deterministic {
+            return (AnimationParams::default(), EventParams::default());
+        }
+        (
+            AnimationParams {
+                remainder_seconds: material_clock.remainder_seconds,
+                epoch: material_clock.epoch,
+                reserved_flow: 0.0,
+                reserved: 0.0,
+            },
+            EventParams {
+                remainder_seconds: world_clock.remainder_seconds,
+                epoch: world_clock.epoch,
+                event_count: event_count as f32,
+            },
+        )
+    }
+
     /// The runtime water knobs, for this frame's lighting uniform (E6).
     pub fn water_params(&self) -> WaterParams {
         WaterParams {
@@ -2654,6 +2783,7 @@ mod tests {
         "CAGI_CELL_DATA_WORDS",
         "CAGI_TRANSMITTANCE_SHIFT",
         "CAGI_TRANSMITTANCE_LEVELS",
+        "CAGI_EVENT_RESPONSE_SHIFT",
         "CAGI_CHANNEL_MASK",
         "CAGI_CHANNEL_MAX",
         "CAGI_SUN_SOURCE_FLAG",
@@ -2918,6 +3048,8 @@ mod tests {
             pattern_max_layers,
             pattern_fade_start_meters,
             pattern_fade_end_meters,
+            animation_speed,
+            animation_deterministic,
         } = materials;
         let TraversalSettings {
             column_fast_forward,
@@ -2956,6 +3088,7 @@ mod tests {
             transmission,
             emissive,
             emitter_bounce,
+            event_light,
             iterations_per_frame,
             strength: gi_strength,
             ambient_floor,
@@ -3045,6 +3178,7 @@ mod tests {
             (LeverId::GiTransmission, LeverValue::Flag(transmission)),
             (LeverId::GiEmissive, LeverValue::Flag(emissive)),
             (LeverId::GiEmitterBounce, LeverValue::Flag(emitter_bounce)),
+            (LeverId::GiEventLight, LeverValue::Flag(event_light)),
             (LeverId::GiEmissiveScale, LeverValue::Scalar(emissive_scale)),
             (
                 LeverId::GiSampleMode,
@@ -3110,6 +3244,14 @@ mod tests {
             (
                 LeverId::MaterialPatternFadeEnd,
                 LeverValue::Scalar(pattern_fade_end_meters),
+            ),
+            (
+                LeverId::MaterialAnimationSpeed,
+                LeverValue::Scalar(animation_speed),
+            ),
+            (
+                LeverId::MaterialAnimationDeterministic,
+                LeverValue::Flag(animation_deterministic),
             ),
             (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
         ];

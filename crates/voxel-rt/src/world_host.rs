@@ -32,7 +32,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::thread::JoinHandle;
 
 use crate::brickmap::Brickmap;
-use crate::cagi::{CagiGrid, MaterialAttributes};
+use crate::cagi::{CagiGrid, GpuEventResponse, MaterialAttributes, EVENT_RESPONSE_SLOTS};
 use crate::world_edit::{apply, VoxelEdit, WorldDelta, WorldEditSettings};
 
 /// Something the render thread must apply, produced by the authority.
@@ -45,6 +45,19 @@ pub enum WorldUpdate {
         grid: CagiGrid,
         attributes: Vec<u32>,
         emissions: Vec<[f32; 4]>,
+        /// S3b — the response rows the slot indices inside `attributes` point at.
+        ///
+        /// Carried WITH the words rather than read from the live table on
+        /// arrival: the material set may have changed again while this built,
+        /// and installing new words against a newer table would point cells at
+        /// the wrong response.
+        ///
+        /// Boxed because this variant travels by value down a channel and the
+        /// table is 384 bytes against three `Vec` handles — every OTHER update,
+        /// including the per-edit `Delta`, would have paid for it. One
+        /// allocation per attribute rebuild, next to a build that just walked
+        /// 37 M voxels.
+        responses: Box<[GpuEventResponse; EVENT_RESPONSE_SLOTS]>,
         build_micros: f32,
     },
 }
@@ -229,6 +242,7 @@ impl WorldHost {
                     grid,
                     attributes,
                     emissions,
+                    responses: Box::new(*attribute_table.responses()),
                     build_micros,
                 });
             }
@@ -321,6 +335,7 @@ fn world_thread_main(
                     grid,
                     attributes,
                     emissions,
+                    responses: Box::new(*attribute_table.responses()),
                     build_micros: started.elapsed().as_secs_f32() * 1e6,
                 };
                 if results.send(update).is_err() {

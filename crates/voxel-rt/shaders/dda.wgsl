@@ -304,9 +304,16 @@ fn shadow_ray_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 // estimators reuse `voxel_occupied` — no forked index math.
 
 // Interleaved gradient noise (Jimenez 2014): a fixed per-pixel dither in
-// [0, 1) from pixel coordinates ONLY. Deterministic across frames — a still
-// camera shows an identical image every frame, matching the engine's
-// noiseless identity (no temporal accumulation, no per-frame randomness).
+// [0, 1) from pixel coordinates ONLY. Deterministic across frames, matching
+// the engine's noiseless identity: no temporal accumulation, no per-frame
+// randomness, and every value in a frame derived from that frame's inputs.
+//
+// S3 amended what "identical every frame" means, and the amendment is narrow.
+// Material animation reads a clock and a world-event field from the frame
+// uniform, so a still camera no longer implies a still image — but the pass
+// remains a pure function OF those inputs. Freeze them (the deterministic
+// animation lever pins the clock at zero and empties the event field) and
+// frame-to-frame stability returns exactly. Nothing here accumulates history.
 fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
 }
@@ -692,7 +699,7 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
             graph_base = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
         }
         albedo = srgb_decode(material_pattern_albedo_from_base(
-            hit.material, pattern, graph_base));
+            hit.material, pattern, graph_base, graph_material.animation));
     }
 
     var sun_visibility = 0.0;
@@ -727,7 +734,8 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     var emission = material_pattern_emission(hit.material, pattern) * lighting.gi_params.w;
     if (graph_material.graph_active) {
         emission = material_pattern_emission_from_base(
-            hit.material, pattern, graph_material.emission.rgb) * lighting.gi_params.w;
+            hit.material, pattern, graph_material.emission.rgb,
+            graph_material.animation) * lighting.gi_params.w;
     }
     return albedo * (sun + indirect) + emission;
 }

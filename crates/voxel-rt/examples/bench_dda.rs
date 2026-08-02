@@ -86,6 +86,7 @@
 
 use std::time::Instant;
 
+use voxel_rt::animation_clock::AnimationClockSample;
 use voxel_rt::ao::{AoMode, AoSettings};
 use voxel_rt::brickmap::{
     Brickmap, ClearanceUpdate, BRICK_SIZE, MATERIAL_WORDS_PER_BRICK, OCCUPANCY_WORDS_PER_BRICK,
@@ -111,6 +112,7 @@ use voxel_rt::variants::{
 };
 use voxel_rt::voxel_dda;
 use voxel_rt::world_edit::{VoxelEdit, WorldEditSettings};
+use voxel_rt::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
 use glam::Vec3;
@@ -193,11 +195,23 @@ impl Scenario {
     /// penumbra scale, fade ramp, the E4 GI knobs) — the levers that need no
     /// pipeline rebuild are swept exactly the way the app applies them.
     fn lighting_uniform(&self, quality: &RenderQuality) -> LightingUniform {
+        let (animation_params, event_params) = quality.animation_params(
+            AnimationClockSample::FROZEN,
+            AnimationClockSample::FROZEN,
+            0,
+        );
         self.sun.lighting_uniform(
             quality.shading_params(),
             quality.gi_params(),
             quality.water_params(),
             quality.material_params(),
+            // S3: the bench pins the animation clock at zero and ships no world
+            // events, so a measured frame is reproducible. This is stated here
+            // rather than left to the deterministic lever, because a scenario
+            // sweeping presets would otherwise inherit whatever that preset
+            // happened to set — and a bench that animates is not a bench.
+            animation_params,
+            event_params,
         )
     }
 }
@@ -321,6 +335,11 @@ fn main() {
     // variant's shading and CAGI passes (E4's WorldBindings seam) — a section
     // with a dozen variants would otherwise upload ~30 MB a dozen times.
     let world_bindings = WorldBindings::new(&device, &brickmap);
+    // ...including the event field, which the bench keeps EMPTY for the whole
+    // run. One write at setup rather than one per batch: nothing here ever
+    // raises an event, so a per-batch write would re-upload the same 768 zero
+    // bytes into every measured section.
+    world_bindings.write_world_events(&queue, &BENCH_WORLD_EVENTS);
 
     if runs_section(1) {
         run_section(
@@ -1207,7 +1226,7 @@ fn report_preset_pipeline_cache(
         device,
         brickmap,
         &CagiSettings::default(),
-        &voxel_rt::material::MATERIALS,
+        &voxel_rt::cagi::MaterialAttributes::compiled(),
     );
     let mut pass = DdaPass::new(device, world_bindings, &light_volume, &target.view);
     println!();
@@ -2644,7 +2663,7 @@ fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
         device,
         brickmap,
         &CagiSettings::default(),
-        &voxel_rt::material::MATERIALS,
+        &voxel_rt::cagi::MaterialAttributes::compiled(),
     );
     let headroom_bytes = (brickmap.brick_capacity() - brickmap.occupied_brick_count()) as usize
         * (OCCUPANCY_WORDS_PER_BRICK + MATERIAL_WORDS_PER_BRICK)
@@ -2674,14 +2693,33 @@ fn report_edit_memory(device: &wgpu::Device, brickmap: &Brickmap) {
     );
 }
 
+/// S3: the bench ships an EMPTY world-event field, so no material sensor can
+/// fire and a measured frame stays reproducible. Paired with the frozen clock
+/// in `Scenario::lighting_uniform`; the two together are what the deterministic
+/// animation lever does in the app.
+///
+/// S3b made this the CA pass's input too — with no events live, every cell's
+/// event gate reads its material's RESTING emission, which is the un-animated
+/// value the recorded baselines were measured against.
+const BENCH_WORLD_EVENTS: [GpuWorldEvent; MAX_WORLD_EVENTS] =
+    [GpuWorldEvent::INACTIVE; MAX_WORLD_EVENTS];
+
 /// The sky radiance the CA injects — the hemisphere constants of `lighting.rs`,
 /// mirrored here for the CPU cross-check's out-of-volume neighbour values.
 fn scenario_sky_radiance() -> [f32; 3] {
+    let quality = RenderQuality::default();
+    let (animation_params, event_params) = quality.animation_params(
+        AnimationClockSample::FROZEN,
+        AnimationClockSample::FROZEN,
+        0,
+    );
     let uniform = SunSettings::default().lighting_uniform(
-        RenderQuality::default().shading_params(),
-        RenderQuality::default().gi_params(),
-        RenderQuality::default().water_params(),
-        RenderQuality::default().material_params(),
+        quality.shading_params(),
+        quality.gi_params(),
+        quality.water_params(),
+        quality.material_params(),
+        animation_params,
+        event_params,
     );
     [
         uniform.sky_ambient[0] * uniform.sky_ambient[3],
@@ -3023,7 +3061,7 @@ impl VariantResources {
             device,
             brickmap,
             &variant.quality.global_illumination,
-            &voxel_rt::material::MATERIALS,
+            &voxel_rt::cagi::MaterialAttributes::compiled(),
         );
         VariantResources {
             cagi_pass: CagiPass::new_with_shader_source(

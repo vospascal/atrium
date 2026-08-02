@@ -217,24 +217,55 @@ fn pattern_snap_to_texels(meters: vec3<f32>, texels: u32,
 
 // A layer's sample coordinate, in period units. The whole frame mechanism: put the
 // position in the right space, snap it to the texel grid, divide by the period.
+// S3 — how far this layer's pattern has drifted, in metres.
+//
+// The offset is QUANTISED TO THE TEXEL GRID, with no opt-out, and the reason is
+// that an opt-out would not do anything. `pattern_coordinate` snaps AFTER
+// subtracting this offset, so the sampled value steps a whole texel at a time
+// either way; leaving the offset un-quantised produces byte-identical output and
+// only costs the texel grid its alignment to world voxel boundaries. Genuinely
+// continuous motion is what `texels_per_voxel = 0` already means — no grid, no
+// snap, and the early return below hands the raw offset straight back.
+fn pattern_drift_meters(layer: PatternLayer, velocity: vec3<f32>,
+                        voxel_size_meters: f32) -> vec3<f32> {
+    if (all(velocity == vec3<f32>(0.0))) {
+        return vec3<f32>(0.0);
+    }
+    let offset = velocity * graph_animation_seconds();
+    let texels = pattern_texels(layer);
+    if (texels == 0u) {
+        return offset;
+    }
+    let texel = (voxel_size_meters * BRICK_SIZE) / f32(texels);
+    // WGSL `trunc` mirrors the CPU path: quantise symmetrically toward zero
+    // so negative motion does not take an immediate one-texel step.
+    return trunc(offset / texel) * texel;
+}
+
 fn pattern_coordinate(layer: PatternLayer, sample: PatternSample,
-                      voxel_size_meters: f32) -> vec3<f32> {
+                      voxel_size_meters: f32, drift_meters: vec3<f32>) -> vec3<f32> {
     let period = max(layer.period_meters, 1e-4);
     let frame = pattern_frame(layer);
     let world_voxel_size_meters = voxel_size_meters * BRICK_SIZE;
     let world_voxel = sample.voxel / vec3<i32>(i32(BRICK_SIZE));
-    var meters = sample.world_meters;
+    var meters = sample.world_meters - drift_meters;
     if (frame == PATTERN_FRAME_VOXEL) {
         // Quantised to the voxel's own centre, so the generator returns ONE value
         // for the whole voxel without any generator knowing about voxels — and why
         // the texel snap is a no-op here, a centre already being one point.
+        //
+        // S3: drift is therefore IGNORED in this frame, and deliberately. The
+        // coordinate is one point per voxel, so translating it would step the
+        // whole voxel's value between neighbours rather than move a pattern
+        // across it. A voxel-frame layer that wants motion wants the world or
+        // face frame instead.
         meters = (vec3<f32>(world_voxel) + vec3<f32>(0.5)) * world_voxel_size_meters;
     } else if (frame == PATTERN_FRAME_FACE) {
         // Voxel-local, so the pattern repeats identically on every face — which is
         // what "about the face" means. The face's own axis keeps its local value
         // rather than being zeroed, so a 3D generator still sees three varying
         // inputs on a face that happens to be flat in one of them.
-        meters = sample.world_meters - vec3<f32>(world_voxel) * world_voxel_size_meters;
+        meters = meters - vec3<f32>(world_voxel) * world_voxel_size_meters;
     }
     // Otherwise WORLD: a field the world sits in, so it flows across neighbouring
     // voxels and CANNOT tile per voxel. The default, and the continuity argument.
@@ -272,8 +303,8 @@ fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
 
 // The generator's raw value, 0..1, before fade, amount, face mask or blend.
 fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
-                           voxel_size_meters: f32) -> f32 {
-    let point = pattern_coordinate(layer, sample, voxel_size_meters);
+                           voxel_size_meters: f32, drift_meters: vec3<f32>) -> f32 {
+    let point = pattern_coordinate(layer, sample, voxel_size_meters, drift_meters);
     let salt = pattern_variation_salt(layer, sample);
     let generator = pattern_generator(layer);
     if (generator == PATTERN_GENERATOR_NOISE) {
@@ -321,11 +352,15 @@ fn pattern_covers_face(layer: PatternLayer, axis: u32, axis_sign: f32) -> bool {
 
 // The layer's effective strength at this sample: its amount, globally scaled,
 // faded, and zero on a face the mask excludes.
-fn pattern_strength(layer: PatternLayer, sample: PatternSample) -> f32 {
+fn pattern_strength(layer: PatternLayer, sample: PatternSample, gain: f32) -> f32 {
     if (!pattern_covers_face(layer, sample.axis, sample.axis_sign)) {
         return 0.0;
     }
+    // The graph's gain multiplies the AUTHORED amount rather than replacing it,
+    // and is a separate value from it: an unconnected socket is 1.0, so the
+    // authored number keeps its one meaning and nothing is applied twice.
     return clamp(layer.amount, 0.0, 1.0)
+        * max(gain, 0.0)
         * MATERIAL_PATTERN_STRENGTH
         * pattern_fade(layer, sample.distance_meters);
 }
@@ -333,12 +368,14 @@ fn pattern_strength(layer: PatternLayer, sample: PatternSample) -> f32 {
 // ---- Blends -----------------------------------------------------------------
 
 fn pattern_apply_color(layer: PatternLayer, base: vec3<f32>, sample: PatternSample,
-                       voxel_size_meters: f32) -> vec3<f32> {
-    let strength = pattern_strength(layer, sample);
+                       voxel_size_meters: f32, gain: f32,
+                       drift_velocity: vec3<f32>) -> vec3<f32> {
+    let strength = pattern_strength(layer, sample, gain);
     if (strength <= 0.0) {
         return base;
     }
-    let value = pattern_generator_value(layer, sample, voxel_size_meters);
+    let drift_meters = pattern_drift_meters(layer, drift_velocity, voxel_size_meters);
+    let value = pattern_generator_value(layer, sample, voxel_size_meters, drift_meters);
     let blend = pattern_blend(layer);
     if (blend == PATTERN_BLEND_MIX_TO_COLOR) {
         return base + (layer.target_color - base) * strength * value;
@@ -353,12 +390,14 @@ fn pattern_apply_color(layer: PatternLayer, base: vec3<f32>, sample: PatternSamp
 }
 
 fn pattern_apply_scalar(layer: PatternLayer, base: f32, sample: PatternSample,
-                        voxel_size_meters: f32) -> f32 {
-    let strength = pattern_strength(layer, sample);
+                        voxel_size_meters: f32, gain: f32,
+                        drift_velocity: vec3<f32>) -> f32 {
+    let strength = pattern_strength(layer, sample, gain);
     if (strength <= 0.0) {
         return base;
     }
-    let value = pattern_generator_value(layer, sample, voxel_size_meters);
+    let drift_meters = pattern_drift_meters(layer, drift_velocity, voxel_size_meters);
+    let value = pattern_generator_value(layer, sample, voxel_size_meters, drift_meters);
     let blend = pattern_blend(layer);
     if (blend == PATTERN_BLEND_MIX_TO_COLOR) {
         return base + (layer.target_color.x - base) * strength * value;
@@ -410,75 +449,18 @@ fn pattern_sample(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> 
 // once per HIT and never once per traversal step, which is what keeps the whole
 // stage off the hot loop.
 
-// This hit's albedo: S1's per-face value with the row's albedo layers applied.
-fn material_pattern_albedo(material: u32, sample: PatternSample) -> vec3<f32> {
-    let base = material_face_albedo(material, sample.axis, sample.axis_sign);
-    let row = materials[material];
-    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
-        return base;
-    }
-    let count = min(
-        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
-        MAX_PATTERN_LAYERS,
-    );
-    var albedo = base;
-    for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let layer = row.patterns[slot];
-        if (pattern_target(layer) == PATTERN_TARGET_ALBEDO) {
-            albedo = pattern_apply_color(layer, albedo, sample, brickmap.voxel_size_meters);
-        }
-    }
-    return albedo;
-}
-
-// This hit's roughness, by the same rule.
-fn material_pattern_roughness(material: u32, sample: PatternSample) -> f32 {
-    let base = material_face_roughness(material, sample.axis, sample.axis_sign);
-    let row = materials[material];
-    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
-        return base;
-    }
-    let count = min(
-        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
-        MAX_PATTERN_LAYERS,
-    );
-    var roughness = base;
-    for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let layer = row.patterns[slot];
-        if (pattern_target(layer) == PATTERN_TARGET_ROUGHNESS) {
-            roughness = pattern_apply_scalar(layer, roughness, sample, brickmap.voxel_size_meters);
-        }
-    }
-    return clamp(roughness, 0.0, 1.0);
-}
-
-// This hit's emitted radiance, patterned. Only ever non-zero on an emitting row, so
-// a pattern aimed at emission on a non-emitter multiplies zero — which is why the
-// panel says so instead of leaving you wondering.
-fn material_pattern_emission(material: u32, sample: PatternSample) -> vec3<f32> {
-    let row = materials[material];
-    if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
-        return row.emission;
-    }
-    let count = min(
-        min(material_pattern_count(row.flags), MATERIAL_PATTERN_MAX_LAYERS),
-        MAX_PATTERN_LAYERS,
-    );
-    var emission = row.emission;
-    for (var slot = 0u; slot < count; slot = slot + 1u) {
-        let layer = row.patterns[slot];
-        if (pattern_target(layer) == PATTERN_TARGET_EMISSION) {
-            emission = pattern_apply_color(layer, emission, sample, brickmap.voxel_size_meters);
-        }
-    }
-    return emission;
-}
-
-// Graph-backed surfaces still retain the authored legacy layer stack. The graph
-// supplies the base value; these variants apply the same face/world/voxel layer
-// semantics without replacing the authored pattern behavior.
+// The authored layer stack, applied over a base the caller supplies.
+//
+// There used to be two copies of each of these — one taking the material row's
+// own base and one taking a graph's — which meant every change to the layer
+// loop had to be made twice. The row-base variants below are now wrappers, so
+// the loop exists once and a graph and a plain material cannot diverge.
+//
+// `animation` carries the per-slot gain and drift a material graph supplied;
+// `pattern_animation_identity()` is the un-animated case and folds away.
 fn material_pattern_albedo_from_base(material: u32, sample: PatternSample,
-                                     base: vec3<f32>) -> vec3<f32> {
+                                     base: vec3<f32>,
+                                     animation: PatternAnimation) -> vec3<f32> {
     let row = materials[material];
     if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
         return base;
@@ -491,14 +473,16 @@ fn material_pattern_albedo_from_base(material: u32, sample: PatternSample,
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_ALBEDO) {
-            albedo = pattern_apply_color(layer, albedo, sample, brickmap.voxel_size_meters);
+            albedo = pattern_apply_color(layer, albedo, sample, brickmap.voxel_size_meters,
+                pattern_animation_gain(animation, slot), animation.drift_velocity[slot].xyz);
         }
     }
     return albedo;
 }
 
 fn material_pattern_roughness_from_base(material: u32, sample: PatternSample,
-                                        base: f32) -> f32 {
+                                        base: f32,
+                                        animation: PatternAnimation) -> f32 {
     let row = materials[material];
     if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
         return base;
@@ -511,14 +495,16 @@ fn material_pattern_roughness_from_base(material: u32, sample: PatternSample,
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_ROUGHNESS) {
-            roughness = pattern_apply_scalar(layer, roughness, sample, brickmap.voxel_size_meters);
+            roughness = pattern_apply_scalar(layer, roughness, sample, brickmap.voxel_size_meters,
+                pattern_animation_gain(animation, slot), animation.drift_velocity[slot].xyz);
         }
     }
     return clamp(roughness, 0.0, 1.0);
 }
 
 fn material_pattern_emission_from_base(material: u32, sample: PatternSample,
-                                       base: vec3<f32>) -> vec3<f32> {
+                                       base: vec3<f32>,
+                                       animation: PatternAnimation) -> vec3<f32> {
     let row = materials[material];
     if (!MATERIAL_PATTERNS || (row.flags & MATERIAL_FLAG_PATTERNS) == 0u) {
         return base;
@@ -531,8 +517,34 @@ fn material_pattern_emission_from_base(material: u32, sample: PatternSample,
     for (var slot = 0u; slot < count; slot = slot + 1u) {
         let layer = row.patterns[slot];
         if (pattern_target(layer) == PATTERN_TARGET_EMISSION) {
-            emission = pattern_apply_color(layer, emission, sample, brickmap.voxel_size_meters);
+            emission = pattern_apply_color(layer, emission, sample, brickmap.voxel_size_meters,
+                pattern_animation_gain(animation, slot), animation.drift_velocity[slot].xyz);
         }
     }
     return emission;
+}
+
+// The row's own base, for a material with no graph. One line each, so the layer
+// loop above stays the single implementation.
+fn material_pattern_albedo(material: u32, sample: PatternSample) -> vec3<f32> {
+    return material_pattern_albedo_from_base(
+        material,
+        sample,
+        material_face_albedo(material, sample.axis, sample.axis_sign),
+        pattern_animation_identity(),
+    );
+}
+
+fn material_pattern_roughness(material: u32, sample: PatternSample) -> f32 {
+    return material_pattern_roughness_from_base(
+        material,
+        sample,
+        material_face_roughness(material, sample.axis, sample.axis_sign),
+        pattern_animation_identity(),
+    );
+}
+
+fn material_pattern_emission(material: u32, sample: PatternSample) -> vec3<f32> {
+    return material_pattern_emission_from_base(
+        material, sample, materials[material].emission, pattern_animation_identity());
 }

@@ -8,6 +8,39 @@
     "outputs": {}
   },
   "nodes": {
+    "animation-lava-glow": {
+      "node_type": "material.oscillator",
+      "node_type_version": 1,
+      "properties": {
+        "seed": {
+          "type": "integer",
+          "value": 4
+        },
+        "sync": {
+          "type": "text",
+          "value": "per_voxel"
+        },
+        "wave": {
+          "type": "text",
+          "value": "sine"
+        }
+      },
+      "socket_defaults": {
+        "high": {
+          "type": "scalar",
+          "value": 1.12
+        },
+        "low": {
+          "type": "scalar",
+          "value": 0.88
+        },
+        "rate_hz": {
+          "type": "scalar",
+          "value": 0.2
+        }
+      },
+      "unknown_payload": null
+    },
     "g-0000000000000099": {
       "node_type": "material.output",
       "node_type_version": 1,
@@ -110,21 +143,41 @@
       "socket_defaults": {},
       "unknown_payload": null
     },
+    "lava-flow-direction": {
+      "node_type": "material.direction",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {
+        "azimuth_degrees": {
+          "type": "scalar",
+          "value": 45.0
+        },
+        "elevation_degrees": {
+          "type": "scalar",
+          "value": 0.0
+        },
+        "speed": {
+          "type": "scalar",
+          "value": 0.2
+        }
+      },
+      "unknown_payload": null
+    },
     "pattern-source-g-00000000000000a1-0": {
       "node_type": "material.pattern_noise",
       "node_type_version": 1,
       "properties": {
         "frame": {
           "type": "text",
-          "value": "face"
+          "value": "world"
         },
         "octaves": {
           "type": "integer",
-          "value": 2
+          "value": 4
         },
         "period_meters": {
           "type": "scalar",
-          "value": 0.02
+          "value": 0.25
         },
         "texels_per_voxel": {
           "type": "integer",
@@ -132,7 +185,7 @@
         },
         "vary_per_face": {
           "type": "boolean",
-          "value": true
+          "value": false
         }
       },
       "socket_defaults": {},
@@ -147,6 +200,17 @@
     }
   },
   "links": {
+    "animation-lava-glow-gain": {
+      "from": {
+        "node": "animation-lava-glow",
+        "socket": "value"
+      },
+      "to": {
+        "node": "g-00000000000000a1",
+        "socket": "animation_gain"
+      },
+      "order": 0
+    },
     "g-000000000000009d": {
       "from": {
         "node": "g-000000000000009a",
@@ -177,6 +241,17 @@
       "to": {
         "node": "surface-vx-000000000000000018c7af1e2e9f8568-000000000000004d",
         "socket": "emission"
+      },
+      "order": 0
+    },
+    "lava-flow-drift": {
+      "from": {
+        "node": "lava-flow-direction",
+        "socket": "vector"
+      },
+      "to": {
+        "node": "g-00000000000000a1",
+        "socket": "drift_velocity"
       },
       "order": 0
     },
@@ -216,6 +291,10 @@
   },
   "layout": {
     "positions": {
+      "animation-lava-glow": [
+        443.34766,
+        -423.02734
+      ],
       "g-0000000000000099": [
         960.0,
         160.0
@@ -236,9 +315,13 @@
         700.0,
         20.0
       ],
+      "lava-flow-direction": [
+        153.94531,
+        -297.25
+      ],
       "pattern-source-g-00000000000000a1-0": [
-        700.0,
-        -260.0
+        759.9375,
+        -394.0586
       ],
       "surface-vx-000000000000000018c7af1e2e9f8568-000000000000004d": [
         440.0,
