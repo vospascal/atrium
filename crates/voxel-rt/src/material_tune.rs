@@ -34,7 +34,7 @@
 
 use voxel_core::vox::VoxMaterialKind;
 
-use crate::material::{Material, MaterialKind, MATERIAL_COUNT};
+use crate::material::{Material, MATERIAL_COUNT};
 use crate::vox_material::ImportedFields;
 
 /// Where an imported row came from — the identity a re-import is checked against.
@@ -330,23 +330,10 @@ impl Field {
     }
 }
 
-/// Whether a row's kind can hold a field at all — used only by the tests, which
-/// need to know which fields a given row could possibly disagree about.
-#[allow(dead_code)]
-fn kind_holds(kind: &MaterialKind, field: Field) -> bool {
-    match field {
-        Field::Albedo | Field::Roughness | Field::Specular | Field::Emission => true,
-        Field::Transmittance => !matches!(kind, MaterialKind::Solid),
-        Field::IndexOfRefraction | Field::Absorption | Field::Scattering => {
-            matches!(kind, MaterialKind::Medium(..))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::{material_id, MATERIALS};
+    use crate::material::{material_id, MaterialKind, MATERIALS};
     use voxel_core::world::Voxel;
 
     fn source(file_index: u8, rgba: [u8; 4]) -> VoxSource {

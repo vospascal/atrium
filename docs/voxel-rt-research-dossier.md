@@ -110,9 +110,14 @@ something the sizing exercise never touched — the load count.)
 **Meanwhile the thing the paper is not named after won, and won on two axes at
 once: the uniform-brick tag (ledger 1.12).** A brick that is one material in all
 512 cells is hit at its entry face with no descent and no level-1 fetch.
-**40,531 of 69,977 occupied bricks qualify — 57.9% — taking the brickmap from
-45.2 MB to 21.9 MB, and scenario A from 5.069 to 4.744 ms (6.4%), scenario C from
-4.899 to 4.402 (10.1%).** Note what that is: **a >50% memory cut *and* a speedup**,
+**RE-MEASURED 2026-08-02: 100,865 of 100,865 occupied bricks qualify — 100% —
+taking the CPU brickmap from 65.1 MB to 7.0 MB, a 9.3x cut.** The figures this row
+carried before (57.9%, 45.2 → 21.9 MB, scenario A 5.069 → 4.744 ms and C 4.899 →
+4.402) were measured on a world that authored sub-block detail; the generated world
+now authors one material per 1 m block and a block is exactly one 8³ brick, so a
+generated brick cannot be anything but uniform. The frame-time half is owed a
+re-measurement and is deliberately not restated. Note what this is: **a 9x memory cut
+*and* a speedup**,
 which is the rarest shape of win in this engine, and it came from reading the
 paper's data layout rather than its algorithm. It is deliberately **not** a lever —
 tag and fast path are one data format, so "off" means building different data.

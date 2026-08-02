@@ -1216,8 +1216,12 @@ fn trace_brick(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<
     // UNIFORM fast path: the brick is one material in all 512 cells, so the
     // first voxel the ray meets is the one it entered through. The hit is the
     // brick's entry face — no dda_setup, no descent, no level-1 fetch at all.
-    // 58.6% of the island's occupied bricks qualify (see the brick_census
-    // probe in voxel-core), which is most of the ground under most rays.
+    // As of 2026-08-02 this is not a fast path taken *often* — it is the ONLY path
+    // the generated island takes. 100% of occupied bricks qualify, because the world
+    // authors one material per 1 m block and a block is exactly one 8³ brick. The
+    // fine DDA below now runs only on edited bricks. (It used to read 58.6%, measured
+    // by a `brick_census` probe that no longer exists; see collapse_uniform_bricks
+    // in src/brickmap.rs for the current numbers.)
     if (brick_is_uniform(pointer)) {
         let material = brick_uniform_material(pointer);
         // E6 again: a liquid does not stop a ray told to ignore liquids. Leaving

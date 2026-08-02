@@ -379,12 +379,17 @@ Suggested by a devlog comment (2026-07-30). Strip voxels that are fully
 enclosed by opaque neighbors from the brickmap; bricks that become entirely
 empty free their level-1 storage.
 
-**What it buys: memory only, zero traversal speed.** Rays always terminate on
-the shell, so interior bricks are never visited — the DDA never reads them.
-Current level-1 footprint (seed-1 island, 71,941 occupied bricks): 4.6 MB
-occupancy masks + 36.8 MB material bytes ≈ 41.4 MB. A solid island likely has
-half or more of its occupied bricks fully underground, so expect ~20-30 MB
-back.
+**SUPERSEDED 2026-08-02 — there is no level-1 storage left to free.** The world now
+authors one material per 1 m block and a block is exactly one 8³ brick, so the
+uniform collapse (ledger 1.12) fires on **100%** of occupied bricks and the level-1
+pool is **empty**: `occupied_brick_count() == 0`, CPU brickmap **7.0 MB** total, down
+from 65.1 MB uncollapsed. Interior culling was a proposal to reclaim level-1 bytes
+that no longer exist, and the collapse already reclaimed 9.3x more than the 20-30 MB
+this estimated.
+
+The objections below are kept, and only those: if a sub-block generator or heavy
+editing ever repopulates level 1, they apply again unchanged. The memory estimate that
+used to sit here is deleted rather than corrected — it counted bytes that are gone.
 
 **Why NOT now:**
 - 41 MB is nothing on the desktop target; no memory pressure exists.

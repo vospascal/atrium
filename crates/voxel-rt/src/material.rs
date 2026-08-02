@@ -1231,9 +1231,11 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
         //
         // All four share one tessellation (2:1 running bond, 0.5 m, 6% gap) — the
         // thing the `material.tessellation` node exists to guarantee. Costed from
-        // bench section 11: 0.010 + 0.432 + 1.111 + 0.041 = ~1.6 ms per layer-stack
-        // at full coverage, which is why it is a demonstration row and not a
-        // terrain one.
+        // bench section 11 (median of three, 2026-08-02):
+        // 0.029 + 0.383 + 1.076 + 0.052 = ~1.54 ms per layer-stack at full coverage,
+        // which is why it is a demonstration row and not a terrain one. Note where
+        // that goes: the worley edge alone is 70% of it, and the two tile generators
+        // together are 5%.
         Material {
             name: "slate tile",
             // Lighter than the look aims for, because FOUR multiply layers stack:

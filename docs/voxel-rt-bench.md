@@ -233,8 +233,12 @@ architecture-specific (re-run everything on Quest 3 in Stage 6):
 Not a lever, and deliberately so:
 
 - **Uniform-brick tag** — a brick that is one material in all 512 cells is hit at
-  its entry face with no descent and no level-1 fetch. 40,531 of 69,977 occupied
-  bricks qualify (57.9%), taking the brickmap from 45.2 MB to 21.9 MB. There is
+  its entry face with no descent and no level-1 fetch. **100,865 of 100,865 occupied
+  bricks qualify — 100%, re-measured 2026-08-02 — taking the CPU brickmap from
+  65.1 MB to 7.0 MB (9.3x).** It is no longer a fast path taken often; it is the only
+  path the generated island takes, because the world authors one material per 1 m
+  block and a block is exactly one 8³ brick. (Previously 57.9% and 45.2 → 21.9 MB, on
+  a world that had sub-block detail.) There is
   no `ENABLE_` flag because a collapsed brick has no level-1 slot at all, so a
   shader compiled without the fast path would read its material id as a slot
   index — tag and fast path are one data format, not a toggle, and the only way
@@ -875,11 +879,34 @@ the sampler and the CA both treat as a constant).
 
 17.5-17.8% of cells are absorbers at every resolution — the surface shell of the
 island, which is also the share of cells that can become sun-bounce candidates. The
-CPU attribute build is bounded by OCCUPIED BRICKS (71,941 x 512 voxels), not by the
-cell count, which is why it barely moves with resolution: ~50-80 ms, paid once at
-startup and again on a resolution change (a preset switch between Quest and Balanced
-is therefore a one-off ~50 ms hitch, in the same class as the 62 ms brickmap build,
-and a candidate for E2's world thread).
+CPU attribute build is bounded by OCCUPIED BRICKS x 512 voxels, not by the cell
+count, which is why it barely moves with resolution.
+
+> **⚠ OPEN REGRESSION, measured 2026-08-02 — this cost is now ~10-17x what is
+> recorded below and the "~50 ms hitch" claim is no longer true.**
+>
+> | cell voxels | recorded | 2026-08-02 |
+> |---|---|---|
+> | 2 (0.25 m) | 53 ms | **946 ms** |
+> | 4 (0.50 m), shipped | 48 ms | **827 ms** |
+> | 8 (1.00 m) | 79 ms | **801 ms** |
+>
+> A preset switch between Quest and Balanced is therefore a **~0.8 s stall**, not a
+> one-off 50 ms hitch. The absorbing share moved with it, 17.5-17.8% -> 25.8-27.5%.
+>
+> **It is not the uniform collapse.** `bench_dda --no-collapse 5` is *slower* still
+> (1.06 s / 947 ms / 923 ms), so synthesising the uniform brick's words is helping,
+> not hurting. What changed is the world: every occupied brick is now fully solid, so
+> the loop body runs on **100,865 x 512 = 51.6 M** occupied voxels with no partial
+> bricks to `continue` past, and each one calls `exposed_face_weight`, which probes
+> six neighbours through `brickmap.get`. That accounts for a large factor but not
+> obviously all of it, so **the cause is localised, not concluded.**
+>
+> Owed: profile the loop body, and check whether `exposed_face_weight` can be
+> answered from the brick's own occupancy words for interior voxels instead of six
+> full `get` calls — on a fully-solid world nearly every probe returns "solid" and
+> the answer is zero. This is a startup/preset cost, not a per-frame one, which is
+> why it has not been visible in any frame-time table.
 
 2 voxels is rejected on both axes at once: 258 MB against the brickmap's own ~30 MB,
 and 5.8-7.9 ms per frame *for the CA alone*. 8 voxels is the Quest configuration —
@@ -2666,8 +2693,9 @@ exists:
 | C ground | 4.385 | **0.968** |
 | D ground low sun | 4.937 | **1.020** |
 
-The run prints **`0 occupied bricks`**, against the 71,941 the ledger's 1.12 row
-records at a 57.9% collapse rate. That reads like a broken world and is not one:
+The run prints **`0 occupied bricks`**, against the 71,941 at a 57.9% collapse rate
+that the ledger's 1.12 row recorded before this was found (both are now corrected to
+100,865 at 100%). That reads like a broken world and is not one:
 `brickmap_round_trips_generated_world` already asserts `occupied_brick_count() == 0`,
 because **one generated world voxel now maps to exactly one uniform 8³ brick**. Every
 occupied brick is fully solid and single-material, the collapse fires on 100% of them,

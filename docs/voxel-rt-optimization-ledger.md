@@ -45,7 +45,7 @@ building it, rather than discovering it per lever.
 
 | # | Technique | Status | Evidence / note |
 |---|---|---|---|
-| 1.1 | Two-level sparse brickmap (8³ bricks, empty bricks skipped) | ✅ USED | S1. 71,941 occupied bricks, seed-1 island |
+| 1.1 | Two-level sparse brickmap (8³ bricks, empty bricks skipped) | ✅ USED | S1. **100,865 occupied bricks, seed-1 island (re-measured 2026-08-02; it read 71,941 before the world moved to one material per 1 m block).** Note what that number now means: every one of them is fully solid and single-material, so level 1 is empty and the second level exists only for edits |
 | 1.2 | **Chebyshev distance-field skip** (bindings 9/10) | ✅ USED | S2 headline win, **17–27% under baseline**. Its byte doubles as the occupancy test. **Its one structural weakness is now named: the scalar is isotropic**, so a ray running parallel to a wall reads clearance 1 while 100 voxels of free travel lie ahead. That is what 2.11 died of. **1.13 built the directional successor and it LOST — and the reason is the most transferable finding of the R1 batch: this byte is not a distance, it is a distance AND the occupancy test in one load.** A directional bound cannot be, so it is a second load; the scalar wins on load count even where the directional field wins on reach |
 | 1.3 | Global-max sky-out for upward rays | ✅ USED | Cheap, exact |
 | 1.4 | Per-XZ column max-brick-Y | ✅ USED | Feeds 1.3; E4 reuses it as the sky test |
@@ -105,7 +105,7 @@ building it, rather than discovering it per lever.
 | 3.3 | Interior-voxel culling | 🔜 OPEN (deferred) | **Memory only, zero traversal speed** — rays terminate on the shell. ~20–30 MB of 41.4 MB back. Blocked because the brickmap doubles as the *acoustic* occupancy structure: audio occlusion through a hill must still see the hill. Revisit at Quest (E9) |
 | 3.4 | Voxel-level clearance field | 🔜 OPEN | ≈37 MB. Would unblock 2.11. **E2 did not add it**: the brick-level field is what the edit path now repairs incrementally, and a voxel-level one would multiply that work by 512 per edit as well as costing the memory. Re-open at E3/E9 with the incremental-update cost in the estimate |
 | 3.6 | **Edit headroom in the level-1 arrays** | ✅ USED | E2, see 4.7c. 2.4 MB per side to keep brick materialization a word patch |
-| 3.7 | **Brick template dedup** (`BRICK_TAG_TEMPLATE` — many pointers into one shared level-1 slot) | 🔜 OPEN, gated on a chunk level | **The tag is a RESERVED bit pattern with no implementation** — it occurs twice in the crate, a doc comment and a constant, read by nothing. `brick_census` (re-run 2026-07-31, seed 1337) says why, at our shipped 8³: **81% of sculpted bricks are already distinct, dedup factor 1.2×, 15.2 → 12.6 MB.** 4³ is the real sweet spot (**2.5×**, 8.4 → 5.3 MB) but is unreachable without a third hierarchy level. 2³ is the cautionary row: **45.3× dedup that LOSES memory** (3.1 → 15.4 MB) because a pointer costs more than an 8-byte payload — the ratio is not the metric, bytes are. **Re-run the census WITH transform matching before this is ever closed as dead (R11):** our 1.2× is an *exact-match* floor, and R11's Table 2 shows S+A removing a further 19–22% of elements and S+A+T 27–50% on the same geometry (their octree nodes at 64k³, so direction only, not the number). The cube symmetry group is the sub-minute half of their search. Note the blocker is the chunk level, not the match rate — transforms move the ratio, not the gate. Related: xima dossier's brick dedup + copy-on-write |
+| 3.7 | **Brick template dedup** (`BRICK_TAG_TEMPLATE` — many pointers into one shared level-1 slot) | ❌ DEAD by empty population — re-triaged 2026-08-02 under 7.12 | **The population this would compress no longer exists.** The world now authors one material per 1 m block, a block is exactly one 8³ brick, so the uniform collapse (1.12) fires on **100%** of occupied bricks and the sculpted-brick pool is **empty** — `occupied_brick_count() == 0`. A dedup scheme over zero bricks saves zero bytes. This is exactly the re-triage 7.12 describes: the row was OPEN-gated-on-a-chunk-level, and an unrelated change to *world authoring* killed it without either the tag or the census moving. The prior reason is still on record and still true of the world it was measured on — at 8³, **81% of sculpted bricks were already distinct, dedup factor 1.2x, 15.2 → 12.6 MB**, which never paid for a palette indirection; 4³ gave 2.5x but needed a third hierarchy level, and that level was the real gate. **Revival condition:** a sub-block generator, or editing heavy enough to repopulate level 1. Re-measure then — 1.2x was an exact-match floor with no transform matching. The reserved tag keeps its slot; two bits are not worth reclaiming |
 
 ## 4. Threading, authority & generation — the GPU-first question
 
@@ -266,12 +266,13 @@ re-prewarm) instead of branching at runtime.
   and nearest volume sampling, E6 the second water interface (free above water,
   2.35× from below it). E2's inline-authority and full-clearance-rebuild
   levers live in the registry with the same discipline.
-- 🔜 **OPEN: 26** — dominated by E3 (GPU generation) and E7 (the look pass, which
+- 🔜 **OPEN: 25** — dominated by E3 (GPU generation) and E7 (the look pass, which
   is cheap and almost entirely unbuilt). The R1–R10 research batch added four:
   **2.19 ray-fed CAGI probes** (the one with a proposed slot, E4b), 4.12, 4.13
-  and the 7.11 observation. R11 added **3.7 brick template dedup** — the reserved
-  tag nothing implements, gated on a chunk level rather than on match rate.
-- ❌ **DEAD: 29** — 13 mesh-era techniques with no ray-tracer analogue, plus 16
+  and the 7.11 observation. R11's **3.7 brick template dedup** left this column on
+  2026-08-02 — not measured away, but killed by an unrelated change to world
+  authoring that emptied the population it would have compressed.
+- ❌ **DEAD: 30** — 13 mesh-era techniques with no ray-tracer analogue, plus 17
   measured or scope closures (E4 closed 0.25 m cells; **E2 closed GPU authority,
   snapshot swapping and per-frame data readback**; **E2b closed the sandbox's
   heightfield terrain-follower** — it cannot see an edited world; **E6 closed
@@ -279,7 +280,9 @@ re-prewarm) instead of branching at runtime.
   light, so every pool would be black; **the R-batch closed ReSTIR (2.16a),
   neural denoising (2.16b), NAADF's per-voxel AADF form (1.14) and the entire
   SVO/DAG branch (1.15, R11 — static by construction, and its own benchmark shows
-  compression costing frame time)**).
+  compression costing frame time)**; and **S3 closed 3.7 brick template dedup and
+  the interior-voxel-culling candidate together — the uniform collapse now fires on
+  100% of the island, so level 1 is empty and both proposals compress nothing**).
 
 **Cheapest open shot on the page, added 2026-07-31:** re-testing 2.11 (soft
 shadows) over 1.13's directional field. The data is already built behind

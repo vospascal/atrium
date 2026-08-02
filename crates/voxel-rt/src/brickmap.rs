@@ -67,9 +67,18 @@ pub const EMPTY_BRICK: u32 = u32::MAX;
 // A bare slot index IS a valid tagged word, which is what makes this change
 // additive rather than a re-encoding of the whole grid.
 //
-// Measured on the shipped island (`cargo run --example brick_census -p
-// voxel-core`): of 71,966 occupied bricks, 58.6% are a single material filling
-// all 512 cells. Those are the ones this tag collapses.
+// RE-MEASURED 2026-08-02, seed 1: of **100,865** occupied bricks, **100%** are a
+// single material filling all 512 cells, so the tag collapses the entire island and
+// no level-1 brick survives. That is not a coincidence — the generated world authors
+// one material per 1 m block, and a 1 m block IS one 8³ brick of 12.5 cm traversal
+// voxels, so a generated brick cannot be anything BUT uniform. Sculpted bricks appear
+// only where an edit or a future sub-block generator puts detail inside a block.
+//
+// The earlier figure here — 71,966 bricks at 58.6% — was measured before that change,
+// via a `brick_census` example that no longer exists. Both are recorded because the
+// difference is the whole reason this tag is worth more than its ledger row claims:
+// the collapse now takes the CPU brickmap from **65.1 MB to 7.0 MB (9.3x)**, not the
+// 45.2 -> 21.9 MB (2.1x) written down when the rate was 57.9%.
 
 /// Bit position of the two-bit level-0 tag.
 pub const BRICK_TAG_SHIFT: u32 = 30;
@@ -90,14 +99,20 @@ pub const BRICK_TAG_UNIFORM: u32 = 1;
 /// into a deduplicated brick palette. Nothing emits this yet; it is spelled out
 /// so the tag space is allocated before the shaders learn to branch on it.
 ///
-/// It stays unimplemented for a measured reason, not an oversight. At our 8³
-/// edge, `brick_census` finds **81% of sculpted bricks already distinct — dedup
-/// factor 1.2×, 15.2 → 12.6 MB**, which does not pay for a palette indirection.
-/// 4³ would give 2.5×, but only with a third hierarchy level above it, and that
-/// chunk level — not the match rate — is the actual gate. See ledger 3.7: if the
-/// chunk level ever lands, re-run the census with transform matching (mirror +
-/// axis permutation) before concluding anything, because 1.2× is an exact-match
-/// floor.
+/// It stays unimplemented, and **as of 2026-08-02 it has nothing left to dedup**:
+/// the uniform collapse fires on 100% of the generated island, so the sculpted-brick
+/// population this tag would compress is **empty**. Only edits create a sculpted
+/// brick now. The tag keeps its slot in the format because reclaiming two bits buys
+/// nothing and a sub-block generator would repopulate the case, but treat it as
+/// dormant rather than pending.
+///
+/// The reason it was already unbuilt before that, measured at 8³ on a world that did
+/// have sculpted bricks: 81% of them were distinct — dedup factor 1.2x, 15.2 → 12.6
+/// MB — which does not pay for a palette indirection. 4³ would give 2.5x, but only
+/// with a third hierarchy level above it, and that chunk level, not the match rate,
+/// was always the gate. See ledger 3.7. If sculpted bricks ever come back in volume,
+/// re-measure before concluding anything: 1.2x was an exact-match floor, with no
+/// transform matching (mirror + axis permutation).
 pub const BRICK_TAG_TEMPLATE: u32 = 2;
 
 /// Tag `0b11`: no non-air voxels. [`EMPTY_BRICK`] is `u32::MAX`, which carries
@@ -1392,12 +1407,20 @@ pub fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
 /// equal. A half-air brick does not qualify — a ray through it must still find
 /// the surface, so there is nothing to skip.
 ///
-/// MEASURED on the shipped island. Memory: 40,531 of 69,977 occupied bricks
-/// collapse (57.9%), taking the whole brickmap from 45.2 MB to 21.9 MB. Frame
-/// time, via `bench_dda --no-collapse` (minimum of three runs each, because the
-/// uncollapsed build is the noisier one and noise only adds): scenario A 4.744 ms
-/// collapsed against 5.069 uncollapsed (6.4% faster), scenario C 4.402 against
-/// 4.899 (10.1% faster).
+/// MEASURED on the shipped island, seed 1, **re-measured 2026-08-02**: all
+/// **100,865** occupied bricks collapse (**100%**), taking the CPU brickmap from
+/// **65.1 MB to 7.0 MB — 9.3x**. Every generated brick is uniform by construction,
+/// because the world authors one material per 1 m block and a block is exactly one
+/// 8³ brick; only edits and future sub-block detail can produce a survivor.
+///
+/// The frame-time half of this measurement is OWED. The figures it used to carry —
+/// scenario A 4.744 collapsed vs 5.069 uncollapsed (6.4%), C 4.402 vs 4.899 (10.1%)
+/// — were taken at the 57.9% rate on a world with 40,531 sculpted bricks left in it.
+/// At a 100% rate there is no level-1 descent anywhere in the island, so the real
+/// speedup is much larger and is currently unquantified: `bench_dda --no-collapse`
+/// still builds the honest comparison, it just has not been re-run against a
+/// section-1 baseline, because that baseline is itself stale (see the S3 section of
+/// `docs/voxel-rt-bench.md`).
 ///
 /// WHY THERE IS NO LEVER: a collapsed brick has no level-1 slot at all, so a
 /// shader compiled without the fast path would read its material id as a slot
