@@ -26,9 +26,10 @@ use crate::ao::AoMode;
 use crate::character::Submersion;
 use crate::frame_timing::FrameTimings;
 use crate::graph::{
-    FieldDeclarationStatic, FieldTarget, GraphCommand, InputPin, LinkId, NodeCategory,
-    NodeDeclaration, NodeId, NodePreview, NodeRecord, NodeRegistry, NodeTypeId, OutputPin,
-    PropertyValue, SocketKey, SocketType,
+    node_reachability, Cardinality, ConnectionError, FieldDeclarationStatic, FieldTarget,
+    GraphAsset, GraphCommand, InputPin, LinkId, NodeCategory, NodeDeclaration, NodeId, NodePreview,
+    NodeRecord, NodeRegistry, NodeTypeId, NumericRange, OutputPin, PropertyValue,
+    SocketDeclarationStatic, SocketKey, SocketType,
 };
 use crate::lighting::SunSettings;
 use crate::material::{self, MATERIAL_COUNT};
@@ -970,6 +971,14 @@ fn draw_graph_section_contents(
     material_table: &MaterialTable,
 ) {
     let registry = NodeRegistry;
+    // Scope the dwell to Graph Studio: sockets sit a few pixels apart, so
+    // egui's default instant tooltip strobes while a connector is dragged
+    // across a node. The delay is read from the GLOBAL style when a tooltip is
+    // decided, so it is set for the canvas and restored when it is done.
+    let previous_tooltip_delay = ui.ctx().global_style().interaction.tooltip_delay;
+    ui.ctx().all_styles_mut(|style| {
+        style.interaction.tooltip_delay = GRAPH_TOOLTIP_DELAY_SECONDS;
+    });
     let previous_material_slot = state.material_slot;
     ui.horizontal_wrapped(|ui| {
         if ui.button("Undo").clicked() {
@@ -1048,8 +1057,14 @@ fn draw_graph_section_contents(
                 .hint_text("search nodes"),
         );
         let visible_nodes = state.visible_node_types(&registry);
+        // The palette reads as a list of NODES, not of registry keys: the title
+        // leads, the stable id stays as dim secondary text for the times you
+        // need it, and the authored description is one hover away.
+        let selected_title = registry
+            .find(&NodeTypeId(state.node_type.clone()))
+            .map_or_else(|| state.node_type.clone(), |node| node.title.to_string());
         egui::ComboBox::from_id_salt("graph-node-type")
-            .selected_text(&state.node_type)
+            .selected_text(selected_title)
             .show_ui(ui, |ui| {
                 for category in NodeCategory::ALL {
                     let category_nodes = visible_nodes
@@ -1063,7 +1078,9 @@ fn draw_graph_section_contents(
                     ui.separator();
                     ui.label(egui::RichText::new(category.label()).strong());
                     for node in category_nodes {
-                        ui.selectable_value(&mut state.node_type, node.id.to_string(), node.id);
+                        let row_text = graph_palette_row_text(ui, node.title, node.id);
+                        ui.selectable_value(&mut state.node_type, node.id.to_string(), row_text)
+                            .on_hover_text(node.description);
                     }
                 }
             });
@@ -1118,7 +1135,12 @@ fn draw_graph_section_contents(
         egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 76, 88)),
         egui::StrokeKind::Outside,
     );
-    let canvas_hovered = canvas_response.hovered();
+    // `contains_pointer`, not `hovered`: node bodies and sockets are interactive
+    // widgets stacked on top of this rectangle, and egui marks only the topmost
+    // interactive hit as hovered. Panning and zooming must keep working with
+    // the pointer over a node, so ask the question that overlap does not answer
+    // away.
+    let canvas_hovered = canvas_response.contains_pointer();
     let (
         pointer_position,
         middle_down,
@@ -1622,6 +1644,10 @@ fn draw_graph_section_contents(
 
     let hovered_socket =
         pointer_position.and_then(|pointer| graph_socket_hit_at_pointer(&visuals, pointer, zoom));
+    // Derived once per frame and shared by every tooltip and context menu: a
+    // node wired to nothing is visually identical to a working one, so this is
+    // the only thing that can tell them apart.
+    let reachable = node_reachability(&state.graph, &registry);
     for visual in &visuals {
         let node_id = &visual.id;
         let rect = visual.rect;
@@ -1673,6 +1699,107 @@ fn draw_graph_section_contents(
             4.0 * zoom.max(0.75),
             egui::Color32::from_rgb(220, 220, 220),
         );
+
+        // Registered BEFORE the sockets so the socket hit areas, which sit on
+        // this same rectangle's edges, stay on top of it. The custom drag and
+        // selection gestures read raw pointer input and are unaffected.
+        let node_response = ui.interact(
+            rect,
+            egui::Id::new(("graph-node-body", node_id.0.as_str())),
+            egui::Sense::click(),
+        );
+        node_response.clone().on_hover_ui(|hover_ui| {
+            let tooltip = graph_node_tooltip(
+                &state.graph,
+                &reachable,
+                node_id,
+                visual.declaration,
+                &visual.record,
+            );
+            graph_tooltip_body(hover_ui, &tooltip);
+        });
+        node_response.context_menu(|menu_ui| {
+            menu_ui.set_min_width(240.0);
+            menu_ui.label(
+                egui::RichText::new(format!(
+                    "{} · {}",
+                    visual.declaration.title,
+                    visual.declaration.category.label()
+                ))
+                .strong(),
+            );
+            graph_tooltip_prose(menu_ui, visual.declaration.description, None);
+            let reaches_output = reachable.contains(node_id);
+            menu_ui.colored_label(
+                if reaches_output {
+                    GRAPH_TOOLTIP_GOOD_COLOR
+                } else {
+                    GRAPH_TOOLTIP_BAD_COLOR
+                },
+                if reaches_output {
+                    "Reaches Material Output"
+                } else {
+                    "Does not reach Material Output"
+                },
+            );
+            menu_ui.separator();
+            if menu_ui
+                .button(if collapsed { "Expand" } else { "Collapse" })
+                .clicked()
+            {
+                if !state.collapsed_nodes.insert(node_id.clone()) {
+                    state.collapsed_nodes.remove(node_id);
+                }
+                menu_ui.close();
+            }
+            if menu_ui.button("Duplicate").clicked() {
+                state.selected_nodes.clear();
+                state.selected_nodes.insert(node_id.clone());
+                state.selected_node = Some(node_id.clone());
+                state.duplicate_requested = true;
+                menu_ui.close();
+            }
+            if menu_ui.button("Delete").clicked() {
+                state.remove_nodes(vec![node_id.clone()], &registry);
+                state.selected_nodes.remove(node_id);
+                state.selected_node = state.selected_nodes.iter().next().cloned();
+                state.status = format!("{} deleted", visual.declaration.title);
+                menu_ui.close();
+            }
+            let attached_links = state
+                .graph
+                .links
+                .iter()
+                .filter(|(_, link)| link.from.node == *node_id || link.to.node == *node_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            if menu_ui
+                .add_enabled(
+                    !attached_links.is_empty(),
+                    egui::Button::new(format!("Disconnect all ({})", attached_links.len())),
+                )
+                .clicked()
+            {
+                state.apply(
+                    GraphCommand::Transaction {
+                        commands: attached_links
+                            .into_iter()
+                            .map(|id| GraphCommand::Disconnect { id })
+                            .collect(),
+                    },
+                    &registry,
+                );
+                state.status = format!("{} disconnected", visual.declaration.title);
+                menu_ui.close();
+            }
+            if menu_ui.button("Frame this").clicked() {
+                state.selected_nodes.clear();
+                state.selected_nodes.insert(node_id.clone());
+                state.selected_node = Some(node_id.clone());
+                state.frame_selection_requested = true;
+                menu_ui.close();
+            }
+        });
 
         if !collapsed {
             if let Some(preview_type) = graph_node_preview_type(&visual.record, visual.declaration)
@@ -1748,18 +1875,37 @@ fn draw_graph_section_contents(
                     ),
                 );
             }
-            let socket_response = ui
-                .interact(
-                    socket_rect,
-                    egui::Id::new(("graph-input", node_id.0.as_str(), socket.key)),
-                    egui::Sense::click_and_drag(),
-                )
-                .on_hover_text(format!(
-                    "Input · {:?} · {} · {}",
-                    socket.value_type,
-                    graph_socket_capacity_label(socket.cardinality, link_count),
-                    socket.cardinality.description()
-                ));
+            let socket_response = ui.interact(
+                socket_rect,
+                egui::Id::new(("graph-input", node_id.0.as_str(), socket.key)),
+                egui::Sense::click_and_drag(),
+            );
+            socket_response.clone().on_hover_ui(|hover_ui| {
+                let tooltip = graph_socket_tooltip(
+                    &state.graph,
+                    &registry,
+                    &reachable,
+                    state.connector_drag.as_ref(),
+                    node_id,
+                    visual.declaration,
+                    &visual.record,
+                    *socket,
+                    true,
+                    link_count,
+                );
+                graph_tooltip_body(hover_ui, &tooltip);
+            });
+            graph_socket_context_menu(
+                &socket_response,
+                state,
+                &registry,
+                node_id,
+                visual.declaration,
+                &visual.record,
+                *socket,
+                true,
+                point,
+            );
             painter.text(
                 point + egui::vec2(10.0 * zoom.max(0.75), -7.0 * zoom.max(0.75)),
                 egui::Align2::LEFT_TOP,
@@ -1842,18 +1988,37 @@ fn draw_graph_section_contents(
                     egui::Stroke::new(2.0, egui::Color32::WHITE),
                 );
             }
-            let socket_response = ui
-                .interact(
-                    socket_rect,
-                    egui::Id::new(("graph-output", node_id.0.as_str(), socket.key)),
-                    egui::Sense::click_and_drag(),
-                )
-                .on_hover_text(format!(
-                    "Output · {:?} · {} · {}",
-                    socket.value_type,
-                    graph_socket_capacity_label(socket.cardinality, link_count),
-                    socket.cardinality.description()
-                ));
+            let socket_response = ui.interact(
+                socket_rect,
+                egui::Id::new(("graph-output", node_id.0.as_str(), socket.key)),
+                egui::Sense::click_and_drag(),
+            );
+            socket_response.clone().on_hover_ui(|hover_ui| {
+                let tooltip = graph_socket_tooltip(
+                    &state.graph,
+                    &registry,
+                    &reachable,
+                    state.connector_drag.as_ref(),
+                    node_id,
+                    visual.declaration,
+                    &visual.record,
+                    *socket,
+                    false,
+                    link_count,
+                );
+                graph_tooltip_body(hover_ui, &tooltip);
+            });
+            graph_socket_context_menu(
+                &socket_response,
+                state,
+                &registry,
+                node_id,
+                visual.declaration,
+                &visual.record,
+                *socket,
+                false,
+                point,
+            );
             painter.text(
                 point - egui::vec2(10.0 * zoom.max(0.75), 7.0 * zoom.max(0.75)),
                 egui::Align2::RIGHT_TOP,
@@ -1923,7 +2088,13 @@ fn draw_graph_section_contents(
                         )),
                         egui::Sense::hover(),
                     );
-                    response.on_hover_text("Zoom to 100% to edit this property");
+                    response.on_hover_ui(|hover_ui| {
+                        graph_tooltip_body(hover_ui, &graph_field_tooltip(field, &value));
+                        hover_ui.colored_label(
+                            GRAPH_TOOLTIP_KEY_COLOR,
+                            "Zoom to 100% to edit this property",
+                        );
+                    });
                     draw_graph_property_summary(&painter, property_rect, field, &value, zoom);
                     false
                 } else {
@@ -2040,6 +2211,7 @@ fn draw_graph_section_contents(
     }
 
     draw_graph_connector_menu(ui, state, &registry, &visuals, canvas_rect, zoom);
+    draw_graph_canvas_context_menu(&canvas_response, state, &registry, canvas_rect);
 
     ui.label(format!(
         "zoom {:.0}% | {} nodes | {} links",
@@ -2060,6 +2232,88 @@ fn draw_graph_section_contents(
             format!("{}: {}", diagnostic.code, diagnostic.message),
         );
     }
+
+    ui.ctx().all_styles_mut(|style| {
+        style.interaction.tooltip_delay = previous_tooltip_delay;
+    });
+}
+
+/// The empty-canvas right-click menu: add a node where the click landed, paste,
+/// or frame the whole graph. The node list is the same filtered palette the
+/// toolbar uses, so there is one answer to "what can I add here?".
+fn draw_graph_canvas_context_menu(
+    canvas_response: &egui::Response,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    canvas_rect: egui::Rect,
+) {
+    // The menu outlives the click frame, so remember where the click landed
+    // instead of following the pointer around while the menu is open.
+    let anchor_id = egui::Id::new("graph_canvas_context_menu_anchor");
+    if canvas_response.secondary_clicked() {
+        if let Some(position) = canvas_response.interact_pointer_pos() {
+            canvas_response
+                .ctx
+                .data_mut(|data| data.insert_temp(anchor_id, [position.x, position.y]));
+        }
+    }
+    canvas_response.context_menu(|menu_ui| {
+        menu_ui.set_min_width(280.0);
+        let anchor = menu_ui
+            .data(|data| data.get_temp::<[f32; 2]>(anchor_id))
+            .map_or_else(|| canvas_rect.center(), |at| egui::pos2(at[0], at[1]));
+        let graph_position = [
+            (anchor.x - canvas_rect.left() - state.pan[0]) / state.zoom,
+            (anchor.y - canvas_rect.top() - state.pan[1]) / state.zoom,
+        ];
+
+        menu_ui.label(egui::RichText::new("Add node").strong());
+        menu_ui.horizontal(|menu_ui| {
+            menu_ui.label("⌕");
+            menu_ui.add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .desired_width(220.0)
+                    .hint_text("search nodes"),
+            );
+        });
+        let visible_nodes = state.visible_node_types(registry);
+        let mut chosen = None;
+        egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .show(menu_ui, |menu_ui| {
+                if visible_nodes.is_empty() {
+                    menu_ui.colored_label(GRAPH_TOOLTIP_KEY_COLOR, "No nodes match this search");
+                }
+                for node in &visible_nodes {
+                    let row_text = graph_palette_row_text(menu_ui, node.title, node.id);
+                    if menu_ui
+                        .selectable_label(false, row_text)
+                        .on_hover_text(node.description)
+                        .clicked()
+                    {
+                        chosen = Some(NodeTypeId(node.id.to_string()));
+                    }
+                }
+            });
+        if let Some(node_type) = chosen {
+            state.add_node_at(node_type, graph_position, registry);
+            state.status = "Node added".to_string();
+            menu_ui.close();
+        }
+
+        menu_ui.separator();
+        if menu_ui
+            .add_enabled(state.can_paste(), egui::Button::new("Paste"))
+            .clicked()
+        {
+            state.paste_clipboard(registry);
+            menu_ui.close();
+        }
+        if menu_ui.button("Frame all").clicked() {
+            state.frame_all_requested = true;
+            menu_ui.close();
+        }
+    });
 }
 
 struct GraphNodeVisual {
@@ -2438,7 +2692,7 @@ fn draw_graph_socket(
     painter: &egui::Painter,
     point: egui::Pos2,
     color: egui::Color32,
-    cardinality: crate::graph::Cardinality,
+    cardinality: Cardinality,
     input: bool,
     link_count: usize,
     zoom: f32,
@@ -2465,10 +2719,7 @@ fn draw_graph_socket(
     }
 }
 
-fn graph_socket_capacity_label(
-    cardinality: crate::graph::Cardinality,
-    link_count: usize,
-) -> String {
+fn graph_socket_capacity_label(cardinality: Cardinality, link_count: usize) -> String {
     match cardinality.maximum {
         Some(maximum) => {
             let state = if cardinality.accepts_additional(link_count) {
@@ -2480,6 +2731,1112 @@ fn graph_socket_capacity_label(
         }
         None => format!("{link_count} links (open)"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Blender-style graph tooltips
+//
+// One renderer serves sockets, node headers, palette rows and property widgets
+// so the anatomy cannot drift between them: authored prose on top, a dim
+// aligned monospace key/value block underneath, then a type-specific visual.
+// Everything below the prose is DERIVED from the live graph — no second place
+// to author "what does this do right now".
+// ---------------------------------------------------------------------------
+
+/// Blender wraps tooltip prose at a wide, fixed column so a sentence reads as a
+/// sentence instead of a stack of two-word lines.
+const GRAPH_TOOLTIP_WIDTH: f32 = 380.0;
+/// Sockets sit a few pixels apart, so an instant tooltip strobes while a
+/// connector is dragged across a node. Dwell first, then explain.
+const GRAPH_TOOLTIP_DELAY_SECONDS: f32 = 0.5;
+const GRAPH_TOOLTIP_KEY_COLOR: egui::Color32 = egui::Color32::from_rgb(134, 141, 154);
+const GRAPH_TOOLTIP_VALUE_COLOR: egui::Color32 = egui::Color32::from_rgb(198, 204, 214);
+const GRAPH_TOOLTIP_ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
+const GRAPH_TOOLTIP_GOOD_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 214, 140);
+const GRAPH_TOOLTIP_BAD_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 132, 132);
+
+/// One aligned `Key: value` line of a tooltip's monospace block.
+struct GraphTooltipRow {
+    key: String,
+    value: String,
+    value_color: Option<egui::Color32>,
+    /// A wire-colour dot drawn beside the value. Used on the `Type:` row so
+    /// hovering teaches the socket colour code instead of leaving it to be
+    /// memorised from the canvas.
+    dot: Option<egui::Color32>,
+}
+
+impl GraphTooltipRow {
+    fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+            value_color: None,
+            dot: None,
+        }
+    }
+
+    fn colored(key: impl Into<String>, value: impl Into<String>, color: egui::Color32) -> Self {
+        Self {
+            value_color: Some(color),
+            ..Self::new(key, value)
+        }
+    }
+
+    fn with_dot(mut self, dot: egui::Color32) -> Self {
+        self.dot = Some(dot);
+        self
+    }
+}
+
+/// The type-specific body drawn under the key/value block.
+enum GraphTooltipVisual {
+    None,
+    Color([f32; 4]),
+    Scalar {
+        value: f32,
+        soft_range: Option<NumericRange>,
+        hard_range: Option<NumericRange>,
+    },
+    Vector3([f32; 3]),
+    Boolean(bool),
+    /// The node's own live preview, reusing the canvas renderer so a tooltip
+    /// can never disagree with what the node itself is drawing.
+    NodePreview {
+        record: NodeRecord,
+        declaration: &'static NodeDeclaration,
+        socket_type: SocketType,
+    },
+}
+
+/// The assembled content of one tooltip, built by the per-subject builders
+/// below and rendered by [`graph_tooltip_body`].
+struct GraphTooltip {
+    title: Option<String>,
+    prose: String,
+    /// Appended to the prose in the accent colour — the live value inlined into
+    /// the sentence, exactly as Blender does for enum properties.
+    prose_accent: Option<String>,
+    /// A second, dimmer sentence: the selected enum choice's own description.
+    detail: Option<String>,
+    rows: Vec<GraphTooltipRow>,
+    visual: GraphTooltipVisual,
+}
+
+impl GraphTooltip {
+    fn new(prose: impl Into<String>) -> Self {
+        Self {
+            title: None,
+            prose: prose.into(),
+            prose_accent: None,
+            detail: None,
+            rows: Vec::new(),
+            visual: GraphTooltipVisual::None,
+        }
+    }
+}
+
+/// The one shared tooltip renderer. Anatomy, in order: prose, the dim
+/// monospace key/value block, then the type-specific visual.
+fn graph_tooltip_body(ui: &mut egui::Ui, tooltip: &GraphTooltip) {
+    ui.set_max_width(GRAPH_TOOLTIP_WIDTH);
+    if let Some(title) = &tooltip.title {
+        ui.label(egui::RichText::new(title).strong());
+    }
+    if !tooltip.prose.is_empty() || tooltip.prose_accent.is_some() {
+        graph_tooltip_prose(ui, &tooltip.prose, tooltip.prose_accent.as_deref());
+    }
+    if let Some(detail) = &tooltip.detail {
+        ui.label(egui::RichText::new(detail).color(GRAPH_TOOLTIP_KEY_COLOR));
+    }
+    if !tooltip.rows.is_empty() {
+        ui.add_space(5.0);
+        egui::Grid::new("graph-tooltip-rows")
+            .num_columns(2)
+            .spacing(egui::vec2(10.0, 2.0))
+            .show(ui, |ui| {
+                for row in &tooltip.rows {
+                    ui.label(
+                        egui::RichText::new(format!("{}:", row.key))
+                            .monospace()
+                            .color(GRAPH_TOOLTIP_KEY_COLOR),
+                    );
+                    ui.horizontal(|ui| {
+                        if let Some(dot) = row.dot {
+                            let (dot_rect, _) = ui
+                                .allocate_exact_size(egui::vec2(11.0, 11.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot_rect.center(), 4.5, dot);
+                            ui.painter().circle_stroke(
+                                dot_rect.center(),
+                                4.5,
+                                egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)),
+                            );
+                        }
+                        ui.label(
+                            egui::RichText::new(&row.value)
+                                .monospace()
+                                .color(row.value_color.unwrap_or(GRAPH_TOOLTIP_VALUE_COLOR)),
+                        );
+                    });
+                    ui.end_row();
+                }
+            });
+    }
+    graph_tooltip_visual(ui, &tooltip.visual);
+}
+
+/// The prose line, with the live value inlined in the accent colour. A layout
+/// job rather than two labels so the accent wraps inside the sentence.
+fn graph_tooltip_prose(ui: &mut egui::Ui, prose: &str, accent: Option<&str>) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = GRAPH_TOOLTIP_WIDTH;
+    if !prose.is_empty() {
+        job.append(
+            prose,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color: ui.visuals().text_color(),
+                ..Default::default()
+            },
+        );
+    }
+    if let Some(accent) = accent {
+        job.append(
+            &format!("{}{accent}", if prose.is_empty() { "" } else { " " }),
+            0.0,
+            egui::TextFormat {
+                font_id: font,
+                color: GRAPH_TOOLTIP_ACCENT_COLOR,
+                ..Default::default()
+            },
+        );
+    }
+    ui.label(job);
+}
+
+fn graph_tooltip_visual(ui: &mut egui::Ui, visual: &GraphTooltipVisual) {
+    match visual {
+        GraphTooltipVisual::None => {}
+        GraphTooltipVisual::Color(color) => graph_tooltip_color_body(ui, *color),
+        GraphTooltipVisual::Scalar {
+            value,
+            soft_range,
+            hard_range,
+        } => graph_tooltip_scalar_body(ui, *value, *soft_range, *hard_range),
+        GraphTooltipVisual::Vector3(components) => graph_tooltip_vector_body(ui, *components),
+        GraphTooltipVisual::Boolean(state) => graph_tooltip_boolean_body(ui, *state),
+        GraphTooltipVisual::NodePreview {
+            record,
+            declaration,
+            socket_type,
+        } => {
+            let height = graph_node_preview_height(record, declaration).max(46.0);
+            ui.add_space(5.0);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width().max(120.0), height),
+                egui::Sense::hover(),
+            );
+            draw_graph_node_preview(ui.painter(), rect, record, declaration, *socket_type);
+        }
+    }
+}
+
+/// The Blender colour tooltip: one large filled swatch over a checkerboard so
+/// alpha is visible, then the numeric readouts.
+fn graph_tooltip_color_body(ui: &mut egui::Ui, color: [f32; 4]) {
+    ui.add_space(5.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(120.0), 40.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let checker = 8.0;
+    let mut row = 0;
+    let mut y = rect.top();
+    while y < rect.bottom() {
+        let mut column = 0;
+        let mut x = rect.left();
+        while x < rect.right() {
+            let cell = egui::Rect::from_min_max(
+                egui::pos2(x, y),
+                egui::pos2(
+                    (x + checker).min(rect.right()),
+                    (y + checker).min(rect.bottom()),
+                ),
+            );
+            painter.rect_filled(
+                cell,
+                0.0,
+                if (row + column) % 2 == 0 {
+                    egui::Color32::from_gray(90)
+                } else {
+                    egui::Color32::from_gray(60)
+                },
+            );
+            x += checker;
+            column += 1;
+        }
+        y += checker;
+        row += 1;
+    }
+    painter.rect_filled(rect, 3.0, graph_color32(color));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
+        egui::StrokeKind::Inside,
+    );
+
+    let [red, green, blue, alpha] = color;
+    let [hue, saturation, value] = rgb_to_hsv(red, green, blue);
+    ui.add_space(4.0);
+    egui::Grid::new("graph-tooltip-color-rows")
+        .num_columns(2)
+        .spacing(egui::vec2(10.0, 2.0))
+        .show(ui, |ui| {
+            for (key, text) in [
+                ("Display RGB", format!("{red:.3}  {green:.3}  {blue:.3}")),
+                ("HSV", format!("{hue:.3}  {saturation:.3}  {value:.3}")),
+                ("Alpha", format!("{alpha:.3}")),
+                (
+                    "Hex",
+                    format!(
+                        "#{:02X}{:02X}{:02X}{:02X}",
+                        graph_color_byte(red),
+                        graph_color_byte(green),
+                        graph_color_byte(blue),
+                        graph_color_byte(alpha),
+                    ),
+                ),
+            ] {
+                ui.label(
+                    egui::RichText::new(format!("{key}:"))
+                        .monospace()
+                        .color(GRAPH_TOOLTIP_KEY_COLOR),
+                );
+                ui.label(
+                    egui::RichText::new(text)
+                        .monospace()
+                        .color(GRAPH_TOOLTIP_VALUE_COLOR),
+                );
+                ui.end_row();
+            }
+        });
+}
+
+/// Where the value sits in its soft range, with the hard-range ends marked so
+/// "how far can I push this?" is answerable without opening the registry.
+fn graph_tooltip_scalar_body(
+    ui: &mut egui::Ui,
+    value: f32,
+    soft_range: Option<NumericRange>,
+    hard_range: Option<NumericRange>,
+) {
+    let soft = soft_range
+        .or(hard_range)
+        .unwrap_or(NumericRange::new(0.0, 1.0));
+    let low = soft.min.min(value);
+    let high = soft.max.max(value);
+    let span = (high - low).abs().max(f32::EPSILON);
+
+    ui.add_space(5.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(120.0), 14.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, egui::Color32::from_gray(48));
+    let soft_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            egui::lerp(rect.left()..=rect.right(), (soft.min - low) / span),
+            rect.top(),
+        ),
+        egui::pos2(
+            egui::lerp(rect.left()..=rect.right(), (soft.max - low) / span),
+            rect.bottom(),
+        ),
+    );
+    painter.rect_filled(soft_rect, 3.0, egui::Color32::from_gray(66));
+    let marker_x = egui::lerp(rect.left()..=rect.right(), (value - low) / span);
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(marker_x, rect.bottom())),
+        3.0,
+        GRAPH_TOOLTIP_ACCENT_COLOR.gamma_multiply(0.55),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(marker_x, rect.top()),
+            egui::pos2(marker_x, rect.bottom()),
+        ],
+        egui::Stroke::new(2.0, GRAPH_TOOLTIP_ACCENT_COLOR),
+    );
+    if let Some(hard) = hard_range {
+        for end in [hard.min, hard.max] {
+            if end < low || end > high {
+                continue;
+            }
+            let x = egui::lerp(rect.left()..=rect.right(), (end - low) / span);
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.5, GRAPH_TOOLTIP_BAD_COLOR),
+            );
+        }
+    }
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)),
+        egui::StrokeKind::Inside,
+    );
+
+    let mut caption = format!("soft {:.3} … {:.3}", soft.min, soft.max);
+    if let Some(hard) = hard_range {
+        caption.push_str(&format!("   ·   hard {:.3} … {:.3}", hard.min, hard.max));
+    }
+    ui.label(
+        egui::RichText::new(caption)
+            .monospace()
+            .small()
+            .color(GRAPH_TOOLTIP_KEY_COLOR),
+    );
+}
+
+fn graph_tooltip_vector_body(ui: &mut egui::Ui, components: [f32; 3]) {
+    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        let (gizmo_rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+        let painter = ui.painter();
+        let center = gizmo_rect.center();
+        let radius = gizmo_rect.height() * 0.44;
+        painter.circle_filled(center, radius, egui::Color32::from_gray(44));
+        painter.circle_stroke(
+            center,
+            radius,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+        );
+        let length = (components[0].powi(2) + components[1].powi(2) + components[2].powi(2)).sqrt();
+        if length > f32::EPSILON {
+            // A plain XY projection with Z shading the tip: enough to read
+            // "which way does this point" at a glance.
+            let direction = egui::vec2(components[0] / length, -components[1] / length);
+            let tip = center + direction * radius * 0.9;
+            painter.line_segment(
+                [center, tip],
+                egui::Stroke::new(2.0, GRAPH_TOOLTIP_ACCENT_COLOR),
+            );
+            let depth = ((components[2] / length) * 0.5 + 0.5).clamp(0.0, 1.0);
+            painter.circle_filled(
+                tip,
+                2.0 + 2.5 * depth,
+                egui::Color32::from_rgb(255, 210, 120),
+            );
+        }
+        ui.vertical(|ui| {
+            for (axis, component, color) in [
+                ("X", components[0], egui::Color32::from_rgb(226, 108, 108)),
+                ("Y", components[1], egui::Color32::from_rgb(120, 210, 130)),
+                ("Z", components[2], egui::Color32::from_rgb(120, 160, 240)),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(axis).monospace().color(color));
+                    ui.label(
+                        egui::RichText::new(format!("{component:>9.3}"))
+                            .monospace()
+                            .color(GRAPH_TOOLTIP_VALUE_COLOR),
+                    );
+                });
+            }
+        });
+    });
+}
+
+fn graph_tooltip_boolean_body(ui: &mut egui::Ui, state: bool) {
+    ui.add_space(5.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(54.0, 18.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let color = if state {
+        GRAPH_TOOLTIP_GOOD_COLOR
+    } else {
+        egui::Color32::from_gray(78)
+    };
+    painter.rect_filled(rect, 9.0, color.gamma_multiply(0.35));
+    painter.rect_stroke(
+        rect,
+        9.0,
+        egui::Stroke::new(1.0, color),
+        egui::StrokeKind::Inside,
+    );
+    let knob_x = if state {
+        rect.right() - 9.0
+    } else {
+        rect.left() + 9.0
+    };
+    painter.circle_filled(egui::pos2(knob_x, rect.center().y), 6.0, color);
+    painter.text(
+        egui::pos2(
+            if state {
+                rect.left() + 7.0
+            } else {
+                rect.right() - 7.0
+            },
+            rect.center().y,
+        ),
+        if state {
+            egui::Align2::LEFT_CENTER
+        } else {
+            egui::Align2::RIGHT_CENTER
+        },
+        if state { "on" } else { "off" },
+        egui::FontId::monospace(10.0),
+        GRAPH_TOOLTIP_VALUE_COLOR,
+    );
+}
+
+fn graph_color_byte(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn graph_color32(color: [f32; 4]) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        graph_color_byte(color[0]),
+        graph_color_byte(color[1]),
+        graph_color_byte(color[2]),
+        graph_color_byte(color[3]),
+    )
+}
+
+fn rgb_to_hsv(red: f32, green: f32, blue: f32) -> [f32; 3] {
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let delta = maximum - minimum;
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if (maximum - red).abs() < f32::EPSILON {
+        ((green - blue) / delta).rem_euclid(6.0) / 6.0
+    } else if (maximum - green).abs() < f32::EPSILON {
+        ((blue - red) / delta + 2.0) / 6.0
+    } else {
+        ((red - green) / delta + 4.0) / 6.0
+    };
+    let saturation = if maximum <= f32::EPSILON {
+        0.0
+    } else {
+        delta / maximum
+    };
+    [hue, saturation, maximum]
+}
+
+/// The effective value of a property or socket default, formatted for the
+/// monospace block — never `{:?}`.
+fn graph_value_text(value: &PropertyValue) -> String {
+    match value {
+        PropertyValue::Scalar(value) => format!("{value:.3}"),
+        PropertyValue::Integer(value) => value.to_string(),
+        PropertyValue::Vector3([x, y, z]) => format!("{x:.3}, {y:.3}, {z:.3}"),
+        PropertyValue::Color([red, green, blue, alpha]) => {
+            format!("{red:.3}, {green:.3}, {blue:.3}, {alpha:.3}")
+        }
+        PropertyValue::Boolean(value) => (if *value { "On" } else { "Off" }).to_string(),
+        PropertyValue::Text(value) => value.clone(),
+        PropertyValue::Asset(value) => value.0.clone(),
+    }
+}
+
+fn graph_tooltip_visual_for_value(
+    value: &PropertyValue,
+    field: Option<FieldDeclarationStatic>,
+) -> GraphTooltipVisual {
+    match value {
+        PropertyValue::Color(color) => GraphTooltipVisual::Color(*color),
+        PropertyValue::Scalar(scalar) => GraphTooltipVisual::Scalar {
+            value: *scalar,
+            soft_range: field.and_then(|field| field.soft_range),
+            hard_range: field.and_then(|field| field.hard_range),
+        },
+        PropertyValue::Integer(integer) => GraphTooltipVisual::Scalar {
+            value: *integer as f32,
+            soft_range: field.and_then(|field| field.soft_range),
+            hard_range: field.and_then(|field| field.hard_range),
+        },
+        PropertyValue::Vector3(components) => GraphTooltipVisual::Vector3(*components),
+        PropertyValue::Boolean(state) => GraphTooltipVisual::Boolean(*state),
+        PropertyValue::Text(_) | PropertyValue::Asset(_) => GraphTooltipVisual::None,
+    }
+}
+
+/// `Type:` never prints a debug name — the registry owns the display strings.
+fn graph_socket_type_row(socket: SocketDeclarationStatic) -> GraphTooltipRow {
+    GraphTooltipRow::new(
+        "Type",
+        format!(
+            "{} · {}",
+            socket.value_type.display_name(),
+            socket.rate.display_name()
+        ),
+    )
+    .with_dot(graph_socket_color(socket.value_type))
+}
+
+/// The node and socket feeding an input, named the way the canvas names them.
+fn graph_input_driver(
+    graph: &GraphAsset,
+    registry: &NodeRegistry,
+    node_id: &NodeId,
+    socket_key: &str,
+) -> Option<String> {
+    graph
+        .links
+        .values()
+        .find(|link| link.to.node == *node_id && link.to.socket.0 == socket_key)
+        .map(|link| {
+            let title = graph
+                .nodes
+                .get(&link.from.node)
+                .and_then(|record| registry.find(&record.node_type))
+                .map_or("unknown node", |declaration| declaration.title);
+            format!("{title} · {}", link.from.socket.0)
+        })
+}
+
+/// Everything an output feeds. A plain sentence when it feeds nothing, because
+/// an empty list reads as "the tooltip is broken".
+fn graph_output_consumers(
+    graph: &GraphAsset,
+    registry: &NodeRegistry,
+    node_id: &NodeId,
+    socket_key: &str,
+) -> Vec<String> {
+    graph
+        .links
+        .values()
+        .filter(|link| link.from.node == *node_id && link.from.socket.0 == socket_key)
+        .map(|link| {
+            let title = graph
+                .nodes
+                .get(&link.to.node)
+                .and_then(|record| registry.find(&record.node_type))
+                .map_or("unknown node", |declaration| declaration.title);
+            format!("{title} · {}", link.to.socket.0)
+        })
+        .collect()
+}
+
+/// The highest-value line in the whole tooltip: a node wired to nothing looks
+/// identical to a working one on the canvas.
+fn graph_effect_row(reachable: &BTreeSet<NodeId>, node_id: &NodeId) -> GraphTooltipRow {
+    if reachable.contains(node_id) {
+        GraphTooltipRow::colored(
+            "Effect",
+            "reaches Material Output",
+            GRAPH_TOOLTIP_GOOD_COLOR,
+        )
+    } else {
+        GraphTooltipRow::colored(
+            "Effect",
+            "none — does not reach Material Output",
+            GRAPH_TOOLTIP_BAD_COLOR,
+        )
+    }
+}
+
+/// Phrase a rejected connection from the planner's own error, so the reason a
+/// drop will not take is visible BEFORE the drop rather than after it fails.
+fn graph_connection_error_text(error: &ConnectionError) -> String {
+    match error {
+        ConnectionError::TypeMismatch { from, to } => format!(
+            "no — {} cannot feed {}",
+            from.display_name(),
+            to.display_name()
+        ),
+        ConnectionError::RateMismatch { from, to } => format!(
+            "no — a {} value cannot drive a {} input",
+            from.display_name(),
+            to.display_name()
+        ),
+        ConnectionError::InputAtCapacity(_) => {
+            "no — this input already holds every link it allows".to_string()
+        }
+        ConnectionError::OutputAtCapacity(_) => {
+            "no — the dragged output already holds every link it allows".to_string()
+        }
+        ConnectionError::Cycle => "no — this would feed the node back into itself".to_string(),
+        ConnectionError::MissingNode(_)
+        | ConnectionError::UnknownInput(_)
+        | ConnectionError::UnknownOutput(_) => "no — that socket no longer exists".to_string(),
+    }
+}
+
+/// Whether the connector currently in flight would land on THIS socket.
+fn graph_connect_gate_row(
+    drag: &ConnectorDrag,
+    graph: &GraphAsset,
+    registry: &NodeRegistry,
+    node_id: &NodeId,
+    socket_key: &str,
+    is_input: bool,
+) -> GraphTooltipRow {
+    let socket = SocketKey(socket_key.to_string());
+    let pins = match drag {
+        ConnectorDrag::FromOutput(from) if is_input => Some((
+            from.clone(),
+            InputPin {
+                node: node_id.clone(),
+                socket,
+            },
+        )),
+        ConnectorDrag::FromInput(to) if !is_input => Some((
+            OutputPin {
+                node: node_id.clone(),
+                socket,
+            },
+            to.clone(),
+        )),
+        _ => None,
+    };
+    let Some((from, to)) = pins else {
+        return GraphTooltipRow::colored(
+            "Connect",
+            match drag {
+                ConnectorDrag::FromOutput(_) => "no — an output can only feed an input",
+                ConnectorDrag::FromInput(_) => "no — an input can only be fed by an output",
+            },
+            GRAPH_TOOLTIP_BAD_COLOR,
+        );
+    };
+    match graph.connection_plan(registry, &from, &to) {
+        Ok(plan) if plan.replaced.is_empty() => {
+            GraphTooltipRow::colored("Connect", "yes — release to link", GRAPH_TOOLTIP_GOOD_COLOR)
+        }
+        Ok(_) => GraphTooltipRow::colored(
+            "Connect",
+            "yes — replaces the link already here",
+            GRAPH_TOOLTIP_GOOD_COLOR,
+        ),
+        Err(error) => GraphTooltipRow::colored(
+            "Connect",
+            graph_connection_error_text(&error),
+            GRAPH_TOOLTIP_BAD_COLOR,
+        ),
+    }
+}
+
+/// A source node with no inputs computes nothing: its output IS its authored
+/// field, so the tooltip can show a real value. Anything with inputs is
+/// computed per sample and has no single honest number to print.
+fn graph_output_static_value(
+    record: &NodeRecord,
+    declaration: &NodeDeclaration,
+    socket: SocketDeclarationStatic,
+) -> Option<(PropertyValue, FieldDeclarationStatic)> {
+    if !declaration.inputs.is_empty() {
+        return None;
+    }
+    declaration
+        .fields
+        .iter()
+        .find(|field| field.default.value().socket_type() == socket.value_type)
+        .map(|field| {
+            let value = record
+                .properties
+                .get(field.key)
+                .or_else(|| {
+                    record
+                        .socket_defaults
+                        .get(&SocketKey(field.key.to_string()))
+                })
+                .cloned()
+                .unwrap_or_else(|| field.default.value());
+            (value, *field)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn graph_socket_tooltip(
+    graph: &GraphAsset,
+    registry: &NodeRegistry,
+    reachable: &BTreeSet<NodeId>,
+    connector_drag: Option<&ConnectorDrag>,
+    node_id: &NodeId,
+    declaration: &'static NodeDeclaration,
+    record: &NodeRecord,
+    socket: SocketDeclarationStatic,
+    is_input: bool,
+    link_count: usize,
+) -> GraphTooltip {
+    let mut tooltip = GraphTooltip::new(socket.description);
+    tooltip.title = Some(format!(
+        "{} · {}",
+        socket.label,
+        if is_input { "input" } else { "output" }
+    ));
+
+    let field = declaration.field(
+        if is_input {
+            FieldTarget::InputSocket
+        } else {
+            FieldTarget::Property
+        },
+        socket.key,
+    );
+    // The field that describes the value shown, so the scalar bar can mark the
+    // right soft and hard ends rather than falling back to 0…1.
+    let mut value_field = field;
+    let mut effective_value = None;
+    if is_input {
+        match graph_input_driver(graph, registry, node_id, socket.key) {
+            Some(driver) => tooltip.rows.push(GraphTooltipRow::colored(
+                "Driven by",
+                driver,
+                GRAPH_TOOLTIP_ACCENT_COLOR,
+            )),
+            None => {
+                let value = record
+                    .socket_defaults
+                    .get(&SocketKey(socket.key.to_string()))
+                    .cloned()
+                    .or_else(|| field.map(|field| field.default.value()));
+                tooltip.rows.push(GraphTooltipRow::new(
+                    "Value",
+                    value
+                        .as_ref()
+                        .map_or_else(|| "unset".to_string(), graph_value_text),
+                ));
+                effective_value = value;
+            }
+        }
+    } else if let Some((value, source_field)) =
+        graph_output_static_value(record, declaration, socket)
+    {
+        tooltip
+            .rows
+            .push(GraphTooltipRow::new("Value", graph_value_text(&value)));
+        value_field = Some(source_field);
+        effective_value = Some(value);
+    }
+
+    tooltip.rows.push(graph_socket_type_row(socket));
+    tooltip.rows.push(GraphTooltipRow::new(
+        "Links",
+        format!(
+            "{} · {}",
+            graph_socket_capacity_label(socket.cardinality, link_count),
+            socket.cardinality.description()
+        ),
+    ));
+
+    if !is_input {
+        let consumers = graph_output_consumers(graph, registry, node_id, socket.key);
+        tooltip.rows.push(if consumers.is_empty() {
+            GraphTooltipRow::colored(
+                "Feeds",
+                "nothing — this output is not connected",
+                GRAPH_TOOLTIP_BAD_COLOR,
+            )
+        } else {
+            GraphTooltipRow::new("Feeds", consumers.join(", "))
+        });
+    }
+
+    tooltip.rows.push(graph_effect_row(reachable, node_id));
+    if let Some(drag) = connector_drag {
+        tooltip.rows.push(graph_connect_gate_row(
+            drag, graph, registry, node_id, socket.key, is_input,
+        ));
+    }
+
+    // A node that draws a preview of this socket's own type teaches more than
+    // any generated swatch, so reuse the canvas renderer whenever it applies.
+    let preview_type = graph_node_preview_type(record, declaration);
+    tooltip.visual = if preview_type == Some(socket.value_type) {
+        GraphTooltipVisual::NodePreview {
+            record: record.clone(),
+            declaration,
+            socket_type: socket.value_type,
+        }
+    } else if let Some(value) = &effective_value {
+        graph_tooltip_visual_for_value(value, value_field)
+    } else {
+        GraphTooltipVisual::None
+    };
+    tooltip
+}
+
+fn graph_node_tooltip(
+    graph: &GraphAsset,
+    reachable: &BTreeSet<NodeId>,
+    node_id: &NodeId,
+    declaration: &'static NodeDeclaration,
+    record: &NodeRecord,
+) -> GraphTooltip {
+    let mut tooltip = GraphTooltip::new(declaration.description);
+    tooltip.title = Some(declaration.title.to_string());
+    let connected_inputs = declaration
+        .inputs
+        .iter()
+        .filter(|socket| {
+            graph
+                .links
+                .values()
+                .any(|link| link.to.node == *node_id && link.to.socket.0 == socket.key)
+        })
+        .count();
+    let connected_outputs = declaration
+        .outputs
+        .iter()
+        .filter(|socket| {
+            graph
+                .links
+                .values()
+                .any(|link| link.from.node == *node_id && link.from.socket.0 == socket.key)
+        })
+        .count();
+    tooltip.rows.push(GraphTooltipRow::new(
+        "Category",
+        declaration.category.label(),
+    ));
+    tooltip
+        .rows
+        .push(GraphTooltipRow::new("Node type", declaration.id));
+    tooltip.rows.push(GraphTooltipRow::new(
+        "Inputs",
+        format!("{connected_inputs}/{} connected", declaration.inputs.len()),
+    ));
+    tooltip.rows.push(GraphTooltipRow::new(
+        "Outputs",
+        format!(
+            "{connected_outputs}/{} connected",
+            declaration.outputs.len()
+        ),
+    ));
+    tooltip.rows.push(graph_effect_row(reachable, node_id));
+    if let Some(socket_type) = graph_node_preview_type(record, declaration) {
+        tooltip.visual = GraphTooltipVisual::NodePreview {
+            record: record.clone(),
+            declaration,
+            socket_type,
+        };
+    }
+    tooltip
+}
+
+/// The enum pattern from Blender: the description with the CURRENT value
+/// inlined in the accent colour, then the selected choice's own description.
+fn graph_field_tooltip(field: &FieldDeclarationStatic, value: &PropertyValue) -> GraphTooltip {
+    let mut tooltip = GraphTooltip::new(field.description);
+    tooltip.title = Some(field.label.to_string());
+    let choice = match value {
+        PropertyValue::Text(text) => field.choice(text.as_str()),
+        _ => None,
+    };
+    tooltip.prose_accent = Some(match choice {
+        Some(choice) => choice.label.to_string(),
+        None => graph_value_text(value),
+    });
+    if let Some(choice) = choice {
+        tooltip.detail = Some(choice.description.to_string());
+    }
+    tooltip
+        .rows
+        .push(GraphTooltipRow::new("Value", graph_value_text(value)));
+    let socket_type = value.socket_type();
+    tooltip.rows.push(
+        GraphTooltipRow::new(
+            "Type",
+            if field.choices.is_empty() {
+                socket_type.display_name().to_string()
+            } else {
+                format!(
+                    "{} · {} options",
+                    socket_type.display_name(),
+                    field.choices.len()
+                )
+            },
+        )
+        .with_dot(graph_socket_color(socket_type)),
+    );
+    if let Some(range) = field.soft_range {
+        tooltip.rows.push(GraphTooltipRow::new(
+            "Soft range",
+            format!("{:.3} … {:.3}", range.min, range.max),
+        ));
+    }
+    if let Some(range) = field.hard_range {
+        tooltip.rows.push(GraphTooltipRow::new(
+            "Hard range",
+            format!("{:.3} … {:.3}", range.min, range.max),
+        ));
+    }
+    if field.read_only {
+        tooltip.rows.push(GraphTooltipRow::colored(
+            "Editable",
+            "no — this value is derived",
+            GRAPH_TOOLTIP_BAD_COLOR,
+        ));
+    }
+    tooltip.visual = graph_tooltip_visual_for_value(value, Some(*field));
+    tooltip
+}
+
+/// The socket right-click menu: what this socket is, what it currently carries,
+/// and the three things you can do to it from here. "Add compatible node"
+/// deliberately reuses the connector-drag menu rather than growing a second
+/// filtered node picker — the filter is already exactly "what can legally
+/// connect to this socket".
+#[allow(clippy::too_many_arguments)]
+fn graph_socket_context_menu(
+    response: &egui::Response,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    node_id: &NodeId,
+    declaration: &'static NodeDeclaration,
+    record: &NodeRecord,
+    socket: SocketDeclarationStatic,
+    is_input: bool,
+    socket_point: egui::Pos2,
+) {
+    response.context_menu(|menu_ui| {
+        menu_ui.set_min_width(240.0);
+        menu_ui.label(
+            egui::RichText::new(format!(
+                "{} · {}",
+                socket.label,
+                if is_input { "input" } else { "output" }
+            ))
+            .strong(),
+        );
+        graph_tooltip_prose(menu_ui, socket.description, None);
+        let driver = is_input
+            .then(|| graph_input_driver(&state.graph, registry, node_id, socket.key))
+            .flatten();
+        match &driver {
+            Some(driver) => {
+                menu_ui.colored_label(GRAPH_TOOLTIP_ACCENT_COLOR, format!("Driven by {driver}"));
+            }
+            None => {
+                let value = record
+                    .socket_defaults
+                    .get(&SocketKey(socket.key.to_string()))
+                    .cloned()
+                    .or_else(|| {
+                        (!is_input)
+                            .then(|| graph_output_static_value(record, declaration, socket))
+                            .flatten()
+                            .map(|(value, _)| value)
+                    });
+                if let Some(value) = value {
+                    menu_ui.colored_label(
+                        GRAPH_TOOLTIP_VALUE_COLOR,
+                        format!("Value {}", graph_value_text(&value)),
+                    );
+                }
+            }
+        }
+        menu_ui.separator();
+
+        let attached_links = state
+            .graph
+            .links
+            .iter()
+            .filter(|(_, link)| {
+                if is_input {
+                    link.to.node == *node_id && link.to.socket.0 == socket.key
+                } else {
+                    link.from.node == *node_id && link.from.socket.0 == socket.key
+                }
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if menu_ui
+            .add_enabled(
+                !attached_links.is_empty(),
+                egui::Button::new(format!("Disconnect ({})", attached_links.len())),
+            )
+            .clicked()
+        {
+            state.apply(
+                GraphCommand::Transaction {
+                    commands: attached_links
+                        .into_iter()
+                        .map(|id| GraphCommand::Disconnect { id })
+                        .collect(),
+                },
+                registry,
+            );
+            state.status = format!("`{}` disconnected", socket.key);
+            menu_ui.close();
+        }
+
+        let field_default = declaration
+            .field(FieldTarget::InputSocket, socket.key)
+            .map(|field| field.default.value());
+        if menu_ui
+            .add_enabled(
+                is_input && field_default.is_some(),
+                egui::Button::new("Reset to default"),
+            )
+            .clicked()
+        {
+            if let Some(value) = field_default {
+                state.apply(
+                    GraphCommand::SetSocketDefault {
+                        node: node_id.clone(),
+                        socket: SocketKey(socket.key.to_string()),
+                        value,
+                    },
+                    registry,
+                );
+                state.status = format!("`{}` reset to its default", socket.key);
+            }
+            menu_ui.close();
+        }
+
+        if menu_ui.button("Add compatible node…").clicked() {
+            state.connector_drag = Some(if is_input {
+                ConnectorDrag::FromInput(InputPin {
+                    node: node_id.clone(),
+                    socket: SocketKey(socket.key.to_string()),
+                })
+            } else {
+                ConnectorDrag::FromOutput(OutputPin {
+                    node: node_id.clone(),
+                    socket: SocketKey(socket.key.to_string()),
+                })
+            });
+            state.connector_menu_filter.clear();
+            state.connector_menu_position = Some([socket_point.x, socket_point.y]);
+            state.pending_output = None;
+            state.status = format!("Choose a node to connect to `{}`", socket.key);
+            menu_ui.close();
+        }
+    });
+}
+
+/// A palette row: the node title in normal text, its stable registry id dim
+/// behind it. One layout job so both halves live in a single selectable row.
+fn graph_palette_row_text(ui: &egui::Ui, title: &str, node_type_id: &str) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        title,
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color: ui.visuals().text_color(),
+            ..Default::default()
+        },
+    );
+    job.append(
+        node_type_id,
+        10.0,
+        egui::TextFormat {
+            font_id: font,
+            color: GRAPH_TOOLTIP_KEY_COLOR,
+            ..Default::default()
+        },
+    );
+    job
 }
 
 fn graph_socket_position(
@@ -2943,36 +4300,77 @@ fn draw_graph_wire(
     painter.add(egui::Shape::line(points, egui::Stroke::new(1.7, color)));
 }
 
+/// The wire colour code. Two socket types can only ever interconnect when they
+/// are the SAME type, so every type needs its own colour: a shared colour is a
+/// lie about what will connect. Families are still legible — data primitives,
+/// the material reds, the sampled-field blues, the definition teals — but no
+/// two entries are byte-identical, and `socket_colors_are_unique` enforces it.
 fn graph_socket_color(socket_type: SocketType) -> egui::Color32 {
     match socket_type {
-        SocketType::Scalar => egui::Color32::from_rgb(221, 181, 65),
-        SocketType::Integer => egui::Color32::from_rgb(177, 205, 91),
+        // Data primitives.
+        SocketType::Scalar => egui::Color32::from_rgb(170, 170, 170),
+        SocketType::Integer => egui::Color32::from_rgb(110, 190, 120),
         SocketType::Vector3 => egui::Color32::from_rgb(154, 109, 208),
-        SocketType::Color => egui::Color32::from_rgb(221, 181, 65),
-        SocketType::Boolean => egui::Color32::from_rgb(93, 178, 101),
-        SocketType::Text => egui::Color32::from_rgb(185, 185, 185),
-        SocketType::Asset => egui::Color32::from_rgb(108, 173, 207),
+        SocketType::Color => egui::Color32::from_rgb(222, 201, 66),
+        SocketType::Boolean => egui::Color32::from_rgb(208, 110, 196),
+        SocketType::Text => egui::Color32::from_rgb(232, 232, 232),
+        SocketType::Asset => egui::Color32::from_rgb(176, 132, 90),
+        // Material reds.
         SocketType::MaterialSurface => egui::Color32::from_rgb(182, 81, 94),
         SocketType::MaterialRole => egui::Color32::from_rgb(192, 115, 82),
-        SocketType::ScalarField
-        | SocketType::MaskField
-        | SocketType::VoxelField
-        | SocketType::PointField
-        | SocketType::SplineField
-        | SocketType::BiomeField
-        | SocketType::BiomeDefinition
-        | SocketType::SurfaceProfile
-        | SocketType::SurfaceRule
-        | SocketType::MaterialBinding
-        | SocketType::Environment => egui::Color32::from_rgb(85, 156, 205),
+        SocketType::MaterialBinding => egui::Color32::from_rgb(206, 146, 120),
+        // Field-like: sampled at a point. Blue family.
+        SocketType::ScalarField => egui::Color32::from_rgb(85, 156, 205),
+        SocketType::MaskField => egui::Color32::from_rgb(104, 186, 214),
+        SocketType::VoxelField => egui::Color32::from_rgb(66, 124, 180),
+        SocketType::PointField => egui::Color32::from_rgb(120, 205, 232),
+        SocketType::SplineField => egui::Color32::from_rgb(48, 102, 150),
+        SocketType::BiomeField => egui::Color32::from_rgb(140, 196, 180),
+        // Definition-like: a recipe carried around, not sampled. Teal family.
+        SocketType::BiomeDefinition => egui::Color32::from_rgb(92, 178, 158),
+        SocketType::SurfaceProfile => egui::Color32::from_rgb(72, 150, 138),
+        SocketType::SurfaceRule => egui::Color32::from_rgb(120, 196, 176),
+        SocketType::Environment => egui::Color32::from_rgb(58, 124, 120),
+        // Domain signals and pipeline plumbing.
         SocketType::FeatureSet => egui::Color32::from_rgb(122, 154, 72),
         SocketType::AudioSignal => egui::Color32::from_rgb(160, 91, 186),
         SocketType::AnimationSignal => egui::Color32::from_rgb(191, 87, 151),
-        SocketType::QualityProfile | SocketType::RenderTarget => {
-            egui::Color32::from_rgb(86, 150, 205)
-        }
+        SocketType::QualityProfile => egui::Color32::from_rgb(100, 116, 168),
+        SocketType::RenderTarget => egui::Color32::from_rgb(77, 96, 132),
     }
 }
+
+/// Every socket type, listed once so the colour test cannot silently skip one.
+/// The exhaustive match in `graph_socket_color` fails to compile when a variant
+/// is added, and `socket_type_list_is_complete` catches a stale list here.
+#[cfg(test)]
+const ALL_SOCKET_TYPES: &[SocketType] = &[
+    SocketType::Scalar,
+    SocketType::Integer,
+    SocketType::Vector3,
+    SocketType::Color,
+    SocketType::Boolean,
+    SocketType::Text,
+    SocketType::Asset,
+    SocketType::MaterialSurface,
+    SocketType::MaterialRole,
+    SocketType::MaterialBinding,
+    SocketType::ScalarField,
+    SocketType::MaskField,
+    SocketType::VoxelField,
+    SocketType::PointField,
+    SocketType::SplineField,
+    SocketType::BiomeField,
+    SocketType::BiomeDefinition,
+    SocketType::SurfaceProfile,
+    SocketType::SurfaceRule,
+    SocketType::Environment,
+    SocketType::FeatureSet,
+    SocketType::AudioSignal,
+    SocketType::AnimationSignal,
+    SocketType::QualityProfile,
+    SocketType::RenderTarget,
+];
 
 fn graph_node_header_color(declaration: &NodeDeclaration) -> egui::Color32 {
     let [red, green, blue] = declaration.category.color();
@@ -3063,7 +4461,9 @@ fn draw_graph_property(
                 egui::vec2(label_width, 18.0 * zoom),
                 egui::Label::new(field.label).truncate(),
             )
-            .on_hover_text(field.description);
+            .on_hover_ui(|hover_ui| {
+                graph_tooltip_body(hover_ui, &graph_field_tooltip(field, &before));
+            });
             let control_width = ui.available_width().max(20.0 * zoom);
             match value {
                 PropertyValue::Scalar(value) => {
@@ -3112,12 +4512,20 @@ fn draw_graph_property(
                 }
                 PropertyValue::Text(value) => {
                     if !field.choices.is_empty() {
+                        let selected_label = field
+                            .choice(value.as_str())
+                            .map_or(value.as_str(), |choice| choice.label);
                         egui::ComboBox::from_id_salt(("graph-node-enum", field.key))
                             .width(control_width)
-                            .selected_text(value.as_str())
+                            .selected_text(selected_label)
                             .show_ui(ui, |ui| {
                                 for choice in field.choices {
-                                    ui.selectable_value(value, (*choice).to_string(), *choice);
+                                    ui.selectable_value(
+                                        value,
+                                        choice.value.to_string(),
+                                        choice.label,
+                                    )
+                                    .on_hover_text(choice.description);
                                 }
                             });
                     } else {
@@ -3160,7 +4568,13 @@ fn draw_graph_property_summary(
             format!("{}  {}", field.label, if *value { "on" } else { "off" })
         }
         PropertyValue::Integer(value) => format!("{}  {value}", field.label),
-        PropertyValue::Text(value) => format!("{}  {value}", field.label),
+        PropertyValue::Text(value) => format!(
+            "{}  {}",
+            field.label,
+            field
+                .choice(value.as_str())
+                .map_or(value.as_str(), |choice| choice.label)
+        ),
         PropertyValue::Asset(value) => format!("{}  {}", field.label, value.0),
     };
     painter.with_clip_rect(rect).text(
@@ -3179,7 +4593,9 @@ fn draw_property(
 ) -> bool {
     let before = value.clone();
     ui.horizontal(|ui| {
-        ui.label(field.label).on_hover_text(field.description);
+        ui.label(field.label).on_hover_ui(|hover_ui| {
+            graph_tooltip_body(hover_ui, &graph_field_tooltip(field, &before));
+        });
         match value {
             PropertyValue::Scalar(value) => {
                 let range = field
@@ -3220,11 +4636,15 @@ fn draw_property(
             }
             PropertyValue::Text(value) => {
                 if !field.choices.is_empty() {
+                    let selected_label = field
+                        .choice(value.as_str())
+                        .map_or(value.as_str(), |choice| choice.label);
                     egui::ComboBox::from_id_salt(("graph-enum", field.key))
-                        .selected_text(value.as_str())
+                        .selected_text(selected_label)
                         .show_ui(ui, |ui| {
                             for choice in field.choices {
-                                ui.selectable_value(value, (*choice).to_string(), *choice);
+                                ui.selectable_value(value, choice.value.to_string(), choice.label)
+                                    .on_hover_text(choice.description);
                             }
                         });
                 } else {
@@ -3452,5 +4872,37 @@ mod tests {
         assert_eq!(samples, VecDeque::from([2.0, 3.0]));
         assert_eq!(rolling_average(&samples), Some(2.5));
         assert_eq!(rolling_average(&VecDeque::new()), None);
+    }
+
+    /// Sockets only ever interconnect when their types are identical, so any
+    /// two types sharing a colour make the wire colour a lie about what will
+    /// connect — which is exactly what `Scalar` and `Color` used to do.
+    #[test]
+    fn socket_colors_are_unique() {
+        for (index, left) in ALL_SOCKET_TYPES.iter().enumerate() {
+            for right in &ALL_SOCKET_TYPES[index + 1..] {
+                assert_ne!(
+                    graph_socket_color(*left),
+                    graph_socket_color(*right),
+                    "{left:?} and {right:?} cannot interconnect but share a wire colour",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn socket_type_list_is_complete() {
+        let mut unique = BTreeSet::new();
+        for socket_type in ALL_SOCKET_TYPES {
+            assert!(
+                unique.insert(format!("{socket_type:?}")),
+                "{socket_type:?} listed twice",
+            );
+        }
+        assert_eq!(
+            ALL_SOCKET_TYPES.len(),
+            25,
+            "a socket type was added — list it in ALL_SOCKET_TYPES and give it its own colour",
+        );
     }
 }

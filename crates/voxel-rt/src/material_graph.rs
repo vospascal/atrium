@@ -2579,6 +2579,47 @@ struct GraphClipboardFragment {
     anchor: [f32; 2],
 }
 
+/// Case-insensitive substring test that never allocates.
+///
+/// The palette runs this once per searchable field per node per keystroke, so
+/// lowercasing a fresh `String` for every field would be pure garbage churn.
+/// `needle_lowercase` must already be lowercased by the caller.
+fn contains_ignore_ascii_case(haystack: &str, needle_lowercase: &str) -> bool {
+    if needle_lowercase.is_empty() {
+        return true;
+    }
+    let haystack_bytes = haystack.as_bytes();
+    let needle_bytes = needle_lowercase.as_bytes();
+    if needle_bytes.len() > haystack_bytes.len() {
+        return false;
+    }
+    haystack_bytes
+        .windows(needle_bytes.len())
+        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+}
+
+/// Does this node type match a palette search term?
+///
+/// The haystack is everything the node exposes in prose: its identifier, title,
+/// category, description, and the label and description of every input and
+/// output socket. Searching the sockets is the point — typing "roughness"
+/// surfaces nodes that merely *expose* a roughness socket, not only the handful
+/// with "roughness" in their title.
+///
+/// `search_lowercase` must already be lowercased by the caller.
+fn node_matches_search(node: &crate::graph::NodeDeclaration, search_lowercase: &str) -> bool {
+    let matches = |haystack: &str| contains_ignore_ascii_case(haystack, search_lowercase);
+    matches(node.id)
+        || matches(node.title)
+        || matches(node.description)
+        || matches(node.category.label())
+        || node
+            .inputs
+            .iter()
+            .chain(node.outputs.iter())
+            .any(|socket| matches(socket.label) || matches(socket.description))
+}
+
 pub struct GraphEditorState {
     pub visible: bool,
     /// Height of the expanded bottom drawer in logical pixels.
@@ -2997,6 +3038,7 @@ impl GraphEditorState {
         &self,
         registry: &NodeRegistry,
     ) -> Vec<&'static crate::graph::NodeDeclaration> {
+        let search_lowercase = self.search.to_ascii_lowercase();
         registry
             .declarations()
             .iter()
@@ -3005,10 +3047,7 @@ impl GraphEditorState {
                     && self
                         .graph
                         .can_add_node_type(registry, &NodeTypeId(node.id.into()))
-                    && (self.search.is_empty()
-                        || format!("{} {} {}", node.id, node.title, node.category.label())
-                            .to_ascii_lowercase()
-                            .contains(&self.search.to_ascii_lowercase()))
+                    && (search_lowercase.is_empty() || node_matches_search(node, &search_lowercase))
             })
             .collect()
     }
@@ -4734,6 +4773,63 @@ mod tests {
         assert!(!visible.contains("material.output"));
         assert!(!visible.contains("material.surface"));
         assert!(visible.contains("material.pattern_layer"));
+    }
+
+    /// A node type whose only occurrence of "gloss" and "hemisphere" is on its
+    /// sockets — the id, title, description and category deliberately avoid
+    /// both words, so a match can only come from socket prose.
+    static SOCKET_PROSE_NODES: &[crate::graph::NodeDeclaration] =
+        &[crate::graph::NodeDeclaration {
+            id: "test.socket_prose",
+            version: 1,
+            title: "Widget",
+            description: "A node declared only for palette search tests.",
+            category: crate::graph::NodeCategory::Inputs,
+            preview: crate::graph::NodePreview::Value,
+            operation: NodeOperation::Material(MaterialNodeOperation::ConstantScalar),
+            kinds: &[GraphKind::Material],
+            inputs: &[crate::graph::SocketDeclarationStatic {
+                key: "gloss",
+                label: "Gloss",
+                description: "How tight the specular highlight stays.",
+                value_type: crate::graph::SocketType::Scalar,
+                rate: crate::graph::EvaluationRate::Uniform,
+                cardinality: crate::graph::Cardinality::OPTIONAL_SINGLE,
+            }],
+            outputs: &[crate::graph::SocketDeclarationStatic {
+                key: "value",
+                label: "Result",
+                description: "Sampled over the hemisphere above the surface.",
+                value_type: crate::graph::SocketType::Scalar,
+                rate: crate::graph::EvaluationRate::Uniform,
+                cardinality: crate::graph::Cardinality::ANY,
+            }],
+            fields: &[],
+        }];
+
+    #[test]
+    fn node_palette_search_matches_socket_label_and_description() {
+        let registry = NodeRegistry::new(SOCKET_PROSE_NODES);
+        let mut editor = GraphEditorState::new(6);
+
+        // "Gloss" is only an input socket label; "hemisphere" is only inside an
+        // output socket description. Both must still surface the node, and the
+        // match must be case-insensitive.
+        for term in ["gloss", "Hemisphere"] {
+            editor.search = term.to_string();
+            let visible = editor
+                .visible_node_types(&registry)
+                .into_iter()
+                .map(|declaration| declaration.id)
+                .collect::<Vec<_>>();
+            assert_eq!(visible, vec!["test.socket_prose"], "search term {term:?}");
+        }
+
+        editor.search = "unrelated".to_string();
+        assert!(
+            editor.visible_node_types(&registry).is_empty(),
+            "an unrelated term must match nothing"
+        );
     }
 
     #[test]

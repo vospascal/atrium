@@ -87,6 +87,41 @@ pub enum SocketType {
     RenderTarget,
 }
 
+impl SocketType {
+    /// Human name for the socket's value type. Where a type has an obvious
+    /// counterpart in Blender's shader editor the wording is borrowed from it,
+    /// so someone arriving from that editor reads the same words here.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Scalar => "Float",
+            Self::Integer => "Int",
+            Self::Vector3 => "Vector",
+            Self::Color => "Float Color",
+            Self::Boolean => "Boolean",
+            Self::Text => "String",
+            Self::Asset => "Asset",
+            Self::MaterialSurface => "Material Surface",
+            Self::MaterialRole => "Material Role",
+            Self::ScalarField => "Scalar Field",
+            Self::MaskField => "Mask Field",
+            Self::VoxelField => "Voxel Field",
+            Self::PointField => "Point Field",
+            Self::SplineField => "Spline Field",
+            Self::BiomeField => "Biome Field",
+            Self::BiomeDefinition => "Biome Definition",
+            Self::SurfaceProfile => "Surface Profile",
+            Self::SurfaceRule => "Surface Rule",
+            Self::MaterialBinding => "Material Binding",
+            Self::Environment => "Environment",
+            Self::FeatureSet => "Feature Set",
+            Self::AudioSignal => "Audio Signal",
+            Self::AnimationSignal => "Animation Signal",
+            Self::QualityProfile => "Quality Profile",
+            Self::RenderTarget => "Render Target",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvaluationRate {
@@ -99,6 +134,16 @@ pub enum EvaluationRate {
 impl EvaluationRate {
     fn can_feed(self, destination: Self) -> bool {
         self <= destination
+    }
+
+    /// Human name for how often the value is recomputed.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Uniform => "Uniform",
+            Self::PerMaterial => "Per Material",
+            Self::PerVoxel => "Per Voxel",
+            Self::PerSample => "Per Sample",
+        }
     }
 }
 
@@ -180,6 +225,28 @@ impl NumericRange {
     }
 }
 
+/// One selectable option of a text-valued field. `value` is the string that is
+/// persisted and that compilers dispatch on; `label` and `description` exist
+/// only so the editor can explain the option instead of showing a bare id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChoiceDeclaration {
+    pub value: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+const fn choice(
+    value: &'static str,
+    label: &'static str,
+    description: &'static str,
+) -> ChoiceDeclaration {
+    ChoiceDeclaration {
+        value,
+        label,
+        description,
+    }
+}
+
 /// Canonical editable-field definition. `hard_range` is enforced by graph
 /// validation and compilers; `soft_range` controls the ordinary UI widget.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -192,7 +259,7 @@ pub struct FieldDeclarationStatic {
     pub hard_range: Option<NumericRange>,
     pub soft_range: Option<NumericRange>,
     pub step: Option<f32>,
-    pub choices: &'static [&'static str],
+    pub choices: &'static [ChoiceDeclaration],
     pub read_only: bool,
 }
 
@@ -206,11 +273,19 @@ impl FieldDeclarationStatic {
             (Some(range), PropertyValue::Integer(value)) => range.contains(*value as f32),
             (_, PropertyValue::Vector3(value)) => value.iter().all(|value| value.is_finite()),
             (_, PropertyValue::Color(value)) => value.iter().all(|value| value.is_finite()),
-            (_, PropertyValue::Text(value)) if !self.choices.is_empty() => {
-                self.choices.contains(&value.as_str())
-            }
+            (_, PropertyValue::Text(value)) if !self.choices.is_empty() => self
+                .choices
+                .iter()
+                .any(|choice| choice.value == value.as_str()),
             _ => true,
         }
+    }
+
+    /// The declared option carrying this persisted value, if the field offers
+    /// choices at all.
+    pub fn choice(&self, value: &str) -> Option<&'static ChoiceDeclaration> {
+        let choices: &'static [ChoiceDeclaration] = self.choices;
+        choices.iter().find(|choice| choice.value == value)
     }
 }
 
@@ -357,6 +432,11 @@ pub enum LogicNodeOperation {
 pub struct FlowConstraintStatic {
     pub value_type: SocketType,
     pub source: NodeOperation,
+    /// The node operations allowed to sit between source and sink. This is a
+    /// canonical chain: the route is walked link by link and anything else on
+    /// it is an error, so only declare a flow for a route that is genuinely
+    /// prescribed. "This node must reach the output somehow" is not a flow —
+    /// that is the `unreached-node` warning, which already covers every node.
     pub intermediates: &'static [NodeOperation],
     pub sink: NodeOperation,
 }
@@ -433,12 +513,21 @@ const MATERIAL_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[
         cardinality: Cardinality::up_to(crate::pattern::MAX_PATTERN_LAYERS),
     },
 ];
-const MATERIAL_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
-    value_type: SocketType::MaterialSurface,
-    source: NodeOperation::Material(MaterialNodeOperation::Surface),
-    intermediates: MATERIAL_SURFACE_INTERMEDIATES,
-    sink: NodeOperation::Material(MaterialNodeOperation::Output),
-}];
+const MATERIAL_FLOWS: &[FlowConstraintStatic] = &[
+    FlowConstraintStatic {
+        value_type: SocketType::MaterialSurface,
+        source: NodeOperation::Material(MaterialNodeOperation::Surface),
+        intermediates: MATERIAL_SURFACE_INTERMEDIATES,
+        sink: NodeOperation::Material(MaterialNodeOperation::Output),
+    },
+    // S3 animation nodes deliberately get NO flow constraint. An oscillator
+    // that reaches nothing is already reported by the `unreached-node` warning
+    // in `resolve`, which covers every node rather than three named ones. A
+    // flow here would fire on the identical condition at Error severity, and
+    // Error blocks material compilation — so an oscillator left unwired for a
+    // moment mid-edit would stop the material building. A warning is the honest
+    // severity for "this has no effect yet".
+];
 const WORLD_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[NodeConstraintStatic {
     operation: NodeOperation::World(WorldNodeOperation::Output),
     cardinality: Cardinality::EXACTLY_ONE,
@@ -488,6 +577,8 @@ pub enum ConnectionError {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SocketDeclaration {
     pub key: SocketKey,
+    pub label: String,
+    pub description: String,
     pub value_type: SocketType,
     pub rate: EvaluationRate,
     pub cardinality: Cardinality,
@@ -797,14 +888,14 @@ impl GraphAsset {
                                 Some(_) => diagnostics.push(Diagnostic::error(
                                     "socket_default_constraint",
                                     format!(
-                                        "node {id} default `{socket}` violates its declared constraints"
-                                    ),
+                                    "node {id} default `{socket}` violates its declared constraints"
+                                ),
                                 )),
                                 None => diagnostics.push(Diagnostic::error(
                                     "missing_socket_schema",
                                     format!(
-                                        "node {id} input `{socket}` has no editable field declaration"
-                                    ),
+                                    "node {id} input `{socket}` has no editable field declaration"
+                                ),
                                 )),
                             }
                         }
@@ -998,8 +1089,24 @@ impl GraphAsset {
                 ));
             }
         }
+        let reachable = node_reachability(self, registry);
         if let Some(contract) = registry.contract(self.kind) {
-            validate_graph_contract(self, contract, &nodes, &links, &mut diagnostics);
+            validate_graph_contract(self, contract, &nodes, &links, &reachable, &mut diagnostics);
+        }
+        // An unreachable node is legal but inert, and silence is the worst way
+        // for an editor to say so. Only report once the graph actually has a
+        // sink to reach, otherwise every node in a sink-less draft is flagged.
+        if !reachable.is_empty() {
+            for id in self.nodes.keys() {
+                if !reachable.contains(id) {
+                    diagnostics.push(Diagnostic::warning(
+                        "unreached-node",
+                        format!(
+                            "node {id} does not reach the graph output and has no effect on the result"
+                        ),
+                    ));
+                }
+            }
         }
         let active_nodes = active_slice(&self.interface, &node_indices, &links);
         let hashes = GraphHashes::from_graph(self, &active_nodes);
@@ -1035,6 +1142,8 @@ pub struct NodeDeclaration {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SocketDeclarationStatic {
     pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
     pub value_type: SocketType,
     pub rate: EvaluationRate,
     pub cardinality: Cardinality,
@@ -1143,505 +1252,1042 @@ pub const NodeRegistry: NodeRegistry = NodeRegistry::builtin();
 
 const MATERIAL: &[GraphKind] = &[GraphKind::Material];
 const WORLD: &[GraphKind] = &[GraphKind::World];
-const SCALAR_UNIFORM_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "value",
-    value_type: SocketType::Scalar,
-    rate: EvaluationRate::Uniform,
-    cardinality: Cardinality::ANY,
-}];
-const VOXEL_FIELD_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "world",
-    value_type: SocketType::VoxelField,
-    rate: EvaluationRate::PerVoxel,
-    cardinality: Cardinality::ANY,
-}];
-const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "world",
-    value_type: SocketType::VoxelField,
-    rate: EvaluationRate::PerVoxel,
-    cardinality: Cardinality::REQUIRED_SINGLE,
-}];
-const WORLD_COMPOSE_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "world",
-        value_type: SocketType::VoxelField,
-        rate: EvaluationRate::PerVoxel,
-        cardinality: Cardinality::REQUIRED_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "environment",
-        value_type: SocketType::Environment,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "biomes",
-        value_type: SocketType::BiomeField,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+
+macro_rules! socket {
+    ($key:literal, $label:literal, $description:literal, $value_type:expr, $rate:expr, $cardinality:expr) => {
+        SocketDeclarationStatic {
+            key: $key,
+            label: $label,
+            description: $description,
+            value_type: $value_type,
+            rate: $rate,
+            cardinality: $cardinality,
+        }
+    };
+}
+
+macro_rules! node {
+    ($id:literal, $operation:expr, $title:literal, $description:literal, $category:expr, $preview:expr,
+     $kinds:expr, $inputs:expr, $outputs:expr, $fields:expr) => {
+        NodeDeclaration {
+            id: $id,
+            version: 1,
+            title: $title,
+            description: $description,
+            category: $category,
+            preview: $preview,
+            operation: $operation,
+            kinds: $kinds,
+            inputs: $inputs,
+            outputs: $outputs,
+            fields: $fields,
+        }
+    };
+}
+
+// Socket schemas are declared once per node rather than shared between nodes
+// that merely happen to agree on type and rate: the prose is the point, and
+// "the a input" helps nobody. Two nodes share a constant only when the socket
+// genuinely means the same thing in both.
+
+// --- Inputs ------------------------------------------------------------------
+const CONSTANT_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The authored constant, unchanged.",
+    SocketType::Scalar,
+    EvaluationRate::Uniform,
+    Cardinality::ANY
+)];
+const CONSTANT_COLOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "The authored constant, as linear RGBA.",
+    SocketType::Color,
+    EvaluationRate::Uniform,
+    Cardinality::ANY
+)];
+const BASE_COLOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "The intrinsic base color, ready for the surface's Base Color input.",
+    SocketType::Color,
+    EvaluationRate::Uniform,
+    Cardinality::ANY
+)];
+const ROUGHNESS_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Roughness",
+    "The intrinsic microsurface roughness, 0 mirror-smooth to 1 fully diffuse.",
+    SocketType::Scalar,
+    EvaluationRate::Uniform,
+    Cardinality::ANY
+)];
+const EMISSION_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "The emitted color in linear RGBA, before any strength scaling.",
+    SocketType::Color,
+    EvaluationRate::Uniform,
+    Cardinality::ANY
+)];
+
+// --- Material output and surface ---------------------------------------------
+const MATERIAL_OUTPUT_IN: &[SocketDeclarationStatic] = &[socket!(
+    "surface",
+    "Surface",
+    "The finished surface the renderer shades with; every material graph must \
+     terminate here.",
+    SocketType::MaterialSurface,
+    EvaluationRate::PerMaterial,
+    Cardinality::REQUIRED_SINGLE
+)];
+const MATERIAL_SURFACE_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "base_color",
+        "Base Color",
+        "Diffuse albedo of the material in linear RGBA, before pattern layers.",
+        SocketType::Color,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "roughness",
+        "Roughness",
+        "Microsurface roughness before pattern layers, 0 mirror-smooth to 1 fully \
+         diffuse.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "emission",
+        "Emission",
+        "Light the surface gives off, in linear RGBA already scaled by its strength.",
+        SocketType::Color,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
-const COLOR_UNIFORM_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "color",
-    value_type: SocketType::Color,
-    rate: EvaluationRate::Uniform,
-    cardinality: Cardinality::ANY,
-}];
-const COLOR_PER_SAMPLE_INPUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "value",
-    value_type: SocketType::Color,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::OPTIONAL_SINGLE,
-}];
-const VECTOR_PER_SAMPLE_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "vector",
-    value_type: SocketType::Vector3,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::ANY,
-}];
-const SCALAR_PER_SAMPLE_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "value",
-    value_type: SocketType::Scalar,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::ANY,
-}];
-const COLOR_PER_SAMPLE_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "color",
-    value_type: SocketType::Color,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::ANY,
-}];
-const VECTOR_INPUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "vector",
-    value_type: SocketType::Vector3,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::OPTIONAL_SINGLE,
-}];
-const VECTOR_BINARY_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "a",
-        value_type: SocketType::Vector3,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "b",
-        value_type: SocketType::Vector3,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+const MATERIAL_SURFACE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "surface",
+    "Surface",
+    "The intrinsic surface, ready for pattern layers or straight into the \
+     Material Output.",
+    SocketType::MaterialSurface,
+    EvaluationRate::PerMaterial,
+    Cardinality::REQUIRED_SINGLE
+)];
+
+// --- Pattern layers -----------------------------------------------------------
+const PATTERN_LAYER_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "surface",
+        "Surface",
+        "The surface this layer modifies; chain layers by feeding one into the next.",
+        SocketType::MaterialSurface,
+        EvaluationRate::PerMaterial,
+        Cardinality::REQUIRED_SINGLE
+    ),
+    socket!(
+        "pattern",
+        "Pattern",
+        "The mask deciding where this layer applies, 0 untouched to 1 full effect.",
+        SocketType::MaskField,
+        EvaluationRate::PerSample,
+        Cardinality::REQUIRED_SINGLE
+    ),
+    // S3 — animation. Optional, and identity when unconnected, so every graph
+    // authored before S3 keeps its exact behaviour.
+    socket!(
+        "animation_gain",
+        "Animation Gain",
+        "Multiplies this layer's Amount, 0 off to 1 as authored; unconnected it is \
+         the identity.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "drift_velocity",
+        "Drift",
+        "How fast the pattern travels through world space, in metres per second; \
+         the shader applies the clock itself.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
-const VECTOR_SCALE_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "vector",
-        value_type: SocketType::Vector3,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "scale",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+const PATTERN_LAYER_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "surface",
+    "Surface",
+    "The incoming surface with this layer applied; feed the next layer or the \
+     Material Output.",
+    SocketType::MaterialSurface,
+    EvaluationRate::PerMaterial,
+    Cardinality::REQUIRED_SINGLE
+)];
+const PATTERN_FLAT_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "One stable value per sampling cell, 0..1.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_NOISE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "Fractal value noise across the sampling cells, 0..1.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PATTERN_SPECKLE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "pattern",
+    "Pattern",
+    "1 inside a speck and 0 everywhere else.",
+    SocketType::MaskField,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+// --- Scalar and color utilities -----------------------------------------------
+const ADD_SCALAR_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "a",
+        "A",
+        "First term of the sum.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "b",
+        "B",
+        "Second term of the sum.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
-const VECTOR_DOT_IN: &[SocketDeclarationStatic] = VECTOR_BINARY_IN;
+const ADD_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "A plus B.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const MULTIPLY_SCALAR_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "a",
+        "A",
+        "First factor — usually the thing being gated.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "b",
+        "B",
+        "Second factor — wire a sensor signal here to gate A, since 0 mutes it and \
+         1 passes it through.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const MULTIPLY_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "A times B.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const SCALAR_CLAMP_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "value",
+        "Value",
+        "The scalar to hold inside the bounds.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "minimum",
+        "Minimum",
+        "Lowest value the result may take.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "maximum",
+        "Maximum",
+        "Highest value the result may take.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const CLAMP_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "Value pulled back inside Minimum..Maximum.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const COLOR_MIX_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "a",
+        "A",
+        "Color returned when Factor is 0.",
+        SocketType::Color,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "b",
+        "B",
+        "Color returned when Factor is 1.",
+        SocketType::Color,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "factor",
+        "Factor",
+        "Blend position between the two colors, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const MIX_COLOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "A and B blended at Factor.",
+    SocketType::Color,
+    EvaluationRate::Uniform,
+    Cardinality::ANY
+)];
 const REMAP_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "value",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "from_min",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "from_max",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "to_min",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "to_max",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+    socket!(
+        "value",
+        "Value",
+        "The scalar to rescale, read against the From interval.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "from_min",
+        "From Min",
+        "Input value that maps onto To Min.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "from_max",
+        "From Max",
+        "Input value that maps onto To Max.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "to_min",
+        "To Min",
+        "Result produced at From Min.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "to_max",
+        "To Max",
+        "Result produced at From Max.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
-const PROCEDURAL_SCALAR_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "position",
-        value_type: SocketType::Vector3,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "scale",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "detail",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "roughness",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const FBM_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "position",
-        value_type: SocketType::Vector3,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "scale",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "octaves",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "roughness",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const COLOR_RAMP_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "factor",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "color_a",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "color_b",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "position_a",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "position_b",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
+const REMAP_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "Value rescaled into the To Min..To Max interval.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const PASSTHROUGH_SCALAR_IN: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The scalar to pass through untouched.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::OPTIONAL_SINGLE
+)];
+const PASSTHROUGH_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The incoming scalar, unchanged.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+// --- Reroutes ------------------------------------------------------------------
+const REROUTE_SCALAR_IN: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The scalar whose wire is being redirected.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::OPTIONAL_SINGLE
+)];
+const REROUTE_SCALAR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The same scalar; only the wire's path through the editor differs.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const REROUTE_COLOR_IN: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Color",
+    "The color whose wire is being redirected.",
+    SocketType::Color,
+    EvaluationRate::PerSample,
+    Cardinality::OPTIONAL_SINGLE
+)];
+const REROUTE_COLOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "The same color; only the wire's path through the editor differs.",
+    SocketType::Color,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const REROUTE_VECTOR_IN: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "The vector whose wire is being redirected.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::OPTIONAL_SINGLE
+)];
+const REROUTE_VECTOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "The same vector; only the wire's path through the editor differs.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+// --- Emission and per-face selection -------------------------------------------
 const COLOR_STRENGTH_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "color",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+    socket!(
+        "color",
+        "Color",
+        "The emitted color to scale, in linear RGBA.",
+        SocketType::Color,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
     // PER SAMPLE, not uniform. It was declared uniform when nothing in the
     // catalog could vary within a material — but an oscillator or an event
     // sensor is exactly a per-sample scalar, and "pulse this emitter" is the
     // first thing anyone reaches for. A rate declaration only constrains what
     // may FEED a socket, so widening it rejects nothing that used to be legal.
-    SocketDeclarationStatic {
-        key: "strength",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+    socket!(
+        "strength",
+        "Strength",
+        "Multiplier on the emitted color; 1 leaves it as authored and 0 turns the \
+         emitter off.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
+const EMISSION_STRENGTH_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "Color times Strength, ready for a surface's Emission input.",
+    SocketType::Color,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
 const FACE_COLOR_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "base",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "top",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "side",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "bottom",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+    socket!(
+        "base",
+        "Base",
+        "Color used by any face whose own input is left at its default.",
+        SocketType::Color,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "top",
+        "Top",
+        "Color for up-facing voxel faces — the grass cap of a turf block.",
+        SocketType::Color,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "side",
+        "Side",
+        "Color for the four vertical voxel faces.",
+        SocketType::Color,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "bottom",
+        "Bottom",
+        "Color for down-facing voxel faces.",
+        SocketType::Color,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
+const FACE_COLOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "The color belonging to the face currently being shaded.",
+    SocketType::Color,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
 const FACE_SCALAR_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "base",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "top",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "side",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "bottom",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+    socket!(
+        "base",
+        "Base",
+        "Roughness used by any face whose own input is left at its default.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "top",
+        "Top",
+        "Roughness for up-facing voxel faces, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "side",
+        "Side",
+        "Roughness for the four vertical voxel faces, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "bottom",
+        "Bottom",
+        "Roughness for down-facing voxel faces, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
+const FACE_ROUGHNESS_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Roughness",
+    "The roughness belonging to the face currently being shaded, 0..1.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+// --- Procedural noise ----------------------------------------------------------
+const PROCEDURAL_SCALAR_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "position",
+        "Position",
+        "World-space point to sample the noise at, in metres.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "scale",
+        "Scale",
+        "Noise frequency: larger values pack more features into the same metre.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "detail",
+        "Detail",
+        "How many fractal octaves are summed; higher adds finer grain.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "roughness",
+        "Roughness",
+        "How much amplitude each octave keeps, 0..1; higher makes the noise grittier.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const NOISE_OUT: &[SocketDeclarationStatic] = &[
+    socket!(
+        "factor",
+        "Factor",
+        "Noise amplitude at Position, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::ANY
+    ),
+    socket!(
+        "color",
+        "Color",
+        "Three decorrelated noise channels packed as an RGB color, each 0..1.",
+        SocketType::Color,
+        EvaluationRate::PerSample,
+        Cardinality::ANY
+    ),
+];
+const FBM_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "position",
+        "Position",
+        "World-space point to sample the noise at, in metres.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "scale",
+        "Scale",
+        "Frequency of the first octave: larger values pack more features into the \
+         same metre.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "octaves",
+        "Octaves",
+        "How many doublings of frequency are summed.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "roughness",
+        "Roughness",
+        "How much amplitude each octave keeps, 0..1; higher makes the noise grittier.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const FBM_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The summed fractal noise at Position, 0..1.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const COLOR_RAMP_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "factor",
+        "Factor",
+        "Where to read the ramp; values at or below Position A give Color A and at \
+         or above Position B give Color B.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "color_a",
+        "Color A",
+        "Color at the first stop.",
+        SocketType::Color,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "color_b",
+        "Color B",
+        "Color at the second stop.",
+        SocketType::Color,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "position_a",
+        "Position A",
+        "Where the first stop sits along the ramp, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "position_b",
+        "Position B",
+        "Where the second stop sits along the ramp, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const COLOR_RAMP_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "color",
+    "Color",
+    "The ramp sampled at Factor.",
+    SocketType::Color,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+// --- Coordinates and vectors ----------------------------------------------------
+const POSITION_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "World-space position of the point being shaded, in metres.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const NORMAL_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "Unit outward normal of the voxel face being shaded, in world space.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const POSITION_COMPONENT_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The chosen axis of the world-space sample position, in metres.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const NORMAL_COMPONENT_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The chosen axis of the world-space surface normal, -1..1.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const VECTOR_ADD_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "a",
+        "A",
+        "First vector of the sum.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "b",
+        "B",
+        "Second vector of the sum, added component by component.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const VECTOR_ADD_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "A plus B, component by component.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const VECTOR_DOT_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "a",
+        "A",
+        "First vector of the product.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "b",
+        "B",
+        "Second vector of the product; wire the surface normal here to test which \
+         way a face points.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const VECTOR_DOT_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The dot product; for unit-length inputs this is the cosine of the angle \
+     between them, -1..1.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const VECTOR_SCALE_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "vector",
+        "Vector",
+        "The vector to lengthen or shorten.",
+        SocketType::Vector3,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "scale",
+        "Scale",
+        "Multiplier applied to every component; a negative value reverses the \
+         direction.",
+        SocketType::Scalar,
+        EvaluationRate::Uniform,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const VECTOR_SCALE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "Vector times Scale.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const NORMALIZE_VECTOR_IN: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "The vector to rescale to unit length; its direction is kept.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::OPTIONAL_SINGLE
+)];
+const NORMALIZE_VECTOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "The input pointing the same way but exactly one unit long; a zero-length \
+     input stays zero.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+
+// --- S3 animation ----------------------------------------------------------------
+/// Speed and angles, all connectable so a flow can itself be animated.
+const DIRECTION_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "speed",
+        "Speed",
+        "Length of the resulting vector; for a pattern drift this is metres per \
+         second.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "azimuth_degrees",
+        "Azimuth",
+        "Heading around the vertical axis in degrees, 0 along +X and 90 along +Z; \
+         it has no effect at an elevation of -90 or +90.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "elevation_degrees",
+        "Elevation",
+        "Angle above horizontal in degrees, -90 straight down to +90 straight up.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const DIRECTION_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "vector",
+    "Vector",
+    "A velocity of length Speed pointing along Azimuth and Elevation, in metres \
+     per second.",
+    SocketType::Vector3,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+const TIME_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "Seconds since the session started, counting up and never stepping backwards.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
+/// The oscillator's numeric controls, all connectable.
+const OSCILLATOR_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "rate_hz",
+        "Rate",
+        "Oscillation rate in hertz — cycles per second.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "phase",
+        "Phase",
+        "Where in the cycle the wave starts, in turns, 0..1; added before the sync \
+         offset.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "duty",
+        "Duty",
+        "Pulse only: the fraction of each cycle spent high, 0..1.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "low",
+        "Low",
+        "Value produced at the bottom of the wave.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "high",
+        "High",
+        "Value produced at the top of the wave.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+];
+const OSCILLATOR_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "value",
+    "Value",
+    "The wave's current value, travelling between Low and High.",
+    SocketType::Scalar,
+    EvaluationRate::PerSample,
+    Cardinality::ANY
+)];
 /// The event sensor's three outputs. All read from ONE winning event, so the
 /// three are mutually consistent — see the lowering for why an independent
 /// per-output maximum would report a combination that never existed.
-/// The oscillator's numeric controls, all connectable.
-/// Speed and angles, all connectable so a flow can itself be animated.
-const DIRECTION_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "speed",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "azimuth_degrees",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "elevation_degrees",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const OSCILLATOR_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "rate_hz",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "phase",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "duty",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "low",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "high",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
 const EVENT_SENSOR_OUT: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "signal",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::ANY,
-    },
-    SocketDeclarationStatic {
-        key: "nearness",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::ANY,
-    },
-    SocketDeclarationStatic {
-        key: "envelope",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::ANY,
-    },
+    socket!(
+        "signal",
+        "Signal",
+        "Falloff times envelope times the event's strength, 0..1 — the output most \
+         graphs want.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::ANY
+    ),
+    socket!(
+        "nearness",
+        "Nearness",
+        "How close the event is, 1 at the sample and 0 at Radius, shaped by Falloff.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::ANY
+    ),
+    socket!(
+        "envelope",
+        "Envelope",
+        "The attack/hold/release curve on its own, 0..1, driven by the event's \
+         timestamp rather than by distance.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::ANY
+    ),
 ];
-const SCALAR_BINARY_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "a",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "b",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
+
+// --- World ------------------------------------------------------------------------
+const GENERATED_TERRAIN_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "world",
+    "World",
+    "The deterministic base terrain, before any environment, biome or surface \
+     program runs.",
+    SocketType::VoxelField,
+    EvaluationRate::PerVoxel,
+    Cardinality::ANY
+)];
+const WORLD_COMPOSE_IN: &[SocketDeclarationStatic] = &[
+    socket!(
+        "world",
+        "World",
+        "The base terrain the registered programs are applied to.",
+        SocketType::VoxelField,
+        EvaluationRate::PerVoxel,
+        Cardinality::REQUIRED_SINGLE
+    ),
+    socket!(
+        "environment",
+        "Environment",
+        "Climate and lighting context the surface rules read; omitted, the profile's \
+         own defaults apply.",
+        SocketType::Environment,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "biomes",
+        "Biomes",
+        "Per-sample biome weights selecting which surface profile wins where.",
+        SocketType::BiomeField,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
 ];
-const COLOR_MIX_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "a",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "b",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "factor",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const SCALAR_CLAMP_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "value",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "minimum",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "maximum",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::Uniform,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const MATERIAL_OUTPUT_IN: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "surface",
-    value_type: SocketType::MaterialSurface,
-    rate: EvaluationRate::PerMaterial,
-    cardinality: Cardinality::REQUIRED_SINGLE,
-}];
-const MATERIAL_SURFACE_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "base_color",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "roughness",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "emission",
-        value_type: SocketType::Color,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const MATERIAL_SURFACE_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "surface",
-    value_type: SocketType::MaterialSurface,
-    rate: EvaluationRate::PerMaterial,
-    cardinality: Cardinality::REQUIRED_SINGLE,
-}];
-const PATTERN_LAYER_IN: &[SocketDeclarationStatic] = &[
-    SocketDeclarationStatic {
-        key: "surface",
-        value_type: SocketType::MaterialSurface,
-        rate: EvaluationRate::PerMaterial,
-        cardinality: Cardinality::REQUIRED_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "pattern",
-        value_type: SocketType::MaskField,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::REQUIRED_SINGLE,
-    },
-    // S3 — animation. Optional, and identity when unconnected, so every graph
-    // authored before S3 keeps its exact behaviour.
-    SocketDeclarationStatic {
-        key: "animation_gain",
-        value_type: SocketType::Scalar,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-    SocketDeclarationStatic {
-        key: "drift_velocity",
-        value_type: SocketType::Vector3,
-        rate: EvaluationRate::PerSample,
-        cardinality: Cardinality::OPTIONAL_SINGLE,
-    },
-];
-const PATTERN_GENERATOR_OUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "pattern",
-    value_type: SocketType::MaskField,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::ANY,
-}];
-const SCALAR_PER_SAMPLE_INPUT: &[SocketDeclarationStatic] = &[SocketDeclarationStatic {
-    key: "value",
-    value_type: SocketType::Scalar,
-    rate: EvaluationRate::PerSample,
-    cardinality: Cardinality::OPTIONAL_SINGLE,
-}];
+const WORLD_COMPOSE_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "world",
+    "World",
+    "The terrain with environment, biome and surface programs applied.",
+    SocketType::VoxelField,
+    EvaluationRate::PerVoxel,
+    Cardinality::ANY
+)];
+const STUDIO_PREVIEW_OUT: &[SocketDeclarationStatic] = &[socket!(
+    "world",
+    "World",
+    "The isolated preview plate and subject used to look at a single material.",
+    SocketType::VoxelField,
+    EvaluationRate::PerVoxel,
+    Cardinality::ANY
+)];
+const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[socket!(
+    "world",
+    "World",
+    "The finished voxel world the engine streams and renders; every world graph \
+     must terminate here.",
+    SocketType::VoxelField,
+    EvaluationRate::PerVoxel,
+    Cardinality::REQUIRED_SINGLE
+)];
 const NONE: Option<NumericRange> = None;
 const UNIT: Option<NumericRange> = Some(NumericRange::new(0.0, 1.0));
 const SIGNED: Option<NumericRange> = Some(NumericRange::new(-1.0, 1.0));
 const WIDE: Option<NumericRange> = Some(NumericRange::new(-1_000_000.0, 1_000_000.0));
 const POSITIVE: Option<NumericRange> = Some(NumericRange::new(0.0, 1_000_000.0));
-const EMPTY_CHOICES: &[&str] = &[];
+const EMPTY_CHOICES: &[ChoiceDeclaration] = &[];
 
 #[allow(clippy::too_many_arguments)]
 const fn field(
@@ -1653,7 +2299,7 @@ const fn field(
     hard_range: Option<NumericRange>,
     soft_range: Option<NumericRange>,
     step: Option<f32>,
-    choices: &'static [&'static str],
+    choices: &'static [ChoiceDeclaration],
     read_only: bool,
 ) -> FieldDeclarationStatic {
     FieldDeclarationStatic {
@@ -1905,7 +2551,38 @@ const OSCILLATOR_FIELDS: &[FieldDeclarationStatic] = &[
         NONE,
         NONE,
         None,
-        &["sine", "triangle", "saw", "pulse", "flicker"],
+        &[
+            choice(
+                "sine",
+                "Sine",
+                "Ease smoothly between Low and High and back, with no corners — a \
+                 breathing glow.",
+            ),
+            choice(
+                "triangle",
+                "Triangle",
+                "Travel between Low and High at a constant speed, turning sharply at \
+                 each end.",
+            ),
+            choice(
+                "saw",
+                "Saw",
+                "Ramp from Low up to High, then snap back to Low — a one-way sweep \
+                 that repeats.",
+            ),
+            choice(
+                "pulse",
+                "Pulse",
+                "Sit at High for Duty of the cycle and at Low for the rest; Duty 0.5 \
+                 is a square wave.",
+            ),
+            choice(
+                "flicker",
+                "Flicker",
+                "Snap to a new random level once per cycle and hold it — a failing \
+                 lamp rather than a wobble.",
+            ),
+        ],
         false,
     ),
     field(
@@ -1982,7 +2659,30 @@ const OSCILLATOR_FIELDS: &[FieldDeclarationStatic] = &[
         NONE,
         NONE,
         None,
-        &["global", "per_voxel", "per_face", "per_material"],
+        &[
+            choice(
+                "global",
+                "Global",
+                "Give every block of this material one shared heartbeat, all in step.",
+            ),
+            choice(
+                "per_voxel",
+                "Per Voxel",
+                "Offset each authored one-metre block so a wall of them shimmers \
+                 instead of blinking as one.",
+            ),
+            choice(
+                "per_face",
+                "Per Face",
+                "Offset each face of each block, for the finest-grained scatter.",
+            ),
+            choice(
+                "per_material",
+                "Per Material",
+                "Offset by Seed alone, so this material stays internally in step but \
+                 deliberately out of step with another.",
+            ),
+        ],
         false,
     ),
     field(
@@ -2055,7 +2755,31 @@ const EVENT_SENSOR_FIELDS: &[FieldDeclarationStatic] = &[
         NONE,
         NONE,
         None,
-        &["smoothstep", "linear", "inverse_square", "step"],
+        &[
+            choice(
+                "smoothstep",
+                "Smoothstep",
+                "Ease in and out across the radius, so the edge of the sensed area \
+                 has no visible seam.",
+            ),
+            choice(
+                "linear",
+                "Linear",
+                "Fall off evenly with distance, reaching zero exactly at Radius.",
+            ),
+            choice(
+                "inverse_square",
+                "Inverse Square",
+                "Drop off the way real light does: very strong up close, nearly \
+                 nothing at arm's length.",
+            ),
+            choice(
+                "step",
+                "Step",
+                "Give full strength anywhere inside Radius and nothing outside it — \
+                 a hard trigger zone.",
+            ),
+        ],
         false,
     ),
     field(
@@ -2672,7 +3396,26 @@ const PATTERN_FRAME_FIELD: FieldDeclarationStatic = field(
     NONE,
     NONE,
     None,
-    &["world", "voxel", "face"],
+    &[
+        choice(
+            "world",
+            "World",
+            "Anchor the pattern to world space, so it stays put while blocks are \
+             placed and removed around it.",
+        ),
+        choice(
+            "voxel",
+            "Voxel",
+            "Anchor the pattern to each one-metre block, so every block carries an \
+             identical copy.",
+        ),
+        choice(
+            "face",
+            "Face",
+            "Anchor the pattern to each face's own 2D surface, so it reads flat \
+             rather than sliced out of a volume.",
+        ),
+    ],
     false,
 );
 const PATTERN_PERIOD_FIELD: FieldDeclarationStatic = field(
@@ -2815,7 +3558,19 @@ const PATTERN_LAYER_FIELDS: &[FieldDeclarationStatic] = &[
         NONE,
         NONE,
         None,
-        &["albedo", "roughness", "emission"],
+        &[
+            choice("albedo", "Albedo", "Modify the surface's base color."),
+            choice(
+                "roughness",
+                "Roughness",
+                "Modify how rough the surface is, turning patches glossy or matte.",
+            ),
+            choice(
+                "emission",
+                "Emission",
+                "Modify the light the surface gives off, for glowing veins or embers.",
+            ),
+        ],
         false,
     ),
     field(
@@ -2827,7 +3582,26 @@ const PATTERN_LAYER_FIELDS: &[FieldDeclarationStatic] = &[
         NONE,
         NONE,
         None,
-        &["multiply", "mix_to_color", "add"],
+        &[
+            choice(
+                "multiply",
+                "Multiply",
+                "Scale the target channel by the pattern, so the mask can only \
+                 darken or weaken it.",
+            ),
+            choice(
+                "mix_to_color",
+                "Mix To Color",
+                "Blend the target channel towards Target Color wherever the pattern \
+                 is high.",
+            ),
+            choice(
+                "add",
+                "Add",
+                "Add the pattern into the target channel, so the mask can only \
+                 brighten or strengthen it.",
+            ),
+        ],
         false,
     ),
     field(
@@ -2904,25 +3678,6 @@ const PATTERN_LAYER_FIELDS: &[FieldDeclarationStatic] = &[
     ),
 ];
 
-macro_rules! node {
-    ($id:literal, $operation:expr, $title:literal, $description:literal, $category:expr, $preview:expr,
-     $kinds:expr, $inputs:expr, $outputs:expr, $fields:expr) => {
-        NodeDeclaration {
-            id: $id,
-            version: 1,
-            title: $title,
-            description: $description,
-            category: $category,
-            preview: $preview,
-            operation: $operation,
-            kinds: $kinds,
-            inputs: $inputs,
-            outputs: $outputs,
-            fields: $fields,
-        }
-    };
-}
-
 /// Canonical node schemas. Backends register execution independently, but node
 /// construction, validation, persistence, catalog presentation, and every
 /// editable widget derive from this table.
@@ -2936,7 +3691,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        SCALAR_UNIFORM_OUT,
+        CONSTANT_SCALAR_OUT,
         CONSTANT_SCALAR_FIELDS
     ),
     node!(
@@ -2972,7 +3727,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::ColorWheel,
         MATERIAL,
         &[],
-        COLOR_UNIFORM_OUT,
+        CONSTANT_COLOR_OUT,
         CONSTANT_COLOR_FIELDS
     ),
     node!(
@@ -2983,8 +3738,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Utilities,
         NodePreview::Value,
         MATERIAL,
-        SCALAR_BINARY_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        ADD_SCALAR_IN,
+        ADD_SCALAR_OUT,
         ADD_SCALAR_FIELDS
     ),
     node!(
@@ -2996,7 +3751,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         COLOR_MIX_IN,
-        COLOR_UNIFORM_OUT,
+        MIX_COLOR_OUT,
         MIX_COLOR_FIELDS
     ),
     node!(
@@ -3008,7 +3763,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         SCALAR_CLAMP_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        CLAMP_SCALAR_OUT,
         CLAMP_SCALAR_FIELDS
     ),
     node!(
@@ -3020,7 +3775,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        VECTOR_PER_SAMPLE_OUT,
+        POSITION_OUT,
         &[]
     ),
     node!(
@@ -3032,7 +3787,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        VECTOR_PER_SAMPLE_OUT,
+        NORMAL_OUT,
         &[]
     ),
     node!(
@@ -3044,7 +3799,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::ColorWheel,
         MATERIAL,
         &[],
-        COLOR_UNIFORM_OUT,
+        BASE_COLOR_OUT,
         BASE_COLOR_FIELDS
     ),
     node!(
@@ -3056,7 +3811,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        SCALAR_UNIFORM_OUT,
+        ROUGHNESS_OUT,
         ROUGHNESS_FIELDS
     ),
     node!(
@@ -3068,7 +3823,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::ColorWheel,
         MATERIAL,
         &[],
-        COLOR_UNIFORM_OUT,
+        EMISSION_OUT,
         EMISSION_FIELDS
     ),
     node!(
@@ -3080,7 +3835,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         COLOR_STRENGTH_IN,
-        COLOR_PER_SAMPLE_OUT,
+        EMISSION_STRENGTH_OUT,
         COLOR_STRENGTH_FIELDS
     ),
     node!(
@@ -3092,7 +3847,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         FACE_COLOR_IN,
-        COLOR_PER_SAMPLE_OUT,
+        FACE_COLOR_OUT,
         FACE_COLOR_FIELDS
     ),
     node!(
@@ -3104,7 +3859,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         FACE_SCALAR_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        FACE_ROUGHNESS_OUT,
         FACE_ROUGHNESS_FIELDS
     ),
     node!(
@@ -3116,7 +3871,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Noise,
         MATERIAL,
         &[],
-        PATTERN_GENERATOR_OUT,
+        PATTERN_FLAT_OUT,
         PATTERN_FLAT_FIELDS
     ),
     node!(
@@ -3128,7 +3883,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Noise,
         MATERIAL,
         &[],
-        PATTERN_GENERATOR_OUT,
+        PATTERN_NOISE_OUT,
         PATTERN_NOISE_FIELDS
     ),
     node!(
@@ -3140,7 +3895,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Noise,
         MATERIAL,
         &[],
-        PATTERN_GENERATOR_OUT,
+        PATTERN_SPECKLE_OUT,
         PATTERN_SPECKLE_FIELDS
     ),
     node!(
@@ -3152,7 +3907,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Noise,
         MATERIAL,
         PATTERN_LAYER_IN,
-        MATERIAL_SURFACE_OUT,
+        PATTERN_LAYER_OUT,
         PATTERN_LAYER_FIELDS
     ),
     node!(
@@ -3165,8 +3920,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Utilities,
         NodePreview::Value,
         MATERIAL,
-        SCALAR_BINARY_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        MULTIPLY_SCALAR_IN,
+        MULTIPLY_SCALAR_OUT,
         MULTIPLY_SCALAR_FIELDS
     ),
     node!(
@@ -3181,7 +3936,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         DIRECTION_IN,
-        VECTOR_PER_SAMPLE_OUT,
+        DIRECTION_OUT,
         DIRECTION_FIELDS
     ),
     node!(
@@ -3195,7 +3950,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        SCALAR_PER_SAMPLE_OUT,
+        TIME_OUT,
         &[]
     ),
     node!(
@@ -3209,7 +3964,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         OSCILLATOR_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        OSCILLATOR_OUT,
         OSCILLATOR_FIELDS
     ),
     node!(
@@ -3235,7 +3990,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         REMAP_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        REMAP_SCALAR_OUT,
         REMAP_FIELDS
     ),
     node!(
@@ -3247,20 +4002,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Noise,
         MATERIAL,
         PROCEDURAL_SCALAR_IN,
-        &[
-            SocketDeclarationStatic {
-                key: "factor",
-                value_type: SocketType::Scalar,
-                rate: EvaluationRate::PerSample,
-                cardinality: Cardinality::ANY
-            },
-            SocketDeclarationStatic {
-                key: "color",
-                value_type: SocketType::Color,
-                rate: EvaluationRate::PerSample,
-                cardinality: Cardinality::ANY
-            }
-        ],
+        NOISE_OUT,
         NOISE_FIELDS
     ),
     node!(
@@ -3272,7 +4014,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Noise,
         MATERIAL,
         FBM_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        FBM_OUT,
         FBM_FIELDS
     ),
     node!(
@@ -3284,7 +4026,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::ColorRamp,
         MATERIAL,
         COLOR_RAMP_IN,
-        COLOR_PER_SAMPLE_OUT,
+        COLOR_RAMP_OUT,
         COLOR_RAMP_FIELDS
     ),
     node!(
@@ -3295,8 +4037,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Coordinates,
         NodePreview::Value,
         MATERIAL,
-        VECTOR_BINARY_IN,
-        VECTOR_PER_SAMPLE_OUT,
+        VECTOR_ADD_IN,
+        VECTOR_ADD_OUT,
         VECTOR_BINARY_FIELDS
     ),
     node!(
@@ -3308,7 +4050,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         VECTOR_SCALE_IN,
-        VECTOR_PER_SAMPLE_OUT,
+        VECTOR_SCALE_OUT,
         VECTOR_SCALE_FIELDS
     ),
     node!(
@@ -3319,8 +4061,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Coordinates,
         NodePreview::Value,
         MATERIAL,
-        VECTOR_INPUT,
-        VECTOR_PER_SAMPLE_OUT,
+        NORMALIZE_VECTOR_IN,
+        NORMALIZE_VECTOR_OUT,
         VECTOR_INPUT_FIELDS
     ),
     node!(
@@ -3332,7 +4074,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         VECTOR_DOT_IN,
-        SCALAR_PER_SAMPLE_OUT,
+        VECTOR_DOT_OUT,
         VECTOR_BINARY_FIELDS
     ),
     node!(
@@ -3344,7 +4086,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        SCALAR_PER_SAMPLE_OUT,
+        POSITION_COMPONENT_OUT,
         COMPONENT_FIELDS
     ),
     node!(
@@ -3356,7 +4098,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::Value,
         MATERIAL,
         &[],
-        SCALAR_PER_SAMPLE_OUT,
+        NORMAL_COMPONENT_OUT,
         COMPONENT_FIELDS
     ),
     node!(
@@ -3367,8 +4109,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Utilities,
         NodePreview::Value,
         MATERIAL,
-        SCALAR_PER_SAMPLE_INPUT,
-        SCALAR_PER_SAMPLE_OUT,
+        PASSTHROUGH_SCALAR_IN,
+        PASSTHROUGH_SCALAR_OUT,
         SCALAR_INPUT_FIELDS
     ),
     node!(
@@ -3379,8 +4121,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Utilities,
         NodePreview::None,
         MATERIAL,
-        SCALAR_PER_SAMPLE_INPUT,
-        SCALAR_PER_SAMPLE_OUT,
+        REROUTE_SCALAR_IN,
+        REROUTE_SCALAR_OUT,
         SCALAR_INPUT_FIELDS
     ),
     node!(
@@ -3391,8 +4133,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Utilities,
         NodePreview::None,
         MATERIAL,
-        COLOR_PER_SAMPLE_INPUT,
-        COLOR_PER_SAMPLE_OUT,
+        REROUTE_COLOR_IN,
+        REROUTE_COLOR_OUT,
         COLOR_INPUT_FIELDS
     ),
     node!(
@@ -3403,8 +4145,8 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodeCategory::Utilities,
         NodePreview::None,
         MATERIAL,
-        VECTOR_INPUT,
-        VECTOR_PER_SAMPLE_OUT,
+        REROUTE_VECTOR_IN,
+        REROUTE_VECTOR_OUT,
         VECTOR_REROUTE_FIELDS
     ),
     node!(
@@ -3416,7 +4158,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::None,
         WORLD,
         &[],
-        VOXEL_FIELD_OUT,
+        GENERATED_TERRAIN_OUT,
         &[]
     ),
     node!(
@@ -3428,7 +4170,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::None,
         WORLD,
         WORLD_COMPOSE_IN,
-        VOXEL_FIELD_OUT,
+        WORLD_COMPOSE_OUT,
         &[]
     ),
     node!(
@@ -3452,7 +4194,7 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
         NodePreview::None,
         WORLD,
         &[],
-        VOXEL_FIELD_OUT,
+        STUDIO_PREVIEW_OUT,
         &[]
     ),
 ];
@@ -3473,11 +4215,66 @@ fn cardinality_description(cardinality: Cardinality) -> String {
     cardinality.description()
 }
 
+/// Every node that reaches the graph's output sink through links.
+///
+/// The sinks are the graph's declared interface outputs together with, for a
+/// kind that has a contract, every node carrying one of the contract's flow
+/// sink operations. Links are then walked backwards from those, so the result
+/// is exactly the set of nodes whose value can still arrive somewhere the
+/// engine reads. This is the single reachability traversal in the module:
+/// contract validation and the inert-node warning both read its answer rather
+/// than each re-deriving one.
+pub fn node_reachability(graph: &GraphAsset, registry: &NodeRegistry) -> BTreeSet<NodeId> {
+    let contract = registry.contract(graph.kind);
+    let mut sources_of: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
+    for link in graph.links.values() {
+        if !graph.nodes.contains_key(&link.from.node) || !graph.nodes.contains_key(&link.to.node) {
+            continue;
+        }
+        sources_of
+            .entry(&link.to.node)
+            .or_default()
+            .push(&link.from.node);
+    }
+    let mut pending: Vec<&NodeId> = graph
+        .interface
+        .outputs
+        .values()
+        .map(|pin| &pin.node)
+        .filter(|node| graph.nodes.contains_key(*node))
+        .collect();
+    for (id, record) in &graph.nodes {
+        let Some(declaration) = registry.find(&record.node_type) else {
+            continue;
+        };
+        let is_sink = contract.is_some_and(|contract| {
+            contract
+                .flows
+                .iter()
+                .any(|flow| flow.sink == declaration.operation)
+        });
+        if is_sink {
+            pending.push(id);
+        }
+    }
+    let mut reached = BTreeSet::new();
+    while let Some(node) = pending.pop() {
+        if !reached.insert(node.clone()) {
+            continue;
+        }
+        if let Some(sources) = sources_of.get(node) {
+            pending.extend(sources.iter().copied());
+        }
+    }
+    reached
+}
+
 fn validate_graph_contract(
     graph: &GraphAsset,
     contract: &GraphContractStatic,
     nodes: &[ResolvedNode],
     links: &[ResolvedLink],
+    reachable: &BTreeSet<NodeId>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for flow in contract.flows {
@@ -3499,15 +4296,18 @@ fn validate_graph_contract(
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        if sources.len() != 1 || sinks.len() != 1 {
+        if sinks.len() != 1 {
+            continue;
+        }
+        let sink = sinks[0];
+
+        if sources.len() != 1 {
             continue;
         }
 
         let source = sources[0];
-        let sink = sinks[0];
         let mut current = source;
         let mut visited = BTreeSet::from([source]);
-        let mut reached_sink = false;
         loop {
             let outgoing = links
                 .iter()
@@ -3541,7 +4341,6 @@ fn validate_graph_contract(
                 break;
             }
             if next == sink {
-                reached_sink = true;
                 break;
             }
             let allowed = nodes[next]
@@ -3559,7 +4358,7 @@ fn validate_graph_contract(
             }
             current = next;
         }
-        if !reached_sink {
+        if !reachable.contains(&nodes[source].id) {
             diagnostics.push(Diagnostic::error(
                 "flow_incomplete",
                 format!(
@@ -3568,11 +4367,11 @@ fn validate_graph_contract(
                 ),
             ));
         }
-        for (index, node) in nodes.iter().enumerate() {
+        for node in nodes.iter() {
             if node
                 .declaration
                 .is_some_and(|declaration| flow.intermediates.contains(&declaration.operation))
-                && !visited.contains(&index)
+                && !reachable.contains(&node.id)
             {
                 diagnostics.push(Diagnostic::error(
                     "flow_disconnected",
@@ -3641,9 +4440,25 @@ pub struct Diagnostic {
     pub message: String,
 }
 impl Diagnostic {
-    fn error(code: &'static str, message: String) -> Self {
+    pub fn error(code: &'static str, message: String) -> Self {
         Self {
             severity: DiagnosticSeverity::Error,
+            code,
+            message,
+        }
+    }
+
+    pub fn warning(code: &'static str, message: String) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Warning,
+            code,
+            message,
+        }
+    }
+
+    pub fn info(code: &'static str, message: String) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Info,
             code,
             message,
         }
@@ -4289,6 +5104,35 @@ mod tests {
                     .maximum
                     .is_none_or(|maximum| output.cardinality.minimum <= maximum));
             }
+            // Every socket carries prose, and the assertion is what keeps it
+            // that way: an undocumented socket added later fails right here
+            // rather than quietly shipping a blank tooltip.
+            for (side, sockets) in [
+                ("input", declaration.inputs),
+                ("output", declaration.outputs),
+            ] {
+                let mut labels = BTreeSet::new();
+                for socket in sockets {
+                    assert!(
+                        !socket.label.trim().is_empty(),
+                        "{side} socket {} on {} has no label",
+                        socket.key,
+                        declaration.id
+                    );
+                    assert!(
+                        !socket.description.trim().is_empty(),
+                        "{side} socket {} on {} has no description",
+                        socket.key,
+                        declaration.id
+                    );
+                    assert!(
+                        labels.insert(socket.label),
+                        "duplicate {side} socket label `{}` on {}",
+                        socket.label,
+                        declaration.id
+                    );
+                }
+            }
             let record = declaration.new_record();
             assert_eq!(record.node_type.0, declaration.id);
             assert_eq!(
@@ -4500,6 +5344,124 @@ mod tests {
         assert_eq!(
             graph.nodes[&id].properties["value"],
             PropertyValue::Scalar(0.6)
+        );
+
+        // Choices are declarations, not bare strings: every option explains
+        // itself, and only a declared `value` survives an edit command.
+        for declaration in BUILTIN_NODES {
+            for field in declaration.fields {
+                let mut values = BTreeSet::new();
+                for option in field.choices {
+                    assert!(
+                        values.insert(option.value),
+                        "duplicate choice `{}` on {}.{}",
+                        option.value,
+                        declaration.id,
+                        field.key
+                    );
+                    assert!(
+                        !option.value.trim().is_empty(),
+                        "a choice on {}.{} has no persisted value",
+                        declaration.id,
+                        field.key
+                    );
+                    assert!(
+                        !option.label.trim().is_empty(),
+                        "choice `{}` on {}.{} has no label",
+                        option.value,
+                        declaration.id,
+                        field.key
+                    );
+                    assert!(
+                        !option.description.trim().is_empty(),
+                        "choice `{}` on {}.{} has no description",
+                        option.value,
+                        declaration.id,
+                        field.key
+                    );
+                    assert_eq!(field.choice(option.value), Some(option));
+                    assert!(field.accepts(&PropertyValue::Text(option.value.to_string())));
+                }
+                if !field.choices.is_empty() {
+                    assert!(field.choice("not-a-declared-choice").is_none());
+                    assert!(!field.accepts(&PropertyValue::Text("not-a-declared-choice".into())));
+                }
+            }
+        }
+
+        let layer = NodeId("layer".into());
+        GraphCommand::AddNode {
+            id: layer.clone(),
+            node_type: NodeTypeId("material.pattern_layer".into()),
+            position: [0.0; 2],
+        }
+        .apply(&mut graph, &registry)
+        .unwrap();
+        GraphCommand::SetProperty {
+            node: layer.clone(),
+            property: "target".into(),
+            value: PropertyValue::Text("emission".into()),
+        }
+        .apply(&mut graph, &registry)
+        .unwrap();
+        let error = GraphCommand::SetProperty {
+            node: layer.clone(),
+            property: "target".into(),
+            value: PropertyValue::Text("specular".into()),
+        }
+        .apply(&mut graph, &registry)
+        .unwrap_err();
+        assert!(matches!(error, GraphCommandError::InvalidField { .. }));
+        assert_eq!(
+            graph.nodes[&layer].properties["target"],
+            PropertyValue::Text("emission".into())
+        );
+    }
+
+    /// A node wired to nothing still renders nothing — the graph has to say so.
+    #[test]
+    fn an_unwired_node_is_unreachable_and_reported_as_inert() {
+        let registry = NodeRegistry::builtin();
+        let mut graph = crate::material_graph::new_material_graph("test");
+        let orphan = id("orphan-oscillator");
+        GraphCommand::AddNode {
+            id: orphan.clone(),
+            node_type: NodeTypeId("material.oscillator".into()),
+            position: [0.0; 2],
+        }
+        .apply(&mut graph, &registry)
+        .unwrap();
+
+        let reachable = node_reachability(&graph, &registry);
+        assert!(
+            !reachable.contains(&orphan),
+            "a node wired to nothing cannot reach the output"
+        );
+        let surface = graph
+            .nodes
+            .iter()
+            .find(|(_, node)| node.node_type.0 == "material.surface")
+            .map(|(id, _)| id.clone())
+            .expect("the canonical graph has a surface node");
+        assert!(
+            reachable.contains(&surface),
+            "the surface feeds the output and must be reachable"
+        );
+
+        let diagnostics = graph.resolve(&registry).diagnostics;
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unreached-node"
+                    && diagnostic.severity == DiagnosticSeverity::Warning
+                    && diagnostic.message.contains(&orphan.0)
+            }),
+            "the orphaned oscillator is not reported: {diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unreached-node" && diagnostic.message.contains(&surface.0)
+            }),
+            "a node feeding the output must not be reported as inert"
         );
     }
 
