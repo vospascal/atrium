@@ -539,7 +539,7 @@ mod tests {
             sun_through_liquid: false,
             ..WaterSettings::default()
         };
-        for source in [SHADER_SOURCE.as_str(), CAGI_SHADER_SOURCE] {
+        for source in [SHADER_SOURCE.as_str(), CAGI_SHADER_SOURCE.as_str()] {
             assert!(source.contains("const WATER_SUN_THROUGH_LIQUID: bool = true;"));
             assert!(no_sun
                 .patch_shader_source(source)

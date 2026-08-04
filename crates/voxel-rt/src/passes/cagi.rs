@@ -38,26 +38,45 @@ use crate::variants::RenderQuality;
 
 use super::world_bindings::WorldBindings;
 use super::ComputePipelineCache;
-use voxel_environment::{AtmosphereBindings, LutConfig};
+use voxel_environment::{EnvironmentGpu, HillaireEnvironment, ENVIRONMENT_BIND_GROUP};
 
 /// Cells per workgroup edge — cubic, so a workgroup's six-neighbour stencil
 /// mostly reads cells its own threads already loaded.
 const WORKGROUP_SIZE: u32 = 4;
 
-/// The CA shader source: the shared traversal core, the shared light-volume
-/// half, the LUT-backed environment sampler, then the automaton itself.
-pub const CAGI_SHADER_SOURCE: &str = concat!(
+/// This crate's own half of the CA shader: the shared traversal core, the shared
+/// light-volume half, then the automaton itself.
+///
+/// **Not the complete module** — [`CAGI_SHADER_SOURCE`] is. Same arrangement as the
+/// shading pass's `OWN_SHADER_SOURCE`, and for the same reason: `concat!` takes literals,
+/// so the piece that comes from another crate cannot join here.
+const OWN_SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/world.wgsl"),
     include_str!("../../shaders/cagi_volume.wgsl"),
-    include_str!("../../../voxel-environment/shaders/environment.wgsl"),
     include_str!("../../shaders/cagi.wgsl"),
 );
+
+/// The CA shader source: this crate's half, then the environment sampler.
+///
+/// A `LazyLock<String>` because the environment WGSL is a const in another crate. It used
+/// to be a `const` built with an `include_str!` reaching across the crate boundary by
+/// relative path — `../../../voxel-environment/shaders/environment.wgsl` — which bypassed
+/// that crate's facade entirely and broke the moment its shader was split into fragments.
+/// The environment's own `WGSL` const is the supported way in; the source of truth is a
+/// crate, not a path.
+pub static CAGI_SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let mut source =
+        String::with_capacity(OWN_SHADER_SOURCE.len() + HillaireEnvironment::WGSL.len());
+    source.push_str(OWN_SHADER_SOURCE);
+    source.push_str(HillaireEnvironment::WGSL);
+    source
+});
 
 /// [`CAGI_SHADER_SOURCE`] with every lever this pass reads patched in: traversal,
 /// shadow and CAGI levers from both shader halves. Environment source visibility
 /// is deliberately not a compile-time ray marcher; it is sampled from the LUT.
 pub fn build_shader_source(quality: &RenderQuality) -> String {
-    let traversal_patched = quality.traversal.patch_shader_source(CAGI_SHADER_SOURCE);
+    let traversal_patched = quality.traversal.patch_shader_source(&CAGI_SHADER_SOURCE);
     let shadows_patched = quality.shadows.patch_shader_source(&traversal_patched);
     // E6: `LIQUIDS_CAST_NO_SHADOW` lives in the shared `world.wgsl`, so the CA
     // pass's source geometry must follow the water mode too — otherwise the
@@ -416,8 +435,8 @@ pub enum AttributeSource {
 pub struct CagiPass {
     pipeline_cache: ComputePipelineCache,
     bind_group_layout: wgpu::BindGroupLayout,
-    atmosphere_bind_group_layout: wgpu::BindGroupLayout,
-    atmosphere_bind_group: wgpu::BindGroup,
+    environment_bind_group_layout: wgpu::BindGroupLayout,
+    environment_bind_group: wgpu::BindGroup,
     /// `bind_groups[i]` reads volume `i` and writes volume `1 - i`.
     bind_groups: [wgpu::BindGroup; 2],
 }
@@ -428,22 +447,22 @@ impl CagiPass {
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
     ) -> Self {
-        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
-        Self::new_with_atmosphere(device, world_bindings, light_volume, &atmosphere)
+        let environment = HillaireEnvironment::new(device);
+        Self::new_with_environment(device, world_bindings, light_volume, &environment)
     }
 
-    pub fn new_with_atmosphere(
+    pub fn new_with_environment(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
-        atmosphere: &AtmosphereBindings,
+        environment: &dyn EnvironmentGpu,
     ) -> Self {
-        Self::new_with_atmosphere_and_shader_source(
+        Self::new_with_environment_and_shader_source(
             device,
             world_bindings,
             light_volume,
-            atmosphere,
-            CAGI_SHADER_SOURCE,
+            environment,
+            &CAGI_SHADER_SOURCE,
         )
     }
 
@@ -455,25 +474,25 @@ impl CagiPass {
         light_volume: &LightVolume,
         shader_source: &str,
     ) -> Self {
-        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
-        Self::new_with_atmosphere_and_shader_source(
+        let environment = HillaireEnvironment::new(device);
+        Self::new_with_environment_and_shader_source(
             device,
             world_bindings,
             light_volume,
-            &atmosphere,
+            &environment,
             shader_source,
         )
     }
 
-    pub fn new_with_atmosphere_and_shader_source(
+    pub fn new_with_environment_and_shader_source(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
-        atmosphere: &AtmosphereBindings,
+        environment: &dyn EnvironmentGpu,
         shader_source: &str,
     ) -> Self {
         let bind_group_layout = create_bind_group_layout(device);
-        let atmosphere_bind_group_layout = atmosphere.sample_bind_group_layout().clone();
+        let environment_bind_group_layout = environment.sample_bind_group_layout().clone();
         let pipeline_cache = ComputePipelineCache::new_with_layouts(
             device,
             "cagi pass",
@@ -481,7 +500,7 @@ impl CagiPass {
             shader_source,
             &[
                 Some(&bind_group_layout),
-                Some(&atmosphere_bind_group_layout),
+                Some(&environment_bind_group_layout),
             ],
         );
         let bind_groups =
@@ -489,8 +508,8 @@ impl CagiPass {
         Self {
             pipeline_cache,
             bind_group_layout,
-            atmosphere_bind_group_layout,
-            atmosphere_bind_group: atmosphere.sample_bind_group().clone(),
+            environment_bind_group_layout,
+            environment_bind_group: environment.sample_bind_group().clone(),
             bind_groups,
         }
     }
@@ -519,7 +538,7 @@ impl CagiPass {
             shader_source,
             &[
                 Some(&self.bind_group_layout),
-                Some(&self.atmosphere_bind_group_layout),
+                Some(&self.environment_bind_group_layout),
             ],
         );
     }
@@ -531,7 +550,7 @@ impl CagiPass {
             shader_sources,
             &[
                 Some(&self.bind_group_layout),
-                Some(&self.atmosphere_bind_group_layout),
+                Some(&self.environment_bind_group_layout),
             ],
         )
     }
@@ -573,7 +592,7 @@ impl CagiPass {
             timestamp_writes,
         });
         compute_pass.set_pipeline(self.pipeline_cache.active());
-        compute_pass.set_bind_group(1, &self.atmosphere_bind_group, &[]);
+        compute_pass.set_bind_group(ENVIRONMENT_BIND_GROUP, &self.environment_bind_group, &[]);
         for _ in 0..iterations {
             compute_pass.set_bind_group(0, &self.bind_groups[light_volume.front], &[]);
             compute_pass.dispatch_workgroups(
@@ -830,7 +849,7 @@ mod tests {
     fn default_settings_build_the_shipped_shader() {
         assert_eq!(
             build_shader_source(&RenderQuality::default()),
-            CAGI_SHADER_SOURCE
+            CAGI_SHADER_SOURCE.as_str()
         );
     }
 
@@ -905,10 +924,7 @@ mod tests {
                             ..RenderQuality::default()
                         };
                         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                        let atmosphere = voxel_environment::AtmosphereBindings::new(
-                            &device,
-                            voxel_environment::LutConfig::default(),
-                        );
+                        let environment = HillaireEnvironment::new(&device);
                         let _pipeline = crate::passes::create_compute_pipeline_with_layouts(
                             &device,
                             "cagi test pipeline",
@@ -916,7 +932,7 @@ mod tests {
                             &build_shader_source(&quality),
                             &[
                                 Some(&bind_group_layout),
-                                Some(atmosphere.sample_bind_group_layout()),
+                                Some(environment.sample_bind_group_layout()),
                             ],
                         );
                         let validation_error = pollster::block_on(error_scope.pop());

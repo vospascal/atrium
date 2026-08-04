@@ -32,9 +32,11 @@ use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
 use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_color::OutputFormat;
-use voxel_environment::{
-    AtmosphereBindings, AtmosphereLutPasses, FroxelCamera, LutConfig, LutUpdate,
-};
+use voxel_environment::{EnvironmentGpu, EnvironmentRequest, FroxelCamera, HillaireEnvironment};
+
+/// Far bound of the aerial-perspective froxel grid, in kilometres. The grid's Z axis is
+/// logarithmic, so this is a horizon distance rather than a resolution cost.
+const FROXEL_FAR_KILOMETERS: f32 = 32.0;
 
 // The compute-written intermediate texture's format is NOT a const here any more.
 // Srgb formats cannot be storage textures, so the DDA pass writes display-ready
@@ -55,8 +57,10 @@ pub struct Renderer {
     surface_height: u32,
     render_scale: f32,
     world_bindings: WorldBindings,
-    atmosphere: AtmosphereBindings,
-    atmosphere_lut_passes: AtmosphereLutPasses,
+    /// The environment backend, behind `voxel-environment`'s contract. This renderer knows
+    /// it has a bind group, some WGSL and a per-frame `submit`; how many lookup tables sit
+    /// behind that, and which of them a head turn invalidates, is the adapter's business.
+    environment: HillaireEnvironment,
     light_volume: LightVolume,
     cagi_pass: CagiPass,
     dda_pass: DdaPass,
@@ -80,18 +84,17 @@ impl Renderer {
         let (storage_view, storage_width, storage_height) =
             create_storage_texture(device, output_format, width, height, render_scale);
         let world_bindings = WorldBindings::new(device, brickmap);
-        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
-        let atmosphere_lut_passes = AtmosphereLutPasses::new(device, &atmosphere);
+        let environment = HillaireEnvironment::new(device);
         let light_volume =
             LightVolume::new(device, brickmap, global_illumination, material_attributes);
         let cagi_pass =
-            CagiPass::new_with_atmosphere(device, &world_bindings, &light_volume, &atmosphere);
-        let dda_pass = DdaPass::new_with_atmosphere(
+            CagiPass::new_with_environment(device, &world_bindings, &light_volume, &environment);
+        let dda_pass = DdaPass::new_with_environment(
             device,
             &world_bindings,
             &light_volume,
             &storage_view,
-            &atmosphere,
+            &environment,
             output_format,
         );
         let blit_pass = BlitPass::new(device, output_format, &storage_view);
@@ -106,8 +109,7 @@ impl Renderer {
             render_scale,
             viewport_height: height,
             world_bindings,
-            atmosphere,
-            atmosphere_lut_passes,
+            environment,
             light_volume,
             cagi_pass,
             dda_pass,
@@ -330,12 +332,12 @@ impl Renderer {
         self.storage_width = storage_width;
         self.storage_height = storage_height;
         self.blit_pass = BlitPass::new(device, output_format, &self.storage_view);
-        self.dda_pass = DdaPass::new_with_atmosphere(
+        self.dda_pass = DdaPass::new_with_environment(
             device,
             &self.world_bindings,
             &self.light_volume,
             &self.storage_view,
-            &self.atmosphere,
+            &self.environment,
             output_format,
         );
         // A fresh BlitPass starts on its 1:1 sampler; a non-native render scale
@@ -377,6 +379,39 @@ impl Renderer {
         );
     }
 
+    /// This frame's environment inputs, translated from the renderer's own uniforms.
+    ///
+    /// The physical half (`sun_direction`, `sun_illuminance`) is what CAGI and the
+    /// transmittance table integrate. The `celestial_*`/`sky_*` half is the camera-only
+    /// appearance layer: [`LightingUniform`] still carries it for surface shading, so it is
+    /// mirrored across here rather than being resolved twice from [`SunSettings`].
+    fn environment_request(
+        lighting_uniform: &LightingUniform,
+        camera_uniform: &CameraUniform,
+    ) -> EnvironmentRequest {
+        let intensity = lighting_uniform.sun_color_intensity[3];
+        EnvironmentRequest {
+            sun_direction: lighting_uniform.sun_direction,
+            sun_illuminance: [
+                lighting_uniform.sun_color_intensity[0] * intensity,
+                lighting_uniform.sun_color_intensity[1] * intensity,
+                lighting_uniform.sun_color_intensity[2] * intensity,
+            ],
+            celestial_sun: lighting_uniform.celestial_sun,
+            celestial_moon: lighting_uniform.celestial_moon,
+            sky_zenith: lighting_uniform.sky_zenith,
+            sky_horizon: lighting_uniform.sky_horizon,
+            camera_position: camera_uniform.position,
+            camera: FroxelCamera {
+                forward: camera_uniform.forward,
+                right_scaled: camera_uniform.right_scaled,
+                up_scaled: camera_uniform.up_scaled,
+                near_world: 0.1,
+                far_world: FROXEL_FAR_KILOMETERS * voxel_environment::FROM_KILOMETERS_SCALE,
+            },
+        }
+    }
+
     /// Record this frame's CAGI iterations and upload the two buffers BOTH
     /// passes read: the lighting uniform (so the CA cannot inject a different
     /// sun than the shading pass shades with) and the world event field (so a
@@ -398,52 +433,12 @@ impl Renderer {
     ) {
         self.world_bindings.write_lighting(queue, lighting_uniform);
         self.world_bindings.write_world_events(queue, world_events);
-        let previous = self.atmosphere.uniform;
-        let mut atmosphere = previous;
-        atmosphere.sun_direction = lighting_uniform.sun_direction;
-        atmosphere.sun_illuminance = [
-            lighting_uniform.sun_color_intensity[0] * lighting_uniform.sun_color_intensity[3],
-            lighting_uniform.sun_color_intensity[1] * lighting_uniform.sun_color_intensity[3],
-            lighting_uniform.sun_color_intensity[2] * lighting_uniform.sun_color_intensity[3],
-        ];
-        // Visual sky controls belong to the environment adapter. LightingUniform
-        // still carries the legacy ABI for surface shading, so mirror the resolved
-        // frame into the atmosphere group at the renderer boundary.
-        atmosphere.visual_sun = lighting_uniform.celestial_sun;
-        atmosphere.visual_moon = lighting_uniform.celestial_moon;
-        atmosphere.visual_zenith = lighting_uniform.sky_zenith;
-        atmosphere.visual_horizon = lighting_uniform.sky_horizon;
-        atmosphere.camera_position = camera_uniform.position;
-        atmosphere.set_froxel_camera(FroxelCamera {
-            forward: camera_uniform.forward,
-            right_scaled: camera_uniform.right_scaled,
-            up_scaled: camera_uniform.up_scaled,
-            near_world: 0.1,
-            far_world: atmosphere.from_kilometers_scale * 32.0,
-        });
-        let sun_changed = previous.sun_direction != atmosphere.sun_direction
-            || previous.sun_illuminance != atmosphere.sun_illuminance;
-        let visual_changed = previous.visual_sun != atmosphere.visual_sun
-            || previous.visual_moon != atmosphere.visual_moon
-            || previous.visual_zenith != atmosphere.visual_zenith
-            || previous.visual_horizon != atmosphere.visual_horizon;
-        let camera_changed = previous.camera_position != atmosphere.camera_position
-            || previous.camera_forward != atmosphere.camera_forward
-            || previous.camera_right_scaled != atmosphere.camera_right_scaled
-            || previous.camera_up_scaled != atmosphere.camera_up_scaled
-            || previous.camera_depth != atmosphere.camera_depth;
-        let first_update = self.atmosphere.resources.generation == 0;
-        if first_update || sun_changed || visual_changed || camera_changed {
-            self.atmosphere.update_uniform(queue, atmosphere);
-            self.atmosphere_lut_passes.encode(
-                encoder,
-                LutUpdate {
-                    atmosphere: first_update,
-                    sun: sun_changed || visual_changed,
-                    camera: camera_changed,
-                },
-            );
-        }
+        // State the environment's inputs; the adapter decides what they invalidated and
+        // encodes only that. Whether this frame costs four compute dispatches, two, or
+        // none is not a decision this file makes any more.
+        let environment_request = Self::environment_request(lighting_uniform, camera_uniform);
+        self.environment
+            .submit(queue, encoder, &environment_request);
         self.cagi_pass.encode(
             encoder,
             &mut self.light_volume,

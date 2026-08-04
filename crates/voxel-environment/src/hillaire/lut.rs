@@ -1,6 +1,14 @@
-//! Jolifanto LUT dimensions and update policy.
+//! Jolifanto LUT dimensions and the compute passes that populate them.
+//!
+//! The *decision* about what needs recomputing is not here — it is
+//! [`EnvironmentInvalidation`], stated in renderer-neutral terms. This file only maps
+//! that answer onto which of the four tables it affects, which is the one part of it that
+//! is genuinely Hillaire-specific: transmittance and multiple scattering depend on the
+//! atmosphere and the sun, sky view and aerial perspective additionally depend on where
+//! the camera is.
 
 use super::resources::{AtmosphereBindings, LutKind};
+use crate::api::EnvironmentInvalidation;
 
 /// Starting LUT sizes from Jolifanto's WebGPU implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,32 +27,6 @@ impl Default for LutConfig {
             sky_view: [192, 108],
             aerial_perspective: [32, 32, 32],
         }
-    }
-}
-
-/// Which LUTs need regeneration for the current frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LutUpdate {
-    pub atmosphere: bool,
-    pub sun: bool,
-    pub camera: bool,
-}
-
-impl LutUpdate {
-    pub const fn all() -> Self {
-        Self {
-            atmosphere: true,
-            sun: true,
-            camera: true,
-        }
-    }
-
-    pub const fn constant_luts(self) -> bool {
-        self.atmosphere || self.sun
-    }
-
-    pub const fn view_luts(self) -> bool {
-        self.atmosphere || self.sun || self.camera
     }
 }
 
@@ -159,17 +141,21 @@ impl AtmosphereLutPasses {
         }
     }
 
-    /// Encode only the LUTs invalidated by the atmosphere/sun/camera update.
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, update: LutUpdate) {
+    /// Encode only the LUTs this frame's invalidation reaches.
+    pub fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        invalidation: EnvironmentInvalidation,
+    ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("jolifanto atmosphere LUT generation"),
             timestamp_writes: None,
         });
-        if update.constant_luts() {
+        if invalidation.view_independent() {
             dispatch(&mut pass, &self.transmittance);
             dispatch(&mut pass, &self.multiple_scattering);
         }
-        if update.view_luts() {
+        if invalidation.view_dependent() {
             dispatch(&mut pass, &self.sky_view);
             dispatch(&mut pass, &self.aerial_perspective);
         }
@@ -201,7 +187,7 @@ mod tests {
         assert!(source.contains("atmosphere_origin_at_height"));
         assert!(source.contains("atmosphere_ray_sphere_distance"));
 
-        let sampling = crate::WGSL;
+        let sampling = super::super::shaders::WGSL;
         assert!(sampling.contains("planet_center_world"));
         assert!(sampling.contains("dot(normalize(direction), local_up)"));
     }

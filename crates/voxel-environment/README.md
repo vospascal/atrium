@@ -39,3 +39,112 @@ The provider is adapted to this engine's world scale (`1` voxel world unit is no
 necessarily `1` km). Camera misses use the appearance layer near the viewer and blend toward
 the aerial-perspective LUT with distance; CAGI remains a pure neighbour-based transport pass
 fed by the physical LUT values.
+
+---
+
+## The boundary, concretely
+
+Four names. A consumer that needs a fifth is a sign the boundary is in the wrong place.
+
+| you want | you use |
+|---|---|
+| where the sun is, how bright, the backdrop palette | `EnvironmentProvider` — no `wgpu`, so lighting code and headless tests can ask |
+| a bind-group layout, a bind group, the matching WGSL, one `submit` per frame | `EnvironmentGpu` |
+| to state this frame's inputs | `EnvironmentRequest` |
+| the shipped implementation of both traits | `adapters::HillaireEnvironment` |
+
+Everything else is behind the facade. `AtmosphereUniform`, `AtmosphereBindings`,
+`AtmosphereLutPasses`, `LutKind`, the four LUT sizes, the compute pipelines — all
+crate-private, all reachable only through the adapter. That is what makes the provider
+replaceable rather than merely abstract.
+
+**The update policy lives here, not in the renderer.** `EnvironmentRequest::invalidation_since`
+is pure, so what a head turn costs is a unit test rather than a frame capture: standing
+still encodes nothing, looking around re-runs sky-view and aerial perspective, moving the
+sun additionally re-integrates transmittance and multiple scattering. `voxel-rt` used to own
+that diff — it copied the previous `AtmosphereUniform`, mutated nine members, then compared
+five groups of them by hand.
+
+### Layout
+
+```text
+src/
+  lib.rs                    facade
+  api.rs                    EnvironmentFrame/Request/Invalidation, EnvironmentProvider — no wgpu
+  gpu.rs                    EnvironmentGpu, ENVIRONMENT_BIND_GROUP
+  state.rs                  SunSettings, the day/night clock, the frame evaluator
+  scale.rs                  km ↔ world units
+  adapters/hillaire.rs      the one shipped policy
+  hillaire/                 its implementation: lut.rs, resources.rs, shaders.rs — crate-private
+shaders/
+  environment/              common → hillaire → appearance → dispatch
+  lut/                      common + one file per lookup table
+```
+
+Both WGSL modules are assembled by `concat!(include_str!(…))` in `hillaire/shaders.rs`. The
+fragments are the only source of truth — there is no hand-maintained aggregate file, and no
+build script needed to produce one.
+
+---
+
+## Things worth knowing before changing this
+
+**There is exactly one adapter, and that is the honest count.** The crate briefly carried a
+second, `AnalyticProvider`, documented as a fallback for when the atmosphere resources
+cannot be allocated. It was a field-for-field copy of the Hillaire provider whose
+`shader_source` returned the *LUT sampler* — a module that reads four textures it would
+never have populated. Selecting it would have bound nothing. Nothing constructed it, so
+nothing caught that. `shader_source` has since moved off `EnvironmentProvider` onto
+`EnvironmentGpu`, which is what makes the mistake unrepresentable: a provider with no GPU
+path can no longer be asked to name a shader.
+
+A real second adapter is a reasonable thing to want — a Quest tier that cannot afford four
+persistent LUTs is the obvious motivation. What it owes is its own `shaders/environment/`
+implementation: `common.wgsl` plus its own answers to the `dispatch.wgsl` entry points, with
+no texture reads it cannot back. The appearance layer is already LUT-free and would carry
+most of it.
+
+**`HillaireEnvironment::WGSL` exists because `concat!` takes literals.** A consumer
+assembling its shader module at compile time cannot call a trait method, so it names the
+adapter. That naming is the honest cost, not a leak: a shader spliced before any device
+exists really is committed to one implementation, and a provider-neutral crate-level `WGSL`
+const would have hidden that rather than removed it. Runtime code should use
+`EnvironmentGpu::shader_source`.
+
+**One dependency runs the wrong way, deliberately, and it is not fixed.**
+`shaders/environment/dispatch.wgsl` reads `lighting.sky_ambient.w` — the *renderer's*
+uniform, not this crate's. The ambient scale still lives in `voxel-rt`'s `LightingUniform`,
+so this crate's WGSL cannot be compiled without a binding it does not declare. Closing it
+means moving the ambient scale into `EnvironmentRequest` and out of the lighting ABI.
+
+**`voxel-rt` keeps its own `SunSettings`, a field-for-field mirror of this crate's.**
+`lighting.rs` converts one into the other to call `environment_frame()`. The renderer's copy
+carries the overlay's documentation and is named across `main.rs`, the bench and the
+variants registry, so collapsing them is a real refactor rather than a deletion — but it is
+duplication, and it is the reason `SUN_INTENSITY` now has a cross-crate audience.
+
+**`SUN_INTENSITY = 2.2` is exported from here and it is not physical.** It was chosen so a
+sunlit surface lands near the top of Reinhard's usable range — the scene's absolute scale
+tuned to fit a tone curve. `voxel-color`'s README calls this its Gap 3; the arbitrary
+constant lives on this side of the boundary and the curve calibrated against it lives on the
+other, so the two READMEs describe one problem. Moving it is a re-authoring pass over every
+material and emitter, not a constant change.
+
+**`atmosphere_transmittance_uv` in `hillaire.wgsl` is dead, and it duplicates a formula
+that is live.** `environment_sun_transmittance_at` recomputes the same UV inline. Two copies
+of one derivation is drift-bait; it is left only because removing it is a behaviour-neutral
+edit that belongs in its own change.
+
+---
+
+## Working on it
+
+```sh
+cargo test -p voxel-environment              # the crate, ~16 tests, no GPU needed
+cargo test -p voxel-rt --lib                 # the consumers
+cargo run -p voxel-rt --release              # the only way to see the sky
+```
+
+`HillaireEnvironment::upload_count` does not advance while the viewer stands still under a
+frozen sun — the cheapest way to confirm the update policy in a running app. `lut_summary`
+reports what was actually allocated.

@@ -18,7 +18,7 @@ use crate::variants::RenderQuality;
 use super::cagi::LightVolume;
 use super::world_bindings::{WorldBindings, PATTERN_CACHE_BINDING};
 use super::ComputePipelineCache;
-use voxel_environment::{AtmosphereBindings, LutConfig};
+use voxel_environment::{EnvironmentGpu, HillaireEnvironment, ENVIRONMENT_BIND_GROUP};
 
 const WORKGROUP_SIZE: u32 = 8;
 
@@ -63,10 +63,12 @@ const OWN_SHADER_SOURCE: &str = concat!(
 /// `passes::cagi`'s `both_pass_shaders_share_the_traversal_core` reads as a `starts_with`.
 pub static SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let mut source = String::with_capacity(
-        OWN_SHADER_SOURCE.len() + voxel_environment::WGSL.len() + voxel_color::tonemap::WGSL.len(),
+        OWN_SHADER_SOURCE.len()
+            + HillaireEnvironment::WGSL.len()
+            + voxel_color::tonemap::WGSL.len(),
     );
     source.push_str(OWN_SHADER_SOURCE);
-    source.push_str(voxel_environment::WGSL);
+    source.push_str(HillaireEnvironment::WGSL);
     source.push_str(voxel_color::tonemap::WGSL);
     source
 });
@@ -119,8 +121,8 @@ pub fn build_shader_source_for_output(
 pub struct DdaPass {
     pipeline_cache: ComputePipelineCache,
     bind_group_layout: wgpu::BindGroupLayout,
-    atmosphere_bind_group_layout: wgpu::BindGroupLayout,
-    atmosphere_bind_group: wgpu::BindGroup,
+    environment_bind_group_layout: wgpu::BindGroupLayout,
+    environment_bind_group: wgpu::BindGroup,
     /// The format this pass's layout was built for, so
     /// [`DdaPass::set_shader_source`] can refuse a source that disagrees with it.
     output_format: voxel_color::OutputFormat,
@@ -139,32 +141,32 @@ impl DdaPass {
         output_view: &wgpu::TextureView,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
-        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
-        Self::new_with_atmosphere(
+        let environment = HillaireEnvironment::new(device);
+        Self::new_with_environment(
             device,
             world_bindings,
             light_volume,
             output_view,
-            &atmosphere,
+            &environment,
             output_format,
         )
     }
 
-    pub fn new_with_atmosphere(
+    pub fn new_with_environment(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
         output_view: &wgpu::TextureView,
-        atmosphere: &AtmosphereBindings,
+        environment: &dyn EnvironmentGpu,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
         let shader_source = output_format.patch_shader_source(&SHADER_SOURCE);
-        Self::new_with_atmosphere_and_shader_source(
+        Self::new_with_environment_and_shader_source(
             device,
             world_bindings,
             light_volume,
             output_view,
-            atmosphere,
+            environment,
             &shader_source,
             output_format,
         )
@@ -182,24 +184,24 @@ impl DdaPass {
         shader_source: &str,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
-        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
-        Self::new_with_atmosphere_and_shader_source(
+        let environment = HillaireEnvironment::new(device);
+        Self::new_with_environment_and_shader_source(
             device,
             world_bindings,
             light_volume,
             output_view,
-            &atmosphere,
+            &environment,
             shader_source,
             output_format,
         )
     }
 
-    pub fn new_with_atmosphere_and_shader_source(
+    pub fn new_with_environment_and_shader_source(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
         output_view: &wgpu::TextureView,
-        atmosphere: &AtmosphereBindings,
+        environment: &dyn EnvironmentGpu,
         shader_source: &str,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
@@ -214,7 +216,7 @@ impl DdaPass {
              this OutputFormat, so the pipeline will not match its bind group layout"
         );
         let bind_group_layout = create_bind_group_layout(device, output_format.storage());
-        let atmosphere_bind_group_layout = atmosphere.sample_bind_group_layout().clone();
+        let environment_bind_group_layout = environment.sample_bind_group_layout().clone();
         let pipeline_cache = ComputePipelineCache::new_with_layouts(
             device,
             "dda pass",
@@ -222,7 +224,7 @@ impl DdaPass {
             shader_source,
             &[
                 Some(&bind_group_layout),
-                Some(&atmosphere_bind_group_layout),
+                Some(&environment_bind_group_layout),
             ],
         );
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -243,8 +245,8 @@ impl DdaPass {
         Self {
             pipeline_cache,
             bind_group_layout,
-            atmosphere_bind_group_layout,
-            atmosphere_bind_group: atmosphere.sample_bind_group().clone(),
+            environment_bind_group_layout,
+            environment_bind_group: environment.sample_bind_group().clone(),
             output_format,
             bind_groups,
             camera_uniform_buffer,
@@ -271,7 +273,7 @@ impl DdaPass {
             shader_source,
             &[
                 Some(&self.bind_group_layout),
-                Some(&self.atmosphere_bind_group_layout),
+                Some(&self.environment_bind_group_layout),
             ],
         );
     }
@@ -286,7 +288,7 @@ impl DdaPass {
             shader_sources,
             &[
                 Some(&self.bind_group_layout),
-                Some(&self.atmosphere_bind_group_layout),
+                Some(&self.environment_bind_group_layout),
             ],
         )
     }
@@ -342,7 +344,7 @@ impl DdaPass {
         });
         compute_pass.set_pipeline(self.pipeline_cache.active());
         compute_pass.set_bind_group(0, &self.bind_groups[light_volume_front], &[]);
-        compute_pass.set_bind_group(1, &self.atmosphere_bind_group, &[]);
+        compute_pass.set_bind_group(ENVIRONMENT_BIND_GROUP, &self.environment_bind_group, &[]);
         compute_pass.dispatch_workgroups(
             output_width.div_ceil(WORKGROUP_SIZE),
             output_height.div_ceil(WORKGROUP_SIZE),
@@ -469,7 +471,7 @@ pub(crate) mod tests {
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let bind_group_layout =
             create_bind_group_layout(&device, voxel_color::OutputFormat::default().storage());
-        let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
+        let environment = HillaireEnvironment::new(&device);
         let _pipeline = create_compute_pipeline_with_layouts(
             &device,
             "dda test pipeline",
@@ -477,7 +479,7 @@ pub(crate) mod tests {
             SHADER_SOURCE.as_str(),
             &[
                 Some(&bind_group_layout),
-                Some(atmosphere.sample_bind_group_layout()),
+                Some(environment.sample_bind_group_layout()),
             ],
         );
         let validation_error = pollster::block_on(error_scope.pop());
@@ -586,14 +588,14 @@ pub(crate) mod tests {
                 continue;
             }
             let layout = create_bind_group_layout(&device, format.storage());
-            let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
+            let environment = HillaireEnvironment::new(&device);
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let _pipeline = create_compute_pipeline_with_layouts(
                 &device,
                 "output depth test pipeline",
                 "main",
                 &format.patch_shader_source(&SHADER_SOURCE),
-                &[Some(&layout), Some(atmosphere.sample_bind_group_layout())],
+                &[Some(&layout), Some(environment.sample_bind_group_layout())],
             );
             let validation_error = pollster::block_on(error_scope.pop());
             assert!(
@@ -635,7 +637,7 @@ pub(crate) mod tests {
 
         let bind_group_layout =
             create_bind_group_layout(&device, voxel_color::OutputFormat::default().storage());
-        let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
+        let environment = HillaireEnvironment::new(&device);
         let compile = |quality: &RenderQuality, description: String| {
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let _pipeline = create_compute_pipeline_with_layouts(
@@ -645,7 +647,7 @@ pub(crate) mod tests {
                 &build_shader_source(quality),
                 &[
                     Some(&bind_group_layout),
-                    Some(atmosphere.sample_bind_group_layout()),
+                    Some(environment.sample_bind_group_layout()),
                 ],
             );
             let validation_error = pollster::block_on(error_scope.pop());
@@ -764,7 +766,7 @@ pub(crate) mod tests {
         };
         let bind_group_layout =
             create_bind_group_layout(&device, voxel_color::OutputFormat::default().storage());
-        let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
+        let environment = HillaireEnvironment::new(&device);
         let mut pass_pipelines: HashMap<u64, wgpu::ComputePipeline> = HashMap::new();
         let mut keys = Vec::new();
         for spec in QUALITY_PRESETS {
@@ -782,7 +784,7 @@ pub(crate) mod tests {
                     &shader_source,
                     &[
                         Some(&bind_group_layout),
-                        Some(atmosphere.sample_bind_group_layout()),
+                        Some(environment.sample_bind_group_layout()),
                     ],
                 )
             });

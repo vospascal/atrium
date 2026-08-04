@@ -3396,7 +3396,7 @@ mod tests {
     /// Both pass shader sources — a lever's const lives in exactly one of them
     /// (the shared files appear in both, which is the point).
     fn shader_sources() -> [&'static str; 2] {
-        [SHADER_SOURCE.as_str(), CAGI_SHADER_SOURCE]
+        [SHADER_SOURCE.as_str(), CAGI_SHADER_SOURCE.as_str()]
     }
 
     fn registry_ids() -> Vec<LeverId> {

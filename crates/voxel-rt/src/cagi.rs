@@ -1397,16 +1397,17 @@ mod tests {
             "CagiSettings::default() drifted from the CAGI levers in cagi_volume.wgsl"
         );
         let patched =
-            settings.patch_propagation_consts(&settings.patch_volume_consts(CAGI_SHADER_SOURCE));
+            settings.patch_propagation_consts(&settings.patch_volume_consts(&CAGI_SHADER_SOURCE));
         assert_eq!(
-            patched, CAGI_SHADER_SOURCE,
+            patched,
+            CAGI_SHADER_SOURCE.as_str(),
             "CagiSettings::default() drifted from the CAGI levers in cagi.wgsl"
         );
     }
 
     #[test]
     fn atmosphere_lut_shader_variants_parse_with_naga() {
-        naga::front::wgsl::parse_str(CAGI_SHADER_SOURCE)
+        naga::front::wgsl::parse_str(&CAGI_SHADER_SOURCE)
             .expect("CAGI + atmosphere LUT sampling WGSL must parse with naga");
         naga::front::wgsl::parse_str(&SHADER_SOURCE)
             .expect("DDA + atmosphere LUT sampling WGSL must parse with naga");
@@ -1426,7 +1427,7 @@ mod tests {
         let volume = settings.patch_volume_consts(&SHADER_SOURCE);
         assert!(volume.contains("const CAGI_ENABLED: bool = false;"));
         assert!(volume.contains("const CAGI_SAMPLE_MODE: u32 = 0u;"));
-        let propagation = settings.patch_propagation_consts(CAGI_SHADER_SOURCE);
+        let propagation = settings.patch_propagation_consts(&CAGI_SHADER_SOURCE);
         assert!(propagation.contains("const CAGI_RULE: u32 = 2u;"));
         assert!(propagation.contains("const CAGI_SKY_TEST: u32 = 1u;"));
         assert!(propagation.contains("const CAGI_SUN_CACHE: bool = false;"));

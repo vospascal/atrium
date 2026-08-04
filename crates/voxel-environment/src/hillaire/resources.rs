@@ -1,13 +1,16 @@
 //! GPU resources shared by the Jolifanto/Hillaire LUT passes and samplers.
 
 use super::LutConfig;
-use crate::FroxelCamera;
+use crate::api::{EnvironmentRequest, FroxelCamera};
+use crate::scale::FROM_KILOMETERS_SCALE;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-/// The bind-group slot used by the atmosphere sampler in DDA and CAGI shaders.
-pub const ATMOSPHERE_BIND_GROUP: u32 = 1;
+/// Jolifanto's Earth-like planet surface radius, in kilometres.
+pub const EARTH_BOTTOM_RADIUS_KM: f32 = 6360.0;
+/// Jolifanto's Earth-like atmosphere top radius, in kilometres — 100 km of air.
+pub const EARTH_TOP_RADIUS_KM: f32 = 6460.0;
 
 /// The four persistent lookup tables used by Jolifanto's LUT path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,37 +89,57 @@ pub struct AtmosphereUniform {
 
 impl Default for AtmosphereUniform {
     fn default() -> Self {
-        Self {
-            bottom_radius_km: 6360.0,
-            top_radius_km: 6460.0,
-            from_kilometers_scale: 1000.0,
-            _pad0: 0.0,
-            sun_direction: [0.55, 0.8, 0.35],
-            _pad1: 0.0,
-            sun_illuminance: [2.2, 2.112, 1.936],
-            _pad2: 0.0,
-            camera_position: [0.0, 0.0, 0.0],
-            _pad3: 0.0,
-            sky_view_size: [192.0, 108.0],
-            _pad_sky_view: [0.0; 2],
-            aerial_size: [32.0, 32.0, 32.0],
-            _pad4: 0.0,
-            visual_sun: [0.55, 0.8, 0.35, 1.0],
-            visual_moon: [-0.55, -0.8, -0.35, 0.85],
-            visual_zenith: [0.08, 0.31, 2.55, 0.0],
-            visual_horizon: [2.55, 1.37, 0.63, 0.0],
-            camera_forward: [1.0, 0.0, 0.0],
-            _pad_camera_forward: 0.0,
-            camera_right_scaled: [0.57735026, 0.0, 0.0],
-            _pad_camera_right: 0.0,
-            camera_up_scaled: [0.0, 0.57735026, 0.0],
-            _pad_camera_up: 0.0,
-            camera_depth: [0.1, 32_000.0, 0.0, 0.0],
-        }
+        Self::new(LutConfig::default(), &EnvironmentRequest::default())
     }
 }
 
 impl AtmosphereUniform {
+    /// Build the uniform from the two things that determine it: the LUT sizes chosen at
+    /// allocation, and the frame the renderer asked for.
+    ///
+    /// Assembled from [`Zeroable::zeroed`] rather than written out field by field, which
+    /// zeroes the six `_pad*` members for free and — more importantly — means the planet
+    /// constants, the LUT dimensions and the per-frame values each appear exactly once in
+    /// the crate. The previous hand-written `Default` restated Jolifanto's LUT sizes and
+    /// the whole default frame, so three lists had to be kept in step by hand.
+    pub fn new(lut_config: LutConfig, request: &EnvironmentRequest) -> Self {
+        let mut uniform = Self::zeroed();
+        uniform.bottom_radius_km = EARTH_BOTTOM_RADIUS_KM;
+        uniform.top_radius_km = EARTH_TOP_RADIUS_KM;
+        uniform.from_kilometers_scale = FROM_KILOMETERS_SCALE;
+        uniform.set_lut_config(lut_config);
+        uniform.apply_request(request);
+        uniform
+    }
+
+    /// Record the allocated LUT dimensions the compute passes index against.
+    pub fn set_lut_config(&mut self, lut_config: LutConfig) {
+        self.sky_view_size = [lut_config.sky_view[0] as f32, lut_config.sky_view[1] as f32];
+        self.aerial_size = [
+            lut_config.aerial_perspective[0] as f32,
+            lut_config.aerial_perspective[1] as f32,
+            lut_config.aerial_perspective[2] as f32,
+        ];
+    }
+
+    /// Overwrite every per-frame field from the renderer's request, leaving the fields
+    /// fixed at construction (planet radii, world scale, LUT dimensions) untouched.
+    ///
+    /// This is the *only* place the GPU uniform layout meets renderer-supplied values, and
+    /// keeping it to one function is what lets [`EnvironmentRequest`] be the boundary: a
+    /// field added to the request without a line here is a field that silently does
+    /// nothing, and it is visible in one place rather than spread across a call site.
+    pub fn apply_request(&mut self, request: &EnvironmentRequest) {
+        self.sun_direction = request.sun_direction;
+        self.sun_illuminance = request.sun_illuminance;
+        self.visual_sun = request.celestial_sun;
+        self.visual_moon = request.celestial_moon;
+        self.visual_zenith = request.sky_zenith;
+        self.visual_horizon = request.sky_horizon;
+        self.camera_position = request.camera_position;
+        self.set_froxel_camera(request.camera);
+    }
+
     /// Apply camera-relative froxel projection data without exposing the GPU
     /// uniform layout to camera or platform code.
     pub fn set_froxel_camera(&mut self, camera: FroxelCamera) {
@@ -154,15 +177,7 @@ pub struct AtmosphereBindings {
 
 impl AtmosphereBindings {
     pub fn new(device: &wgpu::Device, lut_config: LutConfig) -> Self {
-        let uniform = AtmosphereUniform {
-            sky_view_size: [lut_config.sky_view[0] as f32, lut_config.sky_view[1] as f32],
-            aerial_size: [
-                lut_config.aerial_perspective[0] as f32,
-                lut_config.aerial_perspective[1] as f32,
-                lut_config.aerial_perspective[2] as f32,
-            ],
-            ..AtmosphereUniform::default()
-        };
+        let uniform = AtmosphereUniform::new(lut_config, &EnvironmentRequest::default());
         let texture_2d = |label: &str, size: [u32; 2]| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -379,7 +394,59 @@ impl Default for AtmosphereResources {
 
 #[cfg(test)]
 mod tests {
-    use super::AtmosphereUniform;
+    use super::*;
+    use crate::api::FroxelCamera;
+
+    /// Every per-frame field of the request must reach the uniform. Written as a whole-
+    /// struct comparison rather than field-by-field asserts so that adding a field to
+    /// [`EnvironmentRequest`] and forgetting the line in `apply_request` fails here — the
+    /// failure mode is a value that silently never reaches the GPU, which no image makes
+    /// obvious.
+    #[test]
+    fn apply_request_carries_every_per_frame_field() {
+        let request = EnvironmentRequest {
+            sun_direction: [0.1, 0.2, 0.3],
+            sun_illuminance: [4.0, 5.0, 6.0],
+            celestial_sun: [0.7, 0.8, 0.9, 0.25],
+            celestial_moon: [-0.7, -0.8, -0.9, 0.5],
+            sky_zenith: [1.5, 2.5, 3.5, 1.25],
+            sky_horizon: [2.0, 1.0, 0.5, 0.75],
+            camera_position: [10.0, 20.0, 30.0],
+            camera: FroxelCamera {
+                forward: [0.0, 0.0, 1.0],
+                right_scaled: [1.0, 0.0, 0.0],
+                up_scaled: [0.0, 1.0, 0.0],
+                near_world: 0.5,
+                far_world: 4096.0,
+            },
+        };
+        let mut uniform = AtmosphereUniform::default();
+        uniform.apply_request(&request);
+        assert_eq!(
+            uniform,
+            AtmosphereUniform::new(LutConfig::default(), &request)
+        );
+    }
+
+    /// The fields fixed at allocation must survive every frame update. A request that
+    /// reset the planet radii or the world scale would put the LUT domains and the
+    /// sampling code into different coordinate systems.
+    #[test]
+    fn applying_a_request_leaves_the_allocation_time_fields_alone() {
+        let config = LutConfig {
+            sky_view: [96, 54],
+            ..LutConfig::default()
+        };
+        let mut uniform = AtmosphereUniform::new(config, &EnvironmentRequest::default());
+        uniform.apply_request(&EnvironmentRequest {
+            camera_position: [1.0, 2.0, 3.0],
+            ..EnvironmentRequest::default()
+        });
+        assert_eq!(uniform.bottom_radius_km, EARTH_BOTTOM_RADIUS_KM);
+        assert_eq!(uniform.top_radius_km, EARTH_TOP_RADIUS_KM);
+        assert_eq!(uniform.from_kilometers_scale, FROM_KILOMETERS_SCALE);
+        assert_eq!(uniform.sky_view_size, [96.0, 54.0]);
+    }
 
     #[test]
     fn atmosphere_uniform_matches_wgsl_alignment() {
