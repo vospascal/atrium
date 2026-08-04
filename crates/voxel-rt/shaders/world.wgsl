@@ -108,9 +108,9 @@ struct BrickmapMeta {
     world_size_voxels: vec3<u32>, // (1000, 256, 1000)
     voxel_size_meters: f32,       // 0.125
     max_occupied_brick_y: u32,    // tallest occupied brick Y in the world
-    _pad5: u32,
-    _pad6: u32,
-    _pad7: u32,
+    pad_f: u32,
+    pad_g: u32,
+    pad_h: u32,
 }
 
 // S3 — the per-layer animation values a material graph supplies to the pattern
@@ -173,7 +173,7 @@ fn pattern_animation_drift(animation: PatternAnimation, slot: u32) -> vec3<f32> 
 
 struct Lighting {
     sun_direction: vec3<f32>,       // unit vector, surface -> sun
-    _pad0: f32,
+    pad_a: f32,
     sun_color_intensity: vec4<f32>, // rgb = linear sun color, w = intensity
     sky_ambient: vec4<f32>,         // rgb = linear sky ambient, w = strength
     ground_ambient: vec4<f32>,      // rgb = linear ground bounce, w unused
@@ -284,7 +284,7 @@ struct PatternLayer {
     tile_aspect: f32,
     tile_bond: f32,
     tile_gap: f32,
-    _pad_row2: f32,
+    pad_row_b: f32,
 }
 
 struct Material {
@@ -409,7 +409,7 @@ struct WorldEvent {
     channel: u32,
     strength: f32,              // [0, 1], multiplies the sensor's signal only
     open: f32,                  // 1.0 ongoing, 0.0 closed
-    _pad_row2: f32,
+    pad_row_b: f32,
 }
 
 // The literal 16 must equal MAX_WORLD_EVENTS below and in src/world_event.rs.

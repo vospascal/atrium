@@ -5,9 +5,11 @@
 // authored backdrop, or a blend of both — is decided here and only here, so a consumer
 // never branches on the environment provider.
 //
-// One dependency runs the other way and is worth knowing about: `lighting.sky_ambient.w`
-// below is the RENDERER's uniform, not this crate's. The ambient scale still lives in
-// `LightingUniform`, so this file cannot be compiled without that binding in scope.
+// This file reads nothing but `atmosphere`, which is this crate's own uniform. It used to
+// multiply by `lighting.sky_ambient.w` — the RENDERER's uniform — meaning this crate could not
+// be compiled without a binding it does not own. Concatenating every shader into one module hid
+// that; building the same set as an import graph rejected it as a cycle, which is how it was
+// found. The scale now arrives as `EnvironmentRequest::ambient_scale`.
 
 fn environment_diffuse_radiance(normal: vec3<f32>) -> vec3<f32> {
     let up = normalize(vec3<f32>(
@@ -20,7 +22,7 @@ fn environment_diffuse_radiance(normal: vec3<f32>) -> vec3<f32> {
     let sky = environment_hillaire_sky(up);
     let ground = vec3<f32>(0.45, 0.36, 0.28)
         * (0.12 + 0.25 * atmosphere.visual_sun.w);
-    return (sky * 0.12 + ground) * lighting.sky_ambient.w;
+    return (sky * 0.12 + ground) * atmosphere.ambient_scale;
 }
 
 fn sky_color(direction: vec3<f32>) -> vec3<f32> {

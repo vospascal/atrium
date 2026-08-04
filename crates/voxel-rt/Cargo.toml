@@ -26,3 +26,8 @@ winit = "0.30"
 [dev-dependencies]
 # examples/bench_dda.rs: correctness PNGs from the low-sun shadow scenario.
 png = "0.18"
+# examples/naga_oil_probe.rs only — the Stage D evaluation. 0.22 is the release that
+# pins naga 29, matching this tree's wgpu; 0.23 moved to naga 30 and would give us two
+# incompatible naga versions in one graph. A dev-dependency until the probe's verdict
+# says whether the renderer should depend on it for real.
+naga_oil = { version = "0.22", default-features = false }

@@ -868,7 +868,7 @@ impl PatternLayer {
                 .clamp(MINIMUM_TILE_ASPECT, MAXIMUM_TILE_ASPECT),
             tile_bond: self.tile_bond.rem_euclid(1.0),
             tile_gap: self.tile_gap.clamp(0.0, MAXIMUM_TILE_GAP),
-            _pad_row2: 0.0,
+            pad_row_b: 0.0,
         }
     }
 
@@ -1096,7 +1096,7 @@ pub struct GpuPatternLayer {
     pub tile_gap: f32,
     /// Explicit tail padding to close the third row. Named rather than implicit,
     /// the discipline [`crate::world_event::GpuWorldEvent`] documents.
-    pub _pad_row2: f32,
+    pub pad_row_b: f32,
 }
 
 impl GpuPatternLayer {
@@ -1112,7 +1112,7 @@ impl GpuPatternLayer {
         tile_aspect: 1.0,
         tile_bond: 0.0,
         tile_gap: 0.0,
-        _pad_row2: 0.0,
+        pad_row_b: 0.0,
     };
 }
 

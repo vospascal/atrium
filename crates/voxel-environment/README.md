@@ -111,17 +111,19 @@ exists really is committed to one implementation, and a provider-neutral crate-l
 const would have hidden that rather than removed it. Runtime code should use
 `EnvironmentGpu::shader_source`.
 
-**One dependency runs the wrong way, deliberately, and it is not fixed.**
-`shaders/environment/dispatch.wgsl` reads `lighting.sky_ambient.w` — the *renderer's*
-uniform, not this crate's. The ambient scale still lives in `voxel-rt`'s `LightingUniform`,
-so this crate's WGSL cannot be compiled without a binding it does not declare. Closing it
-means moving the ambient scale into `EnvironmentRequest` and out of the lighting ABI.
+**The dependency that ran the wrong way is closed, and how it was found is the point.**
+`shaders/environment/dispatch.wgsl` used to read `lighting.sky_ambient.w` — the *renderer's*
+uniform — so this crate's WGSL could not be compiled without a binding it does not declare.
+It now reads `atmosphere.ambient_scale`, fed by `EnvironmentRequest::ambient_scale`, and all
+three inputs to that number already lived here, so the renderer was only relaying a product
+it had no part in.
 
-**`voxel-rt` keeps its own `SunSettings`, a field-for-field mirror of this crate's.**
-`lighting.rs` converts one into the other to call `environment_frame()`. The renderer's copy
-carries the overlay's documentation and is named across `main.rs`, the bench and the
-variants registry, so collapsing them is a real refactor rather than a deletion — but it is
-duplication, and it is the reason `SUN_INTENSITY` now has a cross-crate audience.
+Worth recording: this survived a whole crate extraction *and* a review that documented it as
+deliberate. Concatenating every shader into one WGSL module gives no signal about which
+direction a dependency runs — everything is in one namespace, so a back-edge compiles.
+Rebuilding the same set as a `naga_oil` import graph (`voxel-rt/examples/naga_oil_probe.rs`)
+rejected it as a cycle on the first run. A tool that can *only* express a DAG found in
+seconds what prose had mislabelled as a design choice.
 
 **`SUN_INTENSITY = 2.2` is exported from here and it is not physical.** It was chosen so a
 sunlit surface lands near the top of Reinhard's usable range — the scene's absolute scale

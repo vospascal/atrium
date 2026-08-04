@@ -25,7 +25,7 @@ use voxel_environment::{
 /// | offset | field                 | WGSL type   | contents |
 /// |--------|-----------------------|-------------|----------|
 /// | 0      | `sun_direction`       | `vec3<f32>` | unit vector, surface → sun |
-/// | 12     | `_pad0`               | `f32`       | |
+/// | 12     | `pad_a`               | `f32`       | |
 /// | 16     | `sun_color_intensity` | `vec4<f32>` | rgb = linear sun color, w = intensity |
 /// | 32     | `sky_ambient`         | `vec4<f32>` | rgb = linear sky ambient, w = ambient strength |
 /// | 48     | `ground_ambient`      | `vec4<f32>` | rgb = linear ground bounce, w = unused |
@@ -45,7 +45,7 @@ use voxel_environment::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
     pub sun_direction: [f32; 3],
-    pub _pad0: f32,
+    pub pad_a: f32,
     pub sun_color_intensity: [f32; 4],
     pub sky_ambient: [f32; 4],
     pub ground_ambient: [f32; 4],
@@ -375,7 +375,7 @@ pub fn lighting_uniform(
     let celestial = sun.environment_frame();
     LightingUniform {
         sun_direction: celestial.active_direction.to_array(),
-        _pad0: 0.0,
+        pad_a: 0.0,
         sun_color_intensity: [
             celestial.active_color[0],
             celestial.active_color[1],

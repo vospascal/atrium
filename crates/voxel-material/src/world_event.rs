@@ -107,7 +107,7 @@ pub struct GpuWorldEvent {
     /// than a sentinel timestamp, so no shader path ever does arithmetic on
     /// `f32::MAX` and produces an infinity.
     pub open: f32,
-    pub _pad_row2: f32,
+    pub pad_row_b: f32,
 }
 
 impl GpuWorldEvent {
@@ -123,7 +123,7 @@ impl GpuWorldEvent {
         channel: 0,
         strength: 0.0,
         open: 0.0,
-        _pad_row2: 0.0,
+        pad_row_b: 0.0,
     };
 
     pub fn is_open(&self) -> bool {
@@ -245,7 +245,7 @@ impl WorldEventField {
             channel: spec.channel,
             strength,
             open: 1.0,
-            _pad_row2: 0.0,
+            pad_row_b: 0.0,
         };
         self.keys[index] = Some(key);
         self.count += 1;
@@ -447,7 +447,7 @@ mod tests {
     }
 
     /// The Rust upload must match the WGSL uniform-array stride of 48. The
-    /// natural `#[repr(C)]` field set is 44 at align 4, so without `_pad_row2`
+    /// natural `#[repr(C)]` field set is 44 at align 4, so without `pad_row_b`
     /// every element from 1 onward would be read shifted. Spec rule and its
     /// conditions are on the type's doc comment.
     #[test]

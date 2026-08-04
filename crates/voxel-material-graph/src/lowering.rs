@@ -1163,7 +1163,7 @@ impl MaterialGraphProgram {
             channel: sensor.channel,
             strength: 1.0,
             open: 1.0,
-            _pad_row2: 0.0,
+            pad_row_b: 0.0,
         }];
         let window = self.emission_oscillator_window(&self.emission_reachable());
         let endpoint = |events: &[GpuWorldEvent]| -> [f32; 3] {
@@ -3333,7 +3333,7 @@ mod tests {
             channel: 0,
             strength: 1.0,
             open: 1.0,
-            _pad_row2: 0.0,
+            pad_row_b: 0.0,
         }
     }
 

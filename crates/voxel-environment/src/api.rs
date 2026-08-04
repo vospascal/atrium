@@ -82,6 +82,18 @@ pub struct EnvironmentRequest {
     pub camera_position: [f32; 3],
     /// Camera basis and depth range for the froxel grid.
     pub camera: FroxelCamera,
+    /// Scale applied to the diffuse hemisphere term this crate returns from
+    /// `environment_diffuse_radiance`.
+    ///
+    /// This field exists because `dispatch.wgsl` used to read `lighting.sky_ambient.w` — the
+    /// *renderer's* uniform — which made this crate uncompilable without a binding it does not
+    /// own. It survived because concatenating every shader into one module hides which
+    /// direction a dependency runs; a `naga_oil` import graph rejected it outright as a cycle.
+    ///
+    /// Nothing was lost by moving it: all three of its inputs (`AMBIENT_STRENGTH`,
+    /// [`crate::SunSettings::ambient_scale`] and [`EnvironmentFrame::ambient_strength`]) already
+    /// live in this crate, so the renderer was only relaying a product it had no part in.
+    pub ambient_scale: f32,
 }
 
 impl Default for EnvironmentRequest {
@@ -95,6 +107,8 @@ impl Default for EnvironmentRequest {
             sky_horizon: [2.55, 1.37, 0.63, 0.0],
             camera_position: [0.0, 0.0, 0.0],
             camera: FroxelCamera::default(),
+            // The shipped noon value: `AMBIENT_STRENGTH` with both scales at 1.0.
+            ambient_scale: crate::state::AMBIENT_STRENGTH,
         }
     }
 }
@@ -117,7 +131,11 @@ impl EnvironmentRequest {
                 || self.celestial_sun != previous.celestial_sun
                 || self.celestial_moon != previous.celestial_moon
                 || self.sky_zenith != previous.sky_zenith
-                || self.sky_horizon != previous.sky_horizon,
+                || self.sky_horizon != previous.sky_horizon
+                // Not a light change in any physical sense, but it rides in the same uniform,
+                // so a changed value still has to be uploaded. Same reasoning as the
+                // appearance-layer fields above.
+                || self.ambient_scale != previous.ambient_scale,
             camera: self.camera_position != previous.camera_position
                 || self.camera != previous.camera,
         }

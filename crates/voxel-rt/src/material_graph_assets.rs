@@ -333,7 +333,7 @@ mod tests {
             channel: CHANNEL_PRESENCE,
             strength: 1.0,
             open: 1.0,
-            _pad_row2: 0.0,
+            pad_row_b: 0.0,
         }];
         let lit = program
             .evaluate(MaterialSampleContext {

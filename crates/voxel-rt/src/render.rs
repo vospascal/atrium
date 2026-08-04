@@ -402,6 +402,10 @@ impl Renderer {
             sky_zenith: lighting_uniform.sky_zenith,
             sky_horizon: lighting_uniform.sky_horizon,
             camera_position: camera_uniform.position,
+            // The identical number the environment's shader used to reach into
+            // `lighting.sky_ambient.w` for. Passing it rather than recomputing it is what makes
+            // this a pure re-route: the value the diffuse term multiplies by cannot drift.
+            ambient_scale: lighting_uniform.sky_ambient[3],
             camera: FroxelCamera {
                 forward: camera_uniform.forward,
                 right_scaled: camera_uniform.right_scaled,

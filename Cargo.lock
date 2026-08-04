@@ -1560,7 +1560,7 @@ dependencies = [
  "bevy_platform",
  "bevy_reflect",
  "naga 27.0.3",
- "naga_oil",
+ "naga_oil 0.20.0",
  "serde",
  "thiserror 2.0.18",
  "tracing",
@@ -3277,7 +3277,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3437,7 +3437,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.18",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4282,6 +4282,23 @@ dependencies = [
  "data-encoding",
  "indexmap",
  "naga 27.0.3",
+ "regex",
+ "rustc-hash 1.1.0",
+ "thiserror 2.0.18",
+ "tracing",
+ "unicode-ident",
+]
+
+[[package]]
+name = "naga_oil"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "319f03062940ed85c03da020042618356bb8ca5263020322930883b05e30208e"
+dependencies = [
+ "codespan-reporting 0.12.0",
+ "data-encoding",
+ "indexmap",
+ "naga 29.0.4",
  "regex",
  "rustc-hash 1.1.0",
  "thiserror 2.0.18",
@@ -6840,6 +6857,7 @@ dependencies = [
  "egui-winit",
  "glam",
  "naga 29.0.4",
+ "naga_oil 0.22.0",
  "png",
  "pollster",
  "serde",

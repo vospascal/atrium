@@ -33,23 +33,28 @@ pub struct AtmosphereUniform {
     pub top_radius_km: f32,
     /// Jolifanto's `fromKilometersScale` conversion at the renderer boundary.
     pub from_kilometers_scale: f32,
-    pub _pad0: f32,
+    pub pad_a: f32,
     /// Direction from the sample toward the dominant sun.
     pub sun_direction: [f32; 3],
-    pub _pad1: f32,
+    pub pad_b: f32,
     /// Top-of-atmosphere sun illuminance in linear scene units.
     pub sun_illuminance: [f32; 3],
-    pub _pad2: f32,
+    pub pad_c: f32,
     /// Camera position in renderer world units.
     pub camera_position: [f32; 3],
-    pub _pad3: f32,
+    pub pad_d: f32,
     /// Sky-view LUT viewport in pixels.
     pub sky_view_size: [f32; 2],
     /// Explicit padding for WGSL's 16-byte alignment before the vec3 below.
     pub _pad_sky_view: [f32; 2],
     /// Aerial perspective LUT dimensions (x/y/z).
     pub aerial_size: [f32; 3],
-    pub _pad4: f32,
+    /// Scale for the diffuse hemisphere term — [`EnvironmentRequest::ambient_scale`].
+    ///
+    /// Deliberately placed in what was `_pad4`, the alignment slack after `aerial_size`. The
+    /// uniform's size and every other field's offset are therefore unchanged, so this carries
+    /// no ABI risk; a padding lane doing real work is what padding is for.
+    pub ambient_scale: f32,
     /// Camera-only sun direction and daylight amount for visual decoration.
     pub visual_sun: [f32; 4],
     /// Camera-only moon direction and phase.
@@ -121,6 +126,7 @@ impl AtmosphereUniform {
         self.visual_zenith = request.sky_zenith;
         self.visual_horizon = request.sky_horizon;
         self.camera_position = request.camera_position;
+        self.ambient_scale = request.ambient_scale;
         self.set_froxel_camera(request.camera);
     }
 
@@ -383,6 +389,7 @@ mod tests {
             sky_zenith: [1.5, 2.5, 3.5, 1.25],
             sky_horizon: [2.0, 1.0, 0.5, 0.75],
             camera_position: [10.0, 20.0, 30.0],
+            ambient_scale: 0.625,
             camera: FroxelCamera {
                 forward: [0.0, 0.0, 1.0],
                 right_scaled: [1.0, 0.0, 0.0],
