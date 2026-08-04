@@ -21,6 +21,35 @@ E2's edit pipeline, `-- 7` only E2b's movement rows, `-- 8` only E6's water
 section — and because sections are independent (isolation rule) a subset run
 yields exactly the rows a full run would print for it.
 
+## Memory rows (added 2026-08-04)
+
+Every GPU section now prints a **GPU memory per variant** table under its timing
+table, from the resources that section actually built — so the footprint reported is
+the one that produced the timings above it. Rows: render target, CAGI light volume,
+per-variant total, plus the shared world buffers once below.
+
+Byte formatting comes from `atrium_profile::memory`, the same formatter the live P
+panel uses, so a number read on screen and a number from a gate run are directly
+comparable. **Units are binary and labelled `MiB`** — the startup log's `48.0 MB` and
+this table's `45.8 MiB` are the SAME allocation.
+
+Section 4's baseline (2026-08-04, M3 Max):
+
+```
+category                     |       Potato @1792x1008 |        Quest @2048x1152 |     Balanced @2560x1440 |    Beautiful @2560x1440
+render target                |                 6.9 MiB |                 9.0 MiB |                14.1 MiB |                14.1 MiB
+light volume (CAGI)          |                   432 B |                 6.0 MiB |                45.8 MiB |                45.8 MiB
+per-variant total            |                 6.9 MiB |                15.0 MiB |                59.8 MiB |                59.8 MiB
+world (shared)               | 70.7 MiB GPU, 6.7 MiB CPU
+```
+
+Beautiful therefore costs ~130 MiB of GPU memory all-in, Quest ~86 MiB.
+
+**The GPU span registry changed with this arc**: the old `post` span (blit through
+overlay) is now two spans, `blit` and `overlay`, because the single span swallowed
+the GPU's inter-pass swapchain wait. Recorded `post` numbers do not compare to the
+new pair.
+
 ## What it measures
 
 Fourteen independent sections, each with its own variant table and pixel compare

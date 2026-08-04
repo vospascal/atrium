@@ -24,12 +24,12 @@
 //! sky by definition, so allocating it would be paying to store a constant.
 //! Measured footprints are in the bench doc's E4 section.
 
-use crate::ao::patch_shader_const;
 use crate::brickmap::{
     brick_is_uniform, brick_slot, brick_uniform_material, Brickmap, BRICK_GRID_X, BRICK_GRID_Y,
     BRICK_GRID_Z, BRICK_SIZE, EMPTY_BRICK, EMPTY_COLUMN, MATERIAL_WORDS_PER_BRICK,
     OCCUPANCY_WORDS_PER_BRICK,
 };
+use crate::shader_consts::{ShaderConstSink, SourcePatcher};
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 use voxel_material::animation_clock::AnimationClockSample;
 use voxel_material::material::{Material, MATERIALS, MATERIAL_COUNT};
@@ -166,10 +166,6 @@ impl CagiRule {
             other => panic!("no CAGI_RULE {other} in cagi.wgsl"),
         }
     }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
-    }
 }
 
 /// How the shading pass reads the volume — mirrors `CAGI_SAMPLE_MODE` in
@@ -196,10 +192,6 @@ impl CagiSampleMode {
             1 => CagiSampleMode::Trilinear,
             other => panic!("no CAGI_SAMPLE_MODE {other} in cagi_volume.wgsl"),
         }
-    }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
     }
 }
 
@@ -229,10 +221,6 @@ impl CagiSkyTest {
             1 => CagiSkyTest::UpwardTrace,
             other => panic!("no CAGI_SKY_TEST {other} in cagi.wgsl"),
         }
-    }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
     }
 }
 
@@ -324,42 +312,33 @@ impl Default for CagiSettings {
 impl CagiSettings {
     /// Patch the consts that live in `cagi_volume.wgsl` — the file BOTH pass
     /// shaders include, so this applies to both sources.
+    pub fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
+        sink.boolean("CAGI_ENABLED", self.enabled);
+        sink.unsigned("CAGI_SAMPLE_MODE", self.sample_mode.shader_value());
+    }
+
     pub fn patch_volume_consts(&self, shader_source: &str) -> String {
-        let patched =
-            patch_shader_const(shader_source, "CAGI_ENABLED", boolean_literal(self.enabled));
-        patch_shader_const(
-            &patched,
-            "CAGI_SAMPLE_MODE",
-            &self.sample_mode.wgsl_literal(),
-        )
+        let mut patcher = SourcePatcher::new(shader_source);
+        self.declare_volume_consts(&mut patcher);
+        patcher.finish()
     }
 
     /// Patch the consts that live in `cagi.wgsl` — the CA pass only.
+    pub fn declare_propagation_consts(&self, sink: &mut dyn ShaderConstSink) {
+        sink.unsigned("CAGI_RULE", self.rule.shader_value());
+        sink.unsigned("CAGI_SKY_TEST", self.sky_test.shader_value());
+        sink.boolean("CAGI_SUN_CACHE", self.sun_cache);
+        sink.boolean("CAGI_TRANSMISSION", self.transmission);
+        sink.boolean("CAGI_REFLECTANCE", self.reflectance);
+        sink.boolean("CAGI_EMISSIVE", self.emissive);
+        sink.boolean("CAGI_EMITTER_BOUNCE", self.emitter_bounce);
+        sink.boolean("CAGI_EVENT_LIGHT", self.event_light);
+    }
+
     pub fn patch_propagation_consts(&self, shader_source: &str) -> String {
-        let mut patched = patch_shader_const(shader_source, "CAGI_RULE", &self.rule.wgsl_literal());
-        patched = patch_shader_const(&patched, "CAGI_SKY_TEST", &self.sky_test.wgsl_literal());
-        patched = patch_shader_const(&patched, "CAGI_SUN_CACHE", boolean_literal(self.sun_cache));
-        patched = patch_shader_const(
-            &patched,
-            "CAGI_TRANSMISSION",
-            boolean_literal(self.transmission),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "CAGI_REFLECTANCE",
-            boolean_literal(self.reflectance),
-        );
-        patched = patch_shader_const(&patched, "CAGI_EMISSIVE", boolean_literal(self.emissive));
-        patched = patch_shader_const(
-            &patched,
-            "CAGI_EMITTER_BOUNCE",
-            boolean_literal(self.emitter_bounce),
-        );
-        patch_shader_const(
-            &patched,
-            "CAGI_EVENT_LIGHT",
-            boolean_literal(self.event_light),
-        )
+        let mut patcher = SourcePatcher::new(shader_source);
+        self.declare_propagation_consts(&mut patcher);
+        patcher.finish()
     }
 
     /// Whether switching from `applied` to `self` changes a compile-time const.
@@ -388,14 +367,6 @@ impl CagiSettings {
             return CagiGrid::placeholder();
         }
         CagiGrid::for_world(self.cell_voxels, brickmap.metadata().max_occupied_brick_y)
-    }
-}
-
-fn boolean_literal(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
     }
 }
 

@@ -5,6 +5,10 @@ edition = "2021"
 description = "Standalone ray-traced voxel renderer — winit + wgpu + egui, no Bevy"
 
 [dependencies]
+# Perf instrumentation: CPU spans, frame pacing, GPU timestamp queries. The `gpu`
+# feature is what pulls in the wgpu half; the audio engine takes the same crate
+# without it.
+atrium-profile = { path = "../profile", features = ["gpu"] }
 bytemuck = "1"
 egui = "0.35"
 egui-wgpu = "0.35"

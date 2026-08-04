@@ -21,12 +21,12 @@ use crate::cagi::{
     CagiGrid, CagiSettings, GpuEventResponse, MaterialAttributes, EVENT_RESPONSE_SLOTS,
 };
 use crate::camera::CameraUniform;
-use crate::frame_timing::{GpuFrameTimers, SPAN_CAGI, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
 use crate::passes::blit::BlitPass;
 use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
 use crate::passes::dda::DdaPass;
 use crate::passes::world_bindings::WorldBindings;
+use crate::profiling::{FrameTimers, GPU_BLIT, GPU_CAGI, GPU_DDA};
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
 use voxel_color::OutputFormat;
@@ -121,6 +121,36 @@ impl Renderer {
     /// uniform's resolution must be.
     pub fn resolution(&self) -> (u32, u32) {
         (self.storage_width, self.storage_height)
+    }
+
+    /// GPU bytes held by the world buffers (brickmap and its derived structures).
+    ///
+    /// Read from `wgpu::Buffer::size` rather than recomputed from the brickmap, so
+    /// it reports what was actually ALLOCATED — including the brick headroom that
+    /// exists precisely so an edit does not have to reallocate 41 MB.
+    pub fn world_gpu_bytes(&self) -> u64 {
+        self.world_bindings.gpu_bytes()
+    }
+
+    /// GPU bytes held by the CAGI light volume: both ping-pong buffers plus the
+    /// cell attribute data.
+    pub fn light_volume_gpu_bytes(&self) -> u64 {
+        self.light_volume.gpu_bytes()
+    }
+
+    /// GPU bytes held by the ray-traced storage texture.
+    ///
+    /// Scales with BOTH the render scale and the output depth — a half-scale
+    /// preset at 8-bit and a full-scale one at 16-bit float differ by 8x, which is
+    /// exactly the tradeoff the quality levers make and therefore worth showing
+    /// next to them.
+    pub fn storage_texture_bytes(&self) -> u64 {
+        let bytes_per_pixel = self
+            .output_format
+            .storage()
+            .block_copy_size(None)
+            .unwrap_or(0);
+        u64::from(self.storage_width) * u64::from(self.storage_height) * u64::from(bytes_per_pixel)
     }
 
     /// Current render scale (storage size / surface size, 1.0 = native).
@@ -433,7 +463,7 @@ impl Renderer {
         camera_uniform: &CameraUniform,
         world_events: &[GpuWorldEvent; MAX_WORLD_EVENTS],
         iterations: u32,
-        frame_timers: Option<&GpuFrameTimers>,
+        frame_timers: Option<&FrameTimers>,
     ) {
         self.world_bindings.write_lighting(queue, lighting_uniform);
         self.world_bindings.write_world_events(queue, world_events);
@@ -447,21 +477,22 @@ impl Renderer {
             encoder,
             &mut self.light_volume,
             iterations,
-            frame_timers.map(|timers| timers.compute_span_writes(SPAN_CAGI)),
+            frame_timers.map(|timers| timers.compute_span_writes(GPU_CAGI)),
         );
     }
 
     /// Record the DDA + blit passes. When `frame_timers` is present, the DDA
-    /// compute pass carries its full timing span and the blit pass OPENS the
-    /// post span — the overlay pass (encoded by the caller afterwards) closes
-    /// it via [`GpuFrameTimers::render_span_end_writes`].
+    /// compute pass and the blit pass each carry their own self-contained timing
+    /// span. The overlay pass, encoded by the caller afterwards, carries its own
+    /// — deliberately NOT one span across both, which would swallow the GPU's
+    /// wait between them (see [`crate::profiling::GPU_BLIT`]).
     pub fn encode_frame(
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         camera_uniform: &CameraUniform,
         target_view: &wgpu::TextureView,
-        frame_timers: Option<&GpuFrameTimers>,
+        frame_timers: Option<&FrameTimers>,
     ) {
         self.dda_pass.encode(
             queue,
@@ -470,7 +501,7 @@ impl Renderer {
             self.light_volume.front(),
             self.storage_width,
             self.storage_height,
-            frame_timers.map(|timers| timers.compute_span_writes(SPAN_DDA)),
+            frame_timers.map(|timers| timers.compute_span_writes(GPU_DDA)),
         );
         self.blit_pass.encode(
             encoder,
@@ -479,7 +510,7 @@ impl Renderer {
             self.surface_height,
             self.surface_width,
             self.viewport_height,
-            frame_timers.map(|timers| timers.render_span_begin_writes(SPAN_POST)),
+            frame_timers.map(|timers| timers.render_span_writes(GPU_BLIT)),
         );
     }
 }

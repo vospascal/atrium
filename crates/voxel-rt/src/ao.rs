@@ -21,6 +21,8 @@
 //! measured verdict) that the bench sweep, the overlay and the pinning tests
 //! all read.
 
+use crate::shader_consts::{ShaderConstSink, SourcePatcher};
+
 /// AO technique — mirrors `AO_MODE` in `dda.wgsl`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AoMode {
@@ -62,10 +64,6 @@ impl AoMode {
             other => panic!("no AO_MODE {other} in dda.wgsl"),
         }
     }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
-    }
 }
 
 /// AO ray direction strategy — mirrors `AO_DIRECTION_MODE` in `dda.wgsl`.
@@ -101,10 +99,6 @@ impl AoDirectionMode {
             2 => AoDirectionMode::BentUp,
             other => panic!("no AO_DIRECTION_MODE {other} in dda.wgsl"),
         }
-    }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
     }
 }
 
@@ -177,46 +171,29 @@ impl Default for AoSettings {
 }
 
 impl AoSettings {
+    /// Declare this group's compile-time consts into `sink`.
+    ///
+    /// `AO_MAX_DISTANCE` is an `f32` const carried as an integer: the field is already
+    /// `max_distance_voxels: u32` and was only ever formatted `"{}.0"`, so nothing is lost, and
+    /// it is what makes this group expressible as preprocessor definitions at all.
+    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+        sink.unsigned("AO_MODE", self.mode.shader_value());
+        sink.unsigned("AO_RAY_COUNT", self.ray_count);
+        sink.integral_float("AO_MAX_DISTANCE", self.max_distance_voxels);
+        sink.unsigned("AO_DIRECTION_MODE", self.direction_mode.shader_value());
+        sink.boolean("AO_DISTANCE_FALLOFF", self.distance_falloff);
+        sink.boolean("AO_BRICK_EARLY_OUT", self.brick_early_out);
+        sink.boolean("AO_DISTANCE_FADE", self.distance_fade);
+        sink.boolean("AO_SUN_AWARE_RAY_BUDGET", self.sun_aware_ray_budget);
+        sink.boolean("AO_MISS_RADIANCE", self.miss_radiance);
+    }
+
     /// `shader_source` with this configuration's compile-time consts patched
     /// in. Identity for the default settings.
     pub fn patch_shader_source(&self, shader_source: &str) -> String {
-        let mut patched = patch_shader_const(shader_source, "AO_MODE", &self.mode.wgsl_literal());
-        patched = patch_shader_const(&patched, "AO_RAY_COUNT", &format!("{}u", self.ray_count));
-        patched = patch_shader_const(
-            &patched,
-            "AO_MAX_DISTANCE",
-            &format!("{}.0", self.max_distance_voxels),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "AO_DIRECTION_MODE",
-            &self.direction_mode.wgsl_literal(),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "AO_DISTANCE_FALLOFF",
-            boolean_literal(self.distance_falloff),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "AO_BRICK_EARLY_OUT",
-            boolean_literal(self.brick_early_out),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "AO_DISTANCE_FADE",
-            boolean_literal(self.distance_fade),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "AO_SUN_AWARE_RAY_BUDGET",
-            boolean_literal(self.sun_aware_ray_budget),
-        );
-        patch_shader_const(
-            &patched,
-            "AO_MISS_RADIANCE",
-            boolean_literal(self.miss_radiance),
-        )
+        let mut patcher = SourcePatcher::new(shader_source);
+        self.declare_consts(&mut patcher);
+        patcher.finish()
     }
 
     /// Whether switching from `applied` to `self` changes a compile-time
@@ -229,52 +206,6 @@ impl AoSettings {
         compile_time_only.fade_end_voxels = applied.fade_end_voxels;
         compile_time_only != *applied
     }
-}
-
-/// A WGSL `f32` literal for `value`.
-///
-/// `{:?}` rather than `{}` on purpose: Rust's `Display` for floats prints `1` for
-/// `1.0`, which WGSL reads as an `i32` and rejects where an `f32` is expected.
-/// `Debug` always emits the decimal point, so `1.0` stays `1.0` and `0.5` stays
-/// `0.5`. The first shader const with a real-valued lever was S2's pattern strength;
-/// every earlier scalar reached the shader as a uniform instead.
-pub fn float_literal(value: f32) -> String {
-    format!("{value:?}")
-}
-
-fn boolean_literal(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
-    }
-}
-
-/// Replace the value of `const {constant_name}: {type} = {value};` in a WGSL
-/// source with `new_value_literal`. Panics when the const is missing — a
-/// patch must never silently no-op (bench/overlay and shader cannot drift).
-pub fn patch_shader_const(
-    shader_source: &str,
-    constant_name: &str,
-    new_value_literal: &str,
-) -> String {
-    let declaration_prefix = format!("const {constant_name}:");
-    let declaration_start = shader_source
-        .find(&declaration_prefix)
-        .unwrap_or_else(|| panic!("shader const `{constant_name}` not found in dda.wgsl"));
-    let equals_offset = shader_source[declaration_start..]
-        .find('=')
-        .unwrap_or_else(|| panic!("shader const `{constant_name}` has no `=`"))
-        + declaration_start;
-    let semicolon_offset = shader_source[equals_offset..]
-        .find(';')
-        .unwrap_or_else(|| panic!("shader const `{constant_name}` has no `;`"))
-        + equals_offset;
-    format!(
-        "{}= {new_value_literal}{}",
-        &shader_source[..equals_offset],
-        &shader_source[semicolon_offset..]
-    )
 }
 
 #[cfg(test)]
@@ -343,10 +274,14 @@ mod tests {
         assert!(shader_source.contains("const AO_MODE_OFF: u32 = 3u;"));
     }
 
+    /// A lever whose const has been renamed or deleted must fail loudly rather than become
+    /// silently inert. The message no longer names `dda.wgsl`: the consts are spread across ten
+    /// files now, and `water.wgsl`'s legitimately are absent from the CA pass — which is what
+    /// [`crate::shader_consts::ShaderConstSink::set_if_present`] is for.
     #[test]
-    #[should_panic(expected = "not found in dda.wgsl")]
+    #[should_panic(expected = "shader const `ENABLE_NONEXISTENT` not found")]
     fn patching_a_missing_const_panics() {
-        patch_shader_const(&SHADER_SOURCE, "ENABLE_NONEXISTENT", "true");
+        crate::shader_consts::patch_shader_const(&SHADER_SOURCE, "ENABLE_NONEXISTENT", "true");
     }
 
     #[test]

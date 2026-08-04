@@ -16,7 +16,7 @@
 //! storage texture, writing the lighting uniform, and switching the pipeline on
 //! a compile-time lever change all stay in the platform layer.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 
 use egui::{Event, Key, MouseWheelUnit};
 use winit::event::WindowEvent;
@@ -24,9 +24,11 @@ use winit::window::Window;
 
 use crate::ao::AoMode;
 use crate::character::Submersion;
-use crate::frame_timing::FrameTimings;
 use crate::material_edit::{MaterialPanelState, WORLD_HOTBAR_BLOCKS};
 use crate::material_table::MaterialTable;
+use crate::performance_panel::PerformancePanel;
+use crate::profiling::FrameTimings;
+use crate::settings_panel::{SettingsContext, SettingsPanel};
 use crate::shadows::ShadowMode;
 use crate::studio_assets::StudioAssetPanelState;
 use crate::variants::{
@@ -49,111 +51,7 @@ use voxel_graph::{
 use voxel_material::material::{self, MATERIAL_COUNT};
 use voxel_material_graph::lowering::{ConnectorDrag, GraphEditorState};
 
-const FRAME_TIME_SAMPLE_COUNT: usize = 120;
-/// Timestamp readback lands a few frames late, so a moderate window keeps the
-/// GPU number readable without hiding a sustained regression.
-const GPU_FRAME_TIME_SAMPLE_COUNT: usize = 60;
-const FPS_GRAPH_MAX_WIDTH: f32 = 240.0;
-const FPS_GRAPH_HEIGHT: f32 = 60.0;
 const GRAPH_NODE_CONTROL_ZOOM: f32 = 0.95;
-
-const FRAME_LOOP_GRAPH_COLOR: egui::Color32 = egui::Color32::from_rgb(117, 180, 255);
-const GPU_GRAPH_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 220, 155);
-
-fn push_rolling_sample(samples: &mut VecDeque<f32>, capacity: usize, sample: f32) {
-    if samples.len() == capacity {
-        samples.pop_front();
-    }
-    samples.push_back(sample);
-}
-
-fn rolling_average(samples: &VecDeque<f32>) -> Option<f32> {
-    (!samples.is_empty()).then(|| samples.iter().sum::<f32>() / samples.len() as f32)
-}
-
-/// A compact history chart without a separate plotting dependency. The source
-/// samples remain frame times, so changing the graph never changes the moving
-/// averages shown beside it.
-fn draw_fps_history(
-    ui: &mut egui::Ui,
-    frame_time_samples: &VecDeque<f32>,
-    gpu_frame_time_samples: &VecDeque<f32>,
-) {
-    let frame_loop_fps: Vec<f32> = frame_time_samples
-        .iter()
-        .filter(|seconds| **seconds > 0.0)
-        .map(|seconds| 1.0 / seconds)
-        .collect();
-    let gpu_fps: Vec<f32> = gpu_frame_time_samples
-        .iter()
-        .filter(|milliseconds| **milliseconds > 0.0)
-        .map(|milliseconds| 1_000.0 / milliseconds)
-        .collect();
-    let peak_fps = frame_loop_fps
-        .iter()
-        .chain(gpu_fps.iter())
-        .copied()
-        .fold(60.0_f32, f32::max);
-    // Hold a readable 30-FPS grid step for the whole history window rather
-    // than rescaling every sample as a line wiggles.
-    let graph_ceiling_fps = (peak_fps / 30.0).ceil() * 30.0;
-
-    ui.horizontal(|ui| {
-        ui.colored_label(FRAME_LOOP_GRAPH_COLOR, "— frame loop");
-        ui.colored_label(GPU_GRAPH_COLOR, "— GPU work");
-        ui.label(format!("history · 0–{graph_ceiling_fps:.0} FPS"));
-    });
-    let (response, painter) = ui.allocate_painter(
-        egui::vec2(
-            ui.available_width().min(FPS_GRAPH_MAX_WIDTH),
-            FPS_GRAPH_HEIGHT,
-        ),
-        egui::Sense::hover(),
-    );
-    let rect = response.rect;
-    let plot = rect.shrink2(egui::vec2(4.0, 4.0));
-    painter.rect_filled(plot, 3.0, ui.visuals().faint_bg_color);
-
-    for fraction in [0.0, 0.5, 1.0] {
-        let y = egui::lerp(plot.bottom()..=plot.top(), fraction);
-        painter.line_segment(
-            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-        );
-    }
-
-    draw_fps_history_line(
-        &painter,
-        plot,
-        &frame_loop_fps,
-        graph_ceiling_fps,
-        FRAME_LOOP_GRAPH_COLOR,
-    );
-    draw_fps_history_line(&painter, plot, &gpu_fps, graph_ceiling_fps, GPU_GRAPH_COLOR);
-}
-
-fn draw_fps_history_line(
-    painter: &egui::Painter,
-    plot: egui::Rect,
-    samples: &[f32],
-    ceiling_fps: f32,
-    color: egui::Color32,
-) {
-    if samples.len() < 2 {
-        return;
-    }
-    let last_index = (samples.len() - 1) as f32;
-    let points = samples
-        .iter()
-        .enumerate()
-        .map(|(index, fps)| {
-            let x = egui::remap(index as f32, 0.0..=last_index, plot.left()..=plot.right());
-            let y = egui::remap_clamp(*fps, 0.0..=ceiling_fps, plot.bottom()..=plot.top());
-            egui::pos2(x, y)
-        })
-        .collect();
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
-}
 
 /// Read-only per-frame display data for the stats panel.
 pub struct OverlayFrameData {
@@ -228,13 +126,11 @@ pub struct Overlay {
     /// render pipeline, so it is a consumer of the output format like the blit is —
     /// see [`Overlay::set_surface_format`].
     surface_format: wgpu::TextureFormat,
-    frame_time_samples: VecDeque<f32>,
-    /// Completed GPU-frame timings only — never frame-loop timing. A rolling
-    /// average makes the asynchronous timestamp readback useful at a glance.
-    gpu_frame_time_samples: VecDeque<f32>,
-    /// `collect` returns its most recent result on frames where no new map has
-    /// landed. Keep it from entering the smoothing window more than once.
-    last_gpu_frame_sample_sequence: Option<u64>,
+    /// Press P. Owns every perf statistic and all of its history — the overlay
+    /// itself keeps no timing state, so there is one definition of "how fast".
+    performance: PerformancePanel,
+    /// Press O. Holds everything that used to be permanently on screen.
+    settings: SettingsPanel,
 }
 
 impl Overlay {
@@ -263,9 +159,8 @@ impl Overlay {
             winit_state,
             renderer,
             surface_format,
-            frame_time_samples: VecDeque::with_capacity(FRAME_TIME_SAMPLE_COUNT),
-            gpu_frame_time_samples: VecDeque::with_capacity(GPU_FRAME_TIME_SAMPLE_COUNT),
-            last_gpu_frame_sample_sequence: None,
+            performance: PerformancePanel::new(),
+            settings: SettingsPanel::new(),
         }
     }
 
@@ -291,30 +186,42 @@ impl Overlay {
         self.context.egui_wants_pointer_input()
     }
 
-    pub fn record_frame_time(&mut self, frame_time_seconds: f32) {
-        push_rolling_sample(
-            &mut self.frame_time_samples,
-            FRAME_TIME_SAMPLE_COUNT,
-            frame_time_seconds,
-        );
+    /// Fold one frame's measurements into the performance panel. Call once per
+    /// frame, at the END of the frame, so the spans drained here are the ones
+    /// this frame actually recorded — including present.
+    pub fn record_frame(
+        &mut self,
+        span_recorder: &atrium_profile::cpu::SpanRecorder,
+        gpu_timings: Option<FrameTimings>,
+    ) {
+        self.performance.record_frame(span_recorder, gpu_timings);
     }
 
-    fn record_gpu_frame_time(&mut self, timings: Option<FrameTimings>) {
-        let Some(timings) = timings else {
-            return;
-        };
-        let Some(gpu_frame_time_milliseconds) = timings.frame_milliseconds() else {
-            return;
-        };
-        if self.last_gpu_frame_sample_sequence == Some(timings.sample_sequence) {
-            return;
-        }
-        self.last_gpu_frame_sample_sequence = Some(timings.sample_sequence);
-        push_rolling_sample(
-            &mut self.gpu_frame_time_samples,
-            GPU_FRAME_TIME_SAMPLE_COUNT,
-            gpu_frame_time_milliseconds,
-        );
+    /// The performance panel's byte gauges, for the platform layer to report the
+    /// sizes it owns once per frame.
+    pub fn performance_memory(&self) -> &atrium_profile::memory::MemoryLedger {
+        self.performance.memory()
+    }
+
+    /// P — show or hide the performance window.
+    pub fn toggle_performance_panel(&mut self) {
+        self.performance.toggle();
+    }
+
+    /// O — show or hide the settings and debug window.
+    pub fn toggle_settings_panel(&mut self) {
+        self.settings.toggle();
+    }
+
+    /// Drop perf history after a deliberate discontinuity (vsync toggle, output
+    /// format change) so the transient is not read as a regression.
+    pub fn reset_performance_history(&mut self) {
+        self.performance.reset();
+    }
+
+    /// Median-interval frame rate, for callers that want the single number.
+    pub fn frames_per_second(&mut self) -> Option<f32> {
+        self.performance.frames_per_second()
     }
 
     /// Rebuild egui for a new surface format.
@@ -336,8 +243,8 @@ impl Overlay {
     ///
     /// The cost is UI state — collapsed sections, scroll offsets, window positions all
     /// reset. Accepted because this fires only on an output-depth change, which is
-    /// already reconfiguring the surface and rebuilding three pipelines. The frame-time
-    /// history is carried across deliberately, so the FPS graph does not blank.
+    /// already reconfiguring the surface and rebuilding three pipelines. The performance
+    /// history is carried across deliberately, so the graph does not blank.
     pub fn set_surface_format(
         &mut self,
         window: &Window,
@@ -347,13 +254,15 @@ impl Overlay {
         if surface_format == self.surface_format {
             return;
         }
-        let frame_time_samples = std::mem::take(&mut self.frame_time_samples);
-        let gpu_frame_time_samples = std::mem::take(&mut self.gpu_frame_time_samples);
-        let last_gpu_frame_sample_sequence = self.last_gpu_frame_sample_sequence;
+        // Carry the whole performance panel across the rebuild — history,
+        // visibility and all. Rebuilding it would blank several seconds of
+        // history exactly when an output-depth change is the thing being
+        // measured, and would close the window the user had open.
+        let performance = std::mem::take(&mut self.performance);
+        let settings = std::mem::take(&mut self.settings);
         *self = Overlay::new(window, device, surface_format);
-        self.frame_time_samples = frame_time_samples;
-        self.gpu_frame_time_samples = gpu_frame_time_samples;
-        self.last_gpu_frame_sample_sequence = last_gpu_frame_sample_sequence;
+        self.performance = performance;
+        self.settings = settings;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -384,22 +293,10 @@ impl Overlay {
         studio_assets: &mut StudioAssetPanelState,
         graph_editor: &mut GraphEditorState,
     ) {
-        self.record_gpu_frame_time(frame_data.gpu_timings);
-        let average_frame_time_seconds = rolling_average(&self.frame_time_samples).unwrap_or(0.0);
-        let frame_time_milliseconds = average_frame_time_seconds * 1000.0;
-        // This measures how quickly the application enters its frame function,
-        // which often tracks the display while FIFO is active. It is *not*
-        // OS-confirmed scanout timing: presentation is asynchronous. GPU FPS
-        // below is the separate answer to "how fast can the renderer do this
-        // frame's work?".
-        let frame_loop_frames_per_second = if average_frame_time_seconds > 0.0 {
-            1.0 / average_frame_time_seconds
-        } else {
-            0.0
-        };
-        let gpu_frames_per_second = rolling_average(&self.gpu_frame_time_samples)
-            .filter(|milliseconds| *milliseconds > 0.0)
-            .map(|milliseconds| 1_000.0 / milliseconds);
+        // The one number that stays permanently on screen. Everything else moved
+        // into the P window: per-span cost is something you go looking for, and
+        // the always-on panel was already too large.
+        let frames_per_second = self.performance.frames_per_second();
 
         // Surface the Retina trap: on macOS the swapchain is PHYSICAL pixels,
         // which can be 4x the logical window area at scale factor 2.0.
@@ -408,204 +305,69 @@ impl Overlay {
         let logical_size = physical_size.to_logical::<f64>(scale_factor);
 
         let raw_input = self.winit_state.take_egui_input(window);
-        let full_output = self.context.run_ui(raw_input, |root_ui| {
+        // `egui::Context` is an `Arc` handle, so cloning it is cheap — and it is
+        // what lets the closure below borrow `self.performance` mutably while the
+        // context drives the UI pass.
+        let context = self.context.clone();
+        let performance = &mut self.performance;
+        let settings = &mut self.settings;
+        let full_output = context.run_ui(raw_input, |root_ui| {
+            performance.draw(root_ui.ctx());
             draw_graph_drawer(root_ui, graph_editor, material_table);
             draw_target_highlight(root_ui, frame_data.target.as_ref(), material_table);
             let drawer_height = graph_drawer_height(root_ui, graph_editor);
-            draw_block_hotbar(
-                root_ui,
-                material_table,
-                material_panel,
-                drawer_height,
-            );
-            egui::Area::new(egui::Id::new("fps_overlay"))
+            draw_block_hotbar(root_ui, material_table, material_panel, drawer_height);
+            // The ONLY permanently visible readout: one line. Everything that used
+            // to live here — resolutions, edit counters, movement, vsync, output
+            // depth, quality levers, the sun section — moved into the O window,
+            // because a debug UI that covers the render is measuring the wrong
+            // thing.
+            egui::Area::new(egui::Id::new("hud"))
                 .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
                 .show(root_ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.label(format!(
-                            "window {:.0} x {:.0} @ {scale_factor:.2}x",
-                            logical_size.width, logical_size.height
-                        ));
-                        ui.label(format!(
-                            "physical {} x {}",
-                            physical_size.width, physical_size.height
-                        ));
-                        ui.label(format!(
-                            "render {} x {}",
-                            frame_data.render_resolution.0, frame_data.render_resolution.1
-                        ));
-                        ui.label(format!(
-                            "frame loop {frame_time_milliseconds:.2} ms  |  {frame_loop_frames_per_second:.0} FPS"
-                        ));
-                        match gpu_frames_per_second {
-                            Some(frames_per_second) => {
-                                ui.label(format!(
-                                    "GPU work (60-sample avg)  |  {frames_per_second:.0} FPS"
-                                ))
-                                    .on_hover_text(
-                                        "The measured DDA + CAGI + blit/UI GPU work, excluding \
-                                         swapchain acquisition and presentation. This shows renderer \
-                                         throughput even when macOS paces a window to its display.",
-                                    );
-                            }
-                            None => {
-                                ui.label(if frame_data.gpu_timings.is_some() {
-                                    "GPU work  |  waiting for timestamp data"
-                                } else {
-                                    "GPU work  |  timestamp queries unavailable"
-                                });
-                            }
-                        }
-                        draw_fps_history(
-                            ui,
-                            &self.frame_time_samples,
-                            &self.gpu_frame_time_samples,
-                        );
-                        match &frame_data.gpu_timings {
-                            Some(timings) => {
-                                ui.label(format!(
-                                    "DDA pass: {}",
-                                    format_pass_milliseconds(timings.dda_milliseconds())
-                                ));
-                                ui.label(format!(
-                                    "CAGI: {}",
-                                    format_pass_milliseconds(timings.cagi_milliseconds())
-                                ));
-                                ui.label(format!(
-                                    "blit+ui: {}",
-                                    format_pass_milliseconds(timings.post_milliseconds())
-                                ));
-                            }
-                            None => {
-                                ui.label("GPU pass timers unavailable");
-                            }
-                        }
-                        let world_edit = &frame_data.world_edit;
-                        ui.label(format!(
-                            "edits {} ({} voxels, {} ignored) | apply {:.0} us | delta {} B",
-                            world_edit.stats.edits_applied,
-                            world_edit.stats.voxels_written,
-                            world_edit.stats.edits_ignored,
-                            world_edit.stats.last_apply_micros,
-                            world_edit.stats.last_upload_bytes,
+                            "{}  ·  {} x {}  ·  P perf  ·  O settings",
+                            match frames_per_second {
+                                Some(value) => format!("{value:.0} FPS"),
+                                None => "-- FPS".to_string(),
+                            },
+                            frame_data.render_resolution.0,
+                            frame_data.render_resolution.1,
                         ))
                         .on_hover_text(
-                            "E2: voxel edits applied by the world authority — one per click, and \
-                             one delta per one-metre world edit. \
-                             `apply` is the CPU cost of patching the brickmap and every derived \
-                             structure; `delta` is what the last edit uploaded to the GPU. On the \
-                             world thread neither is paid inside a frame.",
+                            "Frame rate from the MEDIAN frame interval, not a mean: \
+                             a mean is dominated by the fastest frames and once read \
+                             '1200 FPS' while the display was visibly hitching.\n\n\
+                             P opens spans, pacing, waves and memory. O opens settings \
+                             and the rest of the diagnostics.",
                         );
-                        ui.label(format!(
-                            "world thread: {} | {} in flight | {:.1} KB uploaded",
-                            if world_edit.threaded { "on" } else { "off" },
-                            world_edit.in_flight,
-                            world_edit.stats.total_upload_bytes as f32 / 1024.0,
-                        ));
-                        draw_movement_readout(ui, &frame_data.movement);
-                        ui.checkbox(vsync_enabled, "VSync");
-                        ui.label(if *vsync_enabled {
-                            "VSync on: Frame loop normally tracks the display."
-                        } else {
-                            "VSync off: Compare GPU FPS; the frame loop can run ahead of the GPU."
-                        });
-                        draw_output_depth(
-                            ui,
-                            output_depth,
-                            output_support,
-                            output_color_space,
-                            output_headroom,
-                            headroom_backend,
-                            headroom_choice,
-                            tonemap_curve,
-                            content_peak,
-                            exposure,
-                        );
-                        draw_studio_assets_section(ui, studio_assets);
-                        draw_quality_section(ui, quality);
-                        ui.label("Material authoring is defined by nodes in Graph Studio.");
-                        ui.collapsing("Sun", |ui| {
-                            ui.checkbox(&mut sun_settings.day_night_enabled, "day/night sky");
-                            if sun_settings.day_night_enabled {
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut sun_settings.cycle_running, "run clock");
-                                    ui.label(sun_settings.clock_label());
-                                });
-                                ui.add(
-                                    egui::Slider::new(&mut sun_settings.day_phase, 0.0..=1.0)
-                                        .text("time of day"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut sun_settings.day_length_seconds,
-                                        30.0..=1_200.0,
-                                    )
-                                    .logarithmic(true)
-                                    .text("seconds per day"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(&mut sun_settings.moon_phase, 0.0..=1.0)
-                                        .text("moon phase"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut sun_settings.azimuth_degrees,
-                                        0.0..=360.0,
-                                    )
-                                    .text("noon azimuth"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut sun_settings.elevation_degrees,
-                                        2.0..=90.0,
-                                    )
-                                    .text("noon elevation"),
-                                );
-                            } else {
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut sun_settings.azimuth_degrees,
-                                        0.0..=360.0,
-                                    )
-                                    .text("azimuth"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(
-                                        &mut sun_settings.elevation_degrees,
-                                        2.0..=90.0,
-                                    )
-                                    .text("elevation"),
-                                );
-                            }
-                            ui.add(
-                                egui::Slider::new(&mut sun_settings.intensity_scale, 0.0..=2.0)
-                                    .text("sun intensity")
-                                    .max_decimals(2),
-                            )
-                            .on_hover_text(
-                                "Scales the sun, 1.0 being the shipped look. ZERO IS \
-                                 NIGHT: the sun contributes nothing and only ambient, GI \
-                                 and emitters are left.\n\n\
-                                 Added because an emitter cannot be judged against a \
-                                 light you cannot turn down — a glowing material and the \
-                                 light it casts were both washed out by a hardcoded 2.2 \
-                                 of daylight. Turn this and the ambient below to zero to \
-                                 see what a material actually emits.",
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut sun_settings.ambient_scale, 0.0..=2.0)
-                                    .text("ambient")
-                                    .max_decimals(2),
-                            )
-                            .on_hover_text(
-                                "Scales the hemisphere ambient floor. Needed alongside \
-                                 the sun: at sun zero the ambient alone still reads every \
-                                 surface, so an emitter's own contribution stays \
-                                 invisible until this comes down too.",
-                            );
-                        });
                     });
                 });
+            settings.draw(
+                root_ui.ctx(),
+                SettingsContext {
+                    logical_size: (logical_size.width, logical_size.height),
+                    physical_size: (physical_size.width, physical_size.height),
+                    render_resolution: frame_data.render_resolution,
+                    scale_factor,
+                    world_edit: &frame_data.world_edit,
+                    movement: &frame_data.movement,
+                    vsync_enabled,
+                    output_depth,
+                    output_support,
+                    output_color_space,
+                    output_headroom,
+                    headroom_backend,
+                    headroom_choice,
+                    tonemap_curve,
+                    content_peak,
+                    exposure,
+                    sun_settings,
+                    quality,
+                    studio_assets,
+                },
+            );
         });
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
@@ -795,7 +557,7 @@ fn graph_drawer_height(ui: &egui::Ui, state: &GraphEditorState) -> f32 {
 /// E2b — the movement readout: which model is driving the view, the key that
 /// switches it, and (in walk mode) the body's state plus what its collision step
 /// costs the frame thread.
-fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
+pub(crate) fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
     // S0 — the studio has its own single line and none of the body state below it.
     if let Some(distance_meters) = movement.studio_orbit_distance_meters {
         ui.label(format!(
@@ -861,7 +623,7 @@ fn draw_movement_readout(ui: &mut egui::Ui, movement: &MovementReadout) {
 
 /// Persistent Studio controls. This only raises a request; the platform layer
 /// owns filesystem I/O, loading, and all renderer consequences.
-fn draw_studio_assets_section(ui: &mut egui::Ui, state: &mut StudioAssetPanelState) {
+pub(crate) fn draw_studio_assets_section(ui: &mut egui::Ui, state: &mut StudioAssetPanelState) {
     ui.collapsing("Project", |ui| {
         ui.horizontal(|ui| {
             ui.label("folder");
@@ -4739,7 +4501,7 @@ fn draw_property(
 // selections the caller owns and three are diagnostics that must not be mutable, so a
 // struct would either lose that distinction or need two structs to keep it.
 #[allow(clippy::too_many_arguments)]
-fn draw_output_depth(
+pub(crate) fn draw_output_depth(
     ui: &mut egui::Ui,
     depth: &mut OutputDepth,
     support: OutputSupport,
@@ -4853,7 +4615,7 @@ fn draw_output_depth(
 /// grouped by subsystem. Selecting a preset overwrites the knobs; touching any
 /// knob switches the tag to [`QualityPreset::Custom`] — detected by comparing
 /// the knobs before and after the UI ran, so no widget can forget to do it.
-fn draw_quality_section(ui: &mut egui::Ui, quality: &mut RenderQuality) {
+pub(crate) fn draw_quality_section(ui: &mut egui::Ui, quality: &mut RenderQuality) {
     let knobs_before = *quality;
     let mut preset_selected = false;
 
@@ -5041,28 +4803,9 @@ fn draw_rung_row(
     });
 }
 
-fn format_pass_milliseconds(milliseconds: Option<f32>) -> String {
-    match milliseconds {
-        Some(value) => format!("{value:.2} ms"),
-        None => "-- ms".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rolling_samples_keep_the_newest_values() {
-        let mut samples = VecDeque::new();
-        for sample in [1.0, 2.0, 3.0] {
-            push_rolling_sample(&mut samples, 2, sample);
-        }
-
-        assert_eq!(samples, VecDeque::from([2.0, 3.0]));
-        assert_eq!(rolling_average(&samples), Some(2.5));
-        assert_eq!(rolling_average(&VecDeque::new()), None);
-    }
 
     /// Sockets only ever interconnect when their types are identical, so any
     /// two types sharing a colour make the wire colour a lie about what will

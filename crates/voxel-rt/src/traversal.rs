@@ -10,7 +10,7 @@
 //! without a fresh measurement; the registry in [`crate::variants`] records
 //! that decision per lever.
 
-use crate::ao::patch_shader_const;
+use crate::shader_consts::{ShaderConstSink, SourcePatcher};
 
 /// The seven traversal fast paths. Defaults = the fastest combination measured on
 /// Apple M3 Max; the measured verdict of each is one line in
@@ -58,58 +58,33 @@ impl Default for TraversalSettings {
 }
 
 impl TraversalSettings {
+    /// Declare this group's compile-time consts into `sink`.
+    ///
+    /// The single list. [`Self::patch_shader_source`] renders it as shader text and
+    /// [`crate::shader_consts::ShaderDefs`] renders it as preprocessor definitions, so the two
+    /// cannot disagree.
+    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+        sink.boolean("ENABLE_COLUMN_FAST_FORWARD", self.column_fast_forward);
+        sink.boolean("ENABLE_DESCEND_FAST_FORWARD", self.descend_fast_forward);
+        sink.boolean("ENABLE_GLOBAL_MAX_TERMINATE", self.global_max_terminate);
+        sink.boolean("ENABLE_ANY_HIT_SHADOW", self.any_hit_shadow);
+        sink.boolean("ENABLE_BRICK_BIT_GRID", self.brick_bit_grid);
+        sink.boolean("ENABLE_DISTANCE_SKIP", self.distance_skip);
+        sink.boolean("ENABLE_DIRECTIONAL_SKIP", self.directional_skip);
+    }
+
     /// `shader_source` with this configuration's compile-time consts patched
     /// in. Identity for the default settings.
     pub fn patch_shader_source(&self, shader_source: &str) -> String {
-        let mut patched = patch_shader_const(
-            shader_source,
-            "ENABLE_COLUMN_FAST_FORWARD",
-            boolean_literal(self.column_fast_forward),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "ENABLE_DESCEND_FAST_FORWARD",
-            boolean_literal(self.descend_fast_forward),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "ENABLE_GLOBAL_MAX_TERMINATE",
-            boolean_literal(self.global_max_terminate),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "ENABLE_ANY_HIT_SHADOW",
-            boolean_literal(self.any_hit_shadow),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "ENABLE_BRICK_BIT_GRID",
-            boolean_literal(self.brick_bit_grid),
-        );
-        patched = patch_shader_const(
-            &patched,
-            "ENABLE_DISTANCE_SKIP",
-            boolean_literal(self.distance_skip),
-        );
-        patch_shader_const(
-            &patched,
-            "ENABLE_DIRECTIONAL_SKIP",
-            boolean_literal(self.directional_skip),
-        )
+        let mut patcher = SourcePatcher::new(shader_source);
+        self.declare_consts(&mut patcher);
+        patcher.finish()
     }
 
     /// Every traversal lever is a compile-time const, so ANY difference needs a
     /// new pipeline.
     pub fn requires_pipeline_rebuild(&self, applied: &TraversalSettings) -> bool {
         self != applied
-    }
-}
-
-fn boolean_literal(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
     }
 }
 

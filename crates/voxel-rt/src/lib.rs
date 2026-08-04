@@ -13,7 +13,7 @@
 //! S2) ↔ ambient occlusion (`ao`, E1) ↔ sun shadows (`shadows`, E1b) ↔ CAGI light
 //! volume (`cagi`, E4) ↔ water optics (`water`, E6) ↔ lever registry + quality
 //! presets (`variants`, E1c) ↔ overlay (`overlay`) ↔ GPU timing
-//! (`frame_timing`).
+//! (`profiling` + the `atrium-profile` crate).
 //!
 //! `variants` is the single source of truth for what levers exist: the overlay,
 //! the benchmark and the pinning tests all read its registry, so a lever cannot
@@ -27,7 +27,6 @@ pub mod camera;
 pub mod character;
 pub mod engine_runtime;
 pub mod environment;
-pub mod frame_timing;
 pub mod gpu;
 pub mod graph;
 pub mod light_fixture;
@@ -38,7 +37,11 @@ pub mod material_table;
 pub mod material_tune;
 pub mod overlay;
 pub mod passes;
+pub mod performance_panel;
+pub mod profiling;
 pub mod render;
+pub mod settings_panel;
+pub mod shader_consts;
 pub mod shadows;
 pub mod studio;
 pub mod studio_assets;

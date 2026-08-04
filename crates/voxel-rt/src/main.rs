@@ -18,6 +18,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use atrium_profile::cpu::SpanRecorder;
 use voxel_color::OutputDepth;
 use voxel_color::{HeadroomChoice, TonemapCurve};
 use voxel_environment::SunSettings;
@@ -35,7 +36,6 @@ use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
 use voxel_rt::engine_runtime::{RuntimeMode, VoxelEngineConfig, VoxelEngineRuntime};
 use voxel_rt::environment::{RuntimeEnvironmentState, Season};
-use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::light_fixture;
 use voxel_rt::lighting::OutputParams;
@@ -47,6 +47,7 @@ use voxel_rt::overlay::{
 };
 use voxel_rt::passes::cagi::AttributeSource;
 use voxel_rt::passes::{cagi, dda};
+use voxel_rt::profiling::{self, FrameTimers, GPU_OVERLAY};
 use voxel_rt::render::Renderer;
 use voxel_rt::studio;
 use voxel_rt::studio_assets::{
@@ -264,7 +265,7 @@ struct AppState {
     overlay: Overlay,
     /// GPU pass timers; `None` when the adapter lacks TIMESTAMP_QUERY (the
     /// overlay then reports the readout as unavailable).
-    frame_timers: Option<GpuFrameTimers>,
+    frame_timers: Option<FrameTimers>,
     fly_camera: FlyCamera,
     /// E2b — the walking body. Rebuilt from the fly camera's eye every time walk
     /// mode is entered, so it never holds a stale pose.
@@ -308,12 +309,12 @@ struct AppState {
     /// Scene exposure, applied before the tonemap. 1.0 reproduces the pre-exposure look.
     exposure: f32,
     previous_frame_time: Instant,
-    /// Terminal FPS diagnostic: frames counted since the last 2-second log
-    /// line (fps + present mode + host monitor and its refresh rate). The
-    /// on-screen FPS can only be judged against the monitor actually pacing
-    /// the window — this makes that pairing visible.
-    fps_log_timer: Instant,
-    fps_log_frame_count: u32,
+    /// CPU span accumulators for this frame, drained once per frame into the
+    /// performance panel. See [`profiling::CPU_SPANS`] for what each index means.
+    ///
+    /// Replaced a 2-second stdout fps line, which averaged away every wave it
+    /// might have shown and could not say which phase was slow.
+    span_recorder: SpanRecorder,
     /// S0 — the LIVE material rows. Edited by the panel, uploaded once per frame in
     /// which anything changed; starts as the compiled table, which is what
     /// `WorldBindings::new` already sent.
@@ -547,7 +548,11 @@ impl AppState {
             prewarm_start.elapsed()
         );
         let overlay = Overlay::new(&window, &gpu_context.device, gpu_context.surface_format());
-        let frame_timers = GpuFrameTimers::new(&gpu_context.device, &gpu_context.queue);
+        let frame_timers = FrameTimers::new(
+            &gpu_context.device,
+            &gpu_context.queue,
+            profiling::GPU_SPANS,
+        );
         if frame_timers.is_none() {
             println!("GPU timestamp queries unsupported — per-pass timings disabled");
         }
@@ -612,8 +617,7 @@ impl AppState {
             content_peak: voxel_color::tonemap::DEFAULT_CONTENT_PEAK,
             exposure: 1.0,
             previous_frame_time: Instant::now(),
-            fps_log_timer: Instant::now(),
-            fps_log_frame_count: 0,
+            span_recorder: SpanRecorder::new(profiling::CPU_SPANS),
             // Selecting the sample's own row means the panel opens on the thing the
             // camera is pointed at, which is the only row worth defaulting to.
             material_panel: MaterialPanelState {
@@ -1040,6 +1044,23 @@ impl AppState {
             KeyCode::KeyF => {
                 if pressed {
                     self.toggle_control_mode();
+                }
+            }
+            // O for options: everything that used to be permanently on screen —
+            // resolutions, edit counters, movement, vsync, output depth, quality
+            // levers, sun. A debug UI that covers the render hides the thing it
+            // is there to help you judge.
+            KeyCode::KeyO => {
+                if pressed {
+                    self.overlay.toggle_settings_panel();
+                }
+            }
+            // P for performance: spans, pacing and wave detection. A WINDOW, not
+            // another always-on corner — the overlay already costs too much
+            // permanent screen area for a number you consult occasionally.
+            KeyCode::KeyP => {
+                if pressed {
+                    self.overlay.toggle_performance_panel();
                 }
             }
             // M1b: L places a glow block against the aimed face — the same edit
@@ -1869,34 +1890,6 @@ impl AppState {
         let now = Instant::now();
         let frame_time_seconds = (now - self.previous_frame_time).as_secs_f32();
         self.previous_frame_time = now;
-        self.overlay.record_frame_time(frame_time_seconds);
-
-        // Counted at present time (bottom of this function), so frames that
-        // bail early on an outdated surface never inflate the number — the
-        // reconfigure transient after a vsync toggle read 248k "fps" when
-        // skipped frames were counted here.
-        let seconds_since_fps_log = (now - self.fps_log_timer).as_secs_f32();
-        if seconds_since_fps_log >= 2.0 {
-            let monitor_description = self
-                .window
-                .current_monitor()
-                .map(|monitor| {
-                    format!(
-                        "{} @ {:.0} Hz",
-                        monitor.name().unwrap_or_else(|| "unknown".to_string()),
-                        monitor.refresh_rate_millihertz().unwrap_or(0) as f32 / 1000.0
-                    )
-                })
-                .unwrap_or_else(|| "unknown monitor".to_string());
-            println!(
-                "{:.1} fps | {:?} | {}",
-                self.fps_log_frame_count as f32 / seconds_since_fps_log,
-                self.gpu_context.surface_config.present_mode,
-                monitor_description
-            );
-            self.fps_log_timer = now;
-            self.fps_log_frame_count = 0;
-        }
 
         // A monitor change (dragging between a 1x and a 2x display) updates
         // the window's physical size BEFORE the Resized event reaches us, and
@@ -1913,6 +1906,10 @@ impl AppState {
             self.resize(window_size);
         }
 
+        // Phase timing is marked explicitly rather than with `scope` guards: a
+        // guard borrows `span_recorder` for its whole scope, and every phase
+        // below needs `&mut self`.
+        let input_started = Instant::now();
         let camera_input = self.input_state.drain_camera_input();
         match self.control_mode {
             ControlMode::Fly => self.fly_camera.update(&camera_input, frame_time_seconds),
@@ -1926,6 +1923,8 @@ impl AppState {
                     self.character
                         .step(&brickmap, &camera_input, frame_time_seconds);
                 }
+                // Still its own stopwatch as well as part of CPU_INPUT: the
+                // movement readout reports this one number on its own line.
                 self.character_step_micros = started.elapsed().as_secs_f32() * 1e6;
             }
             // Look only. The orbit derives its position from yaw/pitch in
@@ -1942,8 +1941,16 @@ impl AppState {
         }
         // E2: edits are requested BEFORE the frame is encoded and their deltas are
         // uploaded right after, so a click shows up in the very next frame.
+        self.span_recorder
+            .record(profiling::CPU_INPUT, input_started.elapsed());
+
+        let edits_started = Instant::now();
         self.apply_held_edits(now);
         self.upload_world_updates();
+        self.span_recorder
+            .record(profiling::CPU_EDITS, edits_started.elapsed());
+
+        let uniforms_started = Instant::now();
         // The graph editor is a reserved bottom panel, not a transparent overlay.
         // Keep the ray-traced storage texture and camera aspect ratio aligned with
         // the remaining upper viewport so the Studio subject stays centered there.
@@ -2007,6 +2014,13 @@ impl AppState {
             self.flooded_sun_settings = self.sun_settings;
         }
 
+        self.span_recorder
+            .record(profiling::CPU_UNIFORMS, uniforms_started.elapsed());
+
+        // THE BACKPRESSURE MEASUREMENT: under FIFO the CPU blocks here when the
+        // presentation queue is full, so a wave that lives in this span is vsync
+        // pacing rather than renderer cost.
+        let acquire_started = Instant::now();
         let surface_frame = match self.gpu_context.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(surface_frame) => surface_frame,
@@ -2017,6 +2031,8 @@ impl AppState {
             // Timeout / occluded / validation: skip this frame.
             _ => return,
         };
+        self.span_recorder
+            .record(profiling::CPU_ACQUIRE, acquire_started.elapsed());
         let target_view = surface_frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2045,6 +2061,7 @@ impl AppState {
             .as_mut()
             .map(|frame_timers| frame_timers.collect(&self.gpu_context.device));
 
+        let encode_started = Instant::now();
         let gi_iterations = if self.gi_settle_frames > 0 {
             self.quality.gi_iterations_per_frame().max(8)
         } else {
@@ -2076,6 +2093,10 @@ impl AppState {
             let brickmap = self.world_host.read();
             water::eye_is_submerged(&brickmap, self.active_pose().position)
         };
+        self.span_recorder
+            .record(profiling::CPU_ENCODE, encode_started.elapsed());
+
+        let overlay_started = Instant::now();
         let frame_data = OverlayFrameData {
             render_resolution: self.renderer.resolution(),
             gpu_timings,
@@ -2110,7 +2131,7 @@ impl AppState {
             &frame_data,
             self.frame_timers
                 .as_ref()
-                .map(|frame_timers| frame_timers.render_span_end_writes(SPAN_POST)),
+                .map(|frame_timers| frame_timers.render_span_writes(GPU_OVERLAY)),
             &mut self.vsync_enabled,
             &mut self.output_depth,
             self.gpu_context.output_support(),
@@ -2128,20 +2149,56 @@ impl AppState {
             &mut self.studio_assets,
             &mut self.graph_editor,
         );
+        self.span_recorder
+            .record(profiling::CPU_OVERLAY, overlay_started.elapsed());
+
         let readback_slot = self
             .frame_timers
             .as_ref()
             .and_then(|frame_timers| frame_timers.encode_resolve(&mut encoder));
 
+        let submit_started = Instant::now();
         self.gpu_context
             .queue
             .submit([light_volume_encoder.finish(), encoder.finish()]);
+        self.span_recorder
+            .record(profiling::CPU_SUBMIT, submit_started.elapsed());
         if let (Some(frame_timers), Some(slot_index)) = (&self.frame_timers, readback_slot) {
             frame_timers.after_submit(slot_index);
         }
+        // The other half of the backpressure question: a driver may block in
+        // present rather than in acquire, and which one it picks is a platform
+        // detail to observe rather than assume.
+        let present_started = Instant::now();
         self.window.pre_present_notify();
         surface_frame.present();
-        self.fps_log_frame_count += 1;
+        self.span_recorder
+            .record(profiling::CPU_PRESENT, present_started.elapsed());
+        // Report what we hold, before the frame boundary latches the drift
+        // baseline. The CPU brickmap size is read under the world lock, which is
+        // already taken and released elsewhere in this frame, so this is a second
+        // brief read rather than a held borrow.
+        {
+            let memory = self.overlay.performance_memory();
+            memory.set(
+                profiling::MEMORY_WORLD_CPU,
+                self.world_host.read().cpu_bytes() as u64,
+            );
+            memory.set(profiling::MEMORY_WORLD_GPU, self.renderer.world_gpu_bytes());
+            memory.set(
+                profiling::MEMORY_LIGHT_VOLUME,
+                self.renderer.light_volume_gpu_bytes(),
+            );
+            memory.set(
+                profiling::MEMORY_STORAGE_TEXTURE,
+                self.renderer.storage_texture_bytes(),
+            );
+        }
+
+        // Drain every span and fold this frame in. LAST in the frame on purpose:
+        // the spans collected here are then all from this frame, present
+        // included, rather than one frame stale.
+        self.overlay.record_frame(&self.span_recorder, gpu_timings);
 
         if std::mem::take(&mut self.studio_assets.save_requested) {
             self.save_studio_project(false);
@@ -2208,6 +2265,11 @@ impl AppState {
         }
         if self.vsync_enabled != previous_vsync_enabled {
             self.gpu_context.set_vsync(self.vsync_enabled);
+            // A present-mode change is a deliberate discontinuity in frame
+            // pacing. Keeping the old history would leave the reconfigure
+            // transient sitting in the percentiles, reading as a regression that
+            // is really just the toggle.
+            self.overlay.reset_performance_history();
         }
         if self.quality.render_scale != self.renderer.render_scale() {
             self.renderer

@@ -5,6 +5,7 @@ members = [
     "crates/tui",
     "crates/bevy-ui",
     "crates/behavior",
+    "crates/profile",
     "crates/voxel-color",
     "crates/voxel-environment",
     "crates/voxel-core",

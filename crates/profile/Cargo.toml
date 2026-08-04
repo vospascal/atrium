@@ -1,0 +1,22 @@
+[package]
+name = "atrium-profile"
+version = "0.1.0"
+edition = "2021"
+description = "Performance instrumentation: CPU spans, frame pacing and GPU pass timing"
+
+# DELIBERATELY DEPENDENCY-FREE by default. The CPU half of this crate runs on the
+# audio callback thread, where an allocation or a lock is a dropout — so it is built
+# from `std::sync::atomic` and nothing else, and every type here is preallocated at
+# construction. Do not add a dependency to the default feature set; if a consumer
+# needs one, it belongs behind a feature like `gpu` below.
+[dependencies]
+wgpu = { version = "29", optional = true }
+
+[features]
+# GPU pass timing via wgpu timestamp queries. Off by default so the audio engine can
+# take the CPU spans without pulling a graphics stack into its dependency graph.
+default = []
+gpu = ["dep:wgpu"]
+
+[dev-dependencies]
+pollster = "0.4"

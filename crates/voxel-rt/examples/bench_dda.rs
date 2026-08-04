@@ -1808,8 +1808,14 @@ fn run_section(
 ) {
     println!();
     println!("== {} ==", section.heading);
-    let table = measure_section(device, queue, world_bindings, brickmap, &section);
+    let (table, footprints) = measure_section(device, queue, world_bindings, brickmap, &section);
     print_table(&section, &table);
+    print_memory_table(
+        &section,
+        &footprints,
+        world_bindings.gpu_bytes(),
+        brickmap.cpu_bytes() as u64,
+    );
 }
 
 // ---- Sections ----------------------------------------------------------------
@@ -3974,6 +3980,15 @@ struct RenderTarget {
     height: u32,
 }
 
+impl RenderTarget {
+    /// Allocated bytes, from the texture's own format rather than an assumed
+    /// bytes-per-pixel — the bench and the app can render at different depths.
+    fn bytes(&self) -> u64 {
+        let bytes_per_pixel = self.texture.format().block_copy_size(None).unwrap_or(0);
+        u64::from(self.width) * u64::from(self.height) * u64::from(bytes_per_pixel)
+    }
+}
+
 fn create_render_target(device: &wgpu::Device, width: u32, height: u32) -> RenderTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("bench output texture"),
@@ -4015,7 +4030,7 @@ fn measure_section(
     world_bindings: &WorldBindings,
     brickmap: &Brickmap,
     section: &Section,
-) -> TimingTable {
+) -> (TimingTable, Vec<VariantFootprint>) {
     // One render target per distinct resolution; every variant binds the target
     // its render scale asks for.
     let mut targets: Vec<RenderTarget> = Vec::new();
@@ -4161,7 +4176,37 @@ fn measure_section(
     if measures_light_volume {
         print_light_volume_table(section, &cagi_table);
     }
-    table
+
+    // Memory is read from the resources this section actually built, so the
+    // footprint reported is the one that produced the timings above it.
+    let footprints = section
+        .variants
+        .iter()
+        .zip(&target_of_variant)
+        .zip(&variant_resources)
+        .map(|((variant, target_index), resources)| VariantFootprint {
+            target_bytes: targets[*target_index].bytes(),
+            light_volume_bytes: resources.light_volume.gpu_bytes(),
+            _label: variant.label.clone(),
+        })
+        .collect();
+    (table, footprints)
+}
+
+/// GPU bytes one variant holds, alongside its timings.
+///
+/// A variant's cost is not only time: a render-scale lever trades pixels for
+/// memory, and a GI lever allocates a whole light volume. Reporting both in the
+/// same section is what makes a Quest verdict judgeable — the headset can be short
+/// of memory before it is short of milliseconds.
+struct VariantFootprint {
+    /// The storage/render target at this variant's resolution.
+    target_bytes: u64,
+    /// This variant's CAGI light volume: ping-pong buffers plus attributes.
+    light_volume_bytes: u64,
+    /// Kept for debugging a mismatched column order; the table takes its headings
+    /// from `section.variants` like every other table here.
+    _label: String,
 }
 
 /// Everything one variant needs on the GPU: the E4 light volume it samples, the
@@ -4503,6 +4548,57 @@ fn print_table(section: &Section, table: &[Vec<(f32, f32)>]) {
         }
         println!();
     }
+    println!();
+}
+
+/// Per-variant GPU memory, in the same column layout as [`print_table`].
+///
+/// Byte formatting comes from `atrium_profile::memory` — the SAME formatter the
+/// live P panel uses, so a number read on screen and a number read from a gate run
+/// are directly comparable rather than merely similar.
+///
+/// The world buffers are shared by every variant in a section, so they are printed
+/// once below the table instead of repeated across every column.
+fn print_memory_table(
+    section: &Section,
+    footprints: &[VariantFootprint],
+    world_gpu_bytes: u64,
+    world_cpu_bytes: u64,
+) {
+    use atrium_profile::memory::format_bytes;
+
+    println!("GPU memory per variant (shared world buffers listed once below):");
+    print!("{:<28}", "category");
+    for variant in &section.variants {
+        print!(" | {:>23}", variant.label);
+    }
+    println!();
+
+    /// A named reader over one footprint field — the table's row definition.
+    type MemoryRowReader = (&'static str, fn(&VariantFootprint) -> u64);
+
+    let rows: [MemoryRowReader; 3] = [
+        ("render target", |footprint| footprint.target_bytes),
+        ("light volume (CAGI)", |footprint| {
+            footprint.light_volume_bytes
+        }),
+        ("per-variant total", |footprint| {
+            footprint.target_bytes + footprint.light_volume_bytes
+        }),
+    ];
+    for (label, read) in rows {
+        print!("{label:<28}");
+        for footprint in footprints {
+            print!(" | {:>23}", format_bytes(read(footprint)));
+        }
+        println!();
+    }
+    println!(
+        "{:<28} | {} GPU, {} CPU",
+        "world (shared)",
+        format_bytes(world_gpu_bytes),
+        format_bytes(world_cpu_bytes),
+    );
     println!();
 }
 

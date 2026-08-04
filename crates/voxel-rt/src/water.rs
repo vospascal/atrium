@@ -36,8 +36,8 @@
 
 use glam::Vec3;
 
-use crate::ao::patch_shader_const;
 use crate::brickmap::Brickmap;
+use crate::shader_consts::{ShaderConstSink, ShaderConstValue, SourcePatcher};
 use voxel_core::world::VOXEL_SIZE;
 use voxel_material::material::{
     material_is_liquid, AIR_INDEX_OF_REFRACTION, WATER_ABSORPTION_PER_METER,
@@ -138,10 +138,6 @@ impl WaterMode {
     pub fn traces_refraction(self) -> bool {
         matches!(self, WaterMode::Refraction | WaterMode::Full)
     }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
-    }
 }
 
 /// What the region OUTSIDE Snell's window gets once the full-shading bounce budget
@@ -180,10 +176,6 @@ impl WaterTirFallback {
             1 => WaterTirFallback::CheapMirror,
             other => panic!("no WATER_TIR_FALLBACK {other} in water.wgsl"),
         }
-    }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
     }
 }
 
@@ -232,10 +224,6 @@ impl WaterUnderwaterInterface {
             1 => WaterUnderwaterInterface::Transparent,
             other => panic!("no WATER_UNDERWATER_INTERFACE {other} in water.wgsl"),
         }
-    }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
     }
 }
 
@@ -357,27 +345,31 @@ impl WaterSettings {
     /// the CA pass too — a liquid that stops the shading pass's sun ray but not the
     /// light volume's (or the reverse) would light the bed under water in one and
     /// not the other.
-    pub fn patch_shader_source(&self, shader_source: &str) -> String {
-        let mut patched = patch_shader_const(
-            shader_source,
-            "WATER_SUN_THROUGH_LIQUID",
-            boolean_literal(self.sun_through_liquid),
+    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+        // Lives in the shared `world.wgsl`, so it must move in BOTH passes.
+        sink.boolean("WATER_SUN_THROUGH_LIQUID", self.sun_through_liquid);
+        // The rest live in `water.wgsl`, which the CA pass does not include — hence
+        // `set_if_present` rather than `set`. Absence there is correct, and keeping it a
+        // distinct call is what lets a genuinely renamed const still panic.
+        sink.set_if_present(
+            "WATER_MODE",
+            ShaderConstValue::Unsigned(self.mode.shader_value()),
         );
-        if patched.contains("const WATER_MODE:") {
-            patched = patch_shader_const(&patched, "WATER_MODE", &self.mode.wgsl_literal());
-            patched = patch_shader_const(&patched, "WATER_BOUNCES", &format!("{}u", self.bounces));
-            patched = patch_shader_const(
-                &patched,
-                "WATER_TIR_FALLBACK",
-                &self.tir_fallback.wgsl_literal(),
-            );
-            patched = patch_shader_const(
-                &patched,
-                "WATER_UNDERWATER_INTERFACE",
-                &self.underwater_interface.wgsl_literal(),
-            );
-        }
-        patched
+        sink.set_if_present("WATER_BOUNCES", ShaderConstValue::Unsigned(self.bounces));
+        sink.set_if_present(
+            "WATER_TIR_FALLBACK",
+            ShaderConstValue::Unsigned(self.tir_fallback.shader_value()),
+        );
+        sink.set_if_present(
+            "WATER_UNDERWATER_INTERFACE",
+            ShaderConstValue::Unsigned(self.underwater_interface.shader_value()),
+        );
+    }
+
+    pub fn patch_shader_source(&self, shader_source: &str) -> String {
+        let mut patcher = SourcePatcher::new(shader_source);
+        self.declare_consts(&mut patcher);
+        patcher.finish()
     }
 
     /// Whether `bounces` and `tir_fallback` do anything at all. They describe what
@@ -396,14 +388,6 @@ impl WaterSettings {
             || self.tir_fallback != applied.tir_fallback
             || self.underwater_interface != applied.underwater_interface
             || self.sun_through_liquid != applied.sun_through_liquid
-    }
-}
-
-fn boolean_literal(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
     }
 }
 

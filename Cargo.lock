@@ -507,6 +507,14 @@ name = "atrium-core"
 version = "0.1.0"
 
 [[package]]
+name = "atrium-profile"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "wgpu 29.0.4",
+]
+
+[[package]]
 name = "atrium-tui"
 version = "0.1.0"
 dependencies = [
@@ -6851,6 +6859,7 @@ dependencies = [
 name = "voxel-rt"
 version = "0.1.0"
 dependencies = [
+ "atrium-profile",
  "bytemuck",
  "egui 0.35.0",
  "egui-wgpu",

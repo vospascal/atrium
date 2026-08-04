@@ -28,11 +28,12 @@
 //! patching, and `crate::passes::dda::build_shader_source` remains the single
 //! place a shader source is assembled.
 
-use crate::ao::{float_literal, patch_shader_const, AoDirectionMode, AoMode, AoSettings};
+use crate::ao::{AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
 use crate::lighting::{
     AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams, WaterParams,
 };
+use crate::shader_consts::{float_literal, ShaderConstSink, ShaderDefs, SourcePatcher};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
 use crate::water::{WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface};
@@ -3028,78 +3029,42 @@ impl MaterialSettings {
             || self.pattern_octave_lod != applied.pattern_octave_lod
     }
 
+    /// Declare this group's compile-time consts into `sink`.
+    ///
+    /// `MATERIAL_PATTERN_STRENGTH` is the renderer's only genuinely real-valued lever, so it is
+    /// the one carried as a scaled integer. Per-mille is finer than the slider's own pixel
+    /// resolution, and the value every preset and test uses (1.0) is exact. It stays a const
+    /// rather than a uniform for the reason [`Self::requires_pipeline_rebuild`] records: a
+    /// strength of zero lets naga fold the whole layer away.
+    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+        sink.boolean("MATERIAL_FACE_ROLES", self.face_roles);
+        sink.boolean("MATERIAL_PATTERNS", self.patterns);
+        sink.boolean("MATERIAL_PATTERN_CACHE", self.pattern_cache);
+        sink.boolean("MATERIAL_PATTERN_TEXEL_LOD", self.pattern_texel_lod);
+        sink.unsigned(
+            "MATERIAL_PATTERN_ENTRY_PROBE",
+            self.pattern_entry_probe.min(PATTERN_ENTRY_PROBE_TOP),
+        );
+        sink.boolean("MATERIAL_PATTERN_ANIMATION", self.pattern_animation);
+        sink.unsigned(
+            "MATERIAL_PATTERN_GENERATOR_MASK",
+            self.pattern_generator_mask & voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL,
+        );
+        sink.scaled_float("MATERIAL_PATTERN_STRENGTH", self.pattern_strength, 1000);
+        sink.unsigned(
+            "MATERIAL_PATTERN_MAX_LAYERS",
+            self.pattern_max_layers.min(MAX_PATTERN_LAYERS as u32),
+        );
+        sink.boolean("PATTERN_OCTAVE_LOD", self.pattern_octave_lod);
+    }
+
     /// Patch this group's consts into a shader source, the same way every other
     /// lever group does — so the bench harness can A/B it by source substitution
     /// and the shipped default is literally the unpatched file.
     pub fn patch_shader_source(&self, source: &str) -> String {
-        let roles = patch_shader_const(
-            source,
-            "MATERIAL_FACE_ROLES",
-            if self.face_roles { "true" } else { "false" },
-        );
-        let patterns = patch_shader_const(
-            &roles,
-            "MATERIAL_PATTERNS",
-            if self.patterns { "true" } else { "false" },
-        );
-        let cache = patch_shader_const(
-            &patterns,
-            "MATERIAL_PATTERN_CACHE",
-            if self.pattern_cache { "true" } else { "false" },
-        );
-        let texel_lod = patch_shader_const(
-            &cache,
-            "MATERIAL_PATTERN_TEXEL_LOD",
-            if self.pattern_texel_lod {
-                "true"
-            } else {
-                "false"
-            },
-        );
-        let entry_probe = patch_shader_const(
-            &texel_lod,
-            "MATERIAL_PATTERN_ENTRY_PROBE",
-            &format!("{}u", self.pattern_entry_probe.min(PATTERN_ENTRY_PROBE_TOP)),
-        );
-        let animation = patch_shader_const(
-            &entry_probe,
-            "MATERIAL_PATTERN_ANIMATION",
-            if self.pattern_animation {
-                "true"
-            } else {
-                "false"
-            },
-        );
-        let generator_mask = patch_shader_const(
-            &animation,
-            "MATERIAL_PATTERN_GENERATOR_MASK",
-            &format!(
-                "{}u",
-                self.pattern_generator_mask & voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL
-            ),
-        );
-        let strength = patch_shader_const(
-            &generator_mask,
-            "MATERIAL_PATTERN_STRENGTH",
-            &float_literal(self.pattern_strength),
-        );
-        let layers = patch_shader_const(
-            &strength,
-            "MATERIAL_PATTERN_MAX_LAYERS",
-            &format!(
-                "{}u",
-                self.pattern_max_layers.min(MAX_PATTERN_LAYERS as u32)
-            ),
-        );
-        patch_shader_const(
-            &layers,
-            "PATTERN_OCTAVE_LOD",
-            if self.pattern_octave_lod {
-                "true"
-            } else {
-                "false"
-            },
-        )
+        let mut patcher = SourcePatcher::new(source);
+        self.declare_consts(&mut patcher);
+        patcher.finish()
     }
 }
 
@@ -3150,6 +3115,56 @@ pub struct RenderQuality {
     pub materials: MaterialSettings,
     /// Storage-texture size / surface size (1.0 = native).
     pub render_scale: f32,
+}
+
+impl RenderQuality {
+    /// The compile-time consts the SHADING pass applies.
+    ///
+    /// Deliberately not the same list as [`Self::declare_volume_consts`], and the difference is
+    /// not tidiness — the two passes patch different subsets today, and one of those differences
+    /// is observable. `MATERIAL_FACE_ROLES` lives in the shared `world.wgsl`, and only the
+    /// shading pass patches it, so at Potato the CA pass compiles it as `true` while the shading
+    /// pass compiles it as `false`. Harmless today (the CA shader reads no material rows), but a
+    /// single global def set would have quietly changed the CA pass's compiled value. Mirroring
+    /// what each pass patches keeps behaviour identical by construction.
+    ///
+    /// Order matches [`crate::passes::dda::build_shader_source`].
+    pub fn declare_shading_consts(&self, sink: &mut dyn ShaderConstSink) {
+        self.traversal.declare_consts(sink);
+        self.ambient_occlusion.declare_consts(sink);
+        self.shadows.declare_consts(sink);
+        self.global_illumination.declare_volume_consts(sink);
+        self.water.declare_consts(sink);
+        self.materials.declare_consts(sink);
+    }
+
+    /// The compile-time consts the CA (light volume) pass applies.
+    ///
+    /// No AO and no material levers — it shades nothing. It does take the water levers, because
+    /// `LIQUIDS_CAST_NO_SHADOW` is in the shared `world.wgsl` and a liquid that stops the shading
+    /// pass's sun ray but not the volume's would light the bed under water in one and not the
+    /// other. Order matches [`crate::passes::cagi::build_shader_source`].
+    pub fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
+        self.traversal.declare_consts(sink);
+        self.shadows.declare_consts(sink);
+        self.water.declare_consts(sink);
+        self.global_illumination.declare_volume_consts(sink);
+        self.global_illumination.declare_propagation_consts(sink);
+    }
+
+    /// The shading pass's consts as preprocessor definitions.
+    pub fn shading_shader_defs(&self) -> ShaderDefs {
+        let mut defs = ShaderDefs::default();
+        self.declare_shading_consts(&mut defs);
+        defs
+    }
+
+    /// The CA pass's consts as preprocessor definitions.
+    pub fn volume_shader_defs(&self) -> ShaderDefs {
+        let mut defs = ShaderDefs::default();
+        self.declare_volume_consts(&mut defs);
+        defs
+    }
 }
 
 impl Default for RenderQuality {
@@ -3325,9 +3340,9 @@ impl RenderQuality {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ao::patch_shader_const;
     use crate::passes::cagi::CAGI_SHADER_SOURCE;
     use crate::passes::dda::{build_shader_source, SHADER_SOURCE};
+    use crate::shader_consts::patch_shader_const;
 
     /// Shader consts in the lever blocks that are NOT levers: the mode NAME
     /// constants and the fixed tuning thresholds. Anything else the shaders
@@ -4143,6 +4158,99 @@ mod tests {
         assert_eq!(balanced, RenderQuality::baseline());
         assert_eq!(RenderQuality::default(), balanced);
         assert_eq!(build_shader_source(&balanced), SHADER_SOURCE.as_str());
+    }
+
+    /// The value of `const NAME: type = LITERAL;` in `source`, or `None` when this shader has no
+    /// such const.
+    fn declared_literal(source: &str, name: &str) -> Option<String> {
+        let start = source.find(&format!("const {name}:"))?;
+        let equals = source[start..].find('=')? + start;
+        let semicolon = source[equals..].find(';')? + equals;
+        Some(source[equals + 1..semicolon].trim().to_string())
+    }
+
+    /// The two sinks must agree on every lever, for every preset, in both pass sources.
+    ///
+    /// This is the load-bearing test of the whole `shader_consts` refactor. The def map is about
+    /// to become what the composer compiles from, while `patch_shader_source` is what the shipped
+    /// renderer compiles from today — and a lever whose def carried a different value than its
+    /// patch would be a wrong pixel with no error anywhere. Because both come from one
+    /// `declare_consts` list, disagreement can only mean a bug in a sink, and this catches that.
+    #[test]
+    fn shader_defs_agree_with_the_patched_source_for_every_preset() {
+        let mut checked = 0;
+        for spec in QUALITY_PRESETS {
+            let quality = spec.resolve();
+            for (label, source, defs) in [
+                (
+                    "dda",
+                    build_shader_source(&quality),
+                    quality.shading_shader_defs(),
+                ),
+                (
+                    "cagi",
+                    crate::passes::cagi::build_shader_source(&quality),
+                    quality.volume_shader_defs(),
+                ),
+            ] {
+                assert!(!defs.is_empty());
+                for (name, value) in defs.iter() {
+                    // A const absent from this pass's shader is correct — `water.wgsl` is not in
+                    // the CA pass and `cagi.wgsl` is not in the shading pass.
+                    let Some(actual) = declared_literal(&source, name) else {
+                        continue;
+                    };
+                    assert_eq!(
+                        actual,
+                        value.wgsl_literal(),
+                        "{:?}/{label}: def {name} = {value:?} renders to `{}` but the patched \
+                         source declares `{actual}`",
+                        spec.preset,
+                        value.wgsl_literal()
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // Guard against the assertions being vacuous: if `declared_literal` stopped finding
+        // anything, every comparison above would be skipped and the test would still pass.
+        assert!(
+            checked > 200,
+            "only {checked} const comparisons ran — the lookup is probably broken"
+        );
+    }
+
+    /// The def set must distinguish every configuration the shader source distinguishes, because
+    /// it is about to become the pipeline cache key. Two presets that compile to different
+    /// sources but produce equal defs would silently share a pipeline.
+    #[test]
+    fn presets_with_different_sources_have_different_shader_defs() {
+        let named: Vec<_> = QUALITY_PRESETS
+            .iter()
+            .filter(|spec| spec.preset != QualityPreset::Custom)
+            .map(|spec| {
+                let quality = spec.resolve();
+                (
+                    spec.preset,
+                    build_shader_source(&quality),
+                    quality.shading_shader_defs(),
+                )
+            })
+            .collect();
+        for (preset, source, defs) in &named {
+            for (other_preset, other_source, other_defs) in &named {
+                if preset == other_preset {
+                    continue;
+                }
+                if source != other_source {
+                    assert_ne!(
+                        defs, other_defs,
+                        "{preset:?} and {other_preset:?} compile different sources but share a \
+                         def set, so they would share a pipeline"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! `penumbra_scale` is a RUNTIME knob riding in the lighting uniform
 //! (`shading_params.y`), so the overlay slider needs no rebuild.
 
-use crate::ao::patch_shader_const;
+use crate::shader_consts::{ShaderConstSink, SourcePatcher};
 
 /// Sun-shadow technique — mirrors `SHADOW_MODE` in `dda.wgsl`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,10 +41,6 @@ impl ShadowMode {
             other => panic!("no SHADOW_MODE {other} in dda.wgsl"),
         }
     }
-
-    fn wgsl_literal(self) -> String {
-        format!("{}u", self.shader_value())
-    }
 }
 
 /// User-facing shadow configuration.
@@ -75,10 +71,17 @@ impl Default for ShadowSettings {
 }
 
 impl ShadowSettings {
+    /// Declare this group's compile-time consts into `sink`.
+    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+        sink.unsigned("SHADOW_MODE", self.mode.shader_value());
+    }
+
     /// `shader_source` with this configuration's compile-time consts patched
     /// in. Identity for the default settings.
     pub fn patch_shader_source(&self, shader_source: &str) -> String {
-        patch_shader_const(shader_source, "SHADOW_MODE", &self.mode.wgsl_literal())
+        let mut patcher = SourcePatcher::new(shader_source);
+        self.declare_consts(&mut patcher);
+        patcher.finish()
     }
 
     /// Whether switching from `applied` to `self` changes a compile-time const
