@@ -34,7 +34,7 @@ use voxel_material::material::material_id;
 /// Edge length of one brick in voxels.
 pub const BRICK_SIZE: usize = 8;
 /// Voxels per brick (8^3).
-pub const VOXELS_PER_BRICK: usize = BRICK_SIZE * BRICK_SIZE * BRICK_SIZE;
+pub(crate) const VOXELS_PER_BRICK: usize = BRICK_SIZE * BRICK_SIZE * BRICK_SIZE;
 /// `u32` words of occupancy bits per occupied brick (512 bits / 32).
 pub const OCCUPANCY_WORDS_PER_BRICK: usize = VOXELS_PER_BRICK / 32;
 /// `u32` words of material bytes per occupied brick (512 bytes / 4).
@@ -44,12 +44,12 @@ pub const MATERIAL_WORDS_PER_BRICK: usize = VOXELS_PER_BRICK / 4;
 /// size. 1000/8 = 125 and 256/8 = 32 divide exactly, so no padding bricks
 /// actually exist today, but `div_ceil` keeps the math honest if the world
 /// constants ever change.
-pub const BRICK_GRID_X: usize = WORLD_SIZE_X.div_ceil(BRICK_SIZE);
-pub const BRICK_GRID_Y: usize = WORLD_SIZE_Y.div_ceil(BRICK_SIZE);
-pub const BRICK_GRID_Z: usize = WORLD_SIZE_Z.div_ceil(BRICK_SIZE);
+pub(crate) const BRICK_GRID_X: usize = WORLD_SIZE_X.div_ceil(BRICK_SIZE);
+pub(crate) const BRICK_GRID_Y: usize = WORLD_SIZE_Y.div_ceil(BRICK_SIZE);
+pub(crate) const BRICK_GRID_Z: usize = WORLD_SIZE_Z.div_ceil(BRICK_SIZE);
 
 /// Sentinel pointer marking a brick with no non-air voxels.
-pub const EMPTY_BRICK: u32 = u32::MAX;
+pub(crate) const EMPTY_BRICK: u32 = u32::MAX;
 
 // ---- Level-0 pointer tagging -------------------------------------------------
 //
@@ -81,19 +81,19 @@ pub const EMPTY_BRICK: u32 = u32::MAX;
 // 45.2 -> 21.9 MB (2.1x) written down when the rate was 57.9%.
 
 /// Bit position of the two-bit level-0 tag.
-pub const BRICK_TAG_SHIFT: u32 = 30;
+pub(crate) const BRICK_TAG_SHIFT: u32 = 30;
 
 /// Payload mask — the 30 bits below the tag. 2^30 slots is ~1000x more level-1
 /// bricks than a full world can hold, so nothing is lost by spending two bits.
-pub const BRICK_PAYLOAD_MASK: u32 = (1 << BRICK_TAG_SHIFT) - 1;
+pub(crate) const BRICK_PAYLOAD_MASK: u32 = (1 << BRICK_TAG_SHIFT) - 1;
 
 /// Tag `0b00`: the payload is a level-1 slot index. This is the untagged
 /// encoding every pointer used before tagging existed.
-pub const BRICK_TAG_UNIQUE: u32 = 0;
+pub(crate) const BRICK_TAG_UNIQUE: u32 = 0;
 
 /// Tag `0b01`: the payload is a material id, and the brick is that material in
 /// all 512 cells. No level-1 storage, and a ray hits it at the brick face.
-pub const BRICK_TAG_UNIFORM: u32 = 1;
+pub(crate) const BRICK_TAG_UNIFORM: u32 = 1;
 
 /// Tag `0b10`: RESERVED for a shared template — the payload will be an index
 /// into a deduplicated brick palette. Nothing emits this yet; it is spelled out
@@ -159,7 +159,7 @@ pub const fn uniform_brick(material: u8) -> u32 {
 /// Sentinel for an XZ brick column (or a whole world) with no occupied
 /// bricks. Chosen so the WGSL comparison `brick_y > i32(max)` reads it as -1
 /// (u32 -> i32 conversion is modular) and every brick Y counts as "above".
-pub const EMPTY_COLUMN: u32 = u32::MAX;
+pub(crate) const EMPTY_COLUMN: u32 = u32::MAX;
 
 /// Spare brick slots the level-1 arrays (and therefore the GPU buffers) carry
 /// past the built world, so an edit that materializes a brick patches words
@@ -179,7 +179,7 @@ pub const EDIT_BRICK_HEADROOM: usize = 4096;
 /// `BRICK_GRID_X / 4` = 31 words) while keeping the z slices apart (the z stride
 /// is `BRICK_GRID_X * BRICK_GRID_Y / 4` = 1000 words). Trading a few unchanged
 /// words for an order of magnitude fewer `write_buffer` calls.
-pub const DIRTY_RANGE_GAP_WORDS: usize = 64;
+pub(crate) const DIRTY_RANGE_GAP_WORDS: usize = 64;
 
 /// Dimension metadata for the GPU, bindable as a uniform buffer.
 ///
@@ -755,7 +755,7 @@ impl Brickmap {
     /// [`crate::voxel_dda`] uses it as its skip stride, so the CPU and GPU
     /// traversals accelerate on the same data. Out-of-grid bricks read 0 (the
     /// conservative answer: "do not skip").
-    pub fn brick_clearance_cells(&self, brick: [i32; 3]) -> u8 {
+    pub(crate) fn brick_clearance_cells(&self, brick: [i32; 3]) -> u8 {
         if brick[0] < 0
             || brick[1] < 0
             || brick[2] < 0
@@ -773,7 +773,7 @@ impl Brickmap {
 
     /// One of the upload-ready arrays, by name — how the GPU uploader turns a
     /// [`DirtyWords`] range into bytes without this module knowing about buffers.
-    pub fn array_words(&self, array: BrickmapArray) -> &[u32] {
+    pub(crate) fn array_words(&self, array: BrickmapArray) -> &[u32] {
         match array {
             BrickmapArray::BrickIndices => &self.brick_indices,
             BrickmapArray::OccupancyWords => &self.occupancy_words,
@@ -1372,7 +1372,7 @@ impl DirtyRanges {
 ///
 /// Kept public for batched import and generation jobs that collect dirty ranges
 /// before publishing them to GPU buffers.
-pub fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
+pub(crate) fn coalesce_dirty_words(mut ranges: Vec<DirtyWords>) -> Vec<DirtyWords> {
     ranges.sort_by_key(|range| {
         (
             BrickmapArray::ALL
@@ -1537,16 +1537,17 @@ fn pack_bytes_little_endian(bytes: &[u8]) -> Vec<u32> {
 // ---- Directional bounds (AADF) ------------------------------------------------
 
 /// Bits per directional bound, so six fit one `u32` (6 x 5 = 30).
-pub const BOUND_BITS: u32 = 5;
+pub(crate) const BOUND_BITS: u32 = 5;
 
 /// Largest value a bound can hold — 31 cells, i.e. a 31 m skip in one step.
 /// The world is 125 bricks across, so a maximal free run costs four steps
 /// instead of one; that is a far cheaper compromise than a second word per cell.
-pub const BOUND_MAX: u32 = (1 << BOUND_BITS) - 1;
+pub(crate) const BOUND_MAX: u32 = (1 << BOUND_BITS) - 1;
 
 /// Field order, matching NAADF's `checkMatchingBounds`: -x, +x, -y, +y, -z, +z
 /// at shifts 0, 5, 10, 15, 20, 25. Each entry is the axis and the step sign.
-pub const BOUND_DIRECTIONS: [(usize, i32); 6] = [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)];
+pub(crate) const BOUND_DIRECTIONS: [(usize, i32); 6] =
+    [(0, -1), (0, 1), (1, -1), (1, 1), (2, -1), (2, 1)];
 
 /// One directional bound out of a packed word.
 #[inline]

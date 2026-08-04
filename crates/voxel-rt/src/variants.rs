@@ -45,8 +45,8 @@ use voxel_material::pattern::{
 
 /// Render-scale bounds (the resolution lever's range, also enforced by
 /// `crate::render::Renderer::set_render_scale`).
-pub const MIN_RENDER_SCALE: f32 = 0.5;
-pub const MAX_RENDER_SCALE: f32 = 1.0;
+pub(crate) const MIN_RENDER_SCALE: f32 = 0.5;
+pub(crate) const MAX_RENDER_SCALE: f32 = 1.0;
 
 /// Voxels per meter — the fade levers are voxel counts but are judged (and
 /// sliders labelled) in meters.
@@ -57,13 +57,13 @@ pub const VOXELS_PER_METER: f32 = 8.0;
 /// shader for the same reason `pattern_max_layers` is: a value past the top would
 /// still compile, silently pick the top rung's behaviour, and label a column with
 /// a rung that does not exist.
-pub const PATTERN_ENTRY_PROBE_TOP: u32 = 11;
+pub(crate) const PATTERN_ENTRY_PROBE_TOP: u32 = 11;
 
 /// The three generators bench section 9's saturated table actually authors: flat,
 /// noise and speckle. Pruning to this must leave the frame BIT-IDENTICAL, which is
 /// what makes the pixel gate a self-check on the measurement rather than a
 /// formality.
-pub const PATTERN_GENERATOR_MASK_SECTION_NINE: u32 = 0b111;
+pub(crate) const PATTERN_GENERATOR_MASK_SECTION_NINE: u32 = 0b111;
 
 // ---- Lever identity ----------------------------------------------------------
 
@@ -2943,7 +2943,7 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
 ];
 
 /// The preset table row of `preset`.
-pub fn preset_spec(preset: QualityPreset) -> &'static QualityPresetSpec {
+pub(crate) fn preset_spec(preset: QualityPreset) -> &'static QualityPresetSpec {
     QUALITY_PRESETS
         .iter()
         .find(|spec| spec.preset == preset)
@@ -3036,7 +3036,7 @@ impl MaterialSettings {
     /// resolution, and the value every preset and test uses (1.0) is exact. It stays a const
     /// rather than a uniform for the reason [`Self::requires_pipeline_rebuild`] records: a
     /// strength of zero lets naga fold the whole layer away.
-    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.boolean("MATERIAL_FACE_ROLES", self.face_roles);
         sink.boolean("MATERIAL_PATTERNS", self.patterns);
         sink.boolean("MATERIAL_PATTERN_CACHE", self.pattern_cache);
@@ -3129,7 +3129,7 @@ impl RenderQuality {
     /// what each pass patches keeps behaviour identical by construction.
     ///
     /// Order matches [`crate::passes::dda::build_shader_source`].
-    pub fn declare_shading_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_shading_consts(&self, sink: &mut dyn ShaderConstSink) {
         self.traversal.declare_consts(sink);
         self.ambient_occlusion.declare_consts(sink);
         self.shadows.declare_consts(sink);
@@ -3144,7 +3144,7 @@ impl RenderQuality {
     /// `LIQUIDS_CAST_NO_SHADOW` is in the shared `world.wgsl` and a liquid that stops the shading
     /// pass's sun ray but not the volume's would light the bed under water in one and not the
     /// other. Order matches [`crate::passes::cagi::build_shader_source`].
-    pub fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
         self.traversal.declare_consts(sink);
         self.shadows.declare_consts(sink);
         self.water.declare_consts(sink);

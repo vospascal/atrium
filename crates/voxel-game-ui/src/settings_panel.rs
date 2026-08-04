@@ -29,7 +29,7 @@
 //! The leaf drawing functions for 4, 5, 7 and the movement readout live here, with the two
 //! readout structs they render ([`MovementReadout`], [`WorldEditReadout`]).
 //!
-//! They used to sit in [`crate::overlay`], which made the two modules mutually dependent —
+//! They used to sit in `voxel-ui`'s overlay, which made the two modules mutually dependent —
 //! `overlay` needed `SettingsContext` to open the window, and this module needed four `draw_*`
 //! helpers and both readout types back. `scripts/dep-cycles.py` reported it as a cycle. Nothing
 //! in `overlay` actually called those helpers: it only defined them. So they were simply in the
@@ -41,22 +41,22 @@ use voxel_color::{
 };
 use voxel_environment::SunSettings;
 
-use crate::ao::AoMode;
-use crate::character::Submersion;
-use crate::shadows::ShadowMode;
-use crate::studio_assets::StudioAssetPanelState;
-use crate::variants::{
+use voxel_rt::ao::AoMode;
+use voxel_rt::character::Submersion;
+use voxel_rt::shadows::ShadowMode;
+use voxel_rt::studio_assets::StudioAssetPanelState;
+use voxel_rt::variants::{
     levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
     RenderQuality, QUALITY_PRESETS, VOXELS_PER_METER,
 };
-use crate::water::WaterMode;
-use crate::world_edit::ClearanceUpdateMode;
-use crate::world_host::WorldEditStats;
+use voxel_rt::water::WaterMode;
+use voxel_rt::world_edit::ClearanceUpdateMode;
+use voxel_rt::world_host::WorldEditStats;
 
 /// Everything the window reads or mutates, bundled.
 ///
 /// A struct rather than fifteen parameters: the call already threads this many
-/// values through [`crate::overlay::Overlay::render`], and repeating that list at
+/// values through `voxel-ui`'s `Overlay::render`, and repeating that list at
 /// every hop is how a signature becomes unreadable. Same reasoning as bundling the
 /// foliage parameters — a group that always travels together should travel as one
 /// thing.
@@ -314,7 +314,7 @@ pub struct MovementReadout {
     pub head_submerged: bool,
     /// E6 — whether the ACTIVE eye (fly camera or body head) sits in a liquid, so
     /// the shading pass took its underwater path. Read from the world with
-    /// [`crate::water::eye_is_submerged`], which is why it is true in fly mode as
+    /// [`voxel_rt::water::eye_is_submerged`], which is why it is true in fly mode as
     /// well: E6 owns "the view is underwater", E2b's `head_submerged` owns "the
     /// body's head is wet", and they agree wherever both apply.
     pub eye_submerged: bool,

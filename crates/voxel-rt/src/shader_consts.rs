@@ -74,12 +74,12 @@ impl ShaderConstValue {
 /// `{:?}` rather than `{}` on purpose: Rust's `Display` for floats prints `1` for `1.0`, which
 /// WGSL reads as an `i32` and rejects where an `f32` is expected. `Debug` always emits the
 /// decimal point, so `1.0` stays `1.0` and `0.5` stays `0.5`.
-pub fn float_literal(value: f32) -> String {
+pub(crate) fn float_literal(value: f32) -> String {
     format!("{value:?}")
 }
 
 /// Somewhere a lever group's compile-time consts can be written.
-pub trait ShaderConstSink {
+pub(crate) trait ShaderConstSink {
     fn set(&mut self, name: &'static str, value: ShaderConstValue);
 
     /// Declare a const that legitimately does not exist in every shader.
@@ -117,7 +117,7 @@ pub trait ShaderConstSink {
 }
 
 /// The sink that rewrites shader text — the shipped path.
-pub struct SourcePatcher {
+pub(crate) struct SourcePatcher {
     source: String,
 }
 
@@ -189,7 +189,7 @@ impl ShaderConstSink for ShaderDefs {
 /// Panics when the const is absent, which is deliberate — a lever whose const has been renamed
 /// or deleted is a silently dead lever otherwise. It is also exactly why this cannot be applied
 /// per fragment: each const lives in one of ten files.
-pub fn patch_shader_const(
+pub(crate) fn patch_shader_const(
     shader_source: &str,
     constant_name: &str,
     new_value_literal: &str,

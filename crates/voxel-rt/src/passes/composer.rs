@@ -60,7 +60,7 @@ pub struct Fragment {
 /// Order is load-bearing twice over: it must reproduce the old `concat!` byte for byte, and
 /// `naga_oil` requires a module's imports to be registered before the module itself, so a table in
 /// the wrong order fails loudly rather than composing something subtly different.
-pub fn shading_fragments() -> Vec<Fragment> {
+pub(crate) fn shading_fragments() -> Vec<Fragment> {
     vec![
         world(),
         pattern(),
@@ -89,7 +89,7 @@ pub fn shading_fragments() -> Vec<Fragment> {
 }
 
 /// The CA (light volume) pass's fragments, in shipped concatenation order.
-pub fn volume_fragments() -> Vec<Fragment> {
+pub(crate) fn volume_fragments() -> Vec<Fragment> {
     vec![
         world(),
         cagi_volume(),
@@ -259,7 +259,7 @@ impl Composition {
     }
 
     /// Every fragment's text with `defs` applied, then any [`FragmentEdit`] for that fragment.
-    pub fn patched_fragments_with_edits(
+    pub(crate) fn patched_fragments_with_edits(
         &self,
         defs: &ShaderDefs,
         edits: &[FragmentEdit],
@@ -280,12 +280,16 @@ impl Composition {
     ///
     /// Byte-for-byte what the `concat!` blocks in `passes::dda` and `passes::cagi` produced, which
     /// `joined_source_matches_the_shipped_concatenation` pins against a recorded dump.
-    pub fn joined_source(&self, defs: &ShaderDefs) -> String {
+    pub(crate) fn joined_source(&self, defs: &ShaderDefs) -> String {
         self.joined_source_with_edits(defs, &[])
     }
 
     /// The same, with per-fragment edits applied first.
-    pub fn joined_source_with_edits(&self, defs: &ShaderDefs, edits: &[FragmentEdit]) -> String {
+    pub(crate) fn joined_source_with_edits(
+        &self,
+        defs: &ShaderDefs,
+        edits: &[FragmentEdit],
+    ) -> String {
         let prelude = WorldBinding::wgsl_prelude();
         let patched = self.patched_fragments_with_edits(defs, edits);
         let mut source =

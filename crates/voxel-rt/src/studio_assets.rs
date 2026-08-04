@@ -102,7 +102,7 @@ pub struct MaterialAsset {
 }
 
 impl MaterialAsset {
-    pub fn from_material(slot: u8, material: &Material, graph: AssetId) -> MaterialAsset {
+    pub(crate) fn from_material(slot: u8, material: &Material, graph: AssetId) -> MaterialAsset {
         MaterialAsset {
             schema_version: STUDIO_ASSET_SCHEMA_VERSION,
             id: AssetId::new(),
@@ -117,7 +117,7 @@ impl MaterialAsset {
     /// name remains the compiled/static name because the runtime `Material`
     /// currently stores it as `&'static str`; renaming becomes an asset-level
     /// feature when graph/material assets replace fixed table rows.
-    pub fn apply_to_table(&self, table: &mut MaterialTable) -> Result<(), AssetError> {
+    pub(crate) fn apply_to_table(&self, table: &mut MaterialTable) -> Result<(), AssetError> {
         let Some(base) = table.row(self.voxel_material_slot).copied() else {
             return Err(AssetError::InvalidMaterialSlot(self.voxel_material_slot));
         };
@@ -649,7 +649,10 @@ impl From<SavedLeverValue> for LeverValue {
 }
 
 impl QualityRecipeAsset {
-    pub fn from_quality(name: impl Into<String>, quality: &RenderQuality) -> QualityRecipeAsset {
+    pub(crate) fn from_quality(
+        name: impl Into<String>,
+        quality: &RenderQuality,
+    ) -> QualityRecipeAsset {
         let values = REGISTRY
             .iter()
             .map(|lever| {
@@ -670,7 +673,10 @@ impl QualityRecipeAsset {
 
     /// Restore known levers and leave forward-compatible unknown entries alone.
     /// The returned names are diagnostics suitable for a Studio asset panel.
-    pub fn apply_to_quality(&self, quality: &mut RenderQuality) -> Result<Vec<String>, AssetError> {
+    pub(crate) fn apply_to_quality(
+        &self,
+        quality: &mut RenderQuality,
+    ) -> Result<Vec<String>, AssetError> {
         *quality = preset_from_name(&self.preset)
             .map(|preset| preset_spec(preset).resolve())
             .unwrap_or_else(RenderQuality::baseline);
@@ -708,7 +714,7 @@ impl StudioProjectStore {
         &self.root
     }
 
-    pub fn create_layout(&self) -> Result<(), AssetError> {
+    pub(crate) fn create_layout(&self) -> Result<(), AssetError> {
         fs::create_dir_all(self.root.join("materials"))?;
         fs::create_dir_all(self.root.join("quality"))?;
         fs::create_dir_all(self.root.join("graphs"))?;
@@ -717,7 +723,7 @@ impl StudioProjectStore {
         Ok(())
     }
 
-    pub fn save_manifest(&self, manifest: &ProjectManifest) -> Result<(), AssetError> {
+    pub(crate) fn save_manifest(&self, manifest: &ProjectManifest) -> Result<(), AssetError> {
         self.write_json(Path::new("project.vxproject.json"), manifest)
     }
 
@@ -727,17 +733,21 @@ impl StudioProjectStore {
         Ok(manifest)
     }
 
-    pub fn save_material(&self, path: &Path, material: &MaterialAsset) -> Result<(), AssetError> {
+    pub(crate) fn save_material(
+        &self,
+        path: &Path,
+        material: &MaterialAsset,
+    ) -> Result<(), AssetError> {
         self.write_json(path, material)
     }
 
-    pub fn load_material(&self, path: &Path) -> Result<MaterialAsset, AssetError> {
+    pub(crate) fn load_material(&self, path: &Path) -> Result<MaterialAsset, AssetError> {
         let material: MaterialAsset = self.read_json(path)?;
         validate_schema(material.schema_version)?;
         Ok(material)
     }
 
-    pub fn save_quality(
+    pub(crate) fn save_quality(
         &self,
         path: &Path,
         quality: &QualityRecipeAsset,
@@ -745,17 +755,17 @@ impl StudioProjectStore {
         self.write_json(path, quality)
     }
 
-    pub fn load_quality(&self, path: &Path) -> Result<QualityRecipeAsset, AssetError> {
+    pub(crate) fn load_quality(&self, path: &Path) -> Result<QualityRecipeAsset, AssetError> {
         let quality: QualityRecipeAsset = self.read_json(path)?;
         validate_schema(quality.schema_version)?;
         Ok(quality)
     }
 
-    pub fn save_graph(&self, path: &Path, graph: &GraphAsset) -> Result<(), AssetError> {
+    pub(crate) fn save_graph(&self, path: &Path, graph: &GraphAsset) -> Result<(), AssetError> {
         self.write_json(path, graph)
     }
 
-    pub fn load_graph(&self, path: &Path) -> Result<GraphAsset, AssetError> {
+    pub(crate) fn load_graph(&self, path: &Path) -> Result<GraphAsset, AssetError> {
         let graph: GraphAsset = self.read_json(path)?;
         validate_schema(graph.schema_version)?;
         Ok(graph)
@@ -769,7 +779,7 @@ impl StudioProjectStore {
         self.write_json(path, profile)
     }
 
-    pub fn load_world_profile(&self, path: &Path) -> Result<WorldProfileAsset, AssetError> {
+    pub(crate) fn load_world_profile(&self, path: &Path) -> Result<WorldProfileAsset, AssetError> {
         let profile: WorldProfileAsset = self.read_json(path)?;
         validate_schema(profile.schema_version)?;
         Ok(profile)
@@ -778,7 +788,7 @@ impl StudioProjectStore {
     /// A complete pre-commit image written before a multi-file project save.
     /// It is deliberately separate from normal assets: if the process stops
     /// between asset files, the next launch can restore one coherent state.
-    pub fn save_recovery(&self, snapshot: &RecoverySnapshot) -> Result<(), AssetError> {
+    pub(crate) fn save_recovery(&self, snapshot: &RecoverySnapshot) -> Result<(), AssetError> {
         self.write_json(Path::new(".autosave/recovery.vxrecovery.json"), snapshot)
     }
 
@@ -894,7 +904,7 @@ impl StudioProject {
     /// Save or update one reusable graph definition and register it in the
     /// project manifest. The graph file is independent of material instances,
     /// so several slots can reference the same definition later.
-    pub fn save_graph_asset(
+    pub(crate) fn save_graph_asset(
         &mut self,
         store: &StudioProjectStore,
         path: impl Into<PathBuf>,
@@ -915,7 +925,7 @@ impl StudioProject {
 
     /// Load all graph definitions registered by this project, rejecting a
     /// mismatched identity before any caller can activate a compiled program.
-    pub fn load_graph_assets(
+    pub(crate) fn load_graph_assets(
         &self,
         store: &StudioProjectStore,
     ) -> Result<BTreeMap<AssetId, GraphAsset>, AssetError> {
@@ -936,7 +946,7 @@ impl StudioProject {
     /// Resolve the project's one canonical world composition graph. Unlike the
     /// retired profile path this is an ordinary registered graph asset, so the
     /// same identity/validation rules apply to materials and worlds.
-    pub fn load_active_world_graph(
+    pub(crate) fn load_active_world_graph(
         &self,
         store: &StudioProjectStore,
     ) -> Result<Option<GraphAsset>, AssetError> {
@@ -971,7 +981,7 @@ impl StudioProject {
     /// Resolve every project-local identity required by world compilation.
     /// This is deliberately project-owned: a world profile cannot prove that
     /// its material, graph, or sound IDs exist without the manifest and store.
-    pub fn world_asset_catalog(
+    pub(crate) fn world_asset_catalog(
         &self,
         store: &StudioProjectStore,
     ) -> Result<WorldAssetCatalog, AssetError> {
@@ -1073,7 +1083,7 @@ impl StudioProject {
         store.save_manifest(&self.manifest)
     }
 
-    pub fn load_active_world_profile(
+    pub(crate) fn load_active_world_profile(
         &self,
         store: &StudioProjectStore,
     ) -> Result<Option<WorldProfileAsset>, AssetError> {

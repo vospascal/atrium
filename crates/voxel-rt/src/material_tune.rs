@@ -1,6 +1,17 @@
 //! S0b — provenance: which rows came from a `.vox`, and what you have changed by
 //! hand since.
 //!
+//! **This has no caller right now, and that is expected.** Its consumer was the material
+//! editor's `.vox` import panel, removed at `1613d75` when it turned out nothing drew it any
+//! more. The merge *policy* below is not UI, though — it is pure data plus eleven tests that
+//! specify it, and it is the half of ".vox import assigns the right material" that
+//! [`crate::vox_material`] does not cover: that module parses a file and matches palette
+//! colours to rows, this one decides what a *re-import* is allowed to overwrite.
+//!
+//! It lived in the UI directory before, which is exactly why it read as dead panel code and was
+//! nearly deleted with the panel. It belongs here, beside the loader. When the import UI is
+//! rebuilt, the policy is already written and already tested.
+//!
 //! ## The problem this solves
 //!
 //! An import writes into the live table, so without a record of what it wrote,

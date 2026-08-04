@@ -44,7 +44,7 @@ impl AoMode {
     /// The `AO_MODE` u32 this technique compiles to — the one place the
     /// Rust↔WGSL numbering lives (the registry's mode options and the overlay
     /// radio buttons both go through it).
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             AoMode::RayTraced => 0,
             AoMode::AnalyticCorner => 1,
@@ -55,7 +55,7 @@ impl AoMode {
 
     /// Inverse of [`AoMode::shader_value`]; panics on a value the shader has no
     /// branch for.
-    pub fn from_shader_value(shader_value: u32) -> AoMode {
+    pub(crate) fn from_shader_value(shader_value: u32) -> AoMode {
         match shader_value {
             0 => AoMode::RayTraced,
             1 => AoMode::AnalyticCorner,
@@ -82,7 +82,7 @@ pub enum AoDirectionMode {
 
 impl AoDirectionMode {
     /// The `AO_DIRECTION_MODE` u32 this strategy compiles to.
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             AoDirectionMode::CosineHemisphere => 0,
             AoDirectionMode::UniformHemisphere => 1,
@@ -92,7 +92,7 @@ impl AoDirectionMode {
 
     /// Inverse of [`AoDirectionMode::shader_value`]; panics on a value the
     /// shader has no branch for.
-    pub fn from_shader_value(shader_value: u32) -> AoDirectionMode {
+    pub(crate) fn from_shader_value(shader_value: u32) -> AoDirectionMode {
         match shader_value {
             0 => AoDirectionMode::CosineHemisphere,
             1 => AoDirectionMode::UniformHemisphere,
@@ -176,7 +176,7 @@ impl AoSettings {
     /// `AO_MAX_DISTANCE` is an `f32` const carried as an integer: the field is already
     /// `max_distance_voxels: u32` and was only ever formatted `"{}.0"`, so nothing is lost, and
     /// it is what makes this group expressible as preprocessor definitions at all.
-    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.unsigned("AO_MODE", self.mode.shader_value());
         sink.unsigned("AO_RAY_COUNT", self.ray_count);
         sink.integral_float("AO_MAX_DISTANCE", self.max_distance_voxels);

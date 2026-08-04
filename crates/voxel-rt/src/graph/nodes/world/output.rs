@@ -17,7 +17,7 @@ const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[socket!(
     Cardinality::REQUIRED_SINGLE
 )];
 
-pub const DECLARATION: NodeDeclaration = node!(
+pub(crate) const DECLARATION: NodeDeclaration = node!(
     "world.output",
     WorldNodeOperation::Output,
     "World Output",

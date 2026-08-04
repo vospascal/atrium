@@ -17,8 +17,8 @@ use crate::variants::RenderQuality;
 use voxel_graph::{GraphAsset, GraphKind};
 use voxel_material_graph::lowering::MaterialGraphShaderSet;
 
-pub const DEFAULT_WORLD_SEED: u32 = 1;
-pub const DEFAULT_WORLD_SEASON: f32 = 0.0;
+pub(crate) const DEFAULT_WORLD_SEED: u32 = 1;
+pub(crate) const DEFAULT_WORLD_SEASON: f32 = 0.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeMode {
@@ -128,7 +128,7 @@ pub struct ProjectRuntime {
 impl ProjectRuntime {
     /// Editing is resilient: broken project input never crashes a live authoring
     /// session. The renderer receives compiled defaults and diagnostics instead.
-    pub fn load_for_editing(root: impl AsRef<Path>) -> Self {
+    pub(crate) fn load_for_editing(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
         let store = StudioProjectStore::new(&root);
         let mut materials = MaterialTable::default();

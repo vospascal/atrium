@@ -118,19 +118,19 @@ pub const INTERIOR_LENGTH: i32 = SEGMENT_LENGTH * BAND_MATERIALS.len() as i32;
 
 /// Wall/floor/ceiling thickness. Two, so wall leaking cannot be mistaken for a
 /// transport bug — see the module note.
-pub const SHELL_THICKNESS: i32 = 2;
+pub(crate) const SHELL_THICKNESS: i32 = 2;
 
 /// The shell material. Neutral and dark enough that the shell itself
 /// contributes nothing interesting to the bounce budget.
-pub const SHELL_MATERIAL: Voxel = Voxel::Stone;
+pub(crate) const SHELL_MATERIAL: Voxel = Voxel::Stone;
 
 /// The ceiling material: the palette's whitest row. The ceiling is the readout
 /// surface, so it must not tint what lands on it.
-pub const CEILING_MATERIAL: Voxel = Voxel::Snow;
+pub(crate) const CEILING_MATERIAL: Voxel = Voxel::Snow;
 
 /// Far-end cap material. Same as the ceiling, for the same reason: it is a
 /// second neutral surface that only ever sees indirect light.
-pub const END_CAP_MATERIAL: Voxel = Voxel::Snow;
+pub(crate) const END_CAP_MATERIAL: Voxel = Voxel::Snow;
 
 /// Ceiling-slot width across the corridor, in world voxels. The slot runs the
 /// corridor's **full length**, so this is its only finite dimension.
@@ -148,13 +148,13 @@ pub const END_CAP_MATERIAL: Voxel = Voxel::Snow;
 /// lands on the floor of the SAME band it entered over. All six bands get a
 /// directly lit floor, so all six can bleed onto the ceiling and be compared
 /// against each other in one frame.
-pub const SLOT_WIDTH: i32 = 2;
+pub(crate) const SLOT_WIDTH: i32 = 2;
 
 /// Height of the far-end notch through the `+X` wall, in world voxels — the
 /// "two blocks taken off" of the reference shot.
-pub const NOTCH_HEIGHT: i32 = 2;
+pub(crate) const NOTCH_HEIGHT: i32 = 2;
 /// Corridor length spanned by that notch.
-pub const NOTCH_LENGTH: i32 = 4;
+pub(crate) const NOTCH_LENGTH: i32 = 4;
 
 /// Interior minimum corner, in one-metre world voxels.
 ///
@@ -163,7 +163,7 @@ pub const NOTCH_LENGTH: i32 = 4;
 /// above the island's terrain rather than inside it. A slot that opens into
 /// stone would make the fixture render black and the reason would not be
 /// obvious.
-pub const INTERIOR_MIN: [i32; 3] = [18, 14, 14];
+pub(crate) const INTERIOR_MIN: [i32; 3] = [18, 14, 14];
 
 /// How the far-end notch is treated.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -199,7 +199,7 @@ impl RainbowCorridor {
     }
 
     /// Interior maximum corner, inclusive.
-    pub fn interior_max(&self) -> [i32; 3] {
+    pub(crate) fn interior_max(&self) -> [i32; 3] {
         [
             self.interior_min[0] + INTERIOR_WIDTH - 1,
             self.interior_min[1] + INTERIOR_HEIGHT - 1,
@@ -227,7 +227,7 @@ impl RainbowCorridor {
     /// Whether the structure fits the world lattice. Checked by
     /// [`Self::carve`], because a fixture that silently clips at the world edge
     /// is a fixture with an unaccounted hole in it.
-    pub fn fits_world(&self) -> bool {
+    pub(crate) fn fits_world(&self) -> bool {
         let (min, max) = self.outer_bounds();
         min[0] >= 0
             && min[1] >= 0
@@ -239,7 +239,7 @@ impl RainbowCorridor {
 
     /// The band material for a corridor position, or `None` outside the
     /// interior's Z range.
-    pub fn band_material(&self, z: i32) -> Option<Voxel> {
+    pub(crate) fn band_material(&self, z: i32) -> Option<Voxel> {
         let offset = z - self.interior_min[2];
         if !(0..INTERIOR_LENGTH).contains(&offset) {
             return None;
@@ -248,7 +248,7 @@ impl RainbowCorridor {
     }
 
     /// Whether a voxel is inside the interior air volume.
-    pub fn is_interior(&self, coordinate: WorldVoxelCoord) -> bool {
+    pub(crate) fn is_interior(&self, coordinate: WorldVoxelCoord) -> bool {
         let interior_max = self.interior_max();
         (self.interior_min[0]..=interior_max[0]).contains(&coordinate.x)
             && (self.interior_min[1]..=interior_max[1]).contains(&coordinate.y)
@@ -261,19 +261,19 @@ impl RainbowCorridor {
     /// Flush with the interior's `-X` edge rather than inset. The sun travels
     /// `+X`, so light entering here moves away from the `-X` wall immediately and
     /// the full width of the floor is available to it.
-    pub fn slot_x_range(&self) -> (i32, i32) {
+    pub(crate) fn slot_x_range(&self) -> (i32, i32) {
         (self.interior_min[0], self.interior_min[0] + SLOT_WIDTH - 1)
     }
 
     /// Ceiling-slot Z range, inclusive: the corridor's whole length, so every
     /// colour band gets its own directly lit floor.
-    pub fn slot_z_range(&self) -> (i32, i32) {
+    pub(crate) fn slot_z_range(&self) -> (i32, i32) {
         (self.interior_min[2], self.interior_max()[2])
     }
 
     /// Far-end notch extent, inclusive, as `(y_range, z_range)`. The notch cuts
     /// the top [`NOTCH_HEIGHT`] interior rows of the `+X` wall.
-    pub fn notch_extent(&self) -> ([i32; 2], [i32; 2]) {
+    pub(crate) fn notch_extent(&self) -> ([i32; 2], [i32; 2]) {
         let interior_max = self.interior_max();
         (
             [interior_max[1] - NOTCH_HEIGHT + 1, interior_max[1]],

@@ -31,16 +31,18 @@ pub mod gpu;
 pub mod graph;
 pub mod light_fixture;
 pub mod lighting;
-pub mod material_edit;
 pub mod material_graph_assets;
 pub mod material_table;
+/// S0b — `.vox` re-import provenance and merge policy.
+///
+/// Deliberately `pub` with no in-crate caller: its consumer was the material editor's import
+/// panel, removed at `1613d75`. Narrowing this to `pub(crate)` makes its eleven tests the only
+/// users and buries the module under dead-code warnings, which is how it came to be deleted
+/// once already. It is specified, tested policy waiting for a UI.
 pub mod material_tune;
-pub mod overlay;
 pub mod passes;
-pub mod performance_panel;
 pub mod profiling;
 pub mod render;
-pub mod settings_panel;
 pub mod shader_consts;
 pub mod shadows;
 pub mod studio;

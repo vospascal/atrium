@@ -3,9 +3,9 @@
 use voxel_graph::NodeDeclaration;
 
 pub mod compose;
-pub mod generated_terrain;
+pub(crate) mod generated_terrain;
 pub mod output;
-pub mod studio_preview;
+pub(crate) mod studio_preview;
 
 /// Every `world` node, in catalogue order.
 pub const NODES: &[NodeDeclaration] = &[

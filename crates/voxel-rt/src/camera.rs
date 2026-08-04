@@ -37,7 +37,7 @@ const MAX_PITCH_RADIANS: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 /// square pixels make the two agree anyway. Guards a zero height so a headless
 /// caller with an unset resolution gets a harmless zero footprint (every octave
 /// kept) rather than an infinity that would drop them all.
-pub fn pixel_footprint_at_one_meter(vertical_fov_radians: f32, height_pixels: u32) -> f32 {
+pub(crate) fn pixel_footprint_at_one_meter(vertical_fov_radians: f32, height_pixels: u32) -> f32 {
     if height_pixels == 0 {
         return 0.0;
     }
@@ -197,8 +197,8 @@ pub struct FlyCamera {
 /// Movement-speed band the mouse wheel can reach, meters per second. The floor
 /// is slow enough to line up a single 0.125 m voxel; the ceiling crosses the
 /// 125 m island in about two seconds.
-pub const MIN_MOVEMENT_SPEED: f32 = 0.25;
-pub const MAX_MOVEMENT_SPEED: f32 = 64.0;
+pub(crate) const MIN_MOVEMENT_SPEED: f32 = 0.25;
+pub(crate) const MAX_MOVEMENT_SPEED: f32 = 64.0;
 
 impl Default for FlyCamera {
     /// Spawn above the island's southern rim looking north-and-down at the

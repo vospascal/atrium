@@ -58,7 +58,7 @@ pub struct EvaluationClass {
 }
 
 impl EvaluationClass {
-    pub const STATIC_WORLD: Self = Self {
+    pub(crate) const STATIC_WORLD: Self = Self {
         spatial: SpatialGranularity::PerVoxel,
         update: UpdateFrequency::CompileTime,
     };
@@ -66,12 +66,12 @@ impl EvaluationClass {
         spatial: SpatialGranularity::PerChunk,
         update: UpdateFrequency::WorldEvent,
     };
-    pub const FRAME_UNIFORM: Self = Self {
+    pub(crate) const FRAME_UNIFORM: Self = Self {
         spatial: SpatialGranularity::Global,
         update: UpdateFrequency::PerFrame,
     };
 
-    pub fn combines(self, other: Self) -> Self {
+    pub(crate) fn combines(self, other: Self) -> Self {
         Self {
             spatial: self.spatial.max(other.spatial),
             update: self.update.max(other.update),
@@ -216,7 +216,7 @@ impl EnvironmentContext {
 
     /// Stable random value for procedural decisions. It is independent of
     /// evaluation order and therefore safe across chunk boundaries and threads.
-    pub fn stable_random(&self, salt: u64) -> f32 {
+    pub(crate) fn stable_random(&self, salt: u64) -> f32 {
         let coordinates = self.position.map(|value| value.floor() as i64 as u64);
         let mut hash = self.world_seed ^ salt.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         for coordinate in coordinates {

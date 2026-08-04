@@ -82,96 +82,96 @@ use voxel_material::material::{material_blocks_movement, material_is_liquid};
 
 /// Body width and depth, meters (0.6 m = 4.8 voxels). Wide enough to feel like
 /// a person, narrow enough to walk a 1 m gap between boulders.
-pub const BODY_WIDTH_METERS: f32 = 0.6;
+pub(crate) const BODY_WIDTH_METERS: f32 = 0.6;
 /// Body height, meters (1.8 m = 14.4 voxels).
-pub const BODY_HEIGHT_METERS: f32 = 1.8;
+pub(crate) const BODY_HEIGHT_METERS: f32 = 1.8;
 /// Eye height above the feet, meters — the listener/head pose (E8/E9).
 pub const EYE_HEIGHT_METERS: f32 = 1.65;
 
 /// Downward acceleration, m/s^2. Deliberately above real gravity (the same 22.0
 /// the original controller settled on): 9.81 makes a jump feel like a moon hop, and the
 /// snappier value is what makes a 1.2 m jump land in ~0.47 s.
-pub const GRAVITY_METERS_PER_SECOND_SQUARED: f32 = 22.0;
+pub(crate) const GRAVITY_METERS_PER_SECOND_SQUARED: f32 = 22.0;
 /// Fall-speed ceiling, m/s. Roughly a real skydiver's terminal velocity; here it
 /// also *bounds the substep count* — the worst fall a frame can integrate is
 /// `TERMINAL_VELOCITY * MAX_STEP_SECONDS` = 5.5 m = 22 substeps.
-pub const TERMINAL_VELOCITY_METERS_PER_SECOND: f32 = 55.0;
+pub(crate) const TERMINAL_VELOCITY_METERS_PER_SECOND: f32 = 55.0;
 /// How high a jump rises, meters. The jump *speed* is derived from this and
 /// gravity ([`CharacterSettings::jump_speed`]) so the tunable is the thing you
 /// can see rather than an impulse you have to convert in your head.
-pub const JUMP_APEX_METERS: f32 = 1.2;
+pub(crate) const JUMP_APEX_METERS: f32 = 1.2;
 
 /// Auto-step height, meters. **Exactly 3 voxels** (0.375 m), not the round
 /// 0.35 m: voxels are 0.125 m, natural terrain steps are 1-3 voxels, and 0.35
 /// would fail the 3-voxel step by 2.5 cm — which is precisely the case that
 /// makes walking an island miserable.
-pub const STEP_UP_METERS: f32 = 3.0 * VOXEL_SIZE;
+pub(crate) const STEP_UP_METERS: f32 = 3.0 * VOXEL_SIZE;
 
 /// Walk speed, m/s.
-pub const WALK_SPEED_METERS_PER_SECOND: f32 = 4.5;
+pub(crate) const WALK_SPEED_METERS_PER_SECOND: f32 = 4.5;
 /// Cap on the platform layer's speed multiplier while walking. The fly camera's
 /// boost is 4x, which at walk speed is 18 m/s — a sprint the collision feel
 /// cannot support; 2.6x = 11.7 m/s matches sandbox's 12 m/s sprint.
-pub const SPRINT_MULTIPLIER: f32 = 2.6;
+pub(crate) const SPRINT_MULTIPLIER: f32 = 2.6;
 /// Wheel-tunable walk-speed band, m/s: slow enough to line up a single voxel,
 /// fast enough to cross the island without switching to fly.
-pub const MIN_WALK_SPEED: f32 = 0.5;
-pub const MAX_WALK_SPEED: f32 = 16.0;
+pub(crate) const MIN_WALK_SPEED: f32 = 0.5;
+pub(crate) const MAX_WALK_SPEED: f32 = 16.0;
 
 /// Horizontal speed scale while the feet are in water — the "wading is heavy"
 /// term. Cheap (one multiply) and the whole of water v0's horizontal model.
-pub const WADE_SPEED_SCALE: f32 = 0.55;
+pub(crate) const WADE_SPEED_SCALE: f32 = 0.55;
 /// Horizontal speed while swimming, m/s.
-pub const SWIM_SPEED_METERS_PER_SECOND: f32 = 2.2;
+pub(crate) const SWIM_SPEED_METERS_PER_SECOND: f32 = 2.2;
 /// Fraction of the body height at which submersion becomes *swimming*. 0.8 =
 /// 1.44 m, i.e. water over the shoulders. The float line sits
 /// [`SWIM_FLOAT_SHOULDER_DEPTH_METERS`] *below* this threshold, so the
 /// equilibrium and the state boundary differ by a margin — which is what keeps
 /// the state from dithering at the surface.
-pub const SWIM_SUBMERSION_FRACTION: f32 = 0.8;
+pub(crate) const SWIM_SUBMERSION_FRACTION: f32 = 0.8;
 /// How far under the local water surface the shoulder probe rests at the float
 /// line, meters. Half a voxel: the probe sits in the middle of the topmost water
 /// voxel, so the `Swimming` test keeps 0.06 m of slack either way, and the eye
 /// ends up 0.15 m clear of the surface.
-pub const SWIM_FLOAT_SHOULDER_DEPTH_METERS: f32 = 0.5 * VOXEL_SIZE;
+pub(crate) const SWIM_FLOAT_SHOULDER_DEPTH_METERS: f32 = 0.5 * VOXEL_SIZE;
 /// Depth band below the float line over which buoyancy still lifts, meters.
 /// Deeper than this the body is *neutral* — the point of the whole model: you
 /// float at the SURFACE, you are not shoved up from depth, so a swimmer can hold
 /// a depth and explore instead of being corked out of the water.
-pub const SWIM_SURFACE_BAND_METERS: f32 = 0.75;
+pub(crate) const SWIM_SURFACE_BAND_METERS: f32 = 0.75;
 /// Restoring stiffness at the float line, 1/s^2 (acceleration per meter of
 /// displacement). With [`WATER_VERTICAL_DRAG_PER_SECOND`] this is a damped
 /// spring: 0.2 m under the line lifts at 0.6 m/s, and the dive thrust
 /// ([`SWIM_THRUST_METERS_PER_SECOND_SQUARED`]) beats it several times over, so
 /// pressing dive always wins.
-pub const SWIM_BUOYANCY_STIFFNESS_PER_SECOND_SQUARED: f32 = 12.0;
+pub(crate) const SWIM_BUOYANCY_STIFFNESS_PER_SECOND_SQUARED: f32 = 12.0;
 /// Residual sink acceleration once the body is deeper than
 /// [`SWIM_SURFACE_BAND_METERS`], m/s^2. Not zero, so releasing every key at
 /// depth drifts *down* (0.125 m/s terminal against the drag) rather than
 /// hovering forever — "hover or sink very slowly", never rise.
-pub const SWIM_DEEP_SINK_METERS_PER_SECOND_SQUARED: f32 = 0.5;
+pub(crate) const SWIM_DEEP_SINK_METERS_PER_SECOND_SQUARED: f32 = 0.5;
 /// How far up the surface probe looks for air, meters. Only the band matters, so
 /// the probe is bounded just past it: beyond this the body is neutral by
 /// definition and the exact depth is irrelevant, which keeps the probe ~10 voxel
 /// reads instead of the whole column.
-pub const SWIM_SURFACE_PROBE_METERS: f32 = SWIM_SURFACE_BAND_METERS + 0.5;
+pub(crate) const SWIM_SURFACE_PROBE_METERS: f32 = SWIM_SURFACE_BAND_METERS + 0.5;
 /// Vertical velocity damping per second while any part of the body is in water.
 /// Applied while wading too, not only while swimming: it is what turns every
 /// vertical term in water into a terminal speed instead of an accumulating one.
-pub const WATER_VERTICAL_DRAG_PER_SECOND: f32 = 4.0;
+pub(crate) const WATER_VERTICAL_DRAG_PER_SECOND: f32 = 4.0;
 /// Deliberate swim up/down acceleration (jump = up, crouch = dive), m/s^2.
-pub const SWIM_THRUST_METERS_PER_SECOND_SQUARED: f32 = 12.0;
+pub(crate) const SWIM_THRUST_METERS_PER_SECOND_SQUARED: f32 = 12.0;
 /// Vertical speed ceiling while swimming, m/s — no cannonballing out of a pool.
-pub const SWIM_MAX_VERTICAL_SPEED: f32 = 2.0;
+pub(crate) const SWIM_MAX_VERTICAL_SPEED: f32 = 2.0;
 
 /// Gap kept between the body and the surface it rests against, meters. Large
 /// enough that float error cannot re-enter the voxel, small enough to be
 /// invisible (1 mm = 1/125 of a voxel).
-pub const COLLISION_SKIN_METERS: f32 = 1.0e-3;
+pub(crate) const COLLISION_SKIN_METERS: f32 = 1.0e-3;
 /// How far below the feet the ground test looks, meters. Must exceed
 /// [`COLLISION_SKIN_METERS`] (or a resting body reads as airborne) and stay well
 /// under a voxel (or it grabs ground that is not there).
-pub const GROUND_PROBE_METERS: f32 = 0.02;
+pub(crate) const GROUND_PROBE_METERS: f32 = 0.02;
 /// Slack subtracted from an interval's upper bound before deriving its voxel
 /// layer, so a body exactly touching a voxel plane does not count the voxel
 /// beyond it, meters.
@@ -180,18 +180,18 @@ const CONTACT_EPSILON_METERS: f32 = 1.0e-4;
 /// Largest displacement one substep may apply, meters — strictly less than half
 /// the body's smallest dimension (0.6 / 2 = 0.3), which is the condition that
 /// makes per-axis resolution safe against corner tunneling.
-pub const MAX_SUBSTEP_METERS: f32 = 0.25;
+pub(crate) const MAX_SUBSTEP_METERS: f32 = 0.25;
 /// Longest `delta_seconds` the controller integrates. A longer stall (a shader
 /// compile, a breakpoint, a laptop lid) is simulated as this much: the body
 /// stays somewhere physics can defend instead of teleporting.
-pub const MAX_STEP_SECONDS: f32 = 0.1;
+pub(crate) const MAX_STEP_SECONDS: f32 = 0.1;
 /// Substep ceiling, so a pathological delta can never turn into an unbounded
 /// loop. 64 substeps x 0.25 m = 16 m of motion in one call.
-pub const MAX_SUBSTEPS: u32 = 64;
+pub(crate) const MAX_SUBSTEPS: u32 = 64;
 /// Voxel layers one sweep may test. Reaching it stops the body at the last
 /// verified boundary — the second half of the anti-tunneling guarantee.
 /// 32 layers = 4 m, far past anything [`MAX_SUBSTEP_METERS`] can produce.
-pub const MAX_SWEEP_LAYERS: u32 = 32;
+pub(crate) const MAX_SWEEP_LAYERS: u32 = 32;
 
 const AXIS_X: usize = 0;
 const AXIS_Y: usize = 1;
@@ -777,7 +777,7 @@ impl CharacterController {
 /// than a single column so a body straddling a ledge rests on the higher side.
 ///
 /// Returns `None` when nothing solid is within `max_drop_meters`.
-pub fn ground_height_below(
+pub(crate) fn ground_height_below(
     brickmap: &Brickmap,
     feet_position: Vec3,
     settings: &CharacterSettings,

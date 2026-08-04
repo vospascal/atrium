@@ -13,6 +13,9 @@ members = [
     "crates/voxel-material",
     "crates/voxel-material-graph",
     "crates/voxel-rt",
+    "crates/voxel-game-ui",
+    "crates/voxel-studio",
+    "crates/voxel-ui",
 ]
 
 [package]

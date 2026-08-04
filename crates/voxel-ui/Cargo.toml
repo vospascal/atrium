@@ -1,0 +1,31 @@
+[package]
+name = "voxel-ui"
+version = "0.1.0"
+edition = "2021"
+description = "The voxel engine's application layer: window, egui panels, and the Graph Studio"
+
+# This crate is the composition layer. It owns `main.rs`, so it is where the renderer, the
+# authoring UI and the window are wired together — and `voxel-rt` is now a library that knows
+# nothing about egui.
+#
+# Everything here depends on `voxel-rt`; nothing in `voxel-rt` depends on this. That direction is
+# the whole point: before the split, `main.rs` lived inside the renderer crate and could reach
+# any private item in it.
+[dependencies]
+atrium-profile = { path = "../profile", features = ["gpu"] }
+egui = "0.35"
+egui-wgpu = "0.35"
+egui-winit = "0.35"
+glam = "0.30"
+serde_json = "1"
+voxel-color = { path = "../voxel-color" }
+voxel-core = { path = "../voxel-core" }
+voxel-environment = { path = "../voxel-environment" }
+voxel-graph = { path = "../voxel-graph" }
+voxel-material = { path = "../voxel-material" }
+voxel-material-graph = { path = "../voxel-material-graph" }
+voxel-game-ui = { path = "../voxel-game-ui" }
+voxel-rt = { path = "../voxel-rt" }
+voxel-studio = { path = "../voxel-studio" }
+wgpu = { version = "29", features = ["naga-ir"] }
+winit = "0.30"

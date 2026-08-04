@@ -144,7 +144,7 @@ pub enum Condition {
 }
 
 impl Condition {
-    pub fn evaluate(&self, environment: &EnvironmentContext, biome: &BiomeSample) -> bool {
+    pub(crate) fn evaluate(&self, environment: &EnvironmentContext, biome: &BiomeSample) -> bool {
         match self {
             Self::Always => true,
             Self::Season(season) => environment.season == *season,
@@ -164,7 +164,7 @@ impl Condition {
         }
     }
 
-    pub fn evaluation_class(&self) -> EvaluationClass {
+    pub(crate) fn evaluation_class(&self) -> EvaluationClass {
         match self {
             Self::Always => EvaluationClass {
                 spatial: SpatialGranularity::Global,
@@ -361,11 +361,11 @@ impl WorldAssetCatalog {
         self.material_slots.get(id).copied()
     }
 
-    pub fn graph_kind(&self, id: &AssetId) -> Option<GraphKind> {
+    pub(crate) fn graph_kind(&self, id: &AssetId) -> Option<GraphKind> {
         self.graph_kinds.get(id).copied()
     }
 
-    pub fn contains_runtime_asset(&self, id: &AssetId) -> bool {
+    pub(crate) fn contains_runtime_asset(&self, id: &AssetId) -> bool {
         self.runtime_assets.contains(id)
     }
 }
@@ -528,7 +528,7 @@ impl CompiledWorldProfile {
         &self.asset
     }
 
-    pub fn has_active_voxel_layer_rules(&self, runtime: &RuntimeEnvironmentState) -> bool {
+    pub(crate) fn has_active_voxel_layer_rules(&self, runtime: &RuntimeEnvironmentState) -> bool {
         self.asset.surface_profiles.iter().any(|profile| {
             profile.rules.iter().any(|rule| {
                 matches!(rule.action, SurfaceAction::AddWorldVoxelLayer { .. })

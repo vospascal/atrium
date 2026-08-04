@@ -106,7 +106,7 @@ pub enum WaterMode {
 impl WaterMode {
     /// The `WATER_MODE` u32 this configuration compiles to — the one place the
     /// Rust<->WGSL numbering lives.
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             WaterMode::Opaque => 0,
             WaterMode::FresnelTint => 1,
@@ -118,7 +118,7 @@ impl WaterMode {
 
     /// Inverse of [`WaterMode::shader_value`]; panics on a value the shader has
     /// no branch for.
-    pub fn from_shader_value(shader_value: u32) -> WaterMode {
+    pub(crate) fn from_shader_value(shader_value: u32) -> WaterMode {
         match shader_value {
             0 => WaterMode::Opaque,
             1 => WaterMode::FresnelTint,
@@ -161,7 +161,7 @@ pub enum WaterTirFallback {
 
 impl WaterTirFallback {
     /// The `WATER_TIR_FALLBACK` u32 this choice compiles to.
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             WaterTirFallback::Flat => 0,
             WaterTirFallback::CheapMirror => 1,
@@ -170,7 +170,7 @@ impl WaterTirFallback {
 
     /// Inverse of [`WaterTirFallback::shader_value`]; panics on a value the shader
     /// has no branch for.
-    pub fn from_shader_value(shader_value: u32) -> WaterTirFallback {
+    pub(crate) fn from_shader_value(shader_value: u32) -> WaterTirFallback {
         match shader_value {
             0 => WaterTirFallback::Flat,
             1 => WaterTirFallback::CheapMirror,
@@ -209,7 +209,7 @@ pub enum WaterUnderwaterInterface {
 
 impl WaterUnderwaterInterface {
     /// The `WATER_UNDERWATER_INTERFACE` u32 this choice compiles to.
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             WaterUnderwaterInterface::Fresnel => 0,
             WaterUnderwaterInterface::Transparent => 1,
@@ -218,7 +218,7 @@ impl WaterUnderwaterInterface {
 
     /// Inverse of [`WaterUnderwaterInterface::shader_value`]; panics on a value the
     /// shader has no branch for.
-    pub fn from_shader_value(shader_value: u32) -> WaterUnderwaterInterface {
+    pub(crate) fn from_shader_value(shader_value: u32) -> WaterUnderwaterInterface {
         match shader_value {
             0 => WaterUnderwaterInterface::Fresnel,
             1 => WaterUnderwaterInterface::Transparent,
@@ -345,7 +345,7 @@ impl WaterSettings {
     /// the CA pass too — a liquid that stops the shading pass's sun ray but not the
     /// light volume's (or the reverse) would light the bed under water in one and
     /// not the other.
-    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
         // Lives in the shared `world.wgsl`, so it must move in BOTH passes.
         sink.boolean("WATER_SUN_THROUGH_LIQUID", self.sun_through_liquid);
         // The rest live in `water.wgsl`, which the CA pass does not include — hence

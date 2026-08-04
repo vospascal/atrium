@@ -29,14 +29,14 @@ pub enum ClearanceUpdateMode {
 }
 
 impl ClearanceUpdateMode {
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             ClearanceUpdateMode::LocalBox => 0,
             ClearanceUpdateMode::FullRebuild => 1,
         }
     }
 
-    pub fn from_shader_value(shader_value: u32) -> ClearanceUpdateMode {
+    pub(crate) fn from_shader_value(shader_value: u32) -> ClearanceUpdateMode {
         match shader_value {
             0 => ClearanceUpdateMode::LocalBox,
             1 => ClearanceUpdateMode::FullRebuild,

@@ -88,7 +88,7 @@ pub struct UnusableField {
 
 impl ImportedFields {
     /// Read a palette entry into this engine's terms.
-    pub fn from_palette_entry(entry: &VoxPaletteEntry) -> ImportedFields {
+    pub(crate) fn from_palette_entry(entry: &VoxPaletteEntry) -> ImportedFields {
         let mut fields = ImportedFields {
             // Always present: even a file with no MATL chunks has colours, which
             // is the whole point of the common case.
@@ -146,7 +146,7 @@ impl ImportedFields {
     ///
     /// Returns whether anything changed, so a caller can avoid dirtying the table
     /// for a no-op import.
-    pub fn apply_to(&self, row: &mut Material) -> bool {
+    pub(crate) fn apply_to(&self, row: &mut Material) -> bool {
         let before = *row;
         if let Some(albedo) = self.albedo {
             row.albedo = albedo;
@@ -260,7 +260,7 @@ fn grey(value: f32) -> [f32; 3] {
 /// Air is excluded: it is the miss sentinel and matching it would make a cell
 /// vanish. Rows that emit are excluded too — binding a colour to a light source
 /// because it happens to be pale would silently turn a model into a lamp.
-pub fn nearest_material_row(albedo_srgb: [f32; 3]) -> u8 {
+pub(crate) fn nearest_material_row(albedo_srgb: [f32; 3]) -> u8 {
     let mut best = (f32::MAX, 0_u8);
     for (id, row) in voxel_material::material::MATERIALS.iter().enumerate() {
         if matches!(row.kind, MaterialKind::Air) || row.is_emissive() {

@@ -63,7 +63,7 @@ impl TraversalSettings {
     /// The single list. [`Self::patch_shader_source`] renders it as shader text and
     /// [`crate::shader_consts::ShaderDefs`] renders it as preprocessor definitions, so the two
     /// cannot disagree.
-    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.boolean("ENABLE_COLUMN_FAST_FORWARD", self.column_fast_forward);
         sink.boolean("ENABLE_DESCEND_FAST_FORWARD", self.descend_fast_forward);
         sink.boolean("ENABLE_GLOBAL_MAX_TERMINATE", self.global_max_terminate);

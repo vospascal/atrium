@@ -146,7 +146,7 @@ impl LightVolume {
     /// and non-absorbing — so the frame after a resolution switch renders with no
     /// GI rather than with a hitch, and the flood starts the moment the real
     /// attributes land.
-    pub fn new_with_attributes(
+    pub(crate) fn new_with_attributes(
         device: &wgpu::Device,
         brickmap: &Brickmap,
         settings: &CagiSettings,
@@ -225,7 +225,7 @@ impl LightVolume {
 
     /// Bind-group-layout entries for the volume. `include_back_buffer` adds the
     /// writable binding 12 (the CA pass); the shading pass leaves it out.
-    pub fn layout_entries(include_back_buffer: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
+    pub(crate) fn layout_entries(include_back_buffer: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
         let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -257,7 +257,7 @@ impl LightVolume {
     /// Bind-group entries reading `read_index` (and, for the CA pass, writing the
     /// other buffer). The shading pass passes `include_back_buffer = false` and
     /// [`Self::front`] as the read index.
-    pub fn bind_group_entries(
+    pub(crate) fn bind_group_entries(
         &self,
         read_index: usize,
         include_back_buffer: bool,
@@ -351,7 +351,7 @@ impl LightVolume {
     /// Upload a whole attribute set built elsewhere (the world thread, after a
     /// resolution switch). Ignored when it was built for a different grid than the
     /// one currently allocated — the lever may have moved again while it built.
-    pub fn write_all_attributes(
+    pub(crate) fn write_all_attributes(
         &mut self,
         queue: &wgpu::Queue,
         grid: &CagiGrid,
@@ -432,7 +432,7 @@ impl CagiPass {
         Self::new_with_environment(device, world_bindings, light_volume, &environment)
     }
 
-    pub fn new_with_environment(
+    pub(crate) fn new_with_environment(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
@@ -465,7 +465,7 @@ impl CagiPass {
         )
     }
 
-    pub fn new_with_environment_and_program(
+    pub(crate) fn new_with_environment_and_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
@@ -497,7 +497,7 @@ impl CagiPass {
 
     /// Refresh the bind groups after the volume was recreated (resolution lever
     /// or the CAGI master lever moved).
-    pub fn rebind(
+    pub(crate) fn rebind(
         &mut self,
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
@@ -513,7 +513,7 @@ impl CagiPass {
 
     /// Switch to a patched shader source (a compile-time CAGI/traversal lever
     /// changed), compiling only on a cache miss.
-    pub fn set_shader(
+    pub(crate) fn set_shader(
         &mut self,
         device: &wgpu::Device,
         source: &str,

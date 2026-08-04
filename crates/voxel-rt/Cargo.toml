@@ -2,7 +2,7 @@
 name = "voxel-rt"
 version = "0.1.0"
 edition = "2021"
-description = "Standalone ray-traced voxel renderer — winit + wgpu + egui, no Bevy"
+description = "Ray-traced voxel renderer library — wgpu + winit input types, no egui, no Bevy"
 
 [dependencies]
 # Perf instrumentation: CPU spans, frame pacing, GPU timestamp queries. The `gpu`
@@ -10,9 +10,6 @@ description = "Standalone ray-traced voxel renderer — winit + wgpu + egui, no 
 # without it.
 atrium-profile = { path = "../profile", features = ["gpu"] }
 bytemuck = "1"
-egui = "0.35"
-egui-wgpu = "0.35"
-egui-winit = "0.35"
 glam = "0.30"
 naga = { version = "29", features = ["wgsl-in"] }
 # Shader composition: the ten WGSL fragments are built as an import graph rather than

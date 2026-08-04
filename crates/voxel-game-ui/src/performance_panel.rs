@@ -10,7 +10,7 @@
 //! measured quantities are shown side by side:
 //!
 //! 1. **Frame interval** — how far apart frames actually landed.
-//! 2. **CPU spans** — where the frame's CPU time went ([`crate::profiling`]).
+//! 2. **CPU spans** — where the frame's CPU time went ([`voxel_rt::profiling`]).
 //! 3. **GPU spans** — where the device's time went (timestamp queries).
 //!
 //! The number that usually cracks it is [`PerformancePanel`]'s *unaccounted*
@@ -28,7 +28,7 @@ use atrium_profile::memory::{format_bytes, format_drift, MemoryLedger};
 use atrium_profile::report::{self, TableRow, PERIOD_REPORT_STRENGTH};
 use atrium_profile::DEFAULT_HISTORY_FRAMES;
 
-use crate::profiling::{self, FrameTimings};
+use voxel_rt::profiling::{self, FrameTimings};
 
 const GRAPH_MAX_WIDTH: f32 = 420.0;
 const GRAPH_HEIGHT: f32 = 84.0;

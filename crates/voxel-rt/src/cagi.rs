@@ -54,9 +54,9 @@ pub const CELL_SOLID: u32 = 0x0100_0000;
 /// already-quantized 10-bit channel: the finest step it can express (1/15) is
 /// well under the visible difference between two adjacent light levels, and it
 /// leaves bits 29-31 free.
-pub const CELL_TRANSMITTANCE_SHIFT: u32 = 25;
-pub const CELL_TRANSMITTANCE_LEVELS: u32 = 15;
-pub const CELL_TRANSMITTANCE_MASK: u32 = 0xf << CELL_TRANSMITTANCE_SHIFT;
+pub(crate) const CELL_TRANSMITTANCE_SHIFT: u32 = 25;
+pub(crate) const CELL_TRANSMITTANCE_LEVELS: u32 = 15;
+pub(crate) const CELL_TRANSMITTANCE_MASK: u32 = 0xf << CELL_TRANSMITTANCE_SHIFT;
 
 /// Cell attribute bits 29-31 (S3b): which row of the volume's event-response
 /// table this cell's emission follows. `0` means "none" — the cell's emission is
@@ -68,8 +68,8 @@ pub const CELL_TRANSMITTANCE_MASK: u32 = 0xf << CELL_TRANSMITTANCE_SHIFT;
 /// material that senses the same way, not one per material. Overflow past seven
 /// distinct shapes is reported by [`MaterialAttributes::event_response_overflow`]
 /// rather than silently dropping a material's reaction.
-pub const CELL_EVENT_RESPONSE_SHIFT: u32 = 29;
-pub const CELL_EVENT_RESPONSE_MASK: u32 = 0x7 << CELL_EVENT_RESPONSE_SHIFT;
+pub(crate) const CELL_EVENT_RESPONSE_SHIFT: u32 = 29;
+pub(crate) const CELL_EVENT_RESPONSE_MASK: u32 = 0x7 << CELL_EVENT_RESPONSE_SHIFT;
 
 /// Rows in the volume's event-response table, INCLUDING row 0 ("no response").
 pub const EVENT_RESPONSE_SLOTS: usize = 8;
@@ -82,11 +82,11 @@ pub const EVENT_RESPONSE_SLOTS: usize = 8;
 /// Lives here rather than in the pass because it is the *layout*, and both sides
 /// of the seam need it: the uploader strides by it and
 /// [`crate::world_edit::WorldDelta::upload_bytes`] prices an edit by it.
-pub const CELL_DATA_WORDS: usize = 2;
+pub(crate) const CELL_DATA_WORDS: usize = 2;
 
 /// Bytes one cell occupies in that buffer — what an edit actually uploads per
 /// touched cell.
-pub const CELL_DATA_BYTES: usize = CELL_DATA_WORDS * 4;
+pub(crate) const CELL_DATA_BYTES: usize = CELL_DATA_WORDS * 4;
 
 /// One recomputed CAGI cell payload. Keeping the packed attribute and E5b
 /// emission together avoids parallel vectors at the world/GPU seam.
@@ -98,20 +98,20 @@ pub struct LightCellUpdate {
 }
 
 /// A material's transmittance in the 4-bit attribute form, rounded to nearest.
-pub fn quantize_transmittance(transmittance: f32) -> u32 {
+pub(crate) fn quantize_transmittance(transmittance: f32) -> u32 {
     let levels = CELL_TRANSMITTANCE_LEVELS as f32;
     let quantized = (transmittance.clamp(0.0, 1.0) * levels + 0.5) as u32;
     quantized.min(CELL_TRANSMITTANCE_LEVELS) << CELL_TRANSMITTANCE_SHIFT
 }
 /// Three 10-bit mantissas share the two exponent bits at the top of the word.
-pub const CHANNEL_MAX: u32 = 1023;
-pub const RADIANCE_MAX: f32 = 8.0;
-pub const RADIANCE_MAX_EXPONENT: u32 = 3;
+pub(crate) const CHANNEL_MAX: u32 = 1023;
+pub(crate) const RADIANCE_MAX: f32 = 8.0;
+pub(crate) const RADIANCE_MAX_EXPONENT: u32 = 3;
 /// Fixed-point shift of the diffusion numerators (mirrors `CAGI_DIFFUSION_SHIFT`).
-pub const DIFFUSION_SHIFT: u32 = 12;
+pub(crate) const DIFFUSION_SHIFT: u32 = 12;
 /// Weight sum of the 26-neighbour stencil: 6 faces x 4 + 12 edges x 2 + 8
 /// corners x 1.
-pub const NEIGHBOUR_26_WEIGHT_SUM: u32 = 56;
+pub(crate) const NEIGHBOUR_26_WEIGHT_SUM: u32 = 56;
 
 /// A cell absorbs once a quarter of its voxels are occupied. Binary absorption is
 /// the documented v0 simplification, but the THRESHOLD matters more than it
@@ -120,20 +120,20 @@ pub const NEIGHBOUR_26_WEIGHT_SUM: u32 = 56;
 /// the flood would never reach the ground it is supposed to light. A quarter fill
 /// is exactly one voxel layer of a cell (16 of 64 at 4 voxels per cell), i.e. a
 /// one-voxel wall counts as solid while scattered cover does not.
-pub const SOLID_FILL_DIVISOR: u32 = 4;
+pub(crate) const SOLID_FILL_DIVISOR: u32 = 4;
 
 /// Cells of headroom kept above the world's occupied height. Two is enough for
 /// the trilinear sampler's upper tap over the tallest tree.
-pub const SKY_MARGIN_CELLS: u32 = 2;
+pub(crate) const SKY_MARGIN_CELLS: u32 = 2;
 
 /// Max-decrement attenuation per METER in the packed channel's integer steps.
 /// The shared-exponent HDR range preserves the same physical flood reach
 /// regardless of resolution.
 /// lever, which is what makes the two rules comparable across cell sizes.
-pub const ATTENUATION_PER_METER: f32 = 80.0;
+pub(crate) const ATTENUATION_PER_METER: f32 = 80.0;
 /// Diffusion transmission per METER (0.884/m = 0.94 per 0.5 m cell). Same
 /// motivation: the physics must not change when the resolution changes.
-pub const TRANSMISSION_PER_METER: f32 = 0.884;
+pub(crate) const TRANSMISSION_PER_METER: f32 = 0.884;
 
 /// Propagation rule — mirrors `CAGI_RULE` in `shaders/cagi.wgsl`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +150,7 @@ pub enum CagiRule {
 }
 
 impl CagiRule {
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             CagiRule::MaxDecrement => 0,
             CagiRule::Diffusion6 => 1,
@@ -158,7 +158,7 @@ impl CagiRule {
         }
     }
 
-    pub fn from_shader_value(shader_value: u32) -> CagiRule {
+    pub(crate) fn from_shader_value(shader_value: u32) -> CagiRule {
         match shader_value {
             0 => CagiRule::MaxDecrement,
             1 => CagiRule::Diffusion6,
@@ -179,14 +179,14 @@ pub enum CagiSampleMode {
 }
 
 impl CagiSampleMode {
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             CagiSampleMode::Nearest => 0,
             CagiSampleMode::Trilinear => 1,
         }
     }
 
-    pub fn from_shader_value(shader_value: u32) -> CagiSampleMode {
+    pub(crate) fn from_shader_value(shader_value: u32) -> CagiSampleMode {
         match shader_value {
             0 => CagiSampleMode::Nearest,
             1 => CagiSampleMode::Trilinear,
@@ -208,14 +208,14 @@ pub enum CagiSkyTest {
 }
 
 impl CagiSkyTest {
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             CagiSkyTest::ColumnMax => 0,
             CagiSkyTest::UpwardTrace => 1,
         }
     }
 
-    pub fn from_shader_value(shader_value: u32) -> CagiSkyTest {
+    pub(crate) fn from_shader_value(shader_value: u32) -> CagiSkyTest {
         match shader_value {
             0 => CagiSkyTest::ColumnMax,
             1 => CagiSkyTest::UpwardTrace,
@@ -312,7 +312,7 @@ impl Default for CagiSettings {
 impl CagiSettings {
     /// Patch the consts that live in `cagi_volume.wgsl` — the file BOTH pass
     /// shaders include, so this applies to both sources.
-    pub fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.boolean("CAGI_ENABLED", self.enabled);
         sink.unsigned("CAGI_SAMPLE_MODE", self.sample_mode.shader_value());
     }
@@ -324,7 +324,7 @@ impl CagiSettings {
     }
 
     /// Patch the consts that live in `cagi.wgsl` — the CA pass only.
-    pub fn declare_propagation_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_propagation_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.unsigned("CAGI_RULE", self.rule.shader_value());
         sink.unsigned("CAGI_SKY_TEST", self.sky_test.shader_value());
         sink.boolean("CAGI_SUN_CACHE", self.sun_cache);
@@ -357,7 +357,7 @@ impl CagiSettings {
 
     /// Whether switching from `applied` to `self` needs the GPU volume rebuilt
     /// (its size or its static attributes change).
-    pub fn requires_volume_rebuild(&self, applied: &CagiSettings) -> bool {
+    pub(crate) fn requires_volume_rebuild(&self, applied: &CagiSettings) -> bool {
         self.enabled != applied.enabled || self.cell_voxels != applied.cell_voxels
     }
 
@@ -410,7 +410,7 @@ impl CagiGrid {
     /// The one-cell grid used while CAGI is switched off: the shading pass still
     /// declares the volume bindings, so *something* valid must be bound, but it
     /// must not cost 13 MB of VRAM to keep a folded-away lever addressable.
-    pub fn placeholder() -> CagiGrid {
+    pub(crate) fn placeholder() -> CagiGrid {
         CagiGrid {
             cell_voxels: BRICK_SIZE as u32,
             size: [1, 1, 1],
@@ -448,23 +448,23 @@ impl CagiGrid {
 
     /// Max-decrement attenuation per cell step, derived from the per-meter
     /// constant (at least 1, or the flood would never end).
-    pub fn attenuation(&self) -> u32 {
+    pub(crate) fn attenuation(&self) -> u32 {
         ((ATTENUATION_PER_METER * self.cell_meters()).round() as u32).max(1)
     }
 
     /// Transmission per cell step for the diffusion rules.
-    pub fn transmission(&self) -> f32 {
+    pub(crate) fn transmission(&self) -> f32 {
         TRANSMISSION_PER_METER.powf(self.cell_meters())
     }
 
     /// `(sum_of_6_neighbours * numerator) >> DIFFUSION_SHIFT` — the 6-neighbour
     /// diffusion coefficient in fixed point.
-    pub fn diffusion_numerator(&self) -> u32 {
+    pub(crate) fn diffusion_numerator(&self) -> u32 {
         ((self.transmission() / 6.0) * (1u32 << DIFFUSION_SHIFT) as f32).round() as u32
     }
 
     /// The same for the 26-neighbour weighted stencil.
-    pub fn diffusion_26_numerator(&self) -> u32 {
+    pub(crate) fn diffusion_26_numerator(&self) -> u32 {
         ((self.transmission() / NEIGHBOUR_26_WEIGHT_SUM as f32) * (1u32 << DIFFUSION_SHIFT) as f32)
             .round() as u32
     }
@@ -591,7 +591,7 @@ unsafe impl bytemuck::Pod for CagiVolumeUniform {}
 // ---- Packing (the CPU mirror of cagi_volume.wgsl) ----------------------------
 
 /// Pack three integer radiance levels with a shared two-bit exponent.
-pub fn pack_light(light: [u32; 3]) -> u32 {
+pub(crate) fn pack_light(light: [u32; 3]) -> u32 {
     let largest = light.into_iter().max().unwrap_or(0);
     let mut exponent = 0;
     let mut scale = 1;
@@ -649,7 +649,7 @@ fn packed_albedo(albedo: [f32; 3]) -> u32 {
 /// so a cell's transmittance and emitter always describe the same surface its
 /// bounce colour does. Coarse (one voxel stands for up to 512), and deliberately
 /// the same coarseness the albedo has had since E4.
-pub fn material_attribute_table(
+pub(crate) fn material_attribute_table(
     rows: &[Material],
     emission_responses: &[Option<EmissionEventResponse>],
 ) -> MaterialAttributes {
@@ -1267,7 +1267,7 @@ pub fn emitter_bounce_reference(
 }
 
 /// The 6 face-neighbour offsets, in the shader's order.
-pub const FACE_OFFSETS: [[i32; 3]; 6] = [
+pub(crate) const FACE_OFFSETS: [[i32; 3]; 6] = [
     [1, 0, 0],
     [-1, 0, 0],
     [0, 1, 0],

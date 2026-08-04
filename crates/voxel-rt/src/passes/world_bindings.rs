@@ -57,7 +57,7 @@ use voxel_material::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 /// (`readonly_and_readwrite_storage_textures`); a read_write storage BUFFER is
 /// core. Declared in `shaders/pattern.wgsl`, which only the shading pass
 /// includes; the CA pass carries the binding in its layout and never names it.
-pub const PATTERN_CACHE_BINDING: u32 = WorldBinding::PatternCache.index();
+pub(crate) const PATTERN_CACHE_BINDING: u32 = WorldBinding::PatternCache.index();
 
 /// Entries in the direct-mapped pattern cache. 16 Mi entries x 4 bytes = 64 MiB.
 ///
@@ -66,7 +66,7 @@ pub const PATTERN_CACHE_BINDING: u32 = WorldBinding::PatternCache.index();
 /// ceiling is 14.75 M primary samples, so the next power of two is 16 Mi. This
 /// excludes secondary hits by design; they may evict entries, but a primary-only
 /// frame now fits instead of thrashing as soon as it authors a second layer.
-pub const PATTERN_CACHE_ENTRIES: u64 = 16 * 1024 * 1024;
+pub(crate) const PATTERN_CACHE_ENTRIES: u64 = 16 * 1024 * 1024;
 
 pub struct WorldBindings {
     metadata_uniform_buffer: wgpu::Buffer,
@@ -162,7 +162,7 @@ impl WorldBindings {
     }
 
     /// The shared bind-group-layout entries, to be concatenated with a pass's own.
-    pub fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    pub(crate) fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -199,13 +199,13 @@ impl WorldBindings {
     }
 
     /// The pattern cache buffer, bound by the shading pass's own entries.
-    pub fn pattern_cache_buffer(&self) -> &wgpu::Buffer {
+    pub(crate) fn pattern_cache_buffer(&self) -> &wgpu::Buffer {
         &self.pattern_cache_buffer
     }
 
     /// The layout entry for [`PATTERN_CACHE_BINDING`], for the shading pass to
     /// append to the shared set.
-    pub fn pattern_cache_layout_entry() -> wgpu::BindGroupLayoutEntry {
+    pub(crate) fn pattern_cache_layout_entry() -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
             binding: WorldBinding::PatternCache.index(),
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -219,7 +219,7 @@ impl WorldBindings {
     }
 
     /// The shared bind-group entries, to be concatenated with a pass's own.
-    pub fn bind_group_entries(&self) -> Vec<wgpu::BindGroupEntry<'_>> {
+    pub(crate) fn bind_group_entries(&self) -> Vec<wgpu::BindGroupEntry<'_>> {
         fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry {
                 binding,

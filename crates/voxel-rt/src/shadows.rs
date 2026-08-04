@@ -25,7 +25,7 @@ impl ShadowMode {
     /// The `SHADOW_MODE` u32 this technique compiles to — the one place the
     /// Rust↔WGSL numbering lives (the registry's mode options and the overlay
     /// radio buttons both go through it).
-    pub fn shader_value(self) -> u32 {
+    pub(crate) fn shader_value(self) -> u32 {
         match self {
             ShadowMode::Hard => 0,
             ShadowMode::SoftDistanceField => 1,
@@ -34,7 +34,7 @@ impl ShadowMode {
 
     /// Inverse of [`ShadowMode::shader_value`]; panics on a value the shader has
     /// no branch for.
-    pub fn from_shader_value(shader_value: u32) -> ShadowMode {
+    pub(crate) fn from_shader_value(shader_value: u32) -> ShadowMode {
         match shader_value {
             0 => ShadowMode::Hard,
             1 => ShadowMode::SoftDistanceField,
@@ -72,7 +72,7 @@ impl Default for ShadowSettings {
 
 impl ShadowSettings {
     /// Declare this group's compile-time consts into `sink`.
-    pub fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
+    pub(crate) fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.unsigned("SHADOW_MODE", self.mode.shader_value());
     }
 

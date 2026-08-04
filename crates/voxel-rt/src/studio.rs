@@ -18,21 +18,21 @@ use crate::vox_material::VoxSubject;
 use voxel_material::material::material_voxel;
 
 /// Centre of the preview scene, in one-metre world-voxel coordinates.
-pub const SAMPLE_VOXEL: [i32; 3] = [
+pub(crate) const SAMPLE_VOXEL: [i32; 3] = [
     WORLD_VOXELS_X as i32 / 2,
     WORLD_VOXELS_Y as i32 / 2,
     WORLD_VOXELS_Z as i32 / 2,
 ];
 
 /// Half-extent of the square shadow plate, in one-metre world voxels.
-pub const PLATE_HALF_EXTENT: i32 = 3;
+pub(crate) const PLATE_HALF_EXTENT: i32 = 3;
 
 /// Vertical distance from the sample block to the plate, in world voxels.
-pub const PLATE_DROP: i32 = 3;
+pub(crate) const PLATE_DROP: i32 = 3;
 
 pub const CAMERA_DISTANCE_METERS: f32 = 4.0;
-pub const WALL_SIZE: i32 = 4;
-pub const CUBE_SIZE: i32 = 3;
+pub(crate) const WALL_SIZE: i32 = 4;
+pub(crate) const CUBE_SIZE: i32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StudioPose {
@@ -158,7 +158,7 @@ impl StudioScene {
     }
 
     /// The emitting block as a one-metre world coordinate.
-    pub fn emitter_block_world_voxel(&self) -> [i32; 3] {
+    pub(crate) fn emitter_block_world_voxel(&self) -> [i32; 3] {
         let origin = self.pose_origin();
         let [size_x, size_y, _] = StudioPose::EmitterWall.extent();
         [origin[0] + size_x / 2, origin[1] + size_y / 2, origin[2]]
@@ -204,7 +204,7 @@ impl StudioScene {
         }
     }
 
-    pub fn sample_center_meters(&self) -> Vec3 {
+    pub(crate) fn sample_center_meters(&self) -> Vec3 {
         match &self.subject {
             Some(subject) => {
                 let [x, y, z] = SAMPLE_VOXEL;

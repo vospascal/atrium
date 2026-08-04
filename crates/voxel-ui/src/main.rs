@@ -4,6 +4,9 @@
 //! OpenXR entry point later without touching the renderer. All winit types
 //! stay in this file; camera.rs is pure math.
 
+mod material_edit;
+mod overlay;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,10 +21,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
+use crate::overlay::{Overlay, OverlayFrameData, TargetHighlightReadout};
 use atrium_profile::cpu::SpanRecorder;
 use voxel_color::OutputDepth;
 use voxel_color::{HeadroomChoice, TonemapCurve};
 use voxel_environment::SunSettings;
+use voxel_game_ui::settings_panel::{MovementReadout, WorldEditReadout};
 use voxel_graph::GraphAsset;
 use voxel_material::animation_clock::AnimationClock;
 use voxel_material::material;
@@ -39,16 +45,13 @@ use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::light_fixture;
 use voxel_rt::lighting::OutputParams;
-use voxel_rt::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
 use voxel_rt::material_graph_assets::MaterialGraphAssetService;
 use voxel_rt::material_table::MaterialTable;
-use voxel_rt::overlay::{Overlay, OverlayFrameData, TargetHighlightReadout};
 use voxel_rt::passes::cagi::AttributeSource;
 use voxel_rt::passes::composer::ShaderProgram;
 use voxel_rt::passes::{cagi, dda};
 use voxel_rt::profiling::{self, FrameTimers, GPU_OVERLAY};
 use voxel_rt::render::Renderer;
-use voxel_rt::settings_panel::{MovementReadout, WorldEditReadout};
 use voxel_rt::studio;
 use voxel_rt::studio_assets::{
     live_state_fingerprint, StudioAssetPanelState, StudioProject, StudioProjectStore,
@@ -2112,7 +2115,6 @@ impl AppState {
         let overlay_started = Instant::now();
         let frame_data = OverlayFrameData {
             render_resolution: self.renderer.resolution(),
-            gpu_timings,
             world_edit: WorldEditReadout {
                 threaded: self.world_host.is_threaded(),
                 in_flight: self.world_host.in_flight(),

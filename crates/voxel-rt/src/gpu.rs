@@ -27,7 +27,7 @@ use winit::window::Window;
 /// target ever caps below this, the fix is to concatenate the two empty-space
 /// fields — chebyshev bytes and directional bounds — into one buffer with an
 /// offset per array rather than to drop either.
-pub const REQUIRED_STORAGE_BUFFERS_PER_STAGE: u32 = 11;
+pub(crate) const REQUIRED_STORAGE_BUFFERS_PER_STAGE: u32 = 11;
 
 /// The device descriptor every consumer must use: the raised storage-buffer limit
 /// plus whatever timestamp support the adapter offers (GPU pass timing degrades to

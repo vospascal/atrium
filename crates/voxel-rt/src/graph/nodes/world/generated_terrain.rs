@@ -17,7 +17,7 @@ const GENERATED_TERRAIN_OUT: &[SocketDeclarationStatic] = &[socket!(
     Cardinality::ANY
 )];
 
-pub const DECLARATION: NodeDeclaration = node!(
+pub(crate) const DECLARATION: NodeDeclaration = node!(
     "world.generated_terrain",
     WorldNodeOperation::GeneratedTerrain,
     "Generated Terrain",

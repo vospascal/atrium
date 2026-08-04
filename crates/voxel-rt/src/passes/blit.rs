@@ -7,7 +7,7 @@
 //! than the swapchain (render-scale lever < 1.0) the sampler switches to
 //! LINEAR so the upscale is smooth instead of blocky.
 
-pub struct BlitPass {
+pub(crate) struct BlitPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
@@ -116,7 +116,7 @@ impl BlitPass {
     /// Refresh the source-texture binding after the storage texture is
     /// recreated. `linear_filtering` = true when the source is smaller than
     /// the swapchain (render scale < 1.0) and needs a smooth upscale.
-    pub fn rebind(
+    pub(crate) fn rebind(
         &mut self,
         device: &wgpu::Device,
         source_view: &wgpu::TextureView,

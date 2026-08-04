@@ -70,7 +70,7 @@ impl FieldRange {
         }
     }
 
-    pub fn membership(self, value: f32) -> f32 {
+    pub(crate) fn membership(self, value: f32) -> f32 {
         let distance = self.distance(value);
         if distance == 0.0 {
             1.0

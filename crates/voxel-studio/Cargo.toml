@@ -1,0 +1,17 @@
+[package]
+name = "voxel-studio"
+version = "0.1.0"
+edition = "2021"
+description = "The Graph Studio: the material-graph node editor"
+
+# 79 items, two of them public. The whole editor reaches the rest of the app through
+# `draw_graph_drawer` and `graph_drawer_height` and nothing else, which is what makes this worth a
+# crate rather than a module: the compiler now enforces that surface instead of a convention.
+#
+# Nothing here depends on the game-facing UI (`voxel-game-ui`), and nothing there depends on this.
+# They are siblings composed by `voxel-ui`.
+[dependencies]
+egui = "0.35"
+voxel-graph = { path = "../voxel-graph" }
+voxel-material-graph = { path = "../voxel-material-graph" }
+voxel-rt = { path = "../voxel-rt" }

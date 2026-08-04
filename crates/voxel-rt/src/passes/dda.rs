@@ -155,7 +155,7 @@ impl DdaPass {
         )
     }
 
-    pub fn new_with_environment(
+    pub(crate) fn new_with_environment(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
@@ -201,7 +201,7 @@ impl DdaPass {
         )
     }
 
-    pub fn new_with_environment_and_program(
+    pub(crate) fn new_with_environment_and_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
@@ -262,7 +262,7 @@ impl DdaPass {
     /// (the overlay path: a compile-time lever or a preset changed). Buffers and
     /// bind groups are untouched — only the shader differs, so the existing bind
     /// groups stay valid against every cached pipeline.
-    pub fn set_shader(
+    pub(crate) fn set_shader(
         &mut self,
         device: &wgpu::Device,
         source: &str,
@@ -316,7 +316,7 @@ impl DdaPass {
     /// Refresh the bindings after the storage texture is recreated (a resize or a
     /// render-scale change) or the light volume was rebuilt (the CAGI resolution
     /// lever moved).
-    pub fn rebind(
+    pub(crate) fn rebind(
         &mut self,
         device: &wgpu::Device,
         world_bindings: &WorldBindings,

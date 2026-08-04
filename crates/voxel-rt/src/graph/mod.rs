@@ -33,8 +33,6 @@ use voxel_graph::{
 
 pub mod nodes;
 
-pub use nodes::BUILTIN_NODES;
-
 /// What a node does, as a typed value.
 ///
 /// Declaration sites and lowering code use this; a [`NodeDeclaration`] stores the
@@ -268,7 +266,7 @@ const WORLD_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
 
 /// The contracts for the families `voxel-rt` itself declares. The material contracts belong
 /// to `voxel-material-graph`; `CATALOGUE` composes both.
-pub static WORLD_CONTRACTS: &[GraphContractStatic] = &[GraphContractStatic {
+pub(crate) static WORLD_CONTRACTS: &[GraphContractStatic] = &[GraphContractStatic {
     kind: GraphKind::World,
     nodes: WORLD_NODE_CONSTRAINTS,
     flows: WORLD_FLOWS,

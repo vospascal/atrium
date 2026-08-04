@@ -16,7 +16,7 @@ const STUDIO_PREVIEW_OUT: &[SocketDeclarationStatic] = &[socket!(
     Cardinality::ANY
 )];
 
-pub const DECLARATION: NodeDeclaration = node!(
+pub(crate) const DECLARATION: NodeDeclaration = node!(
     "world.studio_preview",
     WorldNodeOperation::StudioPreview,
     "Studio Preview",

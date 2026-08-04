@@ -29,7 +29,7 @@ pub struct MaterialGraphAssetService;
 impl MaterialGraphAssetService {
     /// Resolve every material graph into a shader program. A material without a
     /// graph, a dangling graph ID, or a compile failure rejects the project.
-    pub fn load_shader_set(
+    pub(crate) fn load_shader_set(
         project_path: &Path,
         project: &StudioProject,
         _material_table: &MaterialTable,

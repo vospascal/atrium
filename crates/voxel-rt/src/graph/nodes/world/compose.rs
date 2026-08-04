@@ -44,7 +44,7 @@ const WORLD_COMPOSE_OUT: &[SocketDeclarationStatic] = &[socket!(
     Cardinality::ANY
 )];
 
-pub const DECLARATION: NodeDeclaration = node!(
+pub(crate) const DECLARATION: NodeDeclaration = node!(
     "world.compose",
     WorldNodeOperation::Compose,
     "Surface Composer",

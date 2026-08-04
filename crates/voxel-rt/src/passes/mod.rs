@@ -52,7 +52,7 @@ impl ComputePipelineCache {
         )
     }
 
-    pub fn new_with_layouts(
+    pub(crate) fn new_with_layouts(
         device: &wgpu::Device,
         label: &'static str,
         entry_point: &'static str,
@@ -76,7 +76,7 @@ impl ComputePipelineCache {
     /// deliberately: it is the same key this cache used before composition existed, so every
     /// preset switch hits and misses exactly as it did. Re-keying would have been a second
     /// behaviour change riding along with the compile path.
-    pub fn source_key(shader_source: &str) -> u64 {
+    pub(crate) fn source_key(shader_source: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         shader_source.hash(&mut hasher);
         hasher.finish()
@@ -126,7 +126,7 @@ impl ComputePipelineCache {
         self.pipelines.len()
     }
 
-    pub fn prewarm_with_layouts(
+    pub(crate) fn prewarm_with_layouts(
         &mut self,
         device: &wgpu::Device,
         programs: &[ShaderProgram],
@@ -193,7 +193,7 @@ pub fn create_compute_pipeline(
     )
 }
 
-pub fn create_compute_pipeline_with_layouts(
+pub(crate) fn create_compute_pipeline_with_layouts(
     device: &wgpu::Device,
     label: &str,
     entry_point: &str,
@@ -210,7 +210,7 @@ pub fn create_compute_pipeline_with_layouts(
 }
 
 /// The same, from an already-composed module.
-pub fn create_compute_pipeline_from_module(
+pub(crate) fn create_compute_pipeline_from_module(
     device: &wgpu::Device,
     label: &str,
     entry_point: &str,

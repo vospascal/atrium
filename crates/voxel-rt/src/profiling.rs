@@ -65,13 +65,13 @@ pub const CPU_PRESENT: usize = 7;
 pub const GPU_SPANS: &[&str] = &["DDA", "CAGI", "blit", "overlay"];
 
 /// The DDA compute pass.
-pub const GPU_DDA: usize = 0;
+pub(crate) const GPU_DDA: usize = 0;
 /// The E4 CAGI compute pass — all of this frame's CA iterations, which share one
 /// pass. That pass is submitted in its OWN command buffer because Metal zeroes
 /// pass-boundary counters once a command buffer holds more than one compute
 /// pass. Always opened, even at zero iterations, so the readout shows ~0.00 ms
 /// rather than going stale when the lever is off.
-pub const GPU_CAGI: usize = 1;
+pub(crate) const GPU_CAGI: usize = 1;
 /// The blit render pass alone.
 ///
 /// **Split out from a single blit-through-overlay span, because that span was
@@ -81,7 +81,7 @@ pub const GPU_CAGI: usize = 1;
 /// cost 0.43 ms, and made [`GpuTimings::total_milliseconds`] report 12.45 ms of
 /// "GPU work" inside a 7.23 ms frame. Two self-contained spans exclude the
 /// inter-pass gap from both, which is what makes the total trustworthy again.
-pub const GPU_BLIT: usize = 2;
+pub(crate) const GPU_BLIT: usize = 2;
 /// The egui overlay render pass alone. See [`GPU_BLIT`] for why these are two
 /// spans and not one.
 pub const GPU_OVERLAY: usize = 3;
