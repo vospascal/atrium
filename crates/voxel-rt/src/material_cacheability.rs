@@ -55,9 +55,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::graph::{
-    Diagnostic, GraphAsset, NodeId, NodeRegistry, Separable, SocketKey, SocketType,
-};
+use voxel_graph::{Diagnostic, GraphAsset, NodeId, NodeRegistry, Separable, SocketKey, SocketType};
 
 /// What a single pattern layer can do about caching its field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -303,8 +301,8 @@ pub fn analyse(graph: &GraphAsset, registry: &NodeRegistry) -> CacheReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{GraphCommand, InputPin, LinkId, NodeRegistry, NodeTypeId, OutputPin};
     use crate::material_graph::new_material_graph;
+    use voxel_graph::{GraphCommand, InputPin, LinkId, NodeTypeId, OutputPin};
 
     fn node(name: &str) -> NodeId {
         NodeId(name.into())
@@ -323,7 +321,7 @@ mod tests {
             node_type: NodeTypeId(node_type.into()),
             position: [0.0, 0.0],
         }
-        .apply(graph, &NodeRegistry)
+        .apply(graph, &crate::graph::CATALOGUE)
         .expect("adding a builtin node");
         id
     }
@@ -340,7 +338,7 @@ mod tests {
                 socket: socket(to.1),
             },
         }
-        .apply(graph, &NodeRegistry)
+        .apply(graph, &crate::graph::CATALOGUE)
         .expect("connecting two builtin sockets");
     }
 
@@ -353,7 +351,7 @@ mod tests {
         let layer = add(&mut graph, "layer", "material.pattern_layer");
         link(&mut graph, (&worley, "pattern"), (&layer, "pattern"));
 
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         assert_eq!(report.layers.len(), 1);
         assert_eq!(report.layers[0].cache, LayerCache::Static);
         assert!(report.is_fully_cacheable());
@@ -375,7 +373,7 @@ mod tests {
             (&layer, "animation_gain"),
         );
 
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         assert_eq!(
             report.layers[0].cache,
             LayerCache::Separable {
@@ -409,7 +407,7 @@ mod tests {
             (&layer, "drift_velocity"),
         );
 
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         assert_eq!(
             report.layers[0].cache,
             LayerCache::Separable {
@@ -442,7 +440,7 @@ mod tests {
         );
         link(&mut graph, (&first, "surface"), (&second, "surface"));
 
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         let first_report = report
             .layers
             .iter()
@@ -481,7 +479,7 @@ mod tests {
         link(&mut graph, (&oscillator, "value"), (&clamp, "value"));
         link(&mut graph, (&clamp, "value"), (&layer, "animation_gain"));
 
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         assert_eq!(
             report.layers[0].cache,
             LayerCache::Separable {
@@ -500,7 +498,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("the checked-in lava graph");
         let graph: GraphAsset = serde_json::from_str(&text).expect("lava graph parses");
 
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         assert!(
             !report.layers.is_empty(),
             "lava should author at least one pattern layer"
@@ -546,7 +544,7 @@ mod tests {
     #[test]
     fn a_graph_with_no_layers_is_vacuously_cacheable() {
         let graph = new_material_graph("bare");
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &crate::graph::CATALOGUE);
         assert!(report.layers.is_empty());
         assert!(report.is_fully_cacheable());
     }

@@ -1349,7 +1349,7 @@ mod tests {
 
     fn vbap_5_1_layout() -> SpeakerLayout {
         // Room 6×4m, speakers on walls at standard ITU angles
-        let mut layout = SpeakerLayout::surround_5_1(
+        let layout = SpeakerLayout::surround_5_1(
             Vec3::new(1.0, 3.5, 0.0), // L: front-left
             Vec3::new(5.0, 3.5, 0.0), // R: front-right
             Vec3::new(3.0, 4.0, 0.0), // C: front-center

@@ -20,7 +20,7 @@ use crate::environment::{
     EnvironmentChannel, EnvironmentContext, EvaluationClass, RuntimeEnvironmentState, Season,
     SpatialGranularity, UpdateFrequency, WeatherKind,
 };
-use crate::graph::GraphKind;
+use voxel_graph::GraphKind;
 use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]

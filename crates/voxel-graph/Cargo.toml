@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "Node-graph documents: identity, wiring, validation and history — no domain knowledge"
 
-# Deliberately serde and nothing else. This crate is the "picture" half of the node
-# system: what a graph IS, not what any particular graph MEANS. A dependency on a voxel,
-# a material or a shader here would make it unusable for the texture, audio and animation
-# graphs it exists to serve. `cargo tree -p voxel-graph` is the test.
+# Serialisation only, and that is a hard constraint rather than a coincidence. This crate is
+# the "picture" half of the node system: what a graph IS, not what any particular graph
+# MEANS. A dependency on a voxel, a material or a shader here would make it unusable for the
+# texture, audio and animation graphs it exists to serve. `cargo tree -p voxel-graph` is the
+# test.
+#
+# serde_json is load-bearing, not a convenience: `NodeRecord::unknown_payload` stores the raw
+# JSON of a node type this build does not recognise, so opening and re-saving a document
+# authored against a newer catalogue cannot destroy it. Graph hashing also canonicalises
+# through JSON.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
-# Only to prove the on-disk encoding, never to produce it.
 serde_json = "1"

@@ -25,12 +25,6 @@ use winit::window::Window;
 use crate::ao::AoMode;
 use crate::character::Submersion;
 use crate::frame_timing::FrameTimings;
-use crate::graph::{
-    node_reachability, Cardinality, ConnectionError, FieldDeclarationStatic, FieldTarget,
-    GraphAsset, GraphCommand, InputPin, LinkId, NodeCategory, NodeDeclaration, NodeId, NodePreview,
-    NodeRecord, NodeRegistry, NodeTypeId, NumericRange, OutputPin, PropertyValue,
-    SocketDeclarationStatic, SocketKey, SocketType,
-};
 use crate::lighting::SunSettings;
 use crate::material::{self, MATERIAL_COUNT};
 use crate::material_edit::{MaterialPanelState, WORLD_HOTBAR_BLOCKS};
@@ -47,6 +41,12 @@ use crate::world_edit::ClearanceUpdateMode;
 use crate::world_host::WorldEditStats;
 use voxel_color::{
     ColorSpaceOutcome, DisplayHeadroom, HeadroomChoice, OutputDepth, OutputSupport, TonemapCurve,
+};
+use voxel_graph::{
+    node_reachability, Cardinality, ConnectionError, FieldDeclarationStatic, FieldTarget,
+    GraphAsset, GraphCommand, InputPin, LinkId, NodeCategory, NodeDeclaration, NodeId, NodePreview,
+    NodeRecord, NodeRegistry, NodeTypeId, NumericRange, OutputPin, PropertyValue,
+    SocketDeclarationStatic, SocketKey, SocketType,
 };
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
@@ -1039,7 +1039,7 @@ fn draw_graph_section_contents(
     state: &mut GraphEditorState,
     material_table: &MaterialTable,
 ) {
-    let registry = NodeRegistry;
+    let registry = crate::graph::CATALOGUE;
     // Scope the dwell to Graph Studio: sockets sit a few pixels apart, so
     // egui's default instant tooltip strobes while a connector is dragged
     // across a node. The delay is read from the GLOBAL style when a tooltip is
@@ -1062,7 +1062,7 @@ fn draw_graph_section_contents(
         let graph_valid = !state
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.severity == crate::graph::DiagnosticSeverity::Error);
+            .any(|diagnostic| diagnostic.severity == voxel_graph::DiagnosticSeverity::Error);
         if ui
             .add_enabled(graph_valid, egui::Button::new("Save"))
             .on_disabled_hover_text("Resolve graph errors before saving")
@@ -1170,6 +1170,7 @@ fn draw_graph_section_contents(
                     == crate::graph::NodeOperation::Material(
                         crate::graph::MaterialNodeOperation::PatternLayer,
                     )
+                    .tag()
         }) {
             let can_add_layer = state
                 .graph
@@ -2293,7 +2294,7 @@ fn draw_graph_section_contents(
     }
     for diagnostic in &state.diagnostics {
         ui.colored_label(
-            if diagnostic.severity == crate::graph::DiagnosticSeverity::Error {
+            if diagnostic.severity == voxel_graph::DiagnosticSeverity::Error {
                 egui::Color32::from_rgb(255, 125, 125)
             } else {
                 egui::Color32::from_rgb(255, 210, 100)
@@ -2443,7 +2444,7 @@ fn graph_socket_hit_at_pointer(
 fn graph_connector_source_socket(
     drag: &ConnectorDrag,
     visuals: &[GraphNodeVisual],
-) -> Option<crate::graph::SocketDeclarationStatic> {
+) -> Option<voxel_graph::SocketDeclarationStatic> {
     let (node, socket, input) = match drag {
         ConnectorDrag::FromOutput(pin) => (&pin.node, &pin.socket, false),
         ConnectorDrag::FromInput(pin) => (&pin.node, &pin.socket, true),
@@ -2476,7 +2477,7 @@ fn graph_connector_source_socket(
 fn graph_connector_detached_link_ids(
     drag: &ConnectorDrag,
     visuals: &[GraphNodeVisual],
-    graph: &crate::graph::GraphAsset,
+    graph: &voxel_graph::GraphAsset,
 ) -> BTreeSet<LinkId> {
     let Some(socket) = graph_connector_source_socket(drag, visuals) else {
         return BTreeSet::new();
@@ -2531,7 +2532,7 @@ fn graph_connector_origin(
 fn graph_connector_can_link(
     drag: &ConnectorDrag,
     hit: &GraphSocketHit,
-    graph: &crate::graph::GraphAsset,
+    graph: &voxel_graph::GraphAsset,
     registry: &NodeRegistry,
 ) -> bool {
     let pins = match drag {
@@ -2575,9 +2576,9 @@ fn graph_connector_link(drag: &ConnectorDrag, hit: GraphSocketHit) -> (OutputPin
 
 fn graph_connector_candidates(
     drag: &ConnectorDrag,
-    source: crate::graph::SocketDeclarationStatic,
+    source: voxel_graph::SocketDeclarationStatic,
     filter: &str,
-    graph: &crate::graph::GraphAsset,
+    graph: &voxel_graph::GraphAsset,
     registry: &NodeRegistry,
 ) -> Vec<GraphConnectorCandidate> {
     let query = filter.trim().to_ascii_lowercase();
@@ -4450,7 +4451,7 @@ fn draw_graph_inspector(
     ui: &mut egui::Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
-    node_id: &crate::graph::NodeId,
+    node_id: &voxel_graph::NodeId,
 ) {
     let Some(record) = state.graph.nodes.get(node_id).cloned() else {
         return;

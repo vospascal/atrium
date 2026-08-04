@@ -8,11 +8,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::graph::{GraphAsset, NodeRegistry};
 use crate::material_graph::{compile, MaterialGraphShaderSet, MaterialSampleContext};
 use crate::material_graph_layers::sync_pattern_layers_from_graph;
 use crate::material_table::MaterialTable;
 use crate::studio_assets::{AssetError, StudioProject, StudioProjectStore};
+use voxel_graph::GraphAsset;
 
 /// Result of selecting a material in Graph Studio.
 #[derive(Clone, Debug)]
@@ -37,7 +37,7 @@ impl MaterialGraphAssetService {
         let store = StudioProjectStore::new(project_path);
         let graphs = project.load_graph_assets(&store)?;
         let mut shaders = MaterialGraphShaderSet::default();
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         for (slot_key, reference) in &project.manifest.material_assignments {
             let slot = slot_key.parse::<u8>().map_err(|_| {
                 AssetError::InvalidMaterial(format!(
@@ -75,7 +75,7 @@ impl MaterialGraphAssetService {
         material_table: &mut MaterialTable,
     ) -> (MaterialGraphShaderSet, Vec<String>) {
         let store = StudioProjectStore::new(project_path);
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut shaders = MaterialGraphShaderSet::default();
         let mut diagnostics = Vec::new();
 
@@ -176,7 +176,7 @@ impl MaterialGraphAssetService {
         slot: u8,
         graph: &GraphAsset,
     ) -> Result<(), AssetError> {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         compile(graph, &registry).map_err(|error| {
             AssetError::InvalidGraph(format!("graph `{}` failed: {error}", graph.id))
         })?;
@@ -270,7 +270,7 @@ mod tests {
             .expect("lava's graph loads");
         let layer = crate::material_graph_layers::project_pattern_stack(
             &lava_graph,
-            &NodeRegistry::builtin(),
+            &crate::graph::CATALOGUE,
         )
         .expect("lava's pattern chain projects")
         .active()

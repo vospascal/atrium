@@ -1,444 +1,29 @@
-//! Renderer-independent, persistent node-graph foundation for Studio.
+//! Atrium's node catalogue: which nodes exist, what sockets and fields each has, and
+//! which of them a graph of a given kind must contain.
 //!
-//! This module owns editable graph documents and their derived validation data;
-//! it deliberately does not evaluate materials, geometry, quality, or render
-//! passes. Those backends consume a successfully resolved graph later.
+//! The graph *mechanics* — documents, wiring rules, validation, history — are
+//! `voxel-graph`, which knows nothing about materials. This file is the domain half: the
+//! 62 operations across seven families, their socket and field declarations, and
+//! [`GRAPH_CONTRACTS`].
+//!
+//! Each operation carries a stable label ([`OperationTag`]) rather than being named
+//! directly in `voxel-graph`'s types. `tag()` and [`NodeOperation::from_tag`] convert;
+//! `every_operation_tag_round_trips` proves no label is orphaned or duplicated.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use voxel_graph::{
+    choice, field, Cardinality, EvaluationRate, FieldDeclarationStatic, FieldDefault, FieldTarget,
+    FlowConstraintStatic, GraphContractStatic, GraphKind, NodeCategory, NodeConstraintStatic,
+    NodeDeclaration, NodePreview, NodeRegistry, NumericRange, OperationTag, Separable,
+    SocketDeclarationStatic, SocketType, TemporalDependence, EMPTY_CHOICES, NONE, POSITIVE, SIGNED,
+    UNIT, WIDE,
+};
 
-use serde::{Deserialize, Serialize};
-
-use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
-
-static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
-
-macro_rules! graph_id {
-    ($name:ident) => {
-        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(pub String);
-        #[allow(clippy::new_without_default)]
-        impl $name {
-            pub fn new() -> Self {
-                let sequence = NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed);
-                Self(format!("g-{sequence:016x}"))
-            }
-        }
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(formatter)
-            }
-        }
-    };
-}
-
-graph_id!(NodeId);
-graph_id!(LinkId);
-graph_id!(SocketKey);
-graph_id!(NodeTypeId);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphKind {
-    World,
-    Material,
-    MaterialFunction,
-    Geometry,
-    Environment,
-    Biome,
-    SurfaceRule,
-    WorldModifier,
-    Feature,
-    Audio,
-    Animation,
-    Quality,
-    RenderPipeline,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SocketType {
-    Scalar,
-    Integer,
-    Vector3,
-    Color,
-    Boolean,
-    Text,
-    Asset,
-    MaterialSurface,
-    MaterialRole,
-    ScalarField,
-    MaskField,
-    VoxelField,
-    PointField,
-    SplineField,
-    BiomeField,
-    BiomeDefinition,
-    SurfaceProfile,
-    SurfaceRule,
-    MaterialBinding,
-    Environment,
-    FeatureSet,
-    AudioSignal,
-    AnimationSignal,
-    QualityProfile,
-    RenderTarget,
-}
-
-impl SocketType {
-    /// Human name for the socket's value type. Where a type has an obvious
-    /// counterpart in Blender's shader editor the wording is borrowed from it,
-    /// so someone arriving from that editor reads the same words here.
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::Scalar => "Float",
-            Self::Integer => "Int",
-            Self::Vector3 => "Vector",
-            Self::Color => "Float Color",
-            Self::Boolean => "Boolean",
-            Self::Text => "String",
-            Self::Asset => "Asset",
-            Self::MaterialSurface => "Material Surface",
-            Self::MaterialRole => "Material Role",
-            Self::ScalarField => "Scalar Field",
-            Self::MaskField => "Mask Field",
-            Self::VoxelField => "Voxel Field",
-            Self::PointField => "Point Field",
-            Self::SplineField => "Spline Field",
-            Self::BiomeField => "Biome Field",
-            Self::BiomeDefinition => "Biome Definition",
-            Self::SurfaceProfile => "Surface Profile",
-            Self::SurfaceRule => "Surface Rule",
-            Self::MaterialBinding => "Material Binding",
-            Self::Environment => "Environment",
-            Self::FeatureSet => "Feature Set",
-            Self::AudioSignal => "Audio Signal",
-            Self::AnimationSignal => "Animation Signal",
-            Self::QualityProfile => "Quality Profile",
-            Self::RenderTarget => "Render Target",
-        }
-    }
-}
-
-/// How a node's OWN operation depends on the clock — the axis
-/// [`EvaluationRate`] does not have.
+/// What a node does, as a typed value.
 ///
-/// **Why this is a second axis and not another rung of the rate ladder.**
-/// `EvaluationRate` is purely SPATIAL and it is ORDERED: `can_feed` is
-/// `self <= destination`, so a coarser value may feed a finer one. Time is not
-/// comparable with that. An oscillator is spatially [`EvaluationRate::Uniform`]
-/// — the same value at every point in the world — and yet it changes every
-/// frame. Folding time into the ladder would either break the ordering or
-/// force every animated value to claim `PerSample`, which would be a lie about
-/// where it can be evaluated.
-///
-/// Declared on every node rather than defaulted, because the safe answer is not
-/// obvious from a node's other metadata and a wrong one silently claims that a
-/// surface can be cached when it cannot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TemporalDependence {
-    /// Time-invariant in itself: the output changes over time only if an input
-    /// does. Every pure math, mix, ramp and pattern-generator node.
-    Inherited,
-    /// Reads the animation clock. The output changes every frame regardless of
-    /// its inputs.
-    Clock,
-    /// Reads the world-event field. Changes when an entity moves or an event is
-    /// raised, which is not the clock but is equally not cacheable.
-    Events,
-}
-
-impl TemporalDependence {
-    /// Whether this node introduces time-dependence on its own, i.e. whether a
-    /// taint pass should SEED at it rather than merely propagate through it.
-    pub fn is_source(self) -> bool {
-        !matches!(self, TemporalDependence::Inherited)
-    }
-}
-
-/// How a time-varying value entering a socket combines with the cacheable
-/// spatial field the node owns — the question that decides whether an ANIMATED
-/// material can still be cached.
-///
-/// Only meaningful on a node that owns such a field; everywhere else the
-/// conservative [`Separable::None`] is correct and is what `socket!` produces.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Separable {
-    /// Time here changes the field itself, so nothing about it can be cached.
-    None,
-    /// Time here multiplies the field's contribution AFTER it is sampled, so the
-    /// field caches and the scalar is applied per pixel.
-    Scale,
-    /// Time here translates the sample COORDINATE, so the field caches and the
-    /// clock only moves where it is read. Exact for a pattern layer, because
-    /// `pattern_drift_meters` quantises the offset to a whole number of texels —
-    /// an integer index shift in the cache's own address space.
-    Translate,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvaluationRate {
-    Uniform,
-    PerMaterial,
-    PerVoxel,
-    PerSample,
-}
-
-impl EvaluationRate {
-    fn can_feed(self, destination: Self) -> bool {
-        self <= destination
-    }
-
-    /// Human name for how often the value is recomputed.
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::Uniform => "Uniform",
-            Self::PerMaterial => "Per Material",
-            Self::PerVoxel => "Per Voxel",
-            Self::PerSample => "Per Sample",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum PropertyValue {
-    Scalar(f32),
-    Vector3([f32; 3]),
-    Color([f32; 4]),
-    Boolean(bool),
-    Integer(i64),
-    Text(String),
-    Asset(AssetId),
-}
-
-impl PropertyValue {
-    pub fn socket_type(&self) -> SocketType {
-        match self {
-            Self::Scalar(_) => SocketType::Scalar,
-            Self::Vector3(_) => SocketType::Vector3,
-            Self::Color(_) => SocketType::Color,
-            Self::Boolean(_) => SocketType::Boolean,
-            Self::Integer(_) => SocketType::Integer,
-            Self::Text(_) => SocketType::Text,
-            Self::Asset(_) => SocketType::Asset,
-        }
-    }
-}
-
-/// Where an editable field is stored in a node record. Both properties and
-/// unconnected input defaults use the same schema and therefore the same UI,
-/// validation, and persistence rules.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FieldTarget {
-    Property,
-    InputSocket,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum FieldDefault {
-    Scalar(f32),
-    Integer(i64),
-    Vector3([f32; 3]),
-    Color([f32; 4]),
-    Boolean(bool),
-    Text(&'static str),
-}
-
-impl FieldDefault {
-    pub fn value(self) -> PropertyValue {
-        match self {
-            Self::Scalar(value) => PropertyValue::Scalar(value),
-            Self::Integer(value) => PropertyValue::Integer(value),
-            Self::Vector3(value) => PropertyValue::Vector3(value),
-            Self::Color(value) => PropertyValue::Color(value),
-            Self::Boolean(value) => PropertyValue::Boolean(value),
-            Self::Text(value) => PropertyValue::Text(value.to_string()),
-        }
-    }
-
-    fn socket_type(self) -> SocketType {
-        self.value().socket_type()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NumericRange {
-    pub min: f32,
-    pub max: f32,
-}
-
-impl NumericRange {
-    pub const fn new(min: f32, max: f32) -> Self {
-        Self { min, max }
-    }
-
-    pub fn contains(self, value: f32) -> bool {
-        value.is_finite() && value >= self.min && value <= self.max
-    }
-}
-
-/// One selectable option of a text-valued field. `value` is the string that is
-/// persisted and that compilers dispatch on; `label` and `description` exist
-/// only so the editor can explain the option instead of showing a bare id.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChoiceDeclaration {
-    pub value: &'static str,
-    pub label: &'static str,
-    pub description: &'static str,
-}
-
-const fn choice(
-    value: &'static str,
-    label: &'static str,
-    description: &'static str,
-) -> ChoiceDeclaration {
-    ChoiceDeclaration {
-        value,
-        label,
-        description,
-    }
-}
-
-/// Canonical editable-field definition. `hard_range` is enforced by graph
-/// validation and compilers; `soft_range` controls the ordinary UI widget.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FieldDeclarationStatic {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub description: &'static str,
-    pub target: FieldTarget,
-    pub default: FieldDefault,
-    pub hard_range: Option<NumericRange>,
-    pub soft_range: Option<NumericRange>,
-    pub step: Option<f32>,
-    pub choices: &'static [ChoiceDeclaration],
-    pub read_only: bool,
-}
-
-impl FieldDeclarationStatic {
-    pub fn accepts(self, value: &PropertyValue) -> bool {
-        if self.default.socket_type() != value.socket_type() {
-            return false;
-        }
-        match (self.hard_range, value) {
-            (Some(range), PropertyValue::Scalar(value)) => range.contains(*value),
-            (Some(range), PropertyValue::Integer(value)) => range.contains(*value as f32),
-            (_, PropertyValue::Vector3(value)) => value.iter().all(|value| value.is_finite()),
-            (_, PropertyValue::Color(value)) => value.iter().all(|value| value.is_finite()),
-            (_, PropertyValue::Text(value)) if !self.choices.is_empty() => self
-                .choices
-                .iter()
-                .any(|choice| choice.value == value.as_str()),
-            _ => true,
-        }
-    }
-
-    /// The declared option carrying this persisted value, if the field offers
-    /// choices at all.
-    pub fn choice(&self, value: &str) -> Option<&'static ChoiceDeclaration> {
-        let choices: &'static [ChoiceDeclaration] = self.choices;
-        choices.iter().find(|choice| choice.value == value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NodeCategory {
-    MaterialOutput,
-    Inputs,
-    Layers,
-    Procedural,
-    Coordinates,
-    Utilities,
-    Conditions,
-    Environment,
-    Biomes,
-    Surface,
-    Features,
-    Audio,
-    Animation,
-    Quality,
-    Render,
-}
-
-impl NodeCategory {
-    pub const ALL: &'static [Self] = &[
-        Self::MaterialOutput,
-        Self::Inputs,
-        Self::Layers,
-        Self::Procedural,
-        Self::Coordinates,
-        Self::Utilities,
-        Self::Conditions,
-        Self::Environment,
-        Self::Biomes,
-        Self::Surface,
-        Self::Features,
-        Self::Audio,
-        Self::Animation,
-        Self::Quality,
-        Self::Render,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::MaterialOutput => "Material Output",
-            Self::Inputs => "Inputs",
-            Self::Layers => "Layers",
-            Self::Procedural => "Procedural",
-            Self::Coordinates => "Coordinates & Vectors",
-            Self::Utilities => "Utilities",
-            Self::Conditions => "Conditions",
-            Self::Environment => "Environment",
-            Self::Biomes => "Biomes",
-            Self::Surface => "Surface Composition",
-            Self::Features => "Features",
-            Self::Audio => "Audio",
-            Self::Animation => "Animation",
-            Self::Quality => "Quality",
-            Self::Render => "Render",
-        }
-    }
-
-    pub const fn color(self) -> [u8; 3] {
-        match self {
-            Self::MaterialOutput => [137, 57, 68],
-            Self::Inputs => [125, 61, 76],
-            Self::Layers => [84, 118, 144],
-            Self::Procedural => [161, 91, 47],
-            Self::Coordinates => [55, 119, 149],
-            Self::Utilities => [161, 127, 47],
-            Self::Conditions => [126, 93, 51],
-            Self::Environment => [55, 128, 121],
-            Self::Biomes => [69, 132, 78],
-            Self::Surface => [104, 126, 50],
-            Self::Features => [109, 105, 58],
-            Self::Audio => [116, 72, 139],
-            Self::Animation => [139, 72, 111],
-            Self::Quality => [72, 101, 157],
-            Self::Render => [77, 84, 101],
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NodePreview {
-    None,
-    Value,
-    ColorWheel,
-    MaterialSphere,
-    Noise,
-    ColorRamp,
-}
-
-/// Typed backend operation associated with a node declaration. Persistence
-/// keeps the stable textual node ID, while compilers dispatch through this enum
-/// so behavior cannot drift from the schema through a second string table.
+/// Declaration sites and lowering code use this; a [`NodeDeclaration`] stores the
+/// [`OperationTag`] it converts to, so `voxel-graph` never sees these variants. The textual
+/// node type stays the persisted identity — this enum is the compiler dispatch key, so
+/// behaviour cannot drift from the schema through a second string table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeOperation {
     Material(MaterialNodeOperation),
@@ -486,30 +71,279 @@ pub enum LogicNodeOperation {
     Always,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FlowConstraintStatic {
-    pub value_type: SocketType,
-    pub source: NodeOperation,
-    /// The node operations allowed to sit between source and sink. This is a
-    /// canonical chain: the route is walked link by link and anything else on
-    /// it is an error, so only declare a flow for a route that is genuinely
-    /// prescribed. "This node must reach the output somehow" is not a flow —
-    /// that is the `unreached-node` warning, which already covers every node.
-    pub intermediates: &'static [NodeOperation],
-    pub sink: NodeOperation,
+impl MaterialNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Output => OperationTag("material.output"),
+            Self::Surface => OperationTag("material.surface"),
+            Self::PatternLayer => OperationTag("material.pattern_layer"),
+            Self::PatternFlat => OperationTag("material.pattern_flat"),
+            Self::PatternNoise => OperationTag("material.pattern_noise"),
+            Self::PatternSpeckle => OperationTag("material.pattern_speckle"),
+            Self::PatternPerlin => OperationTag("material.pattern_perlin"),
+            Self::PatternSimplex => OperationTag("material.pattern_simplex"),
+            Self::PatternRidged => OperationTag("material.pattern_ridged"),
+            Self::PatternTurbulence => OperationTag("material.pattern_turbulence"),
+            Self::PatternWorley => OperationTag("material.pattern_worley"),
+            Self::PatternWorleyEdge => OperationTag("material.pattern_worley_edge"),
+            Self::PatternWorleySmooth => OperationTag("material.pattern_worley_smooth"),
+            Self::PatternWave => OperationTag("material.pattern_wave"),
+            Self::PatternChecker => OperationTag("material.pattern_checker"),
+            Self::PatternTileTone => OperationTag("material.pattern_tile_tone"),
+            Self::PatternTileEdge => OperationTag("material.pattern_tile_edge"),
+            Self::Tessellation => OperationTag("material.tessellation"),
+            Self::ConstantScalar => OperationTag("material.constant_scalar"),
+            Self::ConstantColor => OperationTag("material.constant_color"),
+            Self::AddScalar => OperationTag("material.add_scalar"),
+            Self::MixColor => OperationTag("material.mix_color"),
+            Self::ClampScalar => OperationTag("material.clamp_scalar"),
+            Self::Position => OperationTag("material.position"),
+            Self::Normal => OperationTag("material.normal"),
+            Self::EmissionStrength => OperationTag("material.emission_strength"),
+            Self::FaceColor => OperationTag("material.face_color"),
+            Self::FaceRoughness => OperationTag("material.face_roughness"),
+            Self::RemapScalar => OperationTag("material.remap_scalar"),
+            Self::Noise => OperationTag("material.noise"),
+            Self::Fbm => OperationTag("material.fbm"),
+            Self::ColorRamp => OperationTag("material.color_ramp"),
+            Self::VectorAdd => OperationTag("material.vector_add"),
+            Self::VectorScale => OperationTag("material.vector_scale"),
+            Self::NormalizeVector => OperationTag("material.normalize_vector"),
+            Self::DotVector => OperationTag("material.dot_vector"),
+            Self::PositionComponent => OperationTag("material.position_component"),
+            Self::NormalComponent => OperationTag("material.normal_component"),
+            Self::PassthroughScalar => OperationTag("material.passthrough_scalar"),
+            Self::Time => OperationTag("material.time"),
+            Self::Oscillator => OperationTag("material.oscillator"),
+            Self::EventSensor => OperationTag("material.event_sensor"),
+            Self::MultiplyScalar => OperationTag("material.multiply_scalar"),
+            Self::Direction => OperationTag("material.direction"),
+            Self::RerouteScalar => OperationTag("material.reroute_scalar"),
+            Self::RerouteColor => OperationTag("material.reroute_color"),
+            Self::RerouteVector => OperationTag("material.reroute_vector"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "material.output" => Some(Self::Output),
+            "material.surface" => Some(Self::Surface),
+            "material.pattern_layer" => Some(Self::PatternLayer),
+            "material.pattern_flat" => Some(Self::PatternFlat),
+            "material.pattern_noise" => Some(Self::PatternNoise),
+            "material.pattern_speckle" => Some(Self::PatternSpeckle),
+            "material.pattern_perlin" => Some(Self::PatternPerlin),
+            "material.pattern_simplex" => Some(Self::PatternSimplex),
+            "material.pattern_ridged" => Some(Self::PatternRidged),
+            "material.pattern_turbulence" => Some(Self::PatternTurbulence),
+            "material.pattern_worley" => Some(Self::PatternWorley),
+            "material.pattern_worley_edge" => Some(Self::PatternWorleyEdge),
+            "material.pattern_worley_smooth" => Some(Self::PatternWorleySmooth),
+            "material.pattern_wave" => Some(Self::PatternWave),
+            "material.pattern_checker" => Some(Self::PatternChecker),
+            "material.pattern_tile_tone" => Some(Self::PatternTileTone),
+            "material.pattern_tile_edge" => Some(Self::PatternTileEdge),
+            "material.tessellation" => Some(Self::Tessellation),
+            "material.constant_scalar" => Some(Self::ConstantScalar),
+            "material.constant_color" => Some(Self::ConstantColor),
+            "material.add_scalar" => Some(Self::AddScalar),
+            "material.mix_color" => Some(Self::MixColor),
+            "material.clamp_scalar" => Some(Self::ClampScalar),
+            "material.position" => Some(Self::Position),
+            "material.normal" => Some(Self::Normal),
+            "material.emission_strength" => Some(Self::EmissionStrength),
+            "material.face_color" => Some(Self::FaceColor),
+            "material.face_roughness" => Some(Self::FaceRoughness),
+            "material.remap_scalar" => Some(Self::RemapScalar),
+            "material.noise" => Some(Self::Noise),
+            "material.fbm" => Some(Self::Fbm),
+            "material.color_ramp" => Some(Self::ColorRamp),
+            "material.vector_add" => Some(Self::VectorAdd),
+            "material.vector_scale" => Some(Self::VectorScale),
+            "material.normalize_vector" => Some(Self::NormalizeVector),
+            "material.dot_vector" => Some(Self::DotVector),
+            "material.position_component" => Some(Self::PositionComponent),
+            "material.normal_component" => Some(Self::NormalComponent),
+            "material.passthrough_scalar" => Some(Self::PassthroughScalar),
+            "material.time" => Some(Self::Time),
+            "material.oscillator" => Some(Self::Oscillator),
+            "material.event_sensor" => Some(Self::EventSensor),
+            "material.multiply_scalar" => Some(Self::MultiplyScalar),
+            "material.direction" => Some(Self::Direction),
+            "material.reroute_scalar" => Some(Self::RerouteScalar),
+            "material.reroute_color" => Some(Self::RerouteColor),
+            "material.reroute_vector" => Some(Self::RerouteVector),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NodeConstraintStatic {
-    pub operation: NodeOperation,
-    pub cardinality: Cardinality,
+impl WorldNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Output => OperationTag("world.output"),
+            Self::GeneratedTerrain => OperationTag("world.generated_terrain"),
+            Self::Compose => OperationTag("world.compose"),
+            Self::StudioPreview => OperationTag("world.studio_preview"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "world.output" => Some(Self::Output),
+            "world.generated_terrain" => Some(Self::GeneratedTerrain),
+            "world.compose" => Some(Self::Compose),
+            "world.studio_preview" => Some(Self::StudioPreview),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GraphContractStatic {
-    pub kind: GraphKind,
-    pub nodes: &'static [NodeConstraintStatic],
-    pub flows: &'static [FlowConstraintStatic],
+impl EnvironmentNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Output => OperationTag("environment.output"),
+            Self::Generated => OperationTag("environment.generated"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "environment.output" => Some(Self::Output),
+            "environment.generated" => Some(Self::Generated),
+            _ => None,
+        }
+    }
+}
+
+impl BiomeNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Output => OperationTag("biome.output"),
+            Self::Definition => OperationTag("biome.definition"),
+            Self::Blend => OperationTag("biome.blend"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "biome.output" => Some(Self::Output),
+            "biome.definition" => Some(Self::Definition),
+            "biome.blend" => Some(Self::Blend),
+            _ => None,
+        }
+    }
+}
+
+impl SurfaceNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Output => OperationTag("surface.output"),
+            Self::Profile => OperationTag("surface.profile"),
+            Self::MaterialBinding => OperationTag("surface.material_binding"),
+            Self::AddVoxelLayer => OperationTag("surface.add_voxel_layer"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "surface.output" => Some(Self::Output),
+            "surface.profile" => Some(Self::Profile),
+            "surface.material_binding" => Some(Self::MaterialBinding),
+            "surface.add_voxel_layer" => Some(Self::AddVoxelLayer),
+            _ => None,
+        }
+    }
+}
+
+impl FieldNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Constant => OperationTag("field.constant"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "field.constant" => Some(Self::Constant),
+            _ => None,
+        }
+    }
+}
+
+impl LogicNodeOperation {
+    /// This operation's stable label. The text matches the node's own type id, so a
+    /// collision between two operations is visible on sight.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Always => OperationTag("logic.always"),
+        }
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "logic.always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
+impl NodeOperation {
+    /// The label a `NodeDeclaration` carries. Declaration sites still name a real variant —
+    /// the `node!` macro calls this — so a typo there remains a compile error.
+    pub const fn tag(self) -> OperationTag {
+        match self {
+            Self::Material(operation) => operation.tag(),
+            Self::World(operation) => operation.tag(),
+            Self::Environment(operation) => operation.tag(),
+            Self::Biome(operation) => operation.tag(),
+            Self::Surface(operation) => operation.tag(),
+            Self::Field(operation) => operation.tag(),
+            Self::Logic(operation) => operation.tag(),
+        }
+    }
+
+    /// Recover the operation from a declaration's label.
+    ///
+    /// `None` means the label names no operation this build knows — the same condition as an
+    /// unrecognised node type, which happens when reading a document authored against a newer
+    /// catalogue and is never a reason to panic.
+    pub fn from_tag(tag: OperationTag) -> Option<Self> {
+        if let Some(operation) = MaterialNodeOperation::from_label(tag.0) {
+            return Some(Self::Material(operation));
+        }
+        if let Some(operation) = WorldNodeOperation::from_label(tag.0) {
+            return Some(Self::World(operation));
+        }
+        if let Some(operation) = EnvironmentNodeOperation::from_label(tag.0) {
+            return Some(Self::Environment(operation));
+        }
+        if let Some(operation) = BiomeNodeOperation::from_label(tag.0) {
+            return Some(Self::Biome(operation));
+        }
+        if let Some(operation) = SurfaceNodeOperation::from_label(tag.0) {
+            return Some(Self::Surface(operation));
+        }
+        if let Some(operation) = FieldNodeOperation::from_label(tag.0) {
+            return Some(Self::Field(operation));
+        }
+        if let Some(operation) = LogicNodeOperation::from_label(tag.0) {
+            return Some(Self::Logic(operation));
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -567,28 +401,28 @@ pub enum MaterialNodeOperation {
     RerouteVector,
 }
 
-const MATERIAL_SURFACE_INTERMEDIATES: &[NodeOperation] =
-    &[NodeOperation::Material(MaterialNodeOperation::PatternLayer)];
+const MATERIAL_SURFACE_INTERMEDIATES: &[OperationTag] =
+    &[NodeOperation::Material(MaterialNodeOperation::PatternLayer).tag()];
 const MATERIAL_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[
     NodeConstraintStatic {
-        operation: NodeOperation::Material(MaterialNodeOperation::Output),
+        operation: NodeOperation::Material(MaterialNodeOperation::Output).tag(),
         cardinality: Cardinality::EXACTLY_ONE,
     },
     NodeConstraintStatic {
-        operation: NodeOperation::Material(MaterialNodeOperation::Surface),
+        operation: NodeOperation::Material(MaterialNodeOperation::Surface).tag(),
         cardinality: Cardinality::EXACTLY_ONE,
     },
     NodeConstraintStatic {
-        operation: NodeOperation::Material(MaterialNodeOperation::PatternLayer),
+        operation: NodeOperation::Material(MaterialNodeOperation::PatternLayer).tag(),
         cardinality: Cardinality::up_to(crate::pattern::MAX_PATTERN_LAYERS),
     },
 ];
 const MATERIAL_FLOWS: &[FlowConstraintStatic] = &[
     FlowConstraintStatic {
         value_type: SocketType::MaterialSurface,
-        source: NodeOperation::Material(MaterialNodeOperation::Surface),
+        source: NodeOperation::Material(MaterialNodeOperation::Surface).tag(),
         intermediates: MATERIAL_SURFACE_INTERMEDIATES,
-        sink: NodeOperation::Material(MaterialNodeOperation::Output),
+        sink: NodeOperation::Material(MaterialNodeOperation::Output).tag(),
     },
     // S3 animation nodes deliberately get NO flow constraint. An oscillator
     // that reaches nothing is already reported by the `unreached-node` warning
@@ -599,14 +433,14 @@ const MATERIAL_FLOWS: &[FlowConstraintStatic] = &[
     // severity for "this has no effect yet".
 ];
 const WORLD_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[NodeConstraintStatic {
-    operation: NodeOperation::World(WorldNodeOperation::Output),
+    operation: NodeOperation::World(WorldNodeOperation::Output).tag(),
     cardinality: Cardinality::EXACTLY_ONE,
 }];
 const WORLD_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
     value_type: SocketType::VoxelField,
-    source: NodeOperation::World(WorldNodeOperation::GeneratedTerrain),
-    intermediates: &[NodeOperation::World(WorldNodeOperation::Compose)],
-    sink: NodeOperation::World(WorldNodeOperation::Output),
+    source: NodeOperation::World(WorldNodeOperation::GeneratedTerrain).tag(),
+    intermediates: &[NodeOperation::World(WorldNodeOperation::Compose).tag()],
+    sink: NodeOperation::World(WorldNodeOperation::Output).tag(),
 }];
 pub static GRAPH_CONTRACTS: &[GraphContractStatic] = &[
     GraphContractStatic {
@@ -620,712 +454,6 @@ pub static GRAPH_CONTRACTS: &[GraphContractStatic] = &[
         flows: WORLD_FLOWS,
     },
 ];
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConnectionPlan {
-    pub replaced: Vec<(LinkId, LinkRecord)>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConnectionError {
-    MissingNode(NodeId),
-    UnknownOutput(OutputPin),
-    UnknownInput(InputPin),
-    TypeMismatch {
-        from: SocketType,
-        to: SocketType,
-    },
-    RateMismatch {
-        from: EvaluationRate,
-        to: EvaluationRate,
-    },
-    InputAtCapacity(InputPin),
-    OutputAtCapacity(OutputPin),
-    Cycle,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SocketDeclaration {
-    pub key: SocketKey,
-    pub label: String,
-    pub description: String,
-    pub value_type: SocketType,
-    pub rate: EvaluationRate,
-    pub cardinality: Cardinality,
-}
-
-/// Inclusive connection/instance bounds used by sockets and graph contracts.
-/// `maximum: None` means unbounded. Keeping the same vocabulary at both
-/// levels lets validation and UI affordances derive from one model.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Cardinality {
-    pub minimum: usize,
-    pub maximum: Option<usize>,
-}
-
-impl Cardinality {
-    pub const ANY: Self = Self::new(0, None);
-    pub const OPTIONAL_SINGLE: Self = Self::new(0, Some(1));
-    pub const REQUIRED_SINGLE: Self = Self::new(1, Some(1));
-    pub const EXACTLY_ONE: Self = Self::REQUIRED_SINGLE;
-
-    pub const fn new(minimum: usize, maximum: Option<usize>) -> Self {
-        Self { minimum, maximum }
-    }
-
-    pub const fn up_to(maximum: usize) -> Self {
-        Self::new(0, Some(maximum))
-    }
-
-    pub fn accepts(self, count: usize) -> bool {
-        count >= self.minimum && self.maximum.is_none_or(|maximum| count <= maximum)
-    }
-
-    /// Whether the current occupancy leaves room for one more link/instance.
-    /// A saturated single-link socket is still connectable: the connection
-    /// planner replaces its existing link instead of exceeding this bound.
-    pub const fn accepts_additional(self, count: usize) -> bool {
-        match self.maximum {
-            Some(maximum) => count < maximum,
-            None => true,
-        }
-    }
-
-    pub const fn allows_many(self) -> bool {
-        !matches!(self.maximum, Some(0 | 1))
-    }
-
-    pub fn description(self) -> String {
-        match (self.minimum, self.maximum) {
-            (0, None) => "any number".to_string(),
-            (minimum, None) => format!("at least {minimum}"),
-            (minimum, Some(maximum)) if minimum == maximum => format!("exactly {minimum}"),
-            (minimum, Some(maximum)) => format!("between {minimum} and {maximum}"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GraphInterface {
-    #[serde(default)]
-    pub inputs: BTreeMap<SocketKey, SocketDeclaration>,
-    /// Named graph outputs bind the public interface to an output node pin.
-    #[serde(default)]
-    pub outputs: BTreeMap<SocketKey, OutputPin>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GraphLayout {
-    #[serde(default)]
-    pub positions: BTreeMap<NodeId, [f32; 2]>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NodeRecord {
-    pub node_type: NodeTypeId,
-    pub node_type_version: u32,
-    #[serde(default)]
-    pub properties: BTreeMap<String, PropertyValue>,
-    #[serde(default)]
-    pub socket_defaults: BTreeMap<SocketKey, PropertyValue>,
-    #[serde(default)]
-    pub unknown_payload: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct OutputPin {
-    pub node: NodeId,
-    pub socket: SocketKey,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct InputPin {
-    pub node: NodeId,
-    pub socket: SocketKey,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LinkRecord {
-    pub from: OutputPin,
-    pub to: InputPin,
-    #[serde(default)]
-    pub order: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GraphAsset {
-    pub schema_version: u32,
-    pub id: AssetId,
-    pub name: String,
-    pub kind: GraphKind,
-    #[serde(default)]
-    pub interface: GraphInterface,
-    #[serde(default)]
-    pub nodes: BTreeMap<NodeId, NodeRecord>,
-    #[serde(default)]
-    pub links: BTreeMap<LinkId, LinkRecord>,
-    #[serde(default)]
-    pub layout: GraphLayout,
-}
-
-impl GraphAsset {
-    pub fn new(name: impl Into<String>, kind: GraphKind) -> Self {
-        Self {
-            schema_version: STUDIO_ASSET_SCHEMA_VERSION,
-            id: AssetId::new(),
-            name: name.into(),
-            kind,
-            interface: GraphInterface::default(),
-            nodes: BTreeMap::new(),
-            links: BTreeMap::new(),
-            layout: GraphLayout::default(),
-        }
-    }
-
-    pub fn can_add_node_type(&self, registry: &NodeRegistry, node_type: &NodeTypeId) -> bool {
-        let Some(declaration) = registry.find(node_type) else {
-            return false;
-        };
-        if !declaration.kinds.contains(&self.kind) {
-            return false;
-        }
-        let count = self
-            .nodes
-            .values()
-            .filter(|node| {
-                registry
-                    .find(&node.node_type)
-                    .is_some_and(|node| node.operation == declaration.operation)
-            })
-            .count();
-        registry
-            .node_cardinality(self.kind, declaration.operation)
-            .maximum
-            .is_none_or(|maximum| count < maximum)
-    }
-
-    pub fn incoming_link(&self, pin: &InputPin) -> Option<(&LinkId, &LinkRecord)> {
-        self.links
-            .iter()
-            .find(|(_, link)| link.to.node == pin.node && link.to.socket == pin.socket)
-    }
-
-    /// Derive a complete connection decision from the node/socket schema.
-    /// The editor uses this for hover affordances and commands use the same
-    /// result when committing, so compatibility cannot drift between them.
-    pub fn connection_plan(
-        &self,
-        registry: &NodeRegistry,
-        from: &OutputPin,
-        to: &InputPin,
-    ) -> Result<ConnectionPlan, ConnectionError> {
-        let from_node = self
-            .nodes
-            .get(&from.node)
-            .ok_or_else(|| ConnectionError::MissingNode(from.node.clone()))?;
-        let to_node = self
-            .nodes
-            .get(&to.node)
-            .ok_or_else(|| ConnectionError::MissingNode(to.node.clone()))?;
-        let from_socket = registry
-            .find(&from_node.node_type)
-            .and_then(|declaration| declaration.output(&from.socket))
-            .ok_or_else(|| ConnectionError::UnknownOutput(from.clone()))?;
-        let to_socket = registry
-            .find(&to_node.node_type)
-            .and_then(|declaration| declaration.input(&to.socket))
-            .ok_or_else(|| ConnectionError::UnknownInput(to.clone()))?;
-        if from_socket.value_type != to_socket.value_type {
-            return Err(ConnectionError::TypeMismatch {
-                from: from_socket.value_type,
-                to: to_socket.value_type,
-            });
-        }
-        if !from_socket.rate.can_feed(to_socket.rate) {
-            return Err(ConnectionError::RateMismatch {
-                from: from_socket.rate,
-                to: to_socket.rate,
-            });
-        }
-
-        let incoming = self
-            .links
-            .iter()
-            .filter(|(_, link)| link.to.node == to.node && link.to.socket == to.socket)
-            .map(|(id, link)| (id.clone(), link.clone()))
-            .collect::<Vec<_>>();
-        let outgoing = self
-            .links
-            .iter()
-            .filter(|(_, link)| link.from.node == from.node && link.from.socket == from.socket)
-            .map(|(id, link)| (id.clone(), link.clone()))
-            .collect::<Vec<_>>();
-        let mut replaced = Vec::new();
-        if to_socket
-            .cardinality
-            .maximum
-            .is_some_and(|maximum| incoming.len() >= maximum)
-        {
-            if to_socket.cardinality.maximum == Some(1) {
-                replaced.extend(incoming);
-            } else {
-                return Err(ConnectionError::InputAtCapacity(to.clone()));
-            }
-        }
-        if from_socket
-            .cardinality
-            .maximum
-            .is_some_and(|maximum| outgoing.len() >= maximum)
-        {
-            if from_socket.cardinality.maximum == Some(1) {
-                replaced.extend(outgoing);
-            } else {
-                return Err(ConnectionError::OutputAtCapacity(from.clone()));
-            }
-        }
-        replaced.sort_by(|left, right| left.0.cmp(&right.0));
-        replaced.dedup_by(|left, right| left.0 == right.0);
-        let replaced_ids = replaced.iter().map(|(id, _)| id).collect::<BTreeSet<_>>();
-
-        let mut pending = vec![to.node.clone()];
-        let mut visited = BTreeSet::new();
-        while let Some(node) = pending.pop() {
-            if node == from.node {
-                return Err(ConnectionError::Cycle);
-            }
-            if !visited.insert(node.clone()) {
-                continue;
-            }
-            pending.extend(self.links.iter().filter_map(|(id, link)| {
-                (!replaced_ids.contains(id) && link.from.node == node)
-                    .then_some(link.to.node.clone())
-            }));
-        }
-        Ok(ConnectionPlan { replaced })
-    }
-
-    pub fn resolve(&self, registry: &NodeRegistry) -> ResolvedGraph {
-        let mut diagnostics = Vec::new();
-        if self.schema_version > STUDIO_ASSET_SCHEMA_VERSION {
-            diagnostics.push(Diagnostic::error(
-                "unsupported_schema",
-                format!(
-                    "graph schema {} is newer than this Studio",
-                    self.schema_version
-                ),
-            ));
-        }
-        let mut node_indices = BTreeMap::new();
-        let mut nodes = Vec::new();
-        for (index, (id, record)) in self.nodes.iter().enumerate() {
-            let declaration = registry.find(&record.node_type);
-            if let Some(declaration) = declaration {
-                if !declaration.kinds.contains(&self.kind) {
-                    diagnostics.push(Diagnostic::error(
-                        "node_kind_mismatch",
-                        format!("node {id} is not valid in this graph kind"),
-                    ));
-                }
-                if record.node_type_version > declaration.version {
-                    diagnostics.push(Diagnostic::error(
-                        "unsupported_node_version",
-                        format!(
-                            "node {id} requires newer type version {}",
-                            record.node_type_version
-                        ),
-                    ));
-                }
-                for (property, value) in &record.properties {
-                    match declaration.field(FieldTarget::Property, property) {
-                        Some(field) if field.accepts(value) => {}
-                        Some(_) => diagnostics.push(Diagnostic::error(
-                            "property_constraint",
-                            format!(
-                                "node {id} property `{property}` violates its declared type or constraints"
-                            ),
-                        )),
-                        None => diagnostics.push(Diagnostic::error(
-                            "unknown_property",
-                            format!("node {id} has no declared property `{property}`"),
-                        )),
-                    }
-                }
-                for (socket, value) in &record.socket_defaults {
-                    match declaration.input(socket) {
-                        Some(input) if input.value_type == value.socket_type() => {
-                            match declaration.field(FieldTarget::InputSocket, &socket.0) {
-                                Some(field) if field.accepts(value) => {}
-                                Some(_) => diagnostics.push(Diagnostic::error(
-                                    "socket_default_constraint",
-                                    format!(
-                                    "node {id} default `{socket}` violates its declared constraints"
-                                ),
-                                )),
-                                None => diagnostics.push(Diagnostic::error(
-                                    "missing_socket_schema",
-                                    format!(
-                                    "node {id} input `{socket}` has no editable field declaration"
-                                ),
-                                )),
-                            }
-                        }
-                        Some(_) => diagnostics.push(Diagnostic::error(
-                            "socket_default_type",
-                            format!("node {id} default `{socket}` has the wrong type"),
-                        )),
-                        None => diagnostics.push(Diagnostic::error(
-                            "unknown_input_socket",
-                            format!("node {id} has no input socket `{socket}`"),
-                        )),
-                    }
-                }
-            } else {
-                diagnostics.push(Diagnostic::error(
-                    "unknown_node_type",
-                    format!("node {id} uses unavailable type `{}`", record.node_type),
-                ));
-            }
-            node_indices.insert(id.clone(), index);
-            nodes.push(ResolvedNode {
-                id: id.clone(),
-                declaration,
-            });
-        }
-
-        if let Some(contract) = registry.contract(self.kind) {
-            for constraint in contract.nodes {
-                let count = self
-                    .nodes
-                    .values()
-                    .filter(|node| {
-                        registry
-                            .find(&node.node_type)
-                            .is_some_and(|node| node.operation == constraint.operation)
-                    })
-                    .count();
-                if !constraint.cardinality.accepts(count) {
-                    diagnostics.push(Diagnostic::error(
-                        "node_cardinality",
-                        format!(
-                            "graph contains {count} {:?} node(s), expected {}",
-                            constraint.operation,
-                            cardinality_description(constraint.cardinality)
-                        ),
-                    ));
-                }
-            }
-        }
-
-        let mut links = Vec::new();
-        let mut incoming = vec![Vec::new(); nodes.len()];
-        let mut outgoing = vec![Vec::new(); nodes.len()];
-        let mut input_counts = BTreeMap::new();
-        let mut output_counts = BTreeMap::new();
-        for (link_id, link) in &self.links {
-            let Some(&from_index) = node_indices.get(&link.from.node) else {
-                diagnostics.push(Diagnostic::error(
-                    "missing_link_node",
-                    format!("link {link_id} source node is missing"),
-                ));
-                continue;
-            };
-            let Some(&to_index) = node_indices.get(&link.to.node) else {
-                diagnostics.push(Diagnostic::error(
-                    "missing_link_node",
-                    format!("link {link_id} destination node is missing"),
-                ));
-                continue;
-            };
-            let Some(from) = nodes[from_index]
-                .declaration
-                .and_then(|node| node.output(&link.from.socket))
-            else {
-                diagnostics.push(Diagnostic::error(
-                    "unknown_output_socket",
-                    format!("link {link_id} source socket is invalid"),
-                ));
-                continue;
-            };
-            let Some(to) = nodes[to_index]
-                .declaration
-                .and_then(|node| node.input(&link.to.socket))
-            else {
-                diagnostics.push(Diagnostic::error(
-                    "unknown_input_socket",
-                    format!("link {link_id} destination socket is invalid"),
-                ));
-                continue;
-            };
-            if from.value_type != to.value_type {
-                diagnostics.push(Diagnostic::error(
-                    "socket_type_mismatch",
-                    format!("link {link_id} connects incompatible socket types"),
-                ));
-                continue;
-            }
-            if !from.rate.can_feed(to.rate) {
-                diagnostics.push(Diagnostic::error(
-                    "evaluation_rate_mismatch",
-                    format!("link {link_id} feeds {:?} into {:?}", from.rate, to.rate),
-                ));
-                continue;
-            }
-            let input_key = (link.to.node.clone(), link.to.socket.clone());
-            let input_count = input_counts.entry(input_key).or_insert(0);
-            if to
-                .cardinality
-                .maximum
-                .is_some_and(|maximum| *input_count >= maximum)
-            {
-                diagnostics.push(Diagnostic::error(
-                    "input_cardinality",
-                    format!("link {link_id} exceeds the destination socket cardinality"),
-                ));
-                continue;
-            }
-            let output_key = (link.from.node.clone(), link.from.socket.clone());
-            let output_count = output_counts.entry(output_key).or_insert(0);
-            if from
-                .cardinality
-                .maximum
-                .is_some_and(|maximum| *output_count >= maximum)
-            {
-                diagnostics.push(Diagnostic::error(
-                    "output_cardinality",
-                    format!("link {link_id} exceeds the source socket cardinality"),
-                ));
-                continue;
-            }
-            *input_count += 1;
-            *output_count += 1;
-            let index = links.len();
-            links.push(ResolvedLink {
-                id: link_id.clone(),
-                from: from_index,
-                to: to_index,
-            });
-            outgoing[from_index].push(index);
-            incoming[to_index].push(index);
-        }
-        for (id, record) in &self.nodes {
-            let Some(declaration) = registry.find(&record.node_type) else {
-                continue;
-            };
-            for socket in declaration.inputs {
-                let count = input_counts
-                    .get(&(id.clone(), SocketKey(socket.key.into())))
-                    .copied()
-                    .unwrap_or(0);
-                if !socket.cardinality.accepts(count) {
-                    diagnostics.push(Diagnostic::error(
-                        "input_cardinality",
-                        format!(
-                            "node {id} input `{}` has {count} link(s), expected {}",
-                            socket.key,
-                            cardinality_description(socket.cardinality)
-                        ),
-                    ));
-                }
-            }
-            for socket in declaration.outputs {
-                let count = output_counts
-                    .get(&(id.clone(), SocketKey(socket.key.into())))
-                    .copied()
-                    .unwrap_or(0);
-                if !socket.cardinality.accepts(count) {
-                    diagnostics.push(Diagnostic::error(
-                        "output_cardinality",
-                        format!(
-                            "node {id} output `{}` has {count} link(s), expected {}",
-                            socket.key,
-                            cardinality_description(socket.cardinality)
-                        ),
-                    ));
-                }
-            }
-        }
-        let cycle_nodes = cycle_nodes(&nodes, &links);
-        if !cycle_nodes.is_empty() {
-            diagnostics.push(Diagnostic::error(
-                "cycle",
-                format!("graph has a cycle through {} node(s)", cycle_nodes.len()),
-            ));
-        }
-        for (name, output) in &self.interface.outputs {
-            if !node_indices.contains_key(&output.node) {
-                diagnostics.push(Diagnostic::error(
-                    "missing_graph_output",
-                    format!("graph output `{name}` targets a missing node"),
-                ));
-            }
-        }
-        let reachable = node_reachability(self, registry);
-        if let Some(contract) = registry.contract(self.kind) {
-            validate_graph_contract(self, contract, &nodes, &links, &reachable, &mut diagnostics);
-        }
-        // An unreachable node is legal but inert, and silence is the worst way
-        // for an editor to say so. Only report once the graph actually has a
-        // sink to reach, otherwise every node in a sink-less draft is flagged.
-        if !reachable.is_empty() {
-            for id in self.nodes.keys() {
-                if !reachable.contains(id) {
-                    diagnostics.push(Diagnostic::warning(
-                        "unreached-node",
-                        format!(
-                            "node {id} does not reach the graph output and has no effect on the result"
-                        ),
-                    ));
-                }
-            }
-        }
-        let active_nodes = active_slice(&self.interface, &node_indices, &links);
-        let hashes = GraphHashes::from_graph(self, &active_nodes);
-        ResolvedGraph {
-            nodes,
-            node_indices,
-            links,
-            incoming,
-            outgoing,
-            active_nodes,
-            cycle_nodes,
-            hashes,
-            diagnostics,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NodeDeclaration {
-    pub id: &'static str,
-    pub version: u32,
-    pub title: &'static str,
-    pub description: &'static str,
-    pub category: NodeCategory,
-    pub preview: NodePreview,
-    pub operation: NodeOperation,
-    /// How this node's own operation depends on the clock. Declared explicitly on
-    /// every node — see [`TemporalDependence`] for why it is not defaulted.
-    pub temporal: TemporalDependence,
-    pub kinds: &'static [GraphKind],
-    pub inputs: &'static [SocketDeclarationStatic],
-    pub outputs: &'static [SocketDeclarationStatic],
-    pub fields: &'static [FieldDeclarationStatic],
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SocketDeclarationStatic {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub description: &'static str,
-    pub value_type: SocketType,
-    pub rate: EvaluationRate,
-    pub cardinality: Cardinality,
-    /// How a time-varying value arriving here combines with the node's cacheable
-    /// field. `socket!` produces [`Separable::None`]; `socket_separable!` is the
-    /// opt-in, and only a node that owns such a field may use it.
-    pub separable: Separable,
-}
-
-impl SocketDeclarationStatic {
-    pub fn can_feed(self, destination: Self) -> bool {
-        self.value_type == destination.value_type && self.rate.can_feed(destination.rate)
-    }
-}
-
-impl NodeDeclaration {
-    pub fn input(&self, key: &SocketKey) -> Option<SocketDeclarationStatic> {
-        self.inputs
-            .iter()
-            .copied()
-            .find(|socket| socket.key == key.0)
-    }
-    pub fn output(&self, key: &SocketKey) -> Option<SocketDeclarationStatic> {
-        self.outputs
-            .iter()
-            .copied()
-            .find(|socket| socket.key == key.0)
-    }
-
-    pub fn field(&self, target: FieldTarget, key: &str) -> Option<FieldDeclarationStatic> {
-        self.fields
-            .iter()
-            .copied()
-            .find(|field| field.target == target && field.key == key)
-    }
-
-    pub fn new_record(&self) -> NodeRecord {
-        let mut properties = BTreeMap::new();
-        let mut socket_defaults = BTreeMap::new();
-        for field in self.fields {
-            match field.target {
-                FieldTarget::Property => {
-                    properties.insert(field.key.to_string(), field.default.value());
-                }
-                FieldTarget::InputSocket => {
-                    socket_defaults.insert(SocketKey(field.key.to_string()), field.default.value());
-                }
-            }
-        }
-        NodeRecord {
-            node_type: NodeTypeId(self.id.to_string()),
-            node_type_version: self.version,
-            properties,
-            socket_defaults,
-            unknown_payload: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct NodeRegistry {
-    declarations: &'static [NodeDeclaration],
-}
-
-impl NodeRegistry {
-    pub const fn new(declarations: &'static [NodeDeclaration]) -> Self {
-        Self { declarations }
-    }
-
-    pub const fn builtin() -> Self {
-        Self::new(BUILTIN_NODES)
-    }
-
-    pub fn declarations(&self) -> &'static [NodeDeclaration] {
-        self.declarations
-    }
-
-    pub fn find(&self, id: &NodeTypeId) -> Option<&'static NodeDeclaration> {
-        self.declarations.iter().find(|node| node.id == id.0)
-    }
-
-    pub fn contract(&self, kind: GraphKind) -> Option<&'static GraphContractStatic> {
-        GRAPH_CONTRACTS
-            .iter()
-            .find(|contract| contract.kind == kind)
-    }
-
-    pub fn node_cardinality(&self, kind: GraphKind, operation: NodeOperation) -> Cardinality {
-        self.contract(kind)
-            .and_then(|contract| {
-                contract
-                    .nodes
-                    .iter()
-                    .find(|constraint| constraint.operation == operation)
-            })
-            .map_or(Cardinality::ANY, |constraint| constraint.cardinality)
-    }
-}
-
-impl Default for NodeRegistry {
-    fn default() -> Self {
-        Self::builtin()
-    }
-}
-
-/// Built-in registry value retained as the ordinary application registry.
-/// Tests and domain modules may construct a registry over another static set.
-#[allow(non_upper_case_globals)]
-pub const NodeRegistry: NodeRegistry = NodeRegistry::builtin();
 
 const MATERIAL: &[GraphKind] = &[GraphKind::Material];
 const WORLD: &[GraphKind] = &[GraphKind::World];
@@ -1372,7 +500,7 @@ macro_rules! node {
             description: $description,
             category: $category,
             preview: $preview,
-            operation: $operation,
+            operation: $operation.tag(),
             temporal: $temporal,
             kinds: $kinds,
             inputs: $inputs,
@@ -2473,39 +1601,6 @@ const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[socket!(
     EvaluationRate::PerVoxel,
     Cardinality::REQUIRED_SINGLE
 )];
-const NONE: Option<NumericRange> = None;
-const UNIT: Option<NumericRange> = Some(NumericRange::new(0.0, 1.0));
-const SIGNED: Option<NumericRange> = Some(NumericRange::new(-1.0, 1.0));
-const WIDE: Option<NumericRange> = Some(NumericRange::new(-1_000_000.0, 1_000_000.0));
-const POSITIVE: Option<NumericRange> = Some(NumericRange::new(0.0, 1_000_000.0));
-const EMPTY_CHOICES: &[ChoiceDeclaration] = &[];
-
-#[allow(clippy::too_many_arguments)]
-const fn field(
-    key: &'static str,
-    label: &'static str,
-    description: &'static str,
-    target: FieldTarget,
-    default: FieldDefault,
-    hard_range: Option<NumericRange>,
-    soft_range: Option<NumericRange>,
-    step: Option<f32>,
-    choices: &'static [ChoiceDeclaration],
-    read_only: bool,
-) -> FieldDeclarationStatic {
-    FieldDeclarationStatic {
-        key,
-        label,
-        description,
-        target,
-        default,
-        hard_range,
-        soft_range,
-        step,
-        choices,
-        read_only,
-    }
-}
 
 const CONSTANT_SCALAR_FIELDS: &[FieldDeclarationStatic] = &[field(
     "value",
@@ -4027,6 +3122,14 @@ const PATTERN_LAYER_FIELDS: &[FieldDeclarationStatic] = &[
 /// Canonical node schemas. Backends register execution independently, but node
 /// construction, validation, persistence, catalog presentation, and every
 /// editable widget derive from this table.
+/// Atrium's node catalogue, paired with the contracts its graphs must satisfy.
+///
+/// The one place both halves are named together. `voxel-graph` has no `builtin()` and no
+/// `Default` registry — it owns no nodes, so a default could only have meant "somebody
+/// else's catalogue", which is exactly how the contracts came to be read from a hidden
+/// module-level static.
+pub const CATALOGUE: NodeRegistry = NodeRegistry::new(BUILTIN_NODES, GRAPH_CONTRACTS);
+
 pub static BUILTIN_NODES: &[NodeDeclaration] = &[
     node!(
         "material.constant_scalar",
@@ -4744,828 +3847,82 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
     ),
 ];
 
-#[derive(Clone, Debug)]
-pub struct ResolvedNode {
-    pub id: NodeId,
-    pub declaration: Option<&'static NodeDeclaration>,
-}
-#[derive(Clone, Debug)]
-pub struct ResolvedLink {
-    pub id: LinkId,
-    pub from: usize,
-    pub to: usize,
-}
-
-fn cardinality_description(cardinality: Cardinality) -> String {
-    cardinality.description()
-}
-
-/// Every node that reaches the graph's output sink through links.
-///
-/// The sinks are the graph's declared interface outputs together with, for a
-/// kind that has a contract, every node carrying one of the contract's flow
-/// sink operations. Links are then walked backwards from those, so the result
-/// is exactly the set of nodes whose value can still arrive somewhere the
-/// engine reads. This is the single reachability traversal in the module:
-/// contract validation and the inert-node warning both read its answer rather
-/// than each re-deriving one.
-pub fn node_reachability(graph: &GraphAsset, registry: &NodeRegistry) -> BTreeSet<NodeId> {
-    let contract = registry.contract(graph.kind);
-    let mut sources_of: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
-    for link in graph.links.values() {
-        if !graph.nodes.contains_key(&link.from.node) || !graph.nodes.contains_key(&link.to.node) {
-            continue;
-        }
-        sources_of
-            .entry(&link.to.node)
-            .or_default()
-            .push(&link.from.node);
-    }
-    let mut pending: Vec<&NodeId> = graph
-        .interface
-        .outputs
-        .values()
-        .map(|pin| &pin.node)
-        .filter(|node| graph.nodes.contains_key(*node))
-        .collect();
-    for (id, record) in &graph.nodes {
-        let Some(declaration) = registry.find(&record.node_type) else {
-            continue;
-        };
-        let is_sink = contract.is_some_and(|contract| {
-            contract
-                .flows
-                .iter()
-                .any(|flow| flow.sink == declaration.operation)
-        });
-        if is_sink {
-            pending.push(id);
-        }
-    }
-    let mut reached = BTreeSet::new();
-    while let Some(node) = pending.pop() {
-        if !reached.insert(node.clone()) {
-            continue;
-        }
-        if let Some(sources) = sources_of.get(node) {
-            pending.extend(sources.iter().copied());
-        }
-    }
-    reached
-}
-
-fn validate_graph_contract(
-    graph: &GraphAsset,
-    contract: &GraphContractStatic,
-    nodes: &[ResolvedNode],
-    links: &[ResolvedLink],
-    reachable: &BTreeSet<NodeId>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for flow in contract.flows {
-        let sources = nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| {
-                node.declaration
-                    .is_some_and(|declaration| declaration.operation == flow.source)
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        let sinks = nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| {
-                node.declaration
-                    .is_some_and(|declaration| declaration.operation == flow.sink)
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        if sinks.len() != 1 {
-            continue;
-        }
-        let sink = sinks[0];
-
-        if sources.len() != 1 {
-            continue;
-        }
-
-        let source = sources[0];
-        let mut current = source;
-        let mut visited = BTreeSet::from([source]);
-        loop {
-            let outgoing = links
-                .iter()
-                .filter(|link| {
-                    if link.from != current {
-                        return false;
-                    }
-                    let Some(record) = graph.links.get(&link.id) else {
-                        return false;
-                    };
-                    nodes[current]
-                        .declaration
-                        .and_then(|declaration| declaration.output(&record.from.socket))
-                        .is_some_and(|socket| socket.value_type == flow.value_type)
-                })
-                .collect::<Vec<_>>();
-            if outgoing.len() != 1 {
-                diagnostics.push(Diagnostic::error(
-                    "flow_cardinality",
-                    format!(
-                        "node {} has {} outgoing {:?} flow links; expected exactly one",
-                        nodes[current].id,
-                        outgoing.len(),
-                        flow.value_type
-                    ),
-                ));
-                break;
-            }
-            let next = outgoing[0].to;
-            if !visited.insert(next) {
-                break;
-            }
-            if next == sink {
-                break;
-            }
-            let allowed = nodes[next]
-                .declaration
-                .is_some_and(|declaration| flow.intermediates.contains(&declaration.operation));
-            if !allowed {
-                diagnostics.push(Diagnostic::error(
-                    "flow_node",
-                    format!(
-                        "node {} is not allowed in the {:?} flow",
-                        nodes[next].id, flow.value_type
-                    ),
-                ));
-                break;
-            }
-            current = next;
-        }
-        if !reachable.contains(&nodes[source].id) {
-            diagnostics.push(Diagnostic::error(
-                "flow_incomplete",
-                format!(
-                    "{:?} flow does not reach node {}",
-                    flow.value_type, nodes[sink].id
-                ),
-            ));
-        }
-        for node in nodes.iter() {
-            if node
-                .declaration
-                .is_some_and(|declaration| flow.intermediates.contains(&declaration.operation))
-                && !reachable.contains(&node.id)
-            {
-                diagnostics.push(Diagnostic::error(
-                    "flow_disconnected",
-                    format!("node {} is disconnected from the canonical flow", node.id),
-                ));
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ResolvedGraph {
-    pub nodes: Vec<ResolvedNode>,
-    pub node_indices: BTreeMap<NodeId, usize>,
-    pub links: Vec<ResolvedLink>,
-    pub incoming: Vec<Vec<usize>>,
-    pub outgoing: Vec<Vec<usize>>,
-    pub active_nodes: BTreeSet<NodeId>,
-    pub cycle_nodes: BTreeSet<NodeId>,
-    pub hashes: GraphHashes,
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GraphHashes {
-    pub semantic: u64,
-    pub output_topology: u64,
-    pub layout: u64,
-}
-impl GraphHashes {
-    fn from_graph(graph: &GraphAsset, active: &BTreeSet<NodeId>) -> Self {
-        let semantic = hash_json(&(graph.kind, &graph.interface, &graph.nodes, &graph.links));
-        let active_links: Vec<_> = graph
-            .links
-            .iter()
-            .filter(|(_, link)| active.contains(&link.from.node) && active.contains(&link.to.node))
-            .collect();
-        let output_topology = hash_json(&(graph.kind, &graph.interface, active, active_links));
-        let layout = hash_json(&graph.layout);
-        Self {
-            semantic,
-            output_topology,
-            layout,
-        }
-    }
-}
-fn hash_json(value: &impl Serialize) -> u64 {
-    serde_json::to_vec(value)
-        .unwrap_or_default()
-        .iter()
-        .fold(0xcbf29ce484222325_u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Info,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Diagnostic {
-    pub severity: DiagnosticSeverity,
-    pub code: &'static str,
-    pub message: String,
-}
-impl Diagnostic {
-    pub fn error(code: &'static str, message: String) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Error,
-            code,
-            message,
-        }
-    }
-
-    pub fn warning(code: &'static str, message: String) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Warning,
-            code,
-            message,
-        }
-    }
-
-    pub fn info(code: &'static str, message: String) -> Self {
-        Self {
-            severity: DiagnosticSeverity::Info,
-            code,
-            message,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum GraphCommand {
-    Transaction {
-        commands: Vec<GraphCommand>,
-    },
-    AddNode {
-        id: NodeId,
-        node_type: NodeTypeId,
-        position: [f32; 2],
-    },
-    RemoveNodes {
-        nodes: Vec<NodeId>,
-    },
-    Connect {
-        id: LinkId,
-        from: OutputPin,
-        to: InputPin,
-    },
-    Disconnect {
-        id: LinkId,
-    },
-    SetProperty {
-        node: NodeId,
-        property: String,
-        value: PropertyValue,
-    },
-    SetSocketDefault {
-        node: NodeId,
-        socket: SocketKey,
-        value: PropertyValue,
-    },
-    MoveNodes {
-        positions: Vec<(NodeId, [f32; 2])>,
-    },
-    RestoreFragment {
-        nodes: BTreeMap<NodeId, NodeRecord>,
-        links: BTreeMap<LinkId, LinkRecord>,
-        positions: BTreeMap<NodeId, [f32; 2]>,
-    },
-    // Internal inverses keep public editing commands compact while making every
-    // operation exactly undoable without widget-owned state.
-    RemoveProperty {
-        node: NodeId,
-        property: String,
-    },
-    RemoveSocketDefault {
-        node: NodeId,
-        socket: SocketKey,
-    },
-    RestoreConnection {
-        added_id: LinkId,
-        replaced: Vec<(LinkId, LinkRecord)>,
-    },
-    RestoreGraph {
-        graph: Box<GraphAsset>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EditImpact {
-    Layout,
-    Parameter,
-    Topology,
-}
-#[derive(Clone, Debug)]
-pub struct AppliedCommand {
-    pub inverse: GraphCommand,
-    pub impact: EditImpact,
-}
-
-impl GraphCommand {
-    pub fn apply(
-        self,
-        graph: &mut GraphAsset,
-        registry: &NodeRegistry,
-    ) -> Result<AppliedCommand, GraphCommandError> {
-        match self {
-            Self::Transaction { commands } => {
-                let previous = graph.clone();
-                let mut impact = EditImpact::Layout;
-                for command in commands {
-                    match command.apply(graph, registry) {
-                        Ok(applied) => impact = impact.combine(applied.impact),
-                        Err(error) => {
-                            *graph = previous;
-                            return Err(error);
-                        }
-                    }
-                }
-                Ok(AppliedCommand {
-                    inverse: Self::RestoreGraph {
-                        graph: Box::new(previous),
-                    },
-                    impact,
-                })
-            }
-            Self::AddNode {
-                id,
-                node_type,
-                position,
-            } => {
-                let declaration = registry
-                    .find(&node_type)
-                    .ok_or_else(|| GraphCommandError::UnknownNodeType(node_type.clone()))?;
-                if !declaration.kinds.contains(&graph.kind) {
-                    return Err(GraphCommandError::WrongGraphKind {
-                        node_type,
-                        graph_kind: graph.kind,
-                    });
-                }
-                if graph.nodes.contains_key(&id) {
-                    return Err(GraphCommandError::DuplicateNode(id));
-                }
-                if !graph.can_add_node_type(registry, &node_type) {
-                    return Err(GraphCommandError::NodeCardinality(node_type));
-                }
-                let mut record = declaration.new_record();
-                record.node_type = node_type;
-                graph.nodes.insert(id.clone(), record);
-                graph.layout.positions.insert(id.clone(), position);
-                Ok(AppliedCommand {
-                    inverse: Self::RemoveNodes { nodes: vec![id] },
-                    impact: EditImpact::Topology,
-                })
-            }
-            Self::RemoveNodes { nodes } => {
-                let set: BTreeSet<_> = nodes.iter().cloned().collect();
-                if set.len() != nodes.len() || set.iter().any(|id| !graph.nodes.contains_key(id)) {
-                    return Err(GraphCommandError::MissingNode);
-                }
-                if let Some(contract) = registry.contract(graph.kind) {
-                    for constraint in contract.nodes.iter().filter(|constraint| {
-                        set.iter().any(|id| {
-                            registry
-                                .find(&graph.nodes[id].node_type)
-                                .is_some_and(|node| node.operation == constraint.operation)
-                        })
-                    }) {
-                        let remaining = graph
-                            .nodes
-                            .iter()
-                            .filter(|(id, node)| {
-                                !set.contains(*id)
-                                    && registry
-                                        .find(&node.node_type)
-                                        .is_some_and(|node| node.operation == constraint.operation)
-                            })
-                            .count();
-                        if remaining < constraint.cardinality.minimum {
-                            let node_type = set
-                                .iter()
-                                .find_map(|id| {
-                                    let node = &graph.nodes[id];
-                                    registry.find(&node.node_type).and_then(|declaration| {
-                                        (declaration.operation == constraint.operation)
-                                            .then_some(node.node_type.clone())
-                                    })
-                                })
-                                .expect("an affected constraint has a removed node type");
-                            return Err(GraphCommandError::NodeCardinality(node_type));
-                        }
-                    }
-                }
-                let removed: BTreeMap<_, _> = set
-                    .iter()
-                    .filter_map(|id| graph.nodes.remove_entry(id))
-                    .collect();
-                let positions: BTreeMap<_, _> = set
-                    .iter()
-                    .filter_map(|id| graph.layout.positions.remove_entry(id))
-                    .collect();
-                let link_ids: Vec<_> = graph
-                    .links
-                    .iter()
-                    .filter_map(|(id, link)| {
-                        (set.contains(&link.from.node) || set.contains(&link.to.node))
-                            .then_some(id.clone())
-                    })
-                    .collect();
-                let links = link_ids
-                    .into_iter()
-                    .filter_map(|id| graph.links.remove_entry(&id))
-                    .collect();
-                Ok(AppliedCommand {
-                    inverse: Self::RestoreFragment {
-                        nodes: removed,
-                        links,
-                        positions,
-                    },
-                    impact: EditImpact::Topology,
-                })
-            }
-            Self::Connect { id, from, to } => {
-                if graph.links.contains_key(&id) {
-                    return Err(GraphCommandError::DuplicateLink(id));
-                }
-                let plan = graph
-                    .connection_plan(registry, &from, &to)
-                    .map_err(GraphCommandError::InvalidConnection)?;
-                let replaced = plan
-                    .replaced
-                    .into_iter()
-                    .filter_map(|(id, _)| graph.links.remove_entry(&id))
-                    .collect::<Vec<_>>();
-                let link = LinkRecord { from, to, order: 0 };
-                graph.links.insert(id.clone(), link);
-                Ok(AppliedCommand {
-                    inverse: Self::RestoreConnection {
-                        added_id: id,
-                        replaced,
-                    },
-                    impact: EditImpact::Topology,
-                })
-            }
-            Self::Disconnect { id } => {
-                let link = graph
-                    .links
-                    .remove(&id)
-                    .ok_or_else(|| GraphCommandError::MissingLink(id.clone()))?;
-                Ok(AppliedCommand {
-                    inverse: Self::Connect {
-                        id,
-                        from: link.from,
-                        to: link.to,
-                    },
-                    impact: EditImpact::Topology,
-                })
-            }
-            Self::SetProperty {
-                node,
-                property,
-                value,
-            } => {
-                let node_type = graph
-                    .nodes
-                    .get(&node)
-                    .ok_or(GraphCommandError::MissingNode)?
-                    .node_type
-                    .clone();
-                let field = registry
-                    .find(&node_type)
-                    .and_then(|declaration| declaration.field(FieldTarget::Property, &property))
-                    .ok_or_else(|| GraphCommandError::InvalidField {
-                        node_type: node_type.clone(),
-                        field: property.clone(),
-                    })?;
-                if field.read_only || !field.accepts(&value) {
-                    return Err(GraphCommandError::InvalidField {
-                        node_type,
-                        field: property,
-                    });
-                }
-                let record = graph
-                    .nodes
-                    .get_mut(&node)
-                    .ok_or(GraphCommandError::MissingNode)?;
-                let previous = record.properties.insert(property.clone(), value);
-                let inverse = match previous {
-                    Some(value) => Self::SetProperty {
-                        node,
-                        property,
-                        value,
-                    },
-                    None => Self::RemoveProperty { node, property },
-                };
-                Ok(AppliedCommand {
-                    inverse,
-                    impact: EditImpact::Parameter,
-                })
-            }
-            Self::SetSocketDefault {
-                node,
-                socket,
-                value,
-            } => {
-                let node_type = graph
-                    .nodes
-                    .get(&node)
-                    .ok_or(GraphCommandError::MissingNode)?
-                    .node_type
-                    .clone();
-                let field = registry
-                    .find(&node_type)
-                    .and_then(|declaration| declaration.field(FieldTarget::InputSocket, &socket.0))
-                    .ok_or_else(|| GraphCommandError::InvalidField {
-                        node_type: node_type.clone(),
-                        field: socket.0.clone(),
-                    })?;
-                if field.read_only || !field.accepts(&value) {
-                    return Err(GraphCommandError::InvalidField {
-                        node_type,
-                        field: socket.0,
-                    });
-                }
-                let record = graph
-                    .nodes
-                    .get_mut(&node)
-                    .ok_or(GraphCommandError::MissingNode)?;
-                let previous = record.socket_defaults.insert(socket.clone(), value);
-                let inverse = match previous {
-                    Some(value) => Self::SetSocketDefault {
-                        node,
-                        socket,
-                        value,
-                    },
-                    None => Self::RemoveSocketDefault { node, socket },
-                };
-                Ok(AppliedCommand {
-                    inverse,
-                    impact: EditImpact::Parameter,
-                })
-            }
-            Self::MoveNodes { positions } => {
-                if positions
-                    .iter()
-                    .any(|(id, _)| !graph.nodes.contains_key(id))
-                {
-                    return Err(GraphCommandError::MissingNode);
-                }
-                let mut previous = Vec::new();
-                for (id, position) in positions {
-                    previous.push((
-                        id.clone(),
-                        graph
-                            .layout
-                            .positions
-                            .insert(id, position)
-                            .unwrap_or([0.0, 0.0]),
-                    ));
-                }
-                Ok(AppliedCommand {
-                    inverse: Self::MoveNodes {
-                        positions: previous,
-                    },
-                    impact: EditImpact::Layout,
-                })
-            }
-            Self::RestoreFragment {
-                nodes,
-                links,
-                positions,
-            } => {
-                let ids: Vec<_> = nodes.keys().cloned().collect();
-                graph.nodes.extend(nodes);
-                graph.links.extend(links);
-                graph.layout.positions.extend(positions);
-                Ok(AppliedCommand {
-                    inverse: Self::RemoveNodes { nodes: ids },
-                    impact: EditImpact::Topology,
-                })
-            }
-            Self::RemoveProperty { node, property } => {
-                let record = graph
-                    .nodes
-                    .get_mut(&node)
-                    .ok_or(GraphCommandError::MissingNode)?;
-                let value = record
-                    .properties
-                    .remove(&property)
-                    .ok_or(GraphCommandError::MissingProperty)?;
-                Ok(AppliedCommand {
-                    inverse: Self::SetProperty {
-                        node,
-                        property,
-                        value,
-                    },
-                    impact: EditImpact::Parameter,
-                })
-            }
-            Self::RemoveSocketDefault { node, socket } => {
-                let record = graph
-                    .nodes
-                    .get_mut(&node)
-                    .ok_or(GraphCommandError::MissingNode)?;
-                let value = record
-                    .socket_defaults
-                    .remove(&socket)
-                    .ok_or(GraphCommandError::MissingProperty)?;
-                Ok(AppliedCommand {
-                    inverse: Self::SetSocketDefault {
-                        node,
-                        socket,
-                        value,
-                    },
-                    impact: EditImpact::Parameter,
-                })
-            }
-            Self::RestoreConnection { added_id, replaced } => {
-                let added = graph
-                    .links
-                    .remove(&added_id)
-                    .ok_or_else(|| GraphCommandError::MissingLink(added_id.clone()))?;
-                for (replaced_id, replaced_link) in replaced {
-                    graph.links.insert(replaced_id, replaced_link);
-                }
-                Ok(AppliedCommand {
-                    inverse: Self::Connect {
-                        id: added_id,
-                        from: added.from,
-                        to: added.to,
-                    },
-                    impact: EditImpact::Topology,
-                })
-            }
-            Self::RestoreGraph {
-                graph: mut restored,
-            } => {
-                std::mem::swap(graph, &mut restored);
-                Ok(AppliedCommand {
-                    inverse: Self::RestoreGraph { graph: restored },
-                    impact: EditImpact::Topology,
-                })
-            }
-        }
-    }
-}
-
-impl EditImpact {
-    fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Topology, _) | (_, Self::Topology) => Self::Topology,
-            (Self::Parameter, _) | (_, Self::Parameter) => Self::Parameter,
-            _ => Self::Layout,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum GraphCommandError {
-    UnknownNodeType(NodeTypeId),
-    WrongGraphKind {
-        node_type: NodeTypeId,
-        graph_kind: GraphKind,
-    },
-    DuplicateNode(NodeId),
-    DuplicateLink(LinkId),
-    NodeCardinality(NodeTypeId),
-    MissingNode,
-    MissingLink(LinkId),
-    MissingProperty,
-    InvalidField {
-        node_type: NodeTypeId,
-        field: String,
-    },
-    InvalidConnection(ConnectionError),
-}
-impl fmt::Display for GraphCommandError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "graph command failed: {self:?}")
-    }
-}
-impl std::error::Error for GraphCommandError {}
-
-#[derive(Default)]
-pub struct GraphHistory {
-    undo: Vec<GraphCommand>,
-    redo: Vec<GraphCommand>,
-}
-impl GraphHistory {
-    pub fn apply(
-        &mut self,
-        graph: &mut GraphAsset,
-        registry: &NodeRegistry,
-        command: GraphCommand,
-    ) -> Result<EditImpact, GraphCommandError> {
-        let applied = command.apply(graph, registry)?;
-        self.undo.push(applied.inverse);
-        self.redo.clear();
-        Ok(applied.impact)
-    }
-    pub fn undo(
-        &mut self,
-        graph: &mut GraphAsset,
-        registry: &NodeRegistry,
-    ) -> Result<Option<EditImpact>, GraphCommandError> {
-        let Some(command) = self.undo.pop() else {
-            return Ok(None);
-        };
-        let applied = command.apply(graph, registry)?;
-        self.redo.push(applied.inverse);
-        Ok(Some(applied.impact))
-    }
-    pub fn redo(
-        &mut self,
-        graph: &mut GraphAsset,
-        registry: &NodeRegistry,
-    ) -> Result<Option<EditImpact>, GraphCommandError> {
-        let Some(command) = self.redo.pop() else {
-            return Ok(None);
-        };
-        let applied = command.apply(graph, registry)?;
-        self.undo.push(applied.inverse);
-        Ok(Some(applied.impact))
-    }
-}
-
-fn cycle_nodes(nodes: &[ResolvedNode], links: &[ResolvedLink]) -> BTreeSet<NodeId> {
-    let count = nodes.len();
-    let mut indegree = vec![0; count];
-    let mut outgoing = vec![Vec::new(); count];
-    for link in links {
-        indegree[link.to] += 1;
-        outgoing[link.from].push(link.to);
-    }
-    let mut queue: Vec<_> = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &degree)| (degree == 0).then_some(index))
-        .collect();
-    let mut visited = BTreeSet::new();
-    while let Some(index) = queue.pop() {
-        visited.insert(index);
-        for &next in &outgoing[index] {
-            indegree[next] -= 1;
-            if indegree[next] == 0 {
-                queue.push(next);
-            }
-        }
-    }
-    nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, node)| (!visited.contains(&index)).then_some(node.id.clone()))
-        .collect()
-}
-
-fn active_slice(
-    interface: &GraphInterface,
-    indices: &BTreeMap<NodeId, usize>,
-    links: &[ResolvedLink],
-) -> BTreeSet<NodeId> {
-    let mut reverse = vec![Vec::new(); indices.len()];
-    for link in links {
-        reverse[link.to].push(link.from);
-    }
-    let mut ids: Vec<_> = interface
-        .outputs
-        .values()
-        .filter_map(|pin| indices.get(&pin.node).copied())
-        .collect();
-    let mut seen = BTreeSet::new();
-    while let Some(index) = ids.pop() {
-        if !seen.insert(index) {
-            continue;
-        }
-        ids.extend(reverse[index].iter().copied());
-    }
-    indices
-        .iter()
-        .filter_map(|(id, &index)| seen.contains(&index).then_some(id.clone()))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
+    use voxel_graph::{
+        node_reachability, DiagnosticSeverity, GraphAsset, GraphCommand, GraphCommandError,
+        GraphHistory, InputPin, LinkId, LinkRecord, NodeId, NodeRecord, NodeTypeId, OutputPin,
+        PropertyValue, SocketKey,
+    };
+    /// The safety net for [`OperationTag`]. A tag is a string, so a typo compiles and two
+    /// operations could claim the same label — this is what makes that impossible to ship.
+    ///
+    /// Checks both directions plus injectivity: every declared tag names an operation this
+    /// build knows, that operation tags back to the identical label, and no two distinct
+    /// operations share a label. Without the last one, two node types would silently satisfy
+    /// each other's graph contract.
+    #[test]
+    fn every_operation_tag_round_trips_and_is_unique() {
+        let mut tag_to_operation: BTreeMap<&'static str, NodeOperation> = BTreeMap::new();
+        for declaration in BUILTIN_NODES {
+            let tag = declaration.operation;
+            let operation = NodeOperation::from_tag(tag)
+                .unwrap_or_else(|| panic!("node {} declares unknown tag {tag}", declaration.id));
+            assert_eq!(
+                operation.tag(),
+                tag,
+                "node {} round-tripped to a different tag",
+                declaration.id
+            );
+            if let Some(previous) = tag_to_operation.insert(tag.0, operation) {
+                assert_eq!(
+                    previous, operation,
+                    "tag {tag} is claimed by two different operations"
+                );
+            }
+        }
+        assert!(
+            tag_to_operation.len() >= 40,
+            "expected the material catalogue's tags, found {}",
+            tag_to_operation.len()
+        );
+    }
+
+    /// Contract data refers to operations by tag too, so an unknown tag there would mean a
+    /// rule that silently matches nothing — a graph would validate clean while violating it.
+    #[test]
+    fn every_contract_tag_names_a_known_operation() {
+        for contract in GRAPH_CONTRACTS {
+            for constraint in contract.nodes {
+                assert!(
+                    NodeOperation::from_tag(constraint.operation).is_some(),
+                    "{:?} constraint names unknown tag {}",
+                    contract.kind,
+                    constraint.operation
+                );
+            }
+            for flow in contract.flows {
+                for tag in [flow.source, flow.sink] {
+                    assert!(
+                        NodeOperation::from_tag(tag).is_some(),
+                        "{:?} flow names unknown tag {tag}",
+                        contract.kind
+                    );
+                }
+                for tag in flow.intermediates {
+                    assert!(
+                        NodeOperation::from_tag(*tag).is_some(),
+                        "{:?} flow intermediate names unknown tag {tag}",
+                        contract.kind
+                    );
+                }
+            }
+        }
+    }
+
     fn id(value: &str) -> NodeId {
         NodeId(value.into())
     }
@@ -5703,7 +4060,7 @@ mod tests {
     /// rendered — the checked-in lava had `octaves: 8`.
     #[test]
     fn the_octave_range_offers_only_octaves_the_renderer_evaluates() {
-        let declaration = NodeRegistry
+        let declaration = CATALOGUE
             .find(&NodeTypeId("material.pattern_noise".into()))
             .expect("the noise generator is registered");
         let octaves = declaration
@@ -5727,7 +4084,7 @@ mod tests {
 
     #[test]
     fn add_node_materializes_every_declared_default_atomically() {
-        let registry = NodeRegistry;
+        let registry = CATALOGUE;
         let declaration = registry.find(&NodeTypeId("material.noise".into())).unwrap();
         let mut graph = material_graph();
         let id = id("noise");
@@ -5749,7 +4106,7 @@ mod tests {
 
     #[test]
     fn singleton_node_limits_are_declared_and_enforced_by_commands() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = crate::material_graph::new_material_graph("test");
         let output_type = NodeTypeId("material.output".into());
         assert!(!graph.can_add_node_type(&registry, &output_type));
@@ -5780,7 +4137,7 @@ mod tests {
 
     #[test]
     fn failed_transaction_restores_the_entire_graph() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = material_graph();
         let before = graph.clone();
         let error = GraphCommand::Transaction {
@@ -5805,7 +4162,7 @@ mod tests {
 
     #[test]
     fn material_contract_reports_a_broken_canonical_surface_flow() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = crate::material_graph::new_material_graph("test");
         graph
             .links
@@ -5821,7 +4178,7 @@ mod tests {
 
     #[test]
     fn source_cardinality_rewires_a_surface_output_and_undo_restores_it() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = crate::material_graph::new_material_graph("test");
         let surface = graph
             .nodes
@@ -5868,7 +4225,7 @@ mod tests {
 
     #[test]
     fn edit_commands_enforce_declared_types_ranges_and_choices() {
-        let registry = NodeRegistry;
+        let registry = CATALOGUE;
         let mut graph = material_graph();
         let id = id("roughness");
         GraphCommand::AddNode {
@@ -5966,7 +4323,7 @@ mod tests {
     /// A node wired to nothing still renders nothing — the graph has to say so.
     #[test]
     fn an_unwired_node_is_unreachable_and_reported_as_inert() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = crate::material_graph::new_material_graph("test");
         let orphan = id("orphan-oscillator");
         GraphCommand::AddNode {
@@ -6012,7 +4369,7 @@ mod tests {
 
     #[test]
     fn commands_are_undoable_and_layout_does_not_change_semantics() {
-        let registry = NodeRegistry;
+        let registry = CATALOGUE;
         let mut graph = material_graph();
         let mut history = GraphHistory::default();
         let node = id("value");
@@ -6048,7 +4405,7 @@ mod tests {
 
     #[test]
     fn resolver_rejects_unknown_types_and_bad_links_without_mutating_graph() {
-        let registry = NodeRegistry;
+        let registry = CATALOGUE;
         let mut graph = material_graph();
         let a = id("a");
         let b = id("b");
@@ -6092,7 +4449,7 @@ mod tests {
 
     #[test]
     fn connecting_a_single_input_replaces_the_old_link_and_undo_restores_it() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = material_graph();
         let first = id("first");
         let second = id("second");
@@ -6158,7 +4515,7 @@ mod tests {
 
     #[test]
     fn resolver_detects_cycles_and_slices_only_active_outputs() {
-        let registry = NodeRegistry;
+        let registry = CATALOGUE;
         let mut graph = material_graph();
         let a = id("a");
         let b = id("b");
@@ -6247,7 +4604,9 @@ mod tests {
     fn the_declared_temporal_axis_matches_what_each_node_lowers_to() {
         use crate::graph::MaterialNodeOperation;
         for declaration in BUILTIN_NODES {
-            let NodeOperation::Material(operation) = declaration.operation else {
+            let Some(NodeOperation::Material(operation)) =
+                NodeOperation::from_tag(declaration.operation)
+            else {
                 assert_eq!(
                     declaration.temporal,
                     TemporalDependence::Inherited,

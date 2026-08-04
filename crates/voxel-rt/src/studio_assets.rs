@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
 
-use crate::graph::{DiagnosticSeverity, GraphAsset, NodeRegistry};
 use crate::material::{
     FaceOverride, FaceRoles, Material, MaterialKind, Medium, MediumPhase, MATERIAL_COUNT,
 };
@@ -31,6 +30,7 @@ use crate::variants::{
     preset_spec, Lever, LeverRange, LeverValue, QualityPreset, RenderQuality, REGISTRY,
 };
 use crate::world_profile::{CompiledWorldProfile, WorldAssetCatalog, WorldProfileAsset};
+use voxel_graph::{DiagnosticSeverity, GraphAsset};
 
 /// A project-local reference to one asset file. Paths are always relative to the
 /// project directory; [`StudioProjectStore`] rejects absolute and parent paths.
@@ -960,7 +960,7 @@ impl StudioProject {
                 reference.path.display()
             )));
         }
-        if graph.kind != crate::graph::GraphKind::World {
+        if graph.kind != voxel_graph::GraphKind::World {
             return Err(AssetError::InvalidGraph(format!(
                 "active graph `{active}` is not a world graph"
             )));
@@ -997,8 +997,8 @@ impl StudioProject {
             }
         }
 
-        let registry = NodeRegistry::builtin();
-        let graph_kinds: BTreeMap<AssetId, crate::graph::GraphKind> = BTreeMap::new();
+        let registry = crate::graph::CATALOGUE;
+        let graph_kinds: BTreeMap<AssetId, voxel_graph::GraphKind> = BTreeMap::new();
         for (id, graph) in self.load_graph_assets(store)? {
             let errors: Vec<_> = graph
                 .resolve(&registry)
@@ -1532,12 +1532,12 @@ mod tests {
         BiomeDefinition, BiomeId, BiomeRegistry, BiomeSelector, MaterialPaletteId, MaterialRole,
         SurfaceProfileId,
     };
-    use crate::graph::GraphKind;
     use crate::material::{material_id, MATERIALS};
     use crate::variants::{LeverId, LeverValue};
     use crate::world_profile::{
         MaterialBinding, MaterialChoice, MaterialPalette, SurfaceLayer, SurfaceProfile,
     };
+    use voxel_graph::GraphKind;
 
     fn temporary_project_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("voxel-rt-{label}-{}", AssetId::new()));

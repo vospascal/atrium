@@ -1,6 +1,6 @@
 //! Material-graph lowering shared by the CPU preview and generated WGSL.
 //!
-//! The editable [`GraphAsset`](crate::graph::GraphAsset) is never evaluated
+//! The editable [`GraphAsset`](voxel_graph::GraphAsset) is never evaluated
 //! directly. It first becomes this small typed IR, which gives CPU preview and
 //! GPU code generation the same node semantics.
 
@@ -8,11 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::animation_clock::{fract, AnimationClockSample, EPOCH_SECONDS};
-use crate::graph::{
-    Diagnostic, DiagnosticSeverity, FieldTarget, GraphAsset, GraphCommand, GraphHistory, GraphKind,
-    InputPin, LinkId, LinkRecord, MaterialNodeOperation, NodeId, NodeOperation, NodeRecord,
-    NodeRegistry, NodeTypeId, OutputPin, PropertyValue, SocketKey,
-};
+use crate::graph::{MaterialNodeOperation, NodeOperation};
 use crate::material::Material;
 use crate::material_cacheability::{analyse, CacheReport};
 use crate::material_graph_layers::{
@@ -22,6 +18,11 @@ use crate::material_graph_layers::{
 use crate::pattern::MAX_PATTERN_LAYERS;
 use crate::world_event::{GpuWorldEvent, MAX_EVENT_LIFETIME_SECONDS};
 use voxel_graph::AssetId;
+use voxel_graph::{
+    Diagnostic, DiagnosticSeverity, FieldTarget, GraphAsset, GraphCommand, GraphHistory, GraphKind,
+    InputPin, LinkId, LinkRecord, NodeId, NodeRecord, NodeRegistry, NodeTypeId, OutputPin,
+    PropertyValue, SocketKey,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueType {
@@ -680,7 +681,7 @@ pub struct MaterialSample {
 /// declarations. New/reset documents therefore obey the same schema as loaded
 /// documents and can accept a layer immediately.
 pub fn new_material_graph(name: impl Into<String>) -> GraphAsset {
-    let registry = NodeRegistry::builtin();
+    let registry = crate::graph::CATALOGUE;
     let mut graph = GraphAsset::new(name, GraphKind::Material);
     let surface = NodeId::new();
     let output = NodeId::new();
@@ -1670,7 +1671,7 @@ pub fn compile(
     if !diagnostics.is_empty() {
         return Err(MaterialGraphError::InvalidGraph(diagnostics));
     }
-    if graph.kind != crate::graph::GraphKind::Material {
+    if graph.kind != voxel_graph::GraphKind::Material {
         return Err(MaterialGraphError::WrongGraphKind);
     }
     let surface_chain = resolve_material_surface_chain(graph, registry).map_err(|error| {
@@ -1805,7 +1806,7 @@ impl<'a> Lowerer<'a> {
         let bypassable = matches!(
             self.registry
                 .find(&record.node_type)
-                .map(|declaration| declaration.operation),
+                .and_then(|declaration| NodeOperation::from_tag(declaration.operation)),
             Some(NodeOperation::Material(
                 MaterialNodeOperation::Oscillator | MaterialNodeOperation::EventSensor,
             ))
@@ -1856,7 +1857,7 @@ impl<'a> Lowerer<'a> {
         let operation = self
             .registry
             .find(&record.node_type)
-            .map(|declaration| declaration.operation)
+            .and_then(|declaration| NodeOperation::from_tag(declaration.operation))
             .ok_or_else(|| MaterialGraphError::UnsupportedNode(record.node_type.0.clone()))?;
         let NodeOperation::Material(operation) = operation else {
             return Err(MaterialGraphError::UnsupportedNode(record.node_type.0));
@@ -2563,7 +2564,7 @@ fn validate_wgsl(source: &str) -> Result<(), MaterialGraphError> {
 #[derive(Debug)]
 pub enum MaterialGraphError {
     WrongGraphKind,
-    InvalidGraph(Vec<crate::graph::Diagnostic>),
+    InvalidGraph(Vec<voxel_graph::Diagnostic>),
     OutputCount(usize),
     Surface(LayerGraphError),
     MissingNode(NodeId),
@@ -2638,7 +2639,7 @@ fn contains_ignore_ascii_case(haystack: &str, needle_lowercase: &str) -> bool {
 /// with "roughness" in their title.
 ///
 /// `search_lowercase` must already be lowercased by the caller.
-fn node_matches_search(node: &crate::graph::NodeDeclaration, search_lowercase: &str) -> bool {
+fn node_matches_search(node: &voxel_graph::NodeDeclaration, search_lowercase: &str) -> bool {
     let matches = |haystack: &str| contains_ignore_ascii_case(haystack, search_lowercase);
     matches(node.id)
         || matches(node.title)
@@ -2830,7 +2831,8 @@ impl GraphEditorState {
 
     pub fn add_node(&mut self, node_type: NodeTypeId, registry: &NodeRegistry) {
         if registry.find(&node_type).is_some_and(|declaration| {
-            declaration.operation == NodeOperation::Material(MaterialNodeOperation::PatternLayer)
+            declaration.operation
+                == NodeOperation::Material(MaterialNodeOperation::PatternLayer).tag()
         }) {
             self.add_pattern_layer(registry);
             return;
@@ -3068,7 +3070,7 @@ impl GraphEditorState {
     pub fn visible_node_types(
         &self,
         registry: &NodeRegistry,
-    ) -> Vec<&'static crate::graph::NodeDeclaration> {
+    ) -> Vec<&'static voxel_graph::NodeDeclaration> {
         let search_lowercase = self.search.to_ascii_lowercase();
         registry
             .declarations()
@@ -3245,7 +3247,7 @@ impl std::error::Error for MaterialGraphError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{GraphCommand, GraphHistory, GraphKind, LinkId, NodeTypeId, OutputPin};
+    use voxel_graph::{GraphCommand, GraphHistory, GraphKind, LinkId, NodeTypeId, OutputPin};
     fn node(value: &str) -> NodeId {
         NodeId(value.into())
     }
@@ -3255,7 +3257,7 @@ mod tests {
         let surface = node("surface");
         graph.nodes.insert(
             output.clone(),
-            crate::graph::NodeRecord {
+            voxel_graph::NodeRecord {
                 node_type: NodeTypeId("material.output".into()),
                 node_type_version: 1,
                 properties: BTreeMap::new(),
@@ -3265,7 +3267,7 @@ mod tests {
         );
         graph.nodes.insert(
             surface.clone(),
-            crate::graph::NodeRecord {
+            voxel_graph::NodeRecord {
                 node_type: NodeTypeId("material.surface".into()),
                 node_type_version: 1,
                 properties: BTreeMap::new(),
@@ -3291,7 +3293,7 @@ mod tests {
     }
     #[test]
     fn one_ir_drives_cpu_preview_and_naga_valid_wgsl() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         graph
             .nodes
@@ -3319,7 +3321,7 @@ mod tests {
     }
     #[test]
     fn linked_math_is_evaluated_once_in_both_backends() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         let mut history = GraphHistory::default();
         let add = node("add");
@@ -3351,12 +3353,12 @@ mod tests {
                 &mut graph,
                 &registry,
                 GraphCommand::Connect {
-                    id: crate::graph::LinkId("roughness".into()),
+                    id: voxel_graph::LinkId("roughness".into()),
                     from: OutputPin {
                         node: add,
                         socket: SocketKey("value".into()),
                     },
-                    to: crate::graph::InputPin {
+                    to: voxel_graph::InputPin {
                         node: output,
                         socket: SocketKey("roughness".into()),
                     },
@@ -3381,7 +3383,7 @@ mod tests {
         socket: &str,
         properties: &[(&str, PropertyValue)],
     ) -> (GraphAsset, NodeId) {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         let mut history = GraphHistory::default();
         let driver = node("driver");
@@ -3409,12 +3411,12 @@ mod tests {
                 &mut graph,
                 &registry,
                 GraphCommand::Connect {
-                    id: crate::graph::LinkId("drive".into()),
+                    id: voxel_graph::LinkId("drive".into()),
                     from: OutputPin {
                         node: driver.clone(),
                         socket: SocketKey(socket.into()),
                     },
-                    to: crate::graph::InputPin {
+                    to: voxel_graph::InputPin {
                         node: output,
                         socket: SocketKey("roughness".into()),
                     },
@@ -3450,7 +3452,7 @@ mod tests {
     /// otherwise a runtime-only failure with no test to name it.
     #[test]
     fn animation_nodes_lower_to_naga_valid_wgsl_in_the_full_dda_source() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         for (index, (node_type, socket)) in [
             ("material.time", "value"),
             ("material.oscillator", "value"),
@@ -3504,7 +3506,7 @@ mod tests {
     /// fallback, so the two graphs differ by construction.
     #[test]
     fn a_frozen_clock_and_no_events_make_evaluation_repeatable() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_driving_roughness(
             "material.oscillator",
             "value",
@@ -3523,7 +3525,7 @@ mod tests {
     /// doing arithmetic on it — a lava drift snapping to its origin every 64 s.
     #[test]
     fn time_is_monotone_across_an_epoch_boundary() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_driving_roughness("material.time", "value", &[]);
         let program = compile(&graph, &registry).unwrap();
         let epoch_seconds = crate::animation_clock::EPOCH_SECONDS;
@@ -3553,7 +3555,7 @@ mod tests {
     /// BRICK_SIZE conversion that `pattern_coordinate` also makes.
     #[test]
     fn per_voxel_sync_offsets_whole_blocks_not_detail_cells() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_driving_roughness(
             "material.oscillator",
             "value",
@@ -3585,7 +3587,7 @@ mod tests {
     /// case a lava lake needs.
     #[test]
     fn global_sync_is_identical_everywhere() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_driving_roughness("material.oscillator", "value", &[]);
         let program = compile(&graph, &registry).unwrap();
         let sample = |position: [f32; 3]| {
@@ -3604,7 +3606,7 @@ mod tests {
     /// another's envelope — a combination that never existed.
     #[test]
     fn sensor_outputs_all_describe_one_winning_event() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let mut outputs = Vec::new();
         for socket in ["signal", "nearness", "envelope"] {
             let (graph, _) = graph_driving_roughness(
@@ -3648,7 +3650,7 @@ mod tests {
     /// raw event list instead.
     #[test]
     fn two_sensors_on_different_channels_evaluate_independently() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let evaluate = |channel: i64, radius: f32, events: &[GpuWorldEvent]| {
             let (graph, _) = graph_driving_roughness(
                 "material.event_sensor",
@@ -3846,7 +3848,7 @@ mod tests {
     /// material is in, and the one that keeps the volume bit-identical.
     #[test]
     fn a_graph_without_a_sensor_has_no_emission_response() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_with_output();
         assert!(compile(&graph, &registry)
             .unwrap()
@@ -3858,7 +3860,7 @@ mod tests {
     /// literal meanings so they stay usable as diagnostics.
     #[test]
     fn invert_flips_the_signal_and_leaves_the_diagnostics_literal() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let read = |socket: &str, invert: bool| {
             let (graph, _) = graph_driving_roughness(
                 "material.event_sensor",
@@ -3889,7 +3891,7 @@ mod tests {
     /// one frame while its attack is still ramping.
     #[test]
     fn the_envelope_is_continuous_including_an_impulse_that_closes_during_attack() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_driving_roughness(
             "material.event_sensor",
             "envelope",
@@ -3940,7 +3942,7 @@ mod tests {
     /// up and stop" case. This is what a distance-only sensor could not do.
     #[test]
     fn an_ongoing_event_ramps_over_the_attack_then_holds() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_driving_roughness(
             "material.event_sensor",
             "envelope",
@@ -3976,7 +3978,7 @@ mod tests {
     /// — it is the SUM that has to fit the budget.
     #[test]
     fn a_sensor_envelope_longer_than_the_event_lifetime_is_a_compile_error() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let budget = MAX_EVENT_LIFETIME_SECONDS;
         let (graph, _) = graph_driving_roughness(
             "material.event_sensor",
@@ -4008,7 +4010,7 @@ mod tests {
     /// "trigger a pulse" feature is made of, and the reason multiply exists.
     #[test]
     fn a_sensor_gates_an_oscillator_through_multiply() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         let mut history = GraphHistory::default();
         let sensor = node("sensor");
@@ -4047,12 +4049,12 @@ mod tests {
                     &mut graph,
                     &registry,
                     GraphCommand::Connect {
-                        id: crate::graph::LinkId(format!("{socket}-{input}")),
+                        id: voxel_graph::LinkId(format!("{socket}-{input}")),
                         from: OutputPin {
                             node: from.clone(),
                             socket: SocketKey(socket.into()),
                         },
-                        to: crate::graph::InputPin {
+                        to: voxel_graph::InputPin {
                             node: to.clone(),
                             socket: SocketKey(input.into()),
                         },
@@ -4065,12 +4067,12 @@ mod tests {
                 &mut graph,
                 &registry,
                 GraphCommand::Connect {
-                    id: crate::graph::LinkId("gate-roughness".into()),
+                    id: voxel_graph::LinkId("gate-roughness".into()),
                     from: OutputPin {
                         node: gate,
                         socket: SocketKey("value".into()),
                     },
-                    to: crate::graph::InputPin {
+                    to: voxel_graph::InputPin {
                         node: output,
                         socket: SocketKey("roughness".into()),
                     },
@@ -4116,7 +4118,7 @@ mod tests {
     /// different layer and look like a working feature.
     #[test]
     fn layer_animation_lands_on_the_slot_its_layer_occupies() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let graph = graph_from_material(&crate::material::MATERIALS[6]);
         let mut editor = GraphEditorState::new(6);
         editor.open_graph(6, graph);
@@ -4198,7 +4200,7 @@ mod tests {
     /// wrong index.
     #[test]
     fn a_disabled_layer_consumes_no_animation_slot() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let graph = graph_from_material(&crate::material::MATERIALS[6]);
         let mut editor = GraphEditorState::new(6);
         editor.open_graph(6, graph);
@@ -4244,7 +4246,7 @@ mod tests {
     /// before S3 behaves exactly as it did.
     #[test]
     fn a_graph_without_animation_sockets_emits_the_identity() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let graph = graph_from_material(&crate::material::MATERIALS[26]);
         let program = compile(&graph, &registry).unwrap();
         assert_eq!(
@@ -4277,7 +4279,7 @@ mod tests {
     /// layer gain (1.0) and a mix factor (0.0) do not share one.
     #[test]
     fn a_disabled_oscillator_leaves_its_consumer_on_the_socket_default() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let build = |enabled: bool| {
             let (graph, _) = graph_driving_roughness(
                 "material.oscillator",
@@ -4325,7 +4327,7 @@ mod tests {
     /// bottom of the oscillator's range.
     #[test]
     fn disabling_a_layer_gain_oscillator_restores_the_authored_amount() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let build = |enabled: bool| {
             let graph = graph_from_material(&crate::material::MATERIALS[6]);
             let mut editor = GraphEditorState::new(6);
@@ -4359,12 +4361,12 @@ mod tests {
                     &mut editor.graph,
                     &registry,
                     GraphCommand::Connect {
-                        id: crate::graph::LinkId("gain".into()),
+                        id: voxel_graph::LinkId("gain".into()),
                         from: OutputPin {
                             node: oscillator,
                             socket: SocketKey("value".into()),
                         },
-                        to: crate::graph::InputPin {
+                        to: voxel_graph::InputPin {
                             node: layer,
                             socket: SocketKey("animation_gain".into()),
                         },
@@ -4398,7 +4400,7 @@ mod tests {
     /// backends. -90 elevation is straight down; azimuth 0 is +X and 90 is +Z.
     #[test]
     fn direction_turns_speed_and_angles_into_the_documented_vector() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let read = |azimuth: f32, elevation: f32, speed: f32| {
             let (mut graph, output) = graph_with_output();
             let mut history = GraphHistory::default();
@@ -4450,12 +4452,12 @@ mod tests {
                         &mut probe,
                         &registry,
                         GraphCommand::Connect {
-                            id: crate::graph::LinkId("dir".into()),
+                            id: voxel_graph::LinkId("dir".into()),
                             from: OutputPin {
                                 node: direction.clone(),
                                 socket: SocketKey("vector".into()),
                             },
-                            to: crate::graph::InputPin {
+                            to: voxel_graph::InputPin {
                                 node: component.clone(),
                                 socket: SocketKey("a".into()),
                             },
@@ -4467,12 +4469,12 @@ mod tests {
                         &mut probe,
                         &registry,
                         GraphCommand::Connect {
-                            id: crate::graph::LinkId("out".into()),
+                            id: voxel_graph::LinkId("out".into()),
                             from: OutputPin {
                                 node: component.clone(),
                                 socket: SocketKey("value".into()),
                             },
-                            to: crate::graph::InputPin {
+                            to: voxel_graph::InputPin {
                                 node: output.clone(),
                                 socket: SocketKey("roughness".into()),
                             },
@@ -4505,7 +4507,7 @@ mod tests {
 
     #[test]
     fn invalid_edit_keeps_the_last_known_good_program_active() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         graph
             .nodes
@@ -4529,7 +4531,7 @@ mod tests {
 
     #[test]
     fn graph_dispatch_injects_a_slot_branch_into_the_full_dda_source() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (graph, _) = graph_with_output();
         let program = compile(&graph, &registry).unwrap();
         let mut set = MaterialGraphShaderSet::default();
@@ -4551,7 +4553,7 @@ mod tests {
 
     #[test]
     fn procedural_catalog_lowers_noise_fbm_ramp_and_vectors_for_preview_and_gpu() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         let position = node("position");
         let noise = node("noise");
@@ -4560,7 +4562,7 @@ mod tests {
         graph.nodes.extend([
             (
                 position.clone(),
-                crate::graph::NodeRecord {
+                voxel_graph::NodeRecord {
                     node_type: NodeTypeId("material.position".into()),
                     node_type_version: 1,
                     properties: BTreeMap::new(),
@@ -4570,7 +4572,7 @@ mod tests {
             ),
             (
                 noise.clone(),
-                crate::graph::NodeRecord {
+                voxel_graph::NodeRecord {
                     node_type: NodeTypeId("material.noise".into()),
                     node_type_version: 1,
                     properties: BTreeMap::new(),
@@ -4584,7 +4586,7 @@ mod tests {
             ),
             (
                 ramp.clone(),
-                crate::graph::NodeRecord {
+                voxel_graph::NodeRecord {
                     node_type: NodeTypeId("material.color_ramp".into()),
                     node_type_version: 1,
                     properties: BTreeMap::new(),
@@ -4603,7 +4605,7 @@ mod tests {
             ),
             (
                 fbm.clone(),
-                crate::graph::NodeRecord {
+                voxel_graph::NodeRecord {
                     node_type: NodeTypeId("material.fbm".into()),
                     node_type_version: 1,
                     properties: BTreeMap::new(),
@@ -4615,7 +4617,7 @@ mod tests {
         graph.links.extend([
             (
                 LinkId("position-noise".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: position.clone(),
                         socket: SocketKey("vector".into()),
@@ -4629,7 +4631,7 @@ mod tests {
             ),
             (
                 LinkId("noise-ramp".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: noise.clone(),
                         socket: SocketKey("factor".into()),
@@ -4643,7 +4645,7 @@ mod tests {
             ),
             (
                 LinkId("ramp-base".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: ramp.clone(),
                         socket: SocketKey("color".into()),
@@ -4657,7 +4659,7 @@ mod tests {
             ),
             (
                 LinkId("noise-emission".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: noise.clone(),
                         socket: SocketKey("color".into()),
@@ -4671,7 +4673,7 @@ mod tests {
             ),
             (
                 LinkId("position-fbm".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: position,
                         socket: SocketKey("vector".into()),
@@ -4685,7 +4687,7 @@ mod tests {
             ),
             (
                 LinkId("fbm-roughness".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: fbm,
                         socket: SocketKey("value".into()),
@@ -4725,7 +4727,7 @@ mod tests {
 
     #[test]
     fn canonical_material_graph_preserves_face_roles_in_graph_preview() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let material = crate::material::MATERIALS[1];
         let graph = graph_from_material(&material);
         assert_eq!(
@@ -4748,7 +4750,7 @@ mod tests {
 
     #[test]
     fn every_compiled_material_has_an_openable_graph_representation() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         for (slot, material) in crate::material::MATERIALS.iter().enumerate() {
             let graph = graph_from_material(material);
             let program = compile(&graph, &registry).unwrap_or_else(|error| {
@@ -4766,7 +4768,7 @@ mod tests {
 
     #[test]
     fn editor_adds_nodes_through_commands_with_inspectable_defaults() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let mut editor = GraphEditorState::new(6);
         let baseline_nodes = editor.graph.nodes.len();
         editor.add_node(NodeTypeId("material.constant_scalar".into()), &registry);
@@ -4782,7 +4784,7 @@ mod tests {
 
     #[test]
     fn editor_adds_editable_defaults_for_procedural_nodes() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let mut editor = GraphEditorState::new(6);
         editor.add_node(NodeTypeId("material.noise".into()), &registry);
         let noise = editor.selected_node.clone().unwrap();
@@ -4800,7 +4802,7 @@ mod tests {
 
     #[test]
     fn node_catalog_hides_types_at_their_declared_instance_limit() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let editor = GraphEditorState::new(6);
         let visible = editor
             .visible_node_types(&registry)
@@ -4815,41 +4817,40 @@ mod tests {
     /// A node type whose only occurrence of "gloss" and "hemisphere" is on its
     /// sockets — the id, title, description and category deliberately avoid
     /// both words, so a match can only come from socket prose.
-    static SOCKET_PROSE_NODES: &[crate::graph::NodeDeclaration] =
-        &[crate::graph::NodeDeclaration {
-            id: "test.socket_prose",
-            version: 1,
-            title: "Widget",
-            description: "A node declared only for palette search tests.",
-            category: crate::graph::NodeCategory::Inputs,
-            preview: crate::graph::NodePreview::Value,
-            operation: NodeOperation::Material(MaterialNodeOperation::ConstantScalar),
-            temporal: crate::graph::TemporalDependence::Inherited,
-            kinds: &[GraphKind::Material],
-            inputs: &[crate::graph::SocketDeclarationStatic {
-                key: "gloss",
-                label: "Gloss",
-                description: "How tight the specular highlight stays.",
-                value_type: crate::graph::SocketType::Scalar,
-                rate: crate::graph::EvaluationRate::Uniform,
-                cardinality: crate::graph::Cardinality::OPTIONAL_SINGLE,
-                separable: crate::graph::Separable::None,
-            }],
-            outputs: &[crate::graph::SocketDeclarationStatic {
-                key: "value",
-                label: "Result",
-                description: "Sampled over the hemisphere above the surface.",
-                value_type: crate::graph::SocketType::Scalar,
-                rate: crate::graph::EvaluationRate::Uniform,
-                cardinality: crate::graph::Cardinality::ANY,
-                separable: crate::graph::Separable::None,
-            }],
-            fields: &[],
-        }];
+    static SOCKET_PROSE_NODES: &[voxel_graph::NodeDeclaration] = &[voxel_graph::NodeDeclaration {
+        id: "test.socket_prose",
+        version: 1,
+        title: "Widget",
+        description: "A node declared only for palette search tests.",
+        category: voxel_graph::NodeCategory::Inputs,
+        preview: voxel_graph::NodePreview::Value,
+        operation: NodeOperation::Material(MaterialNodeOperation::ConstantScalar).tag(),
+        temporal: voxel_graph::TemporalDependence::Inherited,
+        kinds: &[GraphKind::Material],
+        inputs: &[voxel_graph::SocketDeclarationStatic {
+            key: "gloss",
+            label: "Gloss",
+            description: "How tight the specular highlight stays.",
+            value_type: voxel_graph::SocketType::Scalar,
+            rate: voxel_graph::EvaluationRate::Uniform,
+            cardinality: voxel_graph::Cardinality::OPTIONAL_SINGLE,
+            separable: voxel_graph::Separable::None,
+        }],
+        outputs: &[voxel_graph::SocketDeclarationStatic {
+            key: "value",
+            label: "Result",
+            description: "Sampled over the hemisphere above the surface.",
+            value_type: voxel_graph::SocketType::Scalar,
+            rate: voxel_graph::EvaluationRate::Uniform,
+            cardinality: voxel_graph::Cardinality::ANY,
+            separable: voxel_graph::Separable::None,
+        }],
+        fields: &[],
+    }];
 
     #[test]
     fn node_palette_search_matches_socket_label_and_description() {
-        let registry = NodeRegistry::new(SOCKET_PROSE_NODES);
+        let registry = NodeRegistry::new(SOCKET_PROSE_NODES, crate::graph::GRAPH_CONTRACTS);
         let mut editor = GraphEditorState::new(6);
 
         // "Gloss" is only an input socket label; "hemisphere" is only inside an
@@ -4874,7 +4875,7 @@ mod tests {
 
     #[test]
     fn editor_inserts_and_removes_layers_in_the_typed_surface_chain() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let graph = graph_from_material(&crate::material::MATERIALS[6]);
         let mut editor = GraphEditorState::new(6);
         editor.open_graph(6, graph);
@@ -4912,7 +4913,7 @@ mod tests {
 
     #[test]
     fn layer_insertion_is_one_atomic_undoable_edit() {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let graph = graph_from_material(&crate::material::MATERIALS[6]);
         let mut editor = GraphEditorState::new(6);
         editor.open_graph(6, graph);
@@ -4959,14 +4960,14 @@ mod tests {
 
     #[test]
     fn reroute_nodes_preserve_typed_values_for_preview_and_gpu() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let (mut graph, output) = graph_with_output();
         let color = node("color");
         let reroute = node("reroute");
         graph.nodes.extend([
             (
                 color.clone(),
-                crate::graph::NodeRecord {
+                voxel_graph::NodeRecord {
                     node_type: NodeTypeId("material.constant_color".into()),
                     node_type_version: 1,
                     properties: BTreeMap::from([(
@@ -4979,7 +4980,7 @@ mod tests {
             ),
             (
                 reroute.clone(),
-                crate::graph::NodeRecord {
+                voxel_graph::NodeRecord {
                     node_type: NodeTypeId("material.reroute_color".into()),
                     node_type_version: 1,
                     properties: BTreeMap::new(),
@@ -4991,7 +4992,7 @@ mod tests {
         graph.links.extend([
             (
                 LinkId("color-reroute".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: color,
                         socket: SocketKey("color".into()),
@@ -5005,7 +5006,7 @@ mod tests {
             ),
             (
                 LinkId("reroute-output".into()),
-                crate::graph::LinkRecord {
+                voxel_graph::LinkRecord {
                     from: OutputPin {
                         node: reroute,
                         socket: SocketKey("color".into()),
@@ -5030,7 +5031,7 @@ mod tests {
 
     #[test]
     fn editor_can_copy_and_paste_a_node_with_defaults() {
-        let registry = NodeRegistry;
+        let registry = crate::graph::CATALOGUE;
         let mut editor = GraphEditorState::new(6);
         editor.add_node(NodeTypeId("material.constant_color".into()), &registry);
         let original = editor.selected_node.clone().unwrap();

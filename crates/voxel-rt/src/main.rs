@@ -20,6 +20,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use voxel_color::OutputDepth;
 use voxel_color::{HeadroomChoice, TonemapCurve};
+use voxel_graph::GraphAsset;
 use voxel_rt::animation_clock::AnimationClock;
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
@@ -28,8 +29,6 @@ use voxel_rt::engine_runtime::{RuntimeMode, VoxelEngineConfig, VoxelEngineRuntim
 use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
-use voxel_rt::graph::GraphAsset;
-use voxel_rt::graph::NodeRegistry;
 use voxel_rt::light_fixture;
 use voxel_rt::lighting::{OutputParams, SunSettings};
 use voxel_rt::material;
@@ -842,7 +841,7 @@ impl AppState {
     }
 
     fn compile_graph_editor(&mut self) {
-        let registry = NodeRegistry;
+        let registry = voxel_rt::graph::CATALOGUE;
         let slot = self.graph_editor.material_slot;
         // Cloned rather than borrowed: `rebuild_dda_shader` below needs `&mut
         // self`, and an editor compile is a keystroke-rate path, not a frame one.

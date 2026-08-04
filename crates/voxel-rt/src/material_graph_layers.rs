@@ -11,15 +11,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::graph::{
-    FieldTarget, GraphAsset, InputPin, LinkId, LinkRecord, MaterialNodeOperation, NodeId,
-    NodeOperation, NodeRecord, NodeRegistry, NodeTypeId, OutputPin, PropertyValue, SocketKey,
-};
+use crate::graph::{MaterialNodeOperation, NodeOperation};
 use crate::material::Material;
 use crate::pattern::{
     PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternStack, PatternTarget,
     MAXIMUM_TILE_ASPECT, MAXIMUM_TILE_GAP, MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES,
     MAX_PATTERN_LAYERS, MAX_TEXELS_PER_VOXEL, MINIMUM_TILE_ASPECT, NO_PATTERNS, TEXEL_RUNGS,
+};
+use voxel_graph::{
+    FieldTarget, GraphAsset, InputPin, LinkId, LinkRecord, NodeId, NodeRecord, NodeRegistry,
+    NodeTypeId, OutputPin, PropertyValue, SocketKey,
 };
 
 pub const MATERIAL_OUTPUT_NODE: &str = "material.output";
@@ -163,7 +164,7 @@ pub fn sync_pattern_layers_from_graph(
     graph: &GraphAsset,
     material: &mut Material,
 ) -> Result<bool, LayerGraphError> {
-    let stack = project_pattern_stack(graph, &NodeRegistry::builtin())?;
+    let stack = project_pattern_stack(graph, &crate::graph::CATALOGUE)?;
     if material.patterns != stack {
         material.patterns = stack;
         Ok(true)
@@ -193,7 +194,7 @@ pub fn project_pattern_stack(
             .expect("resolved pattern source remains present");
         let operation = registry
             .find(&generator.node_type)
-            .map(|declaration| declaration.operation);
+            .and_then(|declaration| NodeOperation::from_tag(declaration.operation));
         let octaves =
             || property_integer(generator, "octaves").clamp(1, MAX_NOISE_OCTAVES as i64) as u32;
         let pattern_generator = match operation {
@@ -272,7 +273,8 @@ pub fn resolve_material_surface_chain(
         .iter()
         .filter(|(_, record)| {
             registry.find(&record.node_type).is_some_and(|declaration| {
-                declaration.operation == NodeOperation::Material(MaterialNodeOperation::Output)
+                declaration.operation
+                    == NodeOperation::Material(MaterialNodeOperation::Output).tag()
             })
         })
         .map(|(id, _)| id)
@@ -306,7 +308,7 @@ pub fn resolve_surface_chain(
                 })?;
         let operation = registry
             .find(&record.node_type)
-            .map(|declaration| declaration.operation);
+            .and_then(|declaration| NodeOperation::from_tag(declaration.operation));
         match operation {
             Some(NodeOperation::Material(MaterialNodeOperation::Surface)) => {
                 if layers.len() > MAX_PATTERN_LAYERS {
@@ -673,7 +675,7 @@ fn blend_name(blend: PatternBlend) -> &'static str {
 
 fn property_value(node: &NodeRecord, key: &str) -> PropertyValue {
     node.properties.get(key).cloned().unwrap_or_else(|| {
-        NodeRegistry::builtin()
+        crate::graph::CATALOGUE
             .find(&node.node_type)
             .and_then(|declaration| declaration.field(FieldTarget::Property, key))
             .unwrap_or_else(|| panic!("node `{}` has no declared field `{key}`", node.node_type))
@@ -722,11 +724,11 @@ fn property_color(node: &NodeRecord, key: &str) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{GraphAsset, GraphKind, NodeRegistry};
     use crate::material::MATERIALS;
+    use voxel_graph::{GraphAsset, GraphKind};
 
     fn graph_with_surface_chain(stack: &PatternStack) -> (GraphAsset, NodeId) {
-        let registry = NodeRegistry::builtin();
+        let registry = crate::graph::CATALOGUE;
         let mut graph = GraphAsset::new("material", GraphKind::Material);
         let surface = NodeId::new();
         let output = NodeId::new();
@@ -770,7 +772,7 @@ mod tests {
             .map(|(id, _)| id.clone())
             .unwrap();
         let generator_id = incoming_pattern_source(&graph, &layer_id).unwrap();
-        let mut speckle = NodeRegistry::builtin()
+        let mut speckle = crate::graph::CATALOGUE
             .find(&NodeTypeId(PATTERN_SPECKLE_NODE.into()))
             .unwrap()
             .new_record();
@@ -779,7 +781,7 @@ mod tests {
             .insert("density".into(), PropertyValue::Scalar(0.4));
         graph.nodes.insert(generator_id, speckle);
 
-        let stack = project_pattern_stack(&graph, &NodeRegistry::builtin()).unwrap();
+        let stack = project_pattern_stack(&graph, &crate::graph::CATALOGUE).unwrap();
         assert_eq!(
             stack.active().next().unwrap().generator,
             PatternGenerator::Speckle { density: 0.4 }
@@ -793,7 +795,7 @@ mod tests {
         graph.links.retain(|_, link| link.to.socket.0 != "pattern");
 
         assert!(matches!(
-            project_pattern_stack(&graph, &NodeRegistry::builtin()),
+            project_pattern_stack(&graph, &crate::graph::CATALOGUE),
             Err(LayerGraphError::MissingPatternConnection { .. })
         ));
     }

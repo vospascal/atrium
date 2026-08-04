@@ -31,7 +31,7 @@
 
 use std::path::PathBuf;
 
-use voxel_rt::graph::{GraphAsset, NodeRegistry};
+use voxel_graph::GraphAsset;
 use voxel_rt::material_cacheability::analyse;
 
 fn main() {
@@ -50,7 +50,7 @@ fn main() {
     for path in &paths {
         let text = std::fs::read_to_string(path).expect("reading a graph");
         let graph: GraphAsset = serde_json::from_str(&text).expect("parsing a graph");
-        let report = analyse(&graph, &NodeRegistry);
+        let report = analyse(&graph, &voxel_rt::graph::CATALOGUE);
         if report.layers.is_empty() {
             continue;
         }

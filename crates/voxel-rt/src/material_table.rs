@@ -209,10 +209,10 @@ impl MaterialTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{NodeRegistry, PropertyValue, SocketKey};
     use crate::material::{material_id, MaterialKind};
     use crate::material_graph::{compile, new_material_graph};
     use voxel_core::world::Voxel;
+    use voxel_graph::{PropertyValue, SocketKey};
 
     /// The default table must be the compiled one AND must not ask for an upload:
     /// `WorldBindings::new` already sent exactly these bytes, so a dirty default
@@ -309,7 +309,7 @@ mod tests {
         surface
             .socket_defaults
             .insert(SocketKey("roughness".into()), PropertyValue::Scalar(0.2));
-        let program = compile(&graph, &NodeRegistry).unwrap();
+        let program = compile(&graph, &crate::graph::CATALOGUE).unwrap();
         let stone = material_id(Voxel::Stone);
         let mut table = MaterialTable::default();
         assert!(table.apply_graph_sample(

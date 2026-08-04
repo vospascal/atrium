@@ -9,13 +9,13 @@ use voxel_core::world::VoxelWorld;
 
 use crate::brickmap::Brickmap;
 use crate::environment::{RuntimeEnvironmentState, Season};
-use crate::graph::{GraphAsset, GraphKind, NodeRegistry};
 use crate::material_graph::MaterialGraphShaderSet;
 use crate::material_graph_assets::MaterialGraphAssetService;
 use crate::material_table::MaterialTable;
 use crate::studio::StudioScene;
 use crate::studio_assets::{AssetError, StudioProject, StudioProjectStore};
 use crate::variants::RenderQuality;
+use voxel_graph::{GraphAsset, GraphKind};
 
 pub const DEFAULT_WORLD_SEED: u32 = 1;
 pub const DEFAULT_WORLD_SEASON: f32 = 0.0;
@@ -224,11 +224,11 @@ impl CompiledWorldProgram {
         if graph.kind != GraphKind::World {
             return Err("active world graph is not a World graph".to_string());
         }
-        let resolved = graph.resolve(&NodeRegistry::builtin());
+        let resolved = graph.resolve(&crate::graph::CATALOGUE);
         if let Some(error) = resolved
             .diagnostics
             .iter()
-            .find(|item| item.severity == crate::graph::DiagnosticSeverity::Error)
+            .find(|item| item.severity == voxel_graph::DiagnosticSeverity::Error)
         {
             return Err(error.message.clone());
         }
