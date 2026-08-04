@@ -15,7 +15,7 @@ members = [
     "crates/voxel-rt",
     "crates/voxel-game-ui",
     "crates/voxel-studio",
-    "crates/voxel-ui",
+    "crates/voxel",
 ]
 
 [package]

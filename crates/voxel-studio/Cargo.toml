@@ -9,7 +9,7 @@ description = "The Graph Studio: the material-graph node editor"
 # crate rather than a module: the compiler now enforces that surface instead of a convention.
 #
 # Nothing here depends on the game-facing UI (`voxel-game-ui`), and nothing there depends on this.
-# They are siblings composed by `voxel-ui`.
+# They are siblings composed by `voxel`.
 [dependencies]
 egui = "0.35"
 voxel-graph = { path = "../voxel-graph" }

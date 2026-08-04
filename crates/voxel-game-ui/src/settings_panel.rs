@@ -29,7 +29,7 @@
 //! The leaf drawing functions for 4, 5, 7 and the movement readout live here, with the two
 //! readout structs they render ([`MovementReadout`], [`WorldEditReadout`]).
 //!
-//! They used to sit in `voxel-ui`'s overlay, which made the two modules mutually dependent —
+//! They used to sit in `voxel`'s overlay, which made the two modules mutually dependent —
 //! `overlay` needed `SettingsContext` to open the window, and this module needed four `draw_*`
 //! helpers and both readout types back. `scripts/dep-cycles.py` reported it as a cycle. Nothing
 //! in `overlay` actually called those helpers: it only defined them. So they were simply in the
@@ -56,7 +56,7 @@ use voxel_rt::world_host::WorldEditStats;
 /// Everything the window reads or mutates, bundled.
 ///
 /// A struct rather than fifteen parameters: the call already threads this many
-/// values through `voxel-ui`'s `Overlay::render`, and repeating that list at
+/// values through `voxel`'s `Overlay::render`, and repeating that list at
 /// every hop is how a signature becomes unreadable. Same reasoning as bundling the
 /// foliage parameters — a group that always travels together should travel as one
 /// thing.

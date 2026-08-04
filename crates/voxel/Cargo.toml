@@ -1,8 +1,8 @@
 [package]
-name = "voxel-ui"
+name = "voxel"
 version = "0.1.0"
 edition = "2021"
-description = "The voxel engine's application layer: window, egui panels, and the Graph Studio"
+description = "The voxel engine application: window, event loop, egui panels and the Graph Studio"
 
 # This crate is the composition layer. It owns `main.rs`, so it is where the renderer, the
 # authoring UI and the window are wired together — and `voxel-rt` is now a library that knows
@@ -29,3 +29,4 @@ voxel-rt = { path = "../voxel-rt" }
 voxel-studio = { path = "../voxel-studio" }
 wgpu = { version = "29", features = ["naga-ir"] }
 winit = "0.30"
+

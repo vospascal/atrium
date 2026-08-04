@@ -1,8 +1,8 @@
 //! The Graph Studio's node editor — the material-graph authoring surface.
 //!
-//! Split out of `voxel-ui`'s overlay, where it was 4033 of that file's 4292 lines: the "overlay"
+//! Split out of `voxel`'s overlay, where it was 4033 of that file's 4292 lines: the "overlay"
 //! was in practice the node editor with an egui container wrapped around it. Two entry points
-//! remain, both called by `voxel-ui`'s `Overlay` — [`draw_graph_drawer`] and
+//! remain, both called by `voxel`'s `Overlay` — [`draw_graph_drawer`] and
 //! [`graph_drawer_height`] — so the container composes the editor rather than containing it.
 //!
 //! This is the studio half of the UI. The game-facing panels (quality levers, output depth,

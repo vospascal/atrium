@@ -6796,6 +6796,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "voxel"
+version = "0.1.0"
+dependencies = [
+ "atrium-profile",
+ "egui 0.35.0",
+ "egui-wgpu",
+ "egui-winit",
+ "glam",
+ "serde_json",
+ "voxel-color",
+ "voxel-core",
+ "voxel-environment",
+ "voxel-game-ui",
+ "voxel-graph",
+ "voxel-material",
+ "voxel-material-graph",
+ "voxel-rt",
+ "voxel-studio",
+ "wgpu 29.0.4",
+ "winit",
+]
+
+[[package]]
 name = "voxel-color"
 version = "0.1.0"
 dependencies = [
@@ -6897,29 +6920,6 @@ dependencies = [
  "voxel-graph",
  "voxel-material-graph",
  "voxel-rt",
-]
-
-[[package]]
-name = "voxel-ui"
-version = "0.1.0"
-dependencies = [
- "atrium-profile",
- "egui 0.35.0",
- "egui-wgpu",
- "egui-winit",
- "glam",
- "serde_json",
- "voxel-color",
- "voxel-core",
- "voxel-environment",
- "voxel-game-ui",
- "voxel-graph",
- "voxel-material",
- "voxel-material-graph",
- "voxel-rt",
- "voxel-studio",
- "wgpu 29.0.4",
- "winit",
 ]
 
 [[package]]
