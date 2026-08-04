@@ -193,4 +193,16 @@ mod tests {
         naga::front::wgsl::parse_str(super::super::shaders::LUT_WGSL)
             .expect("Jolifanto LUT compute WGSL must parse with naga");
     }
+
+    #[test]
+    fn lut_contract_pins_jolifanto_scale_and_local_up_parameterization() {
+        let source = super::super::shaders::LUT_WGSL;
+        assert!(source.contains("from_kilometers_scale"));
+        assert!(source.contains("atmosphere_origin_at_height"));
+        assert!(source.contains("atmosphere_ray_sphere_distance"));
+
+        let sampling = crate::WGSL;
+        assert!(sampling.contains("planet_center_world"));
+        assert!(sampling.contains("dot(normalize(direction), local_up)"));
+    }
 }

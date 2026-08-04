@@ -67,25 +67,28 @@ fn atmosphere_ray_sphere_distance(
     let b = dot(origin, direction);
     let c = dot(origin, origin) - radius * radius;
     let discriminant = b * b - c;
-    if (discriminant <= 0.0) {
-        return 0.0;
+    if (discriminant < 0.0) {
+        return -1.0;
     }
     let root = sqrt(discriminant);
     let near = -b - root;
     let far = -b + root;
-    if (near > 0.0) {
+    if (near >= 0.0) {
         return near;
     }
-    return max(far, 0.0);
+    if (far >= 0.0) {
+        return far;
+    }
+    return -1.0;
 }
 
 fn atmosphere_ray_distance(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
     let top = atmosphere_ray_sphere_distance(origin, direction, atmosphere.top_radius_km);
     let ground = atmosphere_ray_sphere_distance(origin, direction, atmosphere.bottom_radius_km);
-    if (ground > 0.0001) {
+    if (ground >= 0.0) {
         return min(top, ground);
     }
-    return top;
+    return max(top, 0.0);
 }
 
 fn atmosphere_transmittance_segment(

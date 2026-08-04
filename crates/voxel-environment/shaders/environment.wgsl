@@ -46,7 +46,13 @@ fn atmosphere_transmittance_uv(direction: vec3<f32>) -> vec2<f32> {
         0.0,
         1.0,
     );
-    return vec2<f32>(dot(normalize(direction), normalize(atmosphere.sun_direction)) * 0.5 + 0.5, height);
+    let planet_center_world = vec3<f32>(
+        0.0,
+        -atmosphere.bottom_radius_km * atmosphere.from_kilometers_scale,
+        0.0,
+    );
+    let local_up = normalize(atmosphere.camera_position - planet_center_world);
+    return vec2<f32>(dot(normalize(direction), local_up) * 0.5 + 0.5, height);
 }
 
 fn environment_sun_transmittance(direction: vec3<f32>) -> vec3<f32> {
@@ -64,10 +70,13 @@ fn environment_sun_transmittance_at(position_world: vec3<f32>, direction: vec3<f
         0.0,
         1.0,
     );
-    let uv = vec2<f32>(
-        dot(normalize(direction), normalize(atmosphere.sun_direction)) * 0.5 + 0.5,
-        height,
+    let planet_center_world = vec3<f32>(
+        0.0,
+        -atmosphere.bottom_radius_km * atmosphere.from_kilometers_scale,
+        0.0,
     );
+    let local_up = normalize(position_world - planet_center_world);
+    let uv = vec2<f32>(dot(normalize(direction), local_up) * 0.5 + 0.5, height);
     return textureSampleLevel(
         atmosphere_transmittance_lut,
         atmosphere_lut_sampler,

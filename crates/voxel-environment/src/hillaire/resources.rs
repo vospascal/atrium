@@ -355,5 +355,7 @@ mod tests {
     fn atmosphere_uniform_matches_wgsl_alignment() {
         assert_eq!(std::mem::size_of::<AtmosphereUniform>(), 160);
         assert_eq!(std::mem::offset_of!(AtmosphereUniform, aerial_size), 80);
+        assert_eq!(std::mem::offset_of!(AtmosphereUniform, visual_sun), 96);
+        assert_eq!(std::mem::offset_of!(AtmosphereUniform, visual_horizon), 144);
     }
 }
