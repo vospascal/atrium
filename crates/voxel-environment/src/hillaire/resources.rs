@@ -1,6 +1,7 @@
 //! GPU resources shared by the Jolifanto/Hillaire LUT passes and samplers.
 
 use super::LutConfig;
+use crate::FroxelCamera;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -70,6 +71,17 @@ pub struct AtmosphereUniform {
     pub visual_zenith: [f32; 4],
     /// Camera-only horizon radiance and moonlight amount.
     pub visual_horizon: [f32; 4],
+    /// Camera forward basis for froxel ray reconstruction.
+    pub camera_forward: [f32; 3],
+    pub _pad_camera_forward: f32,
+    /// Camera right basis with FOV/aspect scaling already applied.
+    pub camera_right_scaled: [f32; 3],
+    pub _pad_camera_right: f32,
+    /// Camera up basis with vertical-FOV scaling already applied.
+    pub camera_up_scaled: [f32; 3],
+    pub _pad_camera_up: f32,
+    /// Froxel near/far distances in renderer world units.
+    pub camera_depth: [f32; 4],
 }
 
 impl Default for AtmosphereUniform {
@@ -93,7 +105,25 @@ impl Default for AtmosphereUniform {
             visual_moon: [-0.55, -0.8, -0.35, 0.85],
             visual_zenith: [0.08, 0.31, 2.55, 0.0],
             visual_horizon: [2.55, 1.37, 0.63, 0.0],
+            camera_forward: [1.0, 0.0, 0.0],
+            _pad_camera_forward: 0.0,
+            camera_right_scaled: [0.57735026, 0.0, 0.0],
+            _pad_camera_right: 0.0,
+            camera_up_scaled: [0.0, 0.57735026, 0.0],
+            _pad_camera_up: 0.0,
+            camera_depth: [0.1, 32_000.0, 0.0, 0.0],
         }
+    }
+}
+
+impl AtmosphereUniform {
+    /// Apply camera-relative froxel projection data without exposing the GPU
+    /// uniform layout to camera or platform code.
+    pub fn set_froxel_camera(&mut self, camera: FroxelCamera) {
+        self.camera_forward = camera.forward;
+        self.camera_right_scaled = camera.right_scaled;
+        self.camera_up_scaled = camera.up_scaled;
+        self.camera_depth = [camera.near_world, camera.far_world, 0.0, 0.0];
     }
 }
 
@@ -353,9 +383,11 @@ mod tests {
 
     #[test]
     fn atmosphere_uniform_matches_wgsl_alignment() {
-        assert_eq!(std::mem::size_of::<AtmosphereUniform>(), 160);
+        assert_eq!(std::mem::size_of::<AtmosphereUniform>(), 224);
         assert_eq!(std::mem::offset_of!(AtmosphereUniform, aerial_size), 80);
         assert_eq!(std::mem::offset_of!(AtmosphereUniform, visual_sun), 96);
         assert_eq!(std::mem::offset_of!(AtmosphereUniform, visual_horizon), 144);
+        assert_eq!(std::mem::offset_of!(AtmosphereUniform, camera_forward), 160);
+        assert_eq!(std::mem::offset_of!(AtmosphereUniform, camera_depth), 208);
     }
 }

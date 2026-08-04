@@ -24,6 +24,31 @@ pub struct EnvironmentFrame {
     pub star_rotation: f32,
 }
 
+/// Camera-relative projection data used by the aerial-perspective froxel LUT.
+///
+/// The basis vectors already contain the camera's FOV and aspect scaling, so
+/// the environment adapter does not depend on the renderer's camera type.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FroxelCamera {
+    pub forward: [f32; 3],
+    pub right_scaled: [f32; 3],
+    pub up_scaled: [f32; 3],
+    pub near_world: f32,
+    pub far_world: f32,
+}
+
+impl Default for FroxelCamera {
+    fn default() -> Self {
+        Self {
+            forward: [1.0, 0.0, 0.0],
+            right_scaled: [0.57735026, 0.0, 0.0],
+            up_scaled: [0.0, 0.57735026, 0.0],
+            near_world: 0.1,
+            far_world: 32_000.0,
+        }
+    }
+}
+
 /// A provider evaluates the environment state without exposing its implementation.
 /// GPU-specific adapters can use [`EnvironmentProvider::shader_source`] to splice the
 /// matching WGSL and can use [`EnvironmentProvider::settings`] to drive LUT updates.

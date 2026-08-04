@@ -32,7 +32,9 @@ use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
 use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_color::OutputFormat;
-use voxel_environment::{AtmosphereBindings, AtmosphereLutPasses, LutConfig, LutUpdate};
+use voxel_environment::{
+    AtmosphereBindings, AtmosphereLutPasses, FroxelCamera, LutConfig, LutUpdate,
+};
 
 // The compute-written intermediate texture's format is NOT a const here any more.
 // Srgb formats cannot be storage textures, so the DDA pass writes display-ready
@@ -412,13 +414,24 @@ impl Renderer {
         atmosphere.visual_zenith = lighting_uniform.sky_zenith;
         atmosphere.visual_horizon = lighting_uniform.sky_horizon;
         atmosphere.camera_position = camera_uniform.position;
+        atmosphere.set_froxel_camera(FroxelCamera {
+            forward: camera_uniform.forward,
+            right_scaled: camera_uniform.right_scaled,
+            up_scaled: camera_uniform.up_scaled,
+            near_world: 0.1,
+            far_world: atmosphere.from_kilometers_scale * 32.0,
+        });
         let sun_changed = previous.sun_direction != atmosphere.sun_direction
             || previous.sun_illuminance != atmosphere.sun_illuminance;
         let visual_changed = previous.visual_sun != atmosphere.visual_sun
             || previous.visual_moon != atmosphere.visual_moon
             || previous.visual_zenith != atmosphere.visual_zenith
             || previous.visual_horizon != atmosphere.visual_horizon;
-        let camera_changed = previous.camera_position != atmosphere.camera_position;
+        let camera_changed = previous.camera_position != atmosphere.camera_position
+            || previous.camera_forward != atmosphere.camera_forward
+            || previous.camera_right_scaled != atmosphere.camera_right_scaled
+            || previous.camera_up_scaled != atmosphere.camera_up_scaled
+            || previous.camera_depth != atmosphere.camera_depth;
         let first_update = self.atmosphere.resources.generation == 0;
         if first_update || sun_changed || visual_changed || camera_changed {
             self.atmosphere.update_uniform(queue, atmosphere);

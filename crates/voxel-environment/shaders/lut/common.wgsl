@@ -18,6 +18,13 @@ struct AtmosphereUniform {
     visual_moon: vec4<f32>,
     visual_zenith: vec4<f32>,
     visual_horizon: vec4<f32>,
+    camera_forward: vec3<f32>,
+    _pad_camera_forward: f32,
+    camera_right_scaled: vec3<f32>,
+    _pad_camera_right: f32,
+    camera_up_scaled: vec3<f32>,
+    _pad_camera_up: f32,
+    camera_depth: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
@@ -118,6 +125,21 @@ fn atmosphere_view_direction(uv: vec2<f32>) -> vec3<f32> {
         elevation,
         sin(azimuth) * horizontal,
     ));
+}
+
+fn atmosphere_froxel_direction(uv: vec2<f32>) -> vec3<f32> {
+    let ndc = uv * 2.0 - vec2<f32>(1.0);
+    return normalize(
+        atmosphere.camera_forward
+            + ndc.x * atmosphere.camera_right_scaled
+            + ndc.y * atmosphere.camera_up_scaled,
+    );
+}
+
+fn atmosphere_froxel_distance(uv_z: f32) -> f32 {
+    let near_distance = max(atmosphere.camera_depth.x, 0.001);
+    let far_distance = max(atmosphere.camera_depth.y, near_distance + 0.001);
+    return near_distance * pow(far_distance / near_distance, clamp(uv_z, 0.0, 1.0));
 }
 
 fn atmosphere_scattering(

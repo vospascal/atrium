@@ -22,6 +22,13 @@ struct AtmosphereUniform {
     visual_moon: vec4<f32>,
     visual_zenith: vec4<f32>,
     visual_horizon: vec4<f32>,
+    camera_forward: vec3<f32>,
+    _pad_camera_forward: f32,
+    camera_right_scaled: vec3<f32>,
+    _pad_camera_right: f32,
+    camera_up_scaled: vec3<f32>,
+    _pad_camera_up: f32,
+    camera_depth: vec4<f32>,
 };
 
 @group(1) @binding(0) var<uniform> atmosphere: AtmosphereUniform;
@@ -112,17 +119,33 @@ fn environment_hillaire_sky(direction: vec3<f32>) -> vec3<f32> {
     return max(sky + multiple + atmosphere.sun_illuminance * sun_disk * 4.0, vec3<f32>(0.0));
 }
 
+fn atmosphere_froxel_uv(direction: vec3<f32>) -> vec2<f32> {
+    let view = normalize(direction);
+    let forward = normalize(atmosphere.camera_forward);
+    let right = normalize(atmosphere.camera_right_scaled);
+    let up = normalize(atmosphere.camera_up_scaled);
+    let forward_component = max(dot(view, forward), 0.0001);
+    let ndc = vec2<f32>(
+        dot(view, right) / (forward_component * length(atmosphere.camera_right_scaled)),
+        dot(view, up) / (forward_component * length(atmosphere.camera_up_scaled)),
+    );
+    return ndc * 0.5 + vec2<f32>(0.5);
+}
+
+fn atmosphere_froxel_depth(distance_world: f32) -> f32 {
+    let near_distance = max(atmosphere.camera_depth.x, 0.001);
+    let far_distance = max(atmosphere.camera_depth.y, near_distance + 0.001);
+    return log(max(distance_world, near_distance) / near_distance)
+        / log(far_distance / near_distance);
+}
+
 // Sample aerial perspective for a finite camera-ray segment. Sky-view already
 // contains the infinite-atmosphere result, so this is kept separate and is only
 // applied by callers that know the ray distance.
 fn environment_aerial_perspective(direction: vec3<f32>, distance_world: f32) -> vec3<f32> {
     let view = normalize(direction);
-    let distance_uv = clamp(
-        distance_world / atmosphere.from_kilometers_scale / 32.0,
-        0.0,
-        1.0,
-    );
-    let view_uv = atmosphere_sky_view_uv(view);
+    let distance_uv = clamp(atmosphere_froxel_depth(distance_world), 0.0, 1.0);
+    let view_uv = atmosphere_froxel_uv(view);
     let uvw = vec3<f32>(view_uv, distance_uv);
     let aerial = textureSampleLevel(
         atmosphere_aerial_perspective_lut,

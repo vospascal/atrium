@@ -12,7 +12,7 @@ pub mod scale;
 pub mod state;
 
 pub use analytic::AnalyticProvider;
-pub use api::{EnvironmentFrame, EnvironmentProvider};
+pub use api::{EnvironmentFrame, EnvironmentProvider, FroxelCamera};
 pub use hillaire::{
     AtmosphereBindings, AtmosphereLutPasses, AtmosphereResources, AtmosphereUniform,
     HillaireProvider, LutConfig, LutKind, LutUpdate, ATMOSPHERE_BIND_GROUP,

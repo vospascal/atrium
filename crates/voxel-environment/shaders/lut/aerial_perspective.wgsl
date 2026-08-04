@@ -7,11 +7,11 @@ fn atmosphere_aerial_perspective_main(@builtin(global_invocation_id) id: vec3<u3
         return;
     }
     let uv = (vec3<f32>(id) + vec3<f32>(0.5)) / vec3<f32>(size);
-    let distance_km = uv.z * 32.0;
+    let distance_km = atmosphere_froxel_distance(uv.z) / atmosphere.from_kilometers_scale;
     let camera_height = atmosphere.camera_position.y / atmosphere.from_kilometers_scale
         / (atmosphere.top_radius_km - atmosphere.bottom_radius_km);
     let origin = atmosphere_origin_at_height(camera_height);
-    let direction = atmosphere_view_direction(uv.xy);
+    let direction = atmosphere_froxel_direction(uv.xy);
     let distance = min(distance_km, atmosphere_ray_distance(origin, direction));
     let inscatter = atmosphere_scattering(origin, direction, distance);
     let transmittance = atmosphere_transmittance_segment(origin, direction, distance);
