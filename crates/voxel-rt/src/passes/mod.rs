@@ -39,13 +39,29 @@ impl ComputePipelineCache {
         shader_source: &str,
         bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
+        Self::new_with_layouts(
+            device,
+            label,
+            entry_point,
+            shader_source,
+            &[Some(bind_group_layout)],
+        )
+    }
+
+    pub fn new_with_layouts(
+        device: &wgpu::Device,
+        label: &'static str,
+        entry_point: &'static str,
+        shader_source: &str,
+        bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
+    ) -> Self {
         let mut cache = Self {
             label,
             entry_point,
             pipelines: HashMap::new(),
             active_key: 0,
         };
-        cache.active_key = cache.compile(device, shader_source, bind_group_layout);
+        cache.active_key = cache.compile(device, shader_source, bind_group_layouts);
         cache
     }
 
@@ -64,7 +80,16 @@ impl ComputePipelineCache {
         shader_source: &str,
         bind_group_layout: &wgpu::BindGroupLayout,
     ) {
-        self.active_key = self.compile(device, shader_source, bind_group_layout);
+        self.active_key = self.compile(device, shader_source, &[Some(bind_group_layout)]);
+    }
+
+    pub fn set_shader_source_with_layouts(
+        &mut self,
+        device: &wgpu::Device,
+        shader_source: &str,
+        bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
+    ) {
+        self.active_key = self.compile(device, shader_source, bind_group_layouts);
     }
 
     /// Precompile `shader_sources` (duplicates cost nothing). Returns how many
@@ -76,7 +101,19 @@ impl ComputePipelineCache {
         bind_group_layout: &wgpu::BindGroupLayout,
     ) -> usize {
         for shader_source in shader_sources {
-            self.compile(device, shader_source, bind_group_layout);
+            self.compile(device, shader_source, &[Some(bind_group_layout)]);
+        }
+        self.pipelines.len()
+    }
+
+    pub fn prewarm_with_layouts(
+        &mut self,
+        device: &wgpu::Device,
+        shader_sources: &[String],
+        bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
+    ) -> usize {
+        for shader_source in shader_sources {
+            self.compile(device, shader_source, bind_group_layouts);
         }
         self.pipelines.len()
     }
@@ -99,13 +136,19 @@ impl ComputePipelineCache {
         &mut self,
         device: &wgpu::Device,
         shader_source: &str,
-        bind_group_layout: &wgpu::BindGroupLayout,
+        bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
     ) -> u64 {
         let key = Self::source_key(shader_source);
         let label = self.label;
         let entry_point = self.entry_point;
         self.pipelines.entry(key).or_insert_with(|| {
-            create_compute_pipeline(device, label, entry_point, shader_source, bind_group_layout)
+            create_compute_pipeline_with_layouts(
+                device,
+                label,
+                entry_point,
+                shader_source,
+                bind_group_layouts,
+            )
         });
         key
     }
@@ -121,13 +164,29 @@ pub fn create_compute_pipeline(
     shader_source: &str,
     bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::ComputePipeline {
+    create_compute_pipeline_with_layouts(
+        device,
+        label,
+        entry_point,
+        shader_source,
+        &[Some(bind_group_layout)],
+    )
+}
+
+pub fn create_compute_pipeline_with_layouts(
+    device: &wgpu::Device,
+    label: &str,
+    entry_point: &str,
+    shader_source: &str,
+    bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
+) -> wgpu::ComputePipeline {
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
-        bind_group_layouts: &[Some(bind_group_layout)],
+        bind_group_layouts,
         immediate_size: 0,
     });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

@@ -23,11 +23,16 @@ yields exactly the rows a full run would print for it.
 
 ## What it measures
 
-Eight independent sections, each with its own variant table and pixel compare
+Fourteen independent sections, each with its own variant table and pixel compare
 (isolation rule — an experiment's numbers never contaminate the gate for the
 layer below it). **Sections 1–3 force CAGI off and E6's water optics off** as
 well as pinning AO, so every number recorded before E4/E6 stays directly
-comparable:
+comparable.
+
+Sections 1–8 are described below; **9–14 arrived with the materials and output
+arcs and are documented at their own definitions in `examples/bench_dda.rs`**
+(9 material model, 10 emitter probes, 11 generator costs, 12 generator swatches,
+13 per-material cost, 14 output path / tonemap curves):
 
 1. **Traversal levers, AO forced off** — the Stage 2 regression gate. Every
    column here has `AO_MODE = AO_MODE_OFF`, so the medians stay directly
@@ -2822,3 +2827,63 @@ top of 320 produces no signal, the earlier +64 that took the row from 256 to 320
 cannot have produced one either. The row width is not a cache-miss concern at this
 table size, and the way to keep it that way is the table size, not the row: 28 rows
 fit in any L1.
+
+---
+
+## Section 14 — the output path: what the tonemap curves cost (M3 Max, 2026-08-03)
+
+Full write-up, including the provenance of each curve and the Quest caveat, lives in
+`docs/output-depth.md`. The numbers, and why this section can be trusted more than most:
+
+**The curve is a runtime uniform** (`lighting.output_params.y`), so every column runs the
+same shader, the same pipeline object and the same converged light volume — the only
+difference between two timings is four bytes. That removes pipeline caching, shader
+residency and world state from the comparison entirely, which is not true of any section
+whose columns are separate builds.
+
+Per-dispatch median ms at 2560x1440 (3.7 Mpx), `RenderQuality::default()`, exposure 1.0,
+deltas against Reinhard @ headroom 1x:
+
+| curve | A aerial | C ground | delta | per Mpx |
+|---|---|---|---|---|
+| Reinhard / Reinhard+W (superseded) / Knee / Hable | 3.43–3.45 | 3.04–3.09 | **free** | — |
+| **BT.2390** | 3.591–3.598 | 3.237–3.242 | **+0.16 ms** | ~43 µs |
+| **GT7** | 3.675–3.700 | 3.330–3.339 | **+0.25 ms** | ~68 µs |
+
+**The delta is scene-independent, and that is the section's own consistency check.** A
+tonemap runs once per pixel after shading, so its absolute cost must be identical on the
+aerial and the ground shot while the frame around it is not. BT.2390's four measurements
+within one run land at +0.153 / +0.153 / +0.156 / +0.157 — a spread of 4 µs. Headroom 1x
+vs 4x changes nothing measurable, including for GT7, which takes a different code path
+below the SDR boundary; `curve` is uniform across the dispatch, so only the taken path is
+paid for.
+
+### The residency A/B — the five curves you did not select are free
+
+The table above **cannot** answer whether the arc itself cost anything, precisely because
+every column shares a shader. The risk was never the dispatch branch; it was that GT7's
+ICtCp matrices and BT.2390's PQ constants are live in one function and **register
+allocation is decided by a kernel's worst path**. Had occupancy dropped a step, all twelve
+columns would be slow together and the table would read a flat, innocent zero.
+
+So the section also runs a compile-time A/B in the shape of E1c's
+`fade_range_as_shader_consts_variant`: the shipped source against one with `apply_tonemap`
+collapsed to its Reinhard return, making the other five unreachable. Both columns render
+Reinhard. Three runs:
+
+| scenario | resident cost |
+|---|---|
+| A aerial | -0.012 / -0.001 ms |
+| C ground | -0.009 / +0.011 ms |
+
+Straddles zero. **Adding five curves costs nothing until one is selected** — the selector
+is free, only the choice has a price.
+
+### Verdict
+
+Choose freely on desktop: 0.25 ms is 8% of *this* 3 ms frame but 1.5% of a 60 Hz budget.
+**Quest is the one place it bites, and worse than proportionally** — `pow` throughput is
+mobile GPUs' weakest axis and a stereo pass pays per eye. Not measured on-device; the
+extrapolation must not be quoted as though it were. Standard lever hygiene applies: both
+heavy curves stay selectable and measured, and the Quest tier defaults to a free one until
+someone runs `-- 14` on the hardware.

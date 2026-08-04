@@ -96,8 +96,8 @@ mod tests {
     #[test]
     fn default_settings_match_shader_source() {
         assert_eq!(
-            ShadowSettings::default().patch_shader_source(SHADER_SOURCE),
-            SHADER_SOURCE,
+            ShadowSettings::default().patch_shader_source(&SHADER_SOURCE),
+            SHADER_SOURCE.as_str(),
             "ShadowSettings::default() drifted from the shadow lever defaults in dda.wgsl"
         );
     }
@@ -110,7 +110,7 @@ mod tests {
             mode: ShadowMode::SoftDistanceField,
             penumbra_scale: 200.0,
         }
-        .patch_shader_source(SHADER_SOURCE);
+        .patch_shader_source(&SHADER_SOURCE);
         assert!(shader_source.contains("const SHADOW_MODE: u32 = 1u;"));
         assert!(shader_source.contains("const SHADOW_MODE_HARD: u32 = 0u;"));
         assert!(shader_source.contains("const SHADOW_MODE_SOFT_DISTANCE_FIELD: u32 = 1u;"));

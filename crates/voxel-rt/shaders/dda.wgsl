@@ -1,6 +1,6 @@
 // dda.wgsl — the SHADING pass: primary rays, one sun shadow ray per hit,
 // ambient occlusion (E1 ray-traced / E1b analytic), E4 CAGI indirect light,
-// E6 water reflection/refraction/extinction, Reinhard tonemap. Concatenated
+// E6 water reflection/refraction/extinction, exposure + tonemap. Concatenated
 // AFTER `world.wgsl` (the shared traversal core, which owns the brickmap
 // bindings and the traversal/shadow levers), `cagi_volume.wgsl` (the shared
 // light-volume bindings + sampler) and `water.wgsl` (E6's optics: Fresnel,
@@ -17,13 +17,16 @@
 // term keeps its own shadow ray (see the AO and shadow lever blocks).
 //
 // Color pipeline: material albedos are sRGB-encoded (as authored in
-// the former mesh renderer). This shader decodes them to linear (pow-2.2
-// approximation — cheap and self-consistent with the encode below; the exact
-// piecewise curve buys nothing at 8 bits), does ALL lighting math in linear
-// (sun term + indirect term), applies a one-line Reinhard tonemap
-// (Stage 4 refines the curve), then re-encodes to sRGB before textureStore.
-// The storage-texture/blit contract is unchanged: the blit still receives
-// sRGB-encoded bytes and undoes the swapchain's re-encode.
+// the former mesh renderer). This shader decodes them with the exact extended-sRGB
+// transfer used by the tagged compositor surface, then does ALL lighting math in linear
+// (sun term + indirect term), then applies EXPOSURE, one of six selectable
+// tonemap curves, and the sRGB encode — in that order — before textureStore.
+// Exposure and the curve are separate on purpose: without an exposure term the
+// curve ends up doing exposure's job, which is what made switching curves read
+// as a brightness change. The curves themselves are NOT in this file; they come
+// from `voxel_color::tonemap::WGSL`. The storage-texture/blit contract is
+// unchanged: the blit still receives sRGB-encoded bytes and undoes the
+// swapchain's re-encode.
 //
 // Own bindings (group 0), on top of the shared ones documented in world.wgsl
 // and cagi_volume.wgsl:
@@ -163,85 +166,19 @@ const AO_MISS_RADIANCE: bool = false;
 // ---- Color pipeline ----------------------------------------------------------
 // `srgb_decode` / `srgb_encode` live in world.wgsl: the CAGI pass decodes
 // table-derived albedo with the same curve.
+//
+// THE TONEMAP CURVES ARE NOT HERE. They live in `voxel_color::tonemap::WGSL`
+// (`crates/voxel-color/shaders/tonemap.wgsl`) and are spliced into this module by
+// `passes::dda::SHADER_SOURCE`, so `tonemap_reinhard`, `apply_tonemap` and the rest
+// are in scope below exactly as if they were written here.
+//
+// They moved because the curve set is a TWO-SIDED CONTRACT that this file cannot hold
+// on its own: `TonemapCurve::shader_index()` in voxel-color decides that GT7 is 5, and
+// a `const TONEMAP_GT7: u32 = 5u` has to agree with it. While the two halves sat in
+// different crates nothing could check that, and a reordered enum would have selected
+// the wrong curve silently — a wiring bug wearing a rendering bug's clothes. One crate,
+// one test.
 
-// Simple Reinhard: maps [0, inf) radiance into [0, 1). Stage 4 refines this.
-fn tonemap_reinhard(color: vec3<f32>) -> vec3<f32> {
-    return color / (vec3<f32>(1.0, 1.0, 1.0) + color);
-}
-
-// ---- Shading ----------------------------------------------------------------
-
-fn sky_hash(point: vec3<f32>) -> f32 {
-    var q = fract(point * vec3<f32>(0.1031, 0.1030, 0.0973));
-    q += dot(q, q.yzx + vec3<f32>(33.33));
-    return fract((q.x + q.y) * q.z);
-}
-
-fn rotate_sky_y(direction: vec3<f32>, angle: f32) -> vec3<f32> {
-    let sine = sin(angle);
-    let cosine = cos(angle);
-    return vec3<f32>(
-        direction.x * cosine - direction.z * sine,
-        direction.y,
-        direction.x * sine + direction.z * cosine,
-    );
-}
-
-fn star_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
-    if (direction.y <= -0.02 || daylight >= 0.98) {
-        return vec3<f32>(0.0);
-    }
-    let rotated = rotate_sky_y(direction, -lighting.sky_zenith.w);
-    let grid = 180.0;
-    let cell = floor(rotated * grid);
-    let seed = sky_hash(cell);
-    if (seed < 0.992) {
-        return vec3<f32>(0.0);
-    }
-    let offset = vec3<f32>(
-        sky_hash(cell + vec3<f32>(13.1)),
-        sky_hash(cell + vec3<f32>(27.7)),
-        sky_hash(cell + vec3<f32>(41.3)),
-    ) * 0.55 + vec3<f32>(0.225);
-    let radius = length(fract(rotated * grid) - offset);
-    let core = smoothstep(0.24, 0.0, radius);
-    let brightness = (seed - 0.992) / 0.008;
-    let visibility = (1.0 - daylight) * (1.0 - daylight)
-        * smoothstep(-0.02, 0.12, direction.y);
-    let tint = mix(vec3<f32>(0.55, 0.72, 1.0), vec3<f32>(1.0, 0.82, 0.58),
-        step(0.72, brightness));
-    return tint * core * (0.3 + 5.0 * brightness * brightness) * visibility;
-}
-
-fn moon_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
-    let moon_direction = lighting.celestial_moon.xyz;
-    if (moon_direction.y < -0.06) {
-        return vec3<f32>(0.0);
-    }
-    let disc = smoothstep(0.99915, 0.99972, dot(direction, moon_direction));
-    let phase = lighting.celestial_moon.w;
-    let lit_fraction = 0.5 - 0.5 * cos(phase * 6.28318530718);
-    let earthshine = 0.035;
-    return vec3<f32>(0.48, 0.62, 1.0) * disc
-        * (earthshine + 4.0 * lit_fraction) * (1.0 - daylight * 0.9);
-}
-
-// The same analytic day/night sky is used for primary misses, AO misses,
-// water reflection and Snell's window. Its palette and celestial positions
-// come from the CPU clock, so every consumer changes together.
-fn sky_color(direction: vec3<f32>) -> vec3<f32> {
-    let daylight = lighting.celestial_sun.w;
-    let up = clamp(direction.y, 0.0, 1.0);
-    var sky = mix(lighting.sky_horizon.rgb, lighting.sky_zenith.rgb, pow(up, 0.55));
-    let toward_sun = max(dot(direction, lighting.celestial_sun.xyz), 0.0);
-    let sun_glow = pow(toward_sun, 6.0) * 0.22 + pow(toward_sun, 48.0) * 0.55;
-    let sun_disc = smoothstep(0.99955, 0.99985, toward_sun);
-    sky += vec3<f32>(1.0, 0.72, 0.42) * sun_glow * daylight;
-    sky += vec3<f32>(12.0, 8.5, 5.0) * sun_disc * daylight;
-    sky += moon_radiance(direction, daylight) * (1.0 + lighting.sky_horizon.w);
-    sky += star_radiance(direction, daylight);
-    return sky;
-}
 
 // Face normal from the DDA hit record (axis-aligned, opposing the ray).
 fn hit_normal(hit: Hit) -> vec3<f32> {
@@ -254,17 +191,6 @@ fn hit_normal(hit: Hit) -> vec3<f32> {
         normal.z = -hit.axis_sign;
     }
     return normal;
-}
-
-// Hemisphere ambient: sky color from above, warm ground bounce from below,
-// mixed by normal.y. This is what lights shadowed pixels (they must stay
-// readable, never black) and it replaces Stage 1's per-face tint — the
-// vertical gradient comes from the hemisphere, the horizontal differentiation
-// from the sun angle.
-fn ambient_light(normal: vec3<f32>) -> vec3<f32> {
-    let sky_weight = normal.y * 0.5 + 0.5;
-    return mix(lighting.ground_ambient.rgb, lighting.sky_ambient.rgb, sky_weight)
-        * lighting.sky_ambient.w;
 }
 
 // Robust secondary-ray origin (shadow AND AO rays). Reconstructing the hit
@@ -1092,14 +1018,25 @@ fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     } else {
         let hit = trace(origin, direction, MAX_TRACE_DISTANCE, false);
         if (hit.material == 0u) {
-            color = sky_color(direction);
+            color = sky_color_at_distance(
+                direction,
+                MAX_TRACE_DISTANCE * brickmap.voxel_size_meters,
+            );
         } else {
             color = shade_hit(hit, origin, direction, pixel);
         }
     }
-    // Linear radiance -> tonemap -> sRGB encode: the blit contract still
-    // receives sRGB-encoded bytes.
-    color = srgb_encode(tonemap_reinhard(color));
+    // Linear radiance -> tonemap -> sRGB encode. The ENCODE IS UNCONDITIONAL and the
+    // tonemap is the only thing the output mode changes, so every mode hands the blit
+    // and egui the same kind of value and only the highlight rolloff differs. One
+    // variable between SDR and HDR is also what makes the difference reviewable.
+    // EXPOSURE FIRST, then the tonemap. The order is the whole point: exposure decides
+    // where the scene sits, the tonemap only shapes what happens near and above white.
+    // Folding them together is what made a curve change read as a brightness change.
+    color = color * lighting.output_params.w;
+    color = srgb_encode(apply_tonemap(color, lighting.output_params.x,
+                                     u32(lighting.output_params.y),
+                                     lighting.output_params.z));
     textureStore(output, vec2<i32>(i32(invocation.x), i32(invocation.y)),
                  vec4<f32>(color, 1.0));
 }

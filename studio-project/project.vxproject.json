@@ -87,9 +87,57 @@
       "id": "vx-000000000000000018c807fa074e2570-000000000000001c",
       "path": "materials/27-slate-tile.vmat.json"
     },
+    "28": {
+      "id": "vx-000000000000000018c85cf6f35e08d0-000000000000001d",
+      "path": "materials/28-hdr-red.vmat.json"
+    },
+    "29": {
+      "id": "vx-000000000000000018c85cf6f3e65370-0000000000000021",
+      "path": "materials/29-hdr-green.vmat.json"
+    },
     "3": {
       "id": "vx-000000000000000018c777672af9a680-000000000000000b",
       "path": "materials/03-dirt.vmat.json"
+    },
+    "30": {
+      "id": "vx-000000000000000018c85cf6f44e5088-0000000000000025",
+      "path": "materials/30-hdr-blue.vmat.json"
+    },
+    "31": {
+      "id": "vx-000000000000000018c85cf6f4a99ba0-0000000000000029",
+      "path": "materials/31-hdr-cyan.vmat.json"
+    },
+    "32": {
+      "id": "vx-000000000000000018c85cf6f513c368-000000000000002d",
+      "path": "materials/32-hdr-magenta.vmat.json"
+    },
+    "33": {
+      "id": "vx-000000000000000018c85cf6f56031d0-0000000000000031",
+      "path": "materials/33-hdr-yellow.vmat.json"
+    },
+    "34": {
+      "id": "vx-000000000000000018c869d755d4cfe8-0000000000000023",
+      "path": "materials/34-albedo-red.vmat.json"
+    },
+    "35": {
+      "id": "vx-000000000000000018c869d756c87300-0000000000000027",
+      "path": "materials/35-albedo-green.vmat.json"
+    },
+    "36": {
+      "id": "vx-000000000000000018c869d75732f888-000000000000002b",
+      "path": "materials/36-albedo-blue.vmat.json"
+    },
+    "37": {
+      "id": "vx-000000000000000018c869d758466070-000000000000002f",
+      "path": "materials/37-albedo-cyan.vmat.json"
+    },
+    "38": {
+      "id": "vx-000000000000000018c869d758dd9378-0000000000000033",
+      "path": "materials/38-albedo-magenta.vmat.json"
+    },
+    "39": {
+      "id": "vx-000000000000000018c869d759277970-0000000000000037",
+      "path": "materials/39-albedo-yellow.vmat.json"
     },
     "4": {
       "id": "vx-000000000000000018c777672b457c90-000000000000000e",
@@ -239,6 +287,54 @@
     {
       "id": "vx-000000000000000018c807fa074e2958-000000000000001d",
       "path": "graphs/material-27.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c85cf6f35e0cb8-000000000000001e",
+      "path": "graphs/material-28.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c85cf6f3e65758-0000000000000022",
+      "path": "graphs/material-29.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c85cf6f44e5470-0000000000000026",
+      "path": "graphs/material-30.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c85cf6f4a99f88-000000000000002a",
+      "path": "graphs/material-31.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c85cf6f513c750-000000000000002e",
+      "path": "graphs/material-32.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c85cf6f56035b8-0000000000000032",
+      "path": "graphs/material-33.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c869d755d4fec8-0000000000000024",
+      "path": "graphs/material-34.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c869d756c876e8-0000000000000028",
+      "path": "graphs/material-35.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c869d75732fc70-000000000000002c",
+      "path": "graphs/material-36.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c869d758466458-0000000000000030",
+      "path": "graphs/material-37.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c869d758dd9378-0000000000000034",
+      "path": "graphs/material-38.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c869d759277d58-0000000000000038",
+      "path": "graphs/material-39.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",

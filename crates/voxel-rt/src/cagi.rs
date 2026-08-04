@@ -103,11 +103,10 @@ pub fn quantize_transmittance(transmittance: f32) -> u32 {
     let quantized = (transmittance.clamp(0.0, 1.0) * levels + 0.5) as u32;
     quantized.min(CELL_TRANSMITTANCE_LEVELS) << CELL_TRANSMITTANCE_SHIFT
 }
-/// Light word bit 30: this cell's value was injected from a sunlit surface and is
-/// pinned (the `CAGI_SUN_CACHE` amortization).
-pub const SUN_SOURCE_FLAG: u32 = 0x4000_0000;
-/// Largest value one 10-bit channel can hold; 1023 = linear radiance 1.0.
+/// Three 10-bit mantissas share the two exponent bits at the top of the word.
 pub const CHANNEL_MAX: u32 = 1023;
+pub const RADIANCE_MAX: f32 = 8.0;
+pub const RADIANCE_MAX_EXPONENT: u32 = 3;
 /// Fixed-point shift of the diffusion numerators (mirrors `CAGI_DIFFUSION_SHIFT`).
 pub const DIFFUSION_SHIFT: u32 = 12;
 /// Weight sum of the 26-neighbour stencil: 6 faces x 4 + 12 edges x 2 + 8
@@ -127,8 +126,9 @@ pub const SOLID_FILL_DIVISOR: u32 = 4;
 /// the trilinear sampler's upper tap over the tallest tree.
 pub const SKY_MARGIN_CELLS: u32 = 2;
 
-/// Max-decrement attenuation per METER, in 1/1023 light steps: the flood's reach
-/// is `CHANNEL_MAX / ATTENUATION_PER_METER` ~ 12.8 m regardless of the resolution
+/// Max-decrement attenuation per METER in the packed channel's integer steps.
+/// The shared-exponent HDR range preserves the same physical flood reach
+/// regardless of resolution.
 /// lever, which is what makes the two rules comparable across cell sizes.
 pub const ATTENUATION_PER_METER: f32 = 80.0;
 /// Diffusion transmission per METER (0.884/m = 0.94 per 0.5 m cell). Same
@@ -210,7 +210,8 @@ pub enum CagiSkyTest {
     /// One load of the traversal's per-XZ-brick-column max occupied brick Y
     /// (binding 8). O(1), exact vertically, quantized to the 1 m brick column.
     ColumnMax,
-    /// A real vertical shadow ray per candidate cell: exact per voxel.
+    /// Legacy preset alias. It now resolves to [`ColumnMax`] so CAGI remains
+    /// strictly cellular and never launches a per-cell ray.
     UpwardTrace,
 }
 
@@ -253,8 +254,8 @@ pub struct CagiSettings {
     pub sample_mode: CagiSampleMode,
     /// `CAGI_SKY_TEST`.
     pub sky_test: CagiSkyTest,
-    /// `CAGI_SUN_CACHE`: pin sun-injected cells so their shadow ray is traced
-    /// once per re-flood instead of once per iteration.
+    /// Legacy pipeline lever retained for preset compatibility. Sun visibility
+    /// is now sampled from the atmosphere LUT and never ray-traced by CAGI.
     pub sun_cache: bool,
     /// `CAGI_EMISSIVE` (E5): let emissive materials inject their radiance.
     pub emissive: bool,
@@ -273,6 +274,10 @@ pub struct CagiSettings {
     /// transmitted fraction on instead of absorbing everything. Off reproduces
     /// E4's binary absorption bit for bit.
     pub transmission: bool,
+    /// `CAGI_REFLECTANCE` (E5b): let a solid cell return the light reaching it,
+    /// tinted by its albedo — colour bleed. Off reproduces the v0 transport,
+    /// where indirect light existed only where the sun already landed.
+    pub reflectance: bool,
     /// CA iterations per frame (CPU-side dispatch count — no shader const).
     pub iterations_per_frame: u32,
     /// Multiplier on the sampled volume (`gi_params.x`).
@@ -301,6 +306,9 @@ impl Default for CagiSettings {
             emitter_bounce: true,
             event_light: true,
             transmission: false,
+            // Off pending bench section 15's verdict, following the same rule
+            // `transmission` states: a lever's default follows a measurement.
+            reflectance: false,
             iterations_per_frame: 2,
             strength: 1.0,
             // No unoccluded readability light: sealed spaces without an
@@ -336,6 +344,11 @@ impl CagiSettings {
             "CAGI_TRANSMISSION",
             boolean_literal(self.transmission),
         );
+        patched = patch_shader_const(
+            &patched,
+            "CAGI_REFLECTANCE",
+            boolean_literal(self.reflectance),
+        );
         patched = patch_shader_const(&patched, "CAGI_EMISSIVE", boolean_literal(self.emissive));
         patched = patch_shader_const(
             &patched,
@@ -357,6 +370,7 @@ impl CagiSettings {
             || self.sky_test != applied.sky_test
             || self.sun_cache != applied.sun_cache
             || self.transmission != applied.transmission
+            || self.reflectance != applied.reflectance
             || self.emissive != applied.emissive
             || self.emitter_bounce != applied.emitter_bounce
             || self.event_light != applied.event_light
@@ -457,7 +471,7 @@ impl CagiGrid {
     /// Total GPU bytes: both ping-pong buffers plus the packed attribute/emission data.
     pub fn total_bytes(&self) -> usize {
         // Two light ping-pong buffers (8 bytes/cell) plus two packed words:
-        // attributes and E5b's 10:10:10 emission (8 bytes/cell).
+        // attributes and E5b's HDR emission (8 bytes/cell).
         self.volume_bytes() * 4
     }
 
@@ -605,25 +619,34 @@ unsafe impl bytemuck::Pod for CagiVolumeUniform {}
 
 // ---- Packing (the CPU mirror of cagi_volume.wgsl) ----------------------------
 
-/// Pack three 10-bit channels into the light word (saturating).
+/// Pack three integer radiance levels with a shared two-bit exponent.
 pub fn pack_light(light: [u32; 3]) -> u32 {
-    light[0].min(CHANNEL_MAX)
-        | (light[1].min(CHANNEL_MAX) << 10)
-        | (light[2].min(CHANNEL_MAX) << 20)
+    let largest = light.into_iter().max().unwrap_or(0);
+    let mut exponent = 0;
+    let mut scale = 1;
+    while exponent < RADIANCE_MAX_EXPONENT && largest > CHANNEL_MAX * scale {
+        exponent += 1;
+        scale <<= 1;
+    }
+    let quantize = |value: u32| ((value + scale / 2) / scale).min(CHANNEL_MAX);
+    quantize(light[0]) | (quantize(light[1]) << 10) | (quantize(light[2]) << 20) | (exponent << 30)
 }
 
-/// Unpack the three channels, dropping the flag bits.
+/// Unpack the mantissas and restore their shared exponent.
 pub fn unpack_light(word: u32) -> [u32; 3] {
+    let scale = 1 << (word >> 30);
     [
-        word & CHANNEL_MAX,
-        (word >> 10) & CHANNEL_MAX,
-        (word >> 20) & CHANNEL_MAX,
+        (word & CHANNEL_MAX) * scale,
+        ((word >> 10) & CHANNEL_MAX) * scale,
+        ((word >> 20) & CHANNEL_MAX) * scale,
     ]
 }
 
-/// Linear radiance in [0, 1] -> integer level (round to nearest, saturating).
+/// Linear radiance in [0, `RADIANCE_MAX`] -> integer radiance level.
 pub fn quantize_radiance(radiance: [f32; 3]) -> [u32; 3] {
-    let quantize = |value: f32| (value.clamp(0.0, 1.0) * CHANNEL_MAX as f32 + 0.5) as u32;
+    let quantize = |value: f32| {
+        (value.clamp(0.0, RADIANCE_MAX) / RADIANCE_MAX * (CHANNEL_MAX * 8) as f32 + 0.5) as u32
+    };
     [
         quantize(radiance[0]),
         quantize(radiance[1]),
@@ -1369,8 +1392,8 @@ mod tests {
     fn default_settings_match_shader_sources() {
         let settings = CagiSettings::default();
         assert_eq!(
-            settings.patch_volume_consts(SHADER_SOURCE),
-            SHADER_SOURCE,
+            settings.patch_volume_consts(&SHADER_SOURCE),
+            SHADER_SOURCE.as_str(),
             "CagiSettings::default() drifted from the CAGI levers in cagi_volume.wgsl"
         );
         let patched =
@@ -1379,6 +1402,14 @@ mod tests {
             patched, CAGI_SHADER_SOURCE,
             "CagiSettings::default() drifted from the CAGI levers in cagi.wgsl"
         );
+    }
+
+    #[test]
+    fn atmosphere_lut_shader_variants_parse_with_naga() {
+        naga::front::wgsl::parse_str(CAGI_SHADER_SOURCE)
+            .expect("CAGI + atmosphere LUT sampling WGSL must parse with naga");
+        naga::front::wgsl::parse_str(&SHADER_SOURCE)
+            .expect("DDA + atmosphere LUT sampling WGSL must parse with naga");
     }
 
     #[test]
@@ -1392,7 +1423,7 @@ mod tests {
             sun_cache: false,
             ..CagiSettings::default()
         };
-        let volume = settings.patch_volume_consts(SHADER_SOURCE);
+        let volume = settings.patch_volume_consts(&SHADER_SOURCE);
         assert!(volume.contains("const CAGI_ENABLED: bool = false;"));
         assert!(volume.contains("const CAGI_SAMPLE_MODE: u32 = 0u;"));
         let propagation = settings.patch_propagation_consts(CAGI_SHADER_SOURCE);
@@ -1445,7 +1476,7 @@ mod tests {
         assert!(disabled.requires_volume_rebuild(&applied));
     }
 
-    /// Packing round-trip over the channel extremes and the flag bits: the
+    /// Packing round-trip over the channel extremes and shared exponent: the
     /// integer volume's whole correctness rests on this.
     #[test]
     fn light_packing_round_trips() {
@@ -1457,19 +1488,15 @@ mod tests {
         ] {
             assert_eq!(unpack_light(pack_light(light)), light);
         }
-        // Saturation, not wraparound — a channel must never bleed into the next.
-        assert_eq!(unpack_light(pack_light([2000, 0, 0])), [1023, 0, 0]);
-        // The flag bits survive packing and are invisible to unpacking.
-        let word = pack_light([1023, 1023, 1023]) | SUN_SOURCE_FLAG;
-        assert_eq!(unpack_light(word), [1023, 1023, 1023]);
-        assert_ne!(word & SUN_SOURCE_FLAG, 0);
+        // A bright value uses the shared exponent without saturating at 1023.
+        assert_eq!(unpack_light(pack_light([2000, 0, 0]))[0], 2000);
     }
 
     #[test]
     fn radiance_quantization_matches_the_shader_curve() {
         assert_eq!(quantize_radiance([0.0, 0.0, 0.0]), [0, 0, 0]);
         assert_eq!(quantize_radiance([1.0, 1.0, 1.0]), [1023, 1023, 1023]);
-        assert_eq!(quantize_radiance([2.0, -1.0, 0.5]), [1023, 0, 512]);
+        assert_eq!(quantize_radiance([2.0, -1.0, 0.5]), [2046, 0, 512]);
     }
 
     /// Grid indexing must round-trip, and the flat index must be x-major like

@@ -288,8 +288,8 @@ mod tests {
     #[test]
     fn default_settings_match_shader_source() {
         assert_eq!(
-            AoSettings::default().patch_shader_source(SHADER_SOURCE),
-            SHADER_SOURCE,
+            AoSettings::default().patch_shader_source(&SHADER_SOURCE),
+            SHADER_SOURCE.as_str(),
             "AoSettings::default() drifted from the AO lever defaults in dda.wgsl"
         );
     }
@@ -310,7 +310,7 @@ mod tests {
             sun_aware_ray_budget: true,
             miss_radiance: true,
         };
-        let shader_source = settings.patch_shader_source(SHADER_SOURCE);
+        let shader_source = settings.patch_shader_source(&SHADER_SOURCE);
         assert!(shader_source.contains("const AO_MODE: u32 = 2u;"));
         assert!(shader_source.contains("const AO_RAY_COUNT: u32 = 4u;"));
         assert!(shader_source.contains("const AO_MAX_DISTANCE: f32 = 32.0;"));
@@ -335,7 +335,7 @@ mod tests {
             mode: AoMode::Off,
             ..AoSettings::default()
         }
-        .patch_shader_source(SHADER_SOURCE);
+        .patch_shader_source(&SHADER_SOURCE);
         assert!(shader_source.contains("const AO_MODE: u32 = 3u;"));
         assert!(shader_source.contains("const AO_MODE_RAY_TRACED: u32 = 0u;"));
         assert!(shader_source.contains("const AO_MODE_ANALYTIC_CORNER: u32 = 1u;"));
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "not found in dda.wgsl")]
     fn patching_a_missing_const_panics() {
-        patch_shader_const(SHADER_SOURCE, "ENABLE_NONEXISTENT", "true");
+        patch_shader_const(&SHADER_SOURCE, "ENABLE_NONEXISTENT", "true");
     }
 
     #[test]

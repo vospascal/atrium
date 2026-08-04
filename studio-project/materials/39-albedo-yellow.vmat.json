@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c869d759277970-0000000000000037",
+  "name": "albedo_yellow",
+  "voxel_material_slot": 39,
+  "material": {
+    "albedo": [
+      0.8,
+      0.8,
+      0.05
+    ],
+    "roughness": 1.0,
+    "specular": 0.0,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": null,
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.02,
+      0.02,
+      0.03,
+      0.03,
+      0.04,
+      0.05
+    ]
+  },
+  "graph": "vx-000000000000000018c869d759277d58-0000000000000038"
+}

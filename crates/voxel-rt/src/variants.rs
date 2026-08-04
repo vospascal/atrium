@@ -106,6 +106,7 @@ pub enum LeverId {
     GiSkyTest,
     GiSunCache,
     GiTransmission,
+    GiReflectance,
     GiEmissive,
     GiEmitterBounce,
     GiEventLight,
@@ -407,6 +408,7 @@ impl LeverId {
             LeverId::GiSkyTest => LeverValue::Mode(global_illumination.sky_test.shader_value()),
             LeverId::GiSunCache => LeverValue::Flag(global_illumination.sun_cache),
             LeverId::GiTransmission => LeverValue::Flag(global_illumination.transmission),
+            LeverId::GiReflectance => LeverValue::Flag(global_illumination.reflectance),
             LeverId::GiEmissive => LeverValue::Flag(global_illumination.emissive),
             LeverId::GiEmitterBounce => LeverValue::Flag(global_illumination.emitter_bounce),
             LeverId::GiEventLight => LeverValue::Flag(global_illumination.event_light),
@@ -543,6 +545,9 @@ impl LeverId {
             LeverId::GiSunCache => global_illumination.sun_cache = value.expect_flag(self),
             LeverId::GiTransmission => {
                 global_illumination.transmission = value.expect_flag(self);
+            }
+            LeverId::GiReflectance => {
+                global_illumination.reflectance = value.expect_flag(self);
             }
             LeverId::GiEmissive => global_illumination.emissive = value.expect_flag(self),
             LeverId::GiEmitterBounce => {
@@ -1446,6 +1451,41 @@ pub const REGISTRY: &[Lever] = &[
             section: BenchSection::Cagi,
             label: "gi-transmission",
             overrides: &[(LeverId::GiTransmission, LeverValue::Flag(true))],
+        }],
+    },
+    Lever {
+        id: LeverId::GiReflectance,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_REFLECTANCE"),
+        label: "reflect off solids (colour bleed)",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "E5b, UNMEASURED at the time of writing — the default is off until \
+                  section 15 gives it a verdict, and section 15 exists to give it one. \
+                  What it fixes: the v0 transport could not produce colour bleed AT ALL, \
+                  and not for the reason it looked like. The bounce was not missing — \
+                  `cagi_sun_bounce` computes a correctly albedo-tinted term at a fraction \
+                  of 0.35 — it was GATED on the receiving air cell seeing the sun, so \
+                  indirect light existed only in the shell the sun already lit and never \
+                  reached shadow, which is the entire job of GI. L0's corridor rendered \
+                  the floor five voxels out of the sunbeam BLACK between 0.8-albedo walls, \
+                  and its white ceiling grey. This term is ungated and multiplies \
+                  PROPAGATED light, the same move TooManyLimits' published kernel makes \
+                  when a neighbour is a Block. Because it scales INCOMING light rather \
+                  than injecting the surface's own colour, a white ceiling stays white \
+                  only while white light reaches it — red off the floor comes back red — \
+                  so it also fixes the readout surface masking its own signal, without a \
+                  second rule. Costs one extra propagate on solid cells, exactly like \
+                  GiTransmission, and shares the incident term with it when both are on. \
+                  Combined with max, not summed: a surface cannot both transmit and \
+                  reflect the same photon, and max keeps a solid cell strictly dimmer \
+                  than what reaches it, which is what keeps the flood convergent.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-reflectance",
+            overrides: &[(LeverId::GiReflectance, LeverValue::Flag(true))],
         }],
     },
     Lever {
@@ -3321,7 +3361,7 @@ mod tests {
         "CAGI_EVENT_RESPONSE_SHIFT",
         "CAGI_CHANNEL_MASK",
         "CAGI_CHANNEL_MAX",
-        "CAGI_SUN_SOURCE_FLAG",
+        "CAGI_RADIANCE_MAX",
         "CAGI_RADIANCE_PER_STEP",
         "CAGI_SAMPLE_SEARCH_STEPS",
         "CAGI_DIFFUSION_SHIFT",
@@ -3356,7 +3396,7 @@ mod tests {
     /// Both pass shader sources — a lever's const lives in exactly one of them
     /// (the shared files appear in both, which is the point).
     fn shader_sources() -> [&'static str; 2] {
-        [SHADER_SOURCE, CAGI_SHADER_SOURCE]
+        [SHADER_SOURCE.as_str(), CAGI_SHADER_SOURCE]
     }
 
     fn registry_ids() -> Vec<LeverId> {
@@ -3732,6 +3772,7 @@ mod tests {
             sky_test,
             sun_cache,
             transmission,
+            reflectance,
             emissive,
             emitter_bounce,
             event_light,
@@ -3822,6 +3863,7 @@ mod tests {
             ),
             (LeverId::GiSunCache, LeverValue::Flag(sun_cache)),
             (LeverId::GiTransmission, LeverValue::Flag(transmission)),
+            (LeverId::GiReflectance, LeverValue::Flag(reflectance)),
             (LeverId::GiEmissive, LeverValue::Flag(emissive)),
             (LeverId::GiEmitterBounce, LeverValue::Flag(emitter_bounce)),
             (LeverId::GiEventLight, LeverValue::Flag(event_light)),
@@ -4102,7 +4144,7 @@ mod tests {
         let balanced = preset_spec(QualityPreset::Balanced).resolve();
         assert_eq!(balanced, RenderQuality::baseline());
         assert_eq!(RenderQuality::default(), balanced);
-        assert_eq!(build_shader_source(&balanced), SHADER_SOURCE);
+        assert_eq!(build_shader_source(&balanced), SHADER_SOURCE.as_str());
     }
 
     #[test]

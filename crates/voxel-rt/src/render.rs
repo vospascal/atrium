@@ -31,21 +31,30 @@ use crate::passes::world_bindings::WorldBindings;
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
 use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
+use voxel_color::OutputFormat;
+use voxel_environment::{AtmosphereBindings, AtmosphereLutPasses, LutConfig, LutUpdate};
 
-/// Format of the compute-written intermediate texture. Srgb formats cannot be
-/// storage textures, so the DDA pass writes display-ready (sRGB-encoded)
-/// values into this linear-tagged format and the blit undoes the swapchain's
-/// re-encode (see `shaders/blit.wgsl`).
-const STORAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+// The compute-written intermediate texture's format is NOT a const here any more.
+// Srgb formats cannot be storage textures, so the DDA pass writes display-ready
+// (sRGB-encoded) values into a linear-tagged format and the blit undoes the
+// swapchain's re-encode (see `shaders/blit.wgsl`). Which format that is now depends
+// on the output depth, and it is resolved together with the surface format and the
+// blit's transfer function in the `voxel-color` crate — a storage texture wider or
+// narrower than the swapchain is a silent bug rather than a compile error.
 
 pub struct Renderer {
     storage_view: wgpu::TextureView,
+    /// The resolved output formats this renderer was built for. See
+    /// [the `voxel-color` crate] — the single source of truth, never re-derived.
+    output_format: OutputFormat,
     storage_width: u32,
     storage_height: u32,
     surface_width: u32,
     surface_height: u32,
     render_scale: f32,
     world_bindings: WorldBindings,
+    atmosphere: AtmosphereBindings,
+    atmosphere_lut_passes: AtmosphereLutPasses,
     light_volume: LightVolume,
     cagi_pass: CagiPass,
     dda_pass: DdaPass,
@@ -58,7 +67,7 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(
         device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        output_format: OutputFormat,
         width: u32,
         height: u32,
         brickmap: &Brickmap,
@@ -67,16 +76,27 @@ impl Renderer {
     ) -> Self {
         let render_scale = MAX_RENDER_SCALE;
         let (storage_view, storage_width, storage_height) =
-            create_storage_texture(device, width, height, render_scale);
+            create_storage_texture(device, output_format, width, height, render_scale);
         let world_bindings = WorldBindings::new(device, brickmap);
+        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
+        let atmosphere_lut_passes = AtmosphereLutPasses::new(device, &atmosphere);
         let light_volume =
             LightVolume::new(device, brickmap, global_illumination, material_attributes);
-        let cagi_pass = CagiPass::new(device, &world_bindings, &light_volume);
-        let dda_pass = DdaPass::new(device, &world_bindings, &light_volume, &storage_view);
-        let blit_pass = BlitPass::new(device, surface_format, &storage_view);
+        let cagi_pass =
+            CagiPass::new_with_atmosphere(device, &world_bindings, &light_volume, &atmosphere);
+        let dda_pass = DdaPass::new_with_atmosphere(
+            device,
+            &world_bindings,
+            &light_volume,
+            &storage_view,
+            &atmosphere,
+            output_format,
+        );
+        let blit_pass = BlitPass::new(device, output_format, &storage_view);
 
         Self {
             storage_view,
+            output_format,
             storage_width,
             storage_height,
             surface_width: width,
@@ -84,6 +104,8 @@ impl Renderer {
             render_scale,
             viewport_height: height,
             world_bindings,
+            atmosphere,
+            atmosphere_lut_passes,
             light_volume,
             cagi_pass,
             dda_pass,
@@ -271,9 +293,68 @@ impl Renderer {
         self.recreate_storage(device);
     }
 
+    /// Adopt a new resolved output format: reallocate the frame storage texture at
+    /// the new format and rebuild the two pipelines that depend on it.
+    ///
+    /// Mirrors [`Self::set_render_scale`] exactly, because the work is the same —
+    /// the storage texture is recreated and both consumers rebind. The blit pipeline
+    /// additionally has to be rebuilt, since its render target format and its
+    /// transfer-function const both moved.
+    pub fn set_output_format(&mut self, device: &wgpu::Device, output_format: OutputFormat) {
+        if output_format == self.output_format {
+            return;
+        }
+        self.output_format = output_format;
+        // ORDER MATTERS, and getting it wrong reproduces exactly the error this is
+        // fixing. `recreate_storage` REBINDS the existing passes, and the existing
+        // DDA pass's bind group layout still declares the OLD storage format — so
+        // handing it the new view is the "expects Rgba8Unorm, given Rgba16Unorm"
+        // validation failure. The texture is therefore recreated inline here,
+        // without rebinding anything, and both passes are then built from scratch
+        // against the new view.
+        //
+        // Rebuilt rather than rebound because each holds format state a rebind
+        // cannot reach: the blit's render target format, and the DDA's bind group
+        // layout. Recreating the DDA pass drops its pipeline cache, which is
+        // correct — every entry was compiled for the old format.
+        let (storage_view, storage_width, storage_height) = create_storage_texture(
+            device,
+            output_format,
+            self.surface_width,
+            self.viewport_height,
+            self.render_scale,
+        );
+        self.storage_view = storage_view;
+        self.storage_width = storage_width;
+        self.storage_height = storage_height;
+        self.blit_pass = BlitPass::new(device, output_format, &self.storage_view);
+        self.dda_pass = DdaPass::new_with_atmosphere(
+            device,
+            &self.world_bindings,
+            &self.light_volume,
+            &self.storage_view,
+            &self.atmosphere,
+            output_format,
+        );
+        // A fresh BlitPass starts on its 1:1 sampler; a non-native render scale
+        // needs the linear one, which `recreate_storage` would have set.
+        self.blit_pass.rebind(
+            device,
+            &self.storage_view,
+            self.render_scale < MAX_RENDER_SCALE,
+        );
+    }
+
+    /// The resolved format in force, so the caller can patch the shading source to
+    /// match without keeping its own copy.
+    pub fn output_format(&self) -> OutputFormat {
+        self.output_format
+    }
+
     fn recreate_storage(&mut self, device: &wgpu::Device) {
         let (storage_view, storage_width, storage_height) = create_storage_texture(
             device,
+            self.output_format,
             self.surface_width,
             self.viewport_height,
             self.render_scale,
@@ -308,12 +389,48 @@ impl Renderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         lighting_uniform: &LightingUniform,
+        camera_uniform: &CameraUniform,
         world_events: &[GpuWorldEvent; MAX_WORLD_EVENTS],
         iterations: u32,
         frame_timers: Option<&GpuFrameTimers>,
     ) {
         self.world_bindings.write_lighting(queue, lighting_uniform);
         self.world_bindings.write_world_events(queue, world_events);
+        let previous = self.atmosphere.uniform;
+        let mut atmosphere = previous;
+        atmosphere.sun_direction = lighting_uniform.sun_direction;
+        atmosphere.sun_illuminance = [
+            lighting_uniform.sun_color_intensity[0] * lighting_uniform.sun_color_intensity[3],
+            lighting_uniform.sun_color_intensity[1] * lighting_uniform.sun_color_intensity[3],
+            lighting_uniform.sun_color_intensity[2] * lighting_uniform.sun_color_intensity[3],
+        ];
+        // Visual sky controls belong to the environment adapter. LightingUniform
+        // still carries the legacy ABI for surface shading, so mirror the resolved
+        // frame into the atmosphere group at the renderer boundary.
+        atmosphere.visual_sun = lighting_uniform.celestial_sun;
+        atmosphere.visual_moon = lighting_uniform.celestial_moon;
+        atmosphere.visual_zenith = lighting_uniform.sky_zenith;
+        atmosphere.visual_horizon = lighting_uniform.sky_horizon;
+        atmosphere.camera_position = camera_uniform.position;
+        let sun_changed = previous.sun_direction != atmosphere.sun_direction
+            || previous.sun_illuminance != atmosphere.sun_illuminance;
+        let visual_changed = previous.visual_sun != atmosphere.visual_sun
+            || previous.visual_moon != atmosphere.visual_moon
+            || previous.visual_zenith != atmosphere.visual_zenith
+            || previous.visual_horizon != atmosphere.visual_horizon;
+        let camera_changed = previous.camera_position != atmosphere.camera_position;
+        let first_update = self.atmosphere.resources.generation == 0;
+        if first_update || sun_changed || visual_changed || camera_changed {
+            self.atmosphere.update_uniform(queue, atmosphere);
+            self.atmosphere_lut_passes.encode(
+                encoder,
+                LutUpdate {
+                    atmosphere: first_update,
+                    sun: sun_changed || visual_changed,
+                    camera: camera_changed,
+                },
+            );
+        }
         self.cagi_pass.encode(
             encoder,
             &mut self.light_volume,
@@ -357,6 +474,7 @@ impl Renderer {
 
 fn create_storage_texture(
     device: &wgpu::Device,
+    output_format: OutputFormat,
     surface_width: u32,
     viewport_height: u32,
     render_scale: f32,
@@ -373,7 +491,7 @@ fn create_storage_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: STORAGE_FORMAT,
+        format: output_format.storage(),
         usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });

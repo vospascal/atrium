@@ -40,6 +40,14 @@ impl RuntimeMode {
 pub struct VoxelEngineConfig {
     pub mode: RuntimeMode,
     pub project_root: PathBuf,
+    /// Replace the spawn with L0's rainbow corridor and stand the camera inside
+    /// it. `None` is the normal island.
+    ///
+    /// A launch flag rather than a key binding, because entering the fixture also
+    /// re-aims the sun and zeroes the ambient floor
+    /// ([`crate::light_fixture::RainbowCorridor::sun`]) — that is a different
+    /// lighting environment, not a place you walk to.
+    pub light_fixture: Option<crate::light_fixture::NotchState>,
 }
 
 impl Default for VoxelEngineConfig {
@@ -47,6 +55,7 @@ impl Default for VoxelEngineConfig {
         Self {
             mode: RuntimeMode::WorldEdit,
             project_root: PathBuf::from("studio-project"),
+            light_fixture: None,
         }
     }
 }
@@ -71,6 +80,27 @@ impl VoxelEngineConfig {
                     index += 1;
                     config.project_root =
                         PathBuf::from(arguments.get(index).ok_or("--project needs a path")?);
+                }
+                // `--light-fixture` alone is the sealed room, which is the one to
+                // judge colour bleed in: exactly one light path, so anything on the
+                // ceiling came off a wall. `open` cuts the far-end notch for the
+                // corner-seal case.
+                "--light-fixture" => {
+                    let variant = arguments
+                        .get(index + 1)
+                        .filter(|value| !value.starts_with("--"));
+                    config.light_fixture = Some(match variant.map(String::as_str) {
+                        None | Some("sealed") => crate::light_fixture::NotchState::Sealed,
+                        Some("open") => crate::light_fixture::NotchState::Open,
+                        Some(other) => {
+                            return Err(format!(
+                                "unknown --light-fixture variant `{other}`; use sealed or open"
+                            ))
+                        }
+                    });
+                    if variant.is_some() {
+                        index += 1;
+                    }
                 }
                 _ => {}
             }
@@ -309,12 +339,58 @@ mod tests {
         );
     }
 
+    fn parse(arguments: &[&str]) -> Result<VoxelEngineConfig, String> {
+        let owned: Vec<String> = std::iter::once("voxel-rt".to_string())
+            .chain(arguments.iter().map(|value| value.to_string()))
+            .collect();
+        VoxelEngineConfig::from_args(&owned)
+    }
+
+    /// The bare flag has to mean the SEALED room. That is the configuration with
+    /// exactly one light path, so it is the one where anything on the ceiling
+    /// must have come off a wall — the default should be the readable case.
+    #[test]
+    fn light_fixture_defaults_to_the_sealed_room() {
+        assert_eq!(
+            parse(&["--light-fixture"]).unwrap().light_fixture,
+            Some(crate::light_fixture::NotchState::Sealed)
+        );
+        assert_eq!(
+            parse(&["--light-fixture", "sealed"]).unwrap().light_fixture,
+            Some(crate::light_fixture::NotchState::Sealed)
+        );
+        assert_eq!(
+            parse(&["--light-fixture", "open"]).unwrap().light_fixture,
+            Some(crate::light_fixture::NotchState::Open)
+        );
+        assert_eq!(parse(&[]).unwrap().light_fixture, None);
+    }
+
+    /// The bare flag must not swallow a following flag as its variant, or
+    /// `--light-fixture --studio` would silently lose the studio.
+    #[test]
+    fn light_fixture_does_not_consume_a_following_flag() {
+        let config = parse(&["--light-fixture", "--studio"]).unwrap();
+        assert_eq!(
+            config.light_fixture,
+            Some(crate::light_fixture::NotchState::Sealed)
+        );
+        assert_eq!(config.mode, RuntimeMode::StudioEdit);
+    }
+
+    #[test]
+    fn an_unknown_light_fixture_variant_is_an_error() {
+        let error = parse(&["--light-fixture", "rainbow"]).unwrap_err();
+        assert!(error.contains("rainbow"), "unhelpful message: {error}");
+    }
+
     #[test]
     fn checked_in_project_has_a_registered_executable_world_graph() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
         let config = VoxelEngineConfig {
             mode: RuntimeMode::WorldEdit,
             project_root: root,
+            light_fixture: None,
         };
         let runtime = VoxelEngineRuntime::load(config);
         assert!(matches!(runtime.program, CompiledWorldProgram::Generated));
@@ -331,6 +407,7 @@ mod tests {
         let runtime = VoxelEngineRuntime::load(VoxelEngineConfig {
             mode: RuntimeMode::WorldEdit,
             project_root: root,
+            light_fixture: None,
         });
         let stone = crate::material::material_id(voxel_core::world::Voxel::Stone);
         assert_eq!(

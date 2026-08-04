@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c85cf6f513c368-000000000000002d",
+  "name": "hdr_magenta",
+  "voxel_material_slot": 32,
+  "material": {
+    "albedo": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "roughness": 1.0,
+    "specular": 0.0,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": [
+      1.0,
+      0.0,
+      1.0
+    ],
+    "face_roles": null,
+    "patterns": [
+      {
+        "generator": {
+          "kind": "speckle",
+          "density": 0.3
+        },
+        "frame": "world",
+        "period_meters": 0.015,
+        "target": "emission",
+        "blend": "add",
+        "amount": 1.0,
+        "target_color": [
+          100.0,
+          0.0,
+          100.0
+        ],
+        "faces": {
+          "top": true,
+          "side": true,
+          "bottom": true
+        },
+        "texels_per_voxel": 0,
+        "vary_per_face": false,
+        "domain_warp": 0.0,
+        "tile_aspect": 2.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0
+      }
+    ],
+    "acoustic_alpha": [
+      0.02,
+      0.02,
+      0.03,
+      0.03,
+      0.04,
+      0.05
+    ]
+  },
+  "graph": "vx-000000000000000018c85cf6f513c750-000000000000002e"
+}

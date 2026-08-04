@@ -507,8 +507,8 @@ mod tests {
     #[test]
     fn default_settings_match_shader_source() {
         assert_eq!(
-            WaterSettings::default().patch_shader_source(SHADER_SOURCE),
-            SHADER_SOURCE,
+            WaterSettings::default().patch_shader_source(&SHADER_SOURCE),
+            SHADER_SOURCE.as_str(),
             "WaterSettings::default() drifted from the water lever defaults in water.wgsl"
         );
     }
@@ -520,7 +520,7 @@ mod tests {
             bounces: 2,
             ..WaterSettings::default()
         }
-        .patch_shader_source(SHADER_SOURCE);
+        .patch_shader_source(&SHADER_SOURCE);
         assert!(shader_source.contains("const WATER_MODE: u32 = 1u;"));
         assert!(shader_source.contains("const WATER_BOUNCES: u32 = 2u;"));
         // ...without touching the mode NAME constants declared above it.
@@ -539,7 +539,7 @@ mod tests {
             sun_through_liquid: false,
             ..WaterSettings::default()
         };
-        for source in [SHADER_SOURCE, CAGI_SHADER_SOURCE] {
+        for source in [SHADER_SOURCE.as_str(), CAGI_SHADER_SOURCE] {
             assert!(source.contains("const WATER_SUN_THROUGH_LIQUID: bool = true;"));
             assert!(no_sun
                 .patch_shader_source(source)

@@ -2522,7 +2522,10 @@ const CONSTANT_SCALAR_FIELDS: &[FieldDeclarationStatic] = &[field(
 const CONSTANT_COLOR_FIELDS: &[FieldDeclarationStatic] = &[field(
     "value",
     "Color",
-    "Constant linear RGBA color.",
+    "Constant linear RGBA color. The swatch authors CHROMATICITY in 0-1 only — every \
+     colour picker does, and clamping is the widget's, not ours. Magnitude above white \
+     comes from a scale downstream (Emission Strength for emitters), which is also the \
+     only thing HDR float output can show.",
     FieldTarget::Property,
     FieldDefault::Color([0.8, 0.8, 0.8, 1.0]),
     NONE,
@@ -2558,7 +2561,9 @@ const ROUGHNESS_FIELDS: &[FieldDeclarationStatic] = &[field(
 const EMISSION_FIELDS: &[FieldDeclarationStatic] = &[field(
     "value",
     "Emission",
-    "Linear emitted color before intensity scaling.",
+    "Linear emitted color before intensity scaling. A RADIANCE, not a reflectance: \
+     1.0 is SDR reference white (100 cd/m²). The picker only authors 0-1, so anything \
+     brighter than white comes from Emission Strength, not from here.",
     FieldTarget::Property,
     FieldDefault::Color([0.0, 0.0, 0.0, 1.0]),
     NONE,
@@ -3120,11 +3125,20 @@ const COLOR_STRENGTH_FIELDS: &[FieldDeclarationStatic] = &[
     field(
         "strength",
         "Strength",
-        "Emission intensity.",
+        "Emission intensity, in multiples of SDR reference white: 1.0 is a 100 cd/m² \
+         white, 4.0 is 400. Above 1.0 only reaches the display in HDR float output — \
+         the integer depths tone-map it back under white. Note the GI volume quantises \
+         radiance into [0, 1] (cagi.rs quantize_radiance), so past 1.0 the bounced \
+         light saturates while the lit surface itself keeps brightening.",
         FieldTarget::InputSocket,
         FieldDefault::Scalar(1.0),
         POSITIVE,
-        Some(NumericRange::new(0.0, 16.0)),
+        // 64x SDR white = 6400 cd/m², comfortably past the 1600 cd/m² peak of the
+        // brightest panel we target, so nothing physically displayable is out of
+        // reach. Deliberately NOT the 100x PQ signalling ceiling: that is an encoding
+        // limit no display realises, and spending most of the slider on it would make
+        // the 0-2 range everything else lives in unusable.
+        Some(NumericRange::new(0.0, 64.0)),
         Some(0.05),
         EMPTY_CHOICES,
         false,
@@ -6412,6 +6426,55 @@ mod tests {
                 "material.pattern_worley_smooth",
                 "material.tessellation",
             ]
+        );
+    }
+
+    /// Emission is the only authored quantity that can legitimately exceed white, so
+    /// it is the only one HDR float output has anything extra to show. Its slider is
+    /// therefore the whole HDR authoring surface, and its range is stated in
+    /// `voxel_color`'s nits convention rather than as a bare number — otherwise the
+    /// two drift and nobody notices until the brightest thing in a scene is dimmer
+    /// than the display can go.
+    #[test]
+    fn emission_strength_reaches_past_the_brightest_display_we_target() {
+        /// The peak luminance of an Apple XDR panel, the brightest thing this engine
+        /// currently runs on.
+        const BRIGHTEST_PANEL_NITS: f32 = 1600.0;
+
+        let strength = BUILTIN_NODES
+            .iter()
+            .find(|declaration| declaration.id == "material.emission_strength")
+            .expect("material.emission_strength must exist")
+            .fields
+            .iter()
+            .find(|field| field.key == "strength")
+            .expect("emission strength must have a `strength` field");
+
+        let authorable = strength
+            .soft_range
+            .or(strength.hard_range)
+            .expect("the strength slider needs a range to draw at all");
+        let authorable_nits = authorable.max * voxel_color::SDR_REFERENCE_WHITE_NITS;
+        assert!(
+            authorable_nits >= BRIGHTEST_PANEL_NITS,
+            "emission tops out at {authorable_nits} cd/m², below the \
+             {BRIGHTEST_PANEL_NITS} cd/m² the panel can reach — HDR output would have \
+             headroom no graph could author into it"
+        );
+
+        // And not so wide that the SDR range everything else lives in becomes
+        // undraggable. Past the PQ signalling ceiling there is nothing to reach for.
+        assert!(
+            authorable_nits <= voxel_color::PQ_CEILING_NITS,
+            "emission reaches {authorable_nits} cd/m², beyond what PQ can even signal"
+        );
+
+        // Default must sit at reference white, so an untouched emitter is an SDR
+        // emitter and turning HDR on changes nothing until someone asks it to.
+        assert_eq!(
+            strength.default,
+            FieldDefault::Scalar(1.0),
+            "an emitter's default brightness is SDR reference white by definition"
         );
     }
 }

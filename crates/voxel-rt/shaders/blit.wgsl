@@ -16,6 +16,14 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 }
 
+// Patched by `OutputFormat::patch_blit_source` (src/output_format.rs). TRUE only
+// when the swapchain format carries the sRGB transfer function and will therefore
+// re-encode this shader's output — decoding here makes that an exact round trip.
+// A 10-bit `Rgb10a2Unorm` surface applies no transfer, so the already-encoded
+// value must pass straight through; decoding into it would present a washed-out
+// image, and passing through into an sRGB surface would present a dark one.
+const BLIT_DECODES_SRGB: bool = true;
+
 @group(0) @binding(0) var source_texture: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 
@@ -38,5 +46,8 @@ fn srgb_to_linear(encoded: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let encoded_sample = textureSample(source_texture, source_sampler, input.uv);
+    if (!BLIT_DECODES_SRGB) {
+        return encoded_sample;
+    }
     return vec4<f32>(srgb_to_linear(encoded_sample.rgb), encoded_sample.a);
 }

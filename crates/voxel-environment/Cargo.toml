@@ -1,0 +1,13 @@
+[package]
+name = "voxel-environment"
+version = "0.1.0"
+edition = "2021"
+description = "Shared sun, sky and environment-radiance model for the voxel renderer"
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+wgpu = "29"
+
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }

@@ -31,6 +31,7 @@ pub mod environment;
 pub mod frame_timing;
 pub mod gpu;
 pub mod graph;
+pub mod light_fixture;
 pub mod lighting;
 pub mod material;
 pub mod material_cacheability;

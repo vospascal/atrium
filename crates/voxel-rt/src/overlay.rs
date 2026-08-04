@@ -45,6 +45,9 @@ use crate::variants::{
 use crate::water::WaterMode;
 use crate::world_edit::ClearanceUpdateMode;
 use crate::world_host::WorldEditStats;
+use voxel_color::{
+    ColorSpaceOutcome, DisplayHeadroom, HeadroomChoice, OutputDepth, OutputSupport, TonemapCurve,
+};
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
 /// Timestamp readback lands a few frames late, so a moderate window keeps the
@@ -221,6 +224,10 @@ pub struct Overlay {
     context: egui::Context,
     winit_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
+    /// The surface format the egui pipeline was built against. egui builds its OWN
+    /// render pipeline, so it is a consumer of the output format like the blit is —
+    /// see [`Overlay::set_surface_format`].
+    surface_format: wgpu::TextureFormat,
     frame_time_samples: VecDeque<f32>,
     /// Completed GPU-frame timings only — never frame-loop timing. A rolling
     /// average makes the asynchronous timestamp readback useful at a glance.
@@ -255,6 +262,7 @@ impl Overlay {
             context,
             winit_state,
             renderer,
+            surface_format,
             frame_time_samples: VecDeque::with_capacity(FRAME_TIME_SAMPLE_COUNT),
             gpu_frame_time_samples: VecDeque::with_capacity(GPU_FRAME_TIME_SAMPLE_COUNT),
             last_gpu_frame_sample_sequence: None,
@@ -309,6 +317,45 @@ impl Overlay {
         );
     }
 
+    /// Rebuild egui for a new surface format.
+    ///
+    /// egui-wgpu bakes the colour attachment format into its pipeline at
+    /// construction, so an output-depth change otherwise leaves it targeting the old
+    /// format and `set_pipeline` fails with *"Render pipeline targets are incompatible
+    /// with render pass"*. That makes egui a consumer of
+    /// [`voxel_color::OutputFormat`] exactly as the blit is — the difference
+    /// being that we do not own its pipeline, so the renderer is replaced wholesale.
+    ///
+    /// **The CONTEXT is rebuilt too, and it has to be.** `egui::Context` remembers
+    /// which textures it has already handed to a renderer, so a fresh `Renderer`
+    /// paired with the old `Context` receives a PARTIAL font-atlas update for a
+    /// texture it never allocated — *"Tried to update a texture that has not been
+    /// allocated yet"*, inside a non-unwinding callback, so it aborts rather than
+    /// panics cleanly. `Context::set_fonts` is not a way out: it compares definitions
+    /// and does nothing when they are unchanged.
+    ///
+    /// The cost is UI state — collapsed sections, scroll offsets, window positions all
+    /// reset. Accepted because this fires only on an output-depth change, which is
+    /// already reconfiguring the surface and rebuilding three pipelines. The frame-time
+    /// history is carried across deliberately, so the FPS graph does not blank.
+    pub fn set_surface_format(
+        &mut self,
+        window: &Window,
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+    ) {
+        if surface_format == self.surface_format {
+            return;
+        }
+        let frame_time_samples = std::mem::take(&mut self.frame_time_samples);
+        let gpu_frame_time_samples = std::mem::take(&mut self.gpu_frame_time_samples);
+        let last_gpu_frame_sample_sequence = self.last_gpu_frame_sample_sequence;
+        *self = Overlay::new(window, device, surface_format);
+        self.frame_time_samples = frame_time_samples;
+        self.gpu_frame_time_samples = gpu_frame_time_samples;
+        self.last_gpu_frame_sample_sequence = last_gpu_frame_sample_sequence;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -320,6 +367,16 @@ impl Overlay {
         frame_data: &OverlayFrameData,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
         vsync_enabled: &mut bool,
+        output_depth: &mut OutputDepth,
+        output_support: OutputSupport,
+        // Diagnostics only — the overlay reports these, never acts on them.
+        output_color_space: ColorSpaceOutcome,
+        output_headroom: DisplayHeadroom,
+        headroom_backend: &'static str,
+        headroom_choice: &mut HeadroomChoice,
+        tonemap_curve: &mut TonemapCurve,
+        content_peak: &mut f32,
+        exposure: &mut f32,
         sun_settings: &mut SunSettings,
         quality: &mut RenderQuality,
         material_table: &mut MaterialTable,
@@ -452,6 +509,18 @@ impl Overlay {
                         } else {
                             "VSync off: Compare GPU FPS; the frame loop can run ahead of the GPU."
                         });
+                        draw_output_depth(
+                            ui,
+                            output_depth,
+                            output_support,
+                            output_color_space,
+                            output_headroom,
+                            headroom_backend,
+                            headroom_choice,
+                            tonemap_curve,
+                            content_peak,
+                            exposure,
+                        );
                         draw_studio_assets_section(ui, studio_assets);
                         draw_quality_section(ui, quality);
                         ui.label("Material authoring is defined by nodes in Graph Studio.");
@@ -4657,6 +4726,127 @@ fn draw_property(
         }
     });
     *value != before
+}
+
+/// Output bit depth, beside VSync because both are DISPLAY properties rather than
+/// quality tiers — see the `voxel-color` crate.
+///
+/// The only lever in the overlay that can be UNAVAILABLE. Every quality lever is
+/// always valid; ten-bit output depends on the adapter, the surface's advertised
+/// formats and the display. So the control disables itself and says which half is
+/// missing, rather than offering a checkbox that silently does nothing.
+// Eight arguments for one panel, and bundling them would be worse: three are `&mut`
+// selections the caller owns and three are diagnostics that must not be mutable, so a
+// struct would either lose that distinction or need two structs to keep it.
+#[allow(clippy::too_many_arguments)]
+fn draw_output_depth(
+    ui: &mut egui::Ui,
+    depth: &mut OutputDepth,
+    support: OutputSupport,
+    color_space: ColorSpaceOutcome,
+    headroom: DisplayHeadroom,
+    headroom_backend: &'static str,
+    headroom_choice: &mut HeadroomChoice,
+    tonemap_curve: &mut TonemapCurve,
+    content_peak: &mut f32,
+    exposure: &mut f32,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Output:");
+        for option in OutputDepth::ALL {
+            // Ask about EACH option, not about 10-bit. The three modes have different
+            // vetoes: 8-bit is always available, 10-bit needs both a surface format and
+            // a device feature, HDR float needs both a float surface and a presentation
+            // contract the platform can establish. Gating them all on one predicate
+            // would disable a mode the device can actually do.
+            ui.add_enabled_ui(support.supports(option), |ui| {
+                ui.selectable_value(depth, option, option.label());
+            });
+        }
+    });
+    ui.label(
+        "Switching reconfigures the surface, reallocates the frame texture and \
+         rebuilds three pipelines. Not a per-frame knob.",
+    );
+    if !support.supports(OutputDepth::TenBit) {
+        ui.label(format!("  10-bit: {}", support.ten_bit_diagnosis()));
+    }
+    if !support.supports(OutputDepth::HdrFloat) {
+        ui.label(format!("  HDR float: {}", support.hdr_diagnosis()));
+    }
+    // SHOWN ALWAYS, not only on failure. An untagged surface is displayed
+    // pass-through, so a missing tag is a wrong picture that nothing else reports —
+    // which is exactly how it went unnoticed until HDR made it obvious. See
+    // `voxel_color::color_space`.
+    ui.label(format!("  colour space: {}", color_space.diagnosis()));
+    // The number AND where it came from. "1.6x" alone cannot be told apart from a guess,
+    // and the old hard-coded 4.0 was exactly a guess nobody could see — so the source is
+    // shown beside it always, not only when it is missing.
+    ui.label(format!(
+        "  headroom: {:.2}x ({:.0} cd/m², {})",
+        headroom.ratio(),
+        headroom.peak_nits(),
+        headroom.source().diagnosis(),
+    ));
+    ui.horizontal(|ui| {
+        ui.label("Headroom:");
+        for option in HeadroomChoice::PRESETS {
+            ui.selectable_value(headroom_choice, option, option.label());
+        }
+    });
+    ui.label(format!("  backend: {headroom_backend}"));
+    if *depth == OutputDepth::HdrFloat && !headroom.has_headroom() {
+        ui.label(
+            "  no headroom: HDR curves are confined to SDR range. Reinhard+HDR exactly \
+             matches SDR; raise display brightness, or pin a ratio above.",
+        );
+    }
+
+    // The tonemap is here rather than in the Quality section on purpose: it is not a
+    // performance tier, it is the other half of what the depth toggle changes. Switching
+    // to HDR float used to swap this curve invisibly, which is why the whole room got
+    // brighter and nothing said so.
+    ui.horizontal(|ui| {
+        ui.label("Tonemap:");
+        for option in TonemapCurve::ALL {
+            ui.selectable_value(tonemap_curve, option, option.label());
+        }
+    });
+    ui.label(format!("  {}", tonemap_curve.description()));
+    if *depth == OutputDepth::HdrFloat && !tonemap_curve.can_exceed_white() {
+        ui.label("  this curve cannot exceed white, so HDR float has nothing extra to show.");
+    }
+    // ABOVE the tonemap row, because it runs first and because reading them in pipeline
+    // order is what makes the separation obvious.
+    ui.horizontal(|ui| {
+        ui.label("Exposure:");
+        ui.add(
+            egui::Slider::new(exposure, 0.0..=8.0)
+                .logarithmic(true)
+                .show_value(true),
+        );
+    });
+    ui.label(
+        "  scales the scene BEFORE the tonemap. 1.0 is the look before exposure existed. \
+         Without it the curve doubles as exposure, which is why changing curves used to \
+         change brightness.",
+    );
+
+    // Shown only for the curve that reads it — a live-looking control that does nothing is
+    // worse than no control.
+    if tonemap_curve.uses_content_peak() {
+        ui.horizontal(|ui| {
+            ui.label("Scene peak:");
+            for option in voxel_color::tonemap::CONTENT_PEAK_PRESETS {
+                ui.selectable_value(content_peak, option, format!("{option:.0}x"));
+            }
+        });
+        ui.label(format!(
+            "  assumes the brightest pixel is {:.0} cd/m². NOT measured — the EETF needs a \
+             content peak and nothing reports one.",
+            voxel_color::nits(*content_peak),
+        ));
+    }
 }
 
 /// The E1c Quality section: preset selector on top, then every registry lever

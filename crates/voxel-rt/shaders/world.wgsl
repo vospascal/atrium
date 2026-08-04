@@ -232,6 +232,10 @@ struct Lighting {
     // this rather than material animation time, so the art-speed slider never
     // changes their lifetime.
     event_params: vec4<f32>,
+    // x = the display's HDR headroom as a multiple of SDR reference white (1.0 = no
+    // headroom, so tonemap_hdr hard-clips at white). MEASURED per frame, not a const:
+    // EDR headroom moves with the brightness slider. See lighting.rs OutputParams.
+    output_params: vec4<f32>,
 }
 
 @group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;
@@ -680,16 +684,26 @@ const SHADOW_BIAS: f32 = 1e-3;
 
 // ---- Shared color helpers ----------------------------------------------------
 
-// sRGB <-> linear via the pow-2.2 approximation: a self-consistent pair, one
-// pow each way, indistinguishable from the exact piecewise curve at 8 bits.
-// Shared because the CAGI pass decodes table-derived albedo with the same
-// curve the shading pass decodes material colors with.
+// Exact IEC 61966-2-1 sRGB transfer, extended outside the ordinary positive range by
+// signed reflection. The extension matters for HdrFloat: the compositor is explicitly
+// tagged extended sRGB and therefore decodes this exact function, so a gamma-2.2
+// approximation would no longer be self-consistent (linear 0.01 would display as 0.014).
+// Shared because the CAGI pass decodes table-derived albedo with the same curve the
+// shading pass decodes material colors with.
 fn srgb_decode(color: vec3<f32>) -> vec3<f32> {
-    return pow(color, vec3<f32>(2.2, 2.2, 2.2));
+    let magnitude = abs(color);
+    let linear_low = magnitude / 12.92;
+    let linear_high = pow((magnitude + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return sign(color) * select(linear_high, linear_low,
+                                magnitude <= vec3<f32>(0.04045));
 }
 
 fn srgb_encode(color: vec3<f32>) -> vec3<f32> {
-    return pow(color, vec3<f32>(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+    let magnitude = abs(color);
+    let encoded_low = 12.92 * magnitude;
+    let encoded_high = 1.055 * pow(magnitude, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return sign(color) * select(encoded_high, encoded_low,
+                                magnitude <= vec3<f32>(0.0031308));
 }
 
 struct Hit {

@@ -18,6 +18,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use voxel_color::OutputDepth;
+use voxel_color::{HeadroomChoice, TonemapCurve};
 use voxel_rt::animation_clock::AnimationClock;
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
@@ -28,7 +30,8 @@ use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::graph::GraphAsset;
 use voxel_rt::graph::NodeRegistry;
-use voxel_rt::lighting::SunSettings;
+use voxel_rt::light_fixture;
+use voxel_rt::lighting::{OutputParams, SunSettings};
 use voxel_rt::material;
 use voxel_rt::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
 use voxel_rt::material_graph::{
@@ -282,12 +285,28 @@ struct AppState {
     /// settings the pipeline is switched (from the prewarmed cache) after the
     /// overlay pass.
     applied_quality: RenderQuality,
+    /// The exact DDA source the live pipeline was built from, so
+    /// [`App::rebuild_dda_shader`] can refuse to recompile identical source.
+    applied_dda_shader_source: Option<String>,
     input_state: InputState,
     cursor_grabbed: bool,
     /// Latest physical cursor position. The viewport and Graph Studio use
     /// this same boundary for routing camera versus editor input.
     cursor_position: Option<(f64, f64)>,
     vsync_enabled: bool,
+    /// Requested output bit depth (see the `voxel-color` crate). A WISH — the
+    /// device may veto it, and `renderer.output_format().depth()` is what happened.
+    output_depth: OutputDepth,
+    /// Trust the display's reported headroom, or pin a value to see what it does.
+    headroom_choice: HeadroomChoice,
+    /// Which tonemap the shading pass applies. Runtime, so two curves can be compared on
+    /// the same frame.
+    tonemap_curve: TonemapCurve,
+    /// What BT.2390 assumes the scene's brightest pixel is. Unmeasurable today — see
+    /// `voxel_color::tonemap::DEFAULT_CONTENT_PEAK`.
+    content_peak: f32,
+    /// Scene exposure, applied before the tonemap. 1.0 reproduces the pre-exposure look.
+    exposure: f32,
     previous_frame_time: Instant,
     /// Terminal FPS diagnostic: frames counted since the last 2-second log
     /// line (fps + present mode + host monitor and its refresh rate). The
@@ -412,6 +431,29 @@ impl AppState {
             }
         }
 
+        // L0 — `--light-fixture` stamps the rainbow corridor into the world and
+        // spawns inside it. Carved AFTER the profile pass on purpose: the fixture's
+        // whole value is that its geometry is a function of its own constants, so
+        // it has to be the last thing to touch these voxels.
+        let light_fixture_camera = engine_config.light_fixture.map(|notch| {
+            let corridor = light_fixture::RainbowCorridor::new(notch);
+            let written = corridor.carve(&mut brickmap);
+            let eye = corridor.viewer_eye_meters();
+            println!(
+                "light fixture: rainbow corridor ({notch:?}), {written} blocks, interior \
+                 {}x{}x{} at {:?} — spawning inside at {eye:?}",
+                light_fixture::INTERIOR_WIDTH,
+                light_fixture::INTERIOR_HEIGHT,
+                light_fixture::INTERIOR_LENGTH,
+                corridor.interior_min,
+            );
+            println!(
+                "  sun re-aimed and the ambient floor zeroed: with GI off this room is BLACK, \
+                 so everything you see is the light volume"
+            );
+            corridor
+        });
+
         let window_attributes = Window::default_attributes()
             .with_title("voxel-rt")
             .with_inner_size(PhysicalSize::new(1280, 720));
@@ -424,7 +466,7 @@ impl AppState {
         let gpu_context = GpuContext::new(window.clone());
         let mut renderer = Renderer::new(
             &gpu_context.device,
-            gpu_context.surface_format(),
+            gpu_context.output_format(),
             gpu_context.surface_config.width,
             gpu_context.surface_config.height,
             &brickmap,
@@ -446,7 +488,11 @@ impl AppState {
         quality.materials.pattern_generator_mask = material::generator_mask(material_table.rows());
         renderer.set_dda_shader_source(
             &gpu_context.device,
-            &dda::build_shader_source_with_material_graphs(&quality, &material_graph_shaders),
+            &dda::build_shader_source_for_output(
+                &quality,
+                &material_graph_shaders,
+                gpu_context.output_format(),
+            ),
         );
         renderer.set_cagi_shader_source(&gpu_context.device, &cagi::build_shader_source(&quality));
         renderer.set_render_scale(&gpu_context.device, quality.render_scale);
@@ -478,7 +524,11 @@ impl AppState {
         let dda_shader_sources: Vec<String> = preset_qualities
             .iter()
             .map(|quality| {
-                dda::build_shader_source_with_material_graphs(quality, &material_graph_shaders)
+                dda::build_shader_source_for_output(
+                    quality,
+                    &material_graph_shaders,
+                    gpu_context.output_format(),
+                )
             })
             .collect();
         let cagi_shader_sources: Vec<String> = preset_qualities
@@ -509,6 +559,26 @@ impl AppState {
         world_host.set_world_thread(quality.world_edit.world_thread);
         let graph_editor_slot = material::material_id(studio_scene.sample);
 
+        // The fixture's camera and sun, or the ordinary island's. Both come from
+        // `RainbowCorridor` so the interactive view and bench section 15 cannot
+        // disagree about what the room is lit by.
+        let fly_camera = match &light_fixture_camera {
+            Some(corridor) => {
+                let eye = corridor.viewer_eye_meters();
+                FlyCamera {
+                    position: glam::Vec3::new(eye[0], eye[1], eye[2]),
+                    yaw: light_fixture::RainbowCorridor::yaw_down_corridor(),
+                    pitch: -0.12,
+                    ..FlyCamera::default()
+                }
+            }
+            None => FlyCamera::default(),
+        };
+        let sun_settings = match &light_fixture_camera {
+            Some(_) => light_fixture::RainbowCorridor::sun(),
+            None => SunSettings::default(),
+        };
+
         Self {
             window,
             gpu_context,
@@ -516,22 +586,31 @@ impl AppState {
             world_host,
             overlay,
             frame_timers,
-            fly_camera: FlyCamera::default(),
-            character: character_from_fly_camera(&FlyCamera::default()),
+            fly_camera,
+            character: character_from_fly_camera(&fly_camera),
             control_mode: if studio_mode {
                 ControlMode::StudioOrbit
             } else {
                 ControlMode::Fly
             },
             character_step_micros: 0.0,
-            sun_settings: SunSettings::default(),
-            flooded_sun_settings: SunSettings::default(),
+            sun_settings,
+            flooded_sun_settings: sun_settings,
             quality,
             applied_quality: quality,
+            // Startup builds the source inline (the mask has to be derived before
+            // the first pipeline), so the guard starts empty and the first
+            // `rebuild_dda_shader` populates it.
+            applied_dda_shader_source: None,
             input_state: InputState::default(),
             cursor_grabbed: false,
             cursor_position: None,
             vsync_enabled: true,
+            output_depth: OutputDepth::default(),
+            headroom_choice: HeadroomChoice::default(),
+            tonemap_curve: TonemapCurve::default(),
+            content_peak: voxel_color::tonemap::DEFAULT_CONTENT_PEAK,
+            exposure: 1.0,
             previous_frame_time: Instant::now(),
             fps_log_timer: Instant::now(),
             fps_log_frame_count: 0,
@@ -1355,13 +1434,29 @@ impl AppState {
     fn rebuild_dda_shader(&mut self) {
         self.quality.materials.pattern_generator_mask =
             material::generator_mask(self.material_table.rows());
-        self.renderer.set_dda_shader_source(
-            &self.gpu_context.device,
-            &dda::build_shader_source_with_material_graphs(
-                &self.quality,
-                &self.material_graph_shaders,
-            ),
+        let source = dda::build_shader_source_for_output(
+            &self.quality,
+            &self.material_graph_shaders,
+            self.renderer.output_format(),
         );
+        // NEVER rebuild from identical source. `GraphEditor::apply` requests a
+        // compile for EVERY graph command, and graph constants are emitted as WGSL
+        // literals (`format_float` in `material_graph.rs`), so most edits really do
+        // produce new source and really do need a pipeline. But not all of them:
+        // moving a node, selecting one, collapsing one, or any edit the compiler
+        // folds away leaves this string unchanged, and those must not touch the
+        // hottest pipeline in the engine.
+        //
+        // This is a GUARD, not the fix. The fix is to stop baking authored values
+        // into the source at all — see the arc note in
+        // `docs/voxel-rt-optimization-ledger.md` (6.35) — because a slider dragged
+        // through fifty values is still fifty distinct sources and fifty compiles.
+        if self.applied_dda_shader_source.as_deref() == Some(source.as_str()) {
+            return;
+        }
+        self.renderer
+            .set_dda_shader_source(&self.gpu_context.device, &source);
+        self.applied_dda_shader_source = Some(source);
     }
 
     /// S0 — push the frame's material edits to the GPU, and service a requested
@@ -1887,6 +1982,18 @@ impl AppState {
             animation_params,
             event_params,
         );
+        // PROBED EVERY FRAME, not cached: EDR headroom changes while the user drags the
+        // brightness slider or moves the window between displays, and a stale value means
+        // tone-mapping into range the panel does not have. The windowed app is the only
+        // caller that has a display to ask, which is why this is a builder call rather
+        // than a parameter — see `LightingUniform::with_output_params`.
+        let display_headroom = self.gpu_context.display_headroom(self.headroom_choice);
+        let lighting_uniform = lighting_uniform.with_output_params(OutputParams {
+            hdr_headroom: display_headroom.ratio(),
+            tonemap: self.tonemap_curve,
+            content_peak: self.content_peak,
+            exposure: self.exposure,
+        });
         // A moved sun invalidates the whole light volume (E4: the world is
         // static, the sun is not). Dragging the slider therefore re-floods every
         // frame of the drag, which is what makes the GI follow the drag instead of
@@ -1946,6 +2053,7 @@ impl AppState {
             &self.gpu_context.queue,
             &mut light_volume_encoder,
             &lighting_uniform,
+            &camera_uniform,
             &self.world_events.upload_array(),
             gi_iterations,
             self.frame_timers.as_ref(),
@@ -1959,6 +2067,7 @@ impl AppState {
             self.frame_timers.as_ref(),
         );
         let previous_vsync_enabled = self.vsync_enabled;
+        let previous_output_depth = self.output_depth;
         // E6 — is the view underwater? Asked of the ACTIVE eye against the
         // authority, so it is the same question the shading pass asks of the
         // primary ray's origin, and it holds in fly mode too.
@@ -2002,6 +2111,15 @@ impl AppState {
                 .as_ref()
                 .map(|frame_timers| frame_timers.render_span_end_writes(SPAN_POST)),
             &mut self.vsync_enabled,
+            &mut self.output_depth,
+            self.gpu_context.output_support(),
+            self.gpu_context.color_space(),
+            self.gpu_context.display_headroom(self.headroom_choice),
+            self.gpu_context.headroom_backend(),
+            &mut self.headroom_choice,
+            &mut self.tonemap_curve,
+            &mut self.content_peak,
+            &mut self.exposure,
             &mut self.sun_settings,
             &mut self.quality,
             &mut self.material_table,
@@ -2057,6 +2175,36 @@ impl AppState {
         }
         self.update_project_autosave();
         self.upload_material_edits();
+        // The heaviest toggle in the engine: a surface reconfigure, a storage-texture
+        // reallocation and two pipeline rebuilds. `set_output_depth` returns Some only
+        // when something actually moved, so an unchanged toggle — or one the device
+        // vetoed — costs nothing.
+        if self.output_depth != previous_output_depth {
+            if let Some(resolved) = self.gpu_context.set_output_depth(self.output_depth) {
+                // Move the tonemap to the one that suits the new depth, so the toggle is
+                // not a silent look change. Reinhard+HDR is exactly the SDR curve through
+                // scene white and becomes exactly plain Reinhard at 1x headroom; only its
+                // bounded highlight continuation changes. The identity knee remains one
+                // click away for anyone who wants the brighter reading.
+                self.tonemap_curve = TonemapCurve::default_for(resolved.writes_extended_range());
+                self.renderer
+                    .set_output_format(&self.gpu_context.device, resolved);
+                // egui builds its own render pipeline against the surface format, so
+                // it is a consumer of the output format too — the sixth, and the one
+                // outside our own passes.
+                self.overlay.set_surface_format(
+                    &self.window,
+                    &self.gpu_context.device,
+                    resolved.surface(),
+                );
+                // The shading source carries the storage-texture TYPE, so the
+                // pipeline has to be rebuilt from patched source, not just rebound.
+                self.rebuild_dda_shader();
+            }
+            // Snap the request back to what was actually resolved, so the overlay
+            // shows the truth rather than a wish the device refused.
+            self.output_depth = self.renderer.output_format().depth();
+        }
         if self.vsync_enabled != previous_vsync_enabled {
             self.gpu_context.set_vsync(self.vsync_enabled);
         }

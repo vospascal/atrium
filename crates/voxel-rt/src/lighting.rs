@@ -12,28 +12,10 @@
 //! Sun color/intensity and the hemisphere-ambient colors are fixed constants
 //! for now (Stage 4's look pass decides whether they become settings too).
 
-use std::f32::consts::TAU;
-
 use glam::Vec3;
-
-/// Sun color, linear RGB — slightly warm daylight.
-const SUN_COLOR: [f32; 3] = [1.0, 0.96, 0.88];
-
-/// Sun intensity multiplier (linear radiance). Chosen so a fully sunlit,
-/// sun-facing surface lands near the top of the Reinhard curve's usable
-/// range without clipping saturated palette colors to white.
-const SUN_INTENSITY: f32 = 2.2;
-
-/// Hemisphere ambient, sky side: cool blue, linear RGB. Upward faces receive
-/// this in full; it is what keeps shadowed areas readable instead of black.
-const SKY_AMBIENT_COLOR: [f32; 3] = [0.45, 0.65, 1.0];
-
-/// Hemisphere ambient, ground side: warm bounce tint, linear RGB. Downward
-/// faces receive this in full; side faces get the 50/50 mix.
-const GROUND_AMBIENT_COLOR: [f32; 3] = [0.45, 0.36, 0.28];
-
-/// Overall ambient strength applied to the hemisphere mix.
-const AMBIENT_STRENGTH: f32 = 0.4;
+use voxel_environment::{
+    EnvironmentFrame, AMBIENT_STRENGTH, GROUND_AMBIENT_COLOR, SKY_AMBIENT_COLOR, SUN_INTENSITY,
+};
 
 /// Per-frame lighting data for the DDA compute shader, bindable as a uniform.
 ///
@@ -59,6 +41,7 @@ const AMBIENT_STRENGTH: f32 = 0.4;
 /// | 192    | `material_params`     | `vec4<f32>` | runtime material knobs |
 /// | 208    | `animation_params`    | `vec4<f32>` | the scaled material clock — see [`AnimationParams`] |
 /// | 224    | `event_params`        | `vec4<f32>` | the unscaled world clock + event count |
+/// | 240    | `output_params`       | `vec4<f32>` | the display's measured HDR headroom — see [`OutputParams`] |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -85,6 +68,8 @@ pub struct LightingUniform {
     pub animation_params: [f32; 4],
     /// The unscaled simulation clock used by world-event envelopes.
     pub event_params: [f32; 4],
+    /// The display's HDR headroom — see [`OutputParams`].
+    pub output_params: [f32; 4],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -92,6 +77,26 @@ pub struct LightingUniform {
 // is an explicit field).
 unsafe impl bytemuck::Zeroable for LightingUniform {}
 unsafe impl bytemuck::Pod for LightingUniform {}
+
+impl LightingUniform {
+    /// Attach the display's measured HDR headroom.
+    ///
+    /// **A builder rather than a seventh parameter to [`SunSettings::lighting_uniform`],
+    /// deliberately.** Headroom is a property of a physical display, and of the thirteen
+    /// callers of that constructor exactly one — the windowed app — has one. The
+    /// benchmark, the CAGI probes and every unit test render offscreen and have nothing to
+    /// report, so requiring the argument would mean thirteen edits to pass a value twelve
+    /// of them would have to invent.
+    ///
+    /// The failure mode is what makes this safe rather than merely convenient: forgetting
+    /// to call it leaves [`OutputParams::default`], which claims NO headroom and clips at
+    /// white. That is the conservative direction — an over-claimed headroom is the bug
+    /// this whole path exists to fix, and it cannot be reached by omission.
+    pub fn with_output_params(mut self, output_params: OutputParams) -> LightingUniform {
+        self.output_params = output_params.to_array();
+        self
+    }
+}
 
 /// The RUNTIME quality knobs, packed into `Lighting.shading_params` — the
 /// levers a preset switch can change WITHOUT a pipeline rebuild (E1c). The
@@ -233,6 +238,85 @@ impl EventParams {
     }
 }
 
+/// The display's HDR headroom, packed into `Lighting.output_params`.
+///
+/// **A UNIFORM RATHER THAN A SHADER CONST, and that is the change.** Headroom used to be
+/// `const OUTPUT_HDR_HEADROOM: f32 = 4.0` in `dda.wgsl` — a number nothing ever checked
+/// against the hardware. Real EDR headroom moves while the app runs: the brightness
+/// slider changes it, thermal state changes it, dragging the window to another display
+/// changes it. A const would mean a pipeline rebuild on every one of those, which is
+/// stutter during a slider drag, so this is the one output knob that has to be uploaded
+/// rather than patched.
+///
+/// It rides in the lighting uniform because that buffer is already written every frame
+/// unconditionally, so a live headroom costs nothing — and because a new binding is
+/// exactly what broke the HDR path repeatedly while it was being wired.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutputParams {
+    /// Peak display luminance as a multiple of SDR reference white; 1.0 means no
+    /// headroom, so `tonemap_hdr` degenerates to a hard clip at white.
+    ///
+    /// Already clamped to a believable band by
+    /// [`voxel_color::DisplayHeadroom`](voxel_color::DisplayHeadroom), which is the only
+    /// thing that should construct this — `tonemap_hdr` divides by `headroom - 1`, so a
+    /// value below 1.0 would invert the highlight rolloff.
+    pub hdr_headroom: f32,
+    /// `y` — which tonemap the shading pass applies, as
+    /// [`voxel_color::TonemapCurve::shader_index`]. A uniform rather than a shader const
+    /// so the curves can be compared on the same frame instead of across a rebuild.
+    pub tonemap: voxel_color::TonemapCurve,
+    /// `z` — what BT.2390 assumes the scene's brightest pixel is, as a multiple of SDR
+    /// reference white. Read by that curve only; see
+    /// [`voxel_color::tonemap::DEFAULT_CONTENT_PEAK`] for why it is an assumption.
+    pub content_peak: f32,
+    /// `w` — scene exposure, applied BEFORE the tonemap.
+    ///
+    /// **The piece the whole output path was missing.** Without it the tonemap doubles as
+    /// exposure: `SUN_INTENSITY` was tuned so a sunlit surface lands high on Reinhard's
+    /// usable range (see its comment above), which means the curve — not the lighting —
+    /// decides how bright the image is. That is why swapping to a curve that leaves
+    /// mid-tones alone brightened the entire room, and why "what is the content peak?"
+    /// had no answer: the scene's absolute scale was arbitrary, tuned to fit a curve.
+    ///
+    /// With exposure separate, the tonemap only shapes the highlight rolloff and the two
+    /// can be judged independently.
+    ///
+    /// Defaults to 1.0, so nothing changes until someone moves it.
+    pub exposure: f32,
+}
+
+impl Default for OutputParams {
+    /// SDR: no headroom claimed. Matches `voxel_color::headroom::UNMEASURED_HEADROOM`, so
+    /// a caller that never probes gets the conservative answer rather than the old
+    /// optimistic 4.0.
+    fn default() -> OutputParams {
+        OutputParams {
+            hdr_headroom: 1.0,
+            tonemap: voxel_color::TonemapCurve::Reinhard,
+            content_peak: voxel_color::tonemap::DEFAULT_CONTENT_PEAK,
+            exposure: 1.0,
+        }
+    }
+}
+
+impl OutputParams {
+    fn to_array(self) -> [f32; 4] {
+        // Floored at 1.0 as a second line of defence. `DisplayHeadroom` already clamps,
+        // but this struct is `pub` with a `pub` field and the shader has no way to
+        // defend itself against a negative `room`.
+        [
+            self.hdr_headroom.max(1.0),
+            self.tonemap.shader_index(),
+            // Floored at 1.0 for the same reason as headroom: the EETF divides by the
+            // content peak in PQ, and a zero would take the whole curve with it.
+            self.content_peak.max(1.0),
+            // Non-negative, but NOT floored at 1.0 — exposing down is as legitimate as
+            // exposing up, and zero is a valid "black" for a fade.
+            self.exposure.max(0.0),
+        ]
+    }
+}
+
 /// The RUNTIME water knobs (E6), packed into `Lighting.water_params`. The
 /// compile-time water levers (the optics mode and the bounce budget) are shader
 /// consts instead — see [`crate::water`], which also owns the physical constants
@@ -357,17 +441,22 @@ struct CelestialState {
     star_rotation: f32,
 }
 
-fn mix_rgb(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
-    [
-        from[0] + (to[0] - from[0]) * amount,
-        from[1] + (to[1] - from[1]) * amount,
-        from[2] + (to[2] - from[2]) * amount,
-    ]
-}
-
-fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
-    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+impl From<EnvironmentFrame> for CelestialState {
+    fn from(frame: EnvironmentFrame) -> Self {
+        Self {
+            sun_direction: frame.sun_direction,
+            moon_direction: frame.moon_direction,
+            active_direction: frame.active_direction,
+            active_color: frame.active_color,
+            direct_strength: frame.direct_strength,
+            ambient_strength: frame.ambient_strength,
+            daylight: frame.daylight,
+            moonlight: frame.moonlight,
+            zenith: frame.zenith,
+            horizon: frame.horizon,
+            star_rotation: frame.star_rotation,
+        }
+    }
 }
 
 impl SunSettings {
@@ -386,96 +475,21 @@ impl SunSettings {
     }
 
     fn celestial_state(&self) -> CelestialState {
-        if !self.day_night_enabled {
-            let direction = self.manual_sun_direction();
-            return CelestialState {
-                sun_direction: direction,
-                moon_direction: -direction,
-                active_direction: direction,
-                active_color: SUN_COLOR,
-                direct_strength: 1.0,
-                ambient_strength: 1.0,
-                daylight: 1.0,
-                moonlight: 0.0,
-                zenith: [0.08, 0.31, 2.55],
-                horizon: [2.55, 1.37, 0.63],
-                star_rotation: 0.0,
-            };
-        }
-
-        let phase = self.day_phase.rem_euclid(1.0);
-        let orbit = (phase - 0.25) * TAU;
-        let sun_height = orbit.sin();
-        let daylight = smoothstep(0.0, 0.25, sun_height);
-        let moonlight = smoothstep(0.05, 0.35, -sun_height);
-        let elevation = self.elevation_degrees.to_radians() * sun_height;
-        // A 160-degree east-to-west sweep between sunrise and sunset, while the
-        // authored azimuth remains the noon direction and preserves the old look.
-        let azimuth = (self.azimuth_degrees + (phase - 0.5) * 320.0).to_radians();
-        let (sin_elevation, cos_elevation) = elevation.sin_cos();
-        let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
-        let sun_direction = Vec3::new(
-            cos_elevation * cos_azimuth,
-            sin_elevation,
-            cos_elevation * sin_azimuth,
-        )
-        .normalize();
-        let moon_direction = -sun_direction;
-        let is_day = sun_height > 0.0;
-        let active_direction = if is_day {
-            sun_direction
-        } else {
-            moon_direction
-        };
-        let horizon_warmth = 1.0 - smoothstep(0.0, 0.35, sun_height.max(0.0));
-        let sun_color = mix_rgb(SUN_COLOR, [1.0, 0.52, 0.24], horizon_warmth);
-        let moon_color = [0.38, 0.50, 1.0];
-        let phase_brightness = 0.15 + 0.85 * (0.5 - 0.5 * (self.moon_phase * TAU).cos());
-        let direct_strength = if is_day {
-            daylight * (0.75 + 0.25 * sun_height.max(0.0))
-        } else {
-            moonlight * phase_brightness * 0.045
-        };
-        let ambient_strength = 0.045 + daylight * 0.955 + moonlight * phase_brightness * 0.08;
-
-        const NIGHT_ZENITH: [f32; 3] = [0.002, 0.004, 0.018];
-        const DAY_ZENITH: [f32; 3] = [0.08, 0.31, 2.55];
-        const NIGHT_HORIZON: [f32; 3] = [0.012, 0.020, 0.060];
-        const DAY_HORIZON: [f32; 3] = [2.55, 1.37, 0.63];
-        const TWILIGHT: [f32; 3] = [3.0, 0.55, 0.12];
-        let twilight = (1.0 - (sun_height.abs() / 0.28).min(1.0)) * 0.55;
-        let zenith = mix_rgb(NIGHT_ZENITH, DAY_ZENITH, daylight);
-        let horizon = mix_rgb(
-            mix_rgb(NIGHT_HORIZON, DAY_HORIZON, daylight),
-            TWILIGHT,
-            twilight,
-        );
-
-        CelestialState {
-            sun_direction,
-            moon_direction,
-            active_direction,
-            active_color: if is_day { sun_color } else { moon_color },
-            direct_strength,
-            ambient_strength,
-            daylight,
-            moonlight,
-            zenith,
-            horizon,
-            star_rotation: phase * TAU,
-        }
+        self.environment_settings().environment_frame().into()
     }
 
-    fn manual_sun_direction(&self) -> Vec3 {
-        let azimuth_radians = self.azimuth_degrees.to_radians();
-        let elevation_radians = self.elevation_degrees.to_radians();
-        let (sin_elevation, cos_elevation) = elevation_radians.sin_cos();
-        let (sin_azimuth, cos_azimuth) = azimuth_radians.sin_cos();
-        Vec3::new(
-            cos_elevation * cos_azimuth,
-            sin_elevation,
-            cos_elevation * sin_azimuth,
-        )
+    fn environment_settings(&self) -> voxel_environment::SunSettings {
+        voxel_environment::SunSettings {
+            azimuth_degrees: self.azimuth_degrees,
+            elevation_degrees: self.elevation_degrees,
+            intensity_scale: self.intensity_scale,
+            ambient_scale: self.ambient_scale,
+            day_night_enabled: self.day_night_enabled,
+            cycle_running: self.cycle_running,
+            day_phase: self.day_phase,
+            day_length_seconds: self.day_length_seconds,
+            moon_phase: self.moon_phase,
+        }
     }
 
     /// Unit direction from a surface toward the sun.
@@ -566,6 +580,8 @@ impl SunSettings {
             material_params: material_params.to_array(),
             animation_params: animation_params.to_array(),
             event_params: event_params.to_array(),
+            // SDR by default; the windowed app overrides via `with_output_params`.
+            output_params: OutputParams::default().to_array(),
         }
     }
 }
@@ -631,9 +647,68 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 240);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 256);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
         assert_eq!(std::mem::size_of::<LightingUniform>() % 16, 0);
+    }
+
+    /// Headroom must default to NO headroom and must land in `x`.
+    ///
+    /// The default is the load-bearing half. Every offscreen caller — the benchmark, the
+    /// CAGI probes, every test — skips `with_output_params`, so whatever this returns is
+    /// what they render with. If it ever claimed headroom, they would all tone-map into
+    /// range no display was asked about, which is the exact bug the measured probe
+    /// replaced, reintroduced by omission.
+    #[test]
+    fn output_params_default_to_no_headroom_and_land_in_x() {
+        let uniform = probe_uniform(115.0);
+        assert_eq!(
+            uniform.output_params,
+            [
+                1.0,
+                voxel_color::TonemapCurve::Reinhard.shader_index(),
+                voxel_color::tonemap::DEFAULT_CONTENT_PEAK,
+                1.0
+            ],
+            "an unset headroom must be 1.0 (clip at white), never an optimistic guess; the \
+             curve defaults to Reinhard, the content peak to the HDR10 baseline, and \
+             exposure to 1.0 so the default look is unchanged"
+        );
+
+        let bright = uniform.with_output_params(OutputParams {
+            hdr_headroom: 4.0,
+            tonemap: voxel_color::TonemapCurve::HdrKnee,
+            content_peak: 10.0,
+            exposure: 2.0,
+        });
+        assert_eq!(
+            bright.output_params,
+            [
+                4.0,
+                voxel_color::TonemapCurve::HdrKnee.shader_index(),
+                10.0,
+                2.0
+            ],
+            "headroom in x, the curve index in y, the content peak in z"
+        );
+        // The builder must touch nothing else — it is bolted onto a finished uniform.
+        assert_eq!(bright.material_params, uniform.material_params);
+        assert_eq!(bright.event_params, uniform.event_params);
+        assert_eq!(bright.animation_params, uniform.animation_params);
+
+        // `tonemap_hdr` divides by `headroom - 1`, so a sub-1.0 value would invert the
+        // highlight rolloff. `DisplayHeadroom` clamps, but this field is `pub` and the
+        // shader cannot defend itself.
+        let floored = uniform.with_output_params(OutputParams {
+            hdr_headroom: -3.0,
+            tonemap: voxel_color::TonemapCurve::HdrKnee,
+            content_peak: 10.0,
+            exposure: -1.0,
+        });
+        assert_eq!(floored.output_params[0], 1.0);
+        // Exposure floors at ZERO, not one: exposing down is legitimate and a fade to
+        // black wants 0. Only negative is nonsense.
+        assert_eq!(floored.output_params[3], 0.0);
     }
 
     /// The clock must land in its own slots: swapping epoch and remainder

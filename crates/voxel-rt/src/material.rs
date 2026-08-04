@@ -129,7 +129,7 @@ pub const WATER_SCATTERING_PER_METER: [f32; 3] = [0.004, 0.030, 0.045];
 pub const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Number of material ids (== number of `Voxel` variants, Air included).
-pub const MATERIAL_COUNT: usize = 28;
+pub const MATERIAL_COUNT: usize = 40;
 
 /// Air's material id, and the DDA's miss sentinel — the shading path is only ever
 /// called on an occupied voxel, so row 0 is never sampled on a hit.
@@ -174,6 +174,18 @@ pub fn material_id(voxel: Voxel) -> u8 {
         Voxel::GlowBerry => 25,
         Voxel::Lava => 26,
         Voxel::SlateTile => 27,
+        Voxel::HdrRed => 28,
+        Voxel::HdrGreen => 29,
+        Voxel::HdrBlue => 30,
+        Voxel::HdrCyan => 31,
+        Voxel::HdrMagenta => 32,
+        Voxel::HdrYellow => 33,
+        Voxel::AlbedoRed => 34,
+        Voxel::AlbedoGreen => 35,
+        Voxel::AlbedoBlue => 36,
+        Voxel::AlbedoCyan => 37,
+        Voxel::AlbedoMagenta => 38,
+        Voxel::AlbedoYellow => 39,
     }
 }
 
@@ -213,6 +225,18 @@ pub fn material_voxel(material: u8) -> Voxel {
         25 => Voxel::GlowBerry,
         26 => Voxel::Lava,
         27 => Voxel::SlateTile,
+        28 => Voxel::HdrRed,
+        29 => Voxel::HdrGreen,
+        30 => Voxel::HdrBlue,
+        31 => Voxel::HdrCyan,
+        32 => Voxel::HdrMagenta,
+        33 => Voxel::HdrYellow,
+        34 => Voxel::AlbedoRed,
+        35 => Voxel::AlbedoGreen,
+        36 => Voxel::AlbedoBlue,
+        37 => Voxel::AlbedoCyan,
+        38 => Voxel::AlbedoMagenta,
+        39 => Voxel::AlbedoYellow,
         _ => Voxel::Air,
     }
 }
@@ -1334,6 +1358,287 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             ]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
+        // ---- HDR test targets: six hues, base at SDR white, speckle at the PQ ceiling
+        //
+        // Six emissive blocks, each a pure hue at SDR reference white carrying a
+        // speckle of the SAME hue at the Rec.2100 PQ encoding ceiling. They exist to
+        // make the output path's dynamic range visible — see `docs/output-depth.md`.
+        //
+        // THE NITS CONVENTION, which is what makes any of this expressible. SDR
+        // reference white is 100 cd/m^2 (Rec.709/sRGB), so:
+        //
+        //     linear 1.0    =    100 nits   <- SDR reference white, the BASE
+        //     linear 100.0  = 10,000 nits   <- the PQ ceiling, `color(rec2100-pq 1.0)`
+        //     nits          = linear * 100
+        //
+        // So a speckle authored at linear 100 IS `rec2100-pq 1 0 0` in extended-linear
+        // terms. The value is right; only the output path cannot yet present it.
+        //
+        // WHAT THEY LOOK LIKE TODAY, and it is not "invisible in SDR". Through
+        // `pow(reinhard(L), 1/2.2)`:
+        //
+        //     100 nits (base)      -> encoded 0.730 -> 8-bit code 186
+        //     10,000 nits (speckle)-> encoded 0.996 -> 8-bit code 254
+        //
+        // A 68-code gap, so the speckle reads as a bright near-white dot. That is
+        // BECAUSE REINHARD COMPRESSES RATHER THAN CLIPS: `L/(1+L)` maps every value
+        // into 0..1, so nothing can ever exceed white and nothing is ever hidden. For
+        // the speckle to be genuinely HDR-only, SDR would have to CLIP it — base and
+        // speckle both pinned at white, indistinguishable — and then differ only where
+        // real headroom exists. That is a tonemap change, not a material edit.
+        //
+        // Which makes their visibility useful rather than a failure: it proves the
+        // authored radiance reaches the tonemap intact. When a PQ or extended-linear
+        // path lands, these same six rows become the actual HDR test with no
+        // re-authoring — only the numbers in the doc need recomputing against the PQ
+        // curve, which allocates codes very differently from gamma 2.2.
+        //
+        // Pure primaries and secondaries deliberately: they are the widest-gamut
+        // colours sRGB can name, so they are also the rows that will show the gamut
+        // difference first once the surface carries Rec.2020 primaries.
+        Material {
+            name: "hdr_red",
+            albedo: [0.0, 0.0, 0.0],
+            roughness: 1.0,
+            specular: 0.0,
+            kind: MaterialKind::Solid,
+            // #FF0000 at SDR reference white: linear 1.0 = 100 nits.
+            emission: Some([1.0, 0.0, 0.0]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Speckle { density: 0.3 },
+                frame: PatternFrame::World,
+                // 1.5 cm dots — finer than a voxel, so it reads as speckle rather than
+                // as shapes, and a few pixels cover one dot at arm's length.
+                period_meters: 0.015,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 1.0,
+                // `rec2100-pq 1 0 0` — linear 100 = 10,000 nits, the PQ ceiling.
+                // `Add` with amount 1.0 means this lands on top of the base unscaled.
+                target_color: [100.0, 0.0, 0.0],
+                faces: PatternFaces::ALL,
+                // No texel snap: the dots stay continuous rather than quantising to the
+                // 1.56 cm lattice before the frame buffer sees them.
+                texels_per_voxel: 0,
+                vary_per_face: false,
+                domain_warp: 0.0,
+                tile_aspect: 2.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
+                emission_intensity: 1.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        Material {
+            name: "hdr_green",
+            albedo: [0.0, 0.0, 0.0],
+            roughness: 1.0,
+            specular: 0.0,
+            kind: MaterialKind::Solid,
+            // #00FF00 at SDR reference white: linear 1.0 = 100 nits.
+            emission: Some([0.0, 1.0, 0.0]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Speckle { density: 0.3 },
+                frame: PatternFrame::World,
+                // 1.5 cm dots — finer than a voxel, so it reads as speckle rather than
+                // as shapes, and a few pixels cover one dot at arm's length.
+                period_meters: 0.015,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 1.0,
+                // `rec2100-pq 0 1 0` — linear 100 = 10,000 nits, the PQ ceiling.
+                // `Add` with amount 1.0 means this lands on top of the base unscaled.
+                target_color: [0.0, 100.0, 0.0],
+                faces: PatternFaces::ALL,
+                // No texel snap: the dots stay continuous rather than quantising to the
+                // 1.56 cm lattice before the frame buffer sees them.
+                texels_per_voxel: 0,
+                vary_per_face: false,
+                domain_warp: 0.0,
+                tile_aspect: 2.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
+                emission_intensity: 1.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        Material {
+            name: "hdr_blue",
+            albedo: [0.0, 0.0, 0.0],
+            roughness: 1.0,
+            specular: 0.0,
+            kind: MaterialKind::Solid,
+            // #0000FF at SDR reference white: linear 1.0 = 100 nits.
+            emission: Some([0.0, 0.0, 1.0]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Speckle { density: 0.3 },
+                frame: PatternFrame::World,
+                // 1.5 cm dots — finer than a voxel, so it reads as speckle rather than
+                // as shapes, and a few pixels cover one dot at arm's length.
+                period_meters: 0.015,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 1.0,
+                // `rec2100-pq 0 0 1` — linear 100 = 10,000 nits, the PQ ceiling.
+                // `Add` with amount 1.0 means this lands on top of the base unscaled.
+                target_color: [0.0, 0.0, 100.0],
+                faces: PatternFaces::ALL,
+                // No texel snap: the dots stay continuous rather than quantising to the
+                // 1.56 cm lattice before the frame buffer sees them.
+                texels_per_voxel: 0,
+                vary_per_face: false,
+                domain_warp: 0.0,
+                tile_aspect: 2.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
+                emission_intensity: 1.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        Material {
+            name: "hdr_cyan",
+            albedo: [0.0, 0.0, 0.0],
+            roughness: 1.0,
+            specular: 0.0,
+            kind: MaterialKind::Solid,
+            // #00FFFF at SDR reference white: linear 1.0 = 100 nits.
+            emission: Some([0.0, 1.0, 1.0]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Speckle { density: 0.3 },
+                frame: PatternFrame::World,
+                // 1.5 cm dots — finer than a voxel, so it reads as speckle rather than
+                // as shapes, and a few pixels cover one dot at arm's length.
+                period_meters: 0.015,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 1.0,
+                // `rec2100-pq 0 1 1` — linear 100 = 10,000 nits, the PQ ceiling.
+                // `Add` with amount 1.0 means this lands on top of the base unscaled.
+                target_color: [0.0, 100.0, 100.0],
+                faces: PatternFaces::ALL,
+                // No texel snap: the dots stay continuous rather than quantising to the
+                // 1.56 cm lattice before the frame buffer sees them.
+                texels_per_voxel: 0,
+                vary_per_face: false,
+                domain_warp: 0.0,
+                tile_aspect: 2.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
+                emission_intensity: 1.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        Material {
+            name: "hdr_magenta",
+            albedo: [0.0, 0.0, 0.0],
+            roughness: 1.0,
+            specular: 0.0,
+            kind: MaterialKind::Solid,
+            // #FF00FF at SDR reference white: linear 1.0 = 100 nits.
+            emission: Some([1.0, 0.0, 1.0]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Speckle { density: 0.3 },
+                frame: PatternFrame::World,
+                // 1.5 cm dots — finer than a voxel, so it reads as speckle rather than
+                // as shapes, and a few pixels cover one dot at arm's length.
+                period_meters: 0.015,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 1.0,
+                // `rec2100-pq 1 0 1` — linear 100 = 10,000 nits, the PQ ceiling.
+                // `Add` with amount 1.0 means this lands on top of the base unscaled.
+                target_color: [100.0, 0.0, 100.0],
+                faces: PatternFaces::ALL,
+                // No texel snap: the dots stay continuous rather than quantising to the
+                // 1.56 cm lattice before the frame buffer sees them.
+                texels_per_voxel: 0,
+                vary_per_face: false,
+                domain_warp: 0.0,
+                tile_aspect: 2.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
+                emission_intensity: 1.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        Material {
+            name: "hdr_yellow",
+            albedo: [0.0, 0.0, 0.0],
+            roughness: 1.0,
+            specular: 0.0,
+            kind: MaterialKind::Solid,
+            // #FFFF00 at SDR reference white: linear 1.0 = 100 nits.
+            emission: Some([1.0, 1.0, 0.0]),
+            face_roles: None,
+            patterns: PatternStack::of(&[PatternLayer {
+                generator: PatternGenerator::Speckle { density: 0.3 },
+                frame: PatternFrame::World,
+                // 1.5 cm dots — finer than a voxel, so it reads as speckle rather than
+                // as shapes, and a few pixels cover one dot at arm's length.
+                period_meters: 0.015,
+                target: PatternTarget::Emission,
+                blend: PatternBlend::Add,
+                amount: 1.0,
+                // `rec2100-pq 1 1 0` — linear 100 = 10,000 nits, the PQ ceiling.
+                // `Add` with amount 1.0 means this lands on top of the base unscaled.
+                target_color: [100.0, 100.0, 0.0],
+                faces: PatternFaces::ALL,
+                // No texel snap: the dots stay continuous rather than quantising to the
+                // 1.56 cm lattice before the frame buffer sees them.
+                texels_per_voxel: 0,
+                vary_per_face: false,
+                domain_warp: 0.0,
+                tile_aspect: 2.0,
+                tile_bond: 0.5,
+                tile_gap: 0.06,
+                emission_intensity: 1.0,
+            }]),
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        // 34-39  Albedo* (L0) — saturated Lambertian REFLECTORS for the indirect
+        // light fixture. Distinct from the `hdr_*` rows directly above, which are
+        // pure emitters at zero albedo: a room built from those cannot bounce a
+        // photon, which is how the first version of the L0 corridor came to
+        // measure emission while claiming to measure albedo.
+        //
+        // The numbers: 0.80 in a channel the surface reflects, 0.05 in one it does
+        // not. Two deliberate choices.
+        //
+        // * 0.80 rather than 1.0 keeps the infinite-bounce series convergent
+        //   (sum 0.8^n = 5). A unit-albedo surface makes a closed room a
+        //   divergent feedback loop, and CAGI resampling its own cache would grow
+        //   without bound rather than settle.
+        // * 0.05 rather than 0.0 leaves the off-channels a floor. At hard zero a
+        //   channel that darkens has nowhere left to go, so the per-channel
+        //   divergence the corpus warns about ("unequal channels diverge visibly
+        //   as they darken") would clip instead of showing as the hue shift the
+        //   fixture is built to make visible.
+        //
+        // Roughness 1.0 / specular 0.0: pure diffuse, so nothing in the read can
+        // be a specular highlight.
+        opaque("albedo_red", [0.80, 0.05, 0.05], 1.0, 0.0, ACOUSTIC_STONE),
+        opaque("albedo_green", [0.05, 0.80, 0.05], 1.0, 0.0, ACOUSTIC_STONE),
+        opaque("albedo_blue", [0.05, 0.05, 0.80], 1.0, 0.0, ACOUSTIC_STONE),
+        opaque("albedo_cyan", [0.05, 0.80, 0.80], 1.0, 0.0, ACOUSTIC_STONE),
+        opaque(
+            "albedo_magenta",
+            [0.80, 0.05, 0.80],
+            1.0,
+            0.0,
+            ACOUSTIC_STONE,
+        ),
+        opaque(
+            "albedo_yellow",
+            [0.80, 0.80, 0.05],
+            1.0,
+            0.0,
+            ACOUSTIC_STONE,
+        ),
     ]
 };
 
@@ -1464,7 +1769,21 @@ mod tests {
     /// a field, which is how a pin quietly stops being evidence. The new slots get
     /// their own tests, which assert the property that actually matters: a row
     /// without authored roles uploads its base values in every slot.
-    const UPLOAD_PIN: [CorePin; MATERIAL_COUNT] = [
+    /// How many rows [`UPLOAD_PIN`] covers.
+    ///
+    /// DELIBERATELY NOT `MATERIAL_COUNT`. The pin is a recorded baseline — "these
+    /// rows still upload the bytes they used to" — so its length is a property of
+    /// when it was recorded, not of how long the table happens to be now. Tying the
+    /// two together meant that appending a row demanded three hand-computed
+    /// `CorePin` entries, which would have been fabricated evidence rather than a
+    /// regression check.
+    ///
+    /// Appending rows past this index is therefore free and cannot weaken the pin.
+    /// CHANGING any row at or below it must still fail, which is the whole point, and
+    /// the assertion below is written so it does.
+    const PINNED_ROW_COUNT: usize = 28;
+
+    const UPLOAD_PIN: [CorePin; PINNED_ROW_COUNT] = [
         // 0  air
         CorePin {
             albedo: [0.0, 0.0, 0.0],
@@ -1944,7 +2263,13 @@ mod tests {
     #[test]
     fn the_uploaded_table_is_unchanged_by_the_union() {
         let uploaded = gpu_materials();
-        assert_eq!(uploaded.len(), UPLOAD_PIN.len());
+        // The pin covers a PREFIX of the table. Rows appended after it was recorded
+        // (the `hdr_*` output-depth test targets) are not pinned and do not need to
+        // be; rows within it must not have moved.
+        assert!(
+            uploaded.len() >= UPLOAD_PIN.len(),
+            "the table shrank below the pinned prefix — a pinned row was deleted"
+        );
         for (id, (actual, pinned)) in uploaded.iter().zip(UPLOAD_PIN.iter()).enumerate() {
             assert_eq!(
                 &CorePin::of(actual),
@@ -2046,7 +2371,14 @@ mod tests {
         // 5.4 KB of table (up from 3.3 when the tessellation grew the slot from 32
         // bytes to 48), which is the argument for putting detail on the material
         // rather than on the voxel restated as a number.
-        assert_eq!(MATERIAL_TABLE_BYTES, 8960);
+        // 40 rows: 28 shipped, six `hdr_*` output-depth test targets (28 * 320 =
+        // 8960 before them, 10880 with them), and six `albedo_*` reflectors for
+        // L0's indirect-light fixture. Absolute, not derived, so that a row
+        // silently changing size shows up here rather than nowhere.
+        //
+        // The `albedo_*` six are appended past `PINNED_ROW_COUNT`, so they cannot
+        // weaken `UPLOAD_PIN` and no pinned row had to be recomputed for them.
+        assert_eq!(MATERIAL_TABLE_BYTES, 12800);
         // The pattern slots must account for three fifths of the row, or the WGSL's
         // fixed-size array has drifted from `MAX_PATTERN_LAYERS`.
         assert_eq!(
@@ -2376,8 +2708,12 @@ mod tests {
         }
         assert_eq!(
             MATERIALS.iter().filter(|m| m.is_emissive()).count(),
-            3,
-            "M1b/E5b authored exactly three emitters"
+            9,
+            "Three shipped emitters (glow_block, glow_berry, lava) plus six \
+             DIAGNOSTIC ones — the `hdr_*` hue blocks, which are emissive so their \
+             radiance does not depend on irradiance. There is NO emitter-palette cap \
+             to worry about: `cagi.rs` states E5b carries every material's mean \
+             separately rather than indexing a slot table."
         );
     }
 
@@ -2510,23 +2846,51 @@ mod tests {
 
     // ---- S2: the pattern stack ---------------------------------------------
 
-    /// Exactly two rows author pattern layers, and this test is the tripwire for a
-    /// third appearing by accident.
+    /// Exactly which rows author pattern layers, and the tripwire for one appearing
+    /// by accident.
     ///
     /// The list is spelled out rather than counted so that adding a row is a
     /// DECISION with a diff, not a number quietly going up: a layer left behind
     /// from a demo costs every hit that touches the material, and section 11 prices
     /// the cheapest generator's first layer at over a millisecond of entry.
+    ///
+    /// The three `hdr_*` rows were added as that kind of decision. They are diagnostic
+    /// targets for the output-depth toggle (`docs/output-depth.md`), so they cost
+    /// nothing unless deliberately placed — but they DO add `wave` to the derived
+    /// generator mask, which is the one way a diagnostic row can charge the shipped
+    /// build. `wave` was already in the mask via no other row, so that cost is real
+    /// and small; a future diagnostic reaching for an unused generator would not be.
     #[test]
-    fn only_lava_and_slate_tile_author_pattern_layers() {
+    fn the_expected_rows_author_pattern_layers() {
         let authored: Vec<&str> = MATERIALS
             .iter()
             .filter(|row| !row.patterns.is_empty())
             .map(|row| row.name)
             .collect();
-        assert_eq!(authored, vec!["lava", "slate tile"]);
+        assert_eq!(
+            authored,
+            vec![
+                "lava",
+                "slate tile",
+                "hdr_red",
+                "hdr_green",
+                "hdr_blue",
+                "hdr_cyan",
+                "hdr_magenta",
+                "hdr_yellow",
+            ]
+        );
 
-        let expected_counts = [("lava", 1u32), ("slate tile", 4)];
+        let expected_counts = [
+            ("lava", 1u32),
+            ("slate tile", 4),
+            ("hdr_red", 1),
+            ("hdr_green", 1),
+            ("hdr_blue", 1),
+            ("hdr_cyan", 1),
+            ("hdr_magenta", 1),
+            ("hdr_yellow", 1),
+        ];
         for row in &MATERIALS {
             match expected_counts.iter().find(|(name, _)| *name == row.name) {
                 Some((_, count)) => {

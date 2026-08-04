@@ -1,0 +1,142 @@
+{
+  "schema_version": 2,
+  "id": "vx-000000000000000018c869d759277d58-0000000000000038",
+  "name": "albedo_yellow Material Graph",
+  "kind": "material",
+  "interface": {
+    "inputs": {},
+    "outputs": {}
+  },
+  "nodes": {
+    "g-000000000000002e": {
+      "node_type": "material.output",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-000000000000002f": {
+      "node_type": "material.surface",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-0000000000000030": {
+      "node_type": "material.base_color",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "color",
+          "value": [
+            0.8,
+            0.8,
+            0.05,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-0000000000000031": {
+      "node_type": "material.roughness",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "scalar",
+          "value": 1.0
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "g-0000000000000032": {
+      "node_type": "material.emission",
+      "node_type_version": 1,
+      "properties": {
+        "value": {
+          "type": "color",
+          "value": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    }
+  },
+  "links": {
+    "g-0000000000000033": {
+      "from": {
+        "node": "g-0000000000000030",
+        "socket": "color"
+      },
+      "to": {
+        "node": "g-000000000000002f",
+        "socket": "base_color"
+      },
+      "order": 0
+    },
+    "g-0000000000000034": {
+      "from": {
+        "node": "g-0000000000000031",
+        "socket": "value"
+      },
+      "to": {
+        "node": "g-000000000000002f",
+        "socket": "roughness"
+      },
+      "order": 0
+    },
+    "g-0000000000000035": {
+      "from": {
+        "node": "g-0000000000000032",
+        "socket": "color"
+      },
+      "to": {
+        "node": "g-000000000000002f",
+        "socket": "emission"
+      },
+      "order": 0
+    },
+    "g-0000000000000036": {
+      "from": {
+        "node": "g-000000000000002f",
+        "socket": "surface"
+      },
+      "to": {
+        "node": "g-000000000000002e",
+        "socket": "surface"
+      },
+      "order": 0
+    }
+  },
+  "layout": {
+    "positions": {
+      "g-000000000000002e": [
+        700.0,
+        160.0
+      ],
+      "g-000000000000002f": [
+        440.0,
+        160.0
+      ],
+      "g-0000000000000030": [
+        80.0,
+        20.0
+      ],
+      "g-0000000000000031": [
+        80.0,
+        220.0
+      ],
+      "g-0000000000000032": [
+        80.0,
+        420.0
+      ]
+    }
+  }
+}

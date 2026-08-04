@@ -36,7 +36,9 @@
 //! the baselines and reference rows a section is judged against — are spelled
 //! out here.
 //!
-//! Eight sections, each its own variant table (isolation rule):
+//! Fourteen sections, each its own variant table or report (isolation rule).
+//! 1-8 are summarised here; **9-14 are documented at their own definitions**, and
+//! `-- 14` is the one to reach for after touching the output path:
 //!
 //! 1. **Traversal levers, AO off** — the Stage 2 regression gate. Every column
 //!    has `AO_MODE = AO_MODE_OFF`, CAGI off and E6's water optics off, so the
@@ -95,10 +97,10 @@ use voxel_rt::brickmap::{
 };
 use voxel_rt::cagi::{
     cell_sees_sky_by_column, propagate_reference, unpack_light, CagiRule, CagiSettings, CELL_SOLID,
-    SUN_SOURCE_FLAG,
 };
 use voxel_rt::camera::{CameraInput, CameraPose, CameraUniform, DEFAULT_VERTICAL_FOV_RADIANS};
 use voxel_rt::character::{self, CharacterController, CharacterSettings};
+use voxel_rt::light_fixture::{self, NotchState, RainbowCorridor};
 use voxel_rt::lighting::{LightingUniform, SunSettings};
 use voxel_rt::material::{GpuMaterial, MaterialKind, MATERIALS};
 use voxel_rt::passes::cagi::{CagiPass, LightVolume};
@@ -508,6 +510,36 @@ fn main() {
     if runs_section(13) {
         report_material_costs(&device, &queue, use_project);
     }
+    if runs_section(14) {
+        // The output path. Runs on the SHARED bindings and the shared brickmap —
+        // the tonemap is a per-pixel term applied after shading, so it needs no
+        // special world and disturbs no baseline above.
+        report_tonemap_costs(&device, &queue, &world_bindings, &brickmap);
+    }
+    if runs_section(15) {
+        // L0 — the authored light fixture. Its own world and its own bindings,
+        // like section 8: the question is what indirect light does in a room
+        // whose right answer is known by construction, and the island cannot
+        // pose that question. Sections 1-14 measure the untouched island, so
+        // nothing above moves for this.
+        //
+        // Both notch configurations run, and the pair IS the corner-seal
+        // experiment: the only geometric difference between them is two voxels,
+        // so any lighting difference is attributable to that corner and nothing
+        // else.
+        for notch in [NotchState::Sealed, NotchState::Open] {
+            let corridor = RainbowCorridor::new(notch);
+            let corridor_brickmap = light_corridor_world(&brickmap, corridor);
+            let corridor_bindings = WorldBindings::new(&device, &corridor_brickmap);
+            run_section(
+                &device,
+                &queue,
+                &corridor_bindings,
+                &corridor_brickmap,
+                light_corridor_section(corridor),
+            );
+        }
+    }
 
     // Last word, so it is the thing still on screen when a run ends and cannot be
     // lost above a thousand lines of tables.
@@ -625,7 +657,15 @@ fn report_material_costs(device: &wgpu::Device, queue: &wgpu::Queue, use_project
         for table_variant in &tables {
             bindings.write_material_table(queue, table_variant);
             for _ in 0..WARMUP_BATCHES {
-                time_one_batch(device, queue, &bindings, &resources, &variant, &scenario);
+                time_one_batch(
+                    device,
+                    queue,
+                    &bindings,
+                    &resources,
+                    &variant,
+                    &scenario,
+                    &scenario.lighting_uniform(&variant.quality),
+                );
             }
         }
 
@@ -635,7 +675,13 @@ fn report_material_costs(device: &wgpu::Device, queue: &wgpu::Queue, use_project
                 let column = (round + offset) % tables.len();
                 bindings.write_material_table(queue, &tables[column]);
                 samples[column].push(time_one_batch(
-                    device, queue, &bindings, &resources, &variant, &scenario,
+                    device,
+                    queue,
+                    &bindings,
+                    &resources,
+                    &variant,
+                    &scenario,
+                    &scenario.lighting_uniform(&variant.quality),
                 ));
             }
         }
@@ -662,6 +708,264 @@ fn report_material_costs(device: &wgpu::Device, queue: &wgpu::Queue, use_project
         println!(
             "  {name:<18} {layers:>6} {authored_median:>10.3} {stripped_median:>10.3} {:>+10.3}",
             authored_median - stripped_median
+        );
+    }
+}
+
+/// Section 14 — what the OUTPUT PATH costs: the six tonemap curves, priced
+/// against each other on the shipped quality.
+///
+/// The curve is a RUNTIME uniform (`lighting.output_params.y`), and that is what
+/// makes this section both cheap and exact. Every column runs the same shader, the
+/// same pipeline object and the same converged light volume; the only thing that
+/// differs between two timings is four bytes in a buffer. No rebuild, so no
+/// pipeline-cache, shader-residency or brickmap effect can leak into the delta the
+/// way it can in a section whose columns are separate builds.
+///
+/// **Two headrooms, because two curves change SHAPE and not just constants at the
+/// SDR boundary.** GT7 switches to its `peakTarget = 2.5` path at headroom <= 1.0
+/// and pays a correction multiply for it; BT.2390's knee collapses when the display
+/// peak meets the content peak. A single-headroom table would price the HDR curves
+/// on a display that cannot show them, which is the one number nobody needs.
+///
+/// **Two scenarios, because the tonemap is the only per-pixel term here that does
+/// not scale with scene complexity.** It runs once per pixel at the end of shading,
+/// so its absolute cost should be identical on the aerial and ground shots while
+/// the frame around it is not — and if the two deltas disagree, the measurement is
+/// picking up something other than the curve and should not be recorded.
+///
+/// Columns are INTERLEAVED (`(round + offset) % columns`), as sections 1-5 and 13
+/// do it: over a 26-second run the GPU clock ramps and the die warms, so a column
+/// measured last would otherwise be charged for the ones before it.
+fn report_tonemap_costs(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
+    brickmap: &Brickmap,
+) {
+    use voxel_color::TonemapCurve;
+    use voxel_rt::lighting::OutputParams;
+
+    println!();
+    println!("== section 14: output path — tonemap curve cost ==");
+
+    let variant = Variant::new("tonemap".to_string(), RenderQuality::default());
+    let (width, height) = variant.resolution();
+    let target = create_render_target(device, width, height);
+    let megapixels = (width as f64 * height as f64) / 1.0e6;
+
+    // SDR is what every display gives us until one reports otherwise (the unmeasured
+    // fallback is 1.0, deliberately); 4.0 is a real EDR headroom on the dev machine's
+    // XDR panel and reproduces the value this engine used to hard-code.
+    let headrooms = [1.0f32, 4.0];
+    let columns: Vec<(String, OutputParams)> = headrooms
+        .iter()
+        .flat_map(|&hdr_headroom| {
+            TonemapCurve::ALL.into_iter().map(move |tonemap| {
+                (
+                    format!("{}@{:.0}x", tonemap.label(), hdr_headroom),
+                    OutputParams {
+                        hdr_headroom,
+                        tonemap,
+                        ..OutputParams::default()
+                    },
+                )
+            })
+        })
+        .collect();
+
+    // Every scenario in this section shares one `VariantResources` — one pipeline,
+    // one light volume — so the volume is flooded once per scenario's sun and then
+    // reused across all twelve columns. A curve cannot change what the CA pass
+    // computes: the tonemap is applied after shading, in the DDA pass alone.
+    let mut resources =
+        VariantResources::new(device, world_bindings, brickmap, &variant, &target.view);
+
+    println!("  per-dispatch median ms at {width}x{height} ({megapixels:.1} Mpx), exposure 1.0");
+
+    for scenario in build_scenarios(&[]).into_iter().filter(|scenario| {
+        // A (aerial) and C (ground): the two default-sun shots. The low-sun pair adds
+        // shadow-ray cost that the tonemap has nothing to do with.
+        scenario.label.starts_with('A') || scenario.label.starts_with('C')
+    }) {
+        resources.flood_to_convergence(device, queue, world_bindings, &variant, &scenario);
+
+        let uniforms: Vec<LightingUniform> = columns
+            .iter()
+            .map(|(_, output_params)| {
+                scenario
+                    .lighting_uniform(&variant.quality)
+                    .with_output_params(*output_params)
+            })
+            .collect();
+
+        for uniform in &uniforms {
+            for _ in 0..WARMUP_BATCHES {
+                time_one_batch(
+                    device,
+                    queue,
+                    world_bindings,
+                    &resources,
+                    &variant,
+                    &scenario,
+                    uniform,
+                );
+            }
+        }
+
+        let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(BATCH_COUNT); columns.len()];
+        for round in 0..BATCH_COUNT {
+            for offset in 0..columns.len() {
+                let column = (round + offset) % columns.len();
+                samples[column].push(time_one_batch(
+                    device,
+                    queue,
+                    world_bindings,
+                    &resources,
+                    &variant,
+                    &scenario,
+                    &uniforms[column],
+                ));
+            }
+        }
+
+        let medians: Vec<(f32, f32)> = samples.iter_mut().map(|s| summarize(s)).collect();
+        // Reinhard at headroom 1.0 is the baseline: the shipped SDR curve, one divide,
+        // and the cheapest thing the branch can do. Every delta is against it.
+        let baseline = medians[0].0;
+        println!();
+        println!("  scenario: {}", scenario.label);
+        println!(
+            "  {:<20} {:>9} {:>9} {:>10} {:>9} {:>11}",
+            "curve@headroom", "median", "p95", "vs base", "% frame", "ns/Mpx"
+        );
+        for ((label, _), (median, p95)) in columns.iter().zip(medians.iter()) {
+            let delta = median - baseline;
+            println!(
+                "  {label:<20} {median:>9.3} {p95:>9.3} {delta:>+10.3} {:>8.1}% {:>11.0}",
+                100.0 * delta / baseline,
+                (delta as f64 * 1.0e6) / megapixels,
+            );
+        }
+    }
+
+    report_tonemap_residency(device, queue, world_bindings, brickmap, &target);
+}
+
+/// The question the curve table CANNOT answer: what do the five curves nobody
+/// selected cost, purely by being resident in the kernel?
+///
+/// Every column above runs the same shader, which is what made the comparison
+/// exact — and is also exactly why none of them can price the arc itself. A
+/// dispatch branch is a few instructions, but GT7's two ICtCp matrices and
+/// BT.2390's PQ constants are live values in the same function, and register
+/// pressure is decided for the whole kernel by its worst path. If that pushed
+/// occupancy down a step, every column above would be slow together and the table
+/// would show a flat, innocent-looking zero.
+///
+/// So this is a compile-time A/B, in the shape of `fade_range_as_shader_consts_variant`:
+/// the shipped six-curve source against one with `apply_tonemap` collapsed to its
+/// Reinhard return, which makes the other five unreachable and lets the Metal
+/// compiler drop them before register allocation. That second variant is what the
+/// output path looked like before this arc, so the delta IS the arc's resident cost.
+fn report_tonemap_residency(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    world_bindings: &WorldBindings,
+    brickmap: &Brickmap,
+    target: &RenderTarget,
+) {
+    use voxel_rt::lighting::OutputParams;
+
+    // Byte-exact against `shaders/dda.wgsl`. If the dispatch is ever reshaped this
+    // assert fires rather than the row silently measuring the same shader twice —
+    // which would read as "the arc is free" and be the most expensive kind of wrong.
+    let six_curve_dispatch = "\
+fn apply_tonemap(color: vec3<f32>, headroom: f32, curve: u32, content_peak: f32) -> vec3<f32> {
+    if (curve == TONEMAP_GT7) {";
+    let one_curve_dispatch = "\
+fn apply_tonemap(color: vec3<f32>, headroom: f32, curve: u32, content_peak: f32) -> vec3<f32> {
+    return tonemap_reinhard(color);
+}
+fn apply_tonemap_unreachable(color: vec3<f32>, headroom: f32, curve: u32, content_peak: f32) -> vec3<f32> {
+    if (curve == TONEMAP_GT7) {";
+
+    let quality = RenderQuality::default();
+    let shipped_source = build_shader_source(&quality);
+    assert!(
+        shipped_source.contains(six_curve_dispatch),
+        "`apply_tonemap`'s dispatch no longer matches the residency A/B's anchor — \
+         update or drop this row"
+    );
+    let variants = [
+        Variant::new("six-curve (shipped)".to_string(), quality),
+        Variant {
+            label: "one-curve (pre-arc)".to_string(),
+            cagi_shader_source: voxel_rt::passes::cagi::build_shader_source(&quality),
+            quality,
+            shader_source: shipped_source.replacen(six_curve_dispatch, one_curve_dispatch, 1),
+        },
+    ];
+
+    println!();
+    println!("  resident cost of the five unselected curves (both columns RUN Reinhard):");
+
+    for scenario in build_scenarios(&[])
+        .into_iter()
+        .filter(|scenario| scenario.label.starts_with('A') || scenario.label.starts_with('C'))
+    {
+        let mut resources: Vec<VariantResources> = variants
+            .iter()
+            .map(|variant| {
+                VariantResources::new(device, world_bindings, brickmap, variant, &target.view)
+            })
+            .collect();
+        for (variant, resource) in variants.iter().zip(resources.iter_mut()) {
+            resource.flood_to_convergence(device, queue, world_bindings, variant, &scenario);
+        }
+        // Reinhard at headroom 1.0 in BOTH columns: the collapsed variant can render
+        // nothing else, so the shipped one must be pinned to the same curve or the row
+        // would be measuring a curve change wearing a residency label.
+        let uniform = scenario
+            .lighting_uniform(&quality)
+            .with_output_params(OutputParams::default());
+
+        let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(BATCH_COUNT); variants.len()];
+        for (index, variant) in variants.iter().enumerate() {
+            for _ in 0..WARMUP_BATCHES {
+                time_one_batch(
+                    device,
+                    queue,
+                    world_bindings,
+                    &resources[index],
+                    variant,
+                    &scenario,
+                    &uniform,
+                );
+            }
+        }
+        for round in 0..BATCH_COUNT {
+            for offset in 0..variants.len() {
+                let index = (round + offset) % variants.len();
+                samples[index].push(time_one_batch(
+                    device,
+                    queue,
+                    world_bindings,
+                    &resources[index],
+                    &variants[index],
+                    &scenario,
+                    &uniform,
+                ));
+            }
+        }
+        let (six_median, _) = summarize(&mut samples[0]);
+        let (one_median, _) = summarize(&mut samples[1]);
+        println!(
+            "  {:<28} six-curve {six_median:>7.3}   one-curve {one_median:>7.3}   \
+             resident {:>+7.3} ms ({:>+5.1}%)",
+            scenario.label,
+            six_median - one_median,
+            100.0 * (six_median - one_median) / one_median,
         );
     }
 }
@@ -913,7 +1217,15 @@ fn report_generator_costs(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: 
     for table in &tables {
         bindings.write_material_table(queue, table);
         for _ in 0..WARMUP_BATCHES {
-            time_one_batch(device, queue, &bindings, &resources, &variant, &scenario);
+            time_one_batch(
+                device,
+                queue,
+                &bindings,
+                &resources,
+                &variant,
+                &scenario,
+                &scenario.lighting_uniform(&variant.quality),
+            );
         }
     }
     for round in 0..BATCH_COUNT {
@@ -921,7 +1233,13 @@ fn report_generator_costs(device: &wgpu::Device, queue: &wgpu::Queue, brickmap: 
             let column = (round + offset) % columns.len();
             bindings.write_material_table(queue, &tables[column]);
             samples[column].push(time_one_batch(
-                device, queue, &bindings, &resources, &variant, &scenario,
+                device,
+                queue,
+                &bindings,
+                &resources,
+                &variant,
+                &scenario,
+                &scenario.lighting_uniform(&variant.quality),
             ));
         }
     }
@@ -1799,6 +2117,129 @@ fn water_scenarios(pool: WaterPool) -> Vec<Scenario> {
     ]
 }
 
+/// Section 15: L0's authored light-transport fixture — the rainbow corridor.
+///
+/// Every other section measures the ISLAND, where the correct picture is
+/// whatever the renderer happens to produce and a regression is only visible as
+/// a difference from a previously recorded run. This one measures a room whose
+/// answer is known before the frame is drawn: a white ceiling that receives no
+/// direct light at all, over six saturated floor and wall bands. If the bounce
+/// term carries albedo, the ceiling is striped; if it does not, the ceiling is
+/// grey. That is a *correctness* read, not a diff, and it is the one x1m4's own
+/// 2022-11-01 albedo bug would have failed.
+///
+/// Levers come from [`BenchSection::Cagi`], the same sweep section 5 runs, so
+/// the two tables are directly comparable: section 5 says what a propagation
+/// rule COSTS on real terrain, this one says what it GETS RIGHT.
+fn light_corridor_section(corridor: RainbowCorridor) -> Section {
+    // Ambient off, so nothing but the slot lights the room. With the shipped
+    // 1.0 ambient the whole interior reads at the ambient floor and indirect
+    // light contributes a fraction nobody can see — the exact trap
+    // `SunSettings::ambient_scale` was added for.
+    let shipped = RenderQuality::default();
+    let mut variants = vec![Variant::new("corridor-shipped".to_string(), shipped)];
+    variants.extend(registry_variants(BenchSection::Cagi, &shipped));
+
+    Section {
+        heading: "section 15: L0 rainbow corridor — GI correctness on an authored fixture",
+        scenarios: light_corridor_scenarios(corridor),
+        variants,
+        reference_label: "gi-off",
+        compare_heading: "indirect coverage (differing pixels vs gi-off — in this room EVERY \
+                          non-slot pixel is indirect, so a low number is a broken bounce)",
+        crop_regions: LIGHT_CORRIDOR_CROP_REGIONS,
+    }
+}
+
+/// Section 15's world: the seed-1 island with the corridor stamped into the air
+/// above it.
+///
+/// A separate brickmap for the same reason section 8 needs one — the shared
+/// island cannot answer this question — and stamped rather than generated so
+/// sections 1-14 keep measuring the untouched island and no baseline moves.
+fn light_corridor_world(brickmap: &Brickmap, corridor: RainbowCorridor) -> Brickmap {
+    let mut authored = brickmap.clone();
+    let written = corridor.carve(&mut authored);
+    let (outer_min, outer_max) = corridor.outer_bounds();
+    println!();
+    println!(
+        "== section 15 world: island + rainbow corridor, interior {}x{}x{} at {:?} ==",
+        light_fixture::INTERIOR_WIDTH,
+        light_fixture::INTERIOR_HEIGHT,
+        light_fixture::INTERIOR_LENGTH,
+        corridor.interior_min,
+    );
+    println!(
+        "  {written} one-metre blocks written, outer box {outer_min:?}..={outer_max:?}, \
+         {} colour bands of {} voxels, notch {:?}",
+        light_fixture::BAND_MATERIALS.len(),
+        light_fixture::SEGMENT_LENGTH,
+        corridor.notch,
+    );
+    authored
+}
+
+/// Section 15's poses. All three stand inside the room, because the room is the
+/// experiment.
+///
+/// The slot runs the corridor's whole length and the sun crosses it square-on, so
+/// every band is lit alike and there is no bright end and dark end any more.
+/// That changes what the poses are for: they are no longer sampling different
+/// light levels, they are looking at the same lighting from three angles.
+///
+/// - `J` at the near end looking down the corridor: all six bands receding, each
+///   with its own directly lit floor strip. The composition of the reference shot
+///   and the one to read colour bleed from.
+/// - `K` at the far end looking back: the same six bands in reverse order. Worth
+///   having because the palette is asymmetric — reading it from both ends is what
+///   separates a falloff in the LIGHT from a difference between the colours.
+/// - `L` pitched up at the ceiling: the readout surface filling the frame. The
+///   ceiling never sees direct light, so every band visible up there arrived by a
+///   bounce.
+fn light_corridor_scenarios(corridor: RainbowCorridor) -> Vec<Scenario> {
+    // Sun and yaws come from the fixture, not from here: the app's
+    // `--light-fixture` flag reads the same definitions, so a change to the
+    // lighting cannot make the bench and the interactive view disagree.
+    let sun = RainbowCorridor::sun();
+    let near = corridor.viewer_eye_meters();
+    let far = corridor.far_eye_meters();
+    let down_corridor = RainbowCorridor::yaw_down_corridor();
+    let up_corridor = RainbowCorridor::yaw_up_corridor();
+
+    vec![
+        Scenario {
+            label: "J near end -> down the corridor",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(near[0], near[1], near[2]),
+                down_corridor,
+                -0.12,
+            ),
+            sun,
+            capture_image: true,
+        },
+        Scenario {
+            label: "K far end -> back up the corridor",
+            pose: CameraPose::from_yaw_pitch(Vec3::new(far[0], far[1], far[2]), up_corridor, 0.10),
+            sun,
+            capture_image: true,
+        },
+        Scenario {
+            // Pitched up from the near end. The ceiling runs the whole length and
+            // is lit along the whole length now, so any upward aim inside the room
+            // lands on lit ceiling — unlike the across-the-end slot, where aiming
+            // up from here framed the dark far half and read as a broken bounce.
+            label: "L near end -> up at the ceiling",
+            pose: CameraPose::from_yaw_pitch(
+                Vec3::new(near[0], near[1], near[2]),
+                down_corridor,
+                0.55,
+            ),
+            sun,
+            capture_image: true,
+        },
+    ]
+}
+
 /// AO forced off — spelled once, used by section 1.
 fn ao_off(mut quality: RenderQuality) -> RenderQuality {
     quality.ambient_occlusion.mode = AoMode::Off;
@@ -1900,7 +2341,13 @@ fn report_preset_pipeline_cache(
         &CagiSettings::default(),
         &voxel_rt::cagi::MaterialAttributes::compiled(),
     );
-    let mut pass = DdaPass::new(device, world_bindings, &light_volume, &target.view);
+    let mut pass = DdaPass::new(
+        device,
+        world_bindings,
+        &light_volume,
+        &target.view,
+        voxel_color::OutputFormat::default(),
+    );
     println!();
     println!("== preset pipeline cache ==");
     let mut shader_sources = Vec::new();
@@ -2136,9 +2583,6 @@ fn report_cagi_cpu_cross_check(
                     let index = grid.cell_index(cell);
                     if attributes[index] & CELL_SOLID != 0 {
                         continue; // absorber: the shader stores 0, nothing to predict
-                    }
-                    if volume_after[index] & SUN_SOURCE_FLAG != 0 {
-                        continue; // pinned sun source
                     }
                     if cell_sees_sky_by_column(&grid, &brickmap.column_max_brick_y, cell) {
                         continue; // sky source
@@ -3631,13 +4075,15 @@ fn measure_section(
             vec![Vec::with_capacity(BATCH_COUNT); variant_resources.len()];
         for (variant_index, resources) in variant_resources.iter().enumerate() {
             for _ in 0..WARMUP_BATCHES {
+                let variant = &section.variants[variant_index];
                 time_one_batch(
                     device,
                     queue,
                     world_bindings,
                     resources,
-                    &section.variants[variant_index],
+                    variant,
                     scenario,
+                    &scenario.lighting_uniform(&variant.quality),
                 );
             }
         }
@@ -3648,13 +4094,15 @@ fn measure_section(
             // inherits), so every variant must sample every slot equally.
             for offset in 0..variant_resources.len() {
                 let variant_index = (round + offset) % variant_resources.len();
+                let variant = &section.variants[variant_index];
                 samples[variant_index].push(time_one_batch(
                     device,
                     queue,
                     world_bindings,
                     &variant_resources[variant_index],
-                    &section.variants[variant_index],
+                    variant,
                     scenario,
+                    &scenario.lighting_uniform(&variant.quality),
                 ));
                 if measures_light_volume {
                     cagi_samples[variant_index].push(time_one_light_volume_frame(
@@ -3748,6 +4196,9 @@ impl VariantResources {
                 &light_volume,
                 output_view,
                 &variant.shader_source,
+                // The bench measures the shipped 8-bit output path; output depth is
+                // a display property and orthogonal to everything it sweeps.
+                voxel_color::OutputFormat::default(),
             ),
             light_volume,
         }
@@ -3854,13 +4305,19 @@ fn time_one_batch(
     resources: &VariantResources,
     variant: &Variant,
     scenario: &Scenario,
+    lighting_uniform: &LightingUniform,
 ) -> f32 {
     let (width, height) = variant.resolution();
     let camera_uniform = scenario.camera_uniform((width, height));
     // The lighting uniform is shared by both passes now, and variants differ in
     // their RUNTIME knobs (AO strength, fade ramp, GI strength), so it is written
     // per batch — one batch is one (variant, scenario).
-    world_bindings.write_lighting(queue, &scenario.lighting_uniform(&variant.quality));
+    //
+    // It arrives as an ARGUMENT rather than being derived from `(scenario, variant)`
+    // here, because section 14 sweeps a lever that lives in the uniform and nowhere
+    // else: the tonemap curve. Every other caller passes exactly the derivation this
+    // line used to perform.
+    world_bindings.write_lighting(queue, lighting_uniform);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("bench batch"),
     });
@@ -4083,6 +4540,27 @@ const CAGI_CROP_REGIONS: &[(&str, u32, u32, u32, u32)] = &[
     // Canopy undersides and shadowed slopes: thin-geometry leaks and how far light
     // travels into cover (long-distance transport).
     ("canopy-shade", 1600, 480, 320, 180),
+];
+
+/// The L0 corridor crops, in 2560x1440 render pixels. Each one is a *claim*
+/// about indirect light rather than a region of interest, which is the point of
+/// an authored fixture: the crop can be aimed at a surface whose correct
+/// appearance is known.
+const LIGHT_CORRIDOR_CROP_REGIONS: &[(&str, u32, u32, u32, u32)] = &[
+    // Upper middle of the frame: the white ceiling receding down the corridor.
+    // It receives ZERO direct light, so every photon here bounced at least once
+    // and the band colours are the evidence that the bounce carried albedo.
+    // Grey here = the albedo bug.
+    ("ceiling-bleed", 1120, 300, 320, 180),
+    // Screen centre on the near poses: the first band boundary on the floor and
+    // walls. Adjacent bands differ in exactly one RGB channel, so a per-channel
+    // transport error reads as a hue break across this crop.
+    ("band-boundary", 1120, 700, 320, 180),
+    // Low and far: the end of the corridor, lit only by light that has travelled
+    // the room's whole length. This is where CAGI's ~1-cell-per-tick speed of
+    // light and its subtractive decay show up as a falloff, and where an
+    // under-converged volume goes black.
+    ("far-falloff", 1120, 980, 320, 180),
 ];
 
 /// The E6 water crops, in 2560x1440 render pixels. Each targets one claim of the

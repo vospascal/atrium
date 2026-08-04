@@ -168,6 +168,18 @@
       "type": "flag",
       "value": true
     },
+    "MaterialPatternAnimation": {
+      "type": "flag",
+      "value": true
+    },
+    "MaterialPatternCache": {
+      "type": "flag",
+      "value": true
+    },
+    "MaterialPatternEntryProbe": {
+      "type": "mode",
+      "value": 0
+    },
     "MaterialPatternFadeEnd": {
       "type": "scalar",
       "value": 50.0
@@ -175,6 +187,10 @@
     "MaterialPatternFadeStart": {
       "type": "scalar",
       "value": 10.0
+    },
+    "MaterialPatternGeneratorMask": {
+      "type": "count",
+      "value": 16383
     },
     "MaterialPatternMaxLayers": {
       "type": "count",
@@ -187,6 +203,10 @@
     "MaterialPatternStrength": {
       "type": "scalar",
       "value": 1.0
+    },
+    "MaterialPatternTexelLod": {
+      "type": "flag",
+      "value": true
     },
     "MaterialPatterns": {
       "type": "flag",

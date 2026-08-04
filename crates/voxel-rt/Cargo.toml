@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 voxel-core = { version = "0.1.0", path = "../voxel-core" }
 wgpu = "29"
+voxel-color = { path = "../voxel-color" }
+voxel-environment = { path = "../voxel-environment" }
 winit = "0.30"
 
 [dev-dependencies]

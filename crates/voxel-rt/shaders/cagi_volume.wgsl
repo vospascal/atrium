@@ -15,7 +15,7 @@
 //                                    cell, layout below (read-only here; the
 //                                    CA writes the BACK buffer at binding 12)
 //  13  storage  cagi_cell_data — two u32 words per cell: the bounce attribute
-//                                    word followed by E5b's packed 10:10:10
+//                                    word followed by E5b's packed HDR emission.
 //                                    exposed-area-weighted emission.
 //  14  uniform  CagiVolumeMeta      — grid dimensions, the integer transport
 //                                    coefficients and the S3b event-response
@@ -25,19 +25,13 @@
 // float accumulation anywhere in the transport, so the volume is deterministic
 // and noiseless):
 //
-//   bits  0..9   red    (0..1023)
-//   bits 10..19  green
-//   bits 20..29  blue
-//   bit  30      sun-source flag: this cell's value was injected from a sunlit
-//                surface and is PINNED (see CAGI_SUN_CACHE in cagi.wgsl)
-//   bit  31      unused
+//   bits  0..9   red mantissa
+//   bits 10..19  green mantissa
+//   bits 20..29  blue mantissa
+//   bits 30..31  shared exponent (0..3), restoring a 1/2/4/8 scale
 //
-// 10:10:10 rather than 8:8:8 because the choice is free: both fit one u32, so
-// they cost exactly the same bytes, and the extra two bits per channel give the
-// diffusion rule's integer division four times the headroom before its rounding
-// error shows up as banding in a long flood. A channel value of 1023 means
-// linear radiance 1.0; injected values (sky ambient ~0.4, sun bounce ~0.5) sit
-// well under that, so saturation is not a practical concern.
+// The shared exponent keeps the storage at one u32 while preserving HDR source
+// values and avoiding the old silent clamp at linear radiance 1.0.
 
 // S3b — one row of the event-response table: how a cell whose attribute word
 // carries this row's index modulates its stored emission as an event comes and
@@ -69,7 +63,7 @@ struct CagiVolumeMeta {
     cell_voxels: u32,
     // f32(cell_voxels), the sample math's scale factor.
     cell_size_voxels: f32,
-    // Max-decrement rule: light lost per cell step, in 1/1023 units. Derived on
+    // Max-decrement rule: light lost per cell step in packed HDR channel units. Derived on
     // the CPU from a per-METER attenuation so the flood's reach in meters does
     // not change when the resolution lever moves.
     attenuation: u32,
@@ -99,12 +93,7 @@ fn cagi_cell_attribute(cell_index: u32) -> u32 {
 
 fn cagi_cell_emission(cell_index: u32) -> vec3<f32> {
     let base = cell_index * CAGI_CELL_DATA_WORDS + 1u;
-    let packed = cagi_cell_data[base];
-    return vec3<f32>(
-        f32(packed & 0x3ffu),
-        f32((packed >> 10u) & 0x3ffu),
-        f32((packed >> 20u) & 0x3ffu),
-    ) * CAGI_RADIANCE_PER_STEP * lighting.gi_params.w;
+    return cagi_radiance(cagi_unpack(cagi_cell_data[base])) * lighting.gi_params.w;
 }
 
 // ---- E4: CAGI levers, the half both passes need -------------------------------
@@ -132,10 +121,11 @@ const CAGI_CELL_SOLID: u32 = 0x01000000u;
 const CAGI_TRANSMITTANCE_SHIFT: u32 = 25u;
 const CAGI_TRANSMITTANCE_LEVELS: f32 = 15.0;
 const CAGI_EVENT_RESPONSE_SHIFT: u32 = 29u;
-// Light word bits.
+// Light word bits. Three 10-bit mantissas plus a shared two-bit exponent keep
+// the word compact while representing radiance well above SDR white.
 const CAGI_CHANNEL_MASK: u32 = 0x3ffu;
 const CAGI_CHANNEL_MAX: u32 = 1023u;
-const CAGI_SUN_SOURCE_FLAG: u32 = 0x40000000u;
+const CAGI_RADIANCE_MAX: f32 = 8.0;
 const CAGI_RADIANCE_PER_STEP: f32 = 1.0 / 1023.0;
 // Cells searched outward along the hit normal for a non-solid cell to sample.
 // A cell counts as solid at a quarter fill (src/cagi.rs), so the cell touching a
@@ -151,14 +141,28 @@ fn cagi_cell_index(cell: vec3<u32>) -> u32 {
 }
 
 fn cagi_pack(light: vec3<u32>) -> u32 {
-    let clamped = min(light, vec3<u32>(CAGI_CHANNEL_MAX, CAGI_CHANNEL_MAX, CAGI_CHANNEL_MAX));
-    return clamped.x | (clamped.y << 10u) | (clamped.z << 20u);
+    let largest = max(max(light.x, light.y), light.z);
+    var exponent = 0u;
+    var scale = 1u;
+    loop {
+        if (exponent >= 3u || largest <= CAGI_CHANNEL_MAX * scale) {
+            break;
+        }
+        exponent = exponent + 1u;
+        scale = scale << 1u;
+    }
+    let quantized = min((light + vec3<u32>(scale / 2u)) / scale,
+        vec3<u32>(CAGI_CHANNEL_MAX));
+    return quantized.x | (quantized.y << 10u) | (quantized.z << 20u)
+        | (exponent << 30u);
 }
 
 fn cagi_unpack(word: u32) -> vec3<u32> {
+    let exponent = word >> 30u;
+    let scale = 1u << exponent;
     return vec3<u32>(word & CAGI_CHANNEL_MASK,
                      (word >> 10u) & CAGI_CHANNEL_MASK,
-                     (word >> 20u) & CAGI_CHANNEL_MASK);
+                     (word >> 20u) & CAGI_CHANNEL_MASK) * scale;
 }
 
 // Integer light level -> linear radiance.
@@ -168,7 +172,8 @@ fn cagi_radiance(light: vec3<u32>) -> vec3<f32> {
 
 // Linear radiance -> integer light level (round to nearest, saturating).
 fn cagi_quantize(radiance: vec3<f32>) -> vec3<u32> {
-    let scaled = clamp(radiance, vec3<f32>(0.0), vec3<f32>(1.0)) * f32(CAGI_CHANNEL_MAX);
+    let scaled = clamp(radiance, vec3<f32>(0.0), vec3<f32>(CAGI_RADIANCE_MAX))
+        / CAGI_RADIANCE_PER_STEP;
     return vec3<u32>(scaled + vec3<f32>(0.5));
 }
 
@@ -177,7 +182,9 @@ fn cagi_quantize(radiance: vec3<f32>) -> vec3<u32> {
 // constants the E1c ambient used, so switching CAGI on cannot change the overall
 // exposure of open ground, only its distribution.
 fn cagi_sky_radiance() -> vec3<f32> {
-    return lighting.sky_ambient.rgb * lighting.sky_ambient.w;
+    // Sky-visible cells receive the same LUT-derived zenith irradiance as the
+    // surface path. CAGI then transports this value only through neighbours.
+    return environment_hillaire_sky(vec3<f32>(0.0, 1.0, 0.0)) * lighting.sky_ambient.w;
 }
 
 fn cagi_sky_light() -> vec3<u32> {
@@ -221,7 +228,7 @@ fn cagi_cell_albedo(attributes: u32) -> vec3<f32> {
     return srgb_decode(vec3<f32>(bytes) * (1.0 / 255.0));
 }
 
-// Light stored in one cell, in [0, 1] radiance. Out of grid: black, except
+// Light stored in one cell, in [0, CAGI_RADIANCE_MAX] radiance. Out of grid: black, except
 // ABOVE the volume's clamped top, which is open sky. Solid cells always hold 0
 // (the CA writes it every iteration), so no attribute read is needed here.
 fn cagi_cell_radiance(cell: vec3<i32>) -> vec3<f32> {

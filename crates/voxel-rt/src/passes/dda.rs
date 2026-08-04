@@ -18,16 +18,17 @@ use crate::variants::RenderQuality;
 use super::cagi::LightVolume;
 use super::world_bindings::{WorldBindings, PATTERN_CACHE_BINDING};
 use super::ComputePipelineCache;
+use voxel_environment::{AtmosphereBindings, LutConfig};
 
 const WORKGROUP_SIZE: u32 = 8;
 
-/// The shading pass's shader source: the shared traversal core, the shared
-/// light-volume half, E6's water optics, then the shading pass itself. Exposed so
-/// the headless benchmark (`examples/bench_dda.rs`) can build A/B pipeline
-/// variants by patching the compile-time levers (see "A/B benchmark levers" in
-/// `shaders/world.wgsl`, the AO block in `shaders/dda.wgsl` and the water levers
-/// in `shaders/water.wgsl`).
-pub const SHADER_SOURCE: &str = concat!(
+/// This crate's own half of the shading shader: the shared traversal core, the
+/// shared light-volume half, E6's water optics, then the shading pass itself.
+///
+/// **Not the complete module** — [`SHADER_SOURCE`] is, and that is the one to compile
+/// or patch. This const exists only because `concat!` takes string literals, so the
+/// one piece that comes from another crate cannot join here.
+const OWN_SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/world.wgsl"),
     // S2's pattern layers. Appended to THIS pass only, unlike `world.wgsl`, which
     // the CAGI pass shares: the light volume bakes its own cell attributes and never
@@ -44,6 +45,32 @@ pub const SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/material_graph.wgsl"),
 );
 
+/// The shading pass's complete shader source. Exposed so the headless benchmark
+/// (`examples/bench_dda.rs`) can build A/B pipeline variants by patching the
+/// compile-time levers (see "A/B benchmark levers" in `shaders/world.wgsl`, the AO
+/// block in `shaders/dda.wgsl` and the water levers in `shaders/water.wgsl`).
+///
+/// **The output colour path comes from `voxel-color`, not from this crate.** That crate
+/// owns the tonemap curves on both sides — the Rust reference implementation and the
+/// WGSL that runs — because the two must agree and only a test in one crate can check
+/// that. `dda.wgsl` calls `apply_tonemap` and never defines it.
+///
+/// A `LazyLock<String>` rather than a const for the mundane reason that `concat!` takes
+/// literals and `voxel_color::tonemap::WGSL` is a const. It is built once per process.
+///
+/// The colour path goes LAST. WGSL module-scope declarations may appear in any order, so
+/// this is not a correctness requirement — it keeps `world.wgsl` at the front, which
+/// `passes::cagi`'s `both_pass_shaders_share_the_traversal_core` reads as a `starts_with`.
+pub static SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let mut source = String::with_capacity(
+        OWN_SHADER_SOURCE.len() + voxel_environment::WGSL.len() + voxel_color::tonemap::WGSL.len(),
+    );
+    source.push_str(OWN_SHADER_SOURCE);
+    source.push_str(voxel_environment::WGSL);
+    source.push_str(voxel_color::tonemap::WGSL);
+    source
+});
+
 /// [`SHADER_SOURCE`] with every experiment's compile-time levers patched in.
 /// The app's preset path and the benchmark's variant builder both go through
 /// this one function, so a new lever module cannot be forgotten at a call
@@ -53,7 +80,7 @@ pub const SHADER_SOURCE: &str = concat!(
 /// propagation levers live in `cagi.wgsl`, which this source does not contain
 /// (`super::cagi::build_shader_source` patches those).
 pub fn build_shader_source(quality: &RenderQuality) -> String {
-    let traversal_patched = quality.traversal.patch_shader_source(SHADER_SOURCE);
+    let traversal_patched = quality.traversal.patch_shader_source(&SHADER_SOURCE);
     let ao_patched = quality
         .ambient_occlusion
         .patch_shader_source(&traversal_patched);
@@ -75,9 +102,28 @@ pub fn build_shader_source_with_material_graphs(
     graphs.inject_into_dda(&build_shader_source(quality))
 }
 
+/// The same, with the output storage-texture format patched in.
+///
+/// SEPARATE from the quality levers on purpose: output depth is a display property
+/// rather than a quality tier (see [the `voxel-color` crate]), so it is not part of
+/// [`RenderQuality`] and cannot ride its patch chain. Returns byte-identical source
+/// for the shipped 8-bit path, so existing pipeline cache keys do not move.
+pub fn build_shader_source_for_output(
+    quality: &RenderQuality,
+    graphs: &MaterialGraphShaderSet,
+    output_format: voxel_color::OutputFormat,
+) -> String {
+    output_format.patch_shader_source(&build_shader_source_with_material_graphs(quality, graphs))
+}
+
 pub struct DdaPass {
     pipeline_cache: ComputePipelineCache,
     bind_group_layout: wgpu::BindGroupLayout,
+    atmosphere_bind_group_layout: wgpu::BindGroupLayout,
+    atmosphere_bind_group: wgpu::BindGroup,
+    /// The format this pass's layout was built for, so
+    /// [`DdaPass::set_shader_source`] can refuse a source that disagrees with it.
+    output_format: voxel_color::OutputFormat,
     /// One bind group per ping-pong volume buffer: the CA pass leaves the newest
     /// values in whichever buffer it wrote last, so [`DdaPass::encode`] selects by
     /// [`LightVolume::front`] instead of rebuilding a bind group per frame.
@@ -91,13 +137,36 @@ impl DdaPass {
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
         output_view: &wgpu::TextureView,
+        output_format: voxel_color::OutputFormat,
     ) -> Self {
-        Self::new_with_shader_source(
+        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
+        Self::new_with_atmosphere(
             device,
             world_bindings,
             light_volume,
             output_view,
-            SHADER_SOURCE,
+            &atmosphere,
+            output_format,
+        )
+    }
+
+    pub fn new_with_atmosphere(
+        device: &wgpu::Device,
+        world_bindings: &WorldBindings,
+        light_volume: &LightVolume,
+        output_view: &wgpu::TextureView,
+        atmosphere: &AtmosphereBindings,
+        output_format: voxel_color::OutputFormat,
+    ) -> Self {
+        let shader_source = output_format.patch_shader_source(&SHADER_SOURCE);
+        Self::new_with_atmosphere_and_shader_source(
+            device,
+            world_bindings,
+            light_volume,
+            output_view,
+            atmosphere,
+            &shader_source,
+            output_format,
         )
     }
 
@@ -111,14 +180,50 @@ impl DdaPass {
         light_volume: &LightVolume,
         output_view: &wgpu::TextureView,
         shader_source: &str,
+        output_format: voxel_color::OutputFormat,
     ) -> Self {
-        let bind_group_layout = create_bind_group_layout(device);
-        let pipeline_cache = ComputePipelineCache::new(
+        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
+        Self::new_with_atmosphere_and_shader_source(
+            device,
+            world_bindings,
+            light_volume,
+            output_view,
+            &atmosphere,
+            shader_source,
+            output_format,
+        )
+    }
+
+    pub fn new_with_atmosphere_and_shader_source(
+        device: &wgpu::Device,
+        world_bindings: &WorldBindings,
+        light_volume: &LightVolume,
+        output_view: &wgpu::TextureView,
+        atmosphere: &AtmosphereBindings,
+        shader_source: &str,
+        output_format: voxel_color::OutputFormat,
+    ) -> Self {
+        // The source and the format must AGREE, and nothing about the signature
+        // enforces it — so check here, where the message can name the problem,
+        // rather than letting wgpu report it as a pipeline-layout mismatch four
+        // layers down. This exact disagreement shipped twice.
+        let wanted = output_format.wgsl_storage_declaration();
+        assert!(
+            shader_source.contains(&wanted),
+            "shading source does not declare `{wanted}` — it was not patched for \
+             this OutputFormat, so the pipeline will not match its bind group layout"
+        );
+        let bind_group_layout = create_bind_group_layout(device, output_format.storage());
+        let atmosphere_bind_group_layout = atmosphere.sample_bind_group_layout().clone();
+        let pipeline_cache = ComputePipelineCache::new_with_layouts(
             device,
             "dda pass",
             "main",
             shader_source,
-            &bind_group_layout,
+            &[
+                Some(&bind_group_layout),
+                Some(&atmosphere_bind_group_layout),
+            ],
         );
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dda camera uniform"),
@@ -138,6 +243,9 @@ impl DdaPass {
         Self {
             pipeline_cache,
             bind_group_layout,
+            atmosphere_bind_group_layout,
+            atmosphere_bind_group: atmosphere.sample_bind_group().clone(),
+            output_format,
             bind_groups,
             camera_uniform_buffer,
         }
@@ -148,8 +256,24 @@ impl DdaPass {
     /// bind groups are untouched — only the shader differs, so the existing bind
     /// groups stay valid against every cached pipeline.
     pub fn set_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.pipeline_cache
-            .set_shader_source(device, shader_source, &self.bind_group_layout);
+        // The layout is fixed at construction; a source declaring a different
+        // storage format cannot match it. Checked here because this is the path every
+        // runtime rebuild takes, and the wgpu error it otherwise produces names a
+        // "pipeline layout" mismatch rather than the unpatched source that caused it.
+        let wanted = self.output_format.wgsl_storage_declaration();
+        assert!(
+            shader_source.contains(&wanted),
+            "shading source does not declare `{wanted}` — build it with \
+             `build_shader_source_for_output` so it matches this pass's layout"
+        );
+        self.pipeline_cache.set_shader_source_with_layouts(
+            device,
+            shader_source,
+            &[
+                Some(&self.bind_group_layout),
+                Some(&self.atmosphere_bind_group_layout),
+            ],
+        );
     }
 
     /// Precompile `shader_sources` (duplicates cost nothing) so that a later
@@ -157,8 +281,14 @@ impl DdaPass {
     /// a shader compile — the reason a preset switch cannot stutter. Returns how
     /// many pipelines the cache holds afterwards.
     pub fn prewarm_pipelines(&mut self, device: &wgpu::Device, shader_sources: &[String]) -> usize {
-        self.pipeline_cache
-            .prewarm(device, shader_sources, &self.bind_group_layout)
+        self.pipeline_cache.prewarm_with_layouts(
+            device,
+            shader_sources,
+            &[
+                Some(&self.bind_group_layout),
+                Some(&self.atmosphere_bind_group_layout),
+            ],
+        )
     }
 
     /// Pipelines currently held (the memory the cache costs).
@@ -212,6 +342,7 @@ impl DdaPass {
         });
         compute_pass.set_pipeline(self.pipeline_cache.active());
         compute_pass.set_bind_group(0, &self.bind_groups[light_volume_front], &[]);
+        compute_pass.set_bind_group(1, &self.atmosphere_bind_group, &[]);
         compute_pass.dispatch_workgroups(
             output_width.div_ceil(WORKGROUP_SIZE),
             output_height.div_ceil(WORKGROUP_SIZE),
@@ -223,7 +354,15 @@ impl DdaPass {
 /// Bind group layout only, separated from the pipeline so a shader-source
 /// rebuild can reuse the ORIGINAL layout object — the existing bind groups must
 /// stay valid against the new pipeline.
-fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+/// `storage_format` MUST match both the texture the pass writes and the
+/// `texture_storage_2d<FORMAT, write>` type in `dda.wgsl`. wgpu wants a storage
+/// texture's format in THREE places — the texture, this layout entry, and the WGSL
+/// type — and validates all three against each other, so it is resolved once in
+/// the `voxel-color` crate and threaded rather than restated.
+fn create_bind_group_layout(
+    device: &wgpu::Device,
+    storage_format: wgpu::TextureFormat,
+) -> wgpu::BindGroupLayout {
     let mut entries = WorldBindings::layout_entries();
     entries.extend(LightVolume::layout_entries(false));
     entries.push(WorldBindings::pattern_cache_layout_entry());
@@ -242,7 +381,7 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::StorageTexture {
             access: wgpu::StorageTextureAccess::WriteOnly,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: storage_format,
             view_dimension: wgpu::TextureViewDimension::D2,
         },
         count: None,
@@ -290,7 +429,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::ao::{AoDirectionMode, AoMode, AoSettings};
     use crate::cagi::{CagiSampleMode, CagiSettings};
-    use crate::passes::create_compute_pipeline;
+    use crate::passes::create_compute_pipeline_with_layouts;
     use crate::passes::world_bindings::PATTERN_CACHE_ENTRIES;
     use crate::shadows::{ShadowMode, ShadowSettings};
     use crate::traversal::TraversalSettings;
@@ -302,7 +441,7 @@ pub(crate) mod tests {
     fn default_settings_build_the_shipped_shader() {
         assert_eq!(
             build_shader_source(&RenderQuality::default()),
-            SHADER_SOURCE
+            SHADER_SOURCE.as_str()
         );
     }
 
@@ -328,13 +467,18 @@ pub(crate) mod tests {
             return;
         };
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let bind_group_layout = create_bind_group_layout(&device);
-        let _pipeline = create_compute_pipeline(
+        let bind_group_layout =
+            create_bind_group_layout(&device, voxel_color::OutputFormat::default().storage());
+        let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
+        let _pipeline = create_compute_pipeline_with_layouts(
             &device,
             "dda test pipeline",
             "main",
-            SHADER_SOURCE,
-            &bind_group_layout,
+            SHADER_SOURCE.as_str(),
+            &[
+                Some(&bind_group_layout),
+                Some(atmosphere.sample_bind_group_layout()),
+            ],
         );
         let validation_error = pollster::block_on(error_scope.pop());
         assert!(
@@ -348,6 +492,119 @@ pub(crate) mod tests {
     /// the CAGI sampling levers, and every traversal off-lever must validate under
     /// naga. Without this, a WGSL error on a non-default path only surfaces when
     /// someone clicks the radio button.
+    /// The `voxel-color` crate unit-tests its patchers against a small WGSL fixture, so
+    /// something has to check the REAL shader still carries what those patchers expect.
+    /// This is that check: without it the fixture could stay green while `dda.wgsl`
+    /// drifted, and the failure would only appear as a wgpu validation error at runtime.
+    #[test]
+    fn the_real_shading_source_carries_what_the_output_patchers_target() {
+        use voxel_color::{OutputDepth, OutputFormat, OutputSupport};
+
+        let support = OutputSupport {
+            ten_bit_surface: true,
+            float_surface: true,
+            extended_srgb_presentation: true,
+            sixteen_bit_norm_storage: true,
+        };
+        // The shipped file must be the 8-bit configuration verbatim.
+        assert!(SHADER_SOURCE.contains("texture_storage_2d<rgba8unorm, write>"));
+        assert_eq!(
+            OutputFormat::default().patch_shader_source(&SHADER_SOURCE),
+            SHADER_SOURCE.as_str()
+        );
+        // And every non-default depth must actually rewrite it.
+        for depth in [OutputDepth::TenBit, OutputDepth::HdrFloat] {
+            let format = OutputFormat::resolve(depth, support, wgpu::TextureFormat::Bgra8UnormSrgb);
+            let patched = format.patch_shader_source(&SHADER_SOURCE);
+            assert_ne!(
+                patched,
+                SHADER_SOURCE.as_str(),
+                "{depth:?} did not patch the source"
+            );
+            assert!(
+                patched.contains(&format.wgsl_storage_declaration()),
+                "{depth:?} did not install its storage-texture type"
+            );
+        }
+    }
+
+    /// The compositor decodes the exact extended-sRGB transfer named by the surface tag,
+    /// so restoring the old gamma-2.2 approximation would be a semantic mismatch that
+    /// shader validation cannot see.
+    #[test]
+    fn the_real_shading_source_uses_the_exact_extended_srgb_transfer() {
+        for anchor in ["0.04045", "0.0031308", "1.0 / 2.4", "12.92"] {
+            assert!(
+                SHADER_SOURCE.contains(anchor),
+                "the exact sRGB transfer is missing `{anchor}`"
+            );
+        }
+        assert!(
+            !SHADER_SOURCE.contains("vec3<f32>(2.2, 2.2, 2.2)"),
+            "the gamma-2.2 approximation must not feed an extended-sRGB-tagged surface"
+        );
+    }
+
+    /// BOTH output depths must produce a shading pipeline that VALIDATES.
+    ///
+    /// The storage format has to agree in three places — the texture, this pass's
+    /// bind group layout entry, and the `texture_storage_2d<...>` type inside the
+    /// WGSL — and wgpu checks all three against each other. Every one of those
+    /// disagreements shipped at least once while the output-depth toggle was being
+    /// wired, each surfacing as a different error message several layers from its
+    /// cause, and each discoverable only by running the app on a real display.
+    ///
+    /// This builds both depths headlessly so the next one is a `cargo test` failure
+    /// instead of a panic on someone's machine. It exercises the pair that actually
+    /// disagreed — the layout built from [`OutputFormat::storage`] against a
+    /// pipeline built from [`OutputFormat::patch_shader_source`] — because both come
+    /// from one resolved value and a drift between them is the whole failure class.
+    #[test]
+    fn both_output_depths_build_a_valid_shading_pipeline() {
+        use voxel_color::{OutputDepth, OutputFormat, OutputSupport};
+
+        let Some((device, _queue)) = headless_device() else {
+            return;
+        };
+        // Claim surface support: the surface is irrelevant to a compute pipeline, and
+        // the storage feature is the only half a headless device can veto.
+        let support = OutputSupport {
+            ten_bit_surface: true,
+            // The surface is irrelevant to a compute pipeline, so claim both; the
+            // storage feature below is the only half a headless device can veto.
+            float_surface: true,
+            extended_srgb_presentation: true,
+            sixteen_bit_norm_storage: device
+                .features()
+                .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+        };
+
+        for depth in OutputDepth::ALL {
+            let format = OutputFormat::resolve(depth, support, wgpu::TextureFormat::Bgra8UnormSrgb);
+            if format.depth() != depth {
+                eprintln!("skipping {depth:?}: {}", support.ten_bit_diagnosis());
+                continue;
+            }
+            let layout = create_bind_group_layout(&device, format.storage());
+            let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
+            let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let _pipeline = create_compute_pipeline_with_layouts(
+                &device,
+                "output depth test pipeline",
+                "main",
+                &format.patch_shader_source(&SHADER_SOURCE),
+                &[Some(&layout), Some(atmosphere.sample_bind_group_layout())],
+            );
+            let validation_error = pollster::block_on(error_scope.pop());
+            assert!(
+                validation_error.is_none(),
+                "{depth:?} ({:?} storage) failed wgpu validation — the layout and the \
+                 shader disagree about the storage format: {validation_error:?}",
+                format.storage()
+            );
+        }
+    }
+
     #[test]
     fn every_lever_combination_compiles_headless() {
         let Some((device, _queue)) = headless_device() else {
@@ -376,15 +633,20 @@ pub(crate) mod tests {
             ..AoSettings::default()
         });
 
-        let bind_group_layout = create_bind_group_layout(&device);
+        let bind_group_layout =
+            create_bind_group_layout(&device, voxel_color::OutputFormat::default().storage());
+        let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
         let compile = |quality: &RenderQuality, description: String| {
             let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let _pipeline = create_compute_pipeline(
+            let _pipeline = create_compute_pipeline_with_layouts(
                 &device,
                 "dda test pipeline",
                 "main",
                 &build_shader_source(quality),
-                &bind_group_layout,
+                &[
+                    Some(&bind_group_layout),
+                    Some(atmosphere.sample_bind_group_layout()),
+                ],
             );
             let validation_error = pollster::block_on(error_scope.pop());
             assert!(
@@ -500,7 +762,9 @@ pub(crate) mod tests {
         let Some((device, _queue)) = headless_device() else {
             return;
         };
-        let bind_group_layout = create_bind_group_layout(&device);
+        let bind_group_layout =
+            create_bind_group_layout(&device, voxel_color::OutputFormat::default().storage());
+        let atmosphere = AtmosphereBindings::new(&device, LutConfig::default());
         let mut pass_pipelines: HashMap<u64, wgpu::ComputePipeline> = HashMap::new();
         let mut keys = Vec::new();
         for spec in QUALITY_PRESETS {
@@ -511,12 +775,15 @@ pub(crate) mod tests {
             let key = ComputePipelineCache::source_key(&shader_source);
             keys.push(key);
             pass_pipelines.entry(key).or_insert_with(|| {
-                create_compute_pipeline(
+                create_compute_pipeline_with_layouts(
                     &device,
                     "dda test pipeline",
                     "main",
                     &shader_source,
-                    &bind_group_layout,
+                    &[
+                        Some(&bind_group_layout),
+                        Some(atmosphere.sample_bind_group_layout()),
+                    ],
                 )
             });
         }

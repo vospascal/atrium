@@ -121,8 +121,8 @@ mod tests {
     #[test]
     fn default_settings_match_shader_source() {
         assert_eq!(
-            TraversalSettings::default().patch_shader_source(SHADER_SOURCE),
-            SHADER_SOURCE,
+            TraversalSettings::default().patch_shader_source(&SHADER_SOURCE),
+            SHADER_SOURCE.as_str(),
             "TraversalSettings::default() drifted from the lever block in dda.wgsl"
         );
     }
@@ -138,7 +138,7 @@ mod tests {
             distance_skip: false,
             directional_skip: false,
         }
-        .patch_shader_source(SHADER_SOURCE);
+        .patch_shader_source(&SHADER_SOURCE);
         assert!(shader_source.contains("const ENABLE_COLUMN_FAST_FORWARD: bool = true;"));
         assert!(shader_source.contains("const ENABLE_DESCEND_FAST_FORWARD: bool = true;"));
         assert!(shader_source.contains("const ENABLE_GLOBAL_MAX_TERMINATE: bool = false;"));

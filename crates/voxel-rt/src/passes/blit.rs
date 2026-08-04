@@ -18,12 +18,20 @@ pub struct BlitPass {
 impl BlitPass {
     pub fn new(
         device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        output_format: voxel_color::OutputFormat,
         source_view: &wgpu::TextureView,
     ) -> Self {
+        // Both halves come from ONE resolved value: the render target format and
+        // whether this shader decodes sRGB. They are two facts about the same
+        // decision and must never be passed separately.
+        let surface_format = output_format.surface();
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/blit.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                output_format
+                    .patch_blit_source(include_str!("../../shaders/blit.wgsl"))
+                    .into(),
+            ),
         });
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {

@@ -1,7 +1,7 @@
 // cagi.wgsl — E4 CAGI v0: the cellular automaton that floods the integer light
 // volume with sun + sky light. Concatenated after `world.wgsl` (the shared
-// traversal core — this pass calls `trace_shadow_visibility` for its per-cell sun
-// test) and `cagi_volume.wgsl` (the shared volume bindings + packing).
+// traversal core) and `cagi_volume.wgsl` (the shared volume bindings + packing),
+// followed by the LUT-backed environment sampler.
 //
 // One thread per CELL (workgroup 4x4x4 — cubic, so the six neighbour loads land
 // in the same cache lines as the workgroup's own cells). PING-PONG: reads
@@ -15,13 +15,11 @@
 // `L_{t+1}(x) = E(x) + Q( sum_n T(n->x) A(x) L_t(n) )`:
 //
 //   solid cell            -> 0 (absorbed; the v0 simplification, see below)
-//   pinned sun source     -> kept verbatim (CAGI_SUN_CACHE)
+//   sun source            -> recomputed from LUT transmittance each iteration
 //   otherwise             -> max(propagate(neighbours), inject(sky, sun))
 //
-// `max` rather than `+` for the emission term so a source cell is CLAMPED FROM
-// BELOW to its injected value instead of accumulating without bound — with
-// integer channels and a fixed iteration budget, a pinned source is what makes
-// the flood converge to a fixed point rather than oscillate.
+// `max` rather than `+` for the emission term keeps a source cell from
+// accumulating without bound while the cellular flood converges.
 //
 // V0 SIMPLIFICATIONS (all deliberate, all in the E4 report):
 //   * Absorption is binary. A cell counts as solid at a quarter fill
@@ -61,22 +59,14 @@ const CAGI_RULE: u32 = 1u;
 //      (binding 8, the traversal's own column-height data). O(1) and exact for
 //      the vertical direction, but quantized to the 8-voxel brick column: a cell
 //      beside a tree trunk shares the trunk's column and reads "occluded".
-//   1  upward trace: a real vertical shadow ray through the brickmap. Exact per
-//      voxel, one traversal per candidate cell.
+//   1  legacy alias: retained for preset compatibility, but resolved to the
+//      same column-height test so CAGI never launches a per-cell ray.
 const CAGI_SKY_TEST_COLUMN_MAX: u32 = 0u;
 const CAGI_SKY_TEST_UPWARD_TRACE: u32 = 1u;
 const CAGI_SKY_TEST: u32 = 0u;
-// CAGI_SUN_CACHE — amortization: a cell that found the sun sets bit 30 of its
-// light word, and on every later iteration that bit STANDS IN FOR the shadow ray
-// — the cell still propagates and still recomputes its (cheap, six attribute
-// loads) bounce colour, it just does not re-trace. Caching the ray RESULT rather
-// than the cell's value matters: an earlier version pinned the value itself and
-// froze source cells at their injected level, losing the diffusion they should
-// also receive (measured: 26% of the frame, mean 0.6/255 and up to 38/255 too
-// dark). With the ray result cached the output is bit-identical to re-tracing.
-// Correct only because the world and the sun are static between re-floods, which
-// is exactly E4's scope; the Rust side clears both buffers — and therefore every
-// flag — whenever the sun moves.
+// CAGI_SUN_CACHE — packed-volume compatibility flag. Sun visibility is now an
+// atmosphere transmittance LUT lookup, so no per-cell world shadow ray is cached
+// or retraced. The Rust side still clears both buffers on a sun move.
 const CAGI_SUN_CACHE: bool = true;
 // CAGI_TRANSMISSION (M2) — whether a SOLID cell passes its material's
 // transmitted fraction on instead of absorbing everything.
@@ -91,6 +81,40 @@ const CAGI_SUN_CACHE: bool = true;
 // Off by default: the fix is UNMEASURED, and this repo's rule is that a lever's
 // default follows a verdict. Flipping it is the point of the M2 app run.
 const CAGI_TRANSMISSION: bool = false;
+// CAGI_REFLECTANCE (E5b) — whether a SOLID cell returns the light reaching it
+// back into the volume, tinted by its own albedo. This is what colour bleed IS.
+//
+// The v0 transport had no way to produce bleed at all, and the reason was subtle
+// enough to be worth writing down. It was not that the bounce was missing:
+// `cagi_sun_bounce` computes a correctly albedo-tinted term and injects it with a
+// fraction of 0.35. It was that the bounce is GATED on the receiving air cell
+// seeing the sun, so indirect light existed only in the thin shell the sun
+// already lit and never appeared in shadow — which is the entire job of GI. In
+// L0's corridor the floor five voxels out of the sunbeam rendered BLACK next to a
+// brightly lit strip, between 0.8-albedo walls.
+//
+// This term is ungated and works on PROPAGATED light, which is the difference. It
+// is the same move TooManyLimits' published kernel makes:
+//
+//   output[c][dir] = max(output, (input[c][(dir+2)%4] * color[c]).saturating_sub(1))
+//
+// — reflect whatever is flowing into a block back out, tinted, with no reference
+// to any light source. Because it multiplies INCOMING light rather than injecting
+// the surface's own colour, a white ceiling stays white only while white light
+// reaches it: red arriving from the floor comes back red. That is the second half
+// of the fix, and it falls out of the formulation rather than needing its own
+// rule.
+//
+// Where it lives is dictated by the sampler. `cagi_sample_surface` walks OUT of
+// solid cells before reading, and `shade` multiplies the result by the hit
+// surface's own albedo — so the volume must carry the EMITTING surface's colour
+// and must not pre-multiply by the receiving one. Storing the tinted light in the
+// solid cell, where the neighbouring air picks it up as an ordinary propagation
+// source, satisfies both and needs no new gather.
+//
+// Off by default, following the same rule CAGI_TRANSMISSION states above: the
+// verdict comes from bench section 15, whose whole purpose is to score this.
+const CAGI_REFLECTANCE: bool = false;
 // CAGI_EMISSIVE (E5) — whether emissive materials inject their radiance into the
 // volume. ON by default and, unusually for this registry, without a measured
 // verdict first: the generated world contains no emissive voxel, so until one is
@@ -132,7 +156,7 @@ const CAGI_EMITTER_BOUNCE: bool = true;
 // and neither propagation rule reads a cell's own previous value, so the field
 // both brightens and darkens on its own. A time-varying emitter is therefore
 // just an emitter whose value changed; the global re-flood exists only to clear
-// the pinned sun-source flag (bit 30) when the SUN moves.
+// the source field when the SUN moves.
 const CAGI_EVENT_LIGHT: bool = true;
 // Fixed-point shift of both diffusion numerators (see CagiVolumeMeta).
 const CAGI_DIFFUSION_SHIFT: u32 = 12u;
@@ -264,7 +288,8 @@ fn cagi_cell_emission_live(cell_index: u32, attributes: u32, cell: vec3<i32>) ->
 
 // Whether this cell sees the sky (CAGI_SKY_TEST).
 fn cagi_cell_sees_sky(cell: vec3<i32>) -> bool {
-    if (CAGI_SKY_TEST == CAGI_SKY_TEST_COLUMN_MAX) {
+    if (CAGI_SKY_TEST == CAGI_SKY_TEST_COLUMN_MAX
+        || CAGI_SKY_TEST == CAGI_SKY_TEST_UPWARD_TRACE) {
         // A cell never straddles two bricks (cell_voxels divides 8), so one
         // brick column covers it. Its bottom voxel row is clear of terrain when
         // the brick row holding it sits above the column's highest occupied
@@ -274,22 +299,20 @@ fn cagi_cell_sees_sky(cell: vec3<i32>) -> bool {
         let column = u32(brick.x) + u32(brick.z) * brickmap.brick_grid_size.x;
         return brick.y > i32(column_max_brick_y[column]);
     }
-    return trace_shadow_visibility(cagi_cell_center_voxels(cell), vec3<f32>(0.0, 1.0, 0.0))
-        > 0.5;
+    return false;
 }
 
 // Sun bounce injected into an AIR cell that touches sunlit geometry: the mean
 // albedo of its solid face neighbours, weighted by each bounce surface's Lambert
 // term (the surface normal is the direction from the solid neighbour toward this
 // cell), times the sun's radiance and the runtime bounce fraction
-// (gi_params.z) — and gated by ONE shadow ray from the cell center.
+// (gi_params.z) — and attenuated by the atmosphere transmittance LUT at the
+// cell's world position. No world ray is traced here.
 //
 // Returns 0 when the cell touches no sunward-facing solid, so the (comparatively
-// expensive) shadow ray is only traced for real candidates: the surface shell of
-// the world, a few percent of the volume. `sun_already_found` is the cached ray
-// result (CAGI_SUN_CACHE): when set, the trace is skipped and everything else is
-// recomputed exactly as if it had returned "lit".
-fn cagi_sun_bounce(cell: vec3<i32>, sun_already_found: bool) -> vec3<f32> {
+// CAGI propagation remains a purely cellular neighbour operation; the cache
+// parameter is retained only for packed-volume compatibility.
+fn cagi_sun_bounce(cell: vec3<i32>) -> vec3<f32> {
     var albedo_sum = vec3<f32>(0.0, 0.0, 0.0);
     var lambert_sum = 0.0;
     for (var axis = 0u; axis < 3u; axis = axis + 1u) {
@@ -320,17 +343,95 @@ fn cagi_sun_bounce(cell: vec3<i32>, sun_already_found: bool) -> vec3<f32> {
     if (lambert_sum <= 0.0) {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
-    if (!sun_already_found
-        && trace_shadow_visibility(cagi_cell_center_voxels(cell), lighting.sun_direction) <= 0.5) {
-        return vec3<f32>(0.0, 0.0, 0.0);
-    }
+    let cell_world_position = cagi_cell_center_voxels(cell) * brickmap.voxel_size_meters;
+    let transmittance = environment_sun_transmittance_at(
+        cell_world_position,
+        lighting.sun_direction,
+    );
     let sun = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w;
-    return sun * lighting.gi_params.z * (albedo_sum / lambert_sum);
+    return sun * transmittance * lighting.gi_params.z * (albedo_sum / lambert_sum);
 }
 
 // E5c: the radiance an AIR cell receives from EMISSIVE solid face neighbours,
 // injected directly rather than propagated.
 //
+// E5b, second half: read the REFLECTED radiance of solid face neighbours directly
+// instead of waiting for the propagation stencil to carry it.
+//
+// Necessary for exactly the reason CAGI_EMITTER_BOUNCE is, and the first version
+// of this lever proved it by omitting it. Storing `propagate * albedo` in the
+// solid cell is the physically clean half, but the air cell then picks it up
+// through `cagi_propagate`, whose shipped Diffusion6 numerator is transmission/6
+// — near-lossless for a uniform field and a loss of 84% for a LONE bright
+// neighbour among five dark ones. Measured on L0's corridor, reflectance stored
+// but not read directly moved the ceiling readout from 22.8% to 25.7% of frame:
+// real, and far too weak to see.
+//
+// Reading the neighbour's stored word directly bypasses the averaging entirely.
+// The solid cell has already applied its own albedo, so this adds no tint of its
+// own — it just refuses to divide the answer by six.
+//
+// Convergence: the solid cell's value is `propagate(its neighbours) * albedo`,
+// and this cell is one of those neighbours, so the round-trip gain is albedo
+// times that cell's share of the stencil — at most albedo, which is below one for
+// every material. The loop is contracting under every rule.
+// The light ARRIVING at a solid cell: one directional transport step, not the
+// 6-neighbour average.
+//
+// Getting this term right took three attempts and both wrong ones are worth
+// recording, because they bracket the answer.
+//
+// `cagi_propagate` (the shipped Diffusion6 average) is a stencil for a cell
+// sitting IN a field, and averaging over six directions is correct there. A
+// surface is not in a field: its irradiance arrives from the hemisphere in front
+// of it, and five of its six neighbours are the opaque shell it belongs to. That
+// discards ~84% of the incident light before albedo is applied, and on L0's
+// corridor it was the difference between a bleed you can see and a
+// two-percentage-point nudge (22.8% -> 25.7% of frame).
+//
+// The opposite error is just as easy: taking the bare brightest neighbour with no
+// falloff at all. With snow at 0.92 albedo the round-trip gain becomes 0.92, the
+// room turns into a nearly lossless light pipe, and every pixel in the corridor
+// lights up (100% of frame) with almost no falloff over distance. Interreflection
+// has to lose energy to the geometry — the solid angle a neighbour subtends —
+// not only to the albedo.
+//
+// `cagi_propagate_max_decrement` is exactly the middle: brightest neighbour minus
+// the volume's own tuned attenuation. It is directional rather than averaged, so
+// a surface sees the light in front of it, and it carries the same distance
+// falloff every other transport path in this volume uses, so a reflection cannot
+// travel further than direct light would.
+//
+// Transmission deliberately keeps `cagi_propagate`: it is a separate lever with
+// its own unmeasured M2 verdict, and changing what it computes here would
+// silently re-baseline it.
+fn cagi_incident(cell: vec3<i32>) -> vec3<u32> {
+    return cagi_propagate_max_decrement(cell);
+}
+
+fn cagi_reflectance_bounce(cell: vec3<i32>) -> vec3<u32> {
+    var brightest = vec3<u32>(0u, 0u, 0u);
+    for (var axis = 0u; axis < 3u; axis = axis + 1u) {
+        for (var side = 0u; side < 2u; side = side + 1u) {
+            var offset = vec3<i32>(0, 0, 0);
+            let step = select(-1, 1, side == 0u);
+            if (axis == 0u) {
+                offset.x = step;
+            } else if (axis == 1u) {
+                offset.y = step;
+            } else {
+                offset.z = step;
+            }
+            let neighbour = cell + offset;
+            if ((cagi_attributes_of(neighbour) & CAGI_CELL_SOLID) == 0u) {
+                continue;
+            }
+            brightest = max(brightest, cagi_neighbour_light(neighbour));
+        }
+    }
+    return brightest;
+}
+
 // The same 6-neighbour walk as `cagi_sun_bounce`, and deliberately so — an emitter
 // is a bounce surface whose radiance happens to be its own instead of the sun's.
 // Two differences, both making this the cheaper of the two:
@@ -402,27 +503,43 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
                 return;
             }
         }
-        if (!CAGI_TRANSMISSION) {
+        if (!CAGI_TRANSMISSION && !CAGI_REFLECTANCE) {
             light_volume_out[index] = 0u; // absorbed (v0: binary, total)
             return;
         }
-        // M2: pass the transmitted fraction on. No emission term — a solid cell
-        // sees neither sky nor sun — so a transmitting cell can only ever be
-        // DIMMER than what reaches it, and the flood still converges.
-        let transmittance = cagi_cell_transmittance(attributes);
-        if (transmittance <= 0.0) {
+        // What a solid cell hands back to the volume. Two independent mechanisms,
+        // each behind its own lever, both reading the SAME propagated incident
+        // light so they cannot disagree about what reached the surface:
+        //
+        //   * M2 transmission — `incident * transmittance`, light going THROUGH
+        //     (foliage). No emission term: a solid cell sees neither sky nor sun.
+        //   * E5b reflectance — `incident * albedo`, light coming BACK OFF,
+        //     tinted. This is colour bleed.
+        //
+        // Combined per channel with `max` rather than a sum. A surface cannot both
+        // transmit and reflect the same photon, so summing would manufacture
+        // energy; and because both factors are below one, `max` keeps the cell
+        // strictly DIMMER than what reaches it, which is what makes the flood
+        // converge to a fixed point instead of ringing. The reflect-and-return
+        // loop gain is albedo times the stencil's single-neighbour share — about
+        // 0.8 * 0.157 under the shipped Diffusion6 — so it settles quickly.
+        var outgoing = vec3<f32>(0.0, 0.0, 0.0);
+        if (CAGI_TRANSMISSION) {
+            outgoing = vec3<f32>(cagi_propagate(cell)) * cagi_cell_transmittance(attributes);
+        }
+        if (CAGI_REFLECTANCE) {
+            let incident = vec3<f32>(cagi_incident(cell));
+            outgoing = max(outgoing, incident * cagi_cell_albedo(attributes));
+        }
+        if (all(outgoing <= vec3<f32>(0.0, 0.0, 0.0))) {
             light_volume_out[index] = 0u;
             return;
         }
-        let through = vec3<f32>(cagi_propagate(cell)) * transmittance;
-        light_volume_out[index] = cagi_pack(vec3<u32>(through + vec3<f32>(0.5)));
+        light_volume_out[index] = cagi_pack(vec3<u32>(outgoing + vec3<f32>(0.5)));
         return;
     }
-    // The cached shadow-ray result of this cell (CAGI_SUN_CACHE): "this cell has
-    // already been proven to see the sun", which saves the trace but nothing else.
-    let sun_already_found =
-        CAGI_SUN_CACHE && (light_volume[index] & CAGI_SUN_SOURCE_FLAG) != 0u;
-
+    // The source value is recomputed from the LUT and combined with propagated
+    // neighbour radiance below.
     let propagated = cagi_propagate(cell);
 
     var emission = vec3<u32>(0u, 0u, 0u);
@@ -441,16 +558,16 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
             emission = max(emission, cagi_quantize(cagi_emitter_bounce(cell)));
         }
     }
-    var is_sun_source = false;
-    let bounce = cagi_sun_bounce(cell, sun_already_found);
+    // E5b: light coming back off the solid neighbours, already albedo-tinted by
+    // them. Placed with the emission terms rather than folded into `propagated`
+    // because it must not be divided by the stencil — see the function's note.
+    if (CAGI_REFLECTANCE) {
+        emission = max(emission, cagi_reflectance_bounce(cell));
+    }
+    let bounce = cagi_sun_bounce(cell);
     if (any(bounce > vec3<f32>(0.0, 0.0, 0.0))) {
         emission = max(emission, cagi_quantize(bounce));
-        is_sun_source = true;
     }
 
-    var word = cagi_pack(max(propagated, emission));
-    if (CAGI_SUN_CACHE && is_sun_source) {
-        word = word | CAGI_SUN_SOURCE_FLAG;
-    }
-    light_volume_out[index] = word;
+    light_volume_out[index] = cagi_pack(max(propagated, emission));
 }

@@ -38,29 +38,29 @@ use crate::variants::RenderQuality;
 
 use super::world_bindings::WorldBindings;
 use super::ComputePipelineCache;
+use voxel_environment::{AtmosphereBindings, LutConfig};
 
 /// Cells per workgroup edge — cubic, so a workgroup's six-neighbour stencil
 /// mostly reads cells its own threads already loaded.
 const WORKGROUP_SIZE: u32 = 4;
 
-/// The CA shader source: the shared traversal core (the sun ray goes through
-/// `trace_shadow_visibility`), then the shared light-volume half, then the
-/// automaton itself.
+/// The CA shader source: the shared traversal core, the shared light-volume
+/// half, the LUT-backed environment sampler, then the automaton itself.
 pub const CAGI_SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/world.wgsl"),
     include_str!("../../shaders/cagi_volume.wgsl"),
+    include_str!("../../../voxel-environment/shaders/environment.wgsl"),
     include_str!("../../shaders/cagi.wgsl"),
 );
 
-/// [`CAGI_SHADER_SOURCE`] with every lever this pass reads patched in: the
-/// traversal and shadow levers (its sun ray is a real brickmap trace) and the
-/// CAGI levers from both shader halves. Returns the source verbatim for the
-/// shipped quality.
+/// [`CAGI_SHADER_SOURCE`] with every lever this pass reads patched in: traversal,
+/// shadow and CAGI levers from both shader halves. Environment source visibility
+/// is deliberately not a compile-time ray marcher; it is sampled from the LUT.
 pub fn build_shader_source(quality: &RenderQuality) -> String {
     let traversal_patched = quality.traversal.patch_shader_source(CAGI_SHADER_SOURCE);
     let shadows_patched = quality.shadows.patch_shader_source(&traversal_patched);
     // E6: `LIQUIDS_CAST_NO_SHADOW` lives in the shared `world.wgsl`, so the CA
-    // pass's per-cell sun ray must follow the water mode too — otherwise the
+    // pass's source geometry must follow the water mode too — otherwise the
     // volume would still shadow the bed under water that the shading pass now
     // lights.
     let water_patched = quality.water.patch_shader_source(&shadows_patched);
@@ -77,7 +77,7 @@ pub struct LightVolume {
     grid: CagiGrid,
     /// Ping-pong pair. `volume_buffers[front]` holds the newest values.
     volume_buffers: [wgpu::Buffer; 2],
-    /// Two u32 words per cell: the packed bounce attribute and E5b's 10:10:10
+    /// Two u32 words per cell: the packed bounce attribute and E5b's HDR
     /// emission. Keeping them together stays within macOS's 11-storage-buffer
     /// compute-stage limit and avoids a mostly-zero vec4 allocation.
     cell_data_buffer: wgpu::Buffer,
@@ -87,9 +87,11 @@ pub struct LightVolume {
 }
 
 fn pack_emission(emission: [f32; 4]) -> u32 {
-    let [red, green, blue] =
-        crate::cagi::quantize_radiance([emission[0], emission[1], emission[2]]);
-    red | (green << 10) | (blue << 20)
+    crate::cagi::pack_light(crate::cagi::quantize_radiance([
+        emission[0],
+        emission[1],
+        emission[2],
+    ]))
 }
 
 /// Append ONE cell's binding-13 payload. The single place that decides how many
@@ -210,8 +212,7 @@ impl LightVolume {
         self.front
     }
 
-    /// Throw the volume away and flood it from scratch: the sun moved, so every
-    /// injected value AND every pinned sun-source flag is stale. E4's world is
+    /// Throw the volume away and flood it from scratch after a source change. E4's world is
     /// static, so this global re-flood is the only invalidation there is (E5's
     /// dirty regions need E2's edit API).
     pub fn mark_dirty(&mut self) {
@@ -415,6 +416,8 @@ pub enum AttributeSource {
 pub struct CagiPass {
     pipeline_cache: ComputePipelineCache,
     bind_group_layout: wgpu::BindGroupLayout,
+    atmosphere_bind_group_layout: wgpu::BindGroupLayout,
+    atmosphere_bind_group: wgpu::BindGroup,
     /// `bind_groups[i]` reads volume `i` and writes volume `1 - i`.
     bind_groups: [wgpu::BindGroup; 2],
 }
@@ -425,7 +428,23 @@ impl CagiPass {
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
     ) -> Self {
-        Self::new_with_shader_source(device, world_bindings, light_volume, CAGI_SHADER_SOURCE)
+        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
+        Self::new_with_atmosphere(device, world_bindings, light_volume, &atmosphere)
+    }
+
+    pub fn new_with_atmosphere(
+        device: &wgpu::Device,
+        world_bindings: &WorldBindings,
+        light_volume: &LightVolume,
+        atmosphere: &AtmosphereBindings,
+    ) -> Self {
+        Self::new_with_atmosphere_and_shader_source(
+            device,
+            world_bindings,
+            light_volume,
+            atmosphere,
+            CAGI_SHADER_SOURCE,
+        )
     }
 
     /// Build the pass from an explicit shader source — the benchmark's entry
@@ -436,19 +455,42 @@ impl CagiPass {
         light_volume: &LightVolume,
         shader_source: &str,
     ) -> Self {
+        let atmosphere = AtmosphereBindings::new(device, LutConfig::default());
+        Self::new_with_atmosphere_and_shader_source(
+            device,
+            world_bindings,
+            light_volume,
+            &atmosphere,
+            shader_source,
+        )
+    }
+
+    pub fn new_with_atmosphere_and_shader_source(
+        device: &wgpu::Device,
+        world_bindings: &WorldBindings,
+        light_volume: &LightVolume,
+        atmosphere: &AtmosphereBindings,
+        shader_source: &str,
+    ) -> Self {
         let bind_group_layout = create_bind_group_layout(device);
-        let pipeline_cache = ComputePipelineCache::new(
+        let atmosphere_bind_group_layout = atmosphere.sample_bind_group_layout().clone();
+        let pipeline_cache = ComputePipelineCache::new_with_layouts(
             device,
             "cagi pass",
             "cagi_main",
             shader_source,
-            &bind_group_layout,
+            &[
+                Some(&bind_group_layout),
+                Some(&atmosphere_bind_group_layout),
+            ],
         );
         let bind_groups =
             create_bind_groups(device, &bind_group_layout, world_bindings, light_volume);
         Self {
             pipeline_cache,
             bind_group_layout,
+            atmosphere_bind_group_layout,
+            atmosphere_bind_group: atmosphere.sample_bind_group().clone(),
             bind_groups,
         }
     }
@@ -472,14 +514,26 @@ impl CagiPass {
     /// Switch to a patched shader source (a compile-time CAGI/traversal lever
     /// changed), compiling only on a cache miss.
     pub fn set_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.pipeline_cache
-            .set_shader_source(device, shader_source, &self.bind_group_layout);
+        self.pipeline_cache.set_shader_source_with_layouts(
+            device,
+            shader_source,
+            &[
+                Some(&self.bind_group_layout),
+                Some(&self.atmosphere_bind_group_layout),
+            ],
+        );
     }
 
     /// Precompile the permutations the quality presets need.
     pub fn prewarm_pipelines(&mut self, device: &wgpu::Device, shader_sources: &[String]) -> usize {
-        self.pipeline_cache
-            .prewarm(device, shader_sources, &self.bind_group_layout)
+        self.pipeline_cache.prewarm_with_layouts(
+            device,
+            shader_sources,
+            &[
+                Some(&self.bind_group_layout),
+                Some(&self.atmosphere_bind_group_layout),
+            ],
+        )
     }
 
     pub fn cached_pipeline_count(&self) -> usize {
@@ -519,6 +573,7 @@ impl CagiPass {
             timestamp_writes,
         });
         compute_pass.set_pipeline(self.pipeline_cache.active());
+        compute_pass.set_bind_group(1, &self.atmosphere_bind_group, &[]);
         for _ in 0..iterations {
             compute_pass.set_bind_group(0, &self.bind_groups[light_volume.front], &[]);
             compute_pass.dispatch_workgroups(
@@ -793,6 +848,19 @@ mod tests {
         let dda_body = include_str!("../../shaders/dda.wgsl");
         assert!(!cagi_body.contains("fn dda_step"));
         assert!(!dda_body.contains("fn dda_step"));
+        assert!(
+            !cagi_body.contains("trace_shadow_visibility"),
+            "CAGI source injection must stay ray-free"
+        );
+
+        // The output colour path is the same arrangement one crate out: `voxel-color`
+        // owns both the Rust curves and the WGSL, the shading pass SPLICES it, and a copy
+        // living here would be the drift the move was made to prevent. The CA pass must
+        // NOT have it — it bakes cell radiance and never tonemaps anything.
+        assert!(!dda_body.contains("fn apply_tonemap"));
+        assert!(dda_body.contains("apply_tonemap("));
+        assert!(crate::passes::dda::SHADER_SOURCE.contains("fn apply_tonemap"));
+        assert!(!CAGI_SHADER_SOURCE.contains("fn apply_tonemap"));
     }
 
     /// Every CAGI lever combination must validate under naga: a WGSL error on a
@@ -837,12 +905,19 @@ mod tests {
                             ..RenderQuality::default()
                         };
                         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                        let _pipeline = crate::passes::create_compute_pipeline(
+                        let atmosphere = voxel_environment::AtmosphereBindings::new(
+                            &device,
+                            voxel_environment::LutConfig::default(),
+                        );
+                        let _pipeline = crate::passes::create_compute_pipeline_with_layouts(
                             &device,
                             "cagi test pipeline",
                             "cagi_main",
                             &build_shader_source(&quality),
-                            &bind_group_layout,
+                            &[
+                                Some(&bind_group_layout),
+                                Some(atmosphere.sample_bind_group_layout()),
+                            ],
                         );
                         let validation_error = pollster::block_on(error_scope.pop());
                         assert!(

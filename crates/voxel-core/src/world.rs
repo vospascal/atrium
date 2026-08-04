@@ -116,6 +116,35 @@ pub enum Voxel {
     /// tessellation: it is the only row whose look comes from WHERE the tiles are
     /// rather than from a field sampled across a surface.
     SlateTile,
+    // ---- Output-depth test targets, not scenery -------------------------------
+    //
+    // Three placeable surfaces whose only job is to make the frame buffer's bit
+    // depth visible to the eye — see `docs/output-depth.md`. They are ordinary
+    // solid voxels so the editor, the physics and the mesher need no special case;
+    // what makes them diagnostic is the pattern stack on their material rows, not
+    // anything here.
+    HdrRed,
+    HdrGreen,
+    HdrBlue,
+    HdrCyan,
+    HdrMagenta,
+    HdrYellow,
+    // ---- Indirect-light test reflectors, not scenery --------------------------
+    //
+    // Saturated LAMBERTIAN surfaces: high albedo in their own channels, no
+    // emission, no patterns. They exist because the `Hdr*` rows above look like
+    // they would serve the same purpose and do the opposite — those are pure
+    // emitters with ZERO albedo, so a room built from them cannot bounce light
+    // at all. The L0 light fixture needs surfaces whose *reflectance* is known
+    // and saturated, which is what these are.
+    //
+    // See `voxel-rt/src/light_fixture.rs`.
+    AlbedoRed,
+    AlbedoGreen,
+    AlbedoBlue,
+    AlbedoCyan,
+    AlbedoMagenta,
+    AlbedoYellow,
 }
 
 impl Voxel {
