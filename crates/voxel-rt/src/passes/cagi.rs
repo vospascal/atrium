@@ -34,63 +34,42 @@ use crate::cagi::{
 use crate::variants::RenderQuality;
 
 use super::binding::WorldBinding;
+use super::composer::{Composition, ShaderProgram};
 use super::world_bindings::WorldBindings;
 use super::ComputePipelineCache;
+use crate::shader_consts::ShaderDefs;
 use voxel_environment::{EnvironmentGpu, HillaireEnvironment, ENVIRONMENT_BIND_GROUP};
 
 /// Cells per workgroup edge — cubic, so a workgroup's six-neighbour stencil
 /// mostly reads cells its own threads already loaded.
 const WORKGROUP_SIZE: u32 = 4;
 
-/// This crate's own half of the CA shader: the shared traversal core, the shared
-/// light-volume half, then the automaton itself.
+/// The CA shader source, unpatched: the traversal core, the shared light-volume half, the
+/// automaton, then the environment sampler.
 ///
-/// **Not the complete module** — [`CAGI_SHADER_SOURCE`] is. Same arrangement as the
-/// shading pass's `OWN_SHADER_SOURCE`, and for the same reason: `concat!` takes literals,
-/// so the piece that comes from another crate cannot join here.
-const OWN_SHADER_SOURCE: &str = concat!(
-    include_str!("../../shaders/world.wgsl"),
-    include_str!("../../shaders/cagi_volume.wgsl"),
-    include_str!("../../shaders/cagi.wgsl"),
-);
+/// Which fragments those are lives in [`super::composer`], shared with the shading pass. Before
+/// that table, this was a `concat!` here and another in `passes::dda`, and this one had at one
+/// point reached across a crate boundary by relative path
+/// (`../../../voxel-environment/shaders/environment.wgsl`) — bypassing that crate's facade
+/// entirely and breaking the moment its shader was split into fragments. The source of truth is a
+/// crate, never a path.
+pub static CAGI_SHADER_SOURCE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| Composition::volume().joined_source(&ShaderDefs::default()));
 
-/// The CA shader source: this crate's half, then the environment sampler.
-///
-/// A `LazyLock<String>` because the environment WGSL is a const in another crate. It used
-/// to be a `const` built with an `include_str!` reaching across the crate boundary by
-/// relative path — `../../../voxel-environment/shaders/environment.wgsl` — which bypassed
-/// that crate's facade entirely and broke the moment its shader was split into fragments.
-/// The environment's own `WGSL` const is the supported way in; the source of truth is a
-/// crate, not a path.
-pub static CAGI_SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    let prelude = WorldBinding::wgsl_prelude();
-    let mut source = String::with_capacity(
-        prelude.len() + OWN_SHADER_SOURCE.len() + HillaireEnvironment::WGSL.len(),
-    );
-    // The binding indices come FIRST: every declaration below references them by name.
-    source.push_str(&prelude);
-    source.push_str(OWN_SHADER_SOURCE);
-    source.push_str(HillaireEnvironment::WGSL);
-    source
-});
-
-/// [`CAGI_SHADER_SOURCE`] with every lever this pass reads patched in: traversal,
-/// shadow and CAGI levers from both shader halves. Environment source visibility
-/// is deliberately not a compile-time ray marcher; it is sampled from the LUT.
+/// [`CAGI_SHADER_SOURCE`] with every lever this pass reads patched in — the set in
+/// [`RenderQuality::declare_volume_consts`]: traversal, shadows, water and both CAGI groups. No AO
+/// and no material levers; this pass shades nothing. Environment source visibility is deliberately
+/// not a compile-time ray marcher; it is sampled from the LUT.
 pub fn build_shader_source(quality: &RenderQuality) -> String {
-    let traversal_patched = quality.traversal.patch_shader_source(&CAGI_SHADER_SOURCE);
-    let shadows_patched = quality.shadows.patch_shader_source(&traversal_patched);
-    // E6: `LIQUIDS_CAST_NO_SHADOW` lives in the shared `world.wgsl`, so the CA
-    // pass's source geometry must follow the water mode too — otherwise the
-    // volume would still shadow the bed under water that the shading pass now
-    // lights.
-    let water_patched = quality.water.patch_shader_source(&shadows_patched);
-    let volume_patched = quality
-        .global_illumination
-        .patch_volume_consts(&water_patched);
-    quality
-        .global_illumination
-        .patch_propagation_consts(&volume_patched)
+    Composition::volume().joined_source(&quality.volume_shader_defs())
+}
+
+/// The compiled CA program: joined source for the cache key, composed module for the device.
+///
+/// No [`super::composer::FragmentEdit`]s — the output format belongs to the shading pass's storage
+/// texture and the material graphs to its dispatch, and this pass has neither.
+pub fn build_program(quality: &RenderQuality) -> ShaderProgram {
+    Composition::volume().build(&quality.volume_shader_defs(), &[])
 }
 
 /// The light volume's GPU resources.
@@ -459,39 +438,39 @@ impl CagiPass {
         light_volume: &LightVolume,
         environment: &dyn EnvironmentGpu,
     ) -> Self {
-        Self::new_with_environment_and_shader_source(
+        Self::new_with_environment_and_program(
             device,
             world_bindings,
             light_volume,
             environment,
-            &CAGI_SHADER_SOURCE,
+            &build_program(&RenderQuality::default()),
         )
     }
 
-    /// Build the pass from an explicit shader source — the benchmark's entry
+    /// Build the pass from an explicit program — the benchmark's entry
     /// point for A/B variants (patched copies of [`CAGI_SHADER_SOURCE`]).
-    pub fn new_with_shader_source(
+    pub fn new_with_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
-        shader_source: &str,
+        program: &ShaderProgram,
     ) -> Self {
         let environment = HillaireEnvironment::new(device);
-        Self::new_with_environment_and_shader_source(
+        Self::new_with_environment_and_program(
             device,
             world_bindings,
             light_volume,
             &environment,
-            shader_source,
+            program,
         )
     }
 
-    pub fn new_with_environment_and_shader_source(
+    pub fn new_with_environment_and_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
         environment: &dyn EnvironmentGpu,
-        shader_source: &str,
+        program: &ShaderProgram,
     ) -> Self {
         let bind_group_layout = create_bind_group_layout(device);
         let environment_bind_group_layout = environment.sample_bind_group_layout().clone();
@@ -499,7 +478,7 @@ impl CagiPass {
             device,
             "cagi pass",
             "cagi_main",
-            shader_source,
+            program,
             &[
                 Some(&bind_group_layout),
                 Some(&environment_bind_group_layout),
@@ -534,10 +513,16 @@ impl CagiPass {
 
     /// Switch to a patched shader source (a compile-time CAGI/traversal lever
     /// changed), compiling only on a cache miss.
-    pub fn set_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.pipeline_cache.set_shader_source_with_layouts(
+    pub fn set_shader(
+        &mut self,
+        device: &wgpu::Device,
+        source: &str,
+        compose: impl FnOnce() -> naga::Module,
+    ) {
+        self.pipeline_cache.set_source_with_layouts(
             device,
-            shader_source,
+            source,
+            compose,
             &[
                 Some(&self.bind_group_layout),
                 Some(&self.environment_bind_group_layout),
@@ -546,10 +531,14 @@ impl CagiPass {
     }
 
     /// Precompile the permutations the quality presets need.
-    pub fn prewarm_pipelines(&mut self, device: &wgpu::Device, shader_sources: &[String]) -> usize {
+    pub fn prewarm_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        programs: &[ShaderProgram],
+    ) -> usize {
         self.pipeline_cache.prewarm_with_layouts(
             device,
-            shader_sources,
+            programs,
             &[
                 Some(&self.bind_group_layout),
                 Some(&self.environment_bind_group_layout),
@@ -945,7 +934,7 @@ mod tests {
                             &device,
                             "cagi test pipeline",
                             "cagi_main",
-                            &build_shader_source(&quality),
+                            &build_program(&quality),
                             &[
                                 Some(&bind_group_layout),
                                 Some(environment.sample_bind_group_layout()),

@@ -24,6 +24,7 @@ use crate::camera::CameraUniform;
 use crate::lighting::LightingUniform;
 use crate::passes::blit::BlitPass;
 use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
+use crate::passes::composer::ShaderProgram;
 use crate::passes::dda::DdaPass;
 use crate::passes::world_bindings::WorldBindings;
 use crate::profiling::{FrameTimers, GPU_BLIT, GPU_CAGI, GPU_DDA};
@@ -184,17 +185,27 @@ impl Renderer {
         self.recreate_storage(device);
     }
 
-    /// Switch the DDA pass to a patched shader source (the overlay path: a
-    /// compile-time lever or a preset changed). Buffers and bind groups are
-    /// untouched, and a prewarmed permutation costs a hash lookup.
-    pub fn set_dda_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.dda_pass.set_shader_source(device, shader_source);
+    /// Switch the DDA pass to a rebuilt program (the overlay path: a compile-time
+    /// lever or a preset changed). Buffers and bind groups are untouched, and a
+    /// prewarmed permutation costs a hash lookup.
+    pub fn set_dda_shader(
+        &mut self,
+        device: &wgpu::Device,
+        source: &str,
+        compose: impl FnOnce() -> naga::Module,
+    ) {
+        self.dda_pass.set_shader(device, source, compose);
     }
 
     /// The same for the CAGI pass (a propagation lever or the master switch
     /// changed).
-    pub fn set_cagi_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
-        self.cagi_pass.set_shader_source(device, shader_source);
+    pub fn set_cagi_shader(
+        &mut self,
+        device: &wgpu::Device,
+        source: &str,
+        compose: impl FnOnce() -> naga::Module,
+    ) {
+        self.cagi_pass.set_shader(device, source, compose);
     }
 
     /// Reallocate the light volume for `global_illumination` (its resolution or
@@ -306,13 +317,12 @@ impl Renderer {
     pub fn prewarm_pipelines(
         &mut self,
         device: &wgpu::Device,
-        dda_shader_sources: &[String],
-        cagi_shader_sources: &[String],
+        dda_programs: &[ShaderProgram],
+        cagi_programs: &[ShaderProgram],
     ) -> (usize, usize) {
         (
-            self.dda_pass.prewarm_pipelines(device, dda_shader_sources),
-            self.cagi_pass
-                .prewarm_pipelines(device, cagi_shader_sources),
+            self.dda_pass.prewarm_pipelines(device, dda_programs),
+            self.cagi_pass.prewarm_pipelines(device, cagi_programs),
         )
     }
 

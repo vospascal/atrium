@@ -109,6 +109,7 @@ use voxel_rt::character::{self, CharacterController, CharacterSettings};
 use voxel_rt::light_fixture::{self, NotchState, RainbowCorridor};
 use voxel_rt::lighting::LightingUniform;
 use voxel_rt::passes::cagi::{CagiPass, LightVolume};
+use voxel_rt::passes::composer::{Composition, FragmentEdit, ShaderProgram};
 use voxel_rt::passes::dda::{build_shader_source, DdaPass, SHADER_SOURCE};
 use voxel_rt::passes::world_bindings::WorldBindings;
 
@@ -230,26 +231,50 @@ impl Scenario {
 }
 
 /// One shader build to measure: a full [`RenderQuality`] (so the runtime knobs
-/// and the render scale ride along, not just the compile-time consts) plus the
-/// shader source it compiles to.
+/// and the render scale ride along, not just the compile-time consts) plus any
+/// extra source surgery this row needs.
 struct Variant {
     label: String,
     quality: RenderQuality,
-    shader_source: String,
-    /// The CA pass's own source (E4) — patched from the same quality, so a
-    /// traversal lever moves in both pipelines at once.
-    cagi_shader_source: String,
+    /// Text substitutions for A/B rows that cannot be expressed as a lever, as
+    /// `(fragment file, from, to)`.
+    ///
+    /// Naming the fragment is required rather than cosmetic: the shader is composed
+    /// per fragment now, so a substitution has to be applied to the file that owns
+    /// the anchor. Both current rows are honest about which that is — the tonemap
+    /// dispatch lives in `voxel-color`'s `tonemap.wgsl` and the AO fade ramp in
+    /// `dda.wgsl`.
+    edits: Vec<(&'static str, String, String)>,
 }
 
 impl Variant {
-    /// The normal case: the shader sources ARE what this quality compiles to.
+    /// The normal case: the shader is exactly what this quality compiles to.
     fn new(label: String, quality: RenderQuality) -> Variant {
         Variant {
-            shader_source: build_shader_source(&quality),
-            cagi_shader_source: voxel_rt::passes::cagi::build_shader_source(&quality),
             label,
             quality,
+            edits: Vec::new(),
         }
+    }
+
+    /// The shading program this variant compiles to.
+    fn dda_program(&self) -> ShaderProgram {
+        Composition::shading().build(&self.quality.shading_shader_defs(), &self.fragment_edits())
+    }
+
+    /// The CA program. No row substitutes into the CA pass, so this is the plain build.
+    fn cagi_program(&self) -> ShaderProgram {
+        voxel_rt::passes::cagi::build_program(&self.quality)
+    }
+
+    fn fragment_edits(&self) -> Vec<FragmentEdit<'_>> {
+        self.edits
+            .iter()
+            .map(|(file, from, to)| FragmentEdit {
+                file,
+                apply: Box::new(move |text: &str| text.replacen(from.as_str(), to.as_str(), 1)),
+            })
+            .collect()
     }
 
     /// Dispatch size: the tier knob is a resolution, so a variant with a render
@@ -903,9 +928,12 @@ fn apply_tonemap_unreachable(color: vec3<f32>, headroom: f32, curve: u32, conten
         Variant::new("six-curve (shipped)".to_string(), quality),
         Variant {
             label: "one-curve (pre-arc)".to_string(),
-            cagi_shader_source: voxel_rt::passes::cagi::build_shader_source(&quality),
             quality,
-            shader_source: shipped_source.replacen(six_curve_dispatch, one_curve_dispatch, 1),
+            edits: vec![(
+                "tonemap.wgsl",
+                six_curve_dispatch.to_string(),
+                one_curve_dispatch.to_string(),
+            )],
         },
     ];
 
@@ -2328,9 +2356,12 @@ fn fade_range_as_shader_consts_variant(baseline: &RenderQuality) -> Variant {
     );
     Variant {
         label: "ao-2ray-fade15-30-const".to_string(),
-        cagi_shader_source: voxel_rt::passes::cagi::build_shader_source(&quality),
         quality,
-        shader_source: shader_source.replacen(uniform_read, folded_literals, 1),
+        edits: vec![(
+            "dda.wgsl",
+            uniform_read.to_string(),
+            folded_literals.to_string(),
+        )],
     }
 }
 
@@ -2358,29 +2389,30 @@ fn report_preset_pipeline_cache(
     );
     println!();
     println!("== preset pipeline cache ==");
-    let mut shader_sources = Vec::new();
+    let mut programs = Vec::new();
     for spec in QUALITY_PRESETS
         .iter()
         .filter(|spec| spec.preset != QualityPreset::Custom)
     {
-        let shader_source = build_shader_source(&spec.resolve());
+        // Composition is part of what a preset switch costs now, so it is inside the timer.
         let compile_start = Instant::now();
-        let cached = pass.prewarm_pipelines(device, std::slice::from_ref(&shader_source));
+        let program = Variant::new(spec.label.to_string(), spec.resolve()).dda_program();
+        let cached = pass.prewarm_pipelines(device, std::slice::from_ref(&program));
         println!(
             "  {:<10} {:>8.2?}  (cache holds {cached})",
             spec.label,
             compile_start.elapsed()
         );
-        shader_sources.push(shader_source);
+        programs.push(program);
     }
     let total_start = Instant::now();
-    let cached = pass.prewarm_pipelines(device, &shader_sources);
+    let cached = pass.prewarm_pipelines(device, &programs);
     println!(
         "  re-prewarm of all {} presets: {:.2?} (cache holds {cached} distinct pipelines, \
          {} WGSL sources of ~{} KB)",
-        shader_sources.len(),
+        programs.len(),
         total_start.elapsed(),
-        shader_sources.len(),
+        programs.len(),
         SHADER_SOURCE.len() / 1024
     );
 }
@@ -4232,18 +4264,18 @@ impl VariantResources {
             &voxel_rt::cagi::MaterialAttributes::compiled(),
         );
         VariantResources {
-            cagi_pass: CagiPass::new_with_shader_source(
+            cagi_pass: CagiPass::new_with_program(
                 device,
                 world_bindings,
                 &light_volume,
-                &variant.cagi_shader_source,
+                &variant.cagi_program(),
             ),
-            dda_pass: DdaPass::new_with_shader_source(
+            dda_pass: DdaPass::new_with_program(
                 device,
                 world_bindings,
                 &light_volume,
                 output_view,
-                &variant.shader_source,
+                &variant.dda_program(),
                 // The bench measures the shipped 8-bit output path; output depth is
                 // a display property and orthogonal to everything it sweeps.
                 voxel_color::OutputFormat::default(),

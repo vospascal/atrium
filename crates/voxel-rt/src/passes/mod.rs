@@ -12,6 +12,9 @@
 pub mod binding;
 pub mod blit;
 pub mod cagi;
+pub mod composer;
+
+use composer::ShaderProgram;
 pub mod dda;
 pub mod world_bindings;
 
@@ -37,14 +40,14 @@ impl ComputePipelineCache {
         device: &wgpu::Device,
         label: &'static str,
         entry_point: &'static str,
-        shader_source: &str,
+        program: &ShaderProgram,
         bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         Self::new_with_layouts(
             device,
             label,
             entry_point,
-            shader_source,
+            program,
             &[Some(bind_group_layout)],
         )
     }
@@ -53,7 +56,7 @@ impl ComputePipelineCache {
         device: &wgpu::Device,
         label: &'static str,
         entry_point: &'static str,
-        shader_source: &str,
+        program: &ShaderProgram,
         bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
     ) -> Self {
         let mut cache = Self {
@@ -62,47 +65,63 @@ impl ComputePipelineCache {
             pipelines: HashMap::new(),
             active_key: 0,
         };
-        cache.active_key = cache.compile(device, shader_source, bind_group_layouts);
+        cache.active_key = cache.compile(device, program, bind_group_layouts);
         cache
     }
 
     /// Hash of a shader source — pipelines are keyed by it rather than by the
     /// ~70 KB string itself.
+    ///
+    /// Keyed on the joined *source* rather than on the composed module or the lever def set, and
+    /// deliberately: it is the same key this cache used before composition existed, so every
+    /// preset switch hits and misses exactly as it did. Re-keying would have been a second
+    /// behaviour change riding along with the compile path.
     pub fn source_key(shader_source: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         shader_source.hash(&mut hasher);
         hasher.finish()
     }
 
-    /// Dispatch `shader_source` from now on, compiling it only on a cache miss.
-    pub fn set_shader_source(
+    /// Dispatch the pipeline for `source` from now on, composing and compiling only on a miss.
+    ///
+    /// `compose` is a closure rather than a built [`ShaderProgram`] because composing is
+    /// ~30 ms — naga_oil parses every fragment and round-trips each composable module through
+    /// its WGSL backend to validate it — while a hit is a hash lookup. The hot path is
+    /// overwhelmingly a hit: `rebuild_dda_shader` runs on *every* graph editor command, and
+    /// prewarming already put all four presets in the cache. Building the program eagerly here
+    /// put that 30 ms back onto every node drag, which is exactly what the cache exists to
+    /// avoid.
+    pub fn set_source_with_layouts(
         &mut self,
         device: &wgpu::Device,
-        shader_source: &str,
-        bind_group_layout: &wgpu::BindGroupLayout,
-    ) {
-        self.active_key = self.compile(device, shader_source, &[Some(bind_group_layout)]);
-    }
-
-    pub fn set_shader_source_with_layouts(
-        &mut self,
-        device: &wgpu::Device,
-        shader_source: &str,
+        source: &str,
+        compose: impl FnOnce() -> naga::Module,
         bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
     ) {
-        self.active_key = self.compile(device, shader_source, bind_group_layouts);
+        let key = Self::source_key(source);
+        if !self.pipelines.contains_key(&key) {
+            let pipeline = create_compute_pipeline_from_module(
+                device,
+                self.label,
+                self.entry_point,
+                &compose(),
+                bind_group_layouts,
+            );
+            self.pipelines.insert(key, pipeline);
+        }
+        self.active_key = key;
     }
 
-    /// Precompile `shader_sources` (duplicates cost nothing). Returns how many
+    /// Precompile `programs` (duplicates cost nothing). Returns how many
     /// distinct pipelines the cache holds afterwards.
     pub fn prewarm(
         &mut self,
         device: &wgpu::Device,
-        shader_sources: &[String],
+        programs: &[ShaderProgram],
         bind_group_layout: &wgpu::BindGroupLayout,
     ) -> usize {
-        for shader_source in shader_sources {
-            self.compile(device, shader_source, &[Some(bind_group_layout)]);
+        for program in programs {
+            self.compile(device, program, &[Some(bind_group_layout)]);
         }
         self.pipelines.len()
     }
@@ -110,11 +129,11 @@ impl ComputePipelineCache {
     pub fn prewarm_with_layouts(
         &mut self,
         device: &wgpu::Device,
-        shader_sources: &[String],
+        programs: &[ShaderProgram],
         bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
     ) -> usize {
-        for shader_source in shader_sources {
-            self.compile(device, shader_source, bind_group_layouts);
+        for program in programs {
+            self.compile(device, program, bind_group_layouts);
         }
         self.pipelines.len()
     }
@@ -136,10 +155,10 @@ impl ComputePipelineCache {
     fn compile(
         &mut self,
         device: &wgpu::Device,
-        shader_source: &str,
+        program: &ShaderProgram,
         bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
     ) -> u64 {
-        let key = Self::source_key(shader_source);
+        let key = Self::source_key(&program.source);
         let label = self.label;
         let entry_point = self.entry_point;
         self.pipelines.entry(key).or_insert_with(|| {
@@ -147,7 +166,7 @@ impl ComputePipelineCache {
                 device,
                 label,
                 entry_point,
-                shader_source,
+                program,
                 bind_group_layouts,
             )
         });
@@ -162,14 +181,14 @@ pub fn create_compute_pipeline(
     device: &wgpu::Device,
     label: &str,
     entry_point: &str,
-    shader_source: &str,
+    program: &ShaderProgram,
     bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::ComputePipeline {
     create_compute_pipeline_with_layouts(
         device,
         label,
         entry_point,
-        shader_source,
+        program,
         &[Some(bind_group_layout)],
     )
 }
@@ -178,12 +197,32 @@ pub fn create_compute_pipeline_with_layouts(
     device: &wgpu::Device,
     label: &str,
     entry_point: &str,
-    shader_source: &str,
+    program: &ShaderProgram,
     bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
 ) -> wgpu::ComputePipeline {
+    create_compute_pipeline_from_module(
+        device,
+        label,
+        entry_point,
+        &program.module,
+        bind_group_layouts,
+    )
+}
+
+/// The same, from an already-composed module.
+pub fn create_compute_pipeline_from_module(
+    device: &wgpu::Device,
+    label: &str,
+    entry_point: &str,
+    module: &naga::Module,
+    bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
+) -> wgpu::ComputePipeline {
+    // The composed naga IR goes straight to the device. Handing over WGSL text would mean naga's
+    // backend regenerating source that wgpu then re-parses — two extra conversions, each able to
+    // change the module in ways no test here would see.
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module.clone())),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),

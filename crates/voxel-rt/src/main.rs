@@ -42,13 +42,13 @@ use voxel_rt::lighting::OutputParams;
 use voxel_rt::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
 use voxel_rt::material_graph_assets::MaterialGraphAssetService;
 use voxel_rt::material_table::MaterialTable;
-use voxel_rt::overlay::{
-    MovementReadout, Overlay, OverlayFrameData, TargetHighlightReadout, WorldEditReadout,
-};
+use voxel_rt::overlay::{Overlay, OverlayFrameData, TargetHighlightReadout};
 use voxel_rt::passes::cagi::AttributeSource;
+use voxel_rt::passes::composer::ShaderProgram;
 use voxel_rt::passes::{cagi, dda};
 use voxel_rt::profiling::{self, FrameTimers, GPU_OVERLAY};
 use voxel_rt::render::Renderer;
+use voxel_rt::settings_panel::{MovementReadout, WorldEditReadout};
 use voxel_rt::studio;
 use voxel_rt::studio_assets::{
     live_state_fingerprint, StudioAssetPanelState, StudioProject, StudioProjectStore,
@@ -487,15 +487,27 @@ impl AppState {
         // else moves. `requires_pipeline_rebuild` already compares the mask, so
         // every later change is picked up by the ordinary rebuild path.
         quality.materials.pattern_generator_mask = material::generator_mask(material_table.rows());
-        renderer.set_dda_shader_source(
+        renderer.set_dda_shader(
             &gpu_context.device,
             &dda::build_shader_source_for_output(
                 &quality,
                 &material_graph_shaders,
                 gpu_context.output_format(),
             ),
+            || {
+                dda::build_program_for_output(
+                    &quality,
+                    &material_graph_shaders,
+                    gpu_context.output_format(),
+                )
+                .module
+            },
         );
-        renderer.set_cagi_shader_source(&gpu_context.device, &cagi::build_shader_source(&quality));
+        renderer.set_cagi_shader(
+            &gpu_context.device,
+            &cagi::build_shader_source(&quality),
+            || cagi::build_program(&quality).module,
+        );
         renderer.set_render_scale(&gpu_context.device, quality.render_scale);
         quality.render_scale = renderer.render_scale();
         let light_volume_grid = renderer.light_volume_grid();
@@ -522,25 +534,20 @@ impl AppState {
             .filter(|spec| spec.preset != QualityPreset::Custom)
             .map(|spec| spec.resolve())
             .collect();
-        let dda_shader_sources: Vec<String> = preset_qualities
+        let dda_programs: Vec<ShaderProgram> = preset_qualities
             .iter()
             .map(|quality| {
-                dda::build_shader_source_for_output(
+                dda::build_program_for_output(
                     quality,
                     &material_graph_shaders,
                     gpu_context.output_format(),
                 )
             })
             .collect();
-        let cagi_shader_sources: Vec<String> = preset_qualities
-            .iter()
-            .map(cagi::build_shader_source)
-            .collect();
-        let (cached_dda_pipelines, cached_cagi_pipelines) = renderer.prewarm_pipelines(
-            &gpu_context.device,
-            &dda_shader_sources,
-            &cagi_shader_sources,
-        );
+        let cagi_programs: Vec<ShaderProgram> =
+            preset_qualities.iter().map(cagi::build_program).collect();
+        let (cached_dda_pipelines, cached_cagi_pipelines) =
+            renderer.prewarm_pipelines(&gpu_context.device, &dda_programs, &cagi_programs);
         println!(
             "{cached_dda_pipelines} shading + {cached_cagi_pipelines} CAGI pipeline \
              permutations cached for {} presets in {:.2?}",
@@ -1455,10 +1462,11 @@ impl AppState {
     fn rebuild_dda_shader(&mut self) {
         self.quality.materials.pattern_generator_mask =
             material::generator_mask(self.material_table.rows());
+        let output_format = self.renderer.output_format();
         let source = dda::build_shader_source_for_output(
             &self.quality,
             &self.material_graph_shaders,
-            self.renderer.output_format(),
+            output_format,
         );
         // NEVER rebuild from identical source. `GraphEditor::apply` requests a
         // compile for EVERY graph command, and graph constants are emitted as WGSL
@@ -1475,8 +1483,13 @@ impl AppState {
         if self.applied_dda_shader_source.as_deref() == Some(source.as_str()) {
             return;
         }
+        // Composition only runs on a cache miss — see `ComputePipelineCache::set_source_with_layouts`.
+        let quality = self.quality;
+        let graphs = &self.material_graph_shaders;
         self.renderer
-            .set_dda_shader_source(&self.gpu_context.device, &source);
+            .set_dda_shader(&self.gpu_context.device, &source, || {
+                dda::build_program_for_output(&quality, graphs, output_format).module
+            });
         self.applied_dda_shader_source = Some(source);
     }
 
@@ -2284,9 +2297,10 @@ impl AppState {
             // A prewarmed permutation (every preset) is a hash lookup here; an
             // arbitrary Custom combination compiles once and stays cached.
             self.rebuild_dda_shader();
-            self.renderer.set_cagi_shader_source(
+            self.renderer.set_cagi_shader(
                 &self.gpu_context.device,
                 &cagi::build_shader_source(&self.quality),
+                || cagi::build_program(&self.quality).module,
             );
         }
         // E2: the world-thread lever spawns or stops the authority's thread.

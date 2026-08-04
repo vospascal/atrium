@@ -17,92 +17,40 @@ use voxel_material_graph::lowering::MaterialGraphShaderSet;
 
 use super::binding::WorldBinding;
 use super::cagi::LightVolume;
+use super::composer::{Composition, FragmentEdit, ShaderProgram};
 use super::world_bindings::{WorldBindings, PATTERN_CACHE_BINDING};
 use super::ComputePipelineCache;
+use crate::shader_consts::ShaderDefs;
 use voxel_environment::{EnvironmentGpu, HillaireEnvironment, ENVIRONMENT_BIND_GROUP};
 
 const WORKGROUP_SIZE: u32 = 8;
 
-/// This crate's own half of the shading shader: the shared traversal core, the
-/// shared light-volume half, E6's water optics, then the shading pass itself.
+/// The shading pass's complete shader source, unpatched.
 ///
-/// **Not the complete module** — [`SHADER_SOURCE`] is, and that is the one to compile
-/// or patch. This const exists only because `concat!` takes string literals, so the
-/// one piece that comes from another crate cannot join here.
-const OWN_SHADER_SOURCE: &str = concat!(
-    include_str!("../../shaders/world.wgsl"),
-    // S2's pattern layers. Appended to THIS pass only, unlike `world.wgsl`, which
-    // the CAGI pass shares: the light volume bakes its own cell attributes and never
-    // reads the material table, so it needs the row's LAYOUT (which `world.wgsl`
-    // carries) and none of the behaviour below.
-    include_str!("../../shaders/pattern.wgsl"),
-    include_str!("../../shaders/cagi_volume.wgsl"),
-    include_str!("../../shaders/water.wgsl"),
-    include_str!("../../shaders/dda.wgsl"),
-);
-
-/// The graph ABI and its dispatch, from the crate that generates the functions injected into
-/// it. AFTER `dda.wgsl` because the prelude reads `world_events`, which that file declares.
-const GRAPH_ABI: &str = voxel_material_graph::WGSL_PRELUDE;
-
-/// The shading pass's complete shader source. Exposed so the headless benchmark
-/// (`examples/bench_dda.rs`) can build A/B pipeline variants by patching the
-/// compile-time levers (see "A/B benchmark levers" in `shaders/world.wgsl`, the AO
+/// Which fragments it is made of now lives in [`super::composer`] — one table shared with the
+/// CA pass, instead of the `concat!` block that used to sit here and a second one in
+/// `passes::cagi`. Each pass had to name the other crates' WGSL to build that list; neither does
+/// now.
+///
+/// Exposed so the headless benchmark (`examples/bench_dda.rs`) can build A/B pipeline variants by
+/// patching the compile-time levers (see "A/B benchmark levers" in `shaders/world.wgsl`, the AO
 /// block in `shaders/dda.wgsl` and the water levers in `shaders/water.wgsl`).
 ///
-/// **The output colour path comes from `voxel-color`, not from this crate.** That crate
-/// owns the tonemap curves on both sides — the Rust reference implementation and the
-/// WGSL that runs — because the two must agree and only a test in one crate can check
-/// that. `dda.wgsl` calls `apply_tonemap` and never defines it.
-///
-/// A `LazyLock<String>` rather than a const for the mundane reason that `concat!` takes
-/// literals and `voxel_color::tonemap::WGSL` is a const. It is built once per process.
-///
-/// Order: the generated binding indices (`passes::binding`) first, then `world.wgsl`, with
-/// the colour path LAST. WGSL module-scope declarations may appear in any order, so none of
-/// this is a correctness requirement — it keeps a dumped source readable, and
-/// `passes::cagi`'s `both_pass_shaders_share_the_traversal_core` pins the prelude/core pair.
-pub static SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    let prelude = WorldBinding::wgsl_prelude();
-    let mut source = String::with_capacity(
-        prelude.len()
-            + OWN_SHADER_SOURCE.len()
-            + GRAPH_ABI.len()
-            + voxel_material_graph::WGSL_DISPATCH.len()
-            + HillaireEnvironment::WGSL.len()
-            + voxel_color::tonemap::WGSL.len(),
-    );
-    // The binding indices come FIRST: every resource declaration below references them by
-    // name, and WGSL resolves module-scope identifiers regardless of order — but keeping the
-    // generated block at the top is what makes a dumped source readable.
-    source.push_str(&prelude);
-    source.push_str(OWN_SHADER_SOURCE);
-    source.push_str(GRAPH_ABI);
-    source.push_str(voxel_material_graph::WGSL_DISPATCH);
-    source.push_str(HillaireEnvironment::WGSL);
-    source.push_str(voxel_color::tonemap::WGSL);
-    source
-});
+/// An empty def set means no lever is patched, so this is the raw concatenation — the shipped
+/// default *is* the unpatched file, which is the property the `default_settings_match_shader_source`
+/// tests in each lever module rely on.
+pub static SHADER_SOURCE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| Composition::shading().joined_source(&ShaderDefs::default()));
 
 /// [`SHADER_SOURCE`] with every experiment's compile-time levers patched in.
 /// The app's preset path and the benchmark's variant builder both go through
 /// this one function, so a new lever module cannot be forgotten at a call
 /// site. Returns [`SHADER_SOURCE`] verbatim for the shipped (Balanced) quality.
 ///
-/// Only the CAGI levers of the SHARED volume half are patched here; the
-/// propagation levers live in `cagi.wgsl`, which this source does not contain
-/// (`super::cagi::build_shader_source` patches those).
+/// The lever groups this applies are [`RenderQuality::declare_shading_consts`] — deliberately not
+/// the same set as the CA pass's, since this pass shades and that one does not.
 pub fn build_shader_source(quality: &RenderQuality) -> String {
-    let traversal_patched = quality.traversal.patch_shader_source(&SHADER_SOURCE);
-    let ao_patched = quality
-        .ambient_occlusion
-        .patch_shader_source(&traversal_patched);
-    let shadows_patched = quality.shadows.patch_shader_source(&ao_patched);
-    let gi_patched = quality
-        .global_illumination
-        .patch_volume_consts(&shadows_patched);
-    let water_patched = quality.water.patch_shader_source(&gi_patched);
-    quality.materials.patch_shader_source(&water_patched)
+    Composition::shading().joined_source(&quality.shading_shader_defs())
 }
 
 /// Build the shading source with the optional material-graph dispatch appended.
@@ -112,7 +60,8 @@ pub fn build_shader_source_with_material_graphs(
     quality: &RenderQuality,
     graphs: &MaterialGraphShaderSet,
 ) -> String {
-    graphs.inject_into_dda(&build_shader_source(quality))
+    Composition::shading()
+        .joined_source_with_edits(&quality.shading_shader_defs(), &graph_edits(graphs))
 }
 
 /// The same, with the output storage-texture format patched in.
@@ -126,7 +75,50 @@ pub fn build_shader_source_for_output(
     graphs: &MaterialGraphShaderSet,
     output_format: voxel_color::OutputFormat,
 ) -> String {
-    output_format.patch_shader_source(&build_shader_source_with_material_graphs(quality, graphs))
+    Composition::shading().joined_source_with_edits(
+        &quality.shading_shader_defs(),
+        &output_edits(graphs, output_format),
+    )
+}
+
+/// The compiled shading program: joined source for the cache key, composed module for the device.
+pub fn build_program_for_output(
+    quality: &RenderQuality,
+    graphs: &MaterialGraphShaderSet,
+    output_format: voxel_color::OutputFormat,
+) -> ShaderProgram {
+    Composition::shading().build(
+        &quality.shading_shader_defs(),
+        &output_edits(graphs, output_format),
+    )
+}
+
+/// The material-graph injection, aimed at the fragment that owns the marker.
+///
+/// `material_graph.wgsl` declares `GRAPH_DISPATCH_POINT` and the fallback function around it, and
+/// the generated per-material functions are appended after it. They call the graph prelude's
+/// helpers by bare name, which resolves because that fragment already imports
+/// `vx::graph_prelude` — the generated import list covers every item the prelude declares, so
+/// nothing has to predict which ones a graph will use.
+fn graph_edits(graphs: &MaterialGraphShaderSet) -> Vec<FragmentEdit<'_>> {
+    vec![FragmentEdit {
+        file: "material_graph.wgsl",
+        apply: Box::new(move |text| graphs.inject_into_dda(text)),
+    }]
+}
+
+/// The graph injection plus the output-format patch, which belongs to `dda.wgsl` — the fragment
+/// that declares the storage texture.
+fn output_edits(
+    graphs: &MaterialGraphShaderSet,
+    output_format: voxel_color::OutputFormat,
+) -> Vec<FragmentEdit<'_>> {
+    let mut edits = graph_edits(graphs);
+    edits.push(FragmentEdit {
+        file: "dda.wgsl",
+        apply: Box::new(move |text| output_format.patch_shader_source(text)),
+    });
+    edits
 }
 
 pub struct DdaPass {
@@ -135,7 +127,7 @@ pub struct DdaPass {
     environment_bind_group_layout: wgpu::BindGroupLayout,
     environment_bind_group: wgpu::BindGroup,
     /// The format this pass's layout was built for, so
-    /// [`DdaPass::set_shader_source`] can refuse a source that disagrees with it.
+    /// [`DdaPass::set_shader`] can refuse a source that disagrees with it.
     output_format: voxel_color::OutputFormat,
     /// One bind group per ping-pong volume buffer: the CA pass leaves the newest
     /// values in whichever buffer it wrote last, so [`DdaPass::encode`] selects by
@@ -171,49 +163,51 @@ impl DdaPass {
         environment: &dyn EnvironmentGpu,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
-        let shader_source = output_format.patch_shader_source(&SHADER_SOURCE);
-        Self::new_with_environment_and_shader_source(
+        let program = build_program_for_output(
+            &RenderQuality::default(),
+            &MaterialGraphShaderSet::default(),
+            output_format,
+        );
+        Self::new_with_environment_and_program(
             device,
             world_bindings,
             light_volume,
             output_view,
             environment,
-            &shader_source,
+            &program,
             output_format,
         )
     }
 
-    /// Build the pass from an explicit shader source string — the benchmark's
-    /// entry point for A/B variants (patched copies of [`SHADER_SOURCE`]).
-    /// Everything else (buffers, layout, bind groups) is identical to
-    /// [`DdaPass::new`].
-    pub fn new_with_shader_source(
+    /// Build the pass from an explicit program — the benchmark's entry point for A/B variants.
+    /// Everything else (buffers, layout, bind groups) is identical to [`DdaPass::new`].
+    pub fn new_with_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
         output_view: &wgpu::TextureView,
-        shader_source: &str,
+        program: &ShaderProgram,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
         let environment = HillaireEnvironment::new(device);
-        Self::new_with_environment_and_shader_source(
+        Self::new_with_environment_and_program(
             device,
             world_bindings,
             light_volume,
             output_view,
             &environment,
-            shader_source,
+            program,
             output_format,
         )
     }
 
-    pub fn new_with_environment_and_shader_source(
+    pub fn new_with_environment_and_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
         output_view: &wgpu::TextureView,
         environment: &dyn EnvironmentGpu,
-        shader_source: &str,
+        program: &ShaderProgram,
         output_format: voxel_color::OutputFormat,
     ) -> Self {
         // The source and the format must AGREE, and nothing about the signature
@@ -222,7 +216,7 @@ impl DdaPass {
         // layers down. This exact disagreement shipped twice.
         let wanted = output_format.wgsl_storage_declaration();
         assert!(
-            shader_source.contains(&wanted),
+            program.source.contains(&wanted),
             "shading source does not declare `{wanted}` — it was not patched for \
              this OutputFormat, so the pipeline will not match its bind group layout"
         );
@@ -232,7 +226,7 @@ impl DdaPass {
             device,
             "dda pass",
             "main",
-            shader_source,
+            program,
             &[
                 Some(&bind_group_layout),
                 Some(&environment_bind_group_layout),
@@ -268,20 +262,26 @@ impl DdaPass {
     /// (the overlay path: a compile-time lever or a preset changed). Buffers and
     /// bind groups are untouched — only the shader differs, so the existing bind
     /// groups stay valid against every cached pipeline.
-    pub fn set_shader_source(&mut self, device: &wgpu::Device, shader_source: &str) {
+    pub fn set_shader(
+        &mut self,
+        device: &wgpu::Device,
+        source: &str,
+        compose: impl FnOnce() -> naga::Module,
+    ) {
         // The layout is fixed at construction; a source declaring a different
         // storage format cannot match it. Checked here because this is the path every
         // runtime rebuild takes, and the wgpu error it otherwise produces names a
         // "pipeline layout" mismatch rather than the unpatched source that caused it.
         let wanted = self.output_format.wgsl_storage_declaration();
         assert!(
-            shader_source.contains(&wanted),
+            source.contains(&wanted),
             "shading source does not declare `{wanted}` — build it with \
              `build_shader_source_for_output` so it matches this pass's layout"
         );
-        self.pipeline_cache.set_shader_source_with_layouts(
+        self.pipeline_cache.set_source_with_layouts(
             device,
-            shader_source,
+            source,
+            compose,
             &[
                 Some(&self.bind_group_layout),
                 Some(&self.environment_bind_group_layout),
@@ -290,13 +290,17 @@ impl DdaPass {
     }
 
     /// Precompile `shader_sources` (duplicates cost nothing) so that a later
-    /// [`DdaPass::set_shader_source`] to any of them is a hash lookup instead of
+    /// [`DdaPass::set_shader`] to any of them is a hash lookup instead of
     /// a shader compile — the reason a preset switch cannot stutter. Returns how
     /// many pipelines the cache holds afterwards.
-    pub fn prewarm_pipelines(&mut self, device: &wgpu::Device, shader_sources: &[String]) -> usize {
+    pub fn prewarm_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        programs: &[ShaderProgram],
+    ) -> usize {
         self.pipeline_cache.prewarm_with_layouts(
             device,
-            shader_sources,
+            programs,
             &[
                 Some(&self.bind_group_layout),
                 Some(&self.environment_bind_group_layout),
@@ -487,7 +491,11 @@ pub(crate) mod tests {
             &device,
             "dda test pipeline",
             "main",
-            SHADER_SOURCE.as_str(),
+            &build_program_for_output(
+                &RenderQuality::default(),
+                &MaterialGraphShaderSet::default(),
+                voxel_color::OutputFormat::default(),
+            ),
             &[
                 Some(&bind_group_layout),
                 Some(environment.sample_bind_group_layout()),
@@ -605,7 +613,11 @@ pub(crate) mod tests {
                 &device,
                 "output depth test pipeline",
                 "main",
-                &format.patch_shader_source(&SHADER_SOURCE),
+                &build_program_for_output(
+                    &RenderQuality::default(),
+                    &MaterialGraphShaderSet::default(),
+                    format,
+                ),
                 &[Some(&layout), Some(environment.sample_bind_group_layout())],
             );
             let validation_error = pollster::block_on(error_scope.pop());
@@ -655,7 +667,11 @@ pub(crate) mod tests {
                 &device,
                 "dda test pipeline",
                 "main",
-                &build_shader_source(quality),
+                &build_program_for_output(
+                    quality,
+                    &MaterialGraphShaderSet::default(),
+                    voxel_color::OutputFormat::default(),
+                ),
                 &[
                     Some(&bind_group_layout),
                     Some(environment.sample_bind_group_layout()),
@@ -784,15 +800,19 @@ pub(crate) mod tests {
             if spec.preset == QualityPreset::Custom {
                 continue;
             }
-            let shader_source = build_shader_source(&spec.resolve());
-            let key = ComputePipelineCache::source_key(&shader_source);
+            let program = build_program_for_output(
+                &spec.resolve(),
+                &MaterialGraphShaderSet::default(),
+                voxel_color::OutputFormat::default(),
+            );
+            let key = ComputePipelineCache::source_key(&program.source);
             keys.push(key);
             pass_pipelines.entry(key).or_insert_with(|| {
                 create_compute_pipeline_with_layouts(
                     &device,
                     "dda test pipeline",
                     "main",
-                    &shader_source,
+                    &program,
                     &[
                         Some(&bind_group_layout),
                         Some(environment.sample_bind_group_layout()),
