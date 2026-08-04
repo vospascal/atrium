@@ -20,8 +20,8 @@ use crate::material_graph_layers::{
     PATTERN_NOISE_NODE,
 };
 use crate::pattern::MAX_PATTERN_LAYERS;
-use crate::studio_assets::AssetId;
 use crate::world_event::{GpuWorldEvent, MAX_EVENT_LIFETIME_SECONDS};
+use voxel_graph::AssetId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueType {

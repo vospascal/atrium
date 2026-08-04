@@ -21,7 +21,7 @@ use crate::environment::{
     SpatialGranularity, UpdateFrequency, WeatherKind,
 };
 use crate::graph::GraphKind;
-use crate::studio_assets::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
+use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

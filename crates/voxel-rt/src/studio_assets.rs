@@ -13,9 +13,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
 
 use crate::graph::{DiagnosticSeverity, GraphAsset, NodeRegistry};
 use crate::material::{
@@ -31,45 +31,6 @@ use crate::variants::{
     preset_spec, Lever, LeverRange, LeverValue, QualityPreset, RenderQuality, REGISTRY,
 };
 use crate::world_profile::{CompiledWorldProfile, WorldAssetCatalog, WorldProfileAsset};
-
-/// The first on-disk Studio asset format. Future readers migrate old documents
-/// before resolving them into runtime objects.
-pub const STUDIO_ASSET_SCHEMA_VERSION: u32 = 2;
-
-static NEXT_ASSET_ID: AtomicU64 = AtomicU64::new(1);
-
-/// A durable asset identity. It is deliberately opaque: runtime material-table
-/// indices are not safe project identities because a project may later reorder
-/// or replace its material assignments.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AssetId(pub String);
-
-impl AssetId {
-    /// Create a locally unique, portable text identity without making UUIDs a
-    /// rendering dependency. Asset files retain this value forever after first
-    /// save, so uniqueness only matters at creation time.
-    pub fn new() -> AssetId {
-        let sequence = NEXT_ASSET_ID.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        AssetId(format!("vx-{nanos:032x}-{sequence:016x}"))
-    }
-}
-
-impl Default for AssetId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for AssetId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
 
 /// A project-local reference to one asset file. Paths are always relative to the
 /// project directory; [`StudioProjectStore`] rejects absolute and parent paths.
@@ -1421,12 +1382,19 @@ impl From<serde_json::Error> for AssetError {
     }
 }
 
+/// Distinguishes the temporary files of concurrent [`atomic_write`] calls.
+///
+/// Its own counter rather than the asset-id counter, which it used to borrow. That sharing
+/// was incidental — the two have different jobs: an asset id is durable and ends up in a
+/// saved file, this only has to be unique among in-flight writes in this process.
+static NEXT_TEMPORARY_SUFFIX: AtomicU64 = AtomicU64::new(1);
+
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), AssetError> {
     let parent = path
         .parent()
         .ok_or_else(|| AssetError::UnsafePath(path.to_path_buf()))?;
     fs::create_dir_all(parent)?;
-    let sequence = NEXT_ASSET_ID.fetch_add(1, Ordering::Relaxed);
+    let sequence = NEXT_TEMPORARY_SUFFIX.fetch_add(1, Ordering::Relaxed);
     let temporary_path = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name()

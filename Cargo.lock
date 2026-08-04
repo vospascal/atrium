@@ -6804,6 +6804,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "voxel-graph"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "voxel-rt"
 version = "0.1.0"
 dependencies = [
@@ -6820,6 +6828,7 @@ dependencies = [
  "voxel-color",
  "voxel-core",
  "voxel-environment",
+ "voxel-graph",
  "wgpu 29.0.4",
  "winit",
 ]

@@ -8,6 +8,7 @@ members = [
     "crates/voxel-color",
     "crates/voxel-environment",
     "crates/voxel-core",
+    "crates/voxel-graph",
     "crates/voxel-rt",
 ]
 

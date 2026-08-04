@@ -18,6 +18,7 @@ voxel-core = { version = "0.1.0", path = "../voxel-core" }
 wgpu = "29"
 voxel-color = { path = "../voxel-color" }
 voxel-environment = { path = "../voxel-environment" }
+voxel-graph = { path = "../voxel-graph" }
 winit = "0.30"
 
 [dev-dependencies]

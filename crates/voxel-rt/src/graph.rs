@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::studio_assets::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
+use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 

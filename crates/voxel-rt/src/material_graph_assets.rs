@@ -205,7 +205,8 @@ mod tests {
 
     use super::*;
     use crate::material::{material_id, MATERIALS};
-    use crate::studio_assets::{AssetId, AssetReference, MaterialAsset, ProjectManifest};
+    use crate::studio_assets::{AssetReference, MaterialAsset, ProjectManifest};
+    use voxel_graph::AssetId;
 
     #[test]
     fn checked_in_project_compiles_every_assigned_material_graph() {
