@@ -14,18 +14,15 @@
 //! The shading pass reads the same volume (`shaders/cagi_volume.wgsl` is
 //! concatenated into both shaders), so [`LightVolume::layout_entries`] /
 //! [`LightVolume::bind_group_entries`] serve both consumers — with
-//! `include_back_buffer` deciding whether the writable binding 12 is part of the
-//! layout, which is the only difference between them.
+//! `include_back_buffer` deciding whether the writable back buffer is part of the layout,
+//! which is the only difference between them.
 //!
-//! Own bindings (group 0), on top of [`super::world_bindings::WorldBindings`]:
-//!
-//! | binding | resource |
-//! |---------|----------|
-//! | 11 | storage (read)       front light volume |
-//! | 12 | storage (read_write) back light volume — CA pass only |
-//! | 13 | storage (read)       per-cell attributes + E5b emission (5 u32 words) |
-//! | 14 | uniform              grid dimensions, transport coefficients and the S3b event-response table |
-//! | 15 | storage (read)       shared AADF directional bounds |
+//! This pass's own slots are [`WorldBinding::LightVolumeFront`],
+//! [`WorldBinding::LightVolumeBack`] (writable, CA pass only),
+//! [`WorldBinding::CagiCellData`] and [`WorldBinding::CagiVolumeMeta`], on top of
+//! [`super::world_bindings::WorldBindings`]. Indices are not written here on purpose —
+//! [`super::binding`] is the only place a number exists, because a table in prose is how the
+//! shader and the layout drifted before.
 
 use wgpu::util::DeviceExt;
 
@@ -36,6 +33,7 @@ use crate::cagi::{
 };
 use crate::variants::RenderQuality;
 
+use super::binding::WorldBinding;
 use super::world_bindings::WorldBindings;
 use super::ComputePipelineCache;
 use voxel_environment::{EnvironmentGpu, HillaireEnvironment, ENVIRONMENT_BIND_GROUP};
@@ -65,8 +63,12 @@ const OWN_SHADER_SOURCE: &str = concat!(
 /// The environment's own `WGSL` const is the supported way in; the source of truth is a
 /// crate, not a path.
 pub static CAGI_SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    let mut source =
-        String::with_capacity(OWN_SHADER_SOURCE.len() + HillaireEnvironment::WGSL.len());
+    let prelude = WorldBinding::wgsl_prelude();
+    let mut source = String::with_capacity(
+        prelude.len() + OWN_SHADER_SOURCE.len() + HillaireEnvironment::WGSL.len(),
+    );
+    // The binding indices come FIRST: every declaration below references them by name.
+    source.push_str(&prelude);
     source.push_str(OWN_SHADER_SOURCE);
     source.push_str(HillaireEnvironment::WGSL);
     source
@@ -261,7 +263,7 @@ impl LightVolume {
         }
         entries.push(storage_entry(13, true));
         entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 14,
+            binding: WorldBinding::CagiVolumeMeta.index(),
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
@@ -282,21 +284,21 @@ impl LightVolume {
         include_back_buffer: bool,
     ) -> Vec<wgpu::BindGroupEntry<'_>> {
         let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 11,
+            binding: WorldBinding::LightVolumeFront.index(),
             resource: self.volume_buffers[read_index].as_entire_binding(),
         }];
         if include_back_buffer {
             entries.push(wgpu::BindGroupEntry {
-                binding: 12,
+                binding: WorldBinding::LightVolumeBack.index(),
                 resource: self.volume_buffers[1 - read_index].as_entire_binding(),
             });
         }
         entries.push(wgpu::BindGroupEntry {
-            binding: 13,
+            binding: WorldBinding::CagiCellData.index(),
             resource: self.cell_data_buffer.as_entire_binding(),
         });
         entries.push(wgpu::BindGroupEntry {
-            binding: 14,
+            binding: WorldBinding::CagiVolumeMeta.index(),
             resource: self.uniform_buffer.as_entire_binding(),
         });
         entries
@@ -858,8 +860,19 @@ mod tests {
     #[test]
     fn both_pass_shaders_share_the_traversal_core() {
         let world = include_str!("../../shaders/world.wgsl");
-        assert!(CAGI_SHADER_SOURCE.starts_with(world));
-        assert!(crate::passes::dda::SHADER_SOURCE.starts_with(world));
+        // Generated binding indices lead both modules, then the traversal core verbatim.
+        // Asserting the pair rather than just `contains` keeps the ordering guarantee: a
+        // consumer dumping either source still finds the numbers, then the shared code.
+        let prelude = WorldBinding::wgsl_prelude();
+        for source in [
+            CAGI_SHADER_SOURCE.as_str(),
+            crate::passes::dda::SHADER_SOURCE.as_str(),
+        ] {
+            let body = source
+                .strip_prefix(prelude.as_str())
+                .expect("the generated binding prelude must lead every compute module");
+            assert!(body.starts_with(world));
+        }
         assert!(world.contains("fn trace_shadow_visibility"));
         assert!(world.contains("fn dda_step"));
         // ...and neither pass shader may carry its own copy.

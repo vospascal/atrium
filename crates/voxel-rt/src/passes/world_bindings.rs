@@ -9,23 +9,13 @@
 //! DDA pass would have coupled two passes that must stay independently
 //! excludable (plan isolation rule). One owner, two consumers instead.
 //!
-//! Layout (group 0), matching `shaders/world.wgsl`:
+//! The slots are [`WorldBinding`]'s — brickmap metadata and its four grids, the material
+//! table, lighting, the column/occupancy/skip acceleration arrays, the AADF bounds and the
+//! world event field. Numbers are not repeated here: [`super::binding`] allocates them, and a
+//! prose table restating them is precisely what let the shader and the layout disagree.
 //!
-//! | binding | resource |
-//! |---------|----------|
-//! | 1  | uniform  brickmap metadata |
-//! | 2  | storage  brick pointer grid |
-//! | 3  | storage  per-brick occupancy words |
-//! | 4  | storage  per-brick material bytes |
-//! | 5  | storage  material table |
-//! | 7  | uniform  lighting (sun, ambient, the runtime quality + GI knobs) |
-//! | 8  | storage  per-XZ-column max occupied brick Y |
-//! | 9  | storage  1-bit-per-brick occupancy grid |
-//! | 10 | storage  chebyshev skip-distance bytes |
-//! | 16 | uniform  the world event field |
-//!
-//! Bindings 0 and 6 are deliberately absent: they belong to the shading pass
-//! (camera, output texture) and stay free for a consumer that has no camera.
+//! [`WorldBinding::Camera`] and [`WorldBinding::Output`] are deliberately NOT in this set —
+//! they belong to the shading pass, so a consumer with no camera can still use the world.
 //!
 //! S3b moved the event field here from the shading pass. It lived there while a
 //! material's event sensor was the only consumer; once the CA pass had to gate a
@@ -42,18 +32,13 @@
 
 use wgpu::util::DeviceExt;
 
+use super::binding::WorldBinding;
+
 use crate::brickmap::{Brickmap, BrickmapArray, BrickmapMetadata};
 use crate::lighting::LightingUniform;
 use crate::material::{GpuMaterial, MATERIAL_COUNT};
 use crate::world_edit::ArrayWrite;
 use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
-
-/// Where the world event field binds in group 0.
-///
-/// 16 is the first free index: `world.wgsl` owns 1-5, 7-10 and this,
-/// `cagi_volume.wgsl` owns 11, 13 and 14, `cagi.wgsl` owns 12, and the shading
-/// pass owns 0 (camera) and 6 (the output texture).
-pub const WORLD_EVENT_BINDING: u32 = 16;
 
 /// The pattern field cache — 17, the next free index after the event field.
 ///
@@ -72,7 +57,7 @@ pub const WORLD_EVENT_BINDING: u32 = 16;
 /// (`readonly_and_readwrite_storage_textures`); a read_write storage BUFFER is
 /// core. Declared in `shaders/pattern.wgsl`, which only the shading pass
 /// includes; the CA pass carries the binding in its layout and never names it.
-pub const PATTERN_CACHE_BINDING: u32 = 17;
+pub const PATTERN_CACHE_BINDING: u32 = WorldBinding::PatternCache.index();
 
 /// Entries in the direct-mapped pattern cache. 16 Mi entries x 4 bytes = 64 MiB.
 ///
@@ -199,17 +184,17 @@ impl WorldBindings {
             count: None,
         };
         vec![
-            uniform_entry(1),                   // brickmap metadata
-            storage_entry(2),                   // brick indices
-            storage_entry(3),                   // occupancy words
-            storage_entry(4),                   // material words
-            storage_entry(5),                   // material table
-            uniform_entry(7),                   // lighting
-            storage_entry(8),                   // per-XZ-column max occupied brick Y
-            storage_entry(9),                   // 1-bit-per-brick occupancy grid
-            storage_entry(10),                  // chebyshev skip-distance bytes
-            storage_entry(15),                  // AADF directional bounds (11-14 are CAGI's)
-            uniform_entry(WORLD_EVENT_BINDING), // the world event field
+            uniform_entry(WorldBinding::BrickmapMeta.index()), // brickmap metadata
+            storage_entry(WorldBinding::BrickIndices.index()), // brick indices
+            storage_entry(WorldBinding::OccupancyWords.index()), // occupancy words
+            storage_entry(WorldBinding::MaterialWords.index()), // material words
+            storage_entry(WorldBinding::Materials.index()),    // material table
+            uniform_entry(WorldBinding::Lighting.index()),     // lighting
+            storage_entry(WorldBinding::ColumnMaxBrickY.index()), // per-XZ-column max occupied brick Y
+            storage_entry(WorldBinding::BrickOccupancyBits.index()), // 1-bit-per-brick occupancy grid
+            storage_entry(WorldBinding::BrickSkipDistances.index()), // chebyshev skip-distance bytes
+            storage_entry(WorldBinding::BrickBounds.index()), // AADF directional bounds (11-14 are CAGI's)
+            uniform_entry(WorldBinding::WorldEvents.index()), // the world event field
         ]
     }
 
@@ -222,7 +207,7 @@ impl WorldBindings {
     /// append to the shared set.
     pub fn pattern_cache_layout_entry() -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
-            binding: PATTERN_CACHE_BINDING,
+            binding: WorldBinding::PatternCache.index(),
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -242,17 +227,41 @@ impl WorldBindings {
             }
         }
         vec![
-            entry(1, &self.metadata_uniform_buffer),
-            entry(2, &self.brick_indices_buffer),
-            entry(3, &self.occupancy_words_buffer),
-            entry(4, &self.material_words_buffer),
-            entry(5, &self.material_table_buffer),
-            entry(7, &self.lighting_uniform_buffer),
-            entry(8, &self.column_max_buffer),
-            entry(9, &self.brick_occupancy_bits_buffer),
-            entry(10, &self.skip_distance_buffer),
-            entry(15, &self.bound_buffer),
-            entry(WORLD_EVENT_BINDING, &self.world_event_buffer),
+            entry(
+                WorldBinding::BrickmapMeta.index(),
+                &self.metadata_uniform_buffer,
+            ),
+            entry(
+                WorldBinding::BrickIndices.index(),
+                &self.brick_indices_buffer,
+            ),
+            entry(
+                WorldBinding::OccupancyWords.index(),
+                &self.occupancy_words_buffer,
+            ),
+            entry(
+                WorldBinding::MaterialWords.index(),
+                &self.material_words_buffer,
+            ),
+            entry(WorldBinding::Materials.index(), &self.material_table_buffer),
+            entry(
+                WorldBinding::Lighting.index(),
+                &self.lighting_uniform_buffer,
+            ),
+            entry(
+                WorldBinding::ColumnMaxBrickY.index(),
+                &self.column_max_buffer,
+            ),
+            entry(
+                WorldBinding::BrickOccupancyBits.index(),
+                &self.brick_occupancy_bits_buffer,
+            ),
+            entry(
+                WorldBinding::BrickSkipDistances.index(),
+                &self.skip_distance_buffer,
+            ),
+            entry(WorldBinding::BrickBounds.index(), &self.bound_buffer),
+            entry(WorldBinding::WorldEvents.index(), &self.world_event_buffer),
         ]
     }
 

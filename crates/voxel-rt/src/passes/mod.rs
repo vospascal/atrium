@@ -9,6 +9,7 @@
 //! compile-on-miss pipeline cache both compute passes use, so switching a
 //! compile-time lever is a hash lookup instead of a mid-frame shader compile).
 
+pub mod binding;
 pub mod blit;
 pub mod cagi;
 pub mod dda;

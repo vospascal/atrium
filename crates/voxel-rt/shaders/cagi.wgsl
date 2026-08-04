@@ -34,7 +34,7 @@
 // Own binding (group 0):
 //  12  storage  light_volume_out — the BACK ping-pong buffer, read_write
 
-@group(0) @binding(12) var<storage, read_write> light_volume_out: array<u32>;
+@group(G_WORLD) @binding(B_LIGHT_VOLUME_BACK) var<storage, read_write> light_volume_out: array<u32>;
 
 // ---- E4: CAGI propagation levers ---------------------------------------------
 // Registry rows with the measured verdicts: `src/variants.rs::REGISTRY`,

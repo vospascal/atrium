@@ -5,16 +5,17 @@
 //! resources belong to [`super::world_bindings::WorldBindings`] (shared with the
 //! E4 CAGI pass) and the light volume to [`super::cagi::LightVolume`].
 //!
-//! Bind group 0 = the shared world entries (bindings 1-5, 7-10), the shared light
-//! volume entries (11, 13, 14 — the writable back buffer at 12 belongs to the CA
-//! pass alone), plus this pass's own camera uniform (0) and output texture (6).
-//! The tables at the top of `shaders/world.wgsl`, `shaders/cagi_volume.wgsl` and
-//! `shaders/dda.wgsl` document their own thirds.
+//! Bind group 0 = the shared world entries, the shared light-volume entries (minus the
+//! writable back buffer, which belongs to the CA pass alone), plus this pass's own
+//! [`WorldBinding::Camera`] and [`WorldBinding::Output`] — and
+//! [`WorldBinding::PatternCache`], which is this pass's alone and deliberately outside the
+//! shared layout. See [`super::binding`]; indices live there and nowhere else.
 
 use crate::camera::CameraUniform;
 use crate::material_graph::MaterialGraphShaderSet;
 use crate::variants::RenderQuality;
 
+use super::binding::WorldBinding;
 use super::cagi::LightVolume;
 use super::world_bindings::{WorldBindings, PATTERN_CACHE_BINDING};
 use super::ComputePipelineCache;
@@ -58,15 +59,22 @@ const OWN_SHADER_SOURCE: &str = concat!(
 /// A `LazyLock<String>` rather than a const for the mundane reason that `concat!` takes
 /// literals and `voxel_color::tonemap::WGSL` is a const. It is built once per process.
 ///
-/// The colour path goes LAST. WGSL module-scope declarations may appear in any order, so
-/// this is not a correctness requirement — it keeps `world.wgsl` at the front, which
-/// `passes::cagi`'s `both_pass_shaders_share_the_traversal_core` reads as a `starts_with`.
+/// Order: the generated binding indices (`passes::binding`) first, then `world.wgsl`, with
+/// the colour path LAST. WGSL module-scope declarations may appear in any order, so none of
+/// this is a correctness requirement — it keeps a dumped source readable, and
+/// `passes::cagi`'s `both_pass_shaders_share_the_traversal_core` pins the prelude/core pair.
 pub static SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let prelude = WorldBinding::wgsl_prelude();
     let mut source = String::with_capacity(
-        OWN_SHADER_SOURCE.len()
+        prelude.len()
+            + OWN_SHADER_SOURCE.len()
             + HillaireEnvironment::WGSL.len()
             + voxel_color::tonemap::WGSL.len(),
     );
+    // The binding indices come FIRST: every resource declaration below references them by
+    // name, and WGSL resolves module-scope identifiers regardless of order — but keeping the
+    // generated block at the top is what makes a dumped source readable.
+    source.push_str(&prelude);
     source.push_str(OWN_SHADER_SOURCE);
     source.push_str(HillaireEnvironment::WGSL);
     source.push_str(voxel_color::tonemap::WGSL);
@@ -369,7 +377,7 @@ fn create_bind_group_layout(
     entries.extend(LightVolume::layout_entries(false));
     entries.push(WorldBindings::pattern_cache_layout_entry());
     entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 0,
+        binding: WorldBinding::Camera.index(),
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
@@ -379,7 +387,7 @@ fn create_bind_group_layout(
         count: None,
     });
     entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 6,
+        binding: WorldBinding::Output.index(),
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::StorageTexture {
             access: wgpu::StorageTextureAccess::WriteOnly,
@@ -410,11 +418,11 @@ fn create_bind_groups(
             resource: world_bindings.pattern_cache_buffer().as_entire_binding(),
         });
         entries.push(wgpu::BindGroupEntry {
-            binding: 0,
+            binding: WorldBinding::Camera.index(),
             resource: camera_uniform_buffer.as_entire_binding(),
         });
         entries.push(wgpu::BindGroupEntry {
-            binding: 6,
+            binding: WorldBinding::Output.index(),
             resource: wgpu::BindingResource::TextureView(output_view),
         });
         device.create_bind_group(&wgpu::BindGroupDescriptor {

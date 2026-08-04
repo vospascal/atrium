@@ -238,10 +238,10 @@ struct Lighting {
     output_params: vec4<f32>,
 }
 
-@group(0) @binding(1) var<uniform> brickmap: BrickmapMeta;
-@group(0) @binding(2) var<storage, read> brick_indices: array<u32>;
-@group(0) @binding(3) var<storage, read> occupancy_words: array<u32>;
-@group(0) @binding(4) var<storage, read> material_words: array<u32>;
+@group(G_WORLD) @binding(B_BRICKMAP_META) var<uniform> brickmap: BrickmapMeta;
+@group(G_WORLD) @binding(B_BRICK_INDICES) var<storage, read> brick_indices: array<u32>;
+@group(G_WORLD) @binding(B_OCCUPANCY_WORDS) var<storage, read> occupancy_words: array<u32>;
+@group(G_WORLD) @binding(B_MATERIAL_WORDS) var<storage, read> material_words: array<u32>;
 // One row of the material table (src/material.rs `GpuMaterial`). Laid out as
 // SIXTEEN 16-byte rows — each a vec3 followed by the scalar filling its w slot, or
 // four scalars — so std430 adds no implicit padding and the Rust upload matches
@@ -379,12 +379,12 @@ fn material_face_roughness(material: u32, axis: u32, axis_sign: f32) -> f32 {
     return select(row.bottom_roughness, row.top_roughness, axis_sign < 0.0);
 }
 
-@group(0) @binding(5) var<storage, read> materials: array<Material>;
-@group(0) @binding(7) var<uniform> lighting: Lighting;
-@group(0) @binding(8) var<storage, read> column_max_brick_y: array<u32>;
-@group(0) @binding(9) var<storage, read> brick_occupancy_bits: array<u32>;
-@group(0) @binding(10) var<storage, read> brick_skip_distances: array<u32>;
-@group(0) @binding(15) var<storage, read> brick_bounds: array<u32>;
+@group(G_WORLD) @binding(B_MATERIALS) var<storage, read> materials: array<Material>;
+@group(G_WORLD) @binding(B_LIGHTING) var<uniform> lighting: Lighting;
+@group(G_WORLD) @binding(B_COLUMN_MAX_BRICK_Y) var<storage, read> column_max_brick_y: array<u32>;
+@group(G_WORLD) @binding(B_BRICK_OCCUPANCY_BITS) var<storage, read> brick_occupancy_bits: array<u32>;
+@group(G_WORLD) @binding(B_BRICK_SKIP_DISTANCES) var<storage, read> brick_skip_distances: array<u32>;
+@group(G_WORLD) @binding(B_BRICK_BOUNDS) var<storage, read> brick_bounds: array<u32>;
 
 // ---- S3/S3b: the world event field --------------------------------------------
 // Something that happened somewhere, at a time, with a reach: an entity's
@@ -415,7 +415,7 @@ struct WorldEvent {
 // The literal 16 must equal MAX_WORLD_EVENTS below and in src/world_event.rs.
 // It cannot reference the const: a WGSL array size must be declared before use
 // and this is the first file concatenated into every pass.
-@group(0) @binding(16) var<uniform> world_events: array<WorldEvent, 16>;
+@group(G_WORLD) @binding(B_WORLD_EVENTS) var<uniform> world_events: array<WorldEvent, 16>;
 
 const MAX_WORLD_EVENTS: u32 = 16u;
 

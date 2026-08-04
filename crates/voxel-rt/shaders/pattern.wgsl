@@ -979,7 +979,7 @@ fn pattern_variation_salt(layer: PatternLayer, sample: PatternSample) -> u32 {
 // entry is ever invalidated by the clock.
 const PATTERN_CACHE_MASK: u32 = 16777216u - 1u;
 
-@group(0) @binding(17) var<storage, read_write> pattern_cache: array<atomic<u32>>;
+@group(G_WORLD) @binding(B_PATTERN_CACHE) var<storage, read_write> pattern_cache: array<atomic<u32>>;
 
 /// Hash of everything the generator's answer depends on: the snapped coordinate,
 /// the per-face salt, the octave count, and the layer's generator configuration.

@@ -81,9 +81,9 @@ struct CagiVolumeMeta {
     event_responses: array<CagiEventResponse, 8>,
 }
 
-@group(0) @binding(11) var<storage, read> light_volume: array<u32>;
-@group(0) @binding(13) var<storage, read> cagi_cell_data: array<u32>;
-@group(0) @binding(14) var<uniform> cagi_volume_meta: CagiVolumeMeta;
+@group(G_WORLD) @binding(B_LIGHT_VOLUME_FRONT) var<storage, read> light_volume: array<u32>;
+@group(G_WORLD) @binding(B_CAGI_CELL_DATA) var<storage, read> cagi_cell_data: array<u32>;
+@group(G_WORLD) @binding(B_CAGI_VOLUME_META) var<uniform> cagi_volume_meta: CagiVolumeMeta;
 
 const CAGI_CELL_DATA_WORDS: u32 = 2u;
 

@@ -47,8 +47,8 @@ struct Camera {
     _pad4: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(6) var output: texture_storage_2d<rgba8unorm, write>;
+@group(G_WORLD) @binding(B_CAMERA) var<uniform> camera: Camera;
+@group(G_WORLD) @binding(B_OUTPUT) var output: texture_storage_2d<rgba8unorm, write>;
 
 // ---- E1/E1b: ambient occlusion levers ----------------------------------------
 // Ambient occlusion attenuates the hemisphere-ambient term only (never the
