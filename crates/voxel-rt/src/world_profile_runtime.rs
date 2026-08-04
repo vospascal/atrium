@@ -15,8 +15,8 @@ use crate::brickmap::{Brickmap, ClearanceUpdate};
 use crate::environment::{
     EnvironmentChannel, EnvironmentContext, GeneratedEnvironment, RuntimeEnvironmentState,
 };
-use crate::material::{material_blocks_movement, material_is_liquid, material_voxel};
 use crate::world_profile::{CompiledWorldProfile, WorldProfileError};
+use voxel_material::material::{material_blocks_movement, material_is_liquid, material_voxel};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GenerationApplication {

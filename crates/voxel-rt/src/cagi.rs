@@ -24,19 +24,19 @@
 //! sky by definition, so allocating it would be paying to store a constant.
 //! Measured footprints are in the bench doc's E4 section.
 
-use crate::animation_clock::AnimationClockSample;
 use crate::ao::patch_shader_const;
 use crate::brickmap::{
     brick_is_uniform, brick_slot, brick_uniform_material, Brickmap, BRICK_GRID_X, BRICK_GRID_Y,
     BRICK_GRID_Z, BRICK_SIZE, EMPTY_BRICK, EMPTY_COLUMN, MATERIAL_WORDS_PER_BRICK,
     OCCUPANCY_WORDS_PER_BRICK,
 };
-use crate::material::{Material, MATERIALS, MATERIAL_COUNT};
-use crate::material_graph::{
+use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
+use voxel_material::animation_clock::AnimationClockSample;
+use voxel_material::material::{Material, MATERIALS, MATERIAL_COUNT};
+use voxel_material::world_event::GpuWorldEvent;
+use voxel_material_graph::lowering::{
     sense_world_events, EmissionEventResponse, EventSensorConfig, SensorFalloff,
 };
-use crate::world_event::GpuWorldEvent;
-use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 /// Cell attribute bit 24: the cell absorbs light (see [`SOLID_FILL_DIVISOR`]).
 pub const CELL_SOLID: u32 = 0x0100_0000;
@@ -522,7 +522,7 @@ impl CagiGrid {
 /// emission as an event comes and goes.
 ///
 /// THREE EXPLICIT 16-BYTE ROWS, the layout discipline
-/// [`crate::world_event::GpuWorldEvent`] documents. Unlike that type this one
+/// [`voxel_material::world_event::GpuWorldEvent`] documents. Unlike that type this one
 /// needs no pad field: three `vec3` + trailing scalar rows are already 48 bytes
 /// under `#[repr(C)]`, which is exactly the WGSL uniform-array stride. The rows
 /// are a contract to keep, not a mismatch to patch — putting each scalar in the
@@ -1732,8 +1732,9 @@ mod tests {
     #[test]
     fn opaque_materials_transmit_nothing_and_foliage_transmits_something() {
         let table = MaterialAttributes::compiled();
-        let field =
-            |voxel| table.word(crate::material::material_id(voxel)) & CELL_TRANSMITTANCE_MASK;
+        let field = |voxel| {
+            table.word(voxel_material::material::material_id(voxel)) & CELL_TRANSMITTANCE_MASK
+        };
         for opaque in [Voxel::Stone, Voxel::Dirt, Voxel::Sand, Voxel::Trunk] {
             assert_eq!(field(opaque), 0, "{opaque:?} must not transmit");
         }
@@ -1769,8 +1770,8 @@ mod tests {
     #[test]
     fn material_emission_is_separate_from_the_attribute_word() {
         let table = MaterialAttributes::compiled();
-        let stone = crate::material::material_id(Voxel::Stone);
-        let glow = crate::material::material_id(Voxel::GlowBlock);
+        let stone = voxel_material::material::material_id(Voxel::Stone);
+        let glow = voxel_material::material::material_id(Voxel::GlowBlock);
         assert_eq!(table.word(stone) & !0x1fff_ffff, 0);
         assert!(table.emission(glow)[0] > 0.0);
         assert_eq!(table.emission(stone), [0.0; 3]);
@@ -1988,17 +1989,17 @@ mod tests {
     #[test]
     fn with_no_event_in_range_a_responsive_material_injects_its_pre_s4_value() {
         let mut rows = MATERIALS.to_vec();
-        let glow = crate::material::material_id(Voxel::GlowBlock) as usize;
+        let glow = voxel_material::material::material_id(Voxel::GlowBlock) as usize;
         // A REPLACE-blended emission layer, so `mean_emitted_radiance` is both
         // doing real work and non-linear in the base — the case a ratio of point
         // samples gets wrong.
-        rows[glow].patterns.layers[0] = Some(crate::pattern::PatternLayer {
-            generator: crate::pattern::PatternGenerator::Speckle { density: 0.3 },
-            target: crate::pattern::PatternTarget::Emission,
-            blend: crate::pattern::PatternBlend::Add,
+        rows[glow].patterns.layers[0] = Some(voxel_material::pattern::PatternLayer {
+            generator: voxel_material::pattern::PatternGenerator::Speckle { density: 0.3 },
+            target: voxel_material::pattern::PatternTarget::Emission,
+            blend: voxel_material::pattern::PatternBlend::Add,
             amount: 0.8,
             emission_intensity: 6.0,
-            ..crate::pattern::PatternLayer::IDENTITY
+            ..voxel_material::pattern::PatternLayer::IDENTITY
         });
         let resting = [0.4, 0.3, 0.2];
         rows[glow].emission = Some(resting);
@@ -2039,7 +2040,7 @@ mod tests {
     #[test]
     fn a_cell_without_a_response_ignores_the_event_field() {
         let table = MaterialAttributes::compiled();
-        let glow = crate::material::material_id(Voxel::GlowBlock);
+        let glow = voxel_material::material::material_id(Voxel::GlowBlock);
         let stored = table.emission(glow);
         let event = open_event_at([0.0; 3], 100.0);
         assert_eq!(
@@ -2081,7 +2082,7 @@ mod tests {
     /// not work.
     #[test]
     fn a_live_edited_albedo_reaches_the_cell_attributes() {
-        let stone = crate::material::material_id(Voxel::Stone);
+        let stone = voxel_material::material::material_id(Voxel::Stone);
         let compiled = MaterialAttributes::compiled();
 
         let mut rows = MATERIALS.to_vec();
@@ -2114,12 +2115,12 @@ mod tests {
     /// period is the only shape of test that shows it; any single period passes.
     #[test]
     fn a_patterned_emitter_lights_at_every_feature_scale() {
-        use crate::pattern::{
+        use voxel_material::pattern::{
             PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
             PatternTarget,
         };
 
-        let stone = crate::material::material_id(Voxel::Stone);
+        let stone = voxel_material::material::material_id(Voxel::Stone);
         // Speckle is the strict case: it is zero between specks, so a point sample of
         // one cell is as likely to read nothing as to read the speck.
         for generator in [
@@ -2160,9 +2161,9 @@ mod tests {
     /// the E5b area-weighted build; no palette slot is needed.
     #[test]
     fn a_patterned_emitter_mean_reaches_material_attributes() {
-        use crate::pattern::{PatternBlend, PatternLayer, PatternStack, PatternTarget};
+        use voxel_material::pattern::{PatternBlend, PatternLayer, PatternStack, PatternTarget};
 
-        let stone = crate::material::material_id(Voxel::Stone);
+        let stone = voxel_material::material::material_id(Voxel::Stone);
         let mut rows = MATERIALS.to_vec();
         assert!(
             !rows[stone as usize].is_emissive(),
@@ -2193,10 +2194,10 @@ mod tests {
     /// control how much light the surface casts.
     #[test]
     fn the_injected_mean_follows_the_layers_amount() {
-        use crate::pattern::{PatternBlend, PatternLayer, PatternStack, PatternTarget};
+        use voxel_material::pattern::{PatternBlend, PatternLayer, PatternStack, PatternTarget};
 
         let mean_at = |amount: f32| {
-            let mut row = MATERIALS[crate::material::material_id(Voxel::Stone) as usize];
+            let mut row = MATERIALS[voxel_material::material::material_id(Voxel::Stone) as usize];
             row.patterns = PatternStack::of(&[PatternLayer {
                 target: PatternTarget::Emission,
                 blend: PatternBlend::Add,
@@ -2212,7 +2213,7 @@ mod tests {
         assert!(bright > dim * 2.0, "{dim} -> {bright} is not proportional");
 
         // Amount zero is not an emitter at all: no slot spent, nothing injected.
-        let mut row = MATERIALS[crate::material::material_id(Voxel::Stone) as usize];
+        let mut row = MATERIALS[voxel_material::material::material_id(Voxel::Stone) as usize];
         row.patterns = PatternStack::of(&[PatternLayer {
             target: PatternTarget::Emission,
             blend: PatternBlend::Add,
@@ -2265,7 +2266,7 @@ mod tests {
         ];
         let emission =
             cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled()).emission;
-        let full = MATERIALS[crate::material::material_id(Voxel::GlowBlock) as usize]
+        let full = MATERIALS[voxel_material::material::material_id(Voxel::GlowBlock) as usize]
             .mean_emitted_radiance();
         for channel in 0..3 {
             assert!((emission[channel] - full[channel]).abs() < 1e-5);

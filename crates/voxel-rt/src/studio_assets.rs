@@ -17,20 +17,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use voxel_graph::{AssetId, STUDIO_ASSET_SCHEMA_VERSION};
 
-use crate::material::{
-    FaceOverride, FaceRoles, Material, MaterialKind, Medium, MediumPhase, MATERIAL_COUNT,
-};
-use crate::material_graph::graph_from_material;
 use crate::material_table::MaterialTable;
-use crate::pattern::{
-    PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
-    PatternTarget, MAX_PATTERN_LAYERS,
-};
 use crate::variants::{
     preset_spec, Lever, LeverRange, LeverValue, QualityPreset, RenderQuality, REGISTRY,
 };
 use crate::world_profile::{CompiledWorldProfile, WorldAssetCatalog, WorldProfileAsset};
 use voxel_graph::{DiagnosticSeverity, GraphAsset};
+use voxel_material::material::{
+    FaceOverride, FaceRoles, Material, MaterialKind, Medium, MediumPhase, MATERIAL_COUNT,
+};
+use voxel_material::pattern::{
+    PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
+    PatternTarget, MAX_PATTERN_LAYERS,
+};
+use voxel_material_graph::lowering::graph_from_material;
 
 /// A project-local reference to one asset file. Paths are always relative to the
 /// project directory; [`StudioProjectStore`] rejects absolute and parent paths.
@@ -1532,12 +1532,12 @@ mod tests {
         BiomeDefinition, BiomeId, BiomeRegistry, BiomeSelector, MaterialPaletteId, MaterialRole,
         SurfaceProfileId,
     };
-    use crate::material::{material_id, MATERIALS};
     use crate::variants::{LeverId, LeverValue};
     use crate::world_profile::{
         MaterialBinding, MaterialChoice, MaterialPalette, SurfaceLayer, SurfaceProfile,
     };
     use voxel_graph::GraphKind;
+    use voxel_material::material::{material_id, MATERIALS};
 
     fn temporary_project_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("voxel-rt-{label}-{}", AssetId::new()));

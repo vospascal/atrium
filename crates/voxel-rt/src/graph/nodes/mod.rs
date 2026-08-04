@@ -7,60 +7,12 @@
 
 use voxel_graph::NodeDeclaration;
 
-pub mod material;
 pub mod world;
 
+/// The families `voxel-rt` itself declares. The material family is
+/// `voxel_material_graph::NODES`, and `graph::CATALOGUE` composes both — this crate does not
+/// restate another crate's nodes.
 pub static BUILTIN_NODES: &[NodeDeclaration] = &[
-    material::constant_scalar::DECLARATION,
-    material::output::DECLARATION,
-    material::surface::DECLARATION,
-    material::constant_color::DECLARATION,
-    material::add_scalar::DECLARATION,
-    material::mix_color::DECLARATION,
-    material::clamp_scalar::DECLARATION,
-    material::position::DECLARATION,
-    material::normal::DECLARATION,
-    material::base_color::DECLARATION,
-    material::roughness::DECLARATION,
-    material::emission::DECLARATION,
-    material::emission_strength::DECLARATION,
-    material::face_color::DECLARATION,
-    material::face_roughness::DECLARATION,
-    material::pattern_flat::DECLARATION,
-    material::pattern_noise::DECLARATION,
-    material::pattern_speckle::DECLARATION,
-    material::pattern_perlin::DECLARATION,
-    material::pattern_simplex::DECLARATION,
-    material::pattern_ridged::DECLARATION,
-    material::pattern_turbulence::DECLARATION,
-    material::pattern_worley::DECLARATION,
-    material::pattern_worley_edge::DECLARATION,
-    material::pattern_worley_smooth::DECLARATION,
-    material::pattern_wave::DECLARATION,
-    material::pattern_checker::DECLARATION,
-    material::pattern_tile_tone::DECLARATION,
-    material::pattern_tile_edge::DECLARATION,
-    material::tessellation::DECLARATION,
-    material::pattern_layer::DECLARATION,
-    material::multiply_scalar::DECLARATION,
-    material::direction::DECLARATION,
-    material::time::DECLARATION,
-    material::oscillator::DECLARATION,
-    material::event_sensor::DECLARATION,
-    material::remap_scalar::DECLARATION,
-    material::noise::DECLARATION,
-    material::fbm::DECLARATION,
-    material::color_ramp::DECLARATION,
-    material::vector_add::DECLARATION,
-    material::vector_scale::DECLARATION,
-    material::normalize_vector::DECLARATION,
-    material::dot_vector::DECLARATION,
-    material::position_component::DECLARATION,
-    material::normal_component::DECLARATION,
-    material::passthrough_scalar::DECLARATION,
-    material::reroute_scalar::DECLARATION,
-    material::reroute_color::DECLARATION,
-    material::reroute_vector::DECLARATION,
     world::generated_terrain::DECLARATION,
     world::compose::DECLARATION,
     world::output::DECLARATION,
@@ -71,13 +23,14 @@ pub static BUILTIN_NODES: &[NodeDeclaration] = &[
 mod tests {
     use super::*;
 
-    /// The flat list must be exactly the family arrays, concatenated. A node declared in its
+    /// The flat list must be exactly this crate's family arrays, concatenated. The material
+    /// family is `voxel_material_graph::NODES` and is composed in by `graph::CATALOGUE`; its own
+    /// crate tests it. A node declared in its
     /// family but missing here would be unreachable — nothing could instantiate it — and
     /// nothing else would complain.
     #[test]
     fn catalogue_matches_the_family_arrays() {
-        let families: Vec<&NodeDeclaration> =
-            material::NODES.iter().chain(world::NODES.iter()).collect();
+        let families: Vec<&NodeDeclaration> = world::NODES.iter().collect();
         let flat: Vec<&NodeDeclaration> = BUILTIN_NODES.iter().collect();
         assert_eq!(
             flat.len(),
@@ -101,7 +54,7 @@ mod tests {
     #[test]
     fn every_node_file_is_declared_in_its_family() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/graph/nodes");
-        for (family, declared) in [("material", material::NODES), ("world", world::NODES)] {
+        for (family, declared) in [("world", world::NODES)] {
             let mut files: Vec<String> = std::fs::read_dir(root.join(family))
                 .expect("family directory")
                 .map(|entry| {

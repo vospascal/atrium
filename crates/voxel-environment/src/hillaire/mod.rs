@@ -13,4 +13,4 @@ mod lut;
 mod resources;
 
 pub use lut::{AtmosphereLutPasses, LutConfig};
-pub use resources::{AtmosphereBindings, LutKind};
+pub use resources::AtmosphereBindings;

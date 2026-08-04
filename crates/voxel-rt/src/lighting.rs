@@ -12,9 +12,8 @@
 //! Sun color/intensity and the hemisphere-ambient colors are fixed constants
 //! for now (Stage 4's look pass decides whether they become settings too).
 
-use glam::Vec3;
 use voxel_environment::{
-    EnvironmentFrame, AMBIENT_STRENGTH, GROUND_AMBIENT_COLOR, SKY_AMBIENT_COLOR, SUN_INTENSITY,
+    SunSettings, AMBIENT_STRENGTH, GROUND_AMBIENT_COLOR, SKY_AMBIENT_COLOR, SUN_INTENSITY,
 };
 
 /// Per-frame lighting data for the DDA compute shader, bindable as a uniform.
@@ -194,7 +193,7 @@ impl MaterialParams {
 /// The clock is split into whole epochs and a remainder rather than shipped as
 /// one monotonic float, because a single f32 second count loses the fraction
 /// an oscillator needs within hours of uptime, and any wrapped single clock
-/// steps every non-harmonic rate. See [`crate::animation_clock`] for the full
+/// steps every non-harmonic rate. See [`voxel_material::animation_clock`] for the full
 /// argument — this struct only carries the result.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AnimationParams {
@@ -360,235 +359,81 @@ impl WaterParams {
     }
 }
 
-/// User-facing sun position. The overlay mutates the angles; the platform
-/// layer converts to a [`LightingUniform`] once per frame.
+/// This frame's GPU lighting data for `sun`.
 ///
-/// Conventions: azimuth is degrees around +Y with 0° along +X and 90° along
-/// +Z (matching the camera's yaw convention); elevation is degrees above the
-/// horizon.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SunSettings {
-    pub azimuth_degrees: f32,
-    pub elevation_degrees: f32,
-    /// Sun intensity multiplier, scaling [`SUN_INTENSITY`]. 1.0 is the shipped look.
-    ///
-    /// Exposed by S2c, and it was a real gap rather than a nicety: **an emitter cannot
-    /// be judged against a light you cannot turn down.** The sun was a hardcoded
-    /// constant, so a glowing surface and the light it casts were both washed out by a
-    /// fixed 2.2 of daylight, and there was no way to tell an emitter that worked from
-    /// one that did nothing (Pascal, 2026-07-31: *"i cant realy see it emiting .. might
-    /// be as well that we dont have the right sky or light conditions .. we have pretty
-    /// crude over head light"*).
-    ///
-    /// Zero is a genuine night: the sun contributes nothing and only ambient, GI and
-    /// emitters remain. Which is exactly the condition an emissive material is for.
-    pub intensity_scale: f32,
-    /// Hemisphere-ambient multiplier, scaling [`AMBIENT_STRENGTH`]. 1.0 is the shipped
-    /// look, 0.0 removes the ambient floor entirely.
-    ///
-    /// Needed alongside the sun scale for the same reason: at sun zero the 0.4 ambient
-    /// is still enough to read every surface, so an emitter's contribution stays
-    /// invisible. Turning both down is what makes a dark room dark.
-    pub ambient_scale: f32,
-    /// Drive the light and sky from [`Self::day_phase`] instead of treating the
-    /// azimuth/elevation fields as a completely manual directional light.
-    pub day_night_enabled: bool,
-    /// Advance [`Self::day_phase`] each frame. The Studio defaults to a frozen
-    /// noon so opening a material never changes underneath the author.
-    pub cycle_running: bool,
-    /// Normalized time of day: 0/1 midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset.
-    pub day_phase: f32,
-    /// Real seconds for one complete in-world day.
-    pub day_length_seconds: f32,
-    /// 0/1 new moon, 0.5 full moon.
-    pub moon_phase: f32,
-}
-
-impl Default for SunSettings {
-    /// The Stage 1 shader constant, `normalize(vec3(0.55, 0.8, 0.35))`,
-    /// expressed as angles (~32.5° azimuth, ~50.8° elevation).
-    fn default() -> SunSettings {
-        let stage_one_direction = Vec3::new(0.55, 0.8, 0.35).normalize();
-        SunSettings {
-            azimuth_degrees: stage_one_direction
-                .z
-                .atan2(stage_one_direction.x)
-                .to_degrees(),
-            elevation_degrees: stage_one_direction.y.asin().to_degrees(),
-            intensity_scale: 1.0,
-            ambient_scale: 1.0,
-            day_night_enabled: true,
-            cycle_running: false,
-            day_phase: 0.5,
-            day_length_seconds: 240.0,
-            moon_phase: 0.85,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CelestialState {
-    sun_direction: Vec3,
-    moon_direction: Vec3,
-    active_direction: Vec3,
-    active_color: [f32; 3],
-    direct_strength: f32,
-    ambient_strength: f32,
-    daylight: f32,
-    moonlight: f32,
-    zenith: [f32; 3],
-    horizon: [f32; 3],
-    star_rotation: f32,
-}
-
-impl From<EnvironmentFrame> for CelestialState {
-    fn from(frame: EnvironmentFrame) -> Self {
-        Self {
-            sun_direction: frame.sun_direction,
-            moon_direction: frame.moon_direction,
-            active_direction: frame.active_direction,
-            active_color: frame.active_color,
-            direct_strength: frame.direct_strength,
-            ambient_strength: frame.ambient_strength,
-            daylight: frame.daylight,
-            moonlight: frame.moonlight,
-            zenith: frame.zenith,
-            horizon: frame.horizon,
-            star_rotation: frame.star_rotation,
-        }
-    }
-}
-
-impl SunSettings {
-    pub fn advance_day_cycle(&mut self, elapsed_seconds: f32) {
-        if self.day_night_enabled && self.cycle_running {
-            let day_length = self.day_length_seconds.max(1.0);
-            self.day_phase =
-                (self.day_phase + elapsed_seconds.max(0.0) / day_length).rem_euclid(1.0);
-        }
-    }
-
-    /// Human-readable 24-hour clock for the Studio overlay.
-    pub fn clock_label(&self) -> String {
-        let total_minutes = (self.day_phase.rem_euclid(1.0) * 24.0 * 60.0).round() as u32;
-        format!("{:02}:{:02}", (total_minutes / 60) % 24, total_minutes % 60)
-    }
-
-    fn celestial_state(&self) -> CelestialState {
-        self.environment_settings().environment_frame().into()
-    }
-
-    fn environment_settings(&self) -> voxel_environment::SunSettings {
-        voxel_environment::SunSettings {
-            azimuth_degrees: self.azimuth_degrees,
-            elevation_degrees: self.elevation_degrees,
-            intensity_scale: self.intensity_scale,
-            ambient_scale: self.ambient_scale,
-            day_night_enabled: self.day_night_enabled,
-            cycle_running: self.cycle_running,
-            day_phase: self.day_phase,
-            day_length_seconds: self.day_length_seconds,
-            moon_phase: self.moon_phase,
-        }
-    }
-
-    /// Unit direction from a surface toward the sun.
-    pub fn sun_direction(&self) -> Vec3 {
-        self.celestial_state().active_direction
-    }
-
-    /// Whether the CAGI volume has drifted far enough from its last celestial
-    /// solution to warrant a new flood. Direct light and the sky still update
-    /// every frame; this threshold prevents an animated clock from resetting
-    /// the iterative volume sixty times per second.
-    pub fn requires_light_reflood(&self, previous: &Self) -> bool {
-        let current = self.celestial_state();
-        let previous_state = previous.celestial_state();
-        current
-            .active_direction
-            .dot(previous_state.active_direction)
-            < 0.9994
-            || (current.direct_strength - previous_state.direct_strength).abs() > 0.04
-            || (self.intensity_scale - previous.intensity_scale).abs() > f32::EPSILON
-            || (self.ambient_scale - previous.ambient_scale).abs() > f32::EPSILON
-    }
-
-    /// This frame's GPU lighting data. `shading_params` carries the
-    /// experiments' runtime knobs (see [`ShadingParams`]);
-    /// `crate::variants::RenderQuality::shading_params` produces it from the
-    /// live quality settings, and each field is ignored by the shader when its
-    /// lever is compiled off.
-    pub fn lighting_uniform(
-        &self,
-        shading_params: ShadingParams,
-        gi_params: GiParams,
-        water_params: WaterParams,
-        material_params: MaterialParams,
-        animation_params: AnimationParams,
-        event_params: EventParams,
-    ) -> LightingUniform {
-        let celestial = self.celestial_state();
-        LightingUniform {
-            sun_direction: celestial.active_direction.to_array(),
-            _pad0: 0.0,
-            sun_color_intensity: [
-                celestial.active_color[0],
-                celestial.active_color[1],
-                celestial.active_color[2],
-                SUN_INTENSITY * self.intensity_scale.max(0.0) * celestial.direct_strength,
-            ],
-            sky_ambient: [
-                SKY_AMBIENT_COLOR[0] * (0.25 + 0.75 * celestial.daylight),
-                SKY_AMBIENT_COLOR[1] * (0.25 + 0.75 * celestial.daylight),
-                SKY_AMBIENT_COLOR[2],
-                AMBIENT_STRENGTH * self.ambient_scale.max(0.0) * celestial.ambient_strength,
-            ],
-            ground_ambient: [
-                GROUND_AMBIENT_COLOR[0],
-                GROUND_AMBIENT_COLOR[1],
-                GROUND_AMBIENT_COLOR[2],
-                0.0,
-            ],
-            shading_params: shading_params.to_array(),
-            gi_params: gi_params.to_array(),
-            water_params: water_params.to_array(),
-            water_optics: water_params.optics_to_array(),
-            celestial_sun: [
-                celestial.sun_direction.x,
-                celestial.sun_direction.y,
-                celestial.sun_direction.z,
-                celestial.daylight,
-            ],
-            celestial_moon: [
-                celestial.moon_direction.x,
-                celestial.moon_direction.y,
-                celestial.moon_direction.z,
-                self.moon_phase.clamp(0.0, 1.0),
-            ],
-            sky_zenith: [
-                celestial.zenith[0],
-                celestial.zenith[1],
-                celestial.zenith[2],
-                celestial.star_rotation,
-            ],
-            sky_horizon: [
-                celestial.horizon[0],
-                celestial.horizon[1],
-                celestial.horizon[2],
-                celestial.moonlight,
-            ],
-            material_params: material_params.to_array(),
-            animation_params: animation_params.to_array(),
-            event_params: event_params.to_array(),
-            // SDR by default; the windowed app overrides via `with_output_params`.
-            output_params: OutputParams::default().to_array(),
-        }
+/// A free function because [`SunSettings`] belongs to `voxel-environment` now — the mirror this
+/// replaced was a field-for-field copy that existed only so this method could hang off it.
+pub fn lighting_uniform(
+    sun: &SunSettings,
+    shading_params: ShadingParams,
+    gi_params: GiParams,
+    water_params: WaterParams,
+    material_params: MaterialParams,
+    animation_params: AnimationParams,
+    event_params: EventParams,
+) -> LightingUniform {
+    let celestial = sun.environment_frame();
+    LightingUniform {
+        sun_direction: celestial.active_direction.to_array(),
+        _pad0: 0.0,
+        sun_color_intensity: [
+            celestial.active_color[0],
+            celestial.active_color[1],
+            celestial.active_color[2],
+            SUN_INTENSITY * sun.intensity_scale.max(0.0) * celestial.direct_strength,
+        ],
+        sky_ambient: [
+            SKY_AMBIENT_COLOR[0] * (0.25 + 0.75 * celestial.daylight),
+            SKY_AMBIENT_COLOR[1] * (0.25 + 0.75 * celestial.daylight),
+            SKY_AMBIENT_COLOR[2],
+            AMBIENT_STRENGTH * sun.ambient_scale.max(0.0) * celestial.ambient_strength,
+        ],
+        ground_ambient: [
+            GROUND_AMBIENT_COLOR[0],
+            GROUND_AMBIENT_COLOR[1],
+            GROUND_AMBIENT_COLOR[2],
+            0.0,
+        ],
+        shading_params: shading_params.to_array(),
+        gi_params: gi_params.to_array(),
+        water_params: water_params.to_array(),
+        water_optics: water_params.optics_to_array(),
+        celestial_sun: [
+            celestial.sun_direction.x,
+            celestial.sun_direction.y,
+            celestial.sun_direction.z,
+            celestial.daylight,
+        ],
+        celestial_moon: [
+            celestial.moon_direction.x,
+            celestial.moon_direction.y,
+            celestial.moon_direction.z,
+            sun.moon_phase.clamp(0.0, 1.0),
+        ],
+        sky_zenith: [
+            celestial.zenith[0],
+            celestial.zenith[1],
+            celestial.zenith[2],
+            celestial.star_rotation,
+        ],
+        sky_horizon: [
+            celestial.horizon[0],
+            celestial.horizon[1],
+            celestial.horizon[2],
+            celestial.moonlight,
+        ],
+        material_params: material_params.to_array(),
+        animation_params: animation_params.to_array(),
+        event_params: event_params.to_array(),
+        // SDR by default; the windowed app overrides via `with_output_params`.
+        output_params: OutputParams::default().to_array(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
 
     /// Every runtime knob vector, in one uniform, so the component-order tests
     /// below all read the same construction.
@@ -615,7 +460,8 @@ mod tests {
         animation_params: AnimationParams,
         event_params: EventParams,
     ) -> LightingUniform {
-        sun.lighting_uniform(
+        crate::lighting::lighting_uniform(
+            &sun,
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
                 shadow_penumbra_scale,
@@ -636,8 +482,8 @@ mod tests {
                 refraction_strength: 1.0,
             },
             MaterialParams {
-                pattern_fade_start_meters: crate::pattern::PATTERN_FADE_START_METERS,
-                pattern_fade_end_meters: crate::pattern::PATTERN_FADE_END_METERS,
+                pattern_fade_start_meters: voxel_material::pattern::PATTERN_FADE_START_METERS,
+                pattern_fade_end_meters: voxel_material::pattern::PATTERN_FADE_END_METERS,
                 pixel_footprint_at_one_meter: 0.0,
             },
             animation_params,
@@ -739,8 +585,8 @@ mod tests {
         assert_eq!(
             animated.material_params,
             [
-                crate::pattern::PATTERN_FADE_START_METERS,
-                crate::pattern::PATTERN_FADE_END_METERS,
+                voxel_material::pattern::PATTERN_FADE_START_METERS,
+                voxel_material::pattern::PATTERN_FADE_END_METERS,
                 0.0,
                 0.0
             ]

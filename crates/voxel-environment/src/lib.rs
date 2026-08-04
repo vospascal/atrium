@@ -8,8 +8,6 @@
 //!
 //! Consumers depend on two traits and one request type:
 //!
-//! - [`EnvironmentProvider`] — the CPU state. Where the sun is, how bright, what the
-//!   backdrop palette is. No `wgpu`, so lighting code and headless tests can ask.
 //! - [`EnvironmentGpu`] — the GPU state. A bind-group layout, a bind group, the matching
 //!   WGSL, and one `submit` per frame.
 //! - [`EnvironmentRequest`] — what the renderer states each frame. The adapter decides
@@ -28,10 +26,7 @@ pub mod state;
 mod hillaire;
 
 pub use adapters::HillaireEnvironment;
-pub use api::{
-    EnvironmentFrame, EnvironmentInvalidation, EnvironmentProvider, EnvironmentRequest,
-    FroxelCamera,
-};
+pub use api::{EnvironmentFrame, EnvironmentInvalidation, EnvironmentRequest, FroxelCamera};
 pub use gpu::{EnvironmentGpu, ENVIRONMENT_BIND_GROUP};
 pub use scale::{from_kilometers_scale, FROM_KILOMETERS_SCALE};
 pub use state::{

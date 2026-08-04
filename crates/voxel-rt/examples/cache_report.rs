@@ -32,7 +32,7 @@
 use std::path::PathBuf;
 
 use voxel_graph::GraphAsset;
-use voxel_rt::material_cacheability::analyse;
+use voxel_material_graph::cacheability::analyse;
 
 fn main() {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project/graphs");

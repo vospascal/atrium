@@ -1,5 +1,5 @@
 //! S0 — the LIVE material table: the rows the renderer is currently using, as
-//! opposed to [`crate::material::MATERIALS`], which is what the binary was
+//! opposed to [`voxel_material::material::MATERIALS`], which is what the binary was
 //! compiled with.
 //!
 //! Why this exists at all. Before S0 the table reached the GPU exactly once, in
@@ -20,7 +20,7 @@
 //!   edits what a human wrote and [`Material::to_gpu`] stays the one place the
 //!   union is expanded.
 //! * **Dirty is a single flag, not a per-row set.** The table is
-//!   [`crate::material::MATERIAL_TABLE_BYTES`] = 6912 bytes; tracking which rows
+//!   [`voxel_material::material::MATERIAL_TABLE_BYTES`] = 6912 bytes; tracking which rows
 //!   changed would cost more code than the write it saves, and a `write_buffer`
 //!   of 2 KB is not measurable against a frame.
 //! * **`Default` is the compiled table**, which is what makes "reset this row"
@@ -32,14 +32,16 @@
 //! structural, not cosmetic: it decides [`MaterialFlags`], and through them the
 //! character's movement predicate, the editor's notion of emptiness, and whether
 //! traversal continues through the voxel. Those CPU predicates read the compiled
-//! [`crate::material::MATERIALS`] — deliberately, because they are sampled per
+//! [`voxel_material::material::MATERIALS`] — deliberately, because they are sampled per
 //! frame and must not depend on renderer state — so a live kind change would
 //! desync the physics from the picture. Values *within* a kind are safe and are
 //! what tuning actually needs. If kind-switching is ever wanted it has to come
 //! with a story for those predicates, not just a combo box.
 
-use crate::material::{GpuMaterial, Material, MATERIALS, MATERIAL_COUNT};
-use crate::material_graph::{EmissionEventResponse, MaterialGraphProgram, MaterialSampleContext};
+use voxel_material::material::{GpuMaterial, Material, MATERIALS, MATERIAL_COUNT};
+use voxel_material_graph::lowering::{
+    EmissionEventResponse, MaterialGraphProgram, MaterialSampleContext,
+};
 
 /// The live material table plus its upload gate.
 #[derive(Clone, Debug, PartialEq)]
@@ -209,10 +211,10 @@ impl MaterialTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::{material_id, MaterialKind};
-    use crate::material_graph::{compile, new_material_graph};
     use voxel_core::world::Voxel;
     use voxel_graph::{PropertyValue, SocketKey};
+    use voxel_material::material::{material_id, MaterialKind};
+    use voxel_material_graph::lowering::{compile, new_material_graph};
 
     /// The default table must be the compiled one AND must not ask for an upload:
     /// `WorldBindings::new` already sent exactly these bytes, so a dirty default
@@ -225,7 +227,7 @@ mod tests {
         assert!(table.take_dirty().is_none());
         assert_eq!(
             table.gpu_rows(),
-            crate::material::gpu_materials(),
+            voxel_material::material::gpu_materials(),
             "the live table must upload what the compiled one does"
         );
     }
@@ -315,7 +317,7 @@ mod tests {
         assert!(table.apply_graph_sample(
             stone,
             &program,
-            crate::material_graph::MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
+            voxel_material_graph::lowering::MaterialSampleContext::still([0.0; 3], [0.0, 1.0, 0.0]),
         ));
         assert_eq!(table.row(stone).unwrap().albedo, [0.9, 0.1, 0.2]);
         assert_eq!(table.row(stone).unwrap().roughness, 0.2);

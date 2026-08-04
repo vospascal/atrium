@@ -78,7 +78,7 @@ use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 use crate::brickmap::Brickmap;
 use crate::camera::{CameraInput, CameraPose, DEFAULT_VERTICAL_FOV_RADIANS};
-use crate::material::{material_blocks_movement, material_is_liquid};
+use voxel_material::material::{material_blocks_movement, material_is_liquid};
 
 /// Body width and depth, meters (0.6 m = 4.8 voxels). Wide enough to feel like
 /// a person, narrow enough to walk a 1 m gap between boulders.

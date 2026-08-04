@@ -34,8 +34,8 @@
 
 use voxel_core::vox::VoxMaterialKind;
 
-use crate::material::{Material, MATERIAL_COUNT};
 use crate::vox_material::ImportedFields;
+use voxel_material::material::{Material, MATERIAL_COUNT};
 
 /// Where an imported row came from — the identity a re-import is checked against.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,8 +333,8 @@ impl Field {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::{material_id, MaterialKind, MATERIALS};
     use voxel_core::world::Voxel;
+    use voxel_material::material::{material_id, MaterialKind, MATERIALS};
 
     fn source(file_index: u8, rgba: [u8; 4]) -> VoxSource {
         VoxSource {

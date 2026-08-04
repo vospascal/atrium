@@ -12,7 +12,7 @@
 //! (Pascal, 2026-07-31).
 //!
 //! Crucially it never touches the row's [`MaterialKind`]. Kind decides
-//! [`crate::material::MaterialFlags`], and through them the character's movement
+//! [`voxel_material::material::MaterialFlags`], and through them the character's movement
 //! predicate, the editor's notion of emptiness, and whether traversal continues
 //! through the voxel — and those CPU predicates read the *compiled* table on
 //! purpose. A file that could turn stone into a liquid would desync the physics
@@ -49,7 +49,7 @@
 
 use voxel_core::vox::{VoxMaterialKind, VoxPaletteEntry};
 
-use crate::material::{Material, MaterialKind};
+use voxel_material::material::{Material, MaterialKind};
 
 /// Everything a `.vox` file can say about a material, in this engine's units and
 /// conventions. `None` means the file was silent, which is not the same as zero.
@@ -245,7 +245,7 @@ fn grey(value: f32) -> [f32; 3] {
 /// when a `.vox` model is shown in the studio.
 ///
 /// Needed because a `.vox` palette holds up to 256 entries and the table has
-/// [`crate::material::MATERIAL_COUNT`] rows welded to `voxel-core`'s `Voxel` enum,
+/// [`voxel_material::material::MATERIAL_COUNT`] rows welded to `voxel-core`'s `Voxel` enum,
 /// so a file's colours cannot become rows. Nearest-albedo is a *preview* device:
 /// it makes a loaded model recognisable in the studio using materials that already
 /// exist, and it is overridable per entry because "closest colour" and "right
@@ -262,7 +262,7 @@ fn grey(value: f32) -> [f32; 3] {
 /// because it happens to be pale would silently turn a model into a lamp.
 pub fn nearest_material_row(albedo_srgb: [f32; 3]) -> u8 {
     let mut best = (f32::MAX, 0_u8);
-    for (id, row) in crate::material::MATERIALS.iter().enumerate() {
+    for (id, row) in voxel_material::material::MATERIALS.iter().enumerate() {
         if matches!(row.kind, MaterialKind::Air) || row.is_emissive() {
             continue;
         }
@@ -427,10 +427,10 @@ impl MediaScattering for VoxPaletteEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::{material_id, MATERIALS};
     use std::path::{Path, PathBuf};
     use voxel_core::vox::VoxFile;
     use voxel_core::world::Voxel;
+    use voxel_material::material::{material_id, MATERIALS};
 
     fn sheet_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/vox/material_sheet.vox")
@@ -698,8 +698,8 @@ mod tests {
 #[cfg(test)]
 mod studio_binding_tests {
     use super::*;
-    use crate::material::{material_id, MATERIALS};
     use voxel_core::world::Voxel;
+    use voxel_material::material::{material_id, MATERIALS};
 
     /// The nearest-albedo binding must never pick Air (a cell would vanish) or an
     /// emitter (a model would silently become a lamp).

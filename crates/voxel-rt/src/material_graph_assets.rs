@@ -8,11 +8,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::material_graph::{compile, MaterialGraphShaderSet, MaterialSampleContext};
-use crate::material_graph_layers::sync_pattern_layers_from_graph;
 use crate::material_table::MaterialTable;
 use crate::studio_assets::{AssetError, StudioProject, StudioProjectStore};
 use voxel_graph::GraphAsset;
+use voxel_material_graph::layers::sync_pattern_layers_from_graph;
+use voxel_material_graph::lowering::{compile, MaterialGraphShaderSet, MaterialSampleContext};
 
 /// Result of selecting a material in Graph Studio.
 #[derive(Clone, Debug)]
@@ -204,9 +204,9 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::material::{material_id, MATERIALS};
     use crate::studio_assets::{AssetReference, MaterialAsset, ProjectManifest};
     use voxel_graph::AssetId;
+    use voxel_material::material::{material_id, MATERIALS};
 
     #[test]
     fn checked_in_project_compiles_every_assigned_material_graph() {
@@ -227,10 +227,10 @@ mod tests {
     /// renders a still surface. This walks the real checked-in assets.
     #[test]
     fn the_authored_lava_drifts_and_the_authored_glow_block_reacts() {
-        use crate::animation_clock::AnimationClock;
-        use crate::material_graph::MaterialSampleContext;
-        use crate::pattern::{LayerAnimationSample, PatternSample};
-        use crate::world_event::{GpuWorldEvent, CHANNEL_PRESENCE};
+        use voxel_material::animation_clock::AnimationClock;
+        use voxel_material::pattern::{LayerAnimationSample, PatternSample};
+        use voxel_material::world_event::{GpuWorldEvent, CHANNEL_PRESENCE};
+        use voxel_material_graph::lowering::MaterialSampleContext;
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
         let store = StudioProjectStore::new(&root);
@@ -268,7 +268,7 @@ mod tests {
         let lava_graph = store
             .load_graph(std::path::Path::new("graphs/material-26.vgraph.json"))
             .expect("lava's graph loads");
-        let layer = crate::material_graph_layers::project_pattern_stack(
+        let layer = voxel_material_graph::layers::project_pattern_stack(
             &lava_graph,
             &crate::graph::CATALOGUE,
         )
@@ -374,7 +374,7 @@ mod tests {
         // express. The exact figure is deliberately not pinned; that it clears
         // the pattern ceiling is the contract.
         assert!(
-            response.triggered[0] > crate::pattern::MAX_EMISSION_INTENSITY,
+            response.triggered[0] > voxel_material::pattern::MAX_EMISSION_INTENSITY,
             "the glow block's authored amount did not survive to the response, or \
              it no longer demonstrates the uncapped graph route: {response:?}"
         );
@@ -437,7 +437,7 @@ mod tests {
         let mut project = StudioProject {
             manifest: ProjectManifest::new("test"),
         };
-        let mut graph = crate::material_graph::new_material_graph("invalid");
+        let mut graph = voxel_material_graph::lowering::new_material_graph("invalid");
         graph
             .links
             .retain(|_, link| link.from.socket.0 != "surface");

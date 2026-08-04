@@ -20,8 +20,16 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use voxel_color::OutputDepth;
 use voxel_color::{HeadroomChoice, TonemapCurve};
+use voxel_environment::SunSettings;
 use voxel_graph::GraphAsset;
-use voxel_rt::animation_clock::AnimationClock;
+use voxel_material::animation_clock::AnimationClock;
+use voxel_material::material;
+use voxel_material::world_event::{EventKey, EventSpec, WorldEventField, CHANNEL_PRESENCE};
+use voxel_material_graph::layers::sync_pattern_layers_from_graph;
+use voxel_material_graph::lowering::{
+    compile as compile_material_graph, GraphEditorState, MaterialGraphShaderSet,
+    MaterialSampleContext,
+};
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
 use voxel_rt::character::CharacterController;
@@ -30,15 +38,9 @@ use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::frame_timing::{GpuFrameTimers, SPAN_POST};
 use voxel_rt::gpu::GpuContext;
 use voxel_rt::light_fixture;
-use voxel_rt::lighting::{OutputParams, SunSettings};
-use voxel_rt::material;
+use voxel_rt::lighting::OutputParams;
 use voxel_rt::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
-use voxel_rt::material_graph::{
-    compile as compile_material_graph, GraphEditorState, MaterialGraphShaderSet,
-    MaterialSampleContext,
-};
 use voxel_rt::material_graph_assets::MaterialGraphAssetService;
-use voxel_rt::material_graph_layers::sync_pattern_layers_from_graph;
 use voxel_rt::material_table::MaterialTable;
 use voxel_rt::overlay::{
     MovementReadout, Overlay, OverlayFrameData, TargetHighlightReadout, WorldEditReadout,
@@ -55,7 +57,6 @@ use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
 use voxel_rt::world_edit::VoxelEdit;
-use voxel_rt::world_event::{EventKey, EventSpec, WorldEventField, CHANNEL_PRESENCE};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 use voxel_rt::world_profile::CompiledWorldProfile;
 use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
@@ -1970,7 +1971,8 @@ impl AppState {
             self.world_clock.sample(),
             self.world_events.len(),
         );
-        let lighting_uniform = self.sun_settings.lighting_uniform(
+        let lighting_uniform = voxel_rt::lighting::lighting_uniform(
+            &self.sun_settings,
             self.quality.shading_params(),
             self.quality.gi_params(),
             self.quality.water_params(),

@@ -29,7 +29,7 @@ use voxel_core::world::{
     Voxel, VoxelWorld, WorldVoxelCoord, VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z,
 };
 
-use crate::material::material_id;
+use voxel_material::material::material_id;
 
 /// Edge length of one brick in voxels.
 pub const BRICK_SIZE: usize = 8;
@@ -2303,7 +2303,7 @@ mod tests {
             .find(|y| brickmap.is_occupied(500, *y, 500))
             .expect("island column has occupied voxels");
         let existing = brickmap.get(500, surface_y, 500);
-        let same_voxel = (0..crate::material::MATERIAL_COUNT as u8)
+        let same_voxel = (0..voxel_material::material::MATERIAL_COUNT as u8)
             .find(|id| *id == existing)
             .expect("the material id exists");
         assert_eq!(same_voxel, existing);

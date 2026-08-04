@@ -34,7 +34,7 @@
 use voxel_core::world::{VOXEL_SIZE, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 use crate::brickmap::{Brickmap, BRICK_SIZE};
-use crate::material::material_is_empty_for_edits;
+use voxel_material::material::material_is_empty_for_edits;
 
 /// Nudge past a cell boundary before re-deriving an integer cell from a float
 /// position (mirrors `RAY_EPSILON` in `world.wgsl`), in voxel units.
@@ -327,8 +327,8 @@ fn argmin(values: &[f32; 3]) -> usize {
 mod tests {
     use super::*;
     use crate::brickmap::ClearanceUpdate;
-    use crate::material::{material_id, material_is_liquid};
     use voxel_core::world::{Voxel, VoxelWorld, WATER_LEVEL};
+    use voxel_material::material::{material_id, material_is_liquid};
 
     /// The default query — spelled once so the miss assertions stay one-liners.
     const ANY: CastTarget = CastTarget::AnyVoxel;

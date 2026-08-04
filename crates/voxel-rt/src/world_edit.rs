@@ -287,8 +287,8 @@ fn light_cells_in_voxel_box(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::material_id;
     use voxel_core::world::{Voxel, VoxelWorld, WORLD_SIZE_Y};
+    use voxel_material::material::material_id;
 
     fn island() -> Brickmap {
         Brickmap::build(&VoxelWorld::generate(1234, 0.0))

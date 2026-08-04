@@ -28,23 +28,23 @@
 //!
 //! ## Why kind is shown but not editable
 //!
-//! Kind decides [`crate::material::MaterialFlags`], and through them the
+//! Kind decides [`voxel_material::material::MaterialFlags`], and through them the
 //! character's movement predicate, the editor's notion of emptiness, and whether
 //! traversal continues through the voxel. Those CPU predicates read the *compiled*
 //! table on purpose (they are sampled per frame and must not depend on renderer
 //! state), so a live kind change would desync the physics from the picture. Values
 //! within a kind are what tuning actually needs.
 
-use crate::material::{Material, MaterialKind, MATERIALS};
 use crate::material_table::MaterialTable;
 use crate::material_tune::{ProvenanceTable, VoxSource};
-use crate::pattern::{
-    PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternTarget,
-    MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES, MAX_PATTERN_LAYERS, NO_PATTERNS, TEXEL_RUNGS,
-};
 use crate::studio::StudioPose;
 use crate::vox_material::VoxImportRow;
 use voxel_core::world::{Voxel, WORLD_VOXEL_SIZE_METERS};
+use voxel_material::material::{Material, MaterialKind, MATERIALS};
+use voxel_material::pattern::{
+    PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternTarget,
+    MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES, MAX_PATTERN_LAYERS, NO_PATTERNS, TEXEL_RUNGS,
+};
 
 /// The nine quick-access blocks in the in-world test bar. The bar is for fast
 /// construction; its "more" picker still exposes every material row.
@@ -929,7 +929,7 @@ fn draw_pattern_layer(ui: &mut egui::Ui, slot: usize, layer: &mut PatternLayer) 
                             // The pips carry the same tooltip: they are the reason
                             // the row is worth hovering, so hovering them has to
                             // explain itself rather than doing nothing.
-                            ui.colored_label(cost.color(), cost.pips())
+                            ui.colored_label(cost_color(cost), cost.pips())
                                 .on_hover_text(&hint);
                             clicked
                         })
@@ -1456,11 +1456,18 @@ fn draw_tier_controls(
     }
 }
 
+/// [`GeneratorCost::rgb`] as an egui colour. The ramp and the reason for it live with the
+/// data; this is only the type conversion.
+fn cost_color(cost: voxel_material::pattern::GeneratorCost) -> egui::Color32 {
+    let [red, green, blue] = cost.rgb();
+    egui::Color32::from_rgb(red, green, blue)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::material_id;
     use voxel_core::world::Voxel;
+    use voxel_material::material::material_id;
 
     /// The default selection must be a real row. Zero is Air — the miss sentinel —
     /// which is a legitimate thing to inspect but a poor thing to land on, so the

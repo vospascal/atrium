@@ -4,7 +4,7 @@
 //! which knows nothing about materials. This is the domain half.
 //!
 //! ```text
-//! mod.rs     the 62 operations across 7 families, tag()/from_tag(), GRAPH_CONTRACTS, CATALOGUE
+//! mod.rs     the 62 operations across 7 families, tag()/from_tag(), WORLD_CONTRACTS, CATALOGUE
 //! common.rs  the socket!/node!/pattern_fields! builders, and field atoms 2+ nodes share
 //! nodes/     one file per node — 54 of them — plus the flat BUILTIN_NODES list
 //! ```
@@ -24,13 +24,13 @@
 //! have no declaration yet, and no contract references them either, so nothing is
 //! unvalidatable. They are placeholders for families still to be built.
 
+use voxel_material_graph::MaterialNodeOperation;
+
 use voxel_graph::{
     Cardinality, FlowConstraintStatic, GraphContractStatic, GraphKind, NodeConstraintStatic,
-    NodeRegistry, OperationTag, SocketType,
+    NodeDeclaration, NodeRegistry, OperationTag, SocketType,
 };
 
-#[macro_use]
-pub mod common;
 pub mod nodes;
 
 pub use nodes::BUILTIN_NODES;
@@ -86,115 +86,6 @@ pub enum FieldNodeOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicNodeOperation {
     Always,
-}
-
-impl MaterialNodeOperation {
-    /// This operation's stable label. The text matches the node's own type id, so a
-    /// collision between two operations is visible on sight.
-    pub const fn tag(self) -> OperationTag {
-        match self {
-            Self::Output => OperationTag("material.output"),
-            Self::Surface => OperationTag("material.surface"),
-            Self::PatternLayer => OperationTag("material.pattern_layer"),
-            Self::PatternFlat => OperationTag("material.pattern_flat"),
-            Self::PatternNoise => OperationTag("material.pattern_noise"),
-            Self::PatternSpeckle => OperationTag("material.pattern_speckle"),
-            Self::PatternPerlin => OperationTag("material.pattern_perlin"),
-            Self::PatternSimplex => OperationTag("material.pattern_simplex"),
-            Self::PatternRidged => OperationTag("material.pattern_ridged"),
-            Self::PatternTurbulence => OperationTag("material.pattern_turbulence"),
-            Self::PatternWorley => OperationTag("material.pattern_worley"),
-            Self::PatternWorleyEdge => OperationTag("material.pattern_worley_edge"),
-            Self::PatternWorleySmooth => OperationTag("material.pattern_worley_smooth"),
-            Self::PatternWave => OperationTag("material.pattern_wave"),
-            Self::PatternChecker => OperationTag("material.pattern_checker"),
-            Self::PatternTileTone => OperationTag("material.pattern_tile_tone"),
-            Self::PatternTileEdge => OperationTag("material.pattern_tile_edge"),
-            Self::Tessellation => OperationTag("material.tessellation"),
-            Self::ConstantScalar => OperationTag("material.constant_scalar"),
-            Self::ConstantColor => OperationTag("material.constant_color"),
-            Self::AddScalar => OperationTag("material.add_scalar"),
-            Self::MixColor => OperationTag("material.mix_color"),
-            Self::ClampScalar => OperationTag("material.clamp_scalar"),
-            Self::Position => OperationTag("material.position"),
-            Self::Normal => OperationTag("material.normal"),
-            Self::EmissionStrength => OperationTag("material.emission_strength"),
-            Self::FaceColor => OperationTag("material.face_color"),
-            Self::FaceRoughness => OperationTag("material.face_roughness"),
-            Self::RemapScalar => OperationTag("material.remap_scalar"),
-            Self::Noise => OperationTag("material.noise"),
-            Self::Fbm => OperationTag("material.fbm"),
-            Self::ColorRamp => OperationTag("material.color_ramp"),
-            Self::VectorAdd => OperationTag("material.vector_add"),
-            Self::VectorScale => OperationTag("material.vector_scale"),
-            Self::NormalizeVector => OperationTag("material.normalize_vector"),
-            Self::DotVector => OperationTag("material.dot_vector"),
-            Self::PositionComponent => OperationTag("material.position_component"),
-            Self::NormalComponent => OperationTag("material.normal_component"),
-            Self::PassthroughScalar => OperationTag("material.passthrough_scalar"),
-            Self::Time => OperationTag("material.time"),
-            Self::Oscillator => OperationTag("material.oscillator"),
-            Self::EventSensor => OperationTag("material.event_sensor"),
-            Self::MultiplyScalar => OperationTag("material.multiply_scalar"),
-            Self::Direction => OperationTag("material.direction"),
-            Self::RerouteScalar => OperationTag("material.reroute_scalar"),
-            Self::RerouteColor => OperationTag("material.reroute_color"),
-            Self::RerouteVector => OperationTag("material.reroute_vector"),
-        }
-    }
-
-    fn from_label(label: &str) -> Option<Self> {
-        match label {
-            "material.output" => Some(Self::Output),
-            "material.surface" => Some(Self::Surface),
-            "material.pattern_layer" => Some(Self::PatternLayer),
-            "material.pattern_flat" => Some(Self::PatternFlat),
-            "material.pattern_noise" => Some(Self::PatternNoise),
-            "material.pattern_speckle" => Some(Self::PatternSpeckle),
-            "material.pattern_perlin" => Some(Self::PatternPerlin),
-            "material.pattern_simplex" => Some(Self::PatternSimplex),
-            "material.pattern_ridged" => Some(Self::PatternRidged),
-            "material.pattern_turbulence" => Some(Self::PatternTurbulence),
-            "material.pattern_worley" => Some(Self::PatternWorley),
-            "material.pattern_worley_edge" => Some(Self::PatternWorleyEdge),
-            "material.pattern_worley_smooth" => Some(Self::PatternWorleySmooth),
-            "material.pattern_wave" => Some(Self::PatternWave),
-            "material.pattern_checker" => Some(Self::PatternChecker),
-            "material.pattern_tile_tone" => Some(Self::PatternTileTone),
-            "material.pattern_tile_edge" => Some(Self::PatternTileEdge),
-            "material.tessellation" => Some(Self::Tessellation),
-            "material.constant_scalar" => Some(Self::ConstantScalar),
-            "material.constant_color" => Some(Self::ConstantColor),
-            "material.add_scalar" => Some(Self::AddScalar),
-            "material.mix_color" => Some(Self::MixColor),
-            "material.clamp_scalar" => Some(Self::ClampScalar),
-            "material.position" => Some(Self::Position),
-            "material.normal" => Some(Self::Normal),
-            "material.emission_strength" => Some(Self::EmissionStrength),
-            "material.face_color" => Some(Self::FaceColor),
-            "material.face_roughness" => Some(Self::FaceRoughness),
-            "material.remap_scalar" => Some(Self::RemapScalar),
-            "material.noise" => Some(Self::Noise),
-            "material.fbm" => Some(Self::Fbm),
-            "material.color_ramp" => Some(Self::ColorRamp),
-            "material.vector_add" => Some(Self::VectorAdd),
-            "material.vector_scale" => Some(Self::VectorScale),
-            "material.normalize_vector" => Some(Self::NormalizeVector),
-            "material.dot_vector" => Some(Self::DotVector),
-            "material.position_component" => Some(Self::PositionComponent),
-            "material.normal_component" => Some(Self::NormalComponent),
-            "material.passthrough_scalar" => Some(Self::PassthroughScalar),
-            "material.time" => Some(Self::Time),
-            "material.oscillator" => Some(Self::Oscillator),
-            "material.event_sensor" => Some(Self::EventSensor),
-            "material.multiply_scalar" => Some(Self::MultiplyScalar),
-            "material.direction" => Some(Self::Direction),
-            "material.reroute_scalar" => Some(Self::RerouteScalar),
-            "material.reroute_color" => Some(Self::RerouteColor),
-            "material.reroute_vector" => Some(Self::RerouteVector),
-            _ => None,
-        }
-    }
 }
 
 impl WorldNodeOperation {
@@ -338,7 +229,7 @@ impl NodeOperation {
     /// unrecognised node type, which happens when reading a document authored against a newer
     /// catalogue and is never a reason to panic.
     pub fn from_tag(tag: OperationTag) -> Option<Self> {
-        if let Some(operation) = MaterialNodeOperation::from_label(tag.0) {
+        if let Some(operation) = MaterialNodeOperation::from_tag(tag) {
             return Some(Self::Material(operation));
         }
         if let Some(operation) = WorldNodeOperation::from_label(tag.0) {
@@ -363,95 +254,6 @@ impl NodeOperation {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MaterialNodeOperation {
-    Output,
-    Surface,
-    PatternLayer,
-    PatternFlat,
-    PatternNoise,
-    PatternSpeckle,
-    PatternPerlin,
-    PatternSimplex,
-    PatternRidged,
-    PatternTurbulence,
-    PatternWorley,
-    PatternWorleyEdge,
-    PatternWorleySmooth,
-    PatternWave,
-    PatternChecker,
-    PatternTileTone,
-    PatternTileEdge,
-    Tessellation,
-    ConstantScalar,
-    ConstantColor,
-    AddScalar,
-    MixColor,
-    ClampScalar,
-    Position,
-    Normal,
-    EmissionStrength,
-    FaceColor,
-    FaceRoughness,
-    RemapScalar,
-    Noise,
-    Fbm,
-    ColorRamp,
-    VectorAdd,
-    VectorScale,
-    NormalizeVector,
-    DotVector,
-    PositionComponent,
-    NormalComponent,
-    PassthroughScalar,
-    /// S3 — monotone seconds since start.
-    Time,
-    /// S3 — a periodic wave with an authored sync/de-sync source.
-    Oscillator,
-    /// S3 — "did something happen within X metres of me, and how long ago?"
-    EventSensor,
-    MultiplyScalar,
-    /// S3 — speed + angles to a velocity vector.
-    Direction,
-    RerouteScalar,
-    RerouteColor,
-    RerouteVector,
-}
-
-const MATERIAL_SURFACE_INTERMEDIATES: &[OperationTag] =
-    &[NodeOperation::Material(MaterialNodeOperation::PatternLayer).tag()];
-
-const MATERIAL_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[
-    NodeConstraintStatic {
-        operation: NodeOperation::Material(MaterialNodeOperation::Output).tag(),
-        cardinality: Cardinality::EXACTLY_ONE,
-    },
-    NodeConstraintStatic {
-        operation: NodeOperation::Material(MaterialNodeOperation::Surface).tag(),
-        cardinality: Cardinality::EXACTLY_ONE,
-    },
-    NodeConstraintStatic {
-        operation: NodeOperation::Material(MaterialNodeOperation::PatternLayer).tag(),
-        cardinality: Cardinality::up_to(crate::pattern::MAX_PATTERN_LAYERS),
-    },
-];
-
-const MATERIAL_FLOWS: &[FlowConstraintStatic] = &[
-    FlowConstraintStatic {
-        value_type: SocketType::MaterialSurface,
-        source: NodeOperation::Material(MaterialNodeOperation::Surface).tag(),
-        intermediates: MATERIAL_SURFACE_INTERMEDIATES,
-        sink: NodeOperation::Material(MaterialNodeOperation::Output).tag(),
-    },
-    // S3 animation nodes deliberately get NO flow constraint. An oscillator
-    // that reaches nothing is already reported by the `unreached-node` warning
-    // in `resolve`, which covers every node rather than three named ones. A
-    // flow here would fire on the identical condition at Error severity, and
-    // Error blocks material compilation — so an oscillator left unwired for a
-    // moment mid-edit would stop the material building. A warning is the honest
-    // severity for "this has no effect yet".
-];
-
 const WORLD_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[NodeConstraintStatic {
     operation: NodeOperation::World(WorldNodeOperation::Output).tag(),
     cardinality: Cardinality::EXACTLY_ONE,
@@ -464,18 +266,13 @@ const WORLD_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
     sink: NodeOperation::World(WorldNodeOperation::Output).tag(),
 }];
 
-pub static GRAPH_CONTRACTS: &[GraphContractStatic] = &[
-    GraphContractStatic {
-        kind: GraphKind::Material,
-        nodes: MATERIAL_NODE_CONSTRAINTS,
-        flows: MATERIAL_FLOWS,
-    },
-    GraphContractStatic {
-        kind: GraphKind::World,
-        nodes: WORLD_NODE_CONSTRAINTS,
-        flows: WORLD_FLOWS,
-    },
-];
+/// The contracts for the families `voxel-rt` itself declares. The material contracts belong
+/// to `voxel-material-graph`; `CATALOGUE` composes both.
+pub static WORLD_CONTRACTS: &[GraphContractStatic] = &[GraphContractStatic {
+    kind: GraphKind::World,
+    nodes: WORLD_NODE_CONSTRAINTS,
+    flows: WORLD_FLOWS,
+}];
 
 /// Canonical node schemas. Backends register execution independently, but node
 /// construction, validation, persistence, catalog presentation, and every
@@ -486,13 +283,21 @@ pub static GRAPH_CONTRACTS: &[GraphContractStatic] = &[
 /// `Default` registry — it owns no nodes, so a default could only have meant "somebody
 /// else's catalogue", which is exactly how the contracts came to be read from a hidden
 /// module-level static.
-pub const CATALOGUE: NodeRegistry = NodeRegistry::new(BUILTIN_NODES, GRAPH_CONTRACTS);
+pub const CATALOGUE: NodeRegistry = NodeRegistry::new(FAMILIES, CONTRACT_SETS);
+
+/// Every family in the shipped catalogue. Adding a domain — textures, audio — is one entry
+/// here plus its crate; nothing existing changes. That composition is the whole reason
+/// `NodeRegistry` takes families rather than one flat slice.
+static FAMILIES: &[&[NodeDeclaration]] = &[voxel_material_graph::NODES, nodes::world::NODES];
+static CONTRACT_SETS: &[&[GraphContractStatic]] =
+    &[voxel_material_graph::CONTRACTS, WORLD_CONTRACTS];
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+
     use voxel_graph::{
         node_reachability, DiagnosticSeverity, FieldDefault, FieldTarget, GraphAsset, GraphCommand,
         GraphCommandError, GraphHistory, InputPin, LinkId, LinkRecord, NodeId, NodeRecord,
@@ -508,7 +313,7 @@ mod tests {
     #[test]
     fn every_operation_tag_round_trips_and_is_unique() {
         let mut tag_to_operation: BTreeMap<&'static str, NodeOperation> = BTreeMap::new();
-        for declaration in BUILTIN_NODES {
+        for declaration in CATALOGUE.declarations() {
             let tag = declaration.operation;
             let operation = NodeOperation::from_tag(tag)
                 .unwrap_or_else(|| panic!("node {} declares unknown tag {tag}", declaration.id));
@@ -536,7 +341,7 @@ mod tests {
     /// rule that silently matches nothing — a graph would validate clean while violating it.
     #[test]
     fn every_contract_tag_names_a_known_operation() {
-        for contract in GRAPH_CONTRACTS {
+        for contract in CATALOGUE.contracts() {
             for constraint in contract.nodes {
                 assert!(
                     NodeOperation::from_tag(constraint.operation).is_some(),
@@ -577,7 +382,7 @@ mod tests {
     #[test]
     fn builtin_node_schemas_are_complete_unique_and_self_consistent() {
         let mut node_ids = BTreeSet::new();
-        for declaration in BUILTIN_NODES {
+        for declaration in CATALOGUE.declarations() {
             assert!(
                 node_ids.insert(declaration.id),
                 "duplicate {}",
@@ -683,7 +488,7 @@ mod tests {
                 declaration.fields.len()
             );
         }
-        for contract in GRAPH_CONTRACTS {
+        for contract in CATALOGUE.contracts() {
             for constraint in contract.nodes {
                 assert!(constraint
                     .cardinality
@@ -710,7 +515,7 @@ mod tests {
         let range = octaves.hard_range.expect("octaves are bounded");
         assert_eq!(
             range.max,
-            crate::pattern::MAX_NOISE_OCTAVES as f32,
+            voxel_material::pattern::MAX_NOISE_OCTAVES as f32,
             "the inspector offers octaves the generator will clamp away"
         );
     }
@@ -748,7 +553,7 @@ mod tests {
     #[test]
     fn singleton_node_limits_are_declared_and_enforced_by_commands() {
         let registry = crate::graph::CATALOGUE;
-        let mut graph = crate::material_graph::new_material_graph("test");
+        let mut graph = voxel_material_graph::lowering::new_material_graph("test");
         let output_type = NodeTypeId("material.output".into());
         assert!(!graph.can_add_node_type(&registry, &output_type));
         assert!(matches!(
@@ -804,7 +609,7 @@ mod tests {
     #[test]
     fn material_contract_reports_a_broken_canonical_surface_flow() {
         let registry = crate::graph::CATALOGUE;
-        let mut graph = crate::material_graph::new_material_graph("test");
+        let mut graph = voxel_material_graph::lowering::new_material_graph("test");
         graph
             .links
             .retain(|_, link| link.from.socket.0 != "surface");
@@ -820,7 +625,7 @@ mod tests {
     #[test]
     fn source_cardinality_rewires_a_surface_output_and_undo_restores_it() {
         let registry = crate::graph::CATALOGUE;
-        let mut graph = crate::material_graph::new_material_graph("test");
+        let mut graph = voxel_material_graph::lowering::new_material_graph("test");
         let surface = graph
             .nodes
             .iter()
@@ -891,7 +696,7 @@ mod tests {
 
         // Choices are declarations, not bare strings: every option explains
         // itself, and only a declared `value` survives an edit command.
-        for declaration in BUILTIN_NODES {
+        for declaration in CATALOGUE.declarations() {
             for field in declaration.fields {
                 let mut values = BTreeSet::new();
                 for option in field.choices {
@@ -965,7 +770,7 @@ mod tests {
     #[test]
     fn an_unwired_node_is_unreachable_and_reported_as_inert() {
         let registry = crate::graph::CATALOGUE;
-        let mut graph = crate::material_graph::new_material_graph("test");
+        let mut graph = voxel_material_graph::lowering::new_material_graph("test");
         let orphan = id("orphan-oscillator");
         GraphCommand::AddNode {
             id: orphan.clone(),
@@ -1243,8 +1048,8 @@ mod tests {
     /// cacheability analysis that an animated surface can be baked.
     #[test]
     fn the_declared_temporal_axis_matches_what_each_node_lowers_to() {
-        use crate::graph::MaterialNodeOperation;
-        for declaration in BUILTIN_NODES {
+        use voxel_material_graph::MaterialNodeOperation;
+        for declaration in CATALOGUE.declarations() {
             let Some(NodeOperation::Material(operation)) =
                 NodeOperation::from_tag(declaration.operation)
             else {
@@ -1279,8 +1084,8 @@ mod tests {
     /// means the taint pass has a source it does not know about.
     #[test]
     fn exactly_the_known_nodes_are_time_sources() {
-        let mut sources: Vec<&str> = BUILTIN_NODES
-            .iter()
+        let mut sources: Vec<&str> = CATALOGUE
+            .declarations()
             .filter(|declaration| declaration.temporal.is_source())
             .map(|declaration| declaration.id)
             .collect();
@@ -1302,7 +1107,7 @@ mod tests {
     #[test]
     fn only_the_pattern_layers_animation_sockets_are_separable() {
         let mut separable: Vec<(&str, &str, Separable)> = Vec::new();
-        for declaration in BUILTIN_NODES {
+        for declaration in CATALOGUE.declarations() {
             for socket in declaration.inputs.iter().chain(declaration.outputs) {
                 if socket.separable != Separable::None {
                     separable.push((declaration.id, socket.key, socket.separable));
@@ -1344,7 +1149,7 @@ mod tests {
     /// a deliberate change here and not a quiet one.
     #[test]
     fn nothing_time_varying_can_shape_a_cacheable_pattern_field() {
-        for declaration in BUILTIN_NODES {
+        for declaration in CATALOGUE.declarations() {
             let produces_field = declaration
                 .outputs
                 .iter()
@@ -1396,8 +1201,8 @@ mod tests {
     /// produces, not by what it is called.
     #[test]
     fn the_set_of_pattern_field_producers_is_pinned() {
-        let mut producers: Vec<&str> = BUILTIN_NODES
-            .iter()
+        let mut producers: Vec<&str> = CATALOGUE
+            .declarations()
             .filter(|declaration| {
                 declaration
                     .outputs
@@ -1441,8 +1246,8 @@ mod tests {
         /// currently runs on.
         const BRIGHTEST_PANEL_NITS: f32 = 1600.0;
 
-        let strength = BUILTIN_NODES
-            .iter()
+        let strength = CATALOGUE
+            .declarations()
             .find(|declaration| declaration.id == "material.emission_strength")
             .expect("material.emission_strength must exist")
             .fields

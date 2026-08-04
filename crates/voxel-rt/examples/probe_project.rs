@@ -22,9 +22,9 @@ use std::path::PathBuf;
 use voxel_core::world::{
     VoxelWorld, WorldVoxelCoord, WORLD_VOXELS_X, WORLD_VOXELS_Y, WORLD_VOXELS_Z,
 };
+use voxel_material::material::{material_voxel, Material, MATERIALS, MATERIAL_COUNT};
 use voxel_rt::brickmap::Brickmap;
 use voxel_rt::environment::{RuntimeEnvironmentState, Season};
-use voxel_rt::material::{material_voxel, Material, MATERIALS, MATERIAL_COUNT};
 use voxel_rt::material_graph_assets::MaterialGraphAssetService;
 use voxel_rt::material_table::MaterialTable;
 use voxel_rt::studio_assets::{StudioProject, StudioProjectStore};

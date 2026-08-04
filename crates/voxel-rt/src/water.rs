@@ -38,11 +38,11 @@ use glam::Vec3;
 
 use crate::ao::patch_shader_const;
 use crate::brickmap::Brickmap;
-use crate::material::{
+use voxel_core::world::VOXEL_SIZE;
+use voxel_material::material::{
     material_is_liquid, AIR_INDEX_OF_REFRACTION, WATER_ABSORPTION_PER_METER,
     WATER_SCATTERING_PER_METER,
 };
-use voxel_core::world::VOXEL_SIZE;
 
 /// Per-channel **extinction** of water, per metre: `absorption + scattering` from
 /// the material table's authored pair. Kept as a named constant because it is the
@@ -411,7 +411,7 @@ fn boolean_literal(value: bool) -> &'static str {
 
 /// Normal-incidence reflectance of an air/medium boundary — the `F0` Schlick's
 /// approximation needs, derived from the medium's own
-/// [`crate::material::Material::index_of_refraction`] rather than tuned:
+/// [`voxel_material::material::Material::index_of_refraction`] rather than tuned:
 /// `((n1 - n2) / (n1 + n2))^2`. For water's 1.333 that is **0.0204**, i.e. water
 /// seen straight down reflects 2% and transmits 98%.
 pub fn fresnel_f0(index_of_refraction: f32) -> f32 {
@@ -500,9 +500,9 @@ pub fn eye_is_submerged(brickmap: &Brickmap, eye_position_meters: Vec3) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::WATER_INDEX_OF_REFRACTION;
     use crate::passes::cagi::CAGI_SHADER_SOURCE;
     use crate::passes::dda::SHADER_SOURCE;
+    use voxel_material::material::WATER_INDEX_OF_REFRACTION;
 
     #[test]
     fn default_settings_match_shader_source() {
@@ -926,8 +926,8 @@ mod tests {
             "blue should out-scatter red by more than an order of magnitude, got {albedo:?}"
         );
         // ...and it is NOT the water row's diffuse albedo, which is what it replaced.
-        let painted = crate::material::MATERIALS
-            [crate::material::material_id(voxel_core::world::Voxel::Water) as usize]
+        let painted = voxel_material::material::MATERIALS
+            [voxel_material::material::material_id(voxel_core::world::Voxel::Water) as usize]
             .albedo;
         assert!(
             (albedo[1] - painted[1]).abs() > 0.2,
@@ -992,7 +992,7 @@ mod tests {
     /// sun term by in the shader.
     #[test]
     fn the_sun_reaching_a_submerged_surface_dims_and_reddens_with_depth() {
-        let sun_elevation_sine = crate::lighting::SunSettings::default().sun_direction().y;
+        let sun_elevation_sine = voxel_environment::SunSettings::default().sun_direction().y;
         assert!(
             (sun_elevation_sine - 0.7752).abs() < 0.001,
             "default sun elevation sine is {sun_elevation_sine}; the table assumes 0.7752"

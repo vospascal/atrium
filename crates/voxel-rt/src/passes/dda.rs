@@ -12,8 +12,8 @@
 //! shared layout. See [`super::binding`]; indices live there and nowhere else.
 
 use crate::camera::CameraUniform;
-use crate::material_graph::MaterialGraphShaderSet;
 use crate::variants::RenderQuality;
+use voxel_material_graph::lowering::MaterialGraphShaderSet;
 
 use super::binding::WorldBinding;
 use super::cagi::LightVolume;
@@ -39,12 +39,11 @@ const OWN_SHADER_SOURCE: &str = concat!(
     include_str!("../../shaders/cagi_volume.wgsl"),
     include_str!("../../shaders/water.wgsl"),
     include_str!("../../shaders/dda.wgsl"),
-    // The graph ABI and its shared helpers, then the dispatch the generated
-    // functions are injected into. The prelude comes AFTER dda.wgsl because it
-    // reads `world_events`, which that file declares.
-    include_str!("../../shaders/graph_prelude.wgsl"),
-    include_str!("../../shaders/material_graph.wgsl"),
 );
+
+/// The graph ABI and its dispatch, from the crate that generates the functions injected into
+/// it. AFTER `dda.wgsl` because the prelude reads `world_events`, which that file declares.
+const GRAPH_ABI: &str = voxel_material_graph::WGSL_PRELUDE;
 
 /// The shading pass's complete shader source. Exposed so the headless benchmark
 /// (`examples/bench_dda.rs`) can build A/B pipeline variants by patching the
@@ -68,6 +67,8 @@ pub static SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new
     let mut source = String::with_capacity(
         prelude.len()
             + OWN_SHADER_SOURCE.len()
+            + GRAPH_ABI.len()
+            + voxel_material_graph::WGSL_DISPATCH.len()
             + HillaireEnvironment::WGSL.len()
             + voxel_color::tonemap::WGSL.len(),
     );
@@ -76,6 +77,8 @@ pub static SHADER_SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new
     // generated block at the top is what makes a dumped source readable.
     source.push_str(&prelude);
     source.push_str(OWN_SHADER_SOURCE);
+    source.push_str(GRAPH_ABI);
+    source.push_str(voxel_material_graph::WGSL_DISPATCH);
     source.push_str(HillaireEnvironment::WGSL);
     source.push_str(voxel_color::tonemap::WGSL);
     source
@@ -822,5 +825,264 @@ pub(crate) mod tests {
             pollster::block_on(adapter.request_device(&crate::gpu::device_descriptor(&adapter)))
                 .expect("adapter exists but device creation failed"),
         )
+    }
+
+    use std::collections::BTreeMap;
+
+    use voxel_graph::{InputPin, LinkId, NodeTypeId, OutputPin, PropertyValue, SocketKey};
+    use voxel_material_graph::lowering::{compile, MaterialGraphShaderSet, MaterialSampleContext};
+    use voxel_material_graph::test_support::{graph_driving_roughness, graph_with_output, node};
+
+    // ---- moved from `voxel-material-graph` -------------------------------------
+    // These exercise the ASSEMBLED shader, which is this crate's job: the lowering crate
+    // generates a function and validates it standalone, but only here is it spliced into
+    // `world.wgsl` + the binding prelude + the environment + the colour path. They were
+    // the lowering crate's only reach back into the renderer.
+    /// The highest-value test in this module: every animation node must survive
+    /// injection into the WHOLE assembled DDA source, because a codegen slip is
+    /// otherwise a runtime-only failure with no test to name it.
+    #[test]
+    fn animation_nodes_lower_to_naga_valid_wgsl_in_the_full_dda_source() {
+        let registry = crate::graph::CATALOGUE;
+        for (index, (node_type, socket)) in [
+            ("material.time", "value"),
+            ("material.oscillator", "value"),
+            ("material.event_sensor", "signal"),
+            ("material.event_sensor", "nearness"),
+            ("material.event_sensor", "envelope"),
+            ("material.multiply_scalar", "value"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (graph, _) = graph_driving_roughness(node_type, socket, &[]);
+            let program = compile(&graph, &registry)
+                .unwrap_or_else(|error| panic!("{node_type}.{socket} failed to compile: {error}"));
+            let slot = 6 + index as u8;
+            let mut set = MaterialGraphShaderSet::default();
+            set.insert(slot, program);
+            let source = super::build_shader_source_with_material_graphs(
+                &crate::variants::RenderQuality::default(),
+                &set,
+            );
+            let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
+                panic!("{node_type}.{socket}: {}", error.emit_to_string(&source))
+            });
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{node_type}.{socket}: {error}"));
+        }
+    }
+
+    /// A project with no animation nodes must generate byte-identical source.
+    /// This is the ONLY byte-identity S3 claims — a frozen oscillator still
+    /// returns a value, so an animated scene needs its own pixel baseline.
+    #[test]
+    fn a_project_without_animation_nodes_generates_unchanged_shader_source() {
+        let quality = crate::variants::RenderQuality::default();
+        let empty = MaterialGraphShaderSet::default();
+        assert_eq!(
+            super::build_shader_source_with_material_graphs(&quality, &empty),
+            super::build_shader_source(&quality)
+        );
+    }
+
+    #[test]
+    fn graph_dispatch_injects_a_slot_branch_into_the_full_dda_source() {
+        let registry = crate::graph::CATALOGUE;
+        let (graph, _) = graph_with_output();
+        let program = compile(&graph, &registry).unwrap();
+        let mut set = MaterialGraphShaderSet::default();
+        set.insert(6, program);
+        let source = super::build_shader_source_with_material_graphs(
+            &crate::variants::RenderQuality::default(),
+            &set,
+        );
+        assert!(source.contains("if (material == 6u)"));
+        assert!(source.contains("fn graph_material_6("));
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+
+    #[test]
+    fn procedural_catalog_lowers_noise_fbm_ramp_and_vectors_for_preview_and_gpu() {
+        let registry = crate::graph::CATALOGUE;
+        let (mut graph, output) = graph_with_output();
+        let position = node("position");
+        let noise = node("noise");
+        let ramp = node("ramp");
+        let fbm = node("fbm");
+        graph.nodes.extend([
+            (
+                position.clone(),
+                voxel_graph::NodeRecord {
+                    node_type: NodeTypeId("material.position".into()),
+                    node_type_version: 1,
+                    properties: BTreeMap::new(),
+                    socket_defaults: BTreeMap::new(),
+                    unknown_payload: None,
+                },
+            ),
+            (
+                noise.clone(),
+                voxel_graph::NodeRecord {
+                    node_type: NodeTypeId("material.noise".into()),
+                    node_type_version: 1,
+                    properties: BTreeMap::new(),
+                    socket_defaults: BTreeMap::from([
+                        (SocketKey("scale".into()), PropertyValue::Scalar(1.5)),
+                        (SocketKey("detail".into()), PropertyValue::Scalar(3.0)),
+                        (SocketKey("roughness".into()), PropertyValue::Scalar(0.55)),
+                    ]),
+                    unknown_payload: None,
+                },
+            ),
+            (
+                ramp.clone(),
+                voxel_graph::NodeRecord {
+                    node_type: NodeTypeId("material.color_ramp".into()),
+                    node_type_version: 1,
+                    properties: BTreeMap::new(),
+                    socket_defaults: BTreeMap::from([
+                        (
+                            SocketKey("color_a".into()),
+                            PropertyValue::Color([0.02, 0.1, 0.01, 1.0]),
+                        ),
+                        (
+                            SocketKey("color_b".into()),
+                            PropertyValue::Color([0.5, 0.8, 0.08, 1.0]),
+                        ),
+                    ]),
+                    unknown_payload: None,
+                },
+            ),
+            (
+                fbm.clone(),
+                voxel_graph::NodeRecord {
+                    node_type: NodeTypeId("material.fbm".into()),
+                    node_type_version: 1,
+                    properties: BTreeMap::new(),
+                    socket_defaults: BTreeMap::new(),
+                    unknown_payload: None,
+                },
+            ),
+        ]);
+        graph.links.extend([
+            (
+                LinkId("position-noise".into()),
+                voxel_graph::LinkRecord {
+                    from: OutputPin {
+                        node: position.clone(),
+                        socket: SocketKey("vector".into()),
+                    },
+                    to: InputPin {
+                        node: noise.clone(),
+                        socket: SocketKey("position".into()),
+                    },
+                    order: 0,
+                },
+            ),
+            (
+                LinkId("noise-ramp".into()),
+                voxel_graph::LinkRecord {
+                    from: OutputPin {
+                        node: noise.clone(),
+                        socket: SocketKey("factor".into()),
+                    },
+                    to: InputPin {
+                        node: ramp.clone(),
+                        socket: SocketKey("factor".into()),
+                    },
+                    order: 0,
+                },
+            ),
+            (
+                LinkId("ramp-base".into()),
+                voxel_graph::LinkRecord {
+                    from: OutputPin {
+                        node: ramp.clone(),
+                        socket: SocketKey("color".into()),
+                    },
+                    to: InputPin {
+                        node: output.clone(),
+                        socket: SocketKey("base_color".into()),
+                    },
+                    order: 0,
+                },
+            ),
+            (
+                LinkId("noise-emission".into()),
+                voxel_graph::LinkRecord {
+                    from: OutputPin {
+                        node: noise.clone(),
+                        socket: SocketKey("color".into()),
+                    },
+                    to: InputPin {
+                        node: output.clone(),
+                        socket: SocketKey("emission".into()),
+                    },
+                    order: 0,
+                },
+            ),
+            (
+                LinkId("position-fbm".into()),
+                voxel_graph::LinkRecord {
+                    from: OutputPin {
+                        node: position,
+                        socket: SocketKey("vector".into()),
+                    },
+                    to: InputPin {
+                        node: fbm.clone(),
+                        socket: SocketKey("position".into()),
+                    },
+                    order: 0,
+                },
+            ),
+            (
+                LinkId("fbm-roughness".into()),
+                voxel_graph::LinkRecord {
+                    from: OutputPin {
+                        node: fbm,
+                        socket: SocketKey("value".into()),
+                    },
+                    to: InputPin {
+                        node: output,
+                        socket: SocketKey("roughness".into()),
+                    },
+                    order: 0,
+                },
+            ),
+        ]);
+        let program = compile(&graph, &registry).unwrap();
+        let sample = program.evaluate(MaterialSampleContext::still(
+            [1.25, 2.5, -0.75],
+            [0.0, 1.0, 0.0],
+        ));
+        assert!(sample.base_color.iter().all(|value| value.is_finite()));
+        assert!((0.0..=1.0).contains(&sample.roughness));
+        assert!(program.wgsl.contains("graph_fbm"));
+
+        let mut shaders = MaterialGraphShaderSet::default();
+        shaders.insert(3, program.clone());
+        shaders.insert(4, program);
+        let source = super::build_shader_source_with_material_graphs(
+            &crate::variants::RenderQuality::default(),
+            &shaders,
+        );
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
     }
 }

@@ -415,15 +415,15 @@ impl RainbowCorridor {
     ///   voxels of width. It lands on the floor a little past the middle, well
     ///   clear of both side walls, so the lit strip is floor rather than a wall
     ///   graze.
-    pub fn sun() -> crate::lighting::SunSettings {
-        crate::lighting::SunSettings {
+    pub fn sun() -> voxel_environment::SunSettings {
+        voxel_environment::SunSettings {
             azimuth_degrees: 180.0,
             elevation_degrees: 60.0,
             intensity_scale: 1.0,
             ambient_scale: 0.0,
             day_night_enabled: false,
             cycle_running: false,
-            ..crate::lighting::SunSettings::default()
+            ..voxel_environment::SunSettings::default()
         }
     }
 
@@ -479,7 +479,7 @@ mod tests {
     /// detail origin.
     fn material_at(brickmap: &Brickmap, coordinate: WorldVoxelCoord) -> Voxel {
         let origin = coordinate.detail_origin();
-        crate::material::material_voxel(brickmap.get(origin[0], origin[1], origin[2]))
+        voxel_material::material::material_voxel(brickmap.get(origin[0], origin[1], origin[2]))
     }
 
     fn carved(notch: NotchState) -> (RainbowCorridor, Brickmap) {
@@ -553,7 +553,8 @@ mod tests {
     #[test]
     fn every_band_material_is_a_reflector_and_not_an_emitter() {
         for band in BAND_MATERIALS {
-            let material = &crate::material::MATERIALS[crate::material::material_id(band) as usize];
+            let material = &voxel_material::material::MATERIALS
+                [voxel_material::material::material_id(band) as usize];
             assert!(
                 material.emission.is_none(),
                 "band material `{}` emits — a corridor of emitters lights itself and \
@@ -587,8 +588,8 @@ mod tests {
     #[test]
     fn ceiling_is_a_neutral_reflector() {
         for readout in [CEILING_MATERIAL, END_CAP_MATERIAL] {
-            let material =
-                &crate::material::MATERIALS[crate::material::material_id(readout) as usize];
+            let material = &voxel_material::material::MATERIALS
+                [voxel_material::material::material_id(readout) as usize];
             assert!(
                 material.emission.is_none(),
                 "readout surface `{}` emits, so colour on it proves nothing",

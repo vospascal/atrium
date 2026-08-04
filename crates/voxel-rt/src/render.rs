@@ -23,16 +23,16 @@ use crate::cagi::{
 use crate::camera::CameraUniform;
 use crate::frame_timing::{GpuFrameTimers, SPAN_CAGI, SPAN_DDA, SPAN_POST};
 use crate::lighting::LightingUniform;
-use crate::material::GpuMaterial;
 use crate::passes::blit::BlitPass;
 use crate::passes::cagi::{AttributeSource, CagiPass, LightVolume};
 use crate::passes::dda::DdaPass;
 use crate::passes::world_bindings::WorldBindings;
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
-use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_color::OutputFormat;
 use voxel_environment::{EnvironmentGpu, EnvironmentRequest, FroxelCamera, HillaireEnvironment};
+use voxel_material::material::GpuMaterial;
+use voxel_material::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 
 /// Far bound of the aerial-perspective froxel grid, in kilometres. The grid's Z axis is
 /// logarithmic, so this is a horizon distance rather than a resolution cost.

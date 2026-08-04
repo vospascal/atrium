@@ -1,0 +1,25 @@
+[package]
+name = "voxel-material-graph"
+version = "0.1.0"
+edition = "2021"
+description = "Material graphs: the picture becomes a numbered recipe, then shader code and a CPU preview"
+
+# `voxel-graph` supplies the document, `voxel-material` what a surface is, `voxel-core` the
+# world scale a pattern period is measured against.
+#
+# `naga` is a RUNTIME dependency, not a dev one, and deliberately: `lowering::validate_wgsl`
+# parses and validates every generated function before it is handed to the renderer, so a bad
+# graph fails at compile-the-graph time with a message naming the node — rather than at pipeline
+# creation, where the error names a line in a 6000-line concatenation.
+#
+# Still no `wgpu`: this crate generates and checks WGSL text. It never compiles a pipeline or
+# binds a resource. The day it needs a device, the split is in the wrong place.
+[dev-dependencies]
+# Reading the checked-in project graphs in tests.
+serde_json = "1"
+
+[dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
+voxel-core = { path = "../voxel-core" }
+voxel-graph = { path = "../voxel-graph" }
+voxel-material = { path = "../voxel-material" }

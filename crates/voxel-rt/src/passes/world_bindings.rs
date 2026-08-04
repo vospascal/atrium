@@ -36,9 +36,9 @@ use super::binding::WorldBinding;
 
 use crate::brickmap::{Brickmap, BrickmapArray, BrickmapMetadata};
 use crate::lighting::LightingUniform;
-use crate::material::{GpuMaterial, MATERIAL_COUNT};
 use crate::world_edit::ArrayWrite;
-use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
+use voxel_material::material::{GpuMaterial, MATERIAL_COUNT};
+use voxel_material::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 
 /// The pattern field cache — 17, the next free index after the event field.
 ///
@@ -132,7 +132,7 @@ impl WorldBindings {
             }),
             material_table_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("world material table"),
-                contents: bytemuck::cast_slice(&crate::material::gpu_materials()),
+                contents: bytemuck::cast_slice(&voxel_material::material::gpu_materials()),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             }),
             lighting_uniform_buffer,

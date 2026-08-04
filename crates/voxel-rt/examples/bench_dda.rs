@@ -90,7 +90,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use std::path::PathBuf;
-use voxel_rt::animation_clock::AnimationClockSample;
+use voxel_environment::SunSettings;
+use voxel_material::animation_clock::AnimationClockSample;
+use voxel_material::material::{GpuMaterial, MaterialKind, MATERIALS};
+use voxel_material::pattern::{
+    PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
+    PatternTarget, DEFAULT_TEXELS_PER_VOXEL,
+};
 use voxel_rt::ao::{AoMode, AoSettings};
 use voxel_rt::brickmap::{
     Brickmap, ClearanceUpdate, BRICK_SIZE, MATERIAL_WORDS_PER_BRICK, OCCUPANCY_WORDS_PER_BRICK,
@@ -101,16 +107,12 @@ use voxel_rt::cagi::{
 use voxel_rt::camera::{CameraInput, CameraPose, CameraUniform, DEFAULT_VERTICAL_FOV_RADIANS};
 use voxel_rt::character::{self, CharacterController, CharacterSettings};
 use voxel_rt::light_fixture::{self, NotchState, RainbowCorridor};
-use voxel_rt::lighting::{LightingUniform, SunSettings};
-use voxel_rt::material::{GpuMaterial, MaterialKind, MATERIALS};
+use voxel_rt::lighting::LightingUniform;
 use voxel_rt::passes::cagi::{CagiPass, LightVolume};
 use voxel_rt::passes::dda::{build_shader_source, DdaPass, SHADER_SOURCE};
 use voxel_rt::passes::world_bindings::WorldBindings;
-use voxel_rt::pattern::{
-    PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
-    PatternTarget, DEFAULT_TEXELS_PER_VOXEL,
-};
 
+use voxel_material::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_rt::material_graph_assets::MaterialGraphAssetService;
 use voxel_rt::material_table::MaterialTable;
 use voxel_rt::studio_assets::{StudioProject, StudioProjectStore};
@@ -120,7 +122,6 @@ use voxel_rt::variants::{
 };
 use voxel_rt::voxel_dda;
 use voxel_rt::world_edit::{VoxelEdit, WorldEditSettings};
-use voxel_rt::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 
 use glam::Vec3;
@@ -208,7 +209,8 @@ impl Scenario {
             AnimationClockSample::FROZEN,
             0,
         );
-        self.sun.lighting_uniform(
+        voxel_rt::lighting::lighting_uniform(
+            &self.sun,
             quality.shading_params(),
             quality.gi_params(),
             quality.water_params(),
@@ -576,8 +578,8 @@ fn main() {
 fn report_material_costs(device: &wgpu::Device, queue: &wgpu::Queue, use_project: bool) {
     use std::f32::consts::FRAC_PI_2;
     use voxel_core::world::Voxel;
-    use voxel_rt::material::{material_voxel, MATERIAL_COUNT};
-    use voxel_rt::pattern::PatternStack;
+    use voxel_material::material::{material_voxel, MATERIAL_COUNT};
+    use voxel_material::pattern::PatternStack;
     use voxel_rt::studio::{orbit_pose, StudioPose, StudioScene};
 
     println!();
@@ -1106,7 +1108,7 @@ fn swatch_rows(
     generator: PatternGenerator,
     domain_warp: f32,
 ) -> Vec<GpuMaterial> {
-    let target_row = voxel_rt::material::material_id(sample) as usize;
+    let target_row = voxel_material::material::material_id(sample) as usize;
     let layer = PatternLayer {
         generator,
         // TILE frame with a 2:1 running bond, so the two tile generators have a wall
@@ -3829,7 +3831,8 @@ fn scenario_sky_radiance() -> [f32; 3] {
         AnimationClockSample::FROZEN,
         0,
     );
-    let uniform = SunSettings::default().lighting_uniform(
+    let uniform = voxel_rt::lighting::lighting_uniform(
+        &SunSettings::default(),
         quality.shading_params(),
         quality.gi_params(),
         quality.water_params(),

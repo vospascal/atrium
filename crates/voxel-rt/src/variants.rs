@@ -28,17 +28,19 @@
 //! patching, and `crate::passes::dda::build_shader_source` remains the single
 //! place a shader source is assembled.
 
-use crate::animation_clock::AnimationClockSample;
 use crate::ao::{float_literal, patch_shader_const, AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
 use crate::lighting::{
     AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams, WaterParams,
 };
-use crate::pattern::{MAX_PATTERN_LAYERS, PATTERN_FADE_END_METERS, PATTERN_FADE_START_METERS};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
 use crate::water::{WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface};
 use crate::world_edit::{ClearanceUpdateMode, WorldEditSettings};
+use voxel_material::animation_clock::AnimationClockSample;
+use voxel_material::pattern::{
+    MAX_PATTERN_LAYERS, PATTERN_FADE_END_METERS, PATTERN_FADE_START_METERS,
+};
 
 /// Render-scale bounds (the resolution lever's range, also enforced by
 /// `crate::render::Renderer::set_render_scale`).
@@ -55,10 +57,6 @@ pub const VOXELS_PER_METER: f32 = 8.0;
 /// still compile, silently pick the top rung's behaviour, and label a column with
 /// a rung that does not exist.
 pub const PATTERN_ENTRY_PROBE_TOP: u32 = 11;
-
-/// Every generator bit set — the shipped default, mirroring
-/// `MATERIAL_PATTERN_GENERATOR_MASK` in `shaders/pattern.wgsl`. Fourteen codes.
-pub const PATTERN_GENERATOR_MASK_ALL: u32 = (1 << 14) - 1;
 
 /// The three generators bench section 9's saturated table actually authors: flat,
 /// noise and speckle. Pruning to this must leave the frame BIT-IDENTICAL, which is
@@ -2549,13 +2547,13 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::ShaderConst,
         shader_const: Some("MATERIAL_PATTERN_GENERATOR_MASK"),
         label: "generator mask (compiled-in generators)",
-        default_value: LeverValue::Count(PATTERN_GENERATOR_MASK_ALL),
+        default_value: LeverValue::Count(voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL),
         // Two rungs, not a free bitmask field: the panel offers "everything" and
         // "only what the bench table authors", because those are the two values a
         // measurement compares. A derived mask would be computed, never dialled.
         range: LeverRange::Rungs(&[
             PATTERN_GENERATOR_MASK_SECTION_NINE,
-            PATTERN_GENERATOR_MASK_ALL,
+            voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL,
         ]),
         verdict: "WINNER (2026-08-03), and the proof that this pass is \
                   RESIDENCY-bound rather than ALU-bound. Pruning the nine \
@@ -3077,7 +3075,7 @@ impl MaterialSettings {
             "MATERIAL_PATTERN_GENERATOR_MASK",
             &format!(
                 "{}u",
-                self.pattern_generator_mask & PATTERN_GENERATOR_MASK_ALL
+                self.pattern_generator_mask & voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL
             ),
         );
         let strength = patch_shader_const(
@@ -3116,7 +3114,7 @@ impl Default for MaterialSettings {
             pattern_texel_lod: true,
             pattern_entry_probe: 0,
             pattern_animation: true,
-            pattern_generator_mask: PATTERN_GENERATOR_MASK_ALL,
+            pattern_generator_mask: voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL,
             pattern_strength: 1.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
             pattern_octave_lod: false,

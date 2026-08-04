@@ -19,7 +19,6 @@
 //! the benchmark and the pinning tests all read its registry, so a lever cannot
 //! live in the shader without a documented verdict and a bench column.
 
-pub mod animation_clock;
 pub mod ao;
 pub mod biome;
 pub mod brickmap;
@@ -33,17 +32,12 @@ pub mod gpu;
 pub mod graph;
 pub mod light_fixture;
 pub mod lighting;
-pub mod material;
-pub mod material_cacheability;
 pub mod material_edit;
-pub mod material_graph;
 pub mod material_graph_assets;
-pub mod material_graph_layers;
 pub mod material_table;
 pub mod material_tune;
 pub mod overlay;
 pub mod passes;
-pub mod pattern;
 pub mod render;
 pub mod shadows;
 pub mod studio;
@@ -54,7 +48,6 @@ pub mod vox_material;
 pub mod voxel_dda;
 pub mod water;
 pub mod world_edit;
-pub mod world_event;
 pub mod world_host;
 pub mod world_profile;
 pub mod world_profile_runtime;

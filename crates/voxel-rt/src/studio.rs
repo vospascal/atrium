@@ -14,8 +14,8 @@ use voxel_core::world::{
 
 use crate::brickmap::{Brickmap, ClearanceUpdate};
 use crate::camera::CameraPose;
-use crate::material::material_voxel;
 use crate::vox_material::VoxSubject;
+use voxel_material::material::material_voxel;
 
 /// Centre of the preview scene, in one-metre world-voxel coordinates.
 pub const SAMPLE_VOXEL: [i32; 3] = [
@@ -268,7 +268,7 @@ pub fn orbit_pose(scene: &StudioScene, yaw: f32, pitch: f32, distance_meters: f3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::material_id;
+    use voxel_material::material::material_id;
 
     fn world_material(brickmap: &Brickmap, coordinate: [i32; 3]) -> u8 {
         let coordinate = WorldVoxelCoord::new(coordinate[0], coordinate[1], coordinate[2]);

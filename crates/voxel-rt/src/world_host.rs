@@ -349,10 +349,10 @@ fn world_thread_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::material_id;
     use voxel_core::world::{
         Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, WORLD_SIZE_Y,
     };
+    use voxel_material::material::material_id;
 
     fn island_host() -> WorldHost {
         WorldHost::new(Brickmap::build(&VoxelWorld::generate(1234, 0.0)))

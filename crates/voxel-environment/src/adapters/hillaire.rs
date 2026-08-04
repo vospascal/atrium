@@ -5,11 +5,9 @@
 //! file per concern (`lut.rs`, `resources.rs`, `shaders.rs`), and none of it is reachable
 //! from outside the crate.
 
-use crate::api::{
-    EnvironmentFrame, EnvironmentInvalidation, EnvironmentProvider, EnvironmentRequest,
-};
+use crate::api::{EnvironmentFrame, EnvironmentInvalidation, EnvironmentRequest};
 use crate::gpu::EnvironmentGpu;
-use crate::hillaire::{shaders, AtmosphereBindings, AtmosphereLutPasses, LutKind};
+use crate::hillaire::{shaders, AtmosphereBindings, AtmosphereLutPasses};
 use crate::SunSettings;
 
 pub use crate::hillaire::LutConfig;
@@ -57,14 +55,19 @@ impl HillaireEnvironment {
         }
     }
 
-    /// The sun/day-night state this adapter reports through [`EnvironmentProvider`].
+    /// The sun/day-night state this adapter evaluates from.
     pub fn settings_mut(&mut self) -> &mut SunSettings {
         &mut self.settings
     }
 
-    /// The LUT sizes this instance was built with.
-    pub fn lut_config(&self) -> LutConfig {
-        self.bindings.resources.lut_config
+    /// This adapter's current sun/day-night inputs.
+    pub fn settings(&self) -> SunSettings {
+        self.settings
+    }
+
+    /// The CPU environment state for this frame.
+    pub fn frame(&self) -> EnvironmentFrame {
+        self.settings.environment_frame()
     }
 
     /// How many times the atmosphere uniform has been rewritten. A counter that does *not*
@@ -72,33 +75,6 @@ impl HillaireEnvironment {
     /// to see the update policy working in a running app.
     pub fn upload_count(&self) -> u64 {
         self.bindings.resources.generation
-    }
-
-    /// Each LUT's name and the dimensions actually allocated for it, read back from the
-    /// textures rather than from the config.
-    ///
-    /// This is the adapter's whole introspection surface, and it is the reason
-    /// `AtmosphereBindings` keeps the four `wgpu::Texture` handles alongside their views: a
-    /// view keeps its texture alive on its own, so without a reader the handles would be
-    /// dead weight — and dropping them would quietly remove the only route to a LUT dump.
-    pub fn lut_summary(&self) -> [(&'static str, [u32; 3]); 4] {
-        LutKind::ALL.map(|kind| {
-            let size = self.bindings.texture(kind).size();
-            (
-                kind.label(),
-                [size.width, size.height, size.depth_or_array_layers],
-            )
-        })
-    }
-}
-
-impl EnvironmentProvider for HillaireEnvironment {
-    fn frame(&self) -> EnvironmentFrame {
-        self.settings.environment_frame()
-    }
-
-    fn settings(&self) -> SunSettings {
-        self.settings
     }
 }
 

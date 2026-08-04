@@ -5,8 +5,6 @@
 //! a device, and keeping it that way is what makes [`EnvironmentRequest::invalidation_since`]
 //! a plain unit test instead of a headless-GPU one. The `wgpu` seam is [`crate::gpu`].
 
-use crate::SunSettings;
-
 use glam::Vec3;
 
 /// CPU result of evaluating the environment at one point in time.
@@ -178,24 +176,11 @@ impl EnvironmentInvalidation {
     }
 }
 
-/// A provider evaluates the CPU environment state without exposing its implementation.
-///
-/// This is the half that needs no device. The GPU half — bind groups, WGSL and cache
-/// invalidation — is [`crate::gpu::EnvironmentGpu`], and the two are separate traits
-/// because a consumer that only needs to know where the sun is (lighting, shadows, a
-/// headless test) should not need a `wgpu::Device` to find out.
-///
-/// This split also removed a lie. `shader_source` used to sit here, which forced every
-/// provider to name a WGSL module whether or not it had a GPU path — and the non-LUT
-/// provider "satisfied" it by returning the LUT *sampler*, a module that reads four
-/// textures it would never have populated. Selecting it would have bound nothing.
-pub trait EnvironmentProvider {
-    /// The current CPU-side environment state consumed by lighting and CAGI.
-    fn frame(&self) -> EnvironmentFrame;
-
-    /// The sun/day-night inputs that determine whether cached GPU state is stale.
-    fn settings(&self) -> SunSettings;
-}
+// There is deliberately no `EnvironmentProvider` trait. It had exactly one implementation and
+// no consumer outside this crate — a placeholder in trait clothing, by this workspace's own
+// rule. `HillaireEnvironment::frame` and `::settings` are plain methods; the day a second
+// provider exists, the trait can be extracted from two real implementations instead of guessed
+// from one.
 
 #[cfg(test)]
 mod tests {

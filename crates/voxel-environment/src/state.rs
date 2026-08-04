@@ -23,14 +23,35 @@ pub const AMBIENT_STRENGTH: f32 = 0.4;
 pub struct SunSettings {
     pub azimuth_degrees: f32,
     pub elevation_degrees: f32,
-    /// Multiplier on [`SUN_INTENSITY`]. Kept as an environment control, not an HDR control.
+    /// Sun intensity multiplier, scaling [`SUN_INTENSITY`]. 1.0 is the shipped look.
+    ///
+    /// Exposed by S2c, and it was a real gap rather than a nicety: **an emitter cannot
+    /// be judged against a light you cannot turn down.** The sun was a hardcoded
+    /// constant, so a glowing surface and the light it casts were both washed out by a
+    /// fixed 2.2 of daylight, and there was no way to tell an emitter that worked from
+    /// one that did nothing (Pascal, 2026-07-31: *"i cant realy see it emiting .. might
+    /// be as well that we dont have the right sky or light conditions .. we have pretty
+    /// crude over head light"*).
+    ///
+    /// Zero is a genuine night: the sun contributes nothing and only ambient, GI and
+    /// emitters remain. Which is exactly the condition an emissive material is for.
     pub intensity_scale: f32,
-    /// Multiplier on the current diffuse environment approximation.
+    /// Hemisphere-ambient multiplier, scaling [`AMBIENT_STRENGTH`]. 1.0 is the shipped
+    /// look, 0.0 removes the ambient floor entirely.
+    ///
+    /// Needed alongside the sun scale for the same reason: at sun zero the 0.4 ambient
+    /// is still enough to read every surface, so an emitter's contribution stays
+    /// invisible. Turning both down is what makes a dark room dark.
     pub ambient_scale: f32,
+    /// Drive the light and sky from [`Self::day_phase`] instead of treating the
+    /// azimuth/elevation fields as a completely manual directional light.
     pub day_night_enabled: bool,
+    /// Advance [`Self::day_phase`] each frame. The Studio defaults to a frozen
+    /// noon so opening a material never changes underneath the author.
     pub cycle_running: bool,
     /// Normalized time of day: 0/1 midnight, 0.25 sunrise, 0.5 noon, 0.75 sunset.
     pub day_phase: f32,
+    /// Real seconds for one complete in-world day.
     pub day_length_seconds: f32,
     /// 0/1 new moon, 0.5 full moon.
     pub moon_phase: f32,

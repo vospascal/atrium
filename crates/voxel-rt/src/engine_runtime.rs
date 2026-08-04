@@ -9,13 +9,13 @@ use voxel_core::world::VoxelWorld;
 
 use crate::brickmap::Brickmap;
 use crate::environment::{RuntimeEnvironmentState, Season};
-use crate::material_graph::MaterialGraphShaderSet;
 use crate::material_graph_assets::MaterialGraphAssetService;
 use crate::material_table::MaterialTable;
 use crate::studio::StudioScene;
 use crate::studio_assets::{AssetError, StudioProject, StudioProjectStore};
 use crate::variants::RenderQuality;
 use voxel_graph::{GraphAsset, GraphKind};
+use voxel_material_graph::lowering::MaterialGraphShaderSet;
 
 pub const DEFAULT_WORLD_SEED: u32 = 1;
 pub const DEFAULT_WORLD_SEASON: f32 = 0.0;
@@ -409,7 +409,7 @@ mod tests {
             project_root: root,
             light_fixture: None,
         });
-        let stone = crate::material::material_id(voxel_core::world::Voxel::Stone);
+        let stone = voxel_material::material::material_id(voxel_core::world::Voxel::Stone);
         assert_eq!(
             runtime.project.material_graphs.len(),
             runtime.project.project.manifest.material_assignments.len()

@@ -21,23 +21,7 @@ pub enum LutKind {
     AerialPerspective,
 }
 
-impl LutKind {
-    pub const ALL: [Self; 4] = [
-        Self::Transmittance,
-        Self::MultipleScattering,
-        Self::SkyView,
-        Self::AerialPerspective,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Transmittance => "transmittance",
-            Self::MultipleScattering => "multiple scattering",
-            Self::SkyView => "sky view",
-            Self::AerialPerspective => "aerial perspective",
-        }
-    }
-}
+impl LutKind {}
 
 /// Parameters consumed by all four LUT compute passes.
 #[repr(C)]
@@ -159,14 +143,14 @@ pub struct AtmosphereResources {
 }
 
 /// Persistent textures and the sampling bind group consumed by renderer passes.
+///
+/// Only the `TextureView`s are held: a view keeps its texture's GPU resource alive on its own,
+/// and the `Texture` handles were kept solely for an introspection accessor that had no
+/// callers. A LUT dump would want them back — three lines, when something actually needs one.
 pub struct AtmosphereBindings {
     pub resources: AtmosphereResources,
     pub uniform: AtmosphereUniform,
     uniform_buffer: wgpu::Buffer,
-    transmittance: wgpu::Texture,
-    multiple_scattering: wgpu::Texture,
-    sky_view: wgpu::Texture,
-    aerial_perspective: wgpu::Texture,
     transmittance_view: wgpu::TextureView,
     multiple_scattering_view: wgpu::TextureView,
     sky_view_view: wgpu::TextureView,
@@ -290,10 +274,6 @@ impl AtmosphereBindings {
             },
             uniform,
             uniform_buffer,
-            transmittance,
-            multiple_scattering,
-            sky_view,
-            aerial_perspective,
             transmittance_view,
             multiple_scattering_view,
             sky_view_view,
@@ -319,15 +299,6 @@ impl AtmosphereBindings {
         self.uniform = uniform;
         self.resources.generation = self.resources.generation.wrapping_add(1);
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
-    }
-
-    pub fn texture(&self, kind: LutKind) -> &wgpu::Texture {
-        match kind {
-            LutKind::Transmittance => &self.transmittance,
-            LutKind::MultipleScattering => &self.multiple_scattering,
-            LutKind::SkyView => &self.sky_view,
-            LutKind::AerialPerspective => &self.aerial_perspective,
-        }
     }
 
     pub fn view(&self, kind: LutKind) -> &wgpu::TextureView {

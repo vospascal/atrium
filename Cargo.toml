@@ -9,6 +9,8 @@ members = [
     "crates/voxel-environment",
     "crates/voxel-core",
     "crates/voxel-graph",
+    "crates/voxel-material",
+    "crates/voxel-material-graph",
     "crates/voxel-rt",
 ]
 

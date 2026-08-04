@@ -15,8 +15,8 @@ use crate::socket::Cardinality;
 /// catalogue can be a `const`.
 #[derive(Clone, Copy, Debug)]
 pub struct NodeRegistry {
-    declarations: &'static [NodeDeclaration],
-    contracts: &'static [GraphContractStatic],
+    families: &'static [&'static [NodeDeclaration]],
+    contracts: &'static [&'static [GraphContractStatic]],
 }
 
 impl NodeRegistry {
@@ -25,29 +25,36 @@ impl NodeRegistry {
     /// mean "somebody else's catalogue", which is how the contracts ended up read from a
     /// module-level `static` in the first place.
     pub const fn new(
-        declarations: &'static [NodeDeclaration],
-        contracts: &'static [GraphContractStatic],
+        families: &'static [&'static [NodeDeclaration]],
+        contracts: &'static [&'static [GraphContractStatic]],
     ) -> Self {
         Self {
-            declarations,
+            families,
             contracts,
         }
     }
 
-    pub fn declarations(&self) -> &'static [NodeDeclaration] {
-        self.declarations
+    /// Every declaration across every family, flattened.
+    ///
+    /// A slice OF SLICES rather than one slice, because that is what makes a catalogue
+    /// composable: `voxel-rt` names `voxel_material_graph::NODES` and its own world family
+    /// side by side, and neither crate has to restate the other's nodes. Rust cannot
+    /// concatenate `&'static` slices in a `const`, so the nesting is the composition.
+    pub fn declarations(&self) -> impl Iterator<Item = &'static NodeDeclaration> + '_ {
+        self.families.iter().copied().flatten()
     }
 
     pub fn find(&self, id: &NodeTypeId) -> Option<&'static NodeDeclaration> {
-        self.declarations.iter().find(|node| node.id == id.0)
+        self.declarations().find(|node| node.id == id.0)
     }
 
-    pub fn contracts(&self) -> &'static [GraphContractStatic] {
-        self.contracts
+    /// Every contract across every family, flattened. Same reasoning as [`Self::declarations`].
+    pub fn contracts(&self) -> impl Iterator<Item = &'static GraphContractStatic> + '_ {
+        self.contracts.iter().copied().flatten()
     }
 
     pub fn contract(&self, kind: GraphKind) -> Option<&'static GraphContractStatic> {
-        self.contracts.iter().find(|contract| contract.kind == kind)
+        self.contracts().find(|contract| contract.kind == kind)
     }
 
     pub fn node_cardinality(&self, kind: GraphKind, operation: OperationTag) -> Cardinality {

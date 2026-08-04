@@ -680,13 +680,15 @@ mod tests {
     /// sites, and none of those had a test that would notice them failing.
     #[test]
     fn an_event_gated_emitter_lights_its_neighbours_only_when_triggered() {
-        use crate::animation_clock::AnimationClockSample;
         use crate::cagi::material_attribute_table;
-        use crate::lighting::SunSettings;
-        use crate::material::{material_id, MATERIALS, MATERIAL_COUNT};
-        use crate::material_graph::{EmissionEventResponse, EventSensorConfig, SensorFalloff};
-        use crate::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
         use voxel_core::world::Voxel;
+        use voxel_environment::SunSettings;
+        use voxel_material::animation_clock::AnimationClockSample;
+        use voxel_material::material::{material_id, MATERIALS, MATERIAL_COUNT};
+        use voxel_material::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
+        use voxel_material_graph::lowering::{
+            EmissionEventResponse, EventSensorConfig, SensorFalloff,
+        };
 
         let Some((device, queue)) = crate::passes::dda::tests::headless_device() else {
             return;
@@ -762,7 +764,8 @@ mod tests {
             // Sun and sky OFF: the emitter must be the only thing in the volume,
             // or its contribution is a rounding error against daylight — which is
             // exactly why this is measured here and not judged by eye.
-            let mut lighting = SunSettings::default().lighting_uniform(
+            let mut lighting = crate::lighting::lighting_uniform(
+                &SunSettings::default(),
                 quality.shading_params(),
                 quality.gi_params(),
                 quality.water_params(),

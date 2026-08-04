@@ -1,10 +1,11 @@
 //! `world.output` — World Output.
 //!
 //! Its declaration and every constant only it uses. Shared field atoms and the
-//! `socket!`/`node!` builders come from [`crate::graph::common`].
+//! `socket!`/`node!` builders come from `voxel_material_graph::declare`.
 
-use crate::graph::common::*;
-use crate::graph::{NodeOperation, WorldNodeOperation};
+use crate::graph::WorldNodeOperation;
+use voxel_material_graph::declare::*;
+use voxel_material_graph::{node, socket};
 
 const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[socket!(
     "world",
@@ -18,7 +19,7 @@ const VOXEL_FIELD_IN: &[SocketDeclarationStatic] = &[socket!(
 
 pub const DECLARATION: NodeDeclaration = node!(
     "world.output",
-    NodeOperation::World(WorldNodeOperation::Output),
+    WorldNodeOperation::Output,
     "World Output",
     "Final voxel world consumed by the engine.",
     NodeCategory::Render,

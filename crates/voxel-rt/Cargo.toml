@@ -19,6 +19,8 @@ wgpu = "29"
 voxel-color = { path = "../voxel-color" }
 voxel-environment = { path = "../voxel-environment" }
 voxel-graph = { path = "../voxel-graph" }
+voxel-material = { path = "../voxel-material" }
+voxel-material-graph = { path = "../voxel-material-graph" }
 winit = "0.30"
 
 [dev-dependencies]

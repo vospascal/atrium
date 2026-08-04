@@ -6812,6 +6812,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "voxel-material"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "voxel-core",
+]
+
+[[package]]
+name = "voxel-material-graph"
+version = "0.1.0"
+dependencies = [
+ "naga 29.0.4",
+ "serde_json",
+ "voxel-core",
+ "voxel-graph",
+ "voxel-material",
+]
+
+[[package]]
 name = "voxel-rt"
 version = "0.1.0"
 dependencies = [
@@ -6829,6 +6848,8 @@ dependencies = [
  "voxel-core",
  "voxel-environment",
  "voxel-graph",
+ "voxel-material",
+ "voxel-material-graph",
  "wgpu 29.0.4",
  "winit",
 ]

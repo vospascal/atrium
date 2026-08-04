@@ -1,0 +1,12 @@
+[package]
+name = "voxel-material"
+version = "0.1.0"
+edition = "2021"
+description = "The material table and pattern layers — what a surface IS, independent of how it is rendered"
+
+# A closed leaf: nothing here reaches back into the renderer. `voxel-core` supplies the world
+# scale constants, `bytemuck` the GPU row layout. Verified before extraction — the pair had
+# zero `crate::` dependencies outside itself.
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+voxel-core = { path = "../voxel-core" }

@@ -25,10 +25,7 @@ use winit::window::Window;
 use crate::ao::AoMode;
 use crate::character::Submersion;
 use crate::frame_timing::FrameTimings;
-use crate::lighting::SunSettings;
-use crate::material::{self, MATERIAL_COUNT};
 use crate::material_edit::{MaterialPanelState, WORLD_HOTBAR_BLOCKS};
-use crate::material_graph::{ConnectorDrag, GraphEditorState};
 use crate::material_table::MaterialTable;
 use crate::shadows::ShadowMode;
 use crate::studio_assets::StudioAssetPanelState;
@@ -42,12 +39,15 @@ use crate::world_host::WorldEditStats;
 use voxel_color::{
     ColorSpaceOutcome, DisplayHeadroom, HeadroomChoice, OutputDepth, OutputSupport, TonemapCurve,
 };
+use voxel_environment::SunSettings;
 use voxel_graph::{
     node_reachability, Cardinality, ConnectionError, FieldDeclarationStatic, FieldTarget,
     GraphAsset, GraphCommand, InputPin, LinkId, NodeCategory, NodeDeclaration, NodeId, NodePreview,
     NodeRecord, NodeRegistry, NodeTypeId, NumericRange, OutputPin, PropertyValue,
     SocketDeclarationStatic, SocketKey, SocketType,
 };
+use voxel_material::material::{self, MATERIAL_COUNT};
+use voxel_material_graph::lowering::{ConnectorDrag, GraphEditorState};
 
 const FRAME_TIME_SAMPLE_COUNT: usize = 120;
 /// Timestamp readback lands a few frames late, so a moderate window keeps the
@@ -1164,11 +1164,11 @@ fn draw_graph_section_contents(
         {
             state.add_node(NodeTypeId(state.node_type.clone()), &registry);
         }
-        if let Some(layer) = registry.declarations().iter().find(|declaration| {
+        if let Some(layer) = registry.declarations().find(|declaration| {
             declaration.kinds.contains(&state.graph.kind)
                 && declaration.operation
                     == crate::graph::NodeOperation::Material(
-                        crate::graph::MaterialNodeOperation::PatternLayer,
+                        voxel_material_graph::MaterialNodeOperation::PatternLayer,
                     )
                     .tag()
         }) {
@@ -2585,7 +2585,6 @@ fn graph_connector_candidates(
     let wants_input = matches!(drag, ConnectorDrag::FromOutput(_));
     registry
         .declarations()
-        .iter()
         .filter(|declaration| {
             declaration.kinds.contains(&graph.kind)
                 && graph.can_add_node_type(registry, &NodeTypeId(declaration.id.into()))
