@@ -708,10 +708,6 @@ pub(crate) mod tests {
                 ..TraversalSettings::default()
             },
             TraversalSettings {
-                descend_fast_forward: true,
-                ..TraversalSettings::default()
-            },
-            TraversalSettings {
                 any_hit_shadow: true,
                 ..TraversalSettings::default()
             },
@@ -721,7 +717,6 @@ pub(crate) mod tests {
             },
             TraversalSettings {
                 column_fast_forward: true,
-                descend_fast_forward: true,
                 global_max_terminate: false,
                 any_hit_shadow: true,
                 brick_bit_grid: true,

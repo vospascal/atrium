@@ -78,7 +78,6 @@ pub(crate) const PATTERN_GENERATOR_MASK_SECTION_NINE: u32 = 0b111;
 pub enum LeverId {
     // Traversal (S2) — all compile-time, all inside the coarse DDA loops.
     ColumnFastForward,
-    DescendFastForward,
     GlobalMaxTerminate,
     AnyHitShadow,
     BrickBitGrid,
@@ -395,7 +394,6 @@ impl LeverId {
         let global_illumination = &quality.global_illumination;
         match self {
             LeverId::ColumnFastForward => LeverValue::Flag(traversal.column_fast_forward),
-            LeverId::DescendFastForward => LeverValue::Flag(traversal.descend_fast_forward),
             LeverId::GlobalMaxTerminate => LeverValue::Flag(traversal.global_max_terminate),
             LeverId::AnyHitShadow => LeverValue::Flag(traversal.any_hit_shadow),
             LeverId::BrickBitGrid => LeverValue::Flag(traversal.brick_bit_grid),
@@ -551,7 +549,6 @@ impl LeverId {
         let global_illumination = &mut quality.global_illumination;
         match self {
             LeverId::ColumnFastForward => traversal.column_fast_forward = value.expect_flag(self),
-            LeverId::DescendFastForward => traversal.descend_fast_forward = value.expect_flag(self),
             LeverId::GlobalMaxTerminate => traversal.global_max_terminate = value.expect_flag(self),
             LeverId::AnyHitShadow => traversal.any_hit_shadow = value.expect_flag(self),
             LeverId::BrickBitGrid => traversal.brick_bit_grid = value.expect_flag(self),
@@ -880,24 +877,6 @@ pub const REGISTRY: &[Lever] = &[
             section: BenchSection::Traversal,
             label: "with-column-ff",
             overrides: &[(LeverId::ColumnFastForward, LeverValue::Flag(true))],
-        }],
-    },
-    Lever {
-        id: LeverId::DescendFastForward,
-        subsystem: LeverSubsystem::Traversal,
-        kind: LeverKind::ShaderConst,
-        shader_const: Some("ENABLE_DESCEND_FAST_FORWARD"),
-        label: "descend fast-forward (down)",
-        default_value: LeverValue::Flag(false),
-        range: LeverRange::Discrete,
-        verdict: "LOSER on M3 Max, off: was the Stage 2 top-down win, but the \
-                  distance field now covers the same empty air in ALL directions; \
-                  switching the column machinery off saved 8-14% on every scenario.",
-        mode_options: &[],
-        bench: &[BenchPoint {
-            section: BenchSection::Traversal,
-            label: "with-descend-ff",
-            overrides: &[(LeverId::DescendFastForward, LeverValue::Flag(true))],
         }],
     },
     Lever {
@@ -4547,7 +4526,6 @@ mod tests {
         } = materials;
         let TraversalSettings {
             column_fast_forward,
-            descend_fast_forward,
             global_max_terminate,
             any_hit_shadow,
             brick_bit_grid,
@@ -4625,10 +4603,6 @@ mod tests {
             (
                 LeverId::ColumnFastForward,
                 LeverValue::Flag(column_fast_forward),
-            ),
-            (
-                LeverId::DescendFastForward,
-                LeverValue::Flag(descend_fast_forward),
             ),
             (
                 LeverId::GlobalMaxTerminate,

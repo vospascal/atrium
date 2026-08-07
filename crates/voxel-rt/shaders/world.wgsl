@@ -63,15 +63,11 @@
 //   loops HOIST the current column's max into a register and refresh it only
 //   when a step crosses into a new XZ column (`face_axis != 1`), so vertical
 //   stepping never touches the storage buffer. A ray above its column's max
-//   can hit nothing in that column:
-//     * heading UP — fast-forward straight to the next x/z column boundary
-//       in one step (`column_fast_forward`) instead of climbing brick by
-//       brick;
-//     * heading DOWN — jump straight to the top plane of the column's
-//       highest occupied brick (`descend_fast_forward`), which is what makes
-//       top-down primary rays cheap (the empty air between the world ceiling
-//       and the terrain collapses into one jump per column), or to the
-//       lateral column exit when that comes first.
+//   can hit nothing in that column: heading UP it fast-forwards straight to
+//   the next x/z column boundary in one step (`column_fast_forward`) instead
+//   of climbing brick by brick. (The downward twin, descend fast-forward,
+//   was PRUNED 2026-08-07 — the chebyshev distance field covers the same
+//   empty air in all directions and beat it by 8-14%.)
 //   The next column's max is re-checked on entry either way, so geometry
 //   taller than the ray farther along (a mountain behind a lake, a tree
 //   crown one column over) still occludes correctly — fast-forward, NEVER
@@ -624,17 +620,16 @@ const BOUND_MASK: u32 = 31u;
 // live in named functions OUTSIDE the traversal loops so the hot path reads as
 // the algorithm.
 //
-// BOTH column-height fast paths default OFF: measured SLOWER in every
-// scenario on M3 Max once the chebyshev distance skip landed. The upward
-// lateral jump (COLUMN_FAST_FORWARD) already lost before that — shadow rays
+// The upward column-height fast path defaults OFF: measured SLOWER in every
+// scenario on M3 Max once the chebyshev distance skip landed — shadow rays
 // cross columns about once per step at typical elevations, so the jump saves
 // few steps while its per-column resync math and scattered column reads cost
-// more than a plain step. The downward plane jump (DESCEND_FAST_FORWARD) was
-// the Stage 2 top-down win, but the distance field now covers the same empty
-// air in ALL directions and turning the column machinery off besides saves
-// its storage reads and branches (bench: -8% to -14% on every scenario).
+// more than a plain step. Kept as a lever for Quest's Adreno. (Its downward
+// twin, DESCEND_FAST_FORWARD, was PRUNED 2026-08-07: the distance field
+// covers the same empty air in ALL directions and turning the column
+// machinery off saved 8-14% on every scenario, with no hardware story that
+// could flip it.)
 const ENABLE_COLUMN_FAST_FORWARD: bool = false;
-const ENABLE_DESCEND_FAST_FORWARD: bool = false;
 const ENABLE_GLOBAL_MAX_TERMINATE: bool = true;
 // Any-hit shadow rays measured a consistent 1-3% SLOWER than reusing the
 // closest-hit trace on M3 Max (three bench rounds) — the second specialized
@@ -682,9 +677,9 @@ const SHADOW_MODE: u32 = 0u;
 // pixel. One brick of lead-in is the minimum that works.
 const SHADOW_PENUMBRA_MIN_DISTANCE: f32 = 8.0;
 
-// Either column-height fast path needs the per-column max hoisted into a
+// The column-height fast path needs the per-column max hoisted into a
 // register (and the guaranteed-empty-brick skip that comes with it).
-const USE_COLUMN_HEIGHTS: bool = ENABLE_COLUMN_FAST_FORWARD || ENABLE_DESCEND_FAST_FORWARD;
+const USE_COLUMN_HEIGHTS: bool = ENABLE_COLUMN_FAST_FORWARD;
 
 // ---- E6: the sun and liquids (lever) ------------------------------------------
 // Whether the SUN's rays pass THROUGH liquids instead of stopping on them.
@@ -950,42 +945,6 @@ fn column_fast_forward(state: ptr<function, DdaState>, origin: vec3<f32>,
                                   (*state).step_direction.y);
 }
 
-// Fast-forward a DOWNWARD ray that is above every occupied brick of its
-// column: nothing can be hit until the ray reaches the top plane of the
-// column's highest occupied brick row, so jump straight to that plane in one
-// step (this is what makes top-down primary rays cheap — the ~20 empty brick
-// rows between the world ceiling and the terrain collapse into one jump; the
-// plane crossing is exact integer-derived math, no float reconstruction).
-// When a lateral column exit comes FIRST, jump there instead, exactly like
-// `column_fast_forward`, and let the caller re-check the new column.
-fn descend_fast_forward(state: ptr<function, DdaState>, origin: vec3<f32>,
-                        direction: vec3<f32>, inverse_direction: vec3<f32>,
-                        column_max_y: i32) {
-    let plane_y = f32(column_max_y + 1) * BRICK_SIZE;
-    let t_plane = (plane_y - origin.y) * inverse_direction.y;
-    if (t_plane <= (*state).t_max.x && t_plane <= (*state).t_max.z) {
-        (*state).cell.y = column_max_y;
-        (*state).t = max(t_plane, (*state).t);
-        (*state).t_max.y = boundary_t(origin.y, inverse_direction.y,
-                                      f32(column_max_y) * BRICK_SIZE, BRICK_SIZE,
-                                      (*state).step_direction.y);
-        (*state).face_axis = 1u;
-        return;
-    }
-    if ((*state).t_max.x <= (*state).t_max.z) {
-        step_along_axis(state, 0u);
-    } else {
-        step_along_axis(state, 2u);
-    }
-    // min() mirrors the upward variant's max(): reconstruction undershoot
-    // may only re-test a row, never re-ascend past the incremental state.
-    let jumped_y = i32(floor((origin.y + direction.y * ((*state).t + RAY_EPSILON)) / BRICK_SIZE));
-    (*state).cell.y = min((*state).cell.y, jumped_y);
-    (*state).t_max.y = boundary_t(origin.y, inverse_direction.y,
-                                  f32((*state).cell.y) * BRICK_SIZE, BRICK_SIZE,
-                                  (*state).step_direction.y);
-}
-
 // What the caller must do after the coarse-loop height levers ran: test the
 // brick it is standing in, take another loop iteration (a fast-forward moved
 // the state), or stop as a miss.
@@ -994,8 +953,8 @@ const HEIGHT_LEVER_CONTINUE: u32 = 1u;
 const HEIGHT_LEVER_MISS: u32 = 2u;
 
 // All height-based coarse-loop levers in ONE place (E1c): the hoisted column
-// max refresh, the global-max sky-out, and both column fast-forwards. Both
-// coarse loops call this instead of carrying twenty lines of nested `if` each,
+// max refresh, the global-max sky-out, and the upward column fast-forward.
+// Both coarse loops call this instead of carrying twenty lines of nested `if` each,
 // so the loop body reads as the algorithm — and with the shipped defaults
 // (column heights off, global max on) naga folds this down to the single
 // `cell.y > world_max_brick_y` compare.
@@ -1027,10 +986,6 @@ fn coarse_height_levers(state: ptr<function, DdaState>,
                     column_fast_forward(state, origin, direction, inverse_direction);
                     return HEIGHT_LEVER_CONTINUE;
                 }
-            } else if (ENABLE_DESCEND_FAST_FORWARD) {
-                descend_fast_forward(state, origin, direction, inverse_direction,
-                                     *column_max_y);
-                return HEIGHT_LEVER_CONTINUE;
             }
         }
         return HEIGHT_LEVER_TEST_BRICK;

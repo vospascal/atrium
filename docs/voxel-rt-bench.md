@@ -312,8 +312,10 @@ architecture-specific (re-run everything on Quest 3 in Stage 6):
 - `ENABLE_DISTANCE_SKIP` **on** — the engine of the current numbers
   (17–27% under baseline). Its byte also serves as the occupancy test.
 - `ENABLE_GLOBAL_MAX_TERMINATE` **on** — cheap, exact sky-out for upward rays.
-- `ENABLE_COLUMN_FAST_FORWARD` / `ENABLE_DESCEND_FAST_FORWARD` **off** —
-  superseded by the distance field in all directions (+9–17% if re-enabled).
+- `ENABLE_COLUMN_FAST_FORWARD` **off** — superseded by the distance field
+  (+9–17% if re-enabled); kept for Quest's Adreno. Its downward twin
+  `ENABLE_DESCEND_FAST_FORWARD` was PRUNED 2026-08-07: same superseding, and
+  no hardware story that could flip an extra-loads-per-step loss.
 - `ENABLE_ANY_HIT_SHADOW` **off** — the specialized any-hit loop lost 1–3%
   to plain `trace()` in three separate rounds.
 - `ENABLE_BRICK_BIT_GRID` **off** — redundant next to the distance byte for the

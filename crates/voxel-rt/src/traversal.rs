@@ -12,7 +12,7 @@
 
 use crate::shader_consts::{ShaderConstSink, SourcePatcher};
 
-/// The seven traversal fast paths. Defaults = the fastest combination measured on
+/// The six traversal fast paths. Defaults = the fastest combination measured on
 /// Apple M3 Max; the measured verdict of each is one line in
 /// [`crate::variants::REGISTRY`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,9 +20,6 @@ pub struct TraversalSettings {
     /// `ENABLE_COLUMN_FAST_FORWARD`: upward rays above their XZ column's max
     /// occupied brick jump to the next column boundary in one step.
     pub column_fast_forward: bool,
-    /// `ENABLE_DESCEND_FAST_FORWARD`: downward rays above their column's max
-    /// jump straight to the top plane of the highest occupied brick.
-    pub descend_fast_forward: bool,
     /// `ENABLE_GLOBAL_MAX_TERMINATE`: an upward ray above the tallest brick in
     /// the WORLD terminates as a miss immediately.
     pub global_max_terminate: bool,
@@ -47,7 +44,6 @@ impl Default for TraversalSettings {
     fn default() -> TraversalSettings {
         TraversalSettings {
             column_fast_forward: false,
-            descend_fast_forward: false,
             global_max_terminate: true,
             any_hit_shadow: false,
             brick_bit_grid: false,
@@ -65,7 +61,6 @@ impl TraversalSettings {
     /// cannot disagree.
     pub(crate) fn declare_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.boolean("ENABLE_COLUMN_FAST_FORWARD", self.column_fast_forward);
-        sink.boolean("ENABLE_DESCEND_FAST_FORWARD", self.descend_fast_forward);
         sink.boolean("ENABLE_GLOBAL_MAX_TERMINATE", self.global_max_terminate);
         sink.boolean("ENABLE_ANY_HIT_SHADOW", self.any_hit_shadow);
         sink.boolean("ENABLE_BRICK_BIT_GRID", self.brick_bit_grid);
@@ -106,7 +101,6 @@ mod tests {
     fn patched_source_carries_every_lever() {
         let shader_source = TraversalSettings {
             column_fast_forward: true,
-            descend_fast_forward: true,
             global_max_terminate: false,
             any_hit_shadow: true,
             brick_bit_grid: true,
@@ -115,7 +109,6 @@ mod tests {
         }
         .patch_shader_source(&SHADER_SOURCE);
         assert!(shader_source.contains("const ENABLE_COLUMN_FAST_FORWARD: bool = true;"));
-        assert!(shader_source.contains("const ENABLE_DESCEND_FAST_FORWARD: bool = true;"));
         assert!(shader_source.contains("const ENABLE_GLOBAL_MAX_TERMINATE: bool = false;"));
         assert!(shader_source.contains("const ENABLE_ANY_HIT_SHADOW: bool = true;"));
         assert!(shader_source.contains("const ENABLE_BRICK_BIT_GRID: bool = true;"));
@@ -129,10 +122,6 @@ mod tests {
         for changed in [
             TraversalSettings {
                 column_fast_forward: true,
-                ..applied
-            },
-            TraversalSettings {
-                descend_fast_forward: true,
                 ..applied
             },
             TraversalSettings {
