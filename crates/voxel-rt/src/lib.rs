@@ -45,7 +45,6 @@ pub mod passes;
 pub mod profiling;
 pub mod render;
 pub mod shader_consts;
-pub mod shadows;
 pub mod sky_weather;
 pub mod studio;
 pub mod studio_assets;

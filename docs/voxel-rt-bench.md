@@ -128,8 +128,8 @@ settings defaults, the registry or the sweep drift apart.
   registry bench point, which patches one `ENABLE_*` lever (the "A/B benchmark
   levers" block at the top of `shaders/dda.wgsl`), so each optimization is
   measured in isolation. `stage2-baseline` = all traversal aids off. A variant
-  carries a whole `RenderQuality`, so runtime levers (AO strength, penumbra
-  scale, fade ramp) and the render scale are swept exactly the way the app
+  carries a whole `RenderQuality`, so runtime levers (AO strength, fade
+  ramp) and the render scale are swept exactly the way the app
   applies them — the preset section dispatches at each tier's real pixel count.
 - **Timing**: 25 dispatches encoded back-to-back per command buffer,
   wall-clock per batch / 25, 12 batches, median + p95. Variants rotate
@@ -359,9 +359,13 @@ Quality levers with recorded verdicts (details in the E1 / E1b / E1c sections):
 - `AO_MODE` **1 = analytic corner** is the shipped default since E1c (E1b's
   winner: 20x cheaper than rays, noiseless). `0 = ray-traced` is the Beautiful
   tier, kept for its reach. `2 = analytic 3x3x3` **off** (over-darkens).
-- `SHADOW_MODE` **0 = hard**. Soft-from-distance-field is free but prints the
-  1 m brick lattice into the frame at every penumbra scale — documented
-  negative result, needs voxel-level clearance data to become viable.
+- `SHADOW_MODE` — PRUNED 2026-08-07, hard shadows are the only technique.
+  Soft-from-distance-field was free but printed the 1 m brick lattice into the
+  frame at every penumbra scale (documented negative below, E1b section); a fix
+  needs ~37 MB of voxel-level clearance, and the soft-ambience half of
+  shadowing is the CAGI banks volume's job now. Crisp voxel shadows = the art
+  direction. The whole Shadows lever subsystem, the penumbra uniform slot and
+  the soft coarse loop went with it.
 - `AO_BRICK_EARLY_OUT` **off** — measured 0% firing rate on terrain.
 - `AO_DISTANCE_FADE` **off** — 0.6–2.9% at ground level; the big aerial saving
   is the effect itself being removed. Aerial-camera / Potato knob (Potato ships

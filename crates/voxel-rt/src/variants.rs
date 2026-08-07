@@ -23,10 +23,10 @@
 //!
 //! Seams (plan modularity rule): this module is pure data — no wgpu, no
 //! windowing, no shader source of its own. It composes
-//! [`crate::traversal::TraversalSettings`], [`crate::ao::AoSettings`] and
-//! [`crate::shadows::ShadowSettings`], each of which still owns its own WGSL
-//! patching, and `crate::passes::dda::build_shader_source` remains the single
-//! place a shader source is assembled.
+//! [`crate::traversal::TraversalSettings`] and [`crate::ao::AoSettings`],
+//! each of which still owns its own WGSL patching, and
+//! `crate::passes::dda::build_shader_source` remains the single place a
+//! shader source is assembled.
 
 use crate::ao::{AoDirectionMode, AoMode, AoSettings};
 use crate::cagi::{CagiLayout, CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
@@ -34,7 +34,6 @@ use crate::lighting::{
     AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams, WaterParams,
 };
 use crate::shader_consts::{float_literal, ShaderConstSink, ShaderDefs, SourcePatcher};
-use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
 use crate::water::{
     WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface, WaveField,
@@ -95,9 +94,6 @@ pub enum LeverId {
     AoFadeEnd,
     AoSunAwareRayBudget,
     AoMissRadiance,
-    // Sun shadows (E1b).
-    ShadowMode,
-    ShadowPenumbraScale,
     // CAGI global illumination (E4).
     GiEnabled,
     GiResolution,
@@ -172,7 +168,6 @@ pub enum LeverId {
 pub enum LeverSubsystem {
     Traversal,
     AmbientOcclusion,
-    Shadows,
     /// E4 — the CAGI light volume.
     GlobalIllumination,
     /// E6 — water reflection, refraction and extinction.
@@ -189,7 +184,6 @@ impl LeverSubsystem {
         match self {
             LeverSubsystem::Traversal => "Traversal",
             LeverSubsystem::AmbientOcclusion => "AO",
-            LeverSubsystem::Shadows => "Shadows",
             LeverSubsystem::GlobalIllumination => "GI (CAGI)",
             LeverSubsystem::Water => "Water",
             LeverSubsystem::WorldEdit => "World edits",
@@ -199,10 +193,9 @@ impl LeverSubsystem {
     }
 
     /// Panel order.
-    pub const ALL: [LeverSubsystem; 8] = [
+    pub const ALL: [LeverSubsystem; 7] = [
         LeverSubsystem::Traversal,
         LeverSubsystem::AmbientOcclusion,
-        LeverSubsystem::Shadows,
         LeverSubsystem::GlobalIllumination,
         LeverSubsystem::Water,
         LeverSubsystem::WorldEdit,
@@ -389,7 +382,6 @@ impl LeverId {
     pub fn read(self, quality: &RenderQuality) -> LeverValue {
         let traversal = &quality.traversal;
         let ambient_occlusion = &quality.ambient_occlusion;
-        let shadows = &quality.shadows;
         let global_illumination = &quality.global_illumination;
         match self {
             LeverId::ColumnFastForward => LeverValue::Flag(traversal.column_fast_forward),
@@ -415,8 +407,6 @@ impl LeverId {
                 LeverValue::Flag(ambient_occlusion.sun_aware_ray_budget)
             }
             LeverId::AoMissRadiance => LeverValue::Flag(ambient_occlusion.miss_radiance),
-            LeverId::ShadowMode => LeverValue::Mode(shadows.mode.shader_value()),
-            LeverId::ShadowPenumbraScale => LeverValue::Scalar(shadows.penumbra_scale),
             LeverId::GiEnabled => LeverValue::Flag(global_illumination.enabled),
             LeverId::GiResolution => LeverValue::Count(global_illumination.cell_voxels),
             LeverId::GiLayout => LeverValue::Mode(global_illumination.layout.shader_value()),
@@ -543,7 +533,6 @@ impl LeverId {
     pub fn apply(self, quality: &mut RenderQuality, value: LeverValue) {
         let traversal = &mut quality.traversal;
         let ambient_occlusion = &mut quality.ambient_occlusion;
-        let shadows = &mut quality.shadows;
         let global_illumination = &mut quality.global_illumination;
         match self {
             LeverId::ColumnFastForward => traversal.column_fast_forward = value.expect_flag(self),
@@ -580,10 +569,6 @@ impl LeverId {
             LeverId::AoMissRadiance => {
                 ambient_occlusion.miss_radiance = value.expect_flag(self);
             }
-            LeverId::ShadowMode => {
-                shadows.mode = ShadowMode::from_shader_value(value.expect_mode(self));
-            }
-            LeverId::ShadowPenumbraScale => shadows.penumbra_scale = value.expect_scalar(self),
             LeverId::GiEnabled => global_illumination.enabled = value.expect_flag(self),
             LeverId::GiResolution => {
                 global_illumination.cell_voxels = value.expect_count(self);
@@ -1226,101 +1211,6 @@ pub const REGISTRY: &[Lever] = &[
                 (LeverId::AoMissRadiance, LeverValue::Flag(true)),
             ],
         }],
-    },
-    // ---- Shadows (E1b) ----
-    Lever {
-        id: LeverId::ShadowMode,
-        subsystem: LeverSubsystem::Shadows,
-        kind: LeverKind::ShaderConst,
-        shader_const: Some("SHADOW_MODE"),
-        label: "technique",
-        default_value: LeverValue::Mode(0),
-        range: LeverRange::Discrete,
-        verdict: "Hard shadows in every tier — soft-from-distance-field is free but \
-                  broken (see the soft option's verdict).",
-        mode_options: &[
-            ModeOption {
-                value: 0,
-                label: "hard",
-                verdict: "One binary any-hit shadow ray — the default. Crisp voxel shadows also \
-                          suit the art direction, and this is the Stage 2 correctness reference \
-                          (19 differing pixels on B, 0 on D).",
-            },
-            ModeOption {
-                value: 1,
-                label: "soft (distance field)",
-                verdict: "DOCUMENTED NEGATIVE, off: free as promised (+0.10-0.35 ms, no extra \
-                          rays) but the per-BRICK chebyshev field stamps a visible 1 m lattice \
-                          plus sun-aligned streaks into flat surfaces at EVERY penumbra scale \
-                          (k = 4/16/64/115 swept), with no penumbra ramp to trade against it. \
-                          Confirmed broken in-app. Needs voxel-level clearance (~37 MB).",
-            },
-        ],
-        bench: &[BenchPoint {
-            section: BenchSection::CheapOcclusion,
-            label: "corner+soft-k115",
-            overrides: &[
-                (LeverId::AoMode, LeverValue::Mode(1)),
-                (LeverId::ShadowMode, LeverValue::Mode(1)),
-                (LeverId::ShadowPenumbraScale, LeverValue::Scalar(115.0)),
-            ],
-        }],
-    },
-    Lever {
-        id: LeverId::ShadowPenumbraScale,
-        subsystem: LeverSubsystem::Shadows,
-        kind: LeverKind::Runtime,
-        shader_const: None,
-        label: "penumbra scale",
-        default_value: LeverValue::Scalar(115.0),
-        range: LeverRange::Continuous {
-            minimum: 4.0,
-            maximum: 256.0,
-            logarithmic: true,
-        },
-        verdict: "Runtime (shading_params.y), soft mode only. It is the reciprocal \
-                  of the light's angular radius, so 115 = the sun's true 0.5-degree \
-                  disc and 4 would model a 14-degree source. The whole sweep prints \
-                  the brick lattice.",
-        mode_options: &[],
-        bench: &[
-            BenchPoint {
-                section: BenchSection::CheapOcclusion,
-                label: "soft-k4",
-                overrides: &[
-                    (LeverId::AoMode, LeverValue::Mode(3)),
-                    (LeverId::ShadowMode, LeverValue::Mode(1)),
-                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(4.0)),
-                ],
-            },
-            BenchPoint {
-                section: BenchSection::CheapOcclusion,
-                label: "soft-k16",
-                overrides: &[
-                    (LeverId::AoMode, LeverValue::Mode(3)),
-                    (LeverId::ShadowMode, LeverValue::Mode(1)),
-                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(16.0)),
-                ],
-            },
-            BenchPoint {
-                section: BenchSection::CheapOcclusion,
-                label: "soft-k64",
-                overrides: &[
-                    (LeverId::AoMode, LeverValue::Mode(3)),
-                    (LeverId::ShadowMode, LeverValue::Mode(1)),
-                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(64.0)),
-                ],
-            },
-            BenchPoint {
-                section: BenchSection::CheapOcclusion,
-                label: "soft-k115",
-                overrides: &[
-                    (LeverId::AoMode, LeverValue::Mode(3)),
-                    (LeverId::ShadowMode, LeverValue::Mode(1)),
-                    (LeverId::ShadowPenumbraScale, LeverValue::Scalar(115.0)),
-                ],
-            },
-        ],
     },
     // ---- CAGI global illumination (E4) ----
     Lever {
@@ -3517,7 +3407,6 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
                   Fresnel-tinted water, render scale 0.7, AO fade 15->30 m",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
-            (LeverId::ShadowMode, LeverValue::Mode(0)),
             (LeverId::AoDistanceFade, LeverValue::Flag(true)),
             (LeverId::AoFadeStart, LeverValue::VoxelDistance(120)),
             (LeverId::AoFadeEnd, LeverValue::VoxelDistance(240)),
@@ -3546,7 +3435,6 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
                   10->50 m, render scale 0.8 — E9 tunes this tier on device",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
-            (LeverId::ShadowMode, LeverValue::Mode(0)),
             // The D5 flip made banks6 the baseline; Quest pins the isotropic
             // layout — a sixth of the light memory (3.5 vs 20.9 MiB), a third
             // of the CA cost (0.27-0.32 vs 0.97-1.10 ms) and none of the
@@ -3570,7 +3458,6 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
                   shipped default",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
-            (LeverId::ShadowMode, LeverValue::Mode(0)),
             (LeverId::GiEnabled, LeverValue::Flag(true)),
             // The D5 reference pairing: banks6 (the baseline layout) at 8-voxel
             // cells. Banks at 4-voxel cells extrapolates to ~7 ms of CA.
@@ -3601,7 +3488,6 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
             // only tier that traces any. Cosine directions keep the estimate
             // unbiased; the 2-ray grain in dark foreground ships with it.
             (LeverId::AoMissRadiance, LeverValue::Flag(true)),
-            (LeverId::ShadowMode, LeverValue::Mode(0)),
             // Twice Balanced's propagation budget: the volume converges in half
             // the frames after a sun change, at twice the CA cost.
             (LeverId::GiIterationsPerFrame, LeverValue::Count(4)),
@@ -3809,7 +3695,6 @@ pub struct RenderQuality {
     pub preset: QualityPreset,
     pub traversal: TraversalSettings,
     pub ambient_occlusion: AoSettings,
-    pub shadows: ShadowSettings,
     /// E4 — the CAGI light volume.
     pub global_illumination: CagiSettings,
     /// E6 — water reflection, refraction and extinction.
@@ -3840,7 +3725,6 @@ impl RenderQuality {
     pub(crate) fn declare_shading_consts(&self, sink: &mut dyn ShaderConstSink) {
         self.traversal.declare_consts(sink);
         self.ambient_occlusion.declare_consts(sink);
-        self.shadows.declare_consts(sink);
         self.global_illumination.declare_volume_consts(sink);
         self.water.declare_consts(sink);
         self.materials.declare_consts(sink);
@@ -3854,7 +3738,6 @@ impl RenderQuality {
     /// other. Order matches [`crate::passes::cagi::build_shader_source`].
     pub(crate) fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
         self.traversal.declare_consts(sink);
-        self.shadows.declare_consts(sink);
         self.water.declare_consts(sink);
         self.global_illumination.declare_volume_consts(sink);
         self.global_illumination.declare_propagation_consts(sink);
@@ -3893,7 +3776,6 @@ impl RenderQuality {
             preset: QualityPreset::Balanced,
             traversal: TraversalSettings::default(),
             ambient_occlusion: AoSettings::default(),
-            shadows: ShadowSettings::default(),
             global_illumination: CagiSettings::default(),
             water: WaterSettings::default(),
             materials: MaterialSettings::default(),
@@ -3929,7 +3811,6 @@ impl RenderQuality {
             || self
                 .ambient_occlusion
                 .requires_pipeline_rebuild(&applied.ambient_occlusion)
-            || self.shadows.requires_pipeline_rebuild(&applied.shadows)
             || self
                 .global_illumination
                 .requires_pipeline_rebuild(&applied.global_illumination)
@@ -3961,7 +3842,7 @@ impl RenderQuality {
     pub fn shading_params(&self) -> ShadingParams {
         ShadingParams {
             ambient_occlusion_strength: self.ambient_occlusion.strength,
-            shadow_penumbra_scale: self.shadows.penumbra_scale,
+            padding_y: 0.0,
             ambient_occlusion_fade_start_voxels: self.ambient_occlusion.fade_start_voxels as f32,
             ambient_occlusion_fade_end_voxels: self.ambient_occlusion.fade_end_voxels as f32,
         }
@@ -4476,7 +4357,6 @@ mod tests {
             preset: _,
             traversal,
             ambient_occlusion,
-            shadows,
             global_illumination,
             water,
             world_edit,
@@ -4524,10 +4404,6 @@ mod tests {
             sun_aware_ray_budget,
             miss_radiance,
         } = ambient_occlusion;
-        let ShadowSettings {
-            mode: shadow_mode,
-            penumbra_scale,
-        } = shadows;
         let CagiSettings {
             enabled: gi_enabled,
             cell_voxels,
@@ -4619,14 +4495,6 @@ mod tests {
                 LeverValue::Flag(sun_aware_ray_budget),
             ),
             (LeverId::AoMissRadiance, LeverValue::Flag(miss_radiance)),
-            (
-                LeverId::ShadowMode,
-                LeverValue::Mode(shadow_mode.shader_value()),
-            ),
-            (
-                LeverId::ShadowPenumbraScale,
-                LeverValue::Scalar(penumbra_scale),
-            ),
             (LeverId::GiEnabled, LeverValue::Flag(gi_enabled)),
             (LeverId::GiResolution, LeverValue::Count(cell_voxels)),
             (
@@ -5148,7 +5016,6 @@ mod tests {
     fn preset_table_matches_the_e1b_per_tier_recommendation() {
         let potato = preset_spec(QualityPreset::Potato).resolve();
         assert_eq!(potato.ambient_occlusion.mode, AoMode::AnalyticCorner);
-        assert_eq!(potato.shadows.mode, ShadowMode::Hard);
         assert!(potato.ambient_occlusion.distance_fade);
         assert_eq!(potato.ambient_occlusion.fade_start_voxels, 120); // 15 m
         assert_eq!(potato.ambient_occlusion.fade_end_voxels, 240); // 30 m
@@ -5159,7 +5026,6 @@ mod tests {
 
         let quest = preset_spec(QualityPreset::Quest).resolve();
         assert_eq!(quest.ambient_occlusion.mode, AoMode::AnalyticCorner);
-        assert_eq!(quest.shadows.mode, ShadowMode::Hard);
         assert!(!quest.ambient_occlusion.distance_fade);
         assert_eq!(quest.materials.pattern_fade_start_meters, 10.0);
         assert_eq!(quest.materials.pattern_fade_end_meters, 50.0);
@@ -5205,7 +5071,6 @@ mod tests {
             AoDirectionMode::CosineHemisphere
         );
         assert!(beautiful.ambient_occlusion.distance_falloff);
-        assert_eq!(beautiful.shadows.mode, ShadowMode::Hard);
         assert_eq!(beautiful.render_scale, MAX_RENDER_SCALE);
     }
 
@@ -5316,7 +5181,6 @@ mod tests {
         let potato = preset_spec(QualityPreset::Potato).resolve();
         let shading_params = potato.shading_params();
         assert_eq!(shading_params.ambient_occlusion_strength, 0.8);
-        assert_eq!(shading_params.shadow_penumbra_scale, 115.0);
         assert_eq!(shading_params.ambient_occlusion_fade_start_voxels, 120.0);
         assert_eq!(shading_params.ambient_occlusion_fade_end_voxels, 240.0);
     }

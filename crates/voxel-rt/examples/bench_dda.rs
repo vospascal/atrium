@@ -202,8 +202,8 @@ impl Scenario {
     }
 
     /// This scenario's sun with `quality`'s RUNTIME knobs (AO strength,
-    /// penumbra scale, fade ramp, the E4 GI knobs) — the levers that need no
-    /// pipeline rebuild are swept exactly the way the app applies them.
+    /// fade ramp, the E4 GI knobs) — the levers that need no pipeline
+    /// rebuild are swept exactly the way the app applies them.
     fn lighting_uniform(&self, quality: &RenderQuality) -> LightingUniform {
         let (animation_params, event_params) = quality.animation_params(
             AnimationClockSample::FROZEN,
@@ -1927,12 +1927,12 @@ fn cheap_occlusion_section() -> Section {
     variants.push(fade_range_as_shader_consts_variant(&e1_default));
 
     Section {
-        heading: "section 3: E1b cheap occlusion + soft shadows",
+        heading: "section 3: E1b cheap occlusion",
         scenarios: build_scenarios(&['a', 'b', 'c', 'd']),
         variants,
         reference_label: "ao-off",
         compare_heading: "E1b coverage (differing pixels vs ao-off/hard — AO rows = darkening \
-                          reach, soft-shadow rows = penumbra reach)",
+                          reach)",
         crop_regions: &[],
     }
 }

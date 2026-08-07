@@ -92,11 +92,10 @@
 // and BOTH cell levels (brick + voxel) share one stepping core — `DdaState` +
 // `dda_setup` + `dda_step` — so the DDA math exists exactly once. The
 // variants differ only in what they do at an occupied cell: `trace` /
-// `trace_brick` build a full `Hit` (material, face, distance, voxel);
-// `trace_shadow` / `shadow_brick_occluded` return a bool at the first set
-// occupancy bit. E4's CAGI injection calls `trace_shadow_visibility` for its
-// per-cell sun test through this very file; the audio-ray port will reuse the
-// same helpers.
+// `trace_brick` build a full `Hit` (material, face, distance, voxel), and
+// shadow rays reuse the same closest-hit trace. E4's CAGI injection calls
+// `trace_shadow_visibility` for its per-cell sun test through this very
+// file; the audio-ray port will reuse the same helpers.
 
 struct BrickmapMeta {
     brick_grid_size: vec3<u32>,   // (125, 32, 125)
@@ -661,21 +660,12 @@ const ENABLE_DISTANCE_SKIP: bool = true;
 // From NAADF (Ulschmid et al., CGF 2026, MIT).
 const ENABLE_DIRECTIONAL_SKIP: bool = false;
 
-// ---- E1b: shadow levers (technique bank T1) -----------------------------------
-// 0 = hard (one binary any-hit shadow ray — the voxel-purist default and the
-//     Stage 2 correctness gate's reference);
-// 1 = soft from the chebyshev distance field: IQ's single-ray penumbra trick,
-//     tracking min(penumbra_scale * clearance / t) along the SAME shadow ray
-//     using the distance bytes the traversal already fetches. Penumbra scale
-//     is the RUNTIME knob (lighting.shading_params.y).
-const SHADOW_MODE_HARD: u32 = 0u;
-const SHADOW_MODE_SOFT_DISTANCE_FIELD: u32 = 1u;
-const SHADOW_MODE: u32 = 0u;
-// Ray parameter (voxel units) below which the penumbra term is ignored: the
-// shadow ray starts inside the hit voxel's own brick, whose conservative
-// clearance is 0 by definition, so sampling there would blacken every lit
-// pixel. One brick of lead-in is the minimum that works.
-const SHADOW_PENUMBRA_MIN_DISTANCE: f32 = 8.0;
+// (E1b's shadow-mode lever was PRUNED 2026-08-07. Hard shadows — one binary
+// closest-hit ray — are the only technique: crisp voxel shadows are the art
+// direction, and the soft-ambience half of shadowing is the CAGI banks
+// volume's job. The soft-distance-field mode was a DOCUMENTED NEGATIVE: the
+// per-BRICK chebyshev field printed a 1 m lattice at every penumbra scale;
+// its verdict numbers live in the bench doc's E1b section.)
 
 // The column-height fast path needs the per-column max hoisted into a
 // register (and the guaranteed-empty-brick skip that comes with it).
@@ -1028,32 +1018,6 @@ fn skip_distance_of(cell_index: u32) -> u32 {
     return (brick_skip_distances[cell_index >> 2u] >> ((cell_index & 3u) * 8u)) & 0xffu;
 }
 
-// Distance in VOXEL units from `point` (inside the brick `cell`, whose
-// chebyshev skip distance is `skip_cells`) to the nearest possibly occupied
-// voxel — the quantity E1b's soft shadows use as IQ's `h`.
-//
-// The brick sits centered in an all-empty cube of half-width skip_cells - 1
-// bricks, so every occupied voxel lies outside that cube and the L-infinity
-// distance from `point` to the cube's boundary bounds the true distance from
-// below. Using the boundary distance rather than the flat
-// (skip_cells - 1) * BRICK_SIZE floor adds the point's own offset inside the
-// cube, which is what turns a per-brick step function into something varying
-// continuously along the ray — the cheap refinement E1b evaluates against
-// brick-granular banding. Callers must pass a point INSIDE the brick, not on
-// its entry face: at skip_cells = 1 the cube is the brick itself, so a
-// face-point evaluates to 0 and would black out every ray that grazes near
-// geometry (measured — it darkened 55% of the frame regardless of penumbra
-// scale before the sample point moved to the segment midpoint).
-// GRANULARITY CAVEAT: the underlying field is per-BRICK, so the bound still
-// jumps in 8-voxel (1 m) increments as skip_cells changes.
-fn brick_clearance(cell: vec3<i32>, skip_cells: u32, point: vec3<f32>) -> f32 {
-    let half_width = f32(i32(skip_cells) - 1) * BRICK_SIZE;
-    let cube_min = vec3<f32>(cell) * BRICK_SIZE - vec3<f32>(half_width);
-    let cube_max = vec3<f32>(cell + vec3<i32>(1, 1, 1)) * BRICK_SIZE + vec3<f32>(half_width);
-    let to_boundary = min(point - cube_min, cube_max - point);
-    return max(min(min(to_boundary.x, to_boundary.y), to_boundary.z), 0.0);
-}
-
 // Whether every brick of the 3x3x3 brick neighbourhood around `brick_cell` is
 // empty, the OWN brick excluded (it holds the hit voxel, so it is occupied by
 // definition). Out-of-grid neighbours count as empty. Reads the
@@ -1330,50 +1294,6 @@ fn trace_brick(origin: vec3<f32>, direction: vec3<f32>, inverse_direction: vec3<
     return result;
 }
 
-// Any-hit fine traversal for shadow rays: the first set occupancy bit
-// occludes — no material fetch, no face/distance bookkeeping.
-fn shadow_brick_occluded(origin: vec3<f32>, direction: vec3<f32>,
-                         inverse_direction: vec3<f32>, pointer: u32,
-                         brick_cell: vec3<i32>, t_enter: f32, t_exit: f32,
-                         skip_liquids: bool) -> bool {
-    // UNIFORM fast path, the any-hit twin of `trace_brick`'s: a solid brick
-    // occludes, full stop — unless it is a liquid this ray ignores. Shadow rays
-    // graze terrain at shallow angles and cross many ground bricks, so this is
-    // the case that walks the most voxels for the least information.
-    if (brick_is_uniform(pointer)) {
-        return !(skip_liquids && material_is_liquid(brick_uniform_material(pointer)));
-    }
-
-    let brick_min_cell = brick_cell * 8;
-    let brick_max_cell = brick_min_cell + vec3<i32>(7, 7, 7);
-    var state = dda_setup(origin, direction, inverse_direction, t_enter, 1.0,
-                          brick_min_cell, brick_max_cell);
-
-    for (var step_index = 0u; step_index < MAX_VOXEL_STEPS; step_index = step_index + 1u) {
-        let bit = local_bit_index(state.cell, brick_cell);
-        if (occupancy_bit_set(pointer, bit)) {
-            // Same E6 rule as `trace_brick`: a liquid does not occlude a ray that
-            // was told liquids are transparent to it.
-            if (!skip_liquids) {
-                return true;
-            }
-            let packed = material_words[brick_slot(pointer) * 128u + (bit >> 2u)];
-            let material = (packed >> ((bit & 3u) * 8u)) & 0xffu;
-            if (!material_is_liquid(material)) {
-                return true;
-            }
-        }
-        dda_step(&state);
-        if (any(state.cell < brick_min_cell) || any(state.cell > brick_max_cell)) {
-            return false;
-        }
-        if (state.t > t_exit + RAY_EPSILON) {
-            return false;
-        }
-    }
-    return false;
-}
-
 // ---- Coarse level: the brick grid ---------------------------------------------
 
 // Trace one closest-hit ray through the brick grid. Occupancy comes from the
@@ -1465,131 +1385,16 @@ fn trace(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32,
     return result;
 }
 
-// E1b soft shadows (technique bank T1), kept OUT of the shadow loop's body:
-// IQ's single-ray penumbra term `min(penumbra_scale * clearance / t)` folded
-// into the running visibility, from the chebyshev distance bytes the traversal
-// already fetched. Sampled at the MIDPOINT of the ray's segment through this
-// brick — see `brick_clearance` on why a face point blacks out the frame — and
-// ignored for the first brick of lead-in, whose conservative clearance is 0 by
-// definition. DOCUMENTED NEGATIVE (per-brick granularity prints a 1 m lattice);
-// see the registry verdict in src/variants.rs.
-fn soft_penumbra_update(visibility: f32, state: ptr<function, DdaState>,
-                        skip_cells: u32, origin: vec3<f32>,
-                        direction: vec3<f32>) -> f32 {
-    if ((*state).t <= SHADOW_PENUMBRA_MIN_DISTANCE) {
-        return visibility;
-    }
-    let brick_exit = min(min((*state).t_max.x, (*state).t_max.y), (*state).t_max.z);
-    let sample_t = ((*state).t + brick_exit) * 0.5;
-    let clearance = brick_clearance((*state).cell, skip_cells,
-                                    origin + direction * sample_t);
-    return min(visibility, lighting.shading_params.y * clearance / sample_t);
-}
-
-// Sun visibility in [0, 1] along a shadow ray.
+// Sun visibility along a shadow ray: exactly 0.0 or 1.0, from the closest-hit
+// `trace` — measured faster than a specialized any-hit loop (both the loop and
+// the E1b soft mode that owned it were pruned 2026-08-07), and bit-identical
+// to Stage 2. Crisp voxel shadows are the art direction; soft ambience is the
+// CAGI banks volume's job.
 //
-// HARD mode (SHADOW_MODE = 0, the default) returns exactly 0.0 or 1.0 by
-// delegating to the closest-hit `trace` — measured faster than running the
-// any-hit coarse loop below — which keeps the renderer bit-identical to
-// Stage 2.
-//
-// SOFT mode (E1b, technique bank T1) runs the any-hit coarse loop and tracks
-// IQ's single-ray penumbra term `min(penumbra_scale * clearance / t)` from the
-// chebyshev distance bytes the traversal already fetches (`brick_clearance`),
-// then smoothsteps it. No extra rays, no extra data — but see the granularity
-// caveat on `brick_clearance` and the E1b verdict in the bench doc.
-//
-// Occupied bricks always run the occupancy-only fine variant; the first
-// occluding voxel ends the ray at zero visibility either way.
+// E4's CAGI injection and E6's sun-through-liquid rule share this function, so
+// the light volume and the surface cannot disagree about what the sun reaches.
 fn trace_shadow_visibility(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
-    if (SHADOW_MODE == SHADOW_MODE_HARD) {
-        return select(1.0, 0.0,
-                      trace(origin, direction, MAX_TRACE_DISTANCE,
-                            WATER_SUN_THROUGH_LIQUID).material != 0u);
-    }
-    var visibility = 1.0;
-    let inverse_direction = vec3<f32>(
-        safe_inverse(direction.x),
-        safe_inverse(direction.y),
-        safe_inverse(direction.z),
-    );
-    let bounds = intersect_world_bounds(origin, inverse_direction);
-    if (bounds.x > bounds.y) {
-        return 1.0;
-    }
-
-    let grid_size = vec3<i32>(brickmap.brick_grid_size);
-    var state = dda_setup(origin, direction, inverse_direction, bounds.x, BRICK_SIZE,
-                          vec3<i32>(0, 0, 0), grid_size - vec3<i32>(1, 1, 1));
-
-    let heading_upward = direction.y >= 0.0;
-    let world_max_brick_y = i32(brickmap.max_occupied_brick_y); // -1 when empty
-    let t_limit = min(bounds.y, MAX_TRACE_DISTANCE);
-    // Hoisted column max of the CURRENT XZ column (see column_max_of).
-    var column_max_y = 0;
-    if (USE_COLUMN_HEIGHTS) {
-        column_max_y = column_max_of(state.cell);
-    }
-    // Set by distance_skip, which can change the XZ column via a Y-face exit.
-    var column_stale = false;
-
-    for (var step_index = 0u; step_index < MAX_BRICK_STEPS; step_index = step_index + 1u) {
-        if (any(state.cell < vec3<i32>(0, 0, 0)) || any(state.cell >= grid_size)) {
-            break; // left the grid → nothing more can occlude
-        }
-        if (state.t > t_limit) {
-            break;
-        }
-        let height_action = coarse_height_levers(&state, &column_max_y, &column_stale,
-                                                 origin, direction, inverse_direction,
-                                                 heading_upward, world_max_brick_y);
-        if (height_action == HEIGHT_LEVER_MISS) {
-            break; // nothing left that could occlude → unoccluded
-        }
-        if (height_action == HEIGHT_LEVER_CONTINUE) {
-            continue;
-        }
-
-        let cell_index = brick_cell_index(state.cell);
-        if (brick_occupied(cell_index)) {
-            let pointer = brick_indices[cell_index];
-            let brick_exit = min(min(state.t_max.x, state.t_max.y), state.t_max.z);
-            if (shadow_brick_occluded(origin, direction, inverse_direction, pointer,
-                                      state.cell, state.t, brick_exit,
-                                      WATER_SUN_THROUGH_LIQUID)) {
-                return 0.0;
-            }
-        } else {
-            var skip_cells = 0u;
-            if (ENABLE_DISTANCE_SKIP || SHADOW_MODE == SHADOW_MODE_SOFT_DISTANCE_FIELD) {
-                skip_cells = skip_distance_of(cell_index);
-            }
-            if (SHADOW_MODE == SHADOW_MODE_SOFT_DISTANCE_FIELD) {
-                visibility = soft_penumbra_update(visibility, &state, skip_cells,
-                                                  origin, direction);
-            }
-            if (ENABLE_DIRECTIONAL_SKIP) {
-                let extents = directional_box(cell_index);
-                if (any(extents[0] + extents[1] > vec3<i32>(0, 0, 0))) {
-                    bounded_skip(&state, origin, direction, inverse_direction,
-                                 extents[0], extents[1], vec3<i32>(0, 0, 0),
-                                 grid_size - vec3<i32>(1, 1, 1));
-                    column_stale = true;
-                    continue;
-                }
-            } else if (ENABLE_DISTANCE_SKIP && skip_cells >= 2u) {
-                distance_skip(&state, origin, direction, inverse_direction,
-                              i32(skip_cells), vec3<i32>(0, 0, 0),
-                              grid_size - vec3<i32>(1, 1, 1));
-                column_stale = true;
-                continue;
-            }
-        }
-        dda_step(&state);
-    }
-    if (SHADOW_MODE == SHADOW_MODE_SOFT_DISTANCE_FIELD) {
-        let clamped = clamp(visibility, 0.0, 1.0);
-        return clamped * clamped * (3.0 - 2.0 * clamped); // smoothstep
-    }
-    return visibility;
+    return select(1.0, 0.0,
+                  trace(origin, direction, MAX_TRACE_DISTANCE,
+                        WATER_SUN_THROUGH_LIQUID).material != 0u);
 }

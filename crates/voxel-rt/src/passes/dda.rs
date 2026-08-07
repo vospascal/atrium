@@ -448,7 +448,6 @@ pub(crate) mod tests {
     use crate::cagi::{CagiSampleMode, CagiSettings};
     use crate::passes::create_compute_pipeline_with_layouts;
     use crate::passes::world_bindings::PATTERN_CACHE_ENTRIES;
-    use crate::shadows::{ShadowMode, ShadowSettings};
     use crate::traversal::TraversalSettings;
     use crate::variants::{QualityPreset, QUALITY_PRESETS};
     use crate::water::{WaterMode, WaterSettings};
@@ -685,20 +684,11 @@ pub(crate) mod tests {
         };
 
         for ambient_occlusion in ao_settings_to_check {
-            for shadow_mode in [ShadowMode::Hard, ShadowMode::SoftDistanceField] {
-                let quality = RenderQuality {
-                    ambient_occlusion,
-                    shadows: ShadowSettings {
-                        mode: shadow_mode,
-                        ..ShadowSettings::default()
-                    },
-                    ..RenderQuality::default()
-                };
-                compile(
-                    &quality,
-                    format!("AO {:?} + shadows {shadow_mode:?}", ambient_occlusion.mode),
-                );
-            }
+            let quality = RenderQuality {
+                ambient_occlusion,
+                ..RenderQuality::default()
+            };
+            compile(&quality, format!("AO {:?}", ambient_occlusion.mode));
         }
         // Every traversal off-lever on its own, plus the all-on combination:
         // the column fast-forward paths are only reachable this way.

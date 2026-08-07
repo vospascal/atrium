@@ -45,7 +45,6 @@ use voxel_environment::SunSettings;
 
 use voxel_rt::ao::AoMode;
 use voxel_rt::character::Submersion;
-use voxel_rt::shadows::ShadowMode;
 use voxel_rt::sky_weather::SkyWeather;
 use voxel_rt::studio_assets::StudioAssetPanelState;
 use voxel_rt::variants::{
@@ -799,7 +798,7 @@ pub(crate) fn draw_quality_section(ui: &mut egui::Ui, quality: &mut RenderQualit
 }
 
 /// Whether a lever currently does anything — the ray knobs are meaningless for
-/// the analytic estimators, the penumbra scale for hard shadows, the fade range
+/// the analytic estimators, the fade range
 /// with the fade off. Greyed out instead of hidden so the panel layout is
 /// stable and the verdict stays readable. Presentation only: the value itself
 /// is preserved either way.
@@ -817,7 +816,6 @@ fn lever_is_relevant(quality: &RenderQuality, lever_id: LeverId) -> bool {
         LeverId::AoFadeStart | LeverId::AoFadeEnd => {
             ambient_occlusion.mode != AoMode::Off && ambient_occlusion.distance_fade
         }
-        LeverId::ShadowPenumbraScale => quality.shadows.mode == ShadowMode::SoftDistanceField,
         // Every CAGI knob is meaningless without the light volume (E4).
         LeverId::GiResolution
         | LeverId::GiRule

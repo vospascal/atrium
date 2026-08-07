@@ -130,9 +130,9 @@ impl LightingUniform {
 pub struct ShadingParams {
     /// `x` — AO attenuation scale in [0, 1] (E1).
     pub ambient_occlusion_strength: f32,
-    /// `y` — soft-shadow penumbra scale, the reciprocal of the light's angular
-    /// radius (E1b). Ignored in hard-shadow mode.
-    pub shadow_penumbra_scale: f32,
+    /// `y` — the pruned E1b soft-shadow penumbra slot (2026-08-07). Kept as
+    /// explicit padding so `z`/`w` stay at the components the shader reads.
+    pub padding_y: f32,
     /// `z` — start of the AO distance-fade ramp, voxel units (E1b lever 2,
     /// moved out of the shader consts in E1c). Ignored when the fade is
     /// compiled off.
@@ -146,7 +146,7 @@ impl ShadingParams {
     fn to_array(self) -> [f32; 4] {
         [
             self.ambient_occlusion_strength,
-            self.shadow_penumbra_scale,
+            self.padding_y,
             self.ambient_occlusion_fade_start_voxels,
             self.ambient_occlusion_fade_end_voxels,
         ]
@@ -521,26 +521,20 @@ mod tests {
 
     /// Every runtime knob vector, in one uniform, so the component-order tests
     /// below all read the same construction.
-    fn probe_uniform(shadow_penumbra_scale: f32) -> LightingUniform {
-        probe_uniform_for(SunSettings::default(), shadow_penumbra_scale)
+    fn probe_uniform() -> LightingUniform {
+        probe_uniform_for(SunSettings::default())
     }
 
     /// The same, for a chosen sun — so a test about the sun's own knobs shares this
     /// construction rather than writing a second one that could drift from it.
-    fn probe_uniform_for(sun: SunSettings, shadow_penumbra_scale: f32) -> LightingUniform {
-        probe_uniform_full(
-            sun,
-            shadow_penumbra_scale,
-            AnimationParams::default(),
-            EventParams::default(),
-        )
+    fn probe_uniform_for(sun: SunSettings) -> LightingUniform {
+        probe_uniform_full(sun, AnimationParams::default(), EventParams::default())
     }
 
     /// The one construction every probe funnels through, so a new vector cannot
     /// be added to the uniform without every existing component test seeing it.
     fn probe_uniform_full(
         sun: SunSettings,
-        shadow_penumbra_scale: f32,
         animation_params: AnimationParams,
         event_params: EventParams,
     ) -> LightingUniform {
@@ -548,7 +542,7 @@ mod tests {
             &sun,
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
-                shadow_penumbra_scale,
+                padding_y: 0.0,
                 ambient_occlusion_fade_start_voxels: 240.0,
                 ambient_occlusion_fade_end_voxels: 480.0,
             },
@@ -589,10 +583,10 @@ mod tests {
 
     #[test]
     fn material_debug_override_packs_into_unused_material_word() {
-        let uniform = probe_uniform(1.0).with_material_debug(true, 0b0101, 8);
+        let uniform = probe_uniform().with_material_debug(true, 0b0101, 8);
         assert_eq!(uniform.material_params[3], 267.0);
 
-        let disabled = probe_uniform(1.0).with_material_debug(false, 0xff, 0x3f);
+        let disabled = probe_uniform().with_material_debug(false, 0xff, 0x3f);
         assert_eq!(disabled.material_params[3], 510.0);
     }
 
@@ -605,7 +599,7 @@ mod tests {
     /// replaced, reintroduced by omission.
     #[test]
     fn output_params_default_to_no_headroom_and_land_in_x() {
-        let uniform = probe_uniform(115.0);
+        let uniform = probe_uniform();
         assert_eq!(
             uniform.output_params,
             [
@@ -659,12 +653,11 @@ mod tests {
     /// would make every oscillator jump once a second instead of once an epoch.
     #[test]
     fn animation_params_keep_their_vector_components() {
-        let uniform = probe_uniform(115.0);
+        let uniform = probe_uniform();
         assert_eq!(uniform.animation_params, [0.0, 0.0, 0.0, 0.0]);
 
         let animated = probe_uniform_full(
             SunSettings::default(),
-            115.0,
             AnimationParams {
                 remainder_seconds: 12.5,
                 epoch: 3.0,
@@ -695,21 +688,21 @@ mod tests {
     /// would make the GI strength slider control the sun bounce fraction.
     #[test]
     fn gi_params_keep_their_vector_components() {
-        let uniform = probe_uniform(115.0);
+        let uniform = probe_uniform();
         assert_eq!(uniform.gi_params, [1.0, 0.0, 0.35, 0.0]);
         // ...and the E1 knobs must be untouched by the new vector.
-        assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
+        assert_eq!(uniform.shading_params, [0.8, 0.0, 240.0, 480.0]);
     }
 
     /// E6: the water knobs must land in their own slots too, and must not
     /// disturb the two vectors that were already there.
     #[test]
     fn water_params_keep_their_vector_components() {
-        let uniform = probe_uniform(115.0);
+        let uniform = probe_uniform();
         assert_eq!(uniform.water_params, [1.0, 1.0, 0.04, 0.0]);
         assert_eq!(uniform.water_optics, [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(uniform.gi_params, [1.0, 0.0, 0.35, 0.0]);
-        assert_eq!(uniform.shading_params, [0.8, 115.0, 240.0, 480.0]);
+        assert_eq!(uniform.shading_params, [0.8, 0.0, 240.0, 480.0]);
     }
 
     /// The runtime knobs must land in their own slots of the shared
@@ -717,7 +710,7 @@ mod tests {
     /// control the penumbra width.
     #[test]
     fn shading_params_keep_their_vector_components() {
-        assert_eq!(probe_uniform(4.0).shading_params, [0.8, 4.0, 240.0, 480.0]);
+        assert_eq!(probe_uniform().shading_params, [0.8, 0.0, 240.0, 480.0]);
     }
 
     #[test]
@@ -755,15 +748,12 @@ mod tests {
     /// you cannot turn down is a light that hides every emitter behind it.
     #[test]
     fn the_sun_and_the_ambient_floor_can_both_reach_zero() {
-        let day = probe_uniform(1.0);
-        let night = probe_uniform_for(
-            SunSettings {
-                intensity_scale: 0.0,
-                ambient_scale: 0.0,
-                ..SunSettings::default()
-            },
-            1.0,
-        );
+        let day = probe_uniform();
+        let night = probe_uniform_for(SunSettings {
+            intensity_scale: 0.0,
+            ambient_scale: 0.0,
+            ..SunSettings::default()
+        });
 
         // Daylight is the shipped look and must not have moved.
         assert_eq!(day.sun_color_intensity[3], SUN_INTENSITY);
@@ -774,14 +764,11 @@ mod tests {
         // The direction is untouched by the scales — dimming is not moving the sun.
         assert_eq!(day.sun_direction, night.sun_direction);
         // And a negative scale cannot invert the light.
-        let clamped = probe_uniform_for(
-            SunSettings {
-                intensity_scale: -5.0,
-                ambient_scale: -5.0,
-                ..SunSettings::default()
-            },
-            1.0,
-        );
+        let clamped = probe_uniform_for(SunSettings {
+            intensity_scale: -5.0,
+            ambient_scale: -5.0,
+            ..SunSettings::default()
+        });
         assert_eq!(clamped.sun_color_intensity[3], 0.0);
         assert_eq!(clamped.sky_ambient[3], 0.0);
     }
@@ -819,20 +806,14 @@ mod tests {
 
     #[test]
     fn noon_and_midnight_produce_distinct_sky_states() {
-        let noon = probe_uniform_for(
-            SunSettings {
-                day_phase: 0.5,
-                ..SunSettings::default()
-            },
-            1.0,
-        );
-        let midnight = probe_uniform_for(
-            SunSettings {
-                day_phase: 0.0,
-                ..SunSettings::default()
-            },
-            1.0,
-        );
+        let noon = probe_uniform_for(SunSettings {
+            day_phase: 0.5,
+            ..SunSettings::default()
+        });
+        let midnight = probe_uniform_for(SunSettings {
+            day_phase: 0.0,
+            ..SunSettings::default()
+        });
         assert!(noon.celestial_sun[3] > midnight.celestial_sun[3]);
         assert!(midnight.celestial_moon[1] > 0.0);
         assert!(noon.celestial_moon[1] < 0.0);
