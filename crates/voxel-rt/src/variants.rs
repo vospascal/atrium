@@ -891,7 +891,10 @@ pub const REGISTRY: &[Lever] = &[
         range: LeverRange::Discrete,
         verdict: "The E1b shootout's subject: analytic corner AO is the shipped \
                   default (+0.25-0.31 ms) and ray-traced AO is the Beautiful tier \
-                  (+4.2-8.2 ms).",
+                  (+4.2-8.2 ms). The analytic 3x3x3 contender was PRUNED 2026-08-07: \
+                  5x corner AO's cost for over-darkening and per-voxel flat facets — \
+                  slower AND worse-looking on any hardware (verdict kept in the \
+                  bench doc's E1b section).",
         mode_options: &[
             ModeOption {
                 value: 0,
@@ -913,13 +916,6 @@ pub const REGISTRY: &[Lever] = &[
             },
             ModeOption {
                 value: 2,
-                label: "3x3x3",
-                verdict: "Analytic 26-neighbour — LOSER, off: 5x corner AO's cost (+1.3-1.6 ms) \
-                          for a broad low-amplitude over-darkening (68-82% coverage, max delta 43) \
-                          and per-voxel flat facets where corner AO is smooth.",
-            },
-            ModeOption {
-                value: 3,
                 label: "off",
                 verdict: "No occlusion — the pre-E1 renderer bit for bit. The bench floor: \
                           4.74 / 6.52 / 4.40 / 4.96 ms (A/B/C/D).",
@@ -929,22 +925,17 @@ pub const REGISTRY: &[Lever] = &[
             BenchPoint {
                 section: BenchSection::RayTracedAo,
                 label: "ao-off",
-                overrides: &[(LeverId::AoMode, LeverValue::Mode(3))],
+                overrides: &[(LeverId::AoMode, LeverValue::Mode(2))],
             },
             BenchPoint {
                 section: BenchSection::CheapOcclusion,
                 label: "ao-off",
-                overrides: &[(LeverId::AoMode, LeverValue::Mode(3))],
+                overrides: &[(LeverId::AoMode, LeverValue::Mode(2))],
             },
             BenchPoint {
                 section: BenchSection::CheapOcclusion,
                 label: "ao-corner",
                 overrides: &[(LeverId::AoMode, LeverValue::Mode(1))],
-            },
-            BenchPoint {
-                section: BenchSection::CheapOcclusion,
-                label: "ao-neighborhood",
-                overrides: &[(LeverId::AoMode, LeverValue::Mode(2))],
             },
         ],
     },
@@ -3957,12 +3948,8 @@ mod tests {
     const NON_LEVER_SHADER_CONSTANTS: &[&str] = &[
         "AO_MODE_RAY_TRACED",
         "AO_MODE_ANALYTIC_CORNER",
-        "AO_MODE_ANALYTIC_NEIGHBORHOOD",
         "AO_MODE_OFF",
         "AO_SUN_BUDGET_THRESHOLD",
-        "SHADOW_MODE_HARD",
-        "SHADOW_MODE_SOFT_DISTANCE_FIELD",
-        "SHADOW_PENUMBRA_MIN_DISTANCE",
         "SHADOW_BIAS",
         "USE_COLUMN_HEIGHTS",
         // E4 CAGI: mode names, the light-word / attribute bit layout and the

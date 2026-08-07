@@ -67,14 +67,10 @@ struct Camera {
 //   1  analytic corner — zero rays, classic voxel corner occlusion from the
 //      8 occupancy bits around the hit face, bilinearly interpolated across
 //      the face (technique bank T7);
-//   2  analytic 3x3x3 — zero rays, hemisphere-weighted occupancy of the 26
-//      voxels around the face-front voxel (wider than corner AO, flat per
-//      voxel);
-//   3  off.
+//   2  off.
 const AO_MODE_RAY_TRACED: u32 = 0u;
 const AO_MODE_ANALYTIC_CORNER: u32 = 1u;
-const AO_MODE_ANALYTIC_NEIGHBORHOOD: u32 = 2u;
-const AO_MODE_OFF: u32 = 3u;
+const AO_MODE_OFF: u32 = 2u;
 const AO_MODE: u32 = 1u;
 // Occlusion rays per primary hit (bench contenders: 1 / 2 / 4). 1 ray shows
 // a stable but visible IGN crosshatch on flat ground; 2 is clean; 4 buys
@@ -433,40 +429,6 @@ fn analytic_corner_occlusion(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec
                mix(occlusion_low_high, occlusion_high_high, u), v);
 }
 
-// Zero-ray occlusion from the 26 voxels around the FACE-FRONT voxel
-// (hit.voxel + normal), each solid neighbour weighted by how much of the
-// surface hemisphere it blocks: (0.5 + 0.5 * cos) / distance, normalized by
-// the same weight sum over all 26 offsets so a fully enclosed face reads 1.0.
-//
-// Centering on the face-front voxel rather than the hit voxel is deliberate:
-// centered on the hit voxel, the surface's OWN in-plane neighbours (always
-// solid on any flat ground) carry cos = 0 weight and darken open terrain by
-// ~45% — the classic analytic over-darkening failure. One voxel out, that
-// layer sits at cos < 0 and the same flat ground reads ~9%.
-fn analytic_neighborhood_occlusion(hit: Hit, normal: vec3<f32>) -> f32 {
-    let center = hit.voxel + vec3<i32>(normal);
-    var occlusion_sum = 0.0;
-    var weight_sum = 0.0;
-    for (var offset_z = -1; offset_z <= 1; offset_z = offset_z + 1) {
-        for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
-            for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
-                if (offset_x == 0 && offset_y == 0 && offset_z == 0) {
-                    continue;
-                }
-                let offset = vec3<f32>(f32(offset_x), f32(offset_y), f32(offset_z));
-                let inverse_length = 1.0 / length(offset);
-                let weight = (0.5 + 0.5 * dot(offset * inverse_length, normal))
-                    * inverse_length;
-                weight_sum += weight;
-                if (voxel_occupied(center + vec3<i32>(offset_x, offset_y, offset_z))) {
-                    occlusion_sum += weight;
-                }
-            }
-        }
-    }
-    return occlusion_sum / weight_sum;
-}
-
 // E1b cost-cutting lever 2, kept out of the estimator: the distance-fade
 // weight in [0, 1] for a hit at `hit_distance` voxels, over the RUNTIME ramp
 // (shading_params.z -> .w). 0 means "skip the estimator entirely".
@@ -530,8 +492,6 @@ fn ambient_estimate(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
         }
     } else if (AO_MODE == AO_MODE_ANALYTIC_CORNER) {
         occlusion = analytic_corner_occlusion(hit, ray_origin, ray_direction, normal);
-    } else if (AO_MODE == AO_MODE_ANALYTIC_NEIGHBORHOOD) {
-        occlusion = analytic_neighborhood_occlusion(hit, normal);
     }
     estimate.factor = 1.0 - lighting.shading_params.x * fade * occlusion;
     return estimate;

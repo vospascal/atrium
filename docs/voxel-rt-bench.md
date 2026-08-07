@@ -358,7 +358,11 @@ Quality levers with recorded verdicts (details in the E1 / E1b / E1c sections):
 
 - `AO_MODE` **1 = analytic corner** is the shipped default since E1c (E1b's
   winner: 20x cheaper than rays, noiseless). `0 = ray-traced` is the Beautiful
-  tier, kept for its reach. `2 = analytic 3x3x3` **off** (over-darkens).
+  tier, kept for its reach. The analytic 3x3x3 contender was **PRUNED
+  2026-08-07** (`off` renumbered 3 → 2): 5x corner AO's cost for a broad
+  over-darkening and per-voxel flat facets — slower AND worse on any hardware,
+  so nothing for Quest to flip. Its measurements stay in the E1b section
+  below.
 - `SHADOW_MODE` — PRUNED 2026-08-07, hard shadows are the only technique.
   Soft-from-distance-field was free but printed the 1 m brick lattice into the
   frame at every penumbra scale (documented negative below, E1b section); a fix
@@ -670,7 +674,8 @@ crops at 3x):
 (+1.3–1.6 ms) for 68–82% coverage at ≤43 max delta: a broad low-amplitude
 dimming, not contact contrast — the classic analytic over-darkening failure,
 and per-voxel flat (visible facets, no sub-voxel gradient) where corner AO is
-smooth. Kept as a documented off-lever only.
+smooth. PRUNED from the registry and the shader 2026-08-07 — slower and
+worse-looking is hardware-independent; this section is the surviving record.
 
 Implementation note: the 3x3x3 estimator is centered on the FACE-FRONT voxel,
 not on the hit voxel as first specified. Centered on the hit voxel, the
@@ -785,9 +790,9 @@ render scale 1.0:
 - **Hard shadows in every tier.** Soft is free but broken (verdict B); there is
   no tier where 1 m lattice artifacts are the right trade.
 - **`ao-neighborhood`, the brick early-out, the sun-aware budget and the
-  distance fade appear in no tier.** All four stay as documented off-levers
-  with the verdicts above; the fade is the one to reach for first if an
-  aerial/map camera ever ships.
+  distance fade appear in no tier.** `ao-neighborhood` was PRUNED 2026-08-07;
+  the other three stay as documented off-levers with the verdicts above; the
+  fade is the one to reach for first if an aerial/map camera ever ships.
 
 ### Chosen defaults (unchanged pending Pascal's visual gate)
 

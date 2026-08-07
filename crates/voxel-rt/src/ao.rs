@@ -32,9 +32,6 @@ pub enum AoMode {
     /// E1b analytic corner occlusion: zero rays, the 8 occupancy bits around
     /// the hit face, bilinearly interpolated across it (technique bank T7).
     AnalyticCorner,
-    /// E1b analytic 3x3x3: zero rays, hemisphere-weighted occupancy of the 26
-    /// voxels around the face-front voxel.
-    AnalyticNeighborhood,
     /// No occlusion at all — the shader folds AO away and renders
     /// bit-identically to the pre-E1 renderer.
     Off,
@@ -48,8 +45,7 @@ impl AoMode {
         match self {
             AoMode::RayTraced => 0,
             AoMode::AnalyticCorner => 1,
-            AoMode::AnalyticNeighborhood => 2,
-            AoMode::Off => 3,
+            AoMode::Off => 2,
         }
     }
 
@@ -59,8 +55,7 @@ impl AoMode {
         match shader_value {
             0 => AoMode::RayTraced,
             1 => AoMode::AnalyticCorner,
-            2 => AoMode::AnalyticNeighborhood,
-            3 => AoMode::Off,
+            2 => AoMode::Off,
             other => panic!("no AO_MODE {other} in dda.wgsl"),
         }
     }
@@ -228,7 +223,7 @@ mod tests {
     #[test]
     fn patched_source_carries_every_knob() {
         let settings = AoSettings {
-            mode: AoMode::AnalyticNeighborhood,
+            mode: AoMode::RayTraced,
             strength: 1.0,
             ray_count: 4,
             max_distance_voxels: 32,
@@ -242,7 +237,7 @@ mod tests {
             miss_radiance: true,
         };
         let shader_source = settings.patch_shader_source(&SHADER_SOURCE);
-        assert!(shader_source.contains("const AO_MODE: u32 = 2u;"));
+        assert!(shader_source.contains("const AO_MODE: u32 = 0u;"));
         assert!(shader_source.contains("const AO_RAY_COUNT: u32 = 4u;"));
         assert!(shader_source.contains("const AO_MAX_DISTANCE: f32 = 32.0;"));
         assert!(shader_source.contains("const AO_DIRECTION_MODE: u32 = 2u;"));
@@ -267,11 +262,10 @@ mod tests {
             ..AoSettings::default()
         }
         .patch_shader_source(&SHADER_SOURCE);
-        assert!(shader_source.contains("const AO_MODE: u32 = 3u;"));
+        assert!(shader_source.contains("const AO_MODE: u32 = 2u;"));
         assert!(shader_source.contains("const AO_MODE_RAY_TRACED: u32 = 0u;"));
         assert!(shader_source.contains("const AO_MODE_ANALYTIC_CORNER: u32 = 1u;"));
-        assert!(shader_source.contains("const AO_MODE_ANALYTIC_NEIGHBORHOOD: u32 = 2u;"));
-        assert!(shader_source.contains("const AO_MODE_OFF: u32 = 3u;"));
+        assert!(shader_source.contains("const AO_MODE_OFF: u32 = 2u;"));
     }
 
     /// A lever whose const has been renamed or deleted must fail loudly rather than become

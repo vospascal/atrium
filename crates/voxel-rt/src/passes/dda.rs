@@ -619,12 +619,7 @@ pub(crate) mod tests {
             return;
         };
         let mut ao_settings_to_check = Vec::new();
-        for mode in [
-            AoMode::RayTraced,
-            AoMode::AnalyticCorner,
-            AoMode::AnalyticNeighborhood,
-            AoMode::Off,
-        ] {
+        for mode in [AoMode::RayTraced, AoMode::AnalyticCorner, AoMode::Off] {
             ao_settings_to_check.push(AoSettings {
                 mode,
                 ..AoSettings::default()
