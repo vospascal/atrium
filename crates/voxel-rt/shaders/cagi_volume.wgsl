@@ -142,10 +142,15 @@ const CAGI_TRANSMITTANCE_SHIFT: u32 = 25u;
 const CAGI_TRANSMITTANCE_LEVELS: f32 = 15.0;
 const CAGI_EVENT_RESPONSE_SHIFT: u32 = 29u;
 // Light word bits. Three 10-bit mantissas plus a shared two-bit exponent keep
-// the word compact while representing radiance well above SDR white.
+// the word compact while representing radiance well above SDR white. The
+// exponent STRIDES BY 2 (scales 1/4/16/64, 2026-08-07): a level keeps the
+// exact physical size of the old stride-1 ceiling — every transport constant
+// is untouched — while the ceiling rises 8x for HDR emitters. Mirrors
+// src/cagi.rs; change one, change both.
 const CAGI_CHANNEL_MASK: u32 = 0x3ffu;
 const CAGI_CHANNEL_MAX: u32 = 1023u;
-const CAGI_RADIANCE_MAX: f32 = 8.0;
+const CAGI_RADIANCE_EXPONENT_STRIDE: u32 = 2u;
+const CAGI_RADIANCE_MAX: f32 = 64.0;
 const CAGI_RADIANCE_PER_STEP: f32 = 1.0 / 1023.0;
 // Cells searched outward along the hit normal for a non-solid cell to sample.
 // A cell counts as solid at a quarter fill (src/cagi.rs), so the cell touching a
@@ -211,7 +216,7 @@ fn cagi_pack(light: vec3<u32>) -> u32 {
             break;
         }
         exponent = exponent + 1u;
-        scale = scale << 1u;
+        scale = scale << CAGI_RADIANCE_EXPONENT_STRIDE;
     }
     let quantized = min((light + vec3<u32>(scale / 2u)) / scale,
         vec3<u32>(CAGI_CHANNEL_MAX));
@@ -221,7 +226,7 @@ fn cagi_pack(light: vec3<u32>) -> u32 {
 
 fn cagi_unpack(word: u32) -> vec3<u32> {
     let exponent = word >> 30u;
-    let scale = 1u << exponent;
+    let scale = 1u << (exponent * CAGI_RADIANCE_EXPONENT_STRIDE);
     return vec3<u32>(word & CAGI_CHANNEL_MASK,
                      (word >> 10u) & CAGI_CHANNEL_MASK,
                      (word >> 20u) & CAGI_CHANNEL_MASK) * scale;

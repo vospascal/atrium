@@ -104,9 +104,20 @@ pub(crate) fn quantize_transmittance(transmittance: f32) -> u32 {
     quantized.min(CELL_TRANSMITTANCE_LEVELS) << CELL_TRANSMITTANCE_SHIFT
 }
 /// Three 10-bit mantissas share the two exponent bits at the top of the word.
+/// The exponent STRIDES BY 2 (scales 1/4/16/64, 2026-08-07): one level keeps
+/// the exact physical size it had at the old stride-1 ceiling of 8.0 — every
+/// transport constant, probe threshold and flood-reach number is untouched —
+/// while the ceiling rises 8x for HDR emitters. What it costs is quantization
+/// step, and only where it is invisible: values above 16 radiance land on
+/// 64-level (0.0625-radiance) steps, relative error under 0.4%.
 pub(crate) const CHANNEL_MAX: u32 = 1023;
-pub(crate) const RADIANCE_MAX: f32 = 8.0;
+pub(crate) const RADIANCE_MAX: f32 = 64.0;
 pub(crate) const RADIANCE_MAX_EXPONENT: u32 = 3;
+/// Bits the shared exponent shifts per step: scale = `1 << (exponent * stride)`.
+pub(crate) const RADIANCE_EXPONENT_STRIDE: u32 = 2;
+/// The brightest storable integer level: `CHANNEL_MAX` at the top exponent.
+pub(crate) const RADIANCE_MAX_LEVEL: u32 =
+    CHANNEL_MAX << (RADIANCE_MAX_EXPONENT * RADIANCE_EXPONENT_STRIDE);
 /// Fixed-point shift of the diffusion numerators (mirrors `CAGI_DIFFUSION_SHIFT`).
 pub(crate) const DIFFUSION_SHIFT: u32 = 12;
 /// A cell absorbs once a quarter of its voxels are occupied. Binary absorption is
@@ -720,7 +731,7 @@ pub(crate) fn pack_light(light: [u32; 3]) -> u32 {
     let mut scale = 1;
     while exponent < RADIANCE_MAX_EXPONENT && largest > CHANNEL_MAX * scale {
         exponent += 1;
-        scale <<= 1;
+        scale <<= RADIANCE_EXPONENT_STRIDE;
     }
     let quantize = |value: u32| ((value + scale / 2) / scale).min(CHANNEL_MAX);
     quantize(light[0]) | (quantize(light[1]) << 10) | (quantize(light[2]) << 20) | (exponent << 30)
@@ -728,7 +739,7 @@ pub(crate) fn pack_light(light: [u32; 3]) -> u32 {
 
 /// Unpack the mantissas and restore their shared exponent.
 pub fn unpack_light(word: u32) -> [u32; 3] {
-    let scale = 1 << (word >> 30);
+    let scale = 1 << ((word >> 30) * RADIANCE_EXPONENT_STRIDE);
     [
         (word & CHANNEL_MAX) * scale,
         ((word >> 10) & CHANNEL_MAX) * scale,
@@ -739,7 +750,7 @@ pub fn unpack_light(word: u32) -> [u32; 3] {
 /// Linear radiance in [0, `RADIANCE_MAX`] -> integer radiance level.
 pub fn quantize_radiance(radiance: [f32; 3]) -> [u32; 3] {
     let quantize = |value: f32| {
-        (value.clamp(0.0, RADIANCE_MAX) / RADIANCE_MAX * (CHANNEL_MAX * 8) as f32 + 0.5) as u32
+        (value.clamp(0.0, RADIANCE_MAX) / RADIANCE_MAX * RADIANCE_MAX_LEVEL as f32 + 0.5) as u32
     };
     [
         quantize(radiance[0]),
@@ -1551,8 +1562,21 @@ mod tests {
         ] {
             assert_eq!(unpack_light(pack_light(light)), light);
         }
-        // A bright value uses the shared exponent without saturating at 1023.
+        // A bright value uses the shared exponent without saturating at 1023
+        // (2000 is a multiple of the stride-2 scale 4, so it survives exactly).
         assert_eq!(unpack_light(pack_light([2000, 0, 0]))[0], 2000);
+        // The stride-2 ceiling: the brightest representable level survives, and
+        // anything above it saturates there instead of wrapping.
+        assert_eq!(
+            unpack_light(pack_light([RADIANCE_MAX_LEVEL, 0, 0]))[0],
+            RADIANCE_MAX_LEVEL
+        );
+        assert_eq!(
+            unpack_light(pack_light([RADIANCE_MAX_LEVEL + 5000, 0, 0]))[0],
+            RADIANCE_MAX_LEVEL
+        );
+        // One representable step at each exponent: 1 at scale 1, 4 at scale 4.
+        assert_eq!(unpack_light(pack_light([1024, 0, 0]))[0], 1024);
     }
 
     #[test]
@@ -1661,7 +1685,9 @@ mod tests {
     fn diffusion_arithmetic_cannot_overflow() {
         for cell_voxels in [2, 4, 8] {
             let grid = CagiGrid::for_world(cell_voxels, CagiLayout::Isotropic, 24);
-            let worst_6 = (CHANNEL_MAX * 6) as u64 * grid.diffusion_numerator() as u64;
+            // Unpacked levels reach RADIANCE_MAX_LEVEL, not CHANNEL_MAX — the
+            // kernel multiplies AFTER unpacking the shared exponent.
+            let worst_6 = (RADIANCE_MAX_LEVEL * 6) as u64 * grid.diffusion_numerator() as u64;
             assert!(worst_6 < u32::MAX as u64, "6-neighbour sum overflows");
         }
     }
@@ -1690,7 +1716,10 @@ mod tests {
         const NZ: i32 = 24;
         const WALL_X: i32 = 14;
         const EMITTER: [i32; 3] = [7, 1, 12];
-        const EMISSION: u64 = (CHANNEL_MAX * 8) as u64; // the HDR ceiling
+        // 8.0 radiance — lava's league, and the whole ceiling when this probe
+        // was pinned (the stride-2 exponent later raised the ceiling to 64.0;
+        // the probe keeps its ORIGINAL physical emission so its findings stand).
+        const EMISSION: u64 = (CHANNEL_MAX * 8) as u64;
         const DIRECTIONS: [[i32; 3]; 6] = [
             [1, 0, 0],
             [-1, 0, 0],

@@ -209,8 +209,9 @@ const CAGI_BANKS_SEAL_PARTIAL_NUMERATOR: u32 = u32(CAGI_BANKS_SEAL_PARTIAL * 409
 // Multiplicative transmission per meter of air, applied to the transport ON TOP
 // of the subtractive losses — the reference kernel carries both (its DECAY plus
 // DIRECT/SIDE attenuations), and the D3 gate showed why: with subtractive loss
-// alone, reach scales LINEARLY with injected energy, so a lava cell at the HDR
-// ceiling (level 8184) out-reaches the sky (level ~1023) eight to one and eats
+// alone, reach scales LINEARLY with injected energy, so a lava cell at level
+// 8184 out-reaches the sky (level ~1023) eight to one — and the stride-2
+// ceiling (level 65472, 2026-08-07) would make it sixty-four to one — and eats
 // the scene. Exponential decay caps bright point sources at a sane radius while
 // open-air sky light, re-injected at every sky-seeing cell, is untouched.
 //
