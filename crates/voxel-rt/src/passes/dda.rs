@@ -708,17 +708,12 @@ pub(crate) mod tests {
                 ..TraversalSettings::default()
             },
             TraversalSettings {
-                any_hit_shadow: true,
-                ..TraversalSettings::default()
-            },
-            TraversalSettings {
                 brick_bit_grid: true,
                 ..TraversalSettings::default()
             },
             TraversalSettings {
                 column_fast_forward: true,
                 global_max_terminate: false,
-                any_hit_shadow: true,
                 brick_bit_grid: true,
                 distance_skip: false,
                 directional_skip: false,

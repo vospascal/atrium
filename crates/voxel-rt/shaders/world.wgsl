@@ -631,10 +631,10 @@ const BOUND_MASK: u32 = 31u;
 // could flip it.)
 const ENABLE_COLUMN_FAST_FORWARD: bool = false;
 const ENABLE_GLOBAL_MAX_TERMINATE: bool = true;
-// Any-hit shadow rays measured a consistent 1-3% SLOWER than reusing the
-// closest-hit trace on M3 Max (three bench rounds) — the second specialized
-// coarse loop costs more than the material/face bookkeeping it skips.
-const ENABLE_ANY_HIT_SHADOW: bool = false;
+// (An ENABLE_ANY_HIT_SHADOW lever that forced HARD shadows through the soft
+// path's coarse loop was PRUNED 2026-08-07: 1-3% slower than reusing the
+// closest-hit trace in three separate bench rounds, on grounds — more work
+// per ray — that no hardware flips. The loop itself lives on as SOFT mode.)
 // 1-bit-per-brick occupancy grid: no measurable win on M3 Max — the skip
 // distance byte already doubles as the occupancy test, making the bit read
 // a second redundant load, and even standalone (no distance skip) it only
@@ -1488,10 +1488,10 @@ fn soft_penumbra_update(visibility: f32, state: ptr<function, DdaState>,
 
 // Sun visibility in [0, 1] along a shadow ray.
 //
-// HARD mode (SHADOW_MODE = 0, the default) returns exactly 0.0 or 1.0. With
-// the shipped ENABLE_ANY_HIT_SHADOW = false it delegates to the closest-hit
-// `trace` — measured faster than the specialized any-hit loop below — which
-// keeps the renderer bit-identical to Stage 2.
+// HARD mode (SHADOW_MODE = 0, the default) returns exactly 0.0 or 1.0 by
+// delegating to the closest-hit `trace` — measured faster than running the
+// any-hit coarse loop below — which keeps the renderer bit-identical to
+// Stage 2.
 //
 // SOFT mode (E1b, technique bank T1) runs the any-hit coarse loop and tracks
 // IQ's single-ray penumbra term `min(penumbra_scale * clearance / t)` from the
@@ -1502,7 +1502,7 @@ fn soft_penumbra_update(visibility: f32, state: ptr<function, DdaState>,
 // Occupied bricks always run the occupancy-only fine variant; the first
 // occluding voxel ends the ray at zero visibility either way.
 fn trace_shadow_visibility(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
-    if (SHADOW_MODE == SHADOW_MODE_HARD && !ENABLE_ANY_HIT_SHADOW) {
+    if (SHADOW_MODE == SHADOW_MODE_HARD) {
         return select(1.0, 0.0,
                       trace(origin, direction, MAX_TRACE_DISTANCE,
                             WATER_SUN_THROUGH_LIQUID).material != 0u);

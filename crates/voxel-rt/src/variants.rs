@@ -79,7 +79,6 @@ pub enum LeverId {
     // Traversal (S2) — all compile-time, all inside the coarse DDA loops.
     ColumnFastForward,
     GlobalMaxTerminate,
-    AnyHitShadow,
     BrickBitGrid,
     DistanceSkip,
     DirectionalSkip,
@@ -395,7 +394,6 @@ impl LeverId {
         match self {
             LeverId::ColumnFastForward => LeverValue::Flag(traversal.column_fast_forward),
             LeverId::GlobalMaxTerminate => LeverValue::Flag(traversal.global_max_terminate),
-            LeverId::AnyHitShadow => LeverValue::Flag(traversal.any_hit_shadow),
             LeverId::BrickBitGrid => LeverValue::Flag(traversal.brick_bit_grid),
             LeverId::DistanceSkip => LeverValue::Flag(traversal.distance_skip),
             LeverId::DirectionalSkip => LeverValue::Flag(traversal.directional_skip),
@@ -550,7 +548,6 @@ impl LeverId {
         match self {
             LeverId::ColumnFastForward => traversal.column_fast_forward = value.expect_flag(self),
             LeverId::GlobalMaxTerminate => traversal.global_max_terminate = value.expect_flag(self),
-            LeverId::AnyHitShadow => traversal.any_hit_shadow = value.expect_flag(self),
             LeverId::BrickBitGrid => traversal.brick_bit_grid = value.expect_flag(self),
             LeverId::DistanceSkip => traversal.distance_skip = value.expect_flag(self),
             LeverId::DirectionalSkip => traversal.directional_skip = value.expect_flag(self),
@@ -877,24 +874,6 @@ pub const REGISTRY: &[Lever] = &[
             section: BenchSection::Traversal,
             label: "with-column-ff",
             overrides: &[(LeverId::ColumnFastForward, LeverValue::Flag(true))],
-        }],
-    },
-    Lever {
-        id: LeverId::AnyHitShadow,
-        subsystem: LeverSubsystem::Traversal,
-        kind: LeverKind::ShaderConst,
-        shader_const: Some("ENABLE_ANY_HIT_SHADOW"),
-        label: "any-hit shadow loop",
-        default_value: LeverValue::Flag(false),
-        range: LeverRange::Discrete,
-        verdict: "LOSER on M3 Max, off: the specialized any-hit coarse loop lost \
-                  1-3% to plain trace() in three separate rounds — the second loop \
-                  costs more than the material/face bookkeeping it skips.",
-        mode_options: &[],
-        bench: &[BenchPoint {
-            section: BenchSection::Traversal,
-            label: "with-anyhit-shadow",
-            overrides: &[(LeverId::AnyHitShadow, LeverValue::Flag(true))],
         }],
     },
     Lever {
@@ -4527,7 +4506,6 @@ mod tests {
         let TraversalSettings {
             column_fast_forward,
             global_max_terminate,
-            any_hit_shadow,
             brick_bit_grid,
             distance_skip,
             directional_skip,
@@ -4608,7 +4586,6 @@ mod tests {
                 LeverId::GlobalMaxTerminate,
                 LeverValue::Flag(global_max_terminate),
             ),
-            (LeverId::AnyHitShadow, LeverValue::Flag(any_hit_shadow)),
             (LeverId::BrickBitGrid, LeverValue::Flag(brick_bit_grid)),
             (LeverId::DistanceSkip, LeverValue::Flag(distance_skip)),
             (LeverId::DirectionalSkip, LeverValue::Flag(directional_skip)),

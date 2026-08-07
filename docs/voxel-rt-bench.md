@@ -316,8 +316,10 @@ architecture-specific (re-run everything on Quest 3 in Stage 6):
   (+9–17% if re-enabled); kept for Quest's Adreno. Its downward twin
   `ENABLE_DESCEND_FAST_FORWARD` was PRUNED 2026-08-07: same superseding, and
   no hardware story that could flip an extra-loads-per-step loss.
-- `ENABLE_ANY_HIT_SHADOW` **off** — the specialized any-hit loop lost 1–3%
-  to plain `trace()` in three separate rounds.
+- `ENABLE_ANY_HIT_SHADOW` — PRUNED 2026-08-07: forcing hard shadows through
+  the soft path's coarse loop lost 1–3% to plain `trace()` in three separate
+  rounds, on more-work-per-ray grounds no hardware flips. The loop itself
+  survives as SOFT shadow mode.
 - `ENABLE_BRICK_BIT_GRID` **off** — redundant next to the distance byte for the
   traversal; its data is read by E1b's AO brick early-out. Retry where caches
   are small.
