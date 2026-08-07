@@ -1393,15 +1393,17 @@ pub const REGISTRY: &[Lever] = &[
         shader_const: None,
         label: "cell size (voxels)",
         default_value: LeverValue::Count(8),
-        range: LeverRange::Rungs(&[2, 4, 8]),
+        range: LeverRange::Rungs(&[4, 8]),
         verdict: "8 voxels (1 m cells) is the shipped pairing since the D5 flip — \
                   banks6 stores six words per cell, so the resolution rung buys six \
                   times the memory and CA cost it used to: banks at 8 voxels is \
                   0.97-1.10 ms and 20.9 MiB, banks at 4 extrapolates to ~7 ms and \
                   160 MiB (measured once at D1). The pre-banks isotropic ladder for \
                   reference: 4 voxels 0.92-1.52 ms / 33 MB, 8 voxels 5.8x cheaper \
-                  with a visibly coarser look (46% of the frame, mean 4.2/255), \
-                  2 voxels DEAD (258 MB, 6x cost, 7.8/255). Runtime: the grid \
+                  with a visibly coarser look (46% of the frame, mean 4.2/255). The \
+                  2-voxel rung was PRUNED 2026-08-07: already DEAD isotropic \
+                  (258 MB, 6x cost, 7.8/255 mean), and under banks it would be \
+                  ~1.5 GB — past the 128 MB binding limit. Runtime: the grid \
                   dimensions ride in the volume uniform, so changing it reallocates \
                   buffers but compiles no shader.",
         mode_options: &[],
@@ -1410,11 +1412,6 @@ pub const REGISTRY: &[Lever] = &[
                 section: BenchSection::Cagi,
                 label: "gi-cells8",
                 overrides: &[(LeverId::GiResolution, LeverValue::Count(8))],
-            },
-            BenchPoint {
-                section: BenchSection::Cagi,
-                label: "gi-cells2",
-                overrides: &[(LeverId::GiResolution, LeverValue::Count(2))],
             },
         ],
     },
