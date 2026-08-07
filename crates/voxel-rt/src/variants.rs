@@ -1392,15 +1392,18 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::Runtime,
         shader_const: None,
         label: "cell size (voxels)",
-        default_value: LeverValue::Count(4),
+        default_value: LeverValue::Count(8),
         range: LeverRange::Rungs(&[2, 4, 8]),
-        verdict: "4 voxels (0.5 m cells) is the shipped knee: 2.75 M cells, 33 MB \
-                  total, 0.92-1.52 ms per frame at 2 iterations. 8 voxels is the Quest \
-                  tier — 4.3 MB and 0.26-0.42 ms (5.8x cheaper) for a visibly coarser \
-                  look (46% of the frame differs, mean 4.2/255). 2 voxels is DEAD: \
-                  258 MB and 5.8-7.9 ms per frame, 6x the cost for a 7.8/255 mean \
-                  change. Runtime: the grid dimensions ride in the volume uniform, so \
-                  changing it reallocates buffers but compiles no shader.",
+        verdict: "8 voxels (1 m cells) is the shipped pairing since the D5 flip — \
+                  banks6 stores six words per cell, so the resolution rung buys six \
+                  times the memory and CA cost it used to: banks at 8 voxels is \
+                  0.97-1.10 ms and 20.9 MiB, banks at 4 extrapolates to ~7 ms and \
+                  160 MiB (measured once at D1). The pre-banks isotropic ladder for \
+                  reference: 4 voxels 0.92-1.52 ms / 33 MB, 8 voxels 5.8x cheaper \
+                  with a visibly coarser look (46% of the frame, mean 4.2/255), \
+                  2 voxels DEAD (258 MB, 6x cost, 7.8/255). Runtime: the grid \
+                  dimensions ride in the volume uniform, so changing it reallocates \
+                  buffers but compiles no shader.",
         mode_options: &[],
         bench: &[
             BenchPoint {
@@ -1421,12 +1424,12 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::ShaderConst,
         shader_const: Some("CAGI_LAYOUT"),
         label: "volume layout",
-        default_value: LeverValue::Mode(0),
+        default_value: LeverValue::Mode(1),
         range: LeverRange::Discrete,
-        verdict: "MEASURED (bench section 5, 2026-08-07), arc at D5 \
-                  (docs/cagi-directional-banks-plan.md). At the reference pairing \
+        verdict: "MEASURED and SHIPPED (D5 flip, 2026-08-07, \
+                  docs/cagi-directional-banks-plan.md). At the reference pairing \
                   (banks6 + 8-voxel cells) the CA pass costs 0.97-1.10 ms — CHEAPER \
-                  than the shipped isotropic-at-4's 1.33-1.47 ms — at 20.9 MiB vs \
+                  than the old isotropic-at-4 default's 1.33-1.47 ms — at 20.9 MiB vs \
                   45.8 (3.3x isotropic-at-8's 0.27-0.32 ms, the price of 36 light \
                   reads per cell). The directional sampler adds ~0.6 ms to the DDA \
                   pass at 1440p (5.47-6.33 vs 4.85-5.68, after unrolling the \
@@ -1450,9 +1453,11 @@ pub const REGISTRY: &[Lever] = &[
             ModeOption {
                 value: 0,
                 label: "isotropic",
-                verdict: "One light word per cell — the shipped volume. Cannot represent \
-                          a directional bounce: reflected light deposits directionlessly \
-                          and reads as glow.",
+                verdict: "One light word per cell — the pre-D5 volume, now the Quest \
+                          tier's layout (a sixth of the memory, a third of the CA \
+                          cost at equal cells). Cannot represent a directional \
+                          bounce: reflected light deposits directionlessly and \
+                          reads as glow.",
             },
             ModeOption {
                 value: 1,
@@ -3593,14 +3598,17 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
     QualityPresetSpec {
         preset: QualityPreset::Quest,
         label: "Quest",
-        summary: "corner AO + hard shadows, CAGI at 1 m cells x 2 iterations, \
-                  zero-ray Fresnel-tinted water, material fade 10->50 m, render \
-                  scale 0.8 — E9 tunes this tier on device",
+        summary: "corner AO + hard shadows, ISOTROPIC CAGI at 1 m cells x 2 \
+                  iterations, zero-ray Fresnel-tinted water, material fade \
+                  10->50 m, render scale 0.8 — E9 tunes this tier on device",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
-            // 8-voxel cells: 1/8 of Balanced's cells, so 1/8 of both the CA cost
-            // and the 20 MB budget.
+            // The D5 flip made banks6 the baseline; Quest pins the isotropic
+            // layout — a sixth of the light memory (3.5 vs 20.9 MiB), a third
+            // of the CA cost (0.27-0.32 vs 0.97-1.10 ms) and none of the
+            // directional sampler's +0.6 ms of DDA. E9 re-evaluates on device.
+            (LeverId::GiLayout, LeverValue::Mode(0)),
             (LeverId::GiResolution, LeverValue::Count(8)),
             (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
             (LeverId::MaterialPatternFadeStart, LeverValue::Scalar(10.0)),
@@ -3613,14 +3621,17 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
     QualityPresetSpec {
         preset: QualityPreset::Balanced,
         label: "Balanced",
-        summary: "corner AO + hard shadows + CAGI at 0.5 m cells x 2 iterations + \
-                  Fresnel reflection & refraction at 1 water interface, material \
-                  fade 10->50 m, full resolution — the shipped default",
+        summary: "corner AO + hard shadows + directional-banks CAGI at 1 m cells \
+                  x 2 iterations + Fresnel reflection & refraction at 1 water \
+                  interface, material fade 10->50 m, full resolution — the \
+                  shipped default",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(1)),
             (LeverId::ShadowMode, LeverValue::Mode(0)),
             (LeverId::GiEnabled, LeverValue::Flag(true)),
-            (LeverId::GiResolution, LeverValue::Count(4)),
+            // The D5 reference pairing: banks6 (the baseline layout) at 8-voxel
+            // cells. Banks at 4-voxel cells extrapolates to ~7 ms of CA.
+            (LeverId::GiResolution, LeverValue::Count(8)),
             (LeverId::GiIterationsPerFrame, LeverValue::Count(2)),
             (LeverId::MaterialPatternFadeStart, LeverValue::Scalar(10.0)),
             (LeverId::MaterialPatternFadeEnd, LeverValue::Scalar(50.0)),
@@ -3634,8 +3645,9 @@ pub const QUALITY_PRESETS: &[QualityPresetSpec] = &[
         preset: QualityPreset::Beautiful,
         label: "Beautiful",
         summary: "ray-traced AO (2 rays / 8 voxels / cosine / falloff) + directional \
-                  miss radiance + hard shadows + CAGI at 0.5 m cells x 4 iterations + \
-                  full water optics, material fade 100->200 m, full resolution",
+                  miss radiance + hard shadows + banks CAGI at 1 m cells x 4 \
+                  iterations + full water optics, material fade 100->200 m, full \
+                  resolution",
         overrides: &[
             (LeverId::AoMode, LeverValue::Mode(0)),
             (LeverId::AoRayCount, LeverValue::Count(2)),
@@ -5231,17 +5243,24 @@ mod tests {
             assert_eq!(tier.materials.pattern_max_layers, MAX_PATTERN_LAYERS as u32);
         }
 
-        // E4: the GI tiering. Potato is the only tier without a light volume, so
-        // it stays the "CAGI is excludable" proof; Quest trades cell size for
-        // memory and cost; Beautiful buys convergence speed with iterations.
+        // E4 + D5: the GI tiering. Potato is the only tier without a light
+        // volume, so it stays the "CAGI is excludable" proof; Quest keeps the
+        // pre-D5 isotropic layout for memory and cost; Balanced and Beautiful
+        // ship the banks6 reference pairing, Beautiful buying convergence
+        // speed with iterations.
         assert!(!potato.global_illumination.enabled);
         assert_eq!(potato.gi_iterations_per_frame(), 0);
         assert!(quest.global_illumination.enabled);
+        assert_eq!(quest.global_illumination.layout, CagiLayout::Isotropic);
         assert_eq!(quest.global_illumination.cell_voxels, 8);
         assert_eq!(quest.global_illumination.iterations_per_frame, 2);
 
+        assert_eq!(balanced.global_illumination.layout, CagiLayout::Banks6);
+        assert_eq!(balanced.global_illumination.cell_voxels, 8);
+
         assert!(beautiful.global_illumination.enabled);
-        assert_eq!(beautiful.global_illumination.cell_voxels, 4);
+        assert_eq!(beautiful.global_illumination.layout, CagiLayout::Banks6);
+        assert_eq!(beautiful.global_illumination.cell_voxels, 8);
         assert_eq!(beautiful.global_illumination.iterations_per_frame, 4);
         assert_eq!(beautiful.ambient_occlusion.mode, AoMode::RayTraced);
         assert_eq!(beautiful.ambient_occlusion.ray_count, 2);
@@ -5374,13 +5393,13 @@ mod tests {
     fn cagi_levers_force_the_right_kind_of_rebuild() {
         let applied = RenderQuality::baseline();
 
-        let coarser = {
+        let finer = {
             let mut quality = applied;
-            LeverId::GiResolution.apply(&mut quality, LeverValue::Count(8));
+            LeverId::GiResolution.apply(&mut quality, LeverValue::Count(4));
             quality
         };
-        assert!(!coarser.requires_pipeline_rebuild(&applied));
-        assert!(coarser.requires_light_volume_rebuild(&applied));
+        assert!(!finer.requires_pipeline_rebuild(&applied));
+        assert!(finer.requires_light_volume_rebuild(&applied));
 
         let other_rule = {
             let mut quality = applied;

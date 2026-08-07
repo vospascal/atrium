@@ -116,15 +116,16 @@ const CAGI_SAMPLE_TRILINEAR: u32 = 1u;
 const CAGI_SAMPLE_MODE: u32 = 1u;
 // CAGI_LAYOUT (docs/cagi-directional-banks-plan.md) — how the light volume
 // stores a cell:
-//   0  isotropic — ONE light word per cell, the shipped layout;
+//   0  isotropic — ONE light word per cell (the Quest tier's layout);
 //   1  banks6 — SIX directional light words per cell (+X,-X,+Y,-Y,+Z,-Z as
 //      banks 0-5, the direction the light TRAVELS), stored as SoA planes:
 //      bank b of cell i lives at i + b * cell_count. The D2 transport in
 //      cagi.wgsl propagates each bank directionally; omnidirectional reads
-//      (fog, the pre-D4 sampler) SUM the banks.
+//      (fog, the pre-D4 sampler) SUM the banks. Shipped since the D5 flip,
+//      paired with 8-voxel cells.
 const CAGI_LAYOUT_ISOTROPIC: u32 = 0u;
 const CAGI_LAYOUT_BANKS6: u32 = 1u;
-const CAGI_LAYOUT: u32 = 0u;
+const CAGI_LAYOUT: u32 = 1u;
 // Fraction of the sky's radiance the four HORIZONTAL banks carry for a
 // sky-seeing cell (the downward bank always carries the full value) — the
 // horizon's share of the sky hemisphere. Shared because BOTH halves need it:

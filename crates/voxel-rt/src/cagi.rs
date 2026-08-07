@@ -357,10 +357,14 @@ impl Default for CagiSettings {
     fn default() -> CagiSettings {
         CagiSettings {
             enabled: true,
-            cell_voxels: 4,
-            // Isotropic until the directional-banks arc lands its D5 verdict
-            // (docs/cagi-directional-banks-plan.md).
-            layout: CagiLayout::Isotropic,
+            // The D5 default flip (docs/cagi-directional-banks-plan.md,
+            // 2026-08-07): x1m4's reference pairing — six directional banks at
+            // 8-voxel (1 m) cells. Measured CHEAPER per CA frame than the old
+            // isotropic-at-4 (0.97-1.10 vs 1.33-1.47 ms) at less than half the
+            // memory, and the corridor comparison gave faces the orientation
+            // axis isotropic lacks. Isotropic stays a lever (Quest preset).
+            cell_voxels: 8,
+            layout: CagiLayout::Banks6,
             rule: CagiRule::Diffusion6,
             sample_mode: CagiSampleMode::Trilinear,
             sky_test: CagiSkyTest::ColumnMax,
@@ -1561,12 +1565,12 @@ mod tests {
         }
         // The resolution needs new buffers but no new pipeline: the grid
         // dimensions ride in the volume uniform.
-        let coarser = CagiSettings {
-            cell_voxels: 8,
+        let finer = CagiSettings {
+            cell_voxels: 4,
             ..applied
         };
-        assert!(!coarser.requires_pipeline_rebuild(&applied));
-        assert!(coarser.requires_volume_rebuild(&applied));
+        assert!(!finer.requires_pipeline_rebuild(&applied));
+        assert!(finer.requires_volume_rebuild(&applied));
         // Switching the experiment off changes both.
         let disabled = CagiSettings {
             enabled: false,
@@ -2781,7 +2785,7 @@ mod tests {
         let grid = CagiGrid::placeholder();
         assert_eq!(grid.cell_count(), 1);
         assert_eq!(grid.total_bytes(), 16);
-        assert_eq!(disabled.cell_voxels, 4); // the knob keeps its value
+        assert_eq!(disabled.cell_voxels, 8); // the knob keeps its value
     }
 
     #[test]
@@ -3200,11 +3204,16 @@ mod tests {
         let clearance = crate::brickmap::ClearanceUpdate::LocalBox { radius_cells: 1 };
         brickmap.set_voxel(berry[0], berry[1], berry[2], Voxel::GlowBerry, clearance);
         let grid = CagiSettings::default().grid(&brickmap);
+        let cell = [
+            berry[0] as u32 / grid.cell_voxels,
+            berry[1] as u32 / grid.cell_voxels,
+            berry[2] as u32 / grid.cell_voxels,
+        ];
         let air_emission =
-            cell_attribute(&brickmap, &grid, [4, 4, 4], &MaterialAttributes::compiled()).emission;
+            cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled()).emission;
         brickmap.set_voxel(leaves[0], leaves[1], leaves[2], Voxel::Leaves, clearance);
         let leaf_emission =
-            cell_attribute(&brickmap, &grid, [4, 4, 4], &MaterialAttributes::compiled()).emission;
+            cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled()).emission;
         assert!(air_emission[2] > 0.0);
         assert!(
             leaf_emission[2] > 0.0,

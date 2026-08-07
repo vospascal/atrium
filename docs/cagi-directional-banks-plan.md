@@ -125,7 +125,11 @@ implementer named directionality as CAGI's weakness; the banks are his answer.
   the dark side of a thick wall stays dark (the wrap-over light travelling
   away from the face no longer registers); a wall's sun side vs shadow side
   shade differently; ground exposure unchanged vs D3.
-- [ ] **D5 — Bench + verdicts.** CPU-port the sampler maths, measure face-luminance
+- [x] **D5 — Bench + verdicts.** *(COMPLETE 2026-08-07: in-app fps confirmed at
+  the reference pairing — CAGI 0.886-0.99 ms, light volume 20.9 MiB, frame at
+  16.66 ms — and the DEFAULTS FLIPPED: `CagiSettings::default()` is now banks6
+  @ 8-voxel cells, Balanced/Beautiful ship it, Quest pins isotropic@8.)*
+  CPU-port the sampler maths, measure face-luminance
   distributions (corridor scene) banks vs isotropic vs (optional lever) the
   trilinear-gradient approximation. Perf ledger. Flip defaults per verdict; verdicts
   into the registry rows.

@@ -1288,8 +1288,12 @@ one scene: two 8 m walls 4 m apart, near half open-top, far half roofed; sky onl
 The four findings are pinned as asserts in the test. Verdicts recorded in the
 `GiLayout`, `GiBanksSkyHorizontal` and `GiBanksDirectionMix` registry rows.
 
-**Remaining before the default flip**: Pascal's in-app fps confirmation at the
-reference pairing.
+**Default FLIPPED (2026-08-07)** after the in-app fps confirmation (CAGI
+0.886–0.99 ms live, 20.9 MiB, frame at 16.66 ms): `CagiSettings::default()` is
+banks6 @ 8-voxel cells. Balanced and Beautiful ship the reference pairing;
+Quest pins the isotropic layout at 8-voxel cells (a sixth of the memory, a
+third of the CA, no directional-sampler DDA tax) pending E9 on device. This
+supersedes E4's "Chosen defaults" below (isotropic at 4-voxel cells).
 
 ---
 
