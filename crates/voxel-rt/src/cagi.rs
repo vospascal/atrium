@@ -1868,6 +1868,440 @@ mod tests {
         );
     }
 
+    /// D5 — the corridor face-luminance distribution comparison the default
+    /// flip is gated on (docs/cagi-directional-banks-plan.md, D5).
+    ///
+    /// A mono-channel CPU port of BOTH transports (`cagi_main`'s isotropic
+    /// Diffusion6 path and `cagi_banks_main`) AND both surface samplers
+    /// (`cagi_sample_surface`'s two trilinear paths), run to convergence on one
+    /// corridor scene: two 8 m walls 4 m apart, the near half open to the sky,
+    /// the far half roofed. Sky only — no sun, no emitters — so the numbers
+    /// isolate what the LAYOUT does to a face, not what the injections do.
+    /// Every coefficient derives from [`CagiSettings::default`] at the
+    /// reference pairing (8-voxel = 1 m cells), so this also guards the
+    /// defaults. NOTE: mirrors both kernels and both samplers — change one,
+    /// change both.
+    ///
+    /// The measured findings this pins (2026-08-07):
+    ///
+    ///   * the exposure anchor holds: open ground reads the same under both
+    ///     layouts (the D4 design's "no normalization constant" claim);
+    ///   * isotropic CANNOT tell a wall from a floor — a sky-lit corridor wall
+    ///     reads ~100% of open ground; banks read it at the horizon share
+    ///     (~30-40%), which is the whole point of the arc;
+    ///   * a roof's underside is the starkest case: isotropic reads the bright
+    ///     air below it, banks read the (empty) upward bank — the face
+    ///     luminance distribution gains the orientation axis isotropic lacks.
+    #[test]
+    fn corridor_faces_read_directionally_under_banks() {
+        const NX: i32 = 32;
+        const NY: i32 = 12;
+        const NZ: i32 = 16;
+        const WALL_WEST: i32 = 12;
+        const WALL_EAST: i32 = 17;
+        const WALL_TOP: i32 = 8; // walls fill y 0..8, the roof slab is y == 8
+        const ROOF_FROM_Z: i32 = 8;
+        const SKY: u64 = CHANNEL_MAX as u64;
+        const ITERATIONS: usize = 400;
+        const DIRECTIONS: [[i32; 3]; 6] = [
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            [0, 0, -1],
+        ];
+
+        let solid = |x: i32, y: i32, z: i32| -> bool {
+            y == -1
+                || ((x == WALL_WEST || x == WALL_EAST) && (0..WALL_TOP).contains(&y))
+                || (y == WALL_TOP && (WALL_WEST..=WALL_EAST).contains(&x) && z >= ROOF_FROM_Z)
+        };
+        let in_grid =
+            |x: i32, y: i32, z: i32| x >= 0 && y >= 0 && z >= 0 && x < NX && y < NY && z < NZ;
+        let sees_sky =
+            |x: i32, y: i32, z: i32| -> bool { !(y + 1..NY).any(|above| solid(x, above, z)) };
+        let cell_index = |x: i32, y: i32, z: i32| -> usize { ((z * NY + y) * NX + x) as usize };
+
+        // ---- Both transports, from the same defaults at 1 m cells ----
+        let settings = CagiSettings::default();
+        let grid = CagiGrid::for_world(8, CagiLayout::Isotropic, 24);
+        assert_eq!(
+            grid.cell_meters(),
+            1.0,
+            "the reference pairing is 1 m cells"
+        );
+        let shift = DIFFUSION_SHIFT;
+        let numerator = grid.diffusion_numerator() as u64;
+
+        let cell_meters = grid.cell_meters();
+        let direct_loss = (settings.banks_loss_per_meter * cell_meters)
+            .round()
+            .max(1.0) as u64;
+        let side_loss =
+            ((settings.banks_loss_per_meter * settings.banks_side_loss_multiplier * cell_meters)
+                .round() as u64)
+                .max(direct_loss + 1);
+        let transmission =
+            (settings.banks_transmission_per_meter.powf(cell_meters) * 4096.0) as u64;
+        let mix = ((1.0 - (1.0 - settings.banks_direction_mix).powf(cell_meters)) * 4096.0) as u64;
+        let keep = 4096 - mix;
+        let quarter_mix = mix / 4;
+        let seal_partial = (settings.banks_seal_partial * 4096.0) as u64;
+        let sky_horizontal = ((settings.banks_sky_horizontal * 4096.0) as u64 * SKY) >> shift;
+
+        let cells = (NX * NY * NZ) as usize;
+
+        // Isotropic Diffusion6: air = max(stencil, sky-if-sees-sky), solid = 0.
+        let mut iso_front = vec![0u64; cells];
+        let mut iso_back = vec![0u64; cells];
+        for _ in 0..ITERATIONS {
+            for z in 0..NZ {
+                for y in 0..NY {
+                    for x in 0..NX {
+                        if solid(x, y, z) {
+                            iso_back[cell_index(x, y, z)] = 0;
+                            continue;
+                        }
+                        let read = |x: i32, y: i32, z: i32| -> u64 {
+                            if y >= NY {
+                                SKY
+                            } else if in_grid(x, y, z) {
+                                iso_front[cell_index(x, y, z)]
+                            } else {
+                                0
+                            }
+                        };
+                        let mut sum = 0u64;
+                        for direction in DIRECTIONS {
+                            sum += read(x + direction[0], y + direction[1], z + direction[2]);
+                        }
+                        let propagated = (sum * numerator) >> shift;
+                        let injected = if sees_sky(x, y, z) { SKY } else { 0 };
+                        iso_back[cell_index(x, y, z)] = propagated.max(injected);
+                    }
+                }
+            }
+            std::mem::swap(&mut iso_front, &mut iso_back);
+        }
+
+        // Banks6: the leak-mirror kernel plus the sky terms (boundary reads and
+        // per-bank injection) it ran without.
+        let bank_index =
+            |x: i32, y: i32, z: i32, bank: usize| -> usize { cell_index(x, y, z) * 6 + bank };
+        let sky_bank = |bank: usize| -> u64 {
+            match bank {
+                3 => SKY,            // downward: the full sky
+                2 => 0,              // upward: nothing travels up from the sky
+                _ => sky_horizontal, // the horizon fraction
+            }
+        };
+        let mut banks_front = vec![0u64; cells * 6];
+        let mut banks_back = vec![0u64; cells * 6];
+        for _ in 0..ITERATIONS {
+            for z in 0..NZ {
+                for y in 0..NY {
+                    for x in 0..NX {
+                        if solid(x, y, z) {
+                            for bank in 0..6 {
+                                banks_back[bank_index(x, y, z, bank)] = 0;
+                            }
+                            continue;
+                        }
+                        let read = |x: i32, y: i32, z: i32, bank: usize| -> u64 {
+                            if y >= NY {
+                                sky_bank(bank)
+                            } else if in_grid(x, y, z) {
+                                banks_front[bank_index(x, y, z, bank)]
+                            } else {
+                                0
+                            }
+                        };
+                        let mut banks = [0u64; 6];
+                        for (bank, direction) in DIRECTIONS.iter().enumerate() {
+                            let upstream = [x - direction[0], y - direction[1], z - direction[2]];
+                            let direct = (read(upstream[0], upstream[1], upstream[2], bank)
+                                * transmission)
+                                >> shift;
+                            let upstream_solid = solid(upstream[0], upstream[1], upstream[2]);
+                            let mut side = 0u64;
+                            for (lateral, lateral_direction) in DIRECTIONS.iter().enumerate() {
+                                if lateral / 2 == bank / 2 {
+                                    continue;
+                                }
+                                let lx = x + lateral_direction[0];
+                                let ly = y + lateral_direction[1];
+                                let lz = z + lateral_direction[2];
+                                let lateral_solid = solid(lx, ly, lz);
+                                if upstream_solid && lateral_solid {
+                                    continue; // sealed corner
+                                }
+                                let mut seep = read(lx, ly, lz, bank);
+                                if upstream_solid || lateral_solid {
+                                    seep = (seep * seal_partial) >> shift;
+                                }
+                                side = side.max(seep);
+                            }
+                            side = (side * transmission) >> shift;
+                            let propagated = direct
+                                .max(direct_loss)
+                                .saturating_sub(direct_loss)
+                                .max(side.max(side_loss) - side_loss);
+                            let injected = if sees_sky(x, y, z) { sky_bank(bank) } else { 0 };
+                            banks[bank] = propagated.max(injected);
+                        }
+                        let total: u64 = banks.iter().sum();
+                        for bank in 0..6 {
+                            let perpendicular = total - banks[bank] - banks[bank ^ 1];
+                            banks_back[bank_index(x, y, z, bank)] =
+                                (banks[bank] * keep + perpendicular * quarter_mix) >> shift;
+                        }
+                    }
+                }
+            }
+            std::mem::swap(&mut banks_front, &mut banks_back);
+        }
+
+        // ---- Both samplers, in cell units (cell_size_voxels == 1) ----
+        // `cagi_cell_radiance`, summed over banks where the layout has them.
+        let cell_radiance = |cell: [i32; 3], banks: bool| -> f64 {
+            let [x, y, z] = cell;
+            if y >= NY {
+                return SKY as f64;
+            }
+            if !in_grid(x, y, z) {
+                return 0.0;
+            }
+            if banks {
+                (0..6)
+                    .map(|bank| banks_front[bank_index(x, y, z, bank)] as f64)
+                    .sum()
+            } else {
+                iso_front[cell_index(x, y, z)] as f64
+            }
+        };
+        // `cagi_cell_arriving_radiance` — the D4 directional read.
+        let arriving_radiance = |cell: [i32; 3], normal: [f64; 3]| -> f64 {
+            let [x, y, z] = cell;
+            let toward_face = [-normal[0], -normal[1], -normal[2]];
+            let positive = toward_face.map(|component| component.max(0.0));
+            let negative = toward_face.map(|component| (-component).max(0.0));
+            if y >= NY {
+                let horizontal_weight = positive[0] + negative[0] + positive[2] + negative[2];
+                return SKY as f64
+                    * (negative[1] + horizontal_weight * settings.banks_sky_horizontal as f64);
+            }
+            if !in_grid(x, y, z) {
+                return 0.0;
+            }
+            let bank = |bank: usize| banks_front[bank_index(x, y, z, bank)] as f64;
+            positive[0] * bank(0)
+                + negative[0] * bank(1)
+                + positive[1] * bank(2)
+                + negative[1] * bank(3)
+                + positive[2] * bank(4)
+                + negative[2] * bank(5)
+        };
+        // `cagi_sample_surface`: step out along the normal, then trilinear with
+        // solid taps dropped and the weights renormalized.
+        let sample_surface = |surface_point: [f64; 3], normal: [f64; 3], banks: bool| -> f64 {
+            let mut position = [
+                surface_point[0] + normal[0] * 0.5,
+                surface_point[1] + normal[1] * 0.5,
+                surface_point[2] + normal[2] * 0.5,
+            ];
+            let cell_of = |position: [f64; 3]| -> [i32; 3] {
+                [
+                    position[0].floor() as i32,
+                    position[1].floor() as i32,
+                    position[2].floor() as i32,
+                ]
+            };
+            let cell_is_solid = |cell: [i32; 3]| -> bool {
+                let [x, y, z] = cell;
+                if y >= NY {
+                    return false; // above the top is sky
+                }
+                !in_grid(x, y, z) || solid(x, y, z)
+            };
+            for _ in 0..3 {
+                if !cell_is_solid(cell_of(position)) {
+                    break;
+                }
+                for axis in 0..3 {
+                    position[axis] += normal[axis];
+                }
+            }
+            let tap = |cell: [i32; 3]| -> f64 {
+                if banks {
+                    arriving_radiance(cell, normal)
+                } else {
+                    cell_radiance(cell, false)
+                }
+            };
+            let cell_space = [position[0] - 0.5, position[1] - 0.5, position[2] - 0.5];
+            let base = cell_of(cell_space);
+            let fraction = [
+                cell_space[0] - cell_space[0].floor(),
+                cell_space[1] - cell_space[1].floor(),
+                cell_space[2] - cell_space[2].floor(),
+            ];
+            let mut radiance_sum = 0.0;
+            let mut weight_sum = 0.0;
+            for corner in 0..8_u32 {
+                let offset = [
+                    (corner & 1) as i32,
+                    ((corner >> 1) & 1) as i32,
+                    ((corner >> 2) & 1) as i32,
+                ];
+                let cell = [
+                    base[0] + offset[0],
+                    base[1] + offset[1],
+                    base[2] + offset[2],
+                ];
+                let weight = (0..3)
+                    .map(|axis| {
+                        if offset[axis] == 1 {
+                            fraction[axis]
+                        } else {
+                            1.0 - fraction[axis]
+                        }
+                    })
+                    .product::<f64>();
+                if weight <= 0.0 {
+                    continue;
+                }
+                if cell[1] < NY && cell_is_solid(cell) {
+                    continue;
+                }
+                radiance_sum += tap(cell) * weight;
+                weight_sum += weight;
+            }
+            if weight_sum <= 1e-4 {
+                return tap(cell_of(position));
+            }
+            radiance_sum / weight_sum
+        };
+
+        // ---- The face classes, sampled at face centres ----
+        /// A face to sample: (centre point, outward normal), in cell units.
+        type Face = ([f64; 3], [f64; 3]);
+        let mean = |samples: &[f64]| samples.iter().sum::<f64>() / samples.len() as f64;
+        let collect = |faces: &[Face], banks: bool| -> Vec<f64> {
+            faces
+                .iter()
+                .map(|(point, normal)| sample_surface(*point, *normal, banks))
+                .collect()
+        };
+        let mut open_ground = Vec::new(); // the exposure anchor
+        for x in 2..10 {
+            for z in 2..14 {
+                open_ground.push(([x as f64 + 0.5, 0.0, z as f64 + 0.5], [0.0, 1.0, 0.0]));
+            }
+        }
+        let mut open_walls = Vec::new(); // sky-lit corridor walls, both sides
+        for y in 0..WALL_TOP {
+            for z in 1..7 {
+                let (y, z) = (y as f64 + 0.5, z as f64 + 0.5);
+                open_walls.push(([WALL_WEST as f64 + 1.0, y, z], [1.0, 0.0, 0.0]));
+                open_walls.push(([WALL_EAST as f64, y, z], [-1.0, 0.0, 0.0]));
+            }
+        }
+        let mut roofed_floor = Vec::new(); // corridor floor under the roof
+        let mut roof_underside = Vec::new(); // the roof slab seen from below
+        for x in (WALL_WEST + 1)..WALL_EAST {
+            for z in (ROOF_FROM_Z + 1)..(NZ - 1) {
+                let (x, z) = (x as f64 + 0.5, z as f64 + 0.5);
+                roofed_floor.push(([x, 0.0, z], [0.0, 1.0, 0.0]));
+                roof_underside.push(([x, WALL_TOP as f64, z], [0.0, -1.0, 0.0]));
+            }
+        }
+
+        let classes: [(&str, &[Face]); 4] = [
+            ("open ground (anchor)", &open_ground),
+            ("open corridor walls", &open_walls),
+            ("roofed corridor floor", &roofed_floor),
+            ("roof underside", &roof_underside),
+        ];
+        let mut means = std::collections::HashMap::new();
+        for (name, faces) in classes {
+            let iso = collect(faces, false);
+            let banks = collect(faces, true);
+            println!(
+                "{name}: iso mean {:.0} [{:.0}..{:.0}] | banks mean {:.0} [{:.0}..{:.0}]",
+                mean(&iso),
+                iso.iter().cloned().fold(f64::INFINITY, f64::min),
+                iso.iter().cloned().fold(0.0, f64::max),
+                mean(&banks),
+                banks.iter().cloned().fold(f64::INFINITY, f64::min),
+                banks.iter().cloned().fold(0.0, f64::max),
+            );
+            means.insert(name, (mean(&iso), mean(&banks)));
+        }
+        let (iso_anchor, banks_anchor) = means["open ground (anchor)"];
+        let (iso_wall, banks_wall) = means["open corridor walls"];
+        let (iso_roofed_floor, banks_roofed_floor) = means["roofed corridor floor"];
+        let (iso_underside, banks_underside) = means["roof underside"];
+
+        // Finding 1: the exposure anchor holds to within the direction-decay
+        // skim. Open ground reads the downward bank at weight 1 — but the
+        // decay mix redistributes ~6% of a freshly injected downward bank into
+        // the horizontals before any sampler reads it (measured 961/1023 =
+        // 0.94 at the default 0.08/m; the skim is proportional to
+        // GiBanksDirectionMix and exact 1.0 at mix 0).
+        let anchor_ratio = banks_anchor / iso_anchor;
+        assert!(
+            (0.92..=1.0).contains(&anchor_ratio),
+            "exposure anchor moved past the decay skim: iso {iso_anchor:.0} vs \
+             banks {banks_anchor:.0} (ratio {anchor_ratio:.3})"
+        );
+
+        // Finding 2: isotropic reads a sky-lit wall like a floor; banks read it
+        // at the horizon share (measured 0.28 at sky_horizontal 0.25). This
+        // ratio IS the arc's reason to exist.
+        let iso_wall_ratio = iso_wall / iso_anchor;
+        let banks_wall_ratio = banks_wall / banks_anchor;
+        assert!(
+            iso_wall_ratio > 0.8,
+            "isotropic wall/ground ratio {iso_wall_ratio:.2} — expected ~1 (omnidirectional)"
+        );
+        assert!(
+            (0.2..=0.6).contains(&banks_wall_ratio),
+            "banks wall/ground ratio {banks_wall_ratio:.2} — expected the horizon share"
+        );
+
+        // Finding 3: orientation contrast AT THE SAME LOCATION — the roofed
+        // corridor's floor versus the roof underside directly above it. The
+        // isotropic sampler reads the same omnidirectional air for both (ratio
+        // ~1); banks read the downward beams on the floor and the empty upward
+        // bank on the underside (measured 8/172 = 0.05).
+        let iso_orientation_contrast = iso_underside / iso_roofed_floor;
+        let banks_orientation_contrast = banks_underside / banks_roofed_floor;
+        assert!(
+            iso_orientation_contrast > 0.8,
+            "isotropic underside/floor {iso_orientation_contrast:.2} — expected ~1"
+        );
+        assert!(
+            banks_orientation_contrast < 0.2,
+            "banks underside/floor {banks_orientation_contrast:.2} — the upward \
+             bank should leave a roof underside far darker than the lit floor"
+        );
+
+        // Finding 4: max-transport beams CARRY under cover where averaging
+        // diffusion dies — the roofed floor holds a meaningful fraction of the
+        // open-sky value under banks (measured 0.18 of anchor, from the open
+        // end) while isotropic is near-black within metres (0.02).
+        assert!(
+            iso_roofed_floor < 0.05 * iso_anchor,
+            "isotropic roofed floor {iso_roofed_floor:.0} — expected near-black"
+        );
+        assert!(
+            banks_roofed_floor > 0.1 * banks_anchor,
+            "banks roofed floor {banks_roofed_floor:.0} vs anchor {banks_anchor:.0} — \
+             expected the horizontal beams to carry in from the open end"
+        );
+    }
+
     /// Hand-computed reference values for each rule — the CPU reference the bench
     /// cross-checks the GPU against must itself be pinned.
     #[test]

@@ -1251,6 +1251,48 @@ bounce 0.35. Per-tier: **Potato off · Quest 1 m cells x 2 it · Balanced 0.5 m 
 
 ---
 
+## D5 — CAGI directional banks: perf ledger + corridor face-luminance comparison (M3 Max, 2026-08-07)
+
+The directional-banks arc's measurement stage (`docs/cagi-directional-banks-plan.md`).
+Reference pairing: **banks6 @ 8-voxel (1 m) cells** — x1m4's design.
+
+### Perf ledger (2560x1440, post attribute-hoist)
+
+| configuration | CA per frame | DDA per dispatch | light memory |
+|---|---|---|---|
+| banks6 @ 8-voxel | **0.97–1.10 ms** | 5.47–6.33 ms | **20.9 MiB** |
+| isotropic @ 4-voxel (shipped) | 1.33–1.47 ms | 4.85–5.68 ms | 45.8 MiB |
+| isotropic @ 8-voxel | 0.27–0.32 ms | — | — |
+| isotropic @ 2-voxel | 9.6–10.7 ms | — | — |
+
+The directional sampler's +~0.6 ms of DDA is after the per-axis unroll (a
+dynamically-indexed bank-weight array spilled to scratch under naga/Metal; it was
++1.5 ms before) and scales with pixels. All banks *lever* settings cost the same
+CA (0.97–1.05 ms) — the banks levers are look knobs, not perf knobs. In-app, the
+DDA span's big consumer at native res is the cloud march on sky pixels
+(`sky_color`) — the cloud-steps lever is that dial, not this arc's.
+
+### Corridor face-luminance comparison (CPU, `corridor_faces_read_directionally_under_banks`)
+
+Mono-channel CPU port of both transports AND both samplers, run to convergence on
+one scene: two 8 m walls 4 m apart, near half open-top, far half roofed; sky only
+(no sun, no emitters), defaults, 1 m cells. Face-class means (sky = 1023):
+
+| face class | isotropic | banks6 | banks/iso meaning |
+|---|---|---|---|
+| open ground (anchor) | 1023 | 961 | anchor holds at 0.94 — the direction-decay skim (exact 1.0 at mix 0) |
+| sky-lit corridor walls | 1023 (**1.00× ground**) | 265 (**0.28× ground**) | iso cannot tell a wall from a floor; banks read the horizon share |
+| roofed corridor floor | 17 (0.02× anchor) | 172 (0.18× anchor) | max-transport beams carry under cover; averaging diffusion is near-black in metres |
+| roof underside | 17 (**1.00× its floor**) | 8 (**0.05× its floor**) | the orientation axis: banks read the empty upward bank, iso paints the bright air below |
+
+The four findings are pinned as asserts in the test. Verdicts recorded in the
+`GiLayout`, `GiBanksSkyHorizontal` and `GiBanksDirectionMix` registry rows.
+
+**Remaining before the default flip**: Pascal's in-app fps confirmation at the
+reference pairing.
+
+---
+
 ## E2 — World authority, threading & the edit pipeline (M3 Max, 2026-07-30)
 
 The ARCHITECTURE experiment, so the deliverable is a verdict, not a number: which

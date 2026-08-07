@@ -150,9 +150,19 @@ implementer named directionality as CAGI's weakness; the banks are his answer.
   cloud-steps lever is that dial, not this arc's. Memory 20.9 vs 45.8 MiB. Look delta vs
   shipped: max channel 11-12 (every isotropic rule variant: 43) — the
   exposure anchor held. All banks lever settings cost the same (0.97-1.05) —
-  the levers are look knobs, not perf knobs. REMAINING for the default flip:
-  the corridor face-luminance distribution comparison + Pascal's in-app fps
-  confirmation at the reference pairing.
+  the levers are look knobs, not perf knobs.
+  **Corridor face-luminance comparison DONE (2026-08-07)** — the repo test
+  `corridor_faces_read_directionally_under_banks` (cagi.rs) CPU-ports BOTH
+  transports and BOTH samplers onto one corridor scene (8 m walls 4 m apart,
+  near half open-top, far half roofed, sky only). Four pinned findings, full
+  table in `docs/voxel-rt-bench.md` section D5: (1) anchor holds at 0.94 —
+  the direction-decay skim, exact at mix 0; (2) a sky-lit wall reads 0.28 of
+  ground under banks vs 1.00 under isotropic; (3) orientation contrast at one
+  location — roof underside 0.05 of its floor under banks, 1.00 under
+  isotropic; (4) beams carry under cover — roofed floor 0.18 of anchor vs
+  isotropic's near-black 0.02. Verdicts written into the GiLayout,
+  GiBanksSkyHorizontal and GiBanksDirectionMix registry rows. REMAINING for
+  the default flip: Pascal's in-app fps confirmation at the reference pairing.
 - [ ] **D6 — (separate arc, only if D5 perf demands)** dirty-region tracking +
   checkerboard update cadence — his 256³ 2 ms → 0.4 ms path.
 

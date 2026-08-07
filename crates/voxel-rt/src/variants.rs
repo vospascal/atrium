@@ -1435,8 +1435,17 @@ pub const REGISTRY: &[Lever] = &[
                   Look: banks at defaults stays NEAR the shipped image (max channel \
                   delta 11-12, vs 43 for every isotropic rule variant) while walls, \
                   shadows and bounces become directional; the D4 gates verified \
-                  black walled shadows and no leaks. Banks at 4-voxel cells is NOT \
-                  measured as a pairing — extrapolates to ~7 ms of CA.",
+                  black walled shadows and no leaks. The D5 corridor face-luminance \
+                  comparison (`corridor_faces_read_directionally_under_banks`, \
+                  2026-08-07) puts numbers on the difference: isotropic reads a \
+                  sky-lit wall at ~100% of open ground and a roof underside equal \
+                  to the floor below it; banks read the wall at the horizon share \
+                  (0.28), the underside at 0.05 of its own floor, and beam light \
+                  carries under cover where averaging diffusion is near-black \
+                  (0.18 vs 0.02 of the anchor). Open ground holds at 0.94 — the \
+                  direction-decay skim, see banks direction decay. Banks at \
+                  4-voxel cells is NOT measured as a pairing — extrapolates to \
+                  ~7 ms of CA.",
         mode_options: &[
             ModeOption {
                 value: 0,
@@ -1451,7 +1460,9 @@ pub const REGISTRY: &[Lever] = &[
                 verdict: "x1m4's reference design: six directional banks per cell \
                           (10-bit RGB each), SoA planes. Pairs with 8-voxel cells \
                           (~24 MB both ping-pong buffers vs ~200 MB at 4-voxel cells). \
-                          UNMEASURED until D5.",
+                          D5-measured: faces gain the orientation axis isotropic \
+                          lacks (wall 0.28 of ground, roof underside 0.05 of its \
+                          floor) at a CHEAPER CA than isotropic-at-4.",
             },
         ],
         bench: &[BenchPoint {
@@ -1536,11 +1547,15 @@ pub const REGISTRY: &[Lever] = &[
             maximum: 1.0,
             logarithmic: false,
         },
-        verdict: "UNMEASURED — D2 (banks6 only). The horizon's share of the sky: \
-                  what fraction of the sky radiance a sky-seeing cell injects into \
-                  its four horizontal banks (the downward bank always gets the \
-                  full value). 0 makes walls facing the horizon sky-black; 1 \
-                  double-counts the hemisphere.",
+        verdict: "MEASURED (corridor comparison, 2026-08-07) — the wall-brightness \
+                  knob under banks. The horizon's share of the sky: what fraction \
+                  of the sky radiance a sky-seeing cell injects into its four \
+                  horizontal banks (the downward bank always gets the full value). \
+                  At the default 0.25 a sky-lit corridor wall reads 0.28 of open \
+                  ground (transport tops the injected share up slightly) — versus \
+                  1.0 under isotropic, which cannot tell a wall from a floor. \
+                  0 makes walls facing the horizon sky-black; 1 double-counts the \
+                  hemisphere.",
         mode_options: &[],
         bench: &[BenchPoint {
             section: BenchSection::Cagi,
@@ -1627,7 +1642,7 @@ pub const REGISTRY: &[Lever] = &[
             maximum: 0.5,
             logarithmic: false,
         },
-        verdict: "UNMEASURED — D4's wrapped-light fix (banks6 only). The per-meter \
+        verdict: "MEASURED — D4's wrapped-light fix (banks6 only). The per-meter \
                   fraction each bank scatters into its four PERPENDICULAR banks — \
                   how fast a beam forgets its direction. Perpendicular and never \
                   the opposite, a measured deviation from the literal \
@@ -1635,7 +1650,11 @@ pub const REGISTRY: &[Lever] = &[
                   backward light along every beam, which is exactly the bank a \
                   wall's dark face samples — measured in-app as light 'coming \
                   through everywhere'. Conservative across the six banks, so \
-                  exposure and fog are untouched. 0 restores forever-directional \
+                  fog and the bank SUM are untouched — but a SURFACE read pays a \
+                  skim: the corridor comparison measured open ground at 0.94 of \
+                  isotropic at the default 0.08/m, because the decay moves 6% of \
+                  a fresh downward injection into the horizontals the floor does \
+                  not read. 0 restores the exact anchor and forever-directional \
                   beams (lava's wrapped up-column painted bottom faces orange); \
                   0.5/m is near-isotropic within a couple of cells.",
         mode_options: &[],
