@@ -19,7 +19,9 @@ use voxel_graph::{
     NodeRecord, NodeRegistry, NodeTypeId, NumericRange, OutputPin, PropertyValue,
     SocketDeclarationStatic, SocketKey, SocketType,
 };
-use voxel_material_graph::lowering::{ConnectorDrag, GraphEditorState};
+use voxel_material_graph::lowering::{
+    compile, ConnectorDrag, GraphEditorState, GraphPreviewTarget, MaterialSampleContext,
+};
 use voxel_rt::material_table::MaterialTable;
 
 const GRAPH_NODE_CONTROL_ZOOM: f32 = 0.95;
@@ -193,6 +195,23 @@ fn draw_graph_section_contents(
             .clicked()
         {
             state.frame_selection_requested = true;
+        }
+        if ui
+            .add_enabled(
+                state.selected_node.is_some(),
+                egui::Button::new(if state.preview_open {
+                    "Hide preview"
+                } else {
+                    "Preview selected"
+                }),
+            )
+            .clicked()
+        {
+            state.preview_open = !state.preview_open;
+            if state.preview_open {
+                state.preview_target = GraphPreviewTarget::SelectedNode;
+                state.preview_node = state.selected_node.clone();
+            }
         }
         ui.separator();
         ui.label("material");
@@ -705,6 +724,9 @@ fn draw_graph_section_contents(
                 } else {
                     state.selected_nodes.iter().next().cloned()
                 };
+                if state.selected_node.is_some() {
+                    state.preview_node = state.selected_node.clone();
+                }
                 if graph_visual_header_hit(visual, pointer_position, zoom) {
                     if pointer_position.x <= visual.rect.left() + 28.0 * zoom {
                         if !state.collapsed_nodes.insert(visual.id.clone()) {
@@ -964,6 +986,15 @@ fn draw_graph_section_contents(
                 state.selected_nodes.insert(node_id.clone());
                 state.selected_node = Some(node_id.clone());
                 state.frame_selection_requested = true;
+                menu_ui.close();
+            }
+            if menu_ui.button("Inspect preview").clicked() {
+                state.selected_nodes.clear();
+                state.selected_nodes.insert(node_id.clone());
+                state.selected_node = Some(node_id.clone());
+                state.preview_node = Some(node_id.clone());
+                state.preview_target = GraphPreviewTarget::SelectedNode;
+                state.preview_open = true;
                 menu_ui.close();
             }
         });
@@ -1389,6 +1420,7 @@ fn draw_graph_section_contents(
     if let Some(node_id) = state.selected_node.clone() {
         draw_graph_inspector(ui, state, &registry, &node_id);
     }
+    draw_graph_preview_window(ui.ctx(), state, &registry);
     for diagnostic in &state.diagnostics {
         ui.colored_label(
             if diagnostic.severity == voxel_graph::DiagnosticSeverity::Error {
@@ -1481,6 +1513,228 @@ fn draw_graph_canvas_context_menu(
             menu_ui.close();
         }
     });
+}
+
+/// A deliberately separate inspection surface for the graph. The node cards
+/// remain useful for orientation, while this window makes one intermediate
+/// step large enough to compare against a reference texture and debug wiring.
+fn draw_graph_preview_window(
+    ctx: &egui::Context,
+    state: &mut GraphEditorState,
+    registry: &voxel_graph::NodeRegistry,
+) {
+    if !state.preview_open {
+        return;
+    }
+    let mut open = state.preview_open;
+    egui::Window::new("Graph Preview")
+        .id(egui::Id::new("graph_preview_window"))
+        .default_size(egui::vec2(360.0, 430.0))
+        .resizable(true)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("inspect");
+                egui::ComboBox::from_id_salt("graph-preview-target")
+                    .selected_text(graph_preview_target_label(state.preview_target))
+                    .show_ui(ui, |ui| {
+                        for target in [
+                            GraphPreviewTarget::SelectedNode,
+                            GraphPreviewTarget::Final,
+                            GraphPreviewTarget::BaseColor,
+                            GraphPreviewTarget::Specular,
+                            GraphPreviewTarget::AmbientOcclusion,
+                            GraphPreviewTarget::Displacement,
+                            GraphPreviewTarget::Roughness,
+                            GraphPreviewTarget::Normal,
+                            GraphPreviewTarget::Emission,
+                        ] {
+                            ui.selectable_value(
+                                &mut state.preview_target,
+                                target,
+                                graph_preview_target_label(target),
+                            );
+                        }
+                    });
+            });
+            ui.separator();
+
+            if state.preview_target == GraphPreviewTarget::SelectedNode
+                || state.preview_target == GraphPreviewTarget::Displacement
+            {
+                draw_graph_selected_node_preview(ui, state, registry);
+            } else {
+                draw_graph_material_channel_preview(ui, state, registry);
+            }
+        });
+    state.preview_open = open;
+}
+
+fn graph_preview_target_label(target: GraphPreviewTarget) -> &'static str {
+    match target {
+        GraphPreviewTarget::SelectedNode => "Selected node / intermediate",
+        GraphPreviewTarget::Final => "Final material",
+        GraphPreviewTarget::BaseColor => "Base color",
+        GraphPreviewTarget::Specular => "Specular",
+        GraphPreviewTarget::AmbientOcclusion => "Ambient occlusion",
+        GraphPreviewTarget::Displacement => "Displacement / height",
+        GraphPreviewTarget::Roughness => "Roughness",
+        GraphPreviewTarget::Normal => "Normal",
+        GraphPreviewTarget::Emission => "Emission",
+    }
+}
+
+fn draw_graph_selected_node_preview(
+    ui: &mut egui::Ui,
+    state: &GraphEditorState,
+    registry: &voxel_graph::NodeRegistry,
+) {
+    let Some(node_id) = state.preview_node.as_ref().or(state.selected_node.as_ref()) else {
+        ui.label("Select a node, then choose Preview selected.");
+        return;
+    };
+    let Some(record) = state.graph.nodes.get(node_id) else {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "The inspected node no longer exists.",
+        );
+        return;
+    };
+    let Some(declaration) = registry.find(&record.node_type) else {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "The inspected node type is unavailable.",
+        );
+        return;
+    };
+    ui.label(egui::RichText::new(format!("{} · node-local preview", declaration.title)).strong());
+    ui.label(
+        "This shows the intermediate value authored by this node before it reaches the next wire.",
+    );
+    let preview_type = graph_node_preview_type(record, declaration);
+    let Some(preview_type) = preview_type else {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 205, 110),
+            "This node has no visual preview declaration.",
+        );
+        return;
+    };
+    let height = graph_node_preview_height(record, declaration).max(150.0);
+    let width = ui.available_width().min(330.0).max(180.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    draw_graph_node_preview(ui.painter(), rect, record, declaration, preview_type);
+    if declaration.preview == NodePreview::Noise {
+        ui.label("Noise is shown as a grayscale field; brighter texels are higher values.");
+    }
+}
+
+fn draw_graph_material_channel_preview(
+    ui: &mut egui::Ui,
+    state: &GraphEditorState,
+    registry: &voxel_graph::NodeRegistry,
+) {
+    let program = match compile(&state.graph, registry) {
+        Ok(program) => program,
+        Err(error) => {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 135, 135),
+                format!("Cannot evaluate graph preview: {error}"),
+            );
+            return;
+        }
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "{} · CPU evaluation of the compiled graph",
+            graph_preview_target_label(state.preview_target)
+        ))
+        .strong(),
+    );
+    ui.label("This map samples the same material program used for parity checks; it is not a final lit render.");
+    let width = ui.available_width().min(330.0).max(180.0);
+    let size = width.min(300.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    draw_graph_material_channel_map(ui.painter(), rect, &program, state.preview_target);
+}
+
+fn draw_graph_material_channel_map(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    program: &voxel_material_graph::lowering::MaterialGraphProgram,
+    target: GraphPreviewTarget,
+) {
+    const CELLS: usize = 40;
+    for row in 0..CELLS {
+        for column in 0..CELLS {
+            let u = column as f32 / (CELLS - 1) as f32;
+            let v = row as f32 / (CELLS - 1) as f32;
+            let sample = program.evaluate(MaterialSampleContext::still(
+                [u * 8.0 - 4.0, 0.0, v * 8.0 - 4.0],
+                [0.0, 1.0, 0.0],
+            ));
+            let color = match target {
+                GraphPreviewTarget::Final => {
+                    let light = (0.45 + 0.55 * sample.normal[1].abs()).clamp(0.0, 1.0);
+                    [
+                        sample.base_color[0] * light + sample.emission[0],
+                        sample.base_color[1] * light + sample.emission[1],
+                        sample.base_color[2] * light + sample.emission[2],
+                    ]
+                }
+                GraphPreviewTarget::BaseColor => [
+                    sample.base_color[0],
+                    sample.base_color[1],
+                    sample.base_color[2],
+                ],
+                GraphPreviewTarget::Specular => scalar_preview_color(sample.specular),
+                GraphPreviewTarget::AmbientOcclusion => {
+                    scalar_preview_color(sample.ambient_occlusion)
+                }
+                GraphPreviewTarget::Roughness => scalar_preview_color(sample.roughness),
+                GraphPreviewTarget::Normal => [
+                    sample.normal[0] * 0.5 + 0.5,
+                    sample.normal[1] * 0.5 + 0.5,
+                    sample.normal[2] * 0.5 + 0.5,
+                ],
+                GraphPreviewTarget::Emission => {
+                    [sample.emission[0], sample.emission[1], sample.emission[2]]
+                }
+                GraphPreviewTarget::SelectedNode | GraphPreviewTarget::Displacement => {
+                    [0.12, 0.12, 0.12]
+                }
+            };
+            let cell = egui::Rect::from_min_max(
+                egui::pos2(
+                    rect.left() + rect.width() * column as f32 / CELLS as f32,
+                    rect.top() + rect.height() * row as f32 / CELLS as f32,
+                ),
+                egui::pos2(
+                    rect.left() + rect.width() * (column + 1) as f32 / CELLS as f32 + 0.5,
+                    rect.top() + rect.height() * (row + 1) as f32 / CELLS as f32 + 0.5,
+                ),
+            );
+            painter.rect_filled(cell, 0.0, graph_preview_color(color));
+        }
+    }
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn scalar_preview_color(value: f32) -> [f32; 3] {
+    let value = value.clamp(0.0, 1.0);
+    [value, value, value]
+}
+
+fn graph_preview_color(color: [f32; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+    )
 }
 
 struct GraphNodeVisual {

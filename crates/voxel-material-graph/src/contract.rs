@@ -10,8 +10,10 @@ use voxel_graph::{
 
 use crate::operation::MaterialNodeOperation;
 
-const MATERIAL_SURFACE_INTERMEDIATES: &[OperationTag] =
-    &[(MaterialNodeOperation::PatternLayer).tag()];
+const MATERIAL_SURFACE_INTERMEDIATES: &[OperationTag] = &[
+    (MaterialNodeOperation::PatternLayer).tag(),
+    (MaterialNodeOperation::Displacement).tag(),
+];
 
 const MATERIAL_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[
     NodeConstraintStatic {
@@ -24,6 +26,10 @@ const MATERIAL_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[
     },
     NodeConstraintStatic {
         operation: (MaterialNodeOperation::PatternLayer).tag(),
+        cardinality: Cardinality::up_to(voxel_material::pattern::MAX_PATTERN_LAYERS),
+    },
+    NodeConstraintStatic {
+        operation: (MaterialNodeOperation::Displacement).tag(),
         cardinality: Cardinality::up_to(voxel_material::pattern::MAX_PATTERN_LAYERS),
     },
 ];

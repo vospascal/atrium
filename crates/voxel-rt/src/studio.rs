@@ -25,21 +25,35 @@ pub(crate) const SAMPLE_VOXEL: [i32; 3] = [
 ];
 
 /// Half-extent of the square shadow plate, in one-metre world voxels.
-pub(crate) const PLATE_HALF_EXTENT: i32 = 3;
+///
+/// Sized to hold the largest example scene with a margin, so the ground under the
+/// subject does not change when you switch pose: a plate that grew for the floor
+/// and shrank again for the single voxel would change the bounce light and the
+/// horizon at the same time as the geometry, and then nothing is comparable.
+pub(crate) const PLATE_HALF_EXTENT: i32 = FLOOR_SIZE / 2 + 2;
 
 /// Vertical distance from the sample block to the plate, in world voxels.
 pub(crate) const PLATE_DROP: i32 = 3;
 
+/// What the ground plate is made of. One definition, so the eye that hides the
+/// plate can put back exactly what was there.
+pub const PLATE_VOXEL: Voxel = Voxel::Snow;
+
 pub const CAMERA_DISTANCE_METERS: f32 = 4.0;
 pub(crate) const WALL_SIZE: i32 = 4;
 pub(crate) const CUBE_SIZE: i32 = 3;
+/// Side of the flat ground example, in one-metre world voxels. Wide on purpose:
+/// a floor is where tiling and grazing-angle shading show up, and neither is
+/// judgeable on a 1 m patch.
+pub(crate) const FLOOR_SIZE: i32 = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StudioPose {
     #[default]
     Single,
-    Wall,
     Cube,
+    Wall,
+    Floor,
     EmitterWall,
 }
 
@@ -47,13 +61,28 @@ impl StudioPose {
     pub const fn label(&self) -> &'static str {
         match self {
             Self::Single => "single 1 m voxel",
-            Self::Wall => "wall (4x4 m)",
             Self::Cube => "cube (3x3x3 m)",
+            Self::Wall => "wall (4x4 m)",
+            Self::Floor => "floor (9x9 m)",
             Self::EmitterWall => "wall + 1 m glow block",
         }
     }
 
-    pub const ALL: [Self; 4] = [Self::Single, Self::Wall, Self::Cube, Self::EmitterWall];
+    pub const ALL: [Self; 5] = [
+        Self::Single,
+        Self::Cube,
+        Self::Wall,
+        Self::Floor,
+        Self::EmitterWall,
+    ];
+
+    /// The example scenes the studio offers as one-click poses.
+    ///
+    /// [`Self::EmitterWall`] is deliberately not among them: it is a CAGI
+    /// emission diagnostic — it forces a `GlowBlock` into the wall regardless of
+    /// which material you are editing — so it belongs to the tests and the
+    /// bench, not to a material-preview picker.
+    pub const EXAMPLES: [Self; 4] = [Self::Single, Self::Cube, Self::Wall, Self::Floor];
 
     /// Extent in one-metre world voxels.
     pub const fn extent(&self) -> [i32; 3] {
@@ -61,6 +90,7 @@ impl StudioPose {
             Self::Single => [1, 1, 1],
             Self::Wall | Self::EmitterWall => [WALL_SIZE, WALL_SIZE, 1],
             Self::Cube => [CUBE_SIZE, CUBE_SIZE, CUBE_SIZE],
+            Self::Floor => [FLOOR_SIZE, 1, FLOOR_SIZE],
         }
     }
 }
@@ -69,7 +99,12 @@ impl StudioPose {
 pub struct StudioScene {
     pub sample: Voxel,
     pub pose: StudioPose,
-    pub plate: Option<Voxel>,
+    /// What the ground plate is made of. A material rather than an
+    /// `Option<Material>`, with visibility beside it, so hiding the plate cannot
+    /// forget the floor you chose — the eye puts back exactly what was there.
+    pub plate: Voxel,
+    /// Whether the plate is part of the scene at all.
+    pub plate_shown: bool,
     /// Imported asset geometry. Its cells deliberately remain 0.125 m detail.
     pub subject: Option<VoxSubject>,
 }
@@ -79,7 +114,8 @@ impl Default for StudioScene {
         Self {
             sample: Voxel::Grass,
             pose: StudioPose::Single,
-            plate: Some(Voxel::Snow),
+            plate: PLATE_VOXEL,
+            plate_shown: true,
             subject: None,
         }
     }
@@ -90,12 +126,12 @@ impl StudioScene {
         let mut brickmap = Brickmap::empty();
         let [x, y, z] = SAMPLE_VOXEL;
 
-        if let Some(plate) = self.plate {
+        if self.plate_shown {
             let plate_y = y - PLATE_DROP;
             let half = PLATE_HALF_EXTENT.max(self.subject_footprint_half_extent());
             for plate_z in (z - half)..=(z + half) {
                 for plate_x in (x - half)..=(x + half) {
-                    set_world(&mut brickmap, [plate_x, plate_y, plate_z], plate);
+                    set_world(&mut brickmap, [plate_x, plate_y, plate_z], self.plate);
                 }
             }
         }
@@ -310,7 +346,7 @@ mod tests {
         let [x, y, z] = SAMPLE_VOXEL;
         assert_eq!(
             world_material(&brickmap, [x, y - PLATE_DROP, z]),
-            material_id(Voxel::Snow)
+            material_id(scene.plate)
         );
         for gap in 1..PLATE_DROP {
             assert_eq!(world_material(&brickmap, [x, y - gap, z]), 0);
@@ -319,6 +355,78 @@ mod tests {
             world_material(&brickmap, [x + PLATE_HALF_EXTENT + 1, y - PLATE_DROP, z]),
             0
         );
+    }
+
+    /// The eye's other half: no plate at all, and the subject is untouched by it.
+    #[test]
+    fn a_hidden_plate_leaves_only_the_subject() {
+        let scene = StudioScene {
+            plate_shown: false,
+            // Still remembered, which is the point of keeping the two apart.
+            plate: Voxel::Stone,
+            ..StudioScene::default()
+        };
+        let brickmap = scene.build();
+        let [x, y, z] = SAMPLE_VOXEL;
+        assert_eq!(
+            world_material(&brickmap, [x, y, z]),
+            material_id(scene.sample)
+        );
+        for offset in [-PLATE_HALF_EXTENT, 0, PLATE_HALF_EXTENT] {
+            assert_eq!(
+                world_material(&brickmap, [x + offset, y - PLATE_DROP, z + offset]),
+                0,
+                "plate voxel survived at offset {offset}"
+            );
+        }
+    }
+
+    /// The floor picker: the plate is built from whatever material it was given.
+    #[test]
+    fn the_plate_is_made_of_its_own_material() {
+        let scene = StudioScene {
+            plate: Voxel::Lava,
+            ..StudioScene::default()
+        };
+        let brickmap = scene.build();
+        let [x, y, z] = SAMPLE_VOXEL;
+        assert_eq!(
+            world_material(&brickmap, [x, y - PLATE_DROP, z]),
+            material_id(Voxel::Lava)
+        );
+        // The subject is not dragged along by the floor choice.
+        assert_eq!(
+            world_material(&brickmap, [x, y, z]),
+            material_id(scene.sample)
+        );
+    }
+
+    /// Every example rests fully ON the plate, and on the SAME plate: the ground is
+    /// a constant of the studio, not something each pose brings with it.
+    #[test]
+    fn one_plate_carries_every_example_with_a_margin() {
+        for pose in StudioPose::ALL {
+            let [size_x, _, size_z] = pose.extent();
+            assert!(
+                PLATE_HALF_EXTENT >= size_x.max(size_z) / 2 + 1,
+                "{} overhangs the plate",
+                pose.label()
+            );
+            let scene = StudioScene {
+                pose,
+                ..StudioScene::default()
+            };
+            let brickmap = scene.build();
+            let [x, y, z] = SAMPLE_VOXEL;
+            for edge in [-PLATE_HALF_EXTENT, PLATE_HALF_EXTENT] {
+                assert_eq!(
+                    world_material(&brickmap, [x + edge, y - PLATE_DROP, z + edge]),
+                    material_id(scene.plate),
+                    "{} shrank the plate",
+                    pose.label()
+                );
+            }
+        }
     }
 
     #[test]
@@ -349,6 +457,52 @@ mod tests {
             assert_eq!(
                 world_material(&brickmap, [origin[0], origin[1] + extent[1], origin[2]]),
                 0
+            );
+        }
+    }
+
+    #[test]
+    fn floor_is_one_voxel_thick_and_rests_on_the_plate() {
+        let scene = StudioScene {
+            pose: StudioPose::Floor,
+            ..StudioScene::default()
+        };
+        let brickmap = scene.build();
+        let [x, y, z] = SAMPLE_VOXEL;
+        let top = y - PLATE_DROP + 1;
+        let half = FLOOR_SIZE / 2;
+        for offset in [-half, 0, half] {
+            assert_eq!(
+                world_material(&brickmap, [x + offset, top, z + offset]),
+                material_id(scene.sample)
+            );
+            // One voxel thick: nothing above it, and the plate still below it.
+            assert_eq!(
+                world_material(&brickmap, [x + offset, top + 1, z + offset]),
+                0
+            );
+            assert_eq!(
+                world_material(&brickmap, [x + offset, y - PLATE_DROP, z + offset]),
+                material_id(scene.plate)
+            );
+        }
+        // The plate stays visible as a border, so the floor's edge is readable.
+        assert_eq!(world_material(&brickmap, [x + half + 1, top, z]), 0);
+        assert_eq!(
+            world_material(&brickmap, [x + half + 1, y - PLATE_DROP, z]),
+            material_id(scene.plate)
+        );
+    }
+
+    #[test]
+    fn the_pose_bar_offers_every_example_but_not_the_emission_probe() {
+        assert!(!StudioPose::EXAMPLES.contains(&StudioPose::EmitterWall));
+        for pose in StudioPose::ALL {
+            assert_eq!(
+                pose == StudioPose::EmitterWall,
+                !StudioPose::EXAMPLES.contains(&pose),
+                "{} is neither an example nor the emission probe",
+                pose.label()
             );
         }
     }

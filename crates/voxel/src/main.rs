@@ -4,6 +4,7 @@
 //! OpenXR entry point later without touching the renderer. All winit types
 //! stay in this file; camera.rs is pure math.
 
+mod footsteps;
 mod material_edit;
 mod overlay;
 
@@ -21,8 +22,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::footsteps::{ground_transition_sound, FootstepAudio};
 use crate::material_edit::{MaterialPanelState, VoxImportState, WORLD_HOTBAR_BLOCKS};
-use crate::overlay::{Overlay, OverlayFrameData, TargetHighlightReadout};
+use crate::overlay::{Overlay, OverlayFrameData, StudioPoseReadout, TargetHighlightReadout};
 use atrium_profile::cpu::SpanRecorder;
 use voxel_color::OutputDepth;
 use voxel_color::{HeadroomChoice, TonemapCurve};
@@ -31,7 +33,9 @@ use voxel_game_ui::settings_panel::{MovementReadout, WorldEditReadout};
 use voxel_graph::GraphAsset;
 use voxel_material::animation_clock::AnimationClock;
 use voxel_material::material;
-use voxel_material::world_event::{EventKey, EventSpec, WorldEventField, CHANNEL_PRESENCE};
+use voxel_material::world_event::{
+    EventKey, EventSpec, WorldEventField, CHANNEL_PRESENCE, CHANNEL_SPLASH,
+};
 use voxel_material_graph::layers::sync_pattern_layers_from_graph;
 use voxel_material_graph::lowering::{
     compile as compile_material_graph, GraphEditorState, MaterialGraphShaderSet,
@@ -52,6 +56,7 @@ use voxel_rt::passes::composer::ShaderProgram;
 use voxel_rt::passes::{cagi, dda};
 use voxel_rt::profiling::{self, FrameTimers, GPU_OVERLAY};
 use voxel_rt::render::Renderer;
+use voxel_rt::sky_weather::SkyWeather;
 use voxel_rt::studio;
 use voxel_rt::studio_assets::{
     live_state_fingerprint, StudioAssetPanelState, StudioProject, StudioProjectStore,
@@ -69,8 +74,9 @@ use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
 const WORLD_SEED: u32 = 1;
 const WORLD_SEASON: f32 = 0.0;
 
-/// Movement speed multiplier while a Ctrl key is held.
-const BOOST_SPEED_MULTIPLIER: f32 = 4.0;
+/// Movement speed multiplier while a Ctrl key is held in fly mode. The walking
+/// controller applies its own 1.3x sprint cap to the same sprint intent.
+const BOOST_SPEED_MULTIPLIER: f32 = 2.0;
 
 /// How far the edit ray reaches from the eye, world meters (E2). Long enough to
 /// build across a clearing, short enough that a click always has an obvious
@@ -86,10 +92,14 @@ const EDIT_REPEAT_HZ: f32 = 8.0;
 /// S0 — how close and how far the studio orbit can get.
 ///
 /// The floor is two voxels off the sample centre, so the eye never ends up inside
-/// the subject; the ceiling still shows the whole plate and no more, because past
-/// that the sample is a few pixels and there is nothing left to judge.
+/// the subject; the ceiling frames the largest example scene and no more, because
+/// past that the sample is a few pixels and there is nothing left to judge.
+///
+/// S2 — the ceiling was 8 m, which was the whole plate back when the biggest pose
+/// was the 4 m wall. The 9 m floor example needs 18 m to fit in frame, and a
+/// ceiling that cuts the subject in half reads as the pose button being broken.
 const STUDIO_MIN_DISTANCE_METERS: f32 = 0.25;
-const STUDIO_MAX_DISTANCE_METERS: f32 = 8.0;
+const STUDIO_MAX_DISTANCE_METERS: f32 = 20.0;
 
 /// S0 — how far the studio orbit can tip. Just short of straight down and straight
 /// up: at exactly +/-90 degrees the forward vector is parallel to world up and the
@@ -139,6 +149,44 @@ fn studio_sample_to_follow(
         return None;
     }
     Some(sample)
+}
+
+/// S2 — the material slot Graph Studio should be pointed at, or `None` to leave it.
+///
+/// **The other half of the same invariant [`studio_sample_to_follow`] enforces**, and the
+/// half that was missing. That one keeps the studio SUBJECT in step with the selected row;
+/// this keeps the GRAPH EDITOR in step with it. Without both, the studio can show one
+/// material while the editor edits another — which is the "two things called selected"
+/// failure the follow mechanism exists to prevent (Pascal, 2026-07-31: *"it doesnt re apply
+/// i only ever see grass"*).
+///
+/// The route that reintroduced it: the eyedropper. It is deliberately the one click the
+/// studio still allows, and it moved `MaterialPanelState::selected` only — so the subject
+/// rebuilt to the picked material while `GraphEditorState::material_slot` stayed behind.
+/// Compiling then wrote `row_mut(slot)` and `apply_graph_sample(slot)` for the row you were
+/// NOT looking at, so it corrupted a material rather than merely confusing the UI.
+///
+/// Unlike the sample, this does NOT stop for a loaded `.vox` subject: with an asset on
+/// screen the selection names a row of the TABLE rather than the shape in front of you, and
+/// that row is exactly what the editor should be editing.
+fn graph_slot_to_follow(control_mode: ControlMode, selected: u8, current_slot: u8) -> Option<u8> {
+    // Only in the studio. In the island the selection is the PLACEMENT material — pressing a
+    // hotbar digit while building must not reload the editor, which would cost a file read
+    // per keypress and discard whatever graph was being authored.
+    if control_mode != ControlMode::StudioOrbit {
+        return None;
+    }
+    // Air has no row to open; `MaterialGraphAssetService::open` would answer "no material
+    // row for slot 0" once per frame.
+    if selected == material::AIR_MATERIAL_ID {
+        return None;
+    }
+    // Already there: the caller runs every frame, and reopening the graph 60 times a second
+    // would re-read the project from disk that often.
+    if selected == current_slot {
+        return None;
+    }
+    Some(selected)
 }
 
 /// What the L key places (M1b): a plain light-emitting block, so the emissive
@@ -224,6 +272,7 @@ struct InputState {
     right_held: bool,
     up_held: bool,
     down_held: bool,
+    sneak_held: bool,
     boost_held: bool,
     /// Mouse motion accumulated since the last frame, pixels.
     mouse_delta: (f32, f32),
@@ -244,6 +293,7 @@ impl InputState {
             right: self.right_held,
             up: self.up_held,
             down: self.down_held,
+            sneak: self.sneak_held,
             mouse_delta: self.mouse_delta,
             speed_multiplier: if self.boost_held {
                 BOOST_SPEED_MULTIPLIER
@@ -281,6 +331,12 @@ struct AppState {
     /// value and every pinned sun-source flag is stale, so the volume is thrown
     /// away and re-flooded (E4's only invalidation — the world is static).
     flooded_sun_settings: SunSettings,
+    /// Weather, wind and the cloud deck they drive.
+    ///
+    /// Beside `sun_settings` rather than inside the renderer for the same reason the sun is:
+    /// the sky's condition is authored state the app owns, and the renderer's job is to submit
+    /// it. Owning the wind driver here also keeps ONE wind history in the world.
+    sky_weather: SkyWeather,
     /// Overlay-mutated quality levers + preset (E1c): traversal, AO, shadows
     /// and the render scale in one struct.
     quality: RenderQuality,
@@ -293,6 +349,9 @@ struct AppState {
     /// [`App::rebuild_dda_shader`] can refuse to recompile identical source.
     applied_dda_shader_source: Option<String>,
     input_state: InputState,
+    /// Native local-player footsteps. Receives resolved ground movement rather
+    /// than keyboard intent, so blocked movement and airborne travel are quiet.
+    footsteps: FootstepAudio,
     cursor_grabbed: bool,
     /// Latest physical cursor position. The viewport and Graph Studio use
     /// this same boundary for routing camera versus editor input.
@@ -364,6 +423,7 @@ struct AppState {
     /// S3 — what materials can react to. The active eye is raised into it each
     /// frame as the presence entity; a mob system later raises alongside.
     world_events: WorldEventField,
+    next_splash_event_key: u64,
 }
 
 impl AppState {
@@ -573,6 +633,24 @@ impl AppState {
         let mut world_host = WorldHost::new(brickmap);
         world_host.set_world_thread(quality.world_edit.world_thread);
         let graph_editor_slot = material::material_id(studio_scene.sample);
+        let mut graph_editor = GraphEditorState::new(graph_editor_slot);
+        // The initial editor slot already equals the studio sample selection, so the
+        // per-frame follow-up intentionally does nothing on the first frame. Open the
+        // canonical graph here as well; otherwise Graph Studio would retain its small
+        // Surface -> Output bootstrap graph while the renderer correctly used the
+        // material's four graph-backed layers.
+        match MaterialGraphAssetService::open(
+            &project_path,
+            &studio_project,
+            &material_table,
+            graph_editor_slot,
+        ) {
+            Ok(Some(opened)) => graph_editor.open_graph(graph_editor_slot, opened.graph),
+            Ok(None) => {
+                graph_editor.status = format!("No material row for slot {graph_editor_slot}");
+            }
+            Err(error) => graph_editor.status = format!("Could not open graph: {error}"),
+        }
 
         // The fixture's camera and sun, or the ordinary island's. Both come from
         // `RainbowCorridor` so the interactive view and bench section 15 cannot
@@ -611,6 +689,8 @@ impl AppState {
             character_step_micros: 0.0,
             sun_settings,
             flooded_sun_settings: sun_settings,
+            // Fixed seed: a session reproduces its own sky, so a perf capture is comparable.
+            sky_weather: SkyWeather::new(0x5C1_0D5),
             quality,
             applied_quality: quality,
             // Startup builds the source inline (the mask has to be derived before
@@ -618,6 +698,7 @@ impl AppState {
             // `rebuild_dda_shader` populates it.
             applied_dda_shader_source: None,
             input_state: InputState::default(),
+            footsteps: FootstepAudio::new(),
             cursor_grabbed: false,
             cursor_position: None,
             vsync_enabled: true,
@@ -653,7 +734,7 @@ impl AppState {
                 ..StudioAssetPanelState::new(project_path.display().to_string())
             },
             material_graph_shaders,
-            graph_editor: GraphEditorState::new(graph_editor_slot),
+            graph_editor,
             observed_project_fingerprint: project_fingerprint,
             saved_project_fingerprint: None,
             autosave_due_at: None,
@@ -661,6 +742,7 @@ impl AppState {
             animation_clock: AnimationClock::new(),
             world_clock: AnimationClock::new(),
             world_events: WorldEventField::new(),
+            next_splash_event_key: 0,
         }
     }
 
@@ -744,6 +826,12 @@ impl AppState {
                 self.quality = quality;
                 self.material_graph_shaders = graph_shaders;
                 self.material_panel.repack_gi_requested = true;
+                // The editor's CANVAS is per-material state too, and loading replaced every
+                // material under it. Without this it keeps showing the previous project's
+                // graph for the same slot — so the canvas disagrees with what
+                // `load_shader_set_for_editing` just compiled and put on the GPU, and Save
+                // would write the old project's graph into the new one.
+                self.open_graph_editor_graph();
                 if let Err(error) = self.rebuild_generated_world_from_profile() {
                     self.studio_assets.status =
                         format!("Load failed while applying world profile: {error}");
@@ -811,6 +899,9 @@ impl AppState {
                     self.quality = quality;
                     self.material_graph_shaders = graph_shaders;
                     self.material_panel.repack_gi_requested = true;
+                    // Same reason as the ordinary load: recovery replaced every material, so
+                    // the editor's canvas has to be reopened onto the recovered graph.
+                    self.open_graph_editor_graph();
                     if let Err(error) = self.rebuild_generated_world_from_profile() {
                         self.studio_assets.status =
                             format!("Recovery world profile could not apply: {error}");
@@ -1040,7 +1131,13 @@ impl AppState {
             KeyCode::KeyA => self.input_state.left_held = pressed,
             KeyCode::KeyD => self.input_state.right_held = pressed,
             KeyCode::Space => self.input_state.up_held = pressed,
-            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.input_state.down_held = pressed,
+            // Shift remains descend/dive in fly and water, but it also carries
+            // the grounded sneak intent. The character controller decides which
+            // applies from its actual submersion state.
+            KeyCode::ShiftLeft | KeyCode::ShiftRight => {
+                self.input_state.down_held = pressed;
+                self.input_state.sneak_held = pressed;
+            }
             KeyCode::ControlLeft | KeyCode::ControlRight => {
                 self.input_state.boost_held = pressed;
             }
@@ -1095,6 +1192,7 @@ impl AppState {
     fn toggle_control_mode(&mut self) {
         match self.control_mode {
             ControlMode::Fly => {
+                self.footsteps.reset();
                 let walk_speed = self.character.settings.walk_speed;
                 self.character = character_from_fly_camera(&self.fly_camera);
                 // The wheel-tuned walk speed is a preference, not a pose: keep it
@@ -1117,6 +1215,7 @@ impl AppState {
                 );
             }
             ControlMode::Walk => {
+                self.footsteps.reset();
                 self.fly_camera.position = self.character.eye_position();
                 self.fly_camera.yaw = self.character.yaw;
                 self.fly_camera.pitch = self.character.pitch;
@@ -1184,6 +1283,27 @@ impl AppState {
             },
             clock,
         );
+        if let Some(splash) = self.character.take_water_splash() {
+            // Splash events are one-shot: release immediately so the event
+            // field retains only the short ripple tail, never a persistent
+            // presence signal.
+            // Reuse a small ring of released event slots. Each slot gets time
+            // to expand before it is reused, while wading can keep producing
+            // fresh ripples indefinitely without filling the 16-event field.
+            let key = EventKey(1 + self.next_splash_event_key % 8);
+            self.next_splash_event_key = self.next_splash_event_key.wrapping_add(1);
+            self.world_events.raise(
+                key,
+                EventSpec {
+                    position_meters: splash.position_meters.to_array(),
+                    radius_meters: 8.0,
+                    channel: CHANNEL_SPLASH,
+                    strength: splash.strength,
+                },
+                clock,
+            );
+            self.world_events.release(key, clock);
+        }
         self.world_events.retire_expired(clock);
     }
 
@@ -1559,7 +1679,40 @@ impl AppState {
         if let Some(pose) = self.material_panel.studio_pose_requested.take() {
             self.set_studio_pose(pose);
         }
+        if let Some(visible) = self.material_panel.studio_plate_requested.take() {
+            self.set_studio_plate(visible);
+        }
+        if let Some(material) = self.material_panel.studio_plate_material_requested.take() {
+            self.set_studio_plate_material(material);
+        }
+        // BOTH halves of the invariant, and in this order: point the editor at the row
+        // first, then bring the subject to it. `open_graph_editor_graph` writes
+        // `material_panel.selected` itself, so doing it the other way round would rebuild the
+        // world, then reopen the graph, then rebuild it again on the next frame.
+        self.follow_selected_row_in_the_graph_editor();
         self.follow_selected_row_in_the_studio();
+    }
+
+    /// S2 — in the studio, Graph Studio edits the row that is ON SCREEN.
+    ///
+    /// The companion to [`Self::follow_selected_row_in_the_studio`]: that one moves the
+    /// subject to the selection, this one moves the editor to it. See
+    /// [`graph_slot_to_follow`] for why both are needed and which route broke it.
+    ///
+    /// Reopening rather than merely assigning the slot, because the slot alone is not the
+    /// state that matters — the editor's canvas is. `open_graph_editor_graph` loads that row's
+    /// graph and writes `MaterialPanelState::selected` back, so after this the two names for
+    /// "the material" hold the same value by construction.
+    fn follow_selected_row_in_the_graph_editor(&mut self) {
+        let Some(slot) = graph_slot_to_follow(
+            self.control_mode,
+            self.material_panel.selected,
+            self.graph_editor.material_slot,
+        ) else {
+            return;
+        };
+        self.graph_editor.material_slot = slot;
+        self.open_graph_editor_graph();
     }
 
     /// S2 — in the studio, the row being EDITED is the voxel being LOOKED AT.
@@ -1618,6 +1771,60 @@ impl AppState {
         println!("{}", self.material_panel.import.status);
     }
 
+    /// S2 — put the studio's ground plate in the scene or take it out.
+    ///
+    /// The plate is geometry, not a draw flag, so this is a world rebuild like a
+    /// pose change. Unlike a pose change it deliberately keeps the orbit distance:
+    /// the subject did not change size, and having the camera jump because you
+    /// wanted to see a material against the sky would be its own annoyance.
+    fn set_studio_plate(&mut self, visible: bool) {
+        if self.control_mode != ControlMode::StudioOrbit {
+            self.material_panel.import.status =
+                "the ground plate needs the studio — restart with --studio".to_string();
+            return;
+        }
+        self.studio_scene.plate_shown = visible;
+        let bricks = self.rebuild_studio_world_keeping_the_camera();
+        self.material_panel.import.status = format!(
+            "studio ground plate: {} ({bricks} occupied bricks)",
+            if visible { "shown" } else { "hidden" }
+        );
+        println!("{}", self.material_panel.import.status);
+    }
+
+    /// S2 — build the studio's ground plate out of `material`.
+    ///
+    /// The floor is scenery, so this does not touch the selected row: the block being
+    /// previewed stays the one being edited.
+    fn set_studio_plate_material(&mut self, material: u8) {
+        if self.control_mode != ControlMode::StudioOrbit {
+            self.material_panel.import.status =
+                "the ground plate needs the studio — restart with --studio".to_string();
+            return;
+        }
+        self.studio_scene.plate = material::material_voxel(material);
+        let bricks = self.rebuild_studio_world_keeping_the_camera();
+        self.material_panel.import.status = format!(
+            "studio floor: {} ({bricks} occupied bricks)",
+            self.material_table
+                .row(material)
+                .map_or("unknown", |row| row.name)
+        );
+        println!("{}", self.material_panel.import.status);
+    }
+
+    /// A studio rebuild that leaves the orbit where it is.
+    ///
+    /// The re-frame in [`Self::rebuild_studio_world`] exists because the SUBJECT
+    /// changed size. Floor edits do not change its size, and having the camera jump
+    /// because you recoloured the ground would be its own annoyance.
+    fn rebuild_studio_world_keeping_the_camera(&mut self) -> u32 {
+        let distance_meters = self.studio_distance_meters;
+        let bricks = self.rebuild_studio_world();
+        self.studio_distance_meters = distance_meters;
+        bricks
+    }
+
     /// Replace the world with the current studio scene, re-frame the camera, and
     /// return the occupied brick count.
     ///
@@ -1641,6 +1848,16 @@ impl AppState {
         // The light volume was flooded for the old geometry; every injected value and
         // every pinned sun-source flag now describes a world that is gone.
         self.renderer.mark_light_volume_dirty();
+        // And so do the per-cell ATTRIBUTES, which is a second thing and was missing.
+        // `mark_light_volume_dirty` re-floods the light; it does not re-derive which cells
+        // EMIT or transmit, and that buffer is baked per cell from the material that was
+        // there. So a studio rebuild left the old geometry's emission recorded at the old
+        // geometry's cells: switch the floor to an emissive row and it lit nothing, switch
+        // away from the emitter wall and its glow stayed behind in the volume.
+        //
+        // The same channel a material edit uses, so there is one re-pack path rather than
+        // two, and it is correctly a no-op when the light volume is off.
+        self.material_panel.repack_gi_requested = true;
         // Re-frame: a 16-voxel wall at a 0.9 m working distance is a wall of pixels,
         // and scrolling out by hand every time is friction that makes a tool feel
         // broken.
@@ -1934,10 +2151,22 @@ impl AppState {
                 // picking and, at E8, the audio rays read) and holds the read lock
                 // only for the sweep.
                 let started = Instant::now();
+                let feet_before_step = self.character.feet_position;
+                let was_grounded = self.character.grounded();
                 {
                     let brickmap = self.world_host.read();
                     self.character
                         .step(&brickmap, &camera_input, frame_time_seconds);
+                }
+                let travelled = self.character.feet_position - feet_before_step;
+                self.footsteps
+                    .update(travelled.x.hypot(travelled.z), self.character.grounded());
+                if let Some(transition) = ground_transition_sound(
+                    was_grounded,
+                    self.character.grounded(),
+                    camera_input.up,
+                ) {
+                    self.footsteps.play_ground_transition(transition);
                 }
                 // Still its own stopwatch as well as part of CPU_INPUT: the
                 // movement readout reports this one number on its own line.
@@ -1985,6 +2214,22 @@ impl AppState {
         };
         self.sun_settings.advance_day_cycle(frame_time_seconds);
         self.environment_runtime.day_phase = self.sun_settings.day_phase;
+        // Advance wind, weather and the deck's advection, then state the result.
+        //
+        // The ground bounce is stated HERE, from `self.sun_settings`, because this is the only
+        // place that owns the real sun. The renderer used to derive it from
+        // `HillaireEnvironment::frame()`, which read a SECOND `SunSettings` that nothing in the
+        // workspace ever wrote — so the deck's underside was lit by a default noon sun for the
+        // whole session. Measured, that constant was up to 96% of a cloud's ambient at sunset,
+        // 27x too bright and 3x too cool: literally "the clouds stay the same colour always".
+        // The duplicate is now deleted rather than kept in sync.
+        let deck = self.sky_weather.advance(frame_time_seconds);
+        let mut cloud_request = deck.request();
+        let environment_frame = self.sun_settings.environment_frame();
+        cloud_request.ground_bounce_sh =
+            voxel_rt::ground_bounce::ground_bounce_sh(&environment_frame);
+        self.renderer.set_environment_frame(environment_frame);
+        self.renderer.set_clouds(cloud_request);
         self.advance_animation(frame_time_seconds);
         // Sun sliders and the runtime quality knobs were mutated during LAST
         // frame's overlay pass; a change shows up one frame later, which is
@@ -1998,7 +2243,14 @@ impl AppState {
             &self.sun_settings,
             self.quality.shading_params(),
             self.quality.gi_params(),
-            self.quality.water_params(),
+            // W1: the wave field's wind comes from the SAME history the cloud deck
+            // drifts on (`SkyWeather` owns the one driver), so the sea cannot travel
+            // on a bearing the sky disagrees with. The quality settings supply only
+            // the amplitude lever — see `WaterParams::with_wind`.
+            self.quality.water_params().with_wind(
+                self.sky_weather.wind(),
+                self.sky_weather.wind_bearing_radians(),
+            ),
             // The DISPATCH height, not the window height: the octave cutoff asks
             // what a shaded pixel can resolve, and a half-scale preset resolves
             // half as much.
@@ -2012,12 +2264,20 @@ impl AppState {
         // caller that has a display to ask, which is why this is a builder call rather
         // than a parameter — see `LightingUniform::with_output_params`.
         let display_headroom = self.gpu_context.display_headroom(self.headroom_choice);
-        let lighting_uniform = lighting_uniform.with_output_params(OutputParams {
-            hdr_headroom: display_headroom.ratio(),
-            tonemap: self.tonemap_curve,
-            content_peak: self.content_peak,
-            exposure: self.exposure,
-        });
+        let lighting_uniform = lighting_uniform
+            .with_output_params(OutputParams {
+                hdr_headroom: display_headroom.ratio(),
+                tonemap: self.tonemap_curve,
+                content_peak: self.content_peak,
+                exposure: self.exposure,
+            })
+            .with_material_debug(
+                self.material_panel.debug_layers_enabled
+                    || self.material_panel.debug_view
+                        != crate::material_edit::MaterialDebugView::Lit,
+                self.material_panel.debug_layer_mask,
+                self.material_panel.debug_view.shader_mode(),
+            );
         // A moved sun invalidates the whole light volume (E4: the world is
         // static, the sun is not). Dragging the slider therefore re-floods every
         // frame of the drag, which is what makes the GI follow the drag instead of
@@ -2136,6 +2396,18 @@ impl AppState {
                 step_micros: self.character_step_micros,
             },
             target: self.target_highlight(),
+            // S2 — the pose bar is a studio tool: in the island there is no example
+            // scene to switch to, and an imported `.vox` subject means none of the
+            // built-in poses is what is on screen.
+            studio: (self.control_mode == ControlMode::StudioOrbit).then(|| StudioPoseReadout {
+                active: self
+                    .studio_scene
+                    .subject
+                    .is_none()
+                    .then_some(self.studio_scene.pose),
+                plate_shown: self.studio_scene.plate_shown,
+                plate_material: material::material_id(self.studio_scene.plate),
+            }),
         };
         self.overlay.render(
             &self.window,
@@ -2158,6 +2430,7 @@ impl AppState {
             &mut self.content_peak,
             &mut self.exposure,
             &mut self.sun_settings,
+            &mut self.sky_weather,
             &mut self.quality,
             &mut self.material_table,
             &mut self.material_panel,
@@ -2614,5 +2887,74 @@ mod tests {
                 "selecting air emptied a studio showing {sample:?}"
             );
         }
+    }
+
+    /// The other half of the invariant, and the one that was missing: Graph Studio must be
+    /// pointed at the row on screen, or Compile writes `row_mut(slot)` and
+    /// `apply_graph_sample(slot)` for a material nobody is looking at.
+    #[test]
+    fn the_graph_editor_follows_the_selected_row_in_the_studio() {
+        let grass = material::material_id(Voxel::Grass);
+        let stone = material::material_id(Voxel::Stone);
+
+        // The route that broke it: the eyedropper picks a voxel in the studio, which moves
+        // the selection and nothing else. The editor has to come along.
+        assert_eq!(
+            graph_slot_to_follow(ControlMode::StudioOrbit, stone, grass),
+            Some(stone)
+        );
+        // Every row, so a new row cannot be one the editor refuses to follow to.
+        for id in 1..material::MATERIAL_COUNT as u8 {
+            if id == grass {
+                continue;
+            }
+            assert_eq!(
+                graph_slot_to_follow(ControlMode::StudioOrbit, id, grass),
+                Some(id),
+                "the graph editor would not follow to row {id}"
+            );
+        }
+        // Already there: this runs every frame, and reopening re-reads the project from disk.
+        assert_eq!(
+            graph_slot_to_follow(ControlMode::StudioOrbit, grass, grass),
+            None
+        );
+    }
+
+    /// Where the graph editor must NOT follow, and why each case differs from the subject's
+    /// rules — the two decisions are deliberately not the same function.
+    #[test]
+    fn following_the_selected_row_in_the_graph_editor_has_its_own_limits() {
+        let stone = material::material_id(Voxel::Stone);
+        let grass = material::material_id(Voxel::Grass);
+
+        // The island's selection is the PLACEMENT material. Following it would re-read the
+        // project from disk on every hotbar digit and discard the graph being authored.
+        for mode in [ControlMode::Fly, ControlMode::Walk] {
+            assert_eq!(
+                graph_slot_to_follow(mode, stone, grass),
+                None,
+                "{mode:?} would reopen the graph editor from the placement material"
+            );
+        }
+        // Air has no row to open.
+        assert_eq!(
+            graph_slot_to_follow(ControlMode::StudioOrbit, material::AIR_MATERIAL_ID, grass),
+            None
+        );
+
+        // **And here the two rules deliberately diverge.** A loaded `.vox` subject stops the
+        // SAMPLE from following, because the asset owns the geometry on screen — but the
+        // selection still names a table row, and that row is exactly what the editor should
+        // be editing. `studio_sample_to_follow` returns None for this case; this must not.
+        assert_eq!(
+            studio_sample_to_follow(ControlMode::StudioOrbit, true, stone, Voxel::Grass),
+            None
+        );
+        assert_eq!(
+            graph_slot_to_follow(ControlMode::StudioOrbit, stone, grass),
+            Some(stone),
+            "with an asset on screen the editor must still follow the selected ROW"
+        );
     }
 }

@@ -27,8 +27,8 @@ use voxel_material::material::{
     FaceOverride, FaceRoles, Material, MaterialKind, Medium, MediumPhase, MATERIAL_COUNT,
 };
 use voxel_material::pattern::{
-    PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
-    PatternTarget, MAX_PATTERN_LAYERS,
+    EdgeBandDirection, PatternBlend, PatternFaces, PatternFrame, PatternGenerator, PatternLayer,
+    PatternStack, PatternTarget, MAX_PATTERN_LAYERS, MAX_RELIEF_HEIGHT_METERS,
 };
 use voxel_material_graph::lowering::graph_from_material;
 
@@ -194,6 +194,8 @@ pub struct SavedPatternLayer {
     pub amount: f32,
     pub target_color: [f32; 3],
     pub faces: SavedPatternFaces,
+    #[serde(default)]
+    pub relief_faces: Option<SavedPatternFaces>,
     pub texels_per_voxel: u32,
     pub vary_per_face: bool,
     /// Domain warp strength. `#[serde(default)]` so every project saved before the
@@ -211,6 +213,43 @@ pub struct SavedPatternLayer {
     #[serde(default)]
     pub tile_gap: f32,
     pub emission_intensity: f32,
+    /// Mask-driven surface relief in metres. Defaults to zero for older assets.
+    #[serde(default)]
+    pub relief_height_meters: f32,
+    /// Whether the relief field contributes to the derived lighting normal.
+    /// Optional for compatibility with assets written before per-layer control.
+    #[serde(default)]
+    pub relief_normal: Option<bool>,
+    /// Whether the relief raises the LOW end of the mask. Defaults to false for
+    /// assets written before the control existed.
+    #[serde(default)]
+    pub relief_invert: bool,
+    /// Sub-texel finite-difference step for the derived normal, as a fraction of
+    /// one texel. Defaults to the measured crisp-emboss value for assets written
+    /// while it was a global constant.
+    #[serde(default = "default_relief_bevel_fraction")]
+    pub relief_bevel_fraction: f32,
+    /// Multiplier on the derived normal's tilt. Defaults to the physical
+    /// gradient, which is what every older asset rendered with.
+    #[serde(default = "default_relief_normal_strength")]
+    pub relief_normal_strength: f32,
+    /// Grid-average sampling: the generator returns the eight-octant mean over
+    /// the texel cell instead of the centre point sample. Off for older assets,
+    /// which is the value that reproduces them.
+    #[serde(default)]
+    pub grid_average: bool,
+    /// Relief mask quantisation levels; zero (the older-asset default) keeps
+    /// the continuous mask.
+    #[serde(default)]
+    pub relief_steps: u32,
+}
+
+fn default_relief_bevel_fraction() -> f32 {
+    voxel_material::pattern::DEFAULT_RELIEF_BEVEL_FRACTION
+}
+
+fn default_relief_normal_strength() -> f32 {
+    1.0
 }
 
 /// One variant per [`PatternGenerator`], tagged by name rather than by index, so
@@ -220,19 +259,49 @@ pub struct SavedPatternLayer {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SavedPatternGenerator {
     Flat,
-    Noise { octaves: u32 },
-    Speckle { density: f32 },
-    Perlin { octaves: u32 },
-    Simplex { octaves: u32 },
-    Ridged { octaves: u32 },
-    Turbulence { octaves: u32 },
+    Noise {
+        octaves: u32,
+    },
+    Speckle {
+        density: f32,
+    },
+    Perlin {
+        octaves: u32,
+    },
+    Simplex {
+        octaves: u32,
+    },
+    Ridged {
+        octaves: u32,
+    },
+    Turbulence {
+        octaves: u32,
+    },
     Worley,
     WorleyEdge,
     WorleySmooth,
-    Wave { distortion: f32 },
+    Wave {
+        distortion: f32,
+    },
     Checker,
     TileTone,
-    TileEdge { sharpness: f32 },
+    TileEdge {
+        sharpness: f32,
+    },
+    EdgeBand {
+        #[serde(default)]
+        direction: SavedEdgeBandDirection,
+        width: f32,
+        jaggedness: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedEdgeBandDirection {
+    #[default]
+    Top,
+    Bottom,
 }
 
 /// A square tile is the identity, and `serde(default)` on an f32 would give 0 —
@@ -465,6 +534,7 @@ impl From<&PatternLayer> for SavedPatternLayer {
             amount: layer.amount,
             target_color: layer.target_color,
             faces: SavedPatternFaces::from(layer.faces),
+            relief_faces: Some(SavedPatternFaces::from(layer.relief_faces)),
             texels_per_voxel: layer.texels_per_voxel,
             vary_per_face: layer.vary_per_face,
             domain_warp: layer.domain_warp,
@@ -472,6 +542,13 @@ impl From<&PatternLayer> for SavedPatternLayer {
             tile_bond: layer.tile_bond,
             tile_gap: layer.tile_gap,
             emission_intensity: layer.emission_intensity,
+            relief_height_meters: layer.relief_height_meters,
+            relief_normal: Some(layer.relief_normal),
+            relief_invert: layer.relief_invert,
+            relief_bevel_fraction: layer.relief_bevel_fraction,
+            relief_normal_strength: layer.relief_normal_strength,
+            grid_average: layer.grid_average,
+            relief_steps: layer.relief_steps,
         }
     }
 }
@@ -482,6 +559,11 @@ impl SavedPatternLayer {
         validate_finite("pattern amount", &[self.amount])?;
         validate_finite("pattern target_color", &self.target_color)?;
         validate_finite("pattern emission_intensity", &[self.emission_intensity])?;
+        validate_finite("pattern relief_height_meters", &[self.relief_height_meters])?;
+        validate_finite(
+            "pattern relief shaping",
+            &[self.relief_bevel_fraction, self.relief_normal_strength],
+        )?;
         validate_finite("pattern domain_warp", &[self.domain_warp])?;
         validate_finite(
             "pattern tessellation",
@@ -493,6 +575,12 @@ impl SavedPatternLayer {
         if let SavedPatternGenerator::Wave { distortion } = self.generator {
             validate_finite("pattern wave distortion", &[distortion])?;
         }
+        if let SavedPatternGenerator::EdgeBand {
+            width, jaggedness, ..
+        } = self.generator
+        {
+            validate_finite("pattern edge band", &[width, jaggedness])?;
+        }
         Ok(PatternLayer {
             generator: self.generator.clone().into(),
             frame: self.frame.into(),
@@ -502,6 +590,11 @@ impl SavedPatternLayer {
             amount: self.amount,
             target_color: self.target_color,
             faces: self.faces.clone().into(),
+            relief_faces: self
+                .relief_faces
+                .clone()
+                .unwrap_or_else(|| self.faces.clone())
+                .into(),
             texels_per_voxel: self.texels_per_voxel,
             vary_per_face: self.vary_per_face,
             domain_warp: self.domain_warp,
@@ -509,6 +602,22 @@ impl SavedPatternLayer {
             tile_bond: self.tile_bond,
             tile_gap: self.tile_gap,
             emission_intensity: self.emission_intensity,
+            relief_height_meters: self
+                .relief_height_meters
+                .clamp(0.0, MAX_RELIEF_HEIGHT_METERS),
+            relief_normal: self.relief_normal.unwrap_or(true),
+            relief_invert: self.relief_invert,
+            relief_bevel_fraction: self.relief_bevel_fraction.clamp(
+                voxel_material::pattern::MINIMUM_RELIEF_BEVEL_FRACTION,
+                voxel_material::pattern::MAXIMUM_RELIEF_BEVEL_FRACTION,
+            ),
+            relief_normal_strength: self
+                .relief_normal_strength
+                .clamp(0.0, voxel_material::pattern::MAXIMUM_RELIEF_NORMAL_STRENGTH),
+            grid_average: self.grid_average,
+            relief_steps: self
+                .relief_steps
+                .min(voxel_material::pattern::MAX_RELIEF_STEPS),
         })
     }
 }
@@ -534,6 +643,15 @@ impl From<PatternGenerator> for SavedPatternGenerator {
             PatternGenerator::TileEdge { sharpness } => {
                 SavedPatternGenerator::TileEdge { sharpness }
             }
+            PatternGenerator::EdgeBand {
+                direction,
+                width,
+                jaggedness,
+            } => SavedPatternGenerator::EdgeBand {
+                direction: direction.into(),
+                width,
+                jaggedness,
+            },
         }
     }
 }
@@ -559,6 +677,33 @@ impl From<SavedPatternGenerator> for PatternGenerator {
             SavedPatternGenerator::TileEdge { sharpness } => {
                 PatternGenerator::TileEdge { sharpness }
             }
+            SavedPatternGenerator::EdgeBand {
+                direction,
+                width,
+                jaggedness,
+            } => PatternGenerator::EdgeBand {
+                direction: direction.into(),
+                width,
+                jaggedness,
+            },
+        }
+    }
+}
+
+impl From<EdgeBandDirection> for SavedEdgeBandDirection {
+    fn from(direction: EdgeBandDirection) -> Self {
+        match direction {
+            EdgeBandDirection::Top => Self::Top,
+            EdgeBandDirection::Bottom => Self::Bottom,
+        }
+    }
+}
+
+impl From<SavedEdgeBandDirection> for EdgeBandDirection {
+    fn from(direction: SavedEdgeBandDirection) -> Self {
+        match direction {
+            SavedEdgeBandDirection::Top => Self::Top,
+            SavedEdgeBandDirection::Bottom => Self::Bottom,
         }
     }
 }

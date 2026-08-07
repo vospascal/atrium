@@ -9,8 +9,8 @@ use std::fmt;
 
 use crate::cacheability::{analyse, CacheReport};
 use crate::layers::{
-    project_pattern_stack, resolve_material_surface_chain, LayerGraphError, PATTERN_LAYER_NODE,
-    PATTERN_NOISE_NODE,
+    project_pattern_stack, resolve_material_surface_chain, LayerGraphError, DISPLACEMENT_NODE,
+    PATTERN_LAYER_NODE, PATTERN_NOISE_NODE,
 };
 use crate::operation::MaterialNodeOperation;
 use voxel_graph::AssetId;
@@ -448,6 +448,10 @@ pub struct MaterialOutput {
     pub base_color: ValueId,
     pub roughness: ValueId,
     pub emission: ValueId,
+    pub specular: ValueId,
+    pub ambient_occlusion: ValueId,
+    pub normal: ValueId,
+    pub specular_active: bool,
     /// S3 — one entry per ACTIVE pattern slot, in surface-chain order, matching
     /// the slot order the material row uploads. Disabled layers occupy no slot,
     /// exactly as `project_pattern_stack` skips them, so the indices line up
@@ -546,6 +550,13 @@ const GRAPH_HOST_STUBS: &str = concat!(
     "        vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)));\n",
     "}\n",
     "const ANIMATION_EPOCH_SECONDS: f32 = 64.0;\n",
+    // W2 moved the split-clock oscillator phase into `world.wgsl`, beside the epoch
+    // const, because it grew a second consumer: the water wave field, which is water
+    // physics and must not import this prelude to ask what time it is. Same treatment
+    // as `world_event_sense` below — a shape-only stub for the seam that crosses.
+    "fn animation_oscillator_phase(rate_hz: f32) -> f32 {\n",
+    "    return fract(rate_hz * lighting.animation_params.x);\n",
+    "}\n",
     // S3b moved the event field and its sensing into `world.wgsl`, shared with
     // the CA pass. The prelude no longer names the buffer at all — only this
     // one function — so the stub shrank to the seam that actually crosses.
@@ -675,6 +686,9 @@ pub struct MaterialSample {
     pub base_color: [f32; 4],
     pub roughness: f32,
     pub emission: [f32; 4],
+    pub specular: f32,
+    pub ambient_occlusion: f32,
+    pub normal: [f32; 3],
 }
 
 /// Create the smallest valid material graph entirely from the registered node
@@ -1128,6 +1142,9 @@ impl MaterialGraphProgram {
             base_color: values[self.output.base_color.0].color(),
             roughness: values[self.output.roughness.0].scalar(),
             emission: values[self.output.emission.0].color(),
+            specular: values[self.output.specular.0].scalar(),
+            ambient_occlusion: values[self.output.ambient_occlusion.0].scalar(),
+            normal: values[self.output.normal.0].vector(),
         }
     }
 
@@ -1687,11 +1704,17 @@ pub fn compile(
     let base_color = lowerer.input(&surface_chain.surface, "base_color")?;
     let roughness = lowerer.input(&surface_chain.surface, "roughness")?;
     let emission = lowerer.input(&surface_chain.surface, "emission")?;
+    let specular = lowerer.input(&surface_chain.surface, "specular")?;
+    let ambient_occlusion = lowerer.input(&surface_chain.surface, "ambient_occlusion")?;
+    let normal = lowerer.input(&surface_chain.surface, "normal")?;
     // Slot order must match the uploaded row, and a DISABLED layer occupies no
     // slot — `project_pattern_stack` skips it — so this walk skips it too. Any
     // other rule here would silently animate the wrong layer.
     let mut layer_animation = Vec::new();
     for layer_id in &surface_chain.layers {
+        if !is_pattern_layer(graph, registry, layer_id) {
+            continue;
+        }
         if !layer_is_enabled(graph, layer_id) {
             continue;
         }
@@ -1711,11 +1734,18 @@ pub fn compile(
         base_color,
         roughness,
         emission,
+        specular,
+        ambient_occlusion,
+        normal,
+        specular_active: surface_socket_connected(graph, &surface_chain.surface, "specular"),
         layer_animation,
     };
     lowerer.expect(output.base_color, ValueType::Color)?;
     lowerer.expect(output.roughness, ValueType::Scalar)?;
     lowerer.expect(output.emission, ValueType::Color)?;
+    lowerer.expect(output.specular, ValueType::Scalar)?;
+    lowerer.expect(output.ambient_occlusion, ValueType::Scalar)?;
+    lowerer.expect(output.normal, ValueType::Vector3)?;
     let wgsl = emit_wgsl(&lowerer.values, &output);
     validate_wgsl(&wgsl)?;
     Ok(MaterialGraphProgram {
@@ -2135,6 +2165,7 @@ impl<'a> Lowerer<'a> {
             // Reaching one here means a graph wired a generator somewhere a scalar
             // was expected, which is an authoring error and says so.
             | MaterialNodeOperation::PatternLayer
+            | MaterialNodeOperation::Displacement
             | MaterialNodeOperation::PatternFlat
             | MaterialNodeOperation::PatternNoise
             | MaterialNodeOperation::PatternSpeckle
@@ -2149,6 +2180,7 @@ impl<'a> Lowerer<'a> {
             | MaterialNodeOperation::PatternChecker
             | MaterialNodeOperation::PatternTileTone
             | MaterialNodeOperation::PatternTileEdge
+            | MaterialNodeOperation::PatternEdgeBand
             // The tessellation is not a value either — it is where the tiles are,
             // read by the projection and packed into each layer's row.
             | MaterialNodeOperation::Tessellation => {
@@ -2512,10 +2544,14 @@ fn emit_wgsl(values: &[MaterialInstruction], output: &MaterialOutput) -> String 
         drifts.join(", ")
     ));
     source.push_str(&format!(
-        "  return GraphMaterial(v{}, v{}, v{}, true, {}, {}, animation);\n}}\n",
+        "  return GraphMaterial(v{}, v{}, v{}, v{}, v{}, v{}, {}, true, {}, {}, animation);\n}}\n",
         output.base_color.0,
         output.roughness.0,
         output.emission.0,
+        output.specular.0,
+        output.ambient_occlusion.0,
+        output.normal.0,
+        output.specular_active,
         face_color_active,
         face_roughness_active,
     ));
@@ -2531,6 +2567,23 @@ fn layer_is_enabled(graph: &GraphAsset, layer: &NodeId) -> bool {
         .and_then(|record| record.properties.get("enabled"))
         .map(|value| matches!(value, PropertyValue::Boolean(true)))
         .unwrap_or(true)
+}
+
+fn surface_socket_connected(graph: &GraphAsset, surface: &NodeId, socket: &str) -> bool {
+    graph
+        .links
+        .values()
+        .any(|link| link.to.node == *surface && link.to.socket.0 == socket)
+}
+
+fn is_pattern_layer(graph: &GraphAsset, registry: &NodeRegistry, node: &NodeId) -> bool {
+    graph
+        .nodes
+        .get(node)
+        .and_then(|record| registry.find(&record.node_type))
+        .is_some_and(|declaration| {
+            declaration.operation == MaterialNodeOperation::PatternLayer.tag()
+        })
 }
 fn format_float(value: f32) -> String {
     if value.fract() == 0.0 {
@@ -2642,6 +2695,27 @@ fn node_matches_search(node: &voxel_graph::NodeDeclaration, search_lowercase: &s
             .any(|socket| matches(socket.label) || matches(socket.description))
 }
 
+fn is_pattern_generator(operation: MaterialNodeOperation) -> bool {
+    matches!(
+        operation,
+        MaterialNodeOperation::PatternFlat
+            | MaterialNodeOperation::PatternNoise
+            | MaterialNodeOperation::PatternSpeckle
+            | MaterialNodeOperation::PatternPerlin
+            | MaterialNodeOperation::PatternSimplex
+            | MaterialNodeOperation::PatternRidged
+            | MaterialNodeOperation::PatternTurbulence
+            | MaterialNodeOperation::PatternWorley
+            | MaterialNodeOperation::PatternWorleyEdge
+            | MaterialNodeOperation::PatternWorleySmooth
+            | MaterialNodeOperation::PatternWave
+            | MaterialNodeOperation::PatternChecker
+            | MaterialNodeOperation::PatternTileTone
+            | MaterialNodeOperation::PatternTileEdge
+            | MaterialNodeOperation::PatternEdgeBand
+    )
+}
+
 pub struct GraphEditorState {
     pub visible: bool,
     /// Height of the expanded bottom drawer in logical pixels.
@@ -2654,6 +2728,12 @@ pub struct GraphEditorState {
     pub graph: GraphAsset,
     pub history: GraphHistory,
     pub selected_node: Option<NodeId>,
+    /// The large, explicit inspection view in Graph Studio. Keeping this in
+    /// editor state makes the preview survive redraws without coupling the
+    /// graph model to egui.
+    pub preview_open: bool,
+    pub preview_target: GraphPreviewTarget,
+    pub preview_node: Option<NodeId>,
     /// All selected nodes. `selected_node` remains the active/inspected node
     /// for compatibility with the inspector and material bridge.
     pub selected_nodes: BTreeSet<NodeId>,
@@ -2689,6 +2769,24 @@ pub struct GraphEditorState {
     clipboard: Option<GraphClipboardFragment>,
 }
 
+/// What Graph Studio should show in its inspection view.
+///
+/// `SelectedNode` is deliberately separate from the material channels: it is
+/// the way to inspect an intermediate noise, ramp, or displacement step before
+/// it reaches the surface output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphPreviewTarget {
+    SelectedNode,
+    Final,
+    BaseColor,
+    Specular,
+    AmbientOcclusion,
+    Displacement,
+    Roughness,
+    Normal,
+    Emission,
+}
+
 impl GraphEditorState {
     pub fn new(material_slot: u8) -> Self {
         Self {
@@ -2702,6 +2800,9 @@ impl GraphEditorState {
             graph: new_material_graph("Material Graph"),
             history: GraphHistory::default(),
             selected_node: None,
+            preview_open: false,
+            preview_target: GraphPreviewTarget::SelectedNode,
+            preview_node: None,
             selected_nodes: BTreeSet::new(),
             search: String::new(),
             node_type: "material.output".to_string(),
@@ -2770,6 +2871,7 @@ impl GraphEditorState {
         self.graph = graph;
         self.history = GraphHistory::default();
         self.selected_node = None;
+        self.preview_node = None;
         self.selected_nodes.clear();
         self.pending_output = None;
         self.canvas_middle_pan_active = false;
@@ -2783,7 +2885,10 @@ impl GraphEditorState {
         self.drag_start_positions.clear();
         self.box_select_start = None;
         self.box_select_current = None;
-        self.frame_all_requested = false;
+        // Saved graphs carry authored layout coordinates, which may be far outside
+        // the compact drawer's initial viewport. Frame the complete graph on open
+        // so loading a valid asset never presents an apparently empty canvas.
+        self.frame_all_requested = true;
         self.frame_selection_requested = false;
         self.collapsed_nodes.clear();
         self.clipboard = None;
@@ -2796,6 +2901,7 @@ impl GraphEditorState {
         self.graph = new_material_graph("Material Graph");
         self.history = GraphHistory::default();
         self.selected_node = None;
+        self.preview_node = None;
         self.selected_nodes.clear();
         self.pending_output = None;
         self.canvas_middle_pan_active = false;
@@ -2810,7 +2916,7 @@ impl GraphEditorState {
         self.drag_start_positions.clear();
         self.box_select_start = None;
         self.box_select_current = None;
-        self.frame_all_requested = false;
+        self.frame_all_requested = true;
         self.frame_selection_requested = false;
         self.collapsed_nodes.clear();
         self.clipboard = None;
@@ -2820,15 +2926,24 @@ impl GraphEditorState {
     }
 
     pub fn add_node(&mut self, node_type: NodeTypeId, registry: &NodeRegistry) {
-        if registry.find(&node_type).is_some_and(|declaration| {
-            declaration.operation == MaterialNodeOperation::PatternLayer.tag()
-        }) {
+        let operation = registry
+            .find(&node_type)
+            .and_then(|declaration| MaterialNodeOperation::from_tag(declaration.operation));
+        if operation == Some(MaterialNodeOperation::PatternLayer) {
             self.add_pattern_layer(registry);
+            return;
+        }
+        if operation == Some(MaterialNodeOperation::Displacement) {
+            self.add_displacement(registry);
             return;
         }
         let column = self.graph.nodes.len() % 4;
         let row = self.graph.nodes.len() / 4;
         let position = [80.0 + column as f32 * 250.0, 80.0 + row as f32 * 180.0];
+        if operation.is_some_and(is_pattern_generator) {
+            self.add_pattern_layer_with_generator(registry, node_type, Some(position));
+            return;
+        }
         self.add_node_at(node_type, position, registry);
     }
 
@@ -2840,6 +2955,15 @@ impl GraphEditorState {
         position: [f32; 2],
         registry: &NodeRegistry,
     ) -> Option<NodeId> {
+        let operation = registry
+            .find(&node_type)
+            .and_then(|declaration| MaterialNodeOperation::from_tag(declaration.operation));
+        if operation.is_some_and(is_pattern_generator) {
+            return self.add_pattern_layer_with_generator(registry, node_type, Some(position));
+        }
+        if operation == Some(MaterialNodeOperation::Displacement) {
+            return self.add_displacement(registry);
+        }
         let id = NodeId::new();
         if !self.apply(
             GraphCommand::AddNode {
@@ -2861,6 +2985,136 @@ impl GraphEditorState {
     /// operation and typed surface sockets come from the registry; the editor
     /// only orchestrates graph commands.
     pub fn add_pattern_layer(&mut self, registry: &NodeRegistry) -> Option<NodeId> {
+        self.add_pattern_layer_with_generator(
+            registry,
+            NodeTypeId(PATTERN_NOISE_NODE.to_string()),
+            None,
+        )
+    }
+
+    /// Insert a displacement modifier after the current surface chain and feed it
+    /// from the most recently authored pattern source. The editor never leaves a
+    /// required surface or height socket dangling.
+    pub fn add_displacement(&mut self, registry: &NodeRegistry) -> Option<NodeId> {
+        let mut chain = match resolve_material_surface_chain(&self.graph, registry) {
+            Ok(chain) => chain,
+            Err(error) => {
+                self.status = error.to_string();
+                return None;
+            }
+        };
+        let pattern_layer = chain.layers.iter().rev().find(|node| {
+            self.graph
+                .nodes
+                .get(*node)
+                .and_then(|record| registry.find(&record.node_type))
+                .is_some_and(|declaration| {
+                    declaration.operation == MaterialNodeOperation::PatternLayer.tag()
+                })
+        });
+        if pattern_layer.is_none() {
+            self.add_pattern_layer(registry)?;
+            chain = resolve_material_surface_chain(&self.graph, registry).ok()?;
+        }
+        let pattern_layer = chain.layers.iter().rev().find(|node| {
+            self.graph
+                .nodes
+                .get(*node)
+                .and_then(|record| registry.find(&record.node_type))
+                .is_some_and(|declaration| {
+                    declaration.operation == MaterialNodeOperation::PatternLayer.tag()
+                })
+        })?;
+        let generator = self
+            .graph
+            .links
+            .values()
+            .find(|link| link.to.node == *pattern_layer && link.to.socket.0 == "pattern")
+            .map(|link| link.from.node.clone())?;
+        let predecessor = chain.layers.last().unwrap_or(&chain.surface).clone();
+        let output_link = self
+            .graph
+            .links
+            .iter()
+            .find(|(_, link)| {
+                link.from.node == predecessor
+                    && link.from.socket.0 == "surface"
+                    && link.to.node == chain.output
+                    && link.to.socket.0 == "surface"
+            })
+            .map(|(id, _)| id.clone())?;
+        let predecessor_position = self
+            .graph
+            .layout
+            .positions
+            .get(&predecessor)
+            .copied()
+            .unwrap_or([440.0, 160.0]);
+        let displacement = NodeId::new();
+        let position = [
+            predecessor_position[0] + 260.0,
+            predecessor_position[1] + 120.0,
+        ];
+        let commands = vec![
+            GraphCommand::Disconnect { id: output_link },
+            GraphCommand::AddNode {
+                id: displacement.clone(),
+                node_type: NodeTypeId(DISPLACEMENT_NODE.to_string()),
+                position,
+            },
+            GraphCommand::Connect {
+                id: LinkId::new(),
+                from: OutputPin {
+                    node: predecessor,
+                    socket: SocketKey("surface".into()),
+                },
+                to: InputPin {
+                    node: displacement.clone(),
+                    socket: SocketKey("surface".into()),
+                },
+            },
+            GraphCommand::Connect {
+                id: LinkId::new(),
+                from: OutputPin {
+                    node: generator,
+                    socket: SocketKey("pattern".into()),
+                },
+                to: InputPin {
+                    node: displacement.clone(),
+                    socket: SocketKey("height".into()),
+                },
+            },
+            GraphCommand::Connect {
+                id: LinkId::new(),
+                from: OutputPin {
+                    node: displacement.clone(),
+                    socket: SocketKey("surface".into()),
+                },
+                to: InputPin {
+                    node: chain.output.clone(),
+                    socket: SocketKey("surface".into()),
+                },
+            },
+        ];
+        if !self.apply(GraphCommand::Transaction { commands }, registry) {
+            return None;
+        }
+        self.selected_node = Some(displacement.clone());
+        self.selected_nodes.clear();
+        self.selected_nodes.insert(displacement.clone());
+        self.status = "Displacement added — height mask connected".to_string();
+        Some(displacement)
+    }
+
+    /// Add a generator together with the Pattern Layer that consumes it, inserting
+    /// both into the typed surface chain. Pattern generators have no useful
+    /// standalone meaning, so the editor never leaves one dangling.
+    fn add_pattern_layer_with_generator(
+        &mut self,
+        registry: &NodeRegistry,
+        generator_type: NodeTypeId,
+        requested_generator_position: Option<[f32; 2]>,
+    ) -> Option<NodeId> {
         let chain = match resolve_material_surface_chain(&self.graph, registry) {
             Ok(chain) => chain,
             Err(error) => {
@@ -2906,6 +3160,8 @@ impl GraphEditorState {
             predecessor_position[0] + 260.0,
             predecessor_position[1].min(output_position[1]),
         ];
+        let generator_position =
+            requested_generator_position.unwrap_or([layer_position[0], layer_position[1] - 280.0]);
         let layer = NodeId::new();
         let generator = NodeId::new();
         let mut commands = vec![
@@ -2917,8 +3173,8 @@ impl GraphEditorState {
             },
             GraphCommand::AddNode {
                 id: generator.clone(),
-                node_type: NodeTypeId(PATTERN_NOISE_NODE.to_string()),
-                position: [layer_position[0], layer_position[1] - 280.0],
+                node_type: generator_type,
+                position: generator_position,
             },
             GraphCommand::Connect {
                 id: LinkId::new(),
@@ -2968,7 +3224,10 @@ impl GraphEditorState {
         self.selected_node = Some(layer.clone());
         self.selected_nodes.clear();
         self.selected_nodes.insert(layer.clone());
-        self.status = format!("Layer {} added", chain.layers.len() + 1);
+        self.status = format!(
+            "Layer {} added — pattern generator connected",
+            chain.layers.len() + 1
+        );
         Some(layer)
     }
 
@@ -3558,6 +3817,8 @@ mod tests {
                 color: ValueId(0),
                 strength: ValueId(2),
             },
+            MaterialInstruction::Scalar(0.0),
+            MaterialInstruction::Vector3([0.0, 0.0, 0.0]),
         ];
         MaterialGraphProgram {
             graph_id: AssetId("sensing".into()),
@@ -3572,6 +3833,10 @@ mod tests {
                 } else {
                     ValueId(0)
                 },
+                specular: ValueId(4),
+                ambient_occlusion: ValueId(4),
+                normal: ValueId(5),
+                specular_active: false,
                 layer_animation: Vec::new(),
             },
             wgsl: String::new(),
@@ -3643,6 +3908,8 @@ mod tests {
                 color: ValueId(0),
                 strength: ValueId(9),
             },
+            MaterialInstruction::Scalar(0.0),
+            MaterialInstruction::Vector3([0.0, 0.0, 0.0]),
         ];
         let program = MaterialGraphProgram {
             graph_id: AssetId("oscillating".into()),
@@ -3652,6 +3919,10 @@ mod tests {
                 base_color: ValueId(0),
                 roughness: ValueId(4),
                 emission: ValueId(10),
+                specular: ValueId(11),
+                ambient_occlusion: ValueId(11),
+                normal: ValueId(12),
+                specular_active: false,
                 layer_animation: Vec::new(),
             },
             wgsl: String::new(),
@@ -4445,6 +4716,33 @@ mod tests {
             editor.graph.nodes[&ramp].socket_defaults[&SocketKey("color_a".into())],
             PropertyValue::Color(_)
         ));
+    }
+
+    #[test]
+    fn editor_connects_pattern_generators_into_a_surface_layer() {
+        let registry = crate::CATALOGUE;
+        let mut editor = GraphEditorState::new(6);
+        editor.add_node(NodeTypeId("material.pattern_edge_band".into()), &registry);
+
+        let chain = resolve_material_surface_chain(&editor.graph, &registry).unwrap();
+        assert_eq!(chain.layers.len(), 1);
+        let layer = &chain.layers[0];
+        let generator = editor
+            .graph
+            .links
+            .values()
+            .find(|link| link.to.node == *layer && link.to.socket.0 == "pattern")
+            .map(|link| link.from.node.clone())
+            .unwrap();
+        assert_eq!(
+            editor.graph.nodes[&generator].node_type,
+            NodeTypeId("material.pattern_edge_band".into())
+        );
+        assert!(editor
+            .graph
+            .links
+            .values()
+            .any(|link| { link.from.node == *layer && link.to.node == chain.output }));
     }
 
     #[test]

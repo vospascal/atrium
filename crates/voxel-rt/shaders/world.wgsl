@@ -200,15 +200,41 @@ struct Lighting {
     //       coefficients, i.e. how clear the water is
     //   y = scatter strength — what the absorbed light is replaced by
     //   z = ray cutoff — the smallest Fresnel weight worth a secondary ray
-    //   w = reserved (B6's flow)
+    //   w = TURBIDITY SCATTERING FRACTION (E7) — the milkiness dial: what share of
+    //       turbidity's extinction scatters rather than absorbs. Mineral silt scatters
+    //       (a silty river IS milky-bright); the organics that limit most standing water
+    //       ABSORB (a pond you cannot see the bottom of is dark, not white). At 0.85 one
+    //       block in-scatters 0.38-0.47 of the sky and shallow water reads as a white
+    //       sheet; the shipped 0.15 gives 0.07-0.11.
     water_params: vec4<f32>,
     // The E6 water LOOK levers, the two Pascal asked to be able to drag
     // (lighting.rs WaterParams again — a second vector because the first is full):
     //   x = refraction strength — how far the material's authored index of
     //       refraction is pulled toward 1.0, i.e. how WIDE Snell's window is
     //   y = tint — how coloured the water is (0 = neutral, 1 = physical)
-    //   z, w = reserved (E7's water look pass)
+    //   z = wave amplitude lever (W1) — 1.0 the shipped look, 0.0 exactly flat.
+    //       There is no value above 1: WAVE_MAX_STEEPNESS is a physical ceiling
+    //       (the Stokes breaking limit), so "more waves than the wind justifies"
+    //       is a change to that constant and its argument, not a slider that
+    //       quietly walks past it.
+    //   w = TURBIDITY, per-metre extinction from suspended matter (E7), added to the
+    //       medium's own spectral coefficients. The term the model was missing: the
+    //       material table carries PURE water, which still passes 84% of blue at 3 m
+    //       where the look asks for ~5%. Broadband and scattering-dominant, because
+    //       sediment is — see `src/water.rs::turbidity_per_meter`, which derives it
+    //       from a visibility depth in BLOCKS. 0 is exactly the pure-water model.
     water_optics: vec4<f32>,
+    // W1: the wave field, from the ONE wind history that already drives the cloud
+    // deck and the weather (src/water.rs `WaveField`, fed by SkyWeather). Waves are
+    // that history's third consumer, not a fourth noise field — two drivers would
+    // give a sea travelling in a direction the sky does not agree with.
+    //   x = mean wind bearing, radians — the SAME angle the deck drifts along
+    //   y = wind SPEED, m/s      (WindFrame::speed — what Cox & Munk's slope relation
+    //       takes. NOT `activity`: that is a normalised 0..1 shape, and feeding it to a
+    //       relation whose argument is metres per second made the first build 4x too flat)
+    //   z = gust pressure, 0..1  (WindFrame::gust — shifts variance to the short end)
+    //   w = eddy, -1..1          (WindFrame::eddy — the chop)
+    water_waves: vec4<f32>,
     // Day/night sky state (lighting.rs CelestialState). The active directional
     // light above becomes the moon at night; these retain both physical bodies
     // so the background, reflections and water all see the same sky.
@@ -216,7 +242,7 @@ struct Lighting {
     celestial_moon: vec4<f32>, // xyz direction, w moon phase
     sky_zenith: vec4<f32>,     // rgb radiance, w star rotation
     sky_horizon: vec4<f32>,    // rgb radiance, w moonlight
-    material_params: vec4<f32>, // x/y = absolute pattern fade start/end, metres
+    material_params: vec4<f32>, // x/y = pattern fade metres, z = pixel footprint, w = debug bits
     // The S3 animation clock (lighting.rs AnimationParams). Split into whole
     // epochs and a remainder inside one, rather than one monotonic second
     // count: a single f32 loses the fraction an oscillator needs within hours
@@ -256,7 +282,7 @@ struct Lighting {
 // S2 — layer slots per material row. Mirrors MAX_PATTERN_LAYERS in src/pattern.rs.
 const MAX_PATTERN_LAYERS: u32 = 4u;
 
-// S2 — one uploaded pattern layer: 32 bytes, two std430 16-byte rows. Mirrors
+// S2 — one uploaded pattern layer: 64 bytes, four std430 16-byte rows. Mirrors
 // `GpuPatternLayer` in src/pattern.rs.
 //
 // The LAYOUT lives here, with the rest of the row, because `struct Material` embeds
@@ -277,14 +303,24 @@ struct PatternLayer {
     // The second free parameter: the domain-warp strength, which is shared by every
     // generator rather than owned by one.
     param_b: f32,
-    // Row 2 — the tessellation. Read only by PATTERN_FRAME_TILE and the two tile
-    // generators; every other frame ignores all three. Mirrors GpuPatternLayer in
-    // src/pattern.rs, which documents why the row grew from 32 bytes to 48 rather
-    // than packing these into the six free bits of `packed`.
+    // Row 2 — the tessellation plus graph-authored relief height. The first three
+    // values are read only by PATTERN_FRAME_TILE and the two tile generators;
+    // every other frame ignores them. The tail value reuses the old explicit
+    // padding slot and is the mask-driven relief height in metres.
     tile_aspect: f32,
     tile_bond: f32,
     tile_gap: f32,
-    pad_row_b: f32,
+    relief_height_meters: f32,
+    // Row 3 — relief shaping and the extra flag word. The bevel fraction is the
+    // sub-texel finite-difference step for the derived normal; the strength
+    // multiplies the resulting tilt. `flags_extra` bit 0 is grid-average
+    // sampling — packed spent its last bit on relief invert.
+    relief_bevel_fraction: f32,
+    relief_normal_strength: f32,
+    flags_extra: u32,
+    // Relief mask quantisation level count; 0/1 = continuous. Flat plateaus with
+    // full-strength bevels are what make the emboss read as a normal map.
+    relief_steps: u32,
 }
 
 struct Material {
@@ -425,6 +461,24 @@ const MAX_WORLD_EVENTS: u32 = 16u;
 // the wrap. Lives here rather than in the graph prelude because the event
 // envelope below needs it and the CA pass never sees that file.
 const ANIMATION_EPOCH_SECONDS: f32 = 64.0;
+
+// An oscillator's phase in turns, [0, 1) — the split clock recombined.
+//
+// The epoch term is `fract(rate * EPOCH) * epoch` rather than `rate * epoch * EPOCH`:
+// the inner fract is a per-rate constant, so the phase is continuous across an epoch
+// boundary instead of stepping there. `AnimationClockSample::oscillator_phase` is the
+// CPU mirror, and its doc carries the precision budget (phase holds to ~0.001 turn for
+// about 12 days of continuous runtime).
+//
+// Lives HERE, beside the epoch const, rather than in the graph prelude: it is the
+// clock, and the clock has two unrelated consumers now — the material graph's
+// oscillator node and W1's wave field, which is water physics and must not have to
+// import the material-graph prelude to ask what time it is.
+fn animation_oscillator_phase(rate_hz: f32) -> f32 {
+    let per_epoch = fract(rate_hz * ANIMATION_EPOCH_SECONDS);
+    return fract(rate_hz * lighting.animation_params.x
+        + per_epoch * lighting.animation_params.y);
+}
 
 // How many world events are live. Every sensor loops to THIS, never to the
 // array capacity, so a world with no entities costs one comparison per sensor.
@@ -712,6 +766,23 @@ struct Hit {
     axis_sign: f32,    // sign of the ray direction along that axis
     distance: f32,     // ray parameter t, voxel units
     voxel: vec3<i32>,  // world-voxel coordinate of the hit voxel
+}
+
+// Face normal from the DDA hit record (axis-aligned, opposing the ray).
+//
+// Lives beside `Hit` rather than in `dda.wgsl`, where it used to sit: it is a pure
+// accessor on this struct, and the water wave field needs it while being concatenated
+// BEFORE the shading pass. A type and the function that reads it belong together.
+fn hit_normal(hit: Hit) -> vec3<f32> {
+    var normal = vec3<f32>(0.0, 0.0, 0.0);
+    if (hit.axis == 0u) {
+        normal.x = -hit.axis_sign;
+    } else if (hit.axis == 1u) {
+        normal.y = -hit.axis_sign;
+    } else {
+        normal.z = -hit.axis_sign;
+    }
+    return normal;
 }
 
 // ---- Ray setup --------------------------------------------------------------

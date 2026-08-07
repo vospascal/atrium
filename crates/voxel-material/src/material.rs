@@ -788,6 +788,7 @@ impl Material {
                         axis,
                         axis_sign,
                         distance_meters: 0.0,
+                        exposure: crate::pattern::EXPOSURE_ALL,
                     };
                     let emitted = apply_stack_color(
                         &self.patterns,
@@ -1229,6 +1230,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 amount: 0.85,
                 target_color: [1.35, 0.34, 0.02],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 texels_per_voxel: 8,
                 vary_per_face: true,
                 domain_warp: 0.0,
@@ -1236,6 +1238,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 2.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
         },
@@ -1283,6 +1292,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     amount: 0.45,
                     target_color: [1.0, 1.0, 1.0],
                     faces: PatternFaces::ALL,
+                    relief_faces: PatternFaces::ALL,
                     texels_per_voxel: 0,
                     vary_per_face: false,
                     domain_warp: 0.0,
@@ -1290,6 +1300,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     tile_bond: 0.5,
                     tile_gap: 0.06,
                     emission_intensity: 1.0,
+                    relief_height_meters: 0.0,
+                    relief_normal: true,
+                    relief_invert: false,
+                    relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                    relief_normal_strength: 1.0,
+                    grid_average: false,
+                    relief_steps: 0,
                 },
                 PatternLayer {
                     // Four octaves, the ceiling, and it is still coarser than real
@@ -1306,6 +1323,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     amount: 0.55,
                     target_color: [1.0, 1.0, 1.0],
                     faces: PatternFaces::ALL,
+                    relief_faces: PatternFaces::ALL,
                     // Continuous, not snapped: the tile frame already quantises the
                     // look at the joint, and a texel grid on top of that fights it.
                     texels_per_voxel: 0,
@@ -1315,6 +1333,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     tile_bond: 0.5,
                     tile_gap: 0.06,
                     emission_intensity: 1.0,
+                    relief_height_meters: 0.0,
+                    relief_normal: true,
+                    relief_invert: false,
+                    relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                    relief_normal_strength: 1.0,
+                    grid_average: false,
+                    relief_steps: 0,
                 },
                 PatternLayer {
                     generator: PatternGenerator::WorleyEdge,
@@ -1327,6 +1352,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     amount: 0.32,
                     target_color: [1.0, 1.0, 1.0],
                     faces: PatternFaces::ALL,
+                    relief_faces: PatternFaces::ALL,
                     texels_per_voxel: 0,
                     vary_per_face: false,
                     // Warped, because a cellular field on an unwarped lattice reads
@@ -1337,6 +1363,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     tile_bond: 0.5,
                     tile_gap: 0.06,
                     emission_intensity: 1.0,
+                    relief_height_meters: 0.0,
+                    relief_normal: true,
+                    relief_invert: false,
+                    relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                    relief_normal_strength: 1.0,
+                    grid_average: false,
+                    relief_steps: 0,
                 },
                 PatternLayer {
                     generator: PatternGenerator::TileEdge { sharpness: 0.72 },
@@ -1347,6 +1380,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     amount: 0.85,
                     target_color: [1.0, 1.0, 1.0],
                     faces: PatternFaces::ALL,
+                    relief_faces: PatternFaces::ALL,
                     texels_per_voxel: 0,
                     vary_per_face: false,
                     domain_warp: 0.0,
@@ -1354,6 +1388,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                     tile_bond: 0.5,
                     tile_gap: 0.06,
                     emission_intensity: 1.0,
+                    relief_height_meters: 0.0,
+                    relief_normal: true,
+                    relief_invert: false,
+                    relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                    relief_normal_strength: 1.0,
+                    grid_average: false,
+                    relief_steps: 0,
                 },
             ]),
             acoustic_alpha: ACOUSTIC_STONE,
@@ -1418,6 +1459,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 // `Add` with amount 1.0 means this lands on top of the base unscaled.
                 target_color: [100.0, 0.0, 0.0],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 // No texel snap: the dots stay continuous rather than quantising to the
                 // 1.56 cm lattice before the frame buffer sees them.
                 texels_per_voxel: 0,
@@ -1427,6 +1469,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 1.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
@@ -1452,6 +1501,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 // `Add` with amount 1.0 means this lands on top of the base unscaled.
                 target_color: [0.0, 100.0, 0.0],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 // No texel snap: the dots stay continuous rather than quantising to the
                 // 1.56 cm lattice before the frame buffer sees them.
                 texels_per_voxel: 0,
@@ -1461,6 +1511,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 1.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
@@ -1486,6 +1543,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 // `Add` with amount 1.0 means this lands on top of the base unscaled.
                 target_color: [0.0, 0.0, 100.0],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 // No texel snap: the dots stay continuous rather than quantising to the
                 // 1.56 cm lattice before the frame buffer sees them.
                 texels_per_voxel: 0,
@@ -1495,6 +1553,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 1.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
@@ -1520,6 +1585,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 // `Add` with amount 1.0 means this lands on top of the base unscaled.
                 target_color: [0.0, 100.0, 100.0],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 // No texel snap: the dots stay continuous rather than quantising to the
                 // 1.56 cm lattice before the frame buffer sees them.
                 texels_per_voxel: 0,
@@ -1529,6 +1595,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 1.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
@@ -1554,6 +1627,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 // `Add` with amount 1.0 means this lands on top of the base unscaled.
                 target_color: [100.0, 0.0, 100.0],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 // No texel snap: the dots stay continuous rather than quantising to the
                 // 1.56 cm lattice before the frame buffer sees them.
                 texels_per_voxel: 0,
@@ -1563,6 +1637,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 1.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
@@ -1588,6 +1669,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 // `Add` with amount 1.0 means this lands on top of the base unscaled.
                 target_color: [100.0, 100.0, 0.0],
                 faces: PatternFaces::ALL,
+                relief_faces: PatternFaces::ALL,
                 // No texel snap: the dots stay continuous rather than quantising to the
                 // 1.56 cm lattice before the frame buffer sees them.
                 texels_per_voxel: 0,
@@ -1597,6 +1679,13 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 tile_bond: 0.5,
                 tile_gap: 0.06,
                 emission_intensity: 1.0,
+                relief_height_meters: 0.0,
+                relief_normal: true,
+                relief_invert: false,
+                relief_bevel_fraction: crate::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                relief_normal_strength: 1.0,
+                grid_average: false,
+                relief_steps: 0,
             }]),
             acoustic_alpha: ACOUSTIC_STONE,
         },
@@ -2357,33 +2446,34 @@ mod tests {
     /// with the upload.
     ///
     /// 256 bytes since S2 added the four 32-byte pattern slots (E6's
-    /// absorption/scattering pair took it to 80, S1's face roles to 128). Sixteen
-    /// std430 rows, each a `vec3` followed by the scalar filling its `w`, or four
-    /// scalars.
+    /// absorption/scattering pair took it to 80, S1's face roles to 128; the
+    /// tessellation row grew the slots to 48 bytes and the relief-shaping row to
+    /// 64). Twenty-four std430 rows, each a `vec3` followed by the scalar filling
+    /// its `w`, or four scalars.
     #[test]
     fn gpu_row_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<GpuMaterial>(), 320);
+        assert_eq!(std::mem::size_of::<GpuMaterial>(), 384);
         assert_eq!(std::mem::size_of::<GpuMaterial>() % 16, 0);
         assert_eq!(std::mem::align_of::<GpuMaterial>(), 4);
-        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 320);
+        assert_eq!(MATERIAL_TABLE_BYTES, MATERIAL_COUNT * 384);
         // Still trivially free against a ~41 MB world: material richness is not the
         // expensive axis, per-VOXEL state is. The whole S2 layer model now costs
-        // 5.4 KB of table (up from 3.3 when the tessellation grew the slot from 32
-        // bytes to 48), which is the argument for putting detail on the material
-        // rather than on the voxel restated as a number.
-        // 40 rows: 28 shipped, six `hdr_*` output-depth test targets (28 * 320 =
-        // 8960 before them, 10880 with them), and six `albedo_*` reflectors for
-        // L0's indirect-light fixture. Absolute, not derived, so that a row
-        // silently changing size shows up here rather than nowhere.
+        // 10 KB of table (up from 3.3 when the slot was 32 bytes), which is the
+        // argument for putting detail on the material rather than on the voxel
+        // restated as a number.
+        // 40 rows: 28 shipped, six `hdr_*` output-depth test targets, and six
+        // `albedo_*` reflectors for L0's indirect-light fixture. Absolute, not
+        // derived, so that a row silently changing size shows up here rather than
+        // nowhere.
         //
         // The `albedo_*` six are appended past `PINNED_ROW_COUNT`, so they cannot
         // weaken `UPLOAD_PIN` and no pinned row had to be recomputed for them.
-        assert_eq!(MATERIAL_TABLE_BYTES, 12800);
-        // The pattern slots must account for three fifths of the row, or the WGSL's
+        assert_eq!(MATERIAL_TABLE_BYTES, 15360);
+        // The pattern slots must account for two thirds of the row, or the WGSL's
         // fixed-size array has drifted from `MAX_PATTERN_LAYERS`.
         assert_eq!(
             std::mem::size_of::<[GpuPatternLayer; MAX_PATTERN_LAYERS]>(),
-            192
+            256
         );
     }
 

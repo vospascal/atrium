@@ -6804,6 +6804,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "glam",
+ "rodio",
  "serde_json",
  "voxel-color",
  "voxel-core",
@@ -6813,6 +6814,7 @@ dependencies = [
  "voxel-material",
  "voxel-material-graph",
  "voxel-rt",
+ "voxel-sound",
  "voxel-studio",
  "wgpu 29.0.4",
  "winit",
@@ -6858,6 +6860,7 @@ dependencies = [
  "atrium-profile",
  "egui 0.35.0",
  "voxel-color",
+ "voxel-core",
  "voxel-environment",
  "voxel-rt",
 ]
@@ -6910,6 +6913,13 @@ dependencies = [
  "voxel-material-graph",
  "wgpu 29.0.4",
  "winit",
+]
+
+[[package]]
+name = "voxel-sound"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

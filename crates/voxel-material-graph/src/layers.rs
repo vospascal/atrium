@@ -18,9 +18,10 @@ use voxel_graph::{
 };
 use voxel_material::material::Material;
 use voxel_material::pattern::{
-    PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternStack, PatternTarget,
-    MAXIMUM_TILE_ASPECT, MAXIMUM_TILE_GAP, MAX_EMISSION_INTENSITY, MAX_NOISE_OCTAVES,
-    MAX_PATTERN_LAYERS, MAX_TEXELS_PER_VOXEL, MINIMUM_TILE_ASPECT, NO_PATTERNS, TEXEL_RUNGS,
+    EdgeBandDirection, PatternBlend, PatternFrame, PatternGenerator, PatternLayer, PatternStack,
+    PatternTarget, MAXIMUM_TILE_ASPECT, MAXIMUM_TILE_GAP, MAX_EMISSION_INTENSITY,
+    MAX_NOISE_OCTAVES, MAX_PATTERN_LAYERS, MAX_RELIEF_HEIGHT_METERS, MAX_TEXELS_PER_VOXEL,
+    MINIMUM_TILE_ASPECT, NO_PATTERNS, TEXEL_RUNGS,
 };
 
 pub const MATERIAL_OUTPUT_NODE: &str = "material.output";
@@ -38,6 +39,8 @@ pub const PATTERN_WORLEY_EDGE_NODE: &str = "material.pattern_worley_edge";
 pub const PATTERN_WORLEY_SMOOTH_NODE: &str = "material.pattern_worley_smooth";
 pub const PATTERN_WAVE_NODE: &str = "material.pattern_wave";
 pub const PATTERN_CHECKER_NODE: &str = "material.pattern_checker";
+pub const PATTERN_EDGE_BAND_NODE: &str = "material.pattern_edge_band";
+pub const DISPLACEMENT_NODE: &str = "material.displacement";
 pub const PATTERN_TILE_TONE_NODE: &str = "material.pattern_tile_tone";
 pub const PATTERN_TILE_EDGE_NODE: &str = "material.pattern_tile_edge";
 /// The shared tessellation. Not a generator — it produces no pattern of its own;
@@ -150,6 +153,19 @@ pub fn append_pattern_layer_nodes(
         connect_pattern(graph, &generator_id, &layer_id);
         connect_surface(graph, &previous, &layer_id);
         previous = layer_id;
+        if layer.relief_height_meters > 0.0 {
+            let displacement_id = NodeId::new();
+            graph
+                .nodes
+                .insert(displacement_id.clone(), displacement_node(layer));
+            graph.layout.positions.insert(
+                displacement_id.clone(),
+                [760.0 + order as f32 * 260.0, 360.0],
+            );
+            connect_height(graph, &generator_id, &displacement_id);
+            connect_surface(graph, &previous, &displacement_id);
+            previous = displacement_id;
+        }
     }
     connect_surface(graph, &previous, output);
     graph.layout.positions.insert(
@@ -182,6 +198,7 @@ pub fn project_pattern_stack(
 ) -> Result<PatternStack, LayerGraphError> {
     let chain = resolve_material_surface_chain(graph, registry)?;
     let mut stack = NO_PATTERNS;
+    let mut generator_slots = GeneratorSlots::default();
     for layer_id in chain.layers {
         let layer = graph
             .nodes
@@ -192,53 +209,71 @@ pub fn project_pattern_stack(
             .nodes
             .get(&generator_id)
             .expect("resolved pattern source remains present");
-        let operation = registry
-            .find(&generator.node_type)
+        let layer_operation = registry
+            .find(&layer.node_type)
             .and_then(|declaration| MaterialNodeOperation::from_tag(declaration.operation));
-        let octaves =
-            || property_integer(generator, "octaves").clamp(1, MAX_NOISE_OCTAVES as i64) as u32;
-        let pattern_generator = match operation {
-            Some(MaterialNodeOperation::PatternFlat) => PatternGenerator::Flat,
-            Some(MaterialNodeOperation::PatternNoise) => {
-                PatternGenerator::Noise { octaves: octaves() }
+        let pattern_generator = pattern_generator_from_node(generator, &generator_id, registry)?;
+        if layer_operation == Some(MaterialNodeOperation::Displacement) {
+            if !property_bool(layer, "enabled") {
+                continue;
             }
-            Some(MaterialNodeOperation::PatternSpeckle) => {
-                let density = property_scalar(generator, "density").clamp(0.0, 1.0);
-                PatternGenerator::Speckle { density }
-            }
-            Some(MaterialNodeOperation::PatternPerlin) => {
-                PatternGenerator::Perlin { octaves: octaves() }
-            }
-            Some(MaterialNodeOperation::PatternSimplex) => {
-                PatternGenerator::Simplex { octaves: octaves() }
-            }
-            Some(MaterialNodeOperation::PatternRidged) => {
-                PatternGenerator::Ridged { octaves: octaves() }
-            }
-            Some(MaterialNodeOperation::PatternTurbulence) => {
-                PatternGenerator::Turbulence { octaves: octaves() }
-            }
-            Some(MaterialNodeOperation::PatternWorley) => PatternGenerator::Worley,
-            Some(MaterialNodeOperation::PatternWorleyEdge) => PatternGenerator::WorleyEdge,
-            Some(MaterialNodeOperation::PatternWorleySmooth) => PatternGenerator::WorleySmooth,
-            Some(MaterialNodeOperation::PatternWave) => {
-                let distortion = property_scalar(generator, "distortion").max(0.0);
-                PatternGenerator::Wave { distortion }
-            }
-            Some(MaterialNodeOperation::PatternChecker) => PatternGenerator::Checker,
-            Some(MaterialNodeOperation::PatternTileTone) => PatternGenerator::TileTone,
-            Some(MaterialNodeOperation::PatternTileEdge) => {
-                let sharpness = property_scalar(generator, "sharpness").clamp(0.0, 1.0);
-                PatternGenerator::TileEdge { sharpness }
-            }
-            _ => {
-                return Err(LayerGraphError::InvalidPatternGenerator {
-                    node: generator_id,
-                    node_type: generator.node_type.clone(),
+            if let Some(slot) = generator_slots.find(&generator_id) {
+                if let Some(existing) = stack.layers[slot].as_mut() {
+                    apply_displacement_properties(existing, layer);
+                }
+            } else {
+                if stack.active_count() >= MAX_PATTERN_LAYERS {
+                    return Err(LayerGraphError::TooManyLayers {
+                        count: stack.active_count() + 1,
+                        maximum: MAX_PATTERN_LAYERS,
+                    });
+                }
+                let order = stack.active_count();
+                let synthetic_node = pattern_layer_node(&PatternLayer {
+                    amount: 0.0,
+                    ..PatternLayer::IDENTITY
                 });
+                stack.layers[order] = Some(pattern_layer_from_nodes(
+                    &synthetic_node,
+                    generator,
+                    pattern_generator,
+                    incoming_tessellation(graph, &generator_id),
+                ));
+                let relief = stack.layers[order].as_mut().expect("just inserted");
+                apply_displacement_properties(relief, layer);
+                generator_slots.push(generator_id, order, true);
             }
-        };
+            continue;
+        }
+        if layer_operation != Some(MaterialNodeOperation::PatternLayer) {
+            return Err(LayerGraphError::InvalidSurfaceNode {
+                node: layer_id,
+                node_type: layer.node_type.clone(),
+            });
+        }
         if !property_bool(layer, "enabled") {
+            continue;
+        }
+        // A displacement earlier in the chain may already hold this generator's
+        // slot as a colourless placeholder. The colour layer then completes that
+        // slot rather than appending a second one — chain order between a layer
+        // and its displacement must not change how many slots the pair costs.
+        if let Some(slot) = generator_slots.claim_synthetic(&generator_id) {
+            let placeholder = stack.layers[slot].expect("synthetic slot is occupied");
+            let mut completed = pattern_layer_from_nodes(
+                layer,
+                generator,
+                pattern_generator,
+                incoming_tessellation(graph, &generator_id),
+            );
+            completed.relief_height_meters = placeholder.relief_height_meters;
+            completed.relief_faces = placeholder.relief_faces;
+            completed.relief_normal = placeholder.relief_normal;
+            completed.relief_invert = placeholder.relief_invert;
+            completed.relief_bevel_fraction = placeholder.relief_bevel_fraction;
+            completed.relief_normal_strength = placeholder.relief_normal_strength;
+            completed.relief_steps = placeholder.relief_steps;
+            stack.layers[slot] = Some(completed);
             continue;
         }
         let order = stack.active_count();
@@ -248,8 +283,64 @@ pub fn project_pattern_stack(
             pattern_generator,
             incoming_tessellation(graph, &generator_id),
         ));
+        generator_slots.push(generator_id, order, false);
     }
     Ok(stack)
+}
+
+/// The displacement node's authored response, applied onto the pattern slot that
+/// shares its generator. One function so the merge path and the synthetic path
+/// cannot drift apart field by field.
+fn apply_displacement_properties(slot: &mut PatternLayer, displacement: &NodeRecord) {
+    slot.relief_height_meters =
+        property_scalar(displacement, "height_meters").clamp(0.0, MAX_RELIEF_HEIGHT_METERS);
+    slot.relief_faces = voxel_material::pattern::PatternFaces {
+        top: property_bool(displacement, "faces_top"),
+        side: property_bool(displacement, "faces_side"),
+        bottom: property_bool(displacement, "faces_bottom"),
+    };
+    slot.relief_normal = property_bool(displacement, "affects_normal");
+    slot.relief_invert = property_bool(displacement, "invert");
+    slot.relief_bevel_fraction = property_scalar(displacement, "bevel_fraction").clamp(
+        voxel_material::pattern::MINIMUM_RELIEF_BEVEL_FRACTION,
+        voxel_material::pattern::MAXIMUM_RELIEF_BEVEL_FRACTION,
+    );
+    slot.relief_normal_strength = property_scalar(displacement, "normal_strength")
+        .clamp(0.0, voxel_material::pattern::MAXIMUM_RELIEF_NORMAL_STRENGTH);
+    slot.relief_steps = property_integer(displacement, "steps")
+        .clamp(0, voxel_material::pattern::MAX_RELIEF_STEPS as i64) as u32;
+}
+
+/// Which stack slot each generator node landed in, and whether that slot is
+/// still a colourless placeholder a displacement created ahead of its layer.
+#[derive(Default)]
+struct GeneratorSlots {
+    slots: Vec<(NodeId, usize, bool)>,
+}
+
+impl GeneratorSlots {
+    fn find(&self, generator: &NodeId) -> Option<usize> {
+        self.slots
+            .iter()
+            .find(|(source, _, _)| source == generator)
+            .map(|(_, slot, _)| *slot)
+    }
+
+    /// The generator's slot, if it is a placeholder — and claims it: the caller
+    /// is about to complete it with a real colour layer.
+    fn claim_synthetic(&mut self, generator: &NodeId) -> Option<usize> {
+        self.slots
+            .iter_mut()
+            .find(|(source, _, synthetic)| source == generator && *synthetic)
+            .map(|entry| {
+                entry.2 = false;
+                entry.1
+            })
+    }
+
+    fn push(&mut self, generator: NodeId, slot: usize, synthetic: bool) {
+        self.slots.push((generator, slot, synthetic));
+    }
 }
 
 pub fn resolve_material_surface_chain(
@@ -298,10 +389,10 @@ pub fn resolve_surface_chain(
             .and_then(|declaration| MaterialNodeOperation::from_tag(declaration.operation));
         match operation {
             Some(MaterialNodeOperation::Surface) => {
-                if layers.len() > MAX_PATTERN_LAYERS {
+                if layers.len() > MAX_PATTERN_LAYERS * 2 {
                     return Err(LayerGraphError::TooManyLayers {
                         count: layers.len(),
-                        maximum: MAX_PATTERN_LAYERS,
+                        maximum: MAX_PATTERN_LAYERS * 2,
                     });
                 }
                 layers.reverse();
@@ -312,6 +403,10 @@ pub fn resolve_surface_chain(
                 });
             }
             Some(MaterialNodeOperation::PatternLayer) => {
+                layers.push(current.clone());
+                current = incoming_surface_source(graph, &current)?;
+            }
+            Some(MaterialNodeOperation::Displacement) => {
                 layers.push(current.clone());
                 current = incoming_surface_source(graph, &current)?;
             }
@@ -338,11 +433,72 @@ fn incoming_pattern_source(graph: &GraphAsset, layer: &NodeId) -> Result<NodeId,
     graph
         .links
         .values()
-        .find(|link| link.to.node == *layer && link.to.socket.0 == "pattern")
+        .find(|link| {
+            link.to.node == *layer && matches!(link.to.socket.0.as_str(), "pattern" | "height")
+        })
         .map(|link| link.from.node.clone())
         .ok_or_else(|| LayerGraphError::MissingPatternConnection {
             layer: layer.clone(),
         })
+}
+
+fn pattern_generator_from_node(
+    generator: &NodeRecord,
+    generator_id: &NodeId,
+    registry: &NodeRegistry,
+) -> Result<PatternGenerator, LayerGraphError> {
+    let operation = registry
+        .find(&generator.node_type)
+        .and_then(|declaration| MaterialNodeOperation::from_tag(declaration.operation));
+    let octaves =
+        || property_integer(generator, "octaves").clamp(1, MAX_NOISE_OCTAVES as i64) as u32;
+    match operation {
+        Some(MaterialNodeOperation::PatternFlat) => Ok(PatternGenerator::Flat),
+        Some(MaterialNodeOperation::PatternNoise) => {
+            Ok(PatternGenerator::Noise { octaves: octaves() })
+        }
+        Some(MaterialNodeOperation::PatternSpeckle) => Ok(PatternGenerator::Speckle {
+            density: property_scalar(generator, "density").clamp(0.0, 1.0),
+        }),
+        Some(MaterialNodeOperation::PatternPerlin) => {
+            Ok(PatternGenerator::Perlin { octaves: octaves() })
+        }
+        Some(MaterialNodeOperation::PatternSimplex) => {
+            Ok(PatternGenerator::Simplex { octaves: octaves() })
+        }
+        Some(MaterialNodeOperation::PatternRidged) => {
+            Ok(PatternGenerator::Ridged { octaves: octaves() })
+        }
+        Some(MaterialNodeOperation::PatternTurbulence) => {
+            Ok(PatternGenerator::Turbulence { octaves: octaves() })
+        }
+        Some(MaterialNodeOperation::PatternWorley) => Ok(PatternGenerator::Worley),
+        Some(MaterialNodeOperation::PatternWorleyEdge) => Ok(PatternGenerator::WorleyEdge),
+        Some(MaterialNodeOperation::PatternWorleySmooth) => Ok(PatternGenerator::WorleySmooth),
+        Some(MaterialNodeOperation::PatternWave) => Ok(PatternGenerator::Wave {
+            distortion: property_scalar(generator, "distortion").max(0.0),
+        }),
+        Some(MaterialNodeOperation::PatternChecker) => Ok(PatternGenerator::Checker),
+        Some(MaterialNodeOperation::PatternTileTone) => Ok(PatternGenerator::TileTone),
+        Some(MaterialNodeOperation::PatternTileEdge) => Ok(PatternGenerator::TileEdge {
+            sharpness: property_scalar(generator, "sharpness").clamp(0.0, 1.0),
+        }),
+        Some(MaterialNodeOperation::PatternEdgeBand) => {
+            let direction = match property_text(generator, "direction").as_str() {
+                "bottom" => EdgeBandDirection::Bottom,
+                _ => EdgeBandDirection::Top,
+            };
+            Ok(PatternGenerator::EdgeBand {
+                direction,
+                width: property_scalar(generator, "width").clamp(0.0, 1.0),
+                jaggedness: property_scalar(generator, "jaggedness").clamp(0.0, 1.0),
+            })
+        }
+        _ => Err(LayerGraphError::InvalidPatternGenerator {
+            node: generator_id.clone(),
+            node_type: generator.node_type.clone(),
+        }),
+    }
 }
 
 /// The tessellation wired into a generator node, if any.
@@ -387,6 +543,26 @@ fn connect_pattern(graph: &mut GraphAsset, from: &NodeId, to: &NodeId) {
             to: InputPin {
                 node: to.clone(),
                 socket: SocketKey("pattern".into()),
+            },
+            order: 0,
+        },
+    );
+}
+
+/// A generator's mask into a displacement modifier. Same pattern output, but the
+/// displacement declares its input as `height` — wiring it as `pattern` would
+/// leave a generated graph with a socket its node never declared.
+fn connect_height(graph: &mut GraphAsset, from: &NodeId, to: &NodeId) {
+    graph.links.insert(
+        LinkId::new(),
+        LinkRecord {
+            from: OutputPin {
+                node: from.clone(),
+                socket: SocketKey("pattern".into()),
+            },
+            to: InputPin {
+                node: to.clone(),
+                socket: SocketKey("height".into()),
             },
             order: 0,
         },
@@ -461,6 +637,56 @@ fn pattern_layer_node(layer: &PatternLayer) -> NodeRecord {
     }
 }
 
+fn displacement_node(layer: &PatternLayer) -> NodeRecord {
+    NodeRecord {
+        node_type: NodeTypeId(DISPLACEMENT_NODE.into()),
+        node_type_version: 1,
+        properties: [
+            ("enabled".to_string(), PropertyValue::Boolean(true)),
+            (
+                "height_meters".to_string(),
+                PropertyValue::Scalar(layer.relief_height_meters),
+            ),
+            (
+                "faces_top".to_string(),
+                PropertyValue::Boolean(layer.relief_faces.top),
+            ),
+            (
+                "faces_side".to_string(),
+                PropertyValue::Boolean(layer.relief_faces.side),
+            ),
+            (
+                "faces_bottom".to_string(),
+                PropertyValue::Boolean(layer.relief_faces.bottom),
+            ),
+            (
+                "affects_normal".to_string(),
+                PropertyValue::Boolean(layer.relief_normal),
+            ),
+            (
+                "invert".to_string(),
+                PropertyValue::Boolean(layer.relief_invert),
+            ),
+            (
+                "normal_strength".to_string(),
+                PropertyValue::Scalar(layer.relief_normal_strength),
+            ),
+            (
+                "bevel_fraction".to_string(),
+                PropertyValue::Scalar(layer.relief_bevel_fraction),
+            ),
+            (
+                "steps".to_string(),
+                PropertyValue::Integer(layer.relief_steps as i64),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        socket_defaults: BTreeMap::new(),
+        unknown_payload: None,
+    }
+}
+
 fn pattern_generator_node(layer: &PatternLayer) -> NodeRecord {
     let node_type = match layer.generator {
         PatternGenerator::Flat => PATTERN_FLAT_NODE,
@@ -477,6 +703,7 @@ fn pattern_generator_node(layer: &PatternLayer) -> NodeRecord {
         PatternGenerator::Checker => PATTERN_CHECKER_NODE,
         PatternGenerator::TileTone => PATTERN_TILE_TONE_NODE,
         PatternGenerator::TileEdge { .. } => PATTERN_TILE_EDGE_NODE,
+        PatternGenerator::EdgeBand { .. } => PATTERN_EDGE_BAND_NODE,
     };
     NodeRecord {
         node_type: NodeTypeId(node_type.into()),
@@ -490,14 +717,6 @@ fn pattern_generator_node(layer: &PatternLayer) -> NodeRecord {
 fn pattern_generator_properties(layer: &PatternLayer) -> Vec<(String, PropertyValue)> {
     let mut properties = vec![
         (
-            "frame".to_string(),
-            PropertyValue::Text(frame_name(layer.frame).to_string()),
-        ),
-        (
-            "period_meters".to_string(),
-            PropertyValue::Scalar(layer.period_meters),
-        ),
-        (
             "texels_per_voxel".to_string(),
             PropertyValue::Integer(layer.texels_per_voxel as i64),
         ),
@@ -506,6 +725,20 @@ fn pattern_generator_properties(layer: &PatternLayer) -> Vec<(String, PropertyVa
             PropertyValue::Boolean(layer.vary_per_face),
         ),
     ];
+    if !matches!(layer.generator, PatternGenerator::EdgeBand { .. }) {
+        properties.push((
+            "frame".to_string(),
+            PropertyValue::Text(frame_name(layer.frame).to_string()),
+        ));
+        properties.push((
+            "period_meters".to_string(),
+            PropertyValue::Scalar(layer.period_meters),
+        ));
+        properties.push((
+            "grid_average".to_string(),
+            PropertyValue::Boolean(layer.grid_average),
+        ));
+    }
     // The octave count is asked of the generator rather than matched on, so the
     // fractal family can grow without this function knowing about it.
     if layer.generator.has_octaves() {
@@ -524,13 +757,30 @@ fn pattern_generator_properties(layer: &PatternLayer) -> Vec<(String, PropertyVa
         PatternGenerator::TileEdge { sharpness } => {
             properties.push(("sharpness".to_string(), PropertyValue::Scalar(sharpness)));
         }
+        PatternGenerator::EdgeBand {
+            direction,
+            width,
+            jaggedness,
+        } => {
+            properties.push((
+                "direction".to_string(),
+                PropertyValue::Text(match direction {
+                    EdgeBandDirection::Top => "top".to_string(),
+                    EdgeBandDirection::Bottom => "bottom".to_string(),
+                }),
+            ));
+            properties.push(("width".to_string(), PropertyValue::Scalar(width)));
+            properties.push(("jaggedness".to_string(), PropertyValue::Scalar(jaggedness)));
+        }
         _ => {}
     }
     // Orthogonal to the generator, so every generator node carries it.
-    properties.push((
-        "domain_warp".to_string(),
-        PropertyValue::Scalar(layer.domain_warp),
-    ));
+    if !matches!(layer.generator, PatternGenerator::EdgeBand { .. }) {
+        properties.push((
+            "domain_warp".to_string(),
+            PropertyValue::Scalar(layer.domain_warp),
+        ));
+    }
     properties
 }
 
@@ -587,15 +837,24 @@ fn pattern_layer_from_nodes(
     } else {
         8
     };
+    let edge_band = matches!(generator, PatternGenerator::EdgeBand { .. });
     PatternLayer {
         generator,
-        frame: match property_text(generator_node, "frame").as_str() {
-            "voxel" => PatternFrame::Voxel,
-            "face" => PatternFrame::Face,
-            "tile" => PatternFrame::Tile,
-            _ => PatternFrame::World,
+        frame: if edge_band {
+            PatternFrame::Face
+        } else {
+            match property_text(generator_node, "frame").as_str() {
+                "voxel" => PatternFrame::Voxel,
+                "face" => PatternFrame::Face,
+                "tile" => PatternFrame::Tile,
+                _ => PatternFrame::World,
+            }
         },
-        period_meters: property_scalar(generator_node, "period_meters").clamp(0.005, 4.0),
+        period_meters: if edge_band {
+            1.0
+        } else {
+            property_scalar(generator_node, "period_meters").clamp(0.005, 4.0)
+        },
         target: match property_text(layer, "target").as_str() {
             "roughness" => PatternTarget::Roughness,
             "emission" => PatternTarget::Emission,
@@ -613,9 +872,17 @@ fn pattern_layer_from_nodes(
             side: property_bool(layer, "faces_side"),
             bottom: property_bool(layer, "faces_bottom"),
         },
+        relief_faces: voxel_material::pattern::PatternFaces::ALL,
         texels_per_voxel: texels,
         vary_per_face: property_bool(generator_node, "vary_per_face"),
-        domain_warp: property_scalar(generator_node, "domain_warp").max(0.0),
+        // Edge band declares no grid-average field: its value is a per-column
+        // band, already constant across each texel column.
+        grid_average: !edge_band && property_bool(generator_node, "grid_average"),
+        domain_warp: if edge_band {
+            0.0
+        } else {
+            property_scalar(generator_node, "domain_warp").max(0.0)
+        },
         // From the TESSELLATION node when one is wired, so every layer sharing it
         // gets the same numbers and they cannot drift apart. Defaults otherwise.
         tile_aspect: tessellation
@@ -632,6 +899,12 @@ fn pattern_layer_from_nodes(
             .clamp(0.0, MAXIMUM_TILE_GAP),
         emission_intensity: property_scalar(layer, "emission_intensity")
             .clamp(0.0, MAX_EMISSION_INTENSITY),
+        relief_height_meters: 0.0,
+        relief_normal: true,
+        relief_invert: false,
+        relief_bevel_fraction: voxel_material::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+        relief_normal_strength: 1.0,
+        relief_steps: 0,
     }
 }
 
@@ -746,6 +1019,115 @@ mod tests {
         restored.patterns = NO_PATTERNS;
         assert!(sync_pattern_layers_from_graph(&graph, &mut restored).unwrap());
         assert_eq!(restored.patterns, source.patterns);
+    }
+
+    /// Relief must survive the material -> graph -> material round trip: the
+    /// displacement node carries height, face scope, normal opt-out and invert,
+    /// and projection folds them back onto the colour layer's slot.
+    #[test]
+    fn relief_round_trips_through_displacement_nodes() {
+        let mut source = MATERIALS[26];
+        let mut layer = *source.patterns.active().next().unwrap();
+        layer.relief_height_meters = 0.04;
+        layer.relief_invert = true;
+        layer.relief_normal = false;
+        layer.relief_faces = voxel_material::pattern::PatternFaces {
+            top: true,
+            side: true,
+            bottom: false,
+        };
+        layer.relief_bevel_fraction = 0.2;
+        layer.relief_normal_strength = 2.5;
+        layer.relief_steps = 3;
+        layer.grid_average = true;
+        source.patterns = voxel_material::pattern::PatternStack::of(&[layer]);
+        let (graph, _output) = graph_with_surface_chain(&source.patterns);
+        let mut restored = source;
+        restored.patterns = NO_PATTERNS;
+        assert!(sync_pattern_layers_from_graph(&graph, &mut restored).unwrap());
+        assert_eq!(restored.patterns, source.patterns);
+    }
+
+    /// A displacement placed AHEAD of its colour layer in the surface chain must
+    /// complete into the same slot the layer takes, not burn a second one —
+    /// chain order between the pair is an authoring detail, not a cost.
+    #[test]
+    fn displacement_ahead_of_its_layer_shares_one_slot() {
+        let registry = crate::CATALOGUE;
+        let mut graph = GraphAsset::new("material", GraphKind::Material);
+        let surface = NodeId::new();
+        let output = NodeId::new();
+        graph.nodes.insert(
+            surface.clone(),
+            registry
+                .find(&NodeTypeId(MATERIAL_SURFACE_NODE.into()))
+                .unwrap()
+                .new_record(),
+        );
+        graph.nodes.insert(
+            output.clone(),
+            registry
+                .find(&NodeTypeId(MATERIAL_OUTPUT_NODE.into()))
+                .unwrap()
+                .new_record(),
+        );
+        let generator = NodeId::new();
+        graph.nodes.insert(
+            generator.clone(),
+            registry
+                .find(&NodeTypeId(PATTERN_NOISE_NODE.into()))
+                .unwrap()
+                .new_record(),
+        );
+        let displacement = NodeId::new();
+        let mut displacement_record = registry
+            .find(&NodeTypeId(DISPLACEMENT_NODE.into()))
+            .unwrap()
+            .new_record();
+        displacement_record
+            .properties
+            .insert("height_meters".into(), PropertyValue::Scalar(0.05));
+        displacement_record
+            .properties
+            .insert("invert".into(), PropertyValue::Boolean(true));
+        displacement_record
+            .properties
+            .insert("bevel_fraction".into(), PropertyValue::Scalar(0.3));
+        displacement_record
+            .properties
+            .insert("normal_strength".into(), PropertyValue::Scalar(1.5));
+        graph
+            .nodes
+            .insert(displacement.clone(), displacement_record);
+        let layer = NodeId::new();
+        graph.nodes.insert(
+            layer.clone(),
+            registry
+                .find(&NodeTypeId(PATTERN_LAYER_NODE.into()))
+                .unwrap()
+                .new_record(),
+        );
+        connect_surface(&mut graph, &surface, &displacement);
+        connect_surface(&mut graph, &displacement, &layer);
+        connect_surface(&mut graph, &layer, &output);
+        connect_height(&mut graph, &generator, &displacement);
+        connect_pattern(&mut graph, &generator, &layer);
+
+        let stack = project_pattern_stack(&graph, &registry).unwrap();
+        assert_eq!(
+            stack.active_count(),
+            1,
+            "the displacement/layer pair must share one slot regardless of order"
+        );
+        let slot = stack.active().next().unwrap();
+        assert_eq!(slot.relief_height_meters, 0.05);
+        assert!(slot.relief_invert);
+        assert_eq!(slot.relief_bevel_fraction, 0.3);
+        assert_eq!(slot.relief_normal_strength, 1.5);
+        assert!(
+            slot.amount > 0.0,
+            "the colour layer must have completed the placeholder slot"
+        );
     }
 
     #[test]

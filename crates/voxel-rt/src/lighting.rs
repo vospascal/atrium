@@ -12,14 +12,14 @@
 //! Sun color/intensity and the hemisphere-ambient colors are fixed constants
 //! for now (Stage 4's look pass decides whether they become settings too).
 
-use voxel_environment::{
-    SunSettings, AMBIENT_STRENGTH, GROUND_AMBIENT_COLOR, SKY_AMBIENT_COLOR, SUN_INTENSITY,
-};
+use crate::water::WaveField;
+use voxel_core::wind::WindFrame;
+use voxel_environment::{SunSettings, GROUND_AMBIENT_COLOR, SKY_AMBIENT_COLOR, SUN_INTENSITY};
 
 /// Per-frame lighting data for the DDA compute shader, bindable as a uniform.
 ///
-/// `#[repr(C)]` layout (80 bytes, 16-byte aligned — matches the WGSL
-/// `Lighting` struct in `shaders/dda.wgsl`; the `vec3<f32>` is padded to 16
+/// `#[repr(C)]` layout (272 bytes, 16-byte aligned — matches the WGSL
+/// `Lighting` struct in `shaders/world.wgsl`; the `vec3<f32>` is padded to 16
 /// bytes with an explicit pad float):
 ///
 /// | offset | field                 | WGSL type   | contents |
@@ -33,14 +33,15 @@ use voxel_environment::{
 /// | 80     | `gi_params`           | `vec4<f32>` | the runtime CAGI knobs — see [`GiParams`] |
 /// | 96     | `water_params`        | `vec4<f32>` | the runtime E6 water knobs — see [`WaterParams`] |
 /// | 112    | `water_optics`        | `vec4<f32>` | the E6 water look knobs — see [`WaterParams`] |
-/// | 128    | `celestial_sun`       | `vec4<f32>` | physical sun direction + daylight |
-/// | 144    | `celestial_moon`      | `vec4<f32>` | moon direction + phase |
-/// | 160    | `sky_zenith`          | `vec4<f32>` | zenith radiance + star rotation |
-/// | 176    | `sky_horizon`         | `vec4<f32>` | horizon radiance + moonlight |
-/// | 192    | `material_params`     | `vec4<f32>` | runtime material knobs |
-/// | 208    | `animation_params`    | `vec4<f32>` | the scaled material clock — see [`AnimationParams`] |
-/// | 224    | `event_params`        | `vec4<f32>` | the unscaled world clock + event count |
-/// | 240    | `output_params`       | `vec4<f32>` | the display's measured HDR headroom — see [`OutputParams`] |
+/// | 128    | `water_waves`         | `vec4<f32>` | the W1 wave field's wind — see [`crate::water::WaveField`] |
+/// | 144    | `celestial_sun`       | `vec4<f32>` | physical sun direction + daylight |
+/// | 160    | `celestial_moon`      | `vec4<f32>` | moon direction + phase |
+/// | 176    | `sky_zenith`          | `vec4<f32>` | zenith radiance + star rotation |
+/// | 192    | `sky_horizon`         | `vec4<f32>` | horizon radiance + moonlight |
+/// | 208    | `material_params`     | `vec4<f32>` | pattern fade/footprint + debug override |
+/// | 224    | `animation_params`    | `vec4<f32>` | the scaled material clock — see [`AnimationParams`] |
+/// | 240    | `event_params`        | `vec4<f32>` | the unscaled world clock + event count |
+/// | 256    | `output_params`       | `vec4<f32>` | the display's measured HDR headroom — see [`OutputParams`] |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LightingUniform {
@@ -53,6 +54,10 @@ pub struct LightingUniform {
     pub gi_params: [f32; 4],
     pub water_params: [f32; 4],
     pub water_optics: [f32; 4],
+    /// The W1 wave field: x = wind bearing (radians), y = wind SPEED in m/s (what
+    /// Cox & Munk's slope relation takes — not `activity`, which is a normalised shape),
+    /// z = gust, w = eddy. Its amplitude lever rides in `water_optics.z`.
+    pub water_waves: [f32; 4],
     /// xyz = physical sun direction (including below the horizon), w = daylight.
     pub celestial_sun: [f32; 4],
     /// xyz = moon direction, w = moon phase (0/1 new, 0.5 full).
@@ -93,6 +98,25 @@ impl LightingUniform {
     /// this whole path exists to fix, and it cannot be reached by omission.
     pub fn with_output_params(mut self, output_params: OutputParams) -> LightingUniform {
         self.output_params = output_params.to_array();
+        self
+    }
+
+    /// Attach the temporary material inspection override without growing the
+    /// uniform. `material_params.w` is otherwise unused by the material path.
+    ///
+    /// Bits 0..=0 enable the override, bits 1..=4 select pattern layers, and
+    /// bits 5..=8 select the channel view. Keeping this in the existing vec4
+    /// makes the control available to both the world and studio through the
+    /// same binding.
+    pub fn with_material_debug(
+        mut self,
+        enabled: bool,
+        layer_mask: u8,
+        view_mode: u32,
+    ) -> LightingUniform {
+        let packed =
+            u32::from(enabled) | (u32::from(layer_mask & 0x0f) << 1) | ((view_mode & 0x0f) << 5);
+        self.material_params[3] = packed as f32;
         self
     }
 }
@@ -335,27 +359,85 @@ pub struct WaterParams {
     /// secondary ray. Below it the cheap analytic stand-in is substituted, so a
     /// head-on water pixel does not pay a full traced mirror for 2% of its colour.
     pub ray_cutoff: f32,
-    /// `water_params.w` — unused, reserved for B6's fluid flow.
-    pub reserved_flow: f32,
+    /// `water_params.w` — what fraction of turbidity's extinction is **scattering** rather
+    /// than absorption: the milkiness dial (E7).
+    ///
+    /// Not a taste knob so much as a choice of WHAT is suspended. Mineral silt is much
+    /// larger than the wavelength, so it scatters broadband and absorbs little — a silty
+    /// river really is milky-bright, and a fraction near 0.85 renders exactly that. What
+    /// limits visibility in most standing water is instead dissolved organic matter and
+    /// phytoplankton, which ABSORB; a pond you cannot see the bottom of is dark, not white.
+    ///
+    /// Measured: at 0.85 one block of water in-scatters 0.38-0.47 of the sky's radiance, so
+    /// even shallow water reads as a white sheet. At the shipped 0.15 that is 0.07-0.11.
+    pub turbidity_scattering_fraction: f32,
     /// `water_optics.x` — how far the medium's authored index of refraction is
     /// pulled toward 1.0, i.e. how WIDE Snell's window is (half-angle
     /// `asin(1 / n)`). 1.0 is the physical index and the shipped value; E6 step 3
     /// exposes it as a registry lever so it can be dialled in-app.
     pub refraction_strength: f32,
+    /// `water_optics.w` — **turbidity**, per-metre extinction from suspended matter,
+    /// added to the medium's own spectral coefficients (E7).
+    ///
+    /// The term the model was missing. The material table carries *pure water*, and pure
+    /// water is far clearer than any pond: measured, our blue channel still passes 84% at
+    /// 3 m where the look asks for ~5%, i.e. 16.8x too see-through. What hides a real
+    /// lake's bed is suspended sediment, which is broadband and scattering-dominant — not
+    /// a bigger version of water's own steeply blue absorption, which is why this is its
+    /// own grey term rather than a multiplier on the spectral ones.
+    ///
+    /// Derived from a **visibility depth in blocks** rather than authored directly — see
+    /// [`crate::water::turbidity_per_meter`]. 0.0 is exactly the pure-water model.
+    pub turbidity_per_meter: f32,
+    /// W1 — the wave field, which the shader reads as `water_waves` plus
+    /// `water_optics.z` (its amplitude lever).
+    ///
+    /// Carried inside the water knobs rather than as a ninth argument to
+    /// [`lighting_uniform`]: it *is* a water knob, and it comes from the same place
+    /// the others do.
+    pub waves: WaveField,
 }
 
 impl WaterParams {
+    /// Attach this frame's wind to the wave field, keeping the amplitude lever.
+    ///
+    /// A builder rather than a field the quality settings carry, for the reason
+    /// [`LightingUniform::with_output_params`] is one: wind is a property of the running
+    /// world, and of the callers that build these knobs only the app has one. Omitting
+    /// it leaves [`WaveField::FLAT`]'s wind — no waves — which is the conservative
+    /// direction, since the alternative default would be a breeze nobody asked for.
+    pub fn with_wind(mut self, wind: WindFrame, bearing_radians: f32) -> WaterParams {
+        self.waves = WaveField::from_wind(wind, bearing_radians, self.waves.amplitude_scale);
+        self
+    }
+
     fn to_array(self) -> [f32; 4] {
         [
             self.absorption_scale,
             self.scattering_scale,
             self.ray_cutoff,
-            self.reserved_flow,
+            self.turbidity_scattering_fraction.clamp(0.0, 1.0),
         ]
     }
 
     fn optics_to_array(self) -> [f32; 4] {
-        [self.refraction_strength, 0.0, 0.0, 0.0]
+        [
+            self.refraction_strength,
+            0.0,
+            self.waves.amplitude_scale.clamp(0.0, 1.0),
+            self.turbidity_per_meter.max(0.0),
+        ]
+    }
+
+    /// `water_waves` — the wave field's four wind numbers, in the order
+    /// `shaders/water.wgsl` reads them.
+    fn waves_to_array(self) -> [f32; 4] {
+        [
+            self.waves.bearing_radians,
+            self.waves.speed_meters_per_second,
+            self.waves.gust,
+            self.waves.eddy,
+        ]
     }
 }
 
@@ -386,7 +468,7 @@ pub fn lighting_uniform(
             SKY_AMBIENT_COLOR[0] * (0.25 + 0.75 * celestial.daylight),
             SKY_AMBIENT_COLOR[1] * (0.25 + 0.75 * celestial.daylight),
             SKY_AMBIENT_COLOR[2],
-            AMBIENT_STRENGTH * sun.ambient_scale.max(0.0) * celestial.ambient_strength,
+            celestial.ambient_scale,
         ],
         ground_ambient: [
             GROUND_AMBIENT_COLOR[0],
@@ -398,6 +480,7 @@ pub fn lighting_uniform(
         gi_params: gi_params.to_array(),
         water_params: water_params.to_array(),
         water_optics: water_params.optics_to_array(),
+        water_waves: water_params.waves_to_array(),
         celestial_sun: [
             celestial.sun_direction.x,
             celestial.sun_direction.y,
@@ -434,6 +517,7 @@ pub fn lighting_uniform(
 mod tests {
     use super::*;
     use glam::Vec3;
+    use voxel_environment::AMBIENT_STRENGTH;
 
     /// Every runtime knob vector, in one uniform, so the component-order tests
     /// below all read the same construction.
@@ -478,8 +562,13 @@ mod tests {
                 absorption_scale: 1.0,
                 scattering_scale: 1.0,
                 ray_cutoff: 0.04,
-                reserved_flow: 0.0,
+                turbidity_scattering_fraction: 0.0,
                 refraction_strength: 1.0,
+                // Pure water in a unit test, so the packing assertions below read the
+                // authored coefficients rather than a derived turbidity.
+                turbidity_per_meter: 0.0,
+                // No wind in a unit test: flat water, so the wave field folds away.
+                waves: WaveField::FLAT,
             },
             MaterialParams {
                 pattern_fade_start_meters: voxel_material::pattern::PATTERN_FADE_START_METERS,
@@ -493,9 +582,18 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<LightingUniform>(), 256);
+        assert_eq!(std::mem::size_of::<LightingUniform>(), 272);
         assert_eq!(std::mem::align_of::<LightingUniform>(), 4);
         assert_eq!(std::mem::size_of::<LightingUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn material_debug_override_packs_into_unused_material_word() {
+        let uniform = probe_uniform(1.0).with_material_debug(true, 0b0101, 8);
+        assert_eq!(uniform.material_params[3], 267.0);
+
+        let disabled = probe_uniform(1.0).with_material_debug(false, 0xff, 0x3f);
+        assert_eq!(disabled.material_params[3], 510.0);
     }
 
     /// Headroom must default to NO headroom and must land in `x`.

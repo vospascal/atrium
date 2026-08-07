@@ -657,8 +657,10 @@ fn report_material_costs(device: &wgpu::Device, queue: &wgpu::Queue, use_project
         let scene = StudioScene {
             sample: voxel,
             pose: StudioPose::Wall,
-            plate: None,
-            subject: None,
+            // No floor under the swatch: the bench measures the MATERIAL, and a plate
+            // would add bounce light and a horizon to every reading.
+            plate_shown: false,
+            ..StudioScene::default()
         };
         let brickmap = scene.build();
         let bindings = WorldBindings::new(device, &brickmap);
@@ -1043,8 +1045,10 @@ fn write_generator_swatches(device: &wgpu::Device, queue: &wgpu::Queue) {
         let scene = StudioScene {
             sample,
             pose: StudioPose::Wall,
-            plate: None,
-            subject: None,
+            // No floor: the bench measures the MATERIAL, and a plate would add bounce
+            // light and a horizon to every reading.
+            plate_shown: false,
+            ..StudioScene::default()
         };
         let brickmap = scene.build();
         let bindings = WorldBindings::new(device, &brickmap);
@@ -1168,6 +1172,7 @@ fn swatch_rows(
         tile_bond: 0.5,
         tile_gap: 0.06,
         emission_intensity: 1.0,
+        ..PatternLayer::IDENTITY
     };
     MATERIALS
         .iter()
@@ -1582,6 +1587,7 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             tile_gap: 0.06,
             // Albedo target, so the intensity is not read.
             emission_intensity: 1.0,
+            ..PatternLayer::IDENTITY
         },
         PatternLayer {
             generator: PatternGenerator::Speckle { density: 0.3 },
@@ -1608,6 +1614,7 @@ fn saturated_material_rows() -> Vec<GpuMaterial> {
             tile_bond: 0.5,
             tile_gap: 0.06,
             emission_intensity: 1.0,
+            ..PatternLayer::IDENTITY
         },
         PatternLayer {
             generator: PatternGenerator::Noise { octaves: 3 },
@@ -1666,6 +1673,7 @@ fn single_generator_rows(
         tile_bond: 0.5,
         tile_gap: 0.06,
         emission_intensity: 1.0,
+        ..PatternLayer::IDENTITY
     };
     let stack = PatternStack::of(&vec![layer; layers]);
     MATERIALS
@@ -2437,6 +2445,7 @@ fn report_light_volume_memory(brickmap: &Brickmap) {
     for cell_voxels in [2, 4, 8] {
         let grid = voxel_rt::cagi::CagiGrid::for_world(
             cell_voxels,
+            voxel_rt::cagi::CagiLayout::Isotropic,
             brickmap.metadata().max_occupied_brick_y,
         );
         // The static attribute buffer is rebuilt whenever the resolution lever
@@ -2469,7 +2478,12 @@ fn report_light_volume_memory(brickmap: &Brickmap) {
         "  (total = 2 ping-pong buffers + the packed attribute/emission buffer; the vertical \
          extent is clamped to the world's occupied height + 2 cells, which is the \
          difference between {} and {} cells of height at 4 voxels)",
-        voxel_rt::cagi::CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y).size[1],
+        voxel_rt::cagi::CagiGrid::for_world(
+            4,
+            voxel_rt::cagi::CagiLayout::Isotropic,
+            brickmap.metadata().max_occupied_brick_y
+        )
+        .size[1],
         (voxel_rt::cagi::WORLD_SIZE_VOXELS[1]) / 4,
     );
 }
@@ -2914,7 +2928,11 @@ fn report_edit_build_times(world: &VoxelWorld, brickmap: &Brickmap) {
         clone_time,
         snapshot.cpu_bytes() as f32 / 1e6
     );
-    let grid = voxel_rt::cagi::CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y);
+    let grid = voxel_rt::cagi::CagiGrid::for_world(
+        4,
+        voxel_rt::cagi::CagiLayout::Isotropic,
+        brickmap.metadata().max_occupied_brick_y,
+    );
     let attributes = voxel_rt::cagi::MaterialAttributes::compiled();
     let probe_cell = [grid.size[0] / 2, grid.size[1] / 2, grid.size[2] / 2];
     let mut e5b_samples = Vec::with_capacity(32);

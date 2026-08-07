@@ -1105,4 +1105,14 @@ pub(crate) mod tests {
         .validate(&module)
         .unwrap();
     }
+
+    #[test]
+    fn pbr_surface_state_reaches_lighting_as_one_modifier_safe_payload() {
+        let source = super::SHADER_SOURCE.as_str();
+        assert!(source.contains("struct PbrSurface"));
+        assert!(source.contains("surface.specular"));
+        assert!(source.contains("surface.ambient_occlusion"));
+        assert!(source.contains("surface.normal = normal"));
+        assert!(source.contains("pbr_distribution_ggx"));
+    }
 }

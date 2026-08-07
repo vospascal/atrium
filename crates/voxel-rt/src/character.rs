@@ -57,7 +57,7 @@
 //! ## Anti-tunneling guarantee
 //!
 //! Two independent mechanisms, both required, because a 40 ms hitch at sprint
-//! speed is 0.5 m and a stalled second at terminal velocity is 55 m:
+//! speed is 0.22 m and a stalled second at terminal velocity is 77.71 m:
 //!
 //! 1. **The step is clamped and substepped**: `delta_seconds` is capped at
 //!    [`MAX_STEP_SECONDS`] and the remaining motion is split so no substep moves
@@ -92,14 +92,14 @@ pub const EYE_HEIGHT_METERS: f32 = 1.65;
 /// the original controller settled on): 9.81 makes a jump feel like a moon hop, and the
 /// snappier value is what makes a 1.2 m jump land in ~0.47 s.
 pub(crate) const GRAVITY_METERS_PER_SECOND_SQUARED: f32 = 22.0;
-/// Fall-speed ceiling, m/s. Roughly a real skydiver's terminal velocity; here it
+/// Fall-speed ceiling, m/s. Matches Minecraft's 77.71 m/s terminal fall; it
 /// also *bounds the substep count* — the worst fall a frame can integrate is
-/// `TERMINAL_VELOCITY * MAX_STEP_SECONDS` = 5.5 m = 22 substeps.
-pub(crate) const TERMINAL_VELOCITY_METERS_PER_SECOND: f32 = 55.0;
+/// `TERMINAL_VELOCITY * MAX_STEP_SECONDS` = 7.8 m = 32 substeps.
+pub(crate) const TERMINAL_VELOCITY_METERS_PER_SECOND: f32 = 77.71;
 /// How high a jump rises, meters. The jump *speed* is derived from this and
 /// gravity ([`CharacterSettings::jump_speed`]) so the tunable is the thing you
 /// can see rather than an impulse you have to convert in your head.
-pub(crate) const JUMP_APEX_METERS: f32 = 1.2;
+pub(crate) const JUMP_APEX_METERS: f32 = 1.2522;
 
 /// Auto-step height, meters. **Exactly 3 voxels** (0.375 m), not the round
 /// 0.35 m: voxels are 0.125 m, natural terrain steps are 1-3 voxels, and 0.35
@@ -107,12 +107,12 @@ pub(crate) const JUMP_APEX_METERS: f32 = 1.2;
 /// makes walking an island miserable.
 pub(crate) const STEP_UP_METERS: f32 = 3.0 * VOXEL_SIZE;
 
-/// Walk speed, m/s.
-pub(crate) const WALK_SPEED_METERS_PER_SECOND: f32 = 4.5;
-/// Cap on the platform layer's speed multiplier while walking. The fly camera's
-/// boost is 4x, which at walk speed is 18 m/s — a sprint the collision feel
-/// cannot support; 2.6x = 11.7 m/s matches sandbox's 12 m/s sprint.
-pub(crate) const SPRINT_MULTIPLIER: f32 = 2.6;
+/// Minecraft walking speed, m/s.
+pub(crate) const WALK_SPEED_METERS_PER_SECOND: f32 = 4.317;
+/// Minecraft sprint speed is 130% of walking speed (5.612 m/s).
+pub(crate) const SPRINT_MULTIPLIER: f32 = 1.3;
+/// Minecraft sneak speed is 30% of walking speed (1.295 m/s).
+pub(crate) const SNEAK_SPEED_MULTIPLIER: f32 = 0.3;
 /// Wheel-tunable walk-speed band, m/s: slow enough to line up a single voxel,
 /// fast enough to cross the island without switching to fly.
 pub(crate) const MIN_WALK_SPEED: f32 = 0.5;
@@ -239,6 +239,8 @@ pub struct CharacterSettings {
     pub walk_speed: f32,
     /// Ceiling applied to [`CameraInput::speed_multiplier`].
     pub sprint_multiplier: f32,
+    /// Grounded speed scale while the player is sneaking.
+    pub sneak_speed_multiplier: f32,
     /// Downward acceleration, m/s^2.
     pub gravity: f32,
     /// Fall-speed ceiling, m/s.
@@ -261,6 +263,7 @@ impl Default for CharacterSettings {
             eye_height_meters: EYE_HEIGHT_METERS,
             walk_speed: WALK_SPEED_METERS_PER_SECOND,
             sprint_multiplier: SPRINT_MULTIPLIER,
+            sneak_speed_multiplier: SNEAK_SPEED_MULTIPLIER,
             gravity: GRAVITY_METERS_PER_SECOND_SQUARED,
             terminal_velocity: TERMINAL_VELOCITY_METERS_PER_SECOND,
             jump_apex_meters: JUMP_APEX_METERS,
@@ -283,7 +286,8 @@ impl CharacterSettings {
 ///
 /// Mirror of [`crate::camera::FlyCamera`]'s role — it consumes the same
 /// [`CameraInput`] the platform layer already builds (`up` = jump / swim up,
-/// `down` = dive, `speed_multiplier` = sprint) and produces the same
+/// `down` = dive, `sneak` = grounded slow-movement, `speed_multiplier` =
+/// sprint) and produces the same
 /// [`CameraPose`] — so switching modes changes the movement model and nothing
 /// else in the frame.
 #[derive(Clone, Copy, Debug)]
@@ -304,6 +308,16 @@ pub struct CharacterController {
     grounded: bool,
     submersion: Submersion,
     head_submerged: bool,
+    pending_water_splash: Option<WaterSplash>,
+    water_splash_cooldown_seconds: f32,
+}
+
+/// A fall-driven water entry, consumed by the application and uploaded as a
+/// transient world event for the renderer's ripple field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterSplash {
+    pub position_meters: Vec3,
+    pub strength: f32,
 }
 
 /// Pitch clamp, mirroring [`crate::camera`]'s: just short of straight up/down so
@@ -327,6 +341,8 @@ impl CharacterController {
             grounded: false,
             submersion: Submersion::Dry,
             head_submerged: false,
+            pending_water_splash: None,
+            water_splash_cooldown_seconds: 0.0,
         }
     }
 
@@ -369,6 +385,11 @@ impl CharacterController {
         self.vertical_velocity
     }
 
+    /// Take the water-entry impact detected during the last step, if any.
+    pub fn take_water_splash(&mut self) -> Option<WaterSplash> {
+        self.pending_water_splash.take()
+    }
+
     /// Scale the walk speed by `notches` of mouse wheel — multiplicative and
     /// clamped exactly like [`crate::camera::FlyCamera::adjust_movement_speed`],
     /// so the wheel feels the same in both modes.
@@ -383,6 +404,7 @@ impl CharacterController {
     /// most [`MAX_SUBSTEP_METERS`] of motion (the anti-tunneling clamp); each
     /// substep integrates gravity/buoyancy, then resolves X, Y and Z in turn.
     pub fn step(&mut self, brickmap: &Brickmap, input: &CameraInput, delta_seconds: f32) {
+        self.pending_water_splash = None;
         self.apply_look(input);
         let delta_seconds = if delta_seconds.is_finite() {
             delta_seconds.clamp(0.0, MAX_STEP_SECONDS)
@@ -448,18 +470,29 @@ impl CharacterController {
         } else {
             1.0
         };
-        match self.submersion {
-            Submersion::Swimming => self.settings.swim_speed,
-            Submersion::Wading => {
-                self.settings.walk_speed * sprint * self.settings.wade_speed_scale
-            }
-            Submersion::Dry => self.settings.walk_speed * sprint,
+        if self.submersion == Submersion::Swimming {
+            return self.settings.swim_speed;
+        }
+        let ground_speed_scale = if input.sneak {
+            self.settings.sneak_speed_multiplier
+        } else {
+            sprint
+        };
+        let speed = self.settings.walk_speed * ground_speed_scale;
+        if self.submersion == Submersion::Wading {
+            speed * self.settings.wade_speed_scale
+        } else {
+            speed
         }
     }
 
     /// One substep: velocities, then X, then Y, then Z, then grounding.
     fn integrate_substep(&mut self, brickmap: &Brickmap, input: &CameraInput, seconds: f32) {
         self.update_submersion(brickmap);
+        self.water_splash_cooldown_seconds =
+            (self.water_splash_cooldown_seconds - seconds).max(0.0);
+        let submersion_before_motion = self.submersion;
+        let downward_speed_before_motion = (-self.vertical_velocity).max(0.0);
         self.integrate_vertical_velocity(brickmap, input, seconds);
 
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
@@ -519,6 +552,30 @@ impl CharacterController {
             self.snap_down_a_step(brickmap);
         }
         self.clamp_to_world();
+
+        // Entering water from dry space produces a ripple. Its strength comes
+        // from the entry velocity; standing still or merely sinking remains
+        // below the minimum threshold.
+        self.update_submersion(brickmap);
+        let entry_speed =
+            (downward_speed_before_motion.powi(2) + horizontal.length_squared()).sqrt();
+        let entering_water =
+            submersion_before_motion == Submersion::Dry && self.submersion != Submersion::Dry;
+        let wading_motion = submersion_before_motion == Submersion::Wading
+            && self.submersion == Submersion::Wading
+            && horizontal.length_squared() > 1.0e-8;
+        if (entering_water || wading_motion)
+            && entry_speed > 0.1
+            && self.water_splash_cooldown_seconds <= 0.0
+        {
+            self.water_splash_cooldown_seconds = 0.2;
+            self.pending_water_splash = Some(WaterSplash {
+                position_meters: self.feet_position,
+                // Normalize the impact speed to a full-strength fall while
+                // retaining a visible floor for ordinary wading entry.
+                strength: (entry_speed / 8.0).clamp(0.1, 1.0),
+            });
+        }
     }
 
     /// Gravity, jump, buoyancy and water drag — the only place vertical velocity
@@ -1120,6 +1177,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn default_ground_speeds_match_the_minecraft_targets() {
+        let body = CharacterController::from_eye(Vec3::new(10.0, 20.0, 30.0), 0.0, 0.0);
+        let sprint = CameraInput {
+            speed_multiplier: 100.0,
+            ..CameraInput::default()
+        };
+        let sneak = CameraInput {
+            sneak: true,
+            ..CameraInput::default()
+        };
+
+        assert!((body.planar_speed(&CameraInput::default()) - 4.317).abs() < 1e-3);
+        assert!((body.planar_speed(&sprint) - 5.612).abs() < 1e-3);
+        assert!((body.planar_speed(&sneak) - 1.295).abs() < 1e-3);
+        assert!((body.settings.terminal_velocity - 77.71).abs() < f32::EPSILON);
+    }
+
     /// A wall taller than the step height stops the body dead, outside the wall,
     /// and does not lift it.
     #[test]
@@ -1318,9 +1393,11 @@ mod tests {
             0.0,
         );
         let mut saw_swimming = false;
+        let mut saw_splash = false;
         for _ in 0..600 {
             body.step(&brickmap, &CameraInput::default(), 1.0 / 60.0);
             saw_swimming |= body.submersion() == Submersion::Swimming;
+            saw_splash |= body.take_water_splash().is_some();
             assert!(!body_overlaps_solid(
                 &brickmap,
                 body.feet_position,
@@ -1330,6 +1407,10 @@ mod tests {
         assert!(
             saw_swimming,
             "falling into deep water never entered swim mode"
+        );
+        assert!(
+            saw_splash,
+            "a downward dry-to-water crossing must emit one splash"
         );
         // The last second must be a stable float, not a bob between states.
         let mut lowest = f32::INFINITY;
@@ -1389,10 +1470,12 @@ mod tests {
         );
         let mut saw_wading = false;
         let mut saw_swimming = false;
+        let mut saw_splash = false;
         for _ in 0..300 {
             body.step(&brickmap, &walking_forward(), 1.0 / 60.0);
             saw_wading |= body.submersion() == Submersion::Wading;
             saw_swimming |= body.submersion() == Submersion::Swimming;
+            saw_splash |= body.take_water_splash().is_some();
             // Reaching swimming is the behavior under test. Continuing to
             // hold forward would now correctly let the swimmer leave over the
             // opposite water-level rim.
@@ -1410,6 +1493,10 @@ mod tests {
             saw_swimming,
             "walking into the pool never reached swimming: feet at {:?}",
             body.feet_position
+        );
+        assert!(
+            saw_splash,
+            "walking into the pool must emit a speed-scaled ripple"
         );
 
         // Resting at the surface: a stable float line, head out (regime a).

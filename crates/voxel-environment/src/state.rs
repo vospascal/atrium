@@ -109,9 +109,21 @@ impl SunSettings {
                 sun_direction: direction,
                 moon_direction: -direction,
                 active_direction: direction,
+                sun_illuminance: [
+                    SUN_COLOR[0] * SUN_INTENSITY * self.intensity_scale.max(0.0),
+                    SUN_COLOR[1] * SUN_INTENSITY * self.intensity_scale.max(0.0),
+                    SUN_COLOR[2] * SUN_INTENSITY * self.intensity_scale.max(0.0),
+                ],
+                moon_illuminance: [0.0; 3],
+                active_illuminance: [
+                    SUN_COLOR[0] * SUN_INTENSITY * self.intensity_scale.max(0.0),
+                    SUN_COLOR[1] * SUN_INTENSITY * self.intensity_scale.max(0.0),
+                    SUN_COLOR[2] * SUN_INTENSITY * self.intensity_scale.max(0.0),
+                ],
                 active_color: SUN_COLOR,
                 direct_strength: 1.0,
                 ambient_strength: 1.0,
+                ambient_scale: AMBIENT_STRENGTH * self.ambient_scale.max(0.0),
                 daylight: 1.0,
                 moonlight: 0.0,
                 zenith: [0.08, 0.31, 2.55],
@@ -151,7 +163,27 @@ impl SunSettings {
         } else {
             moonlight * phase_brightness * 0.045
         };
+        let intensity = SUN_INTENSITY * self.intensity_scale.max(0.0);
+        // Keep the physical sun source alive through the low-sun twilight band so Hillaire can
+        // colour the upper atmosphere, but remove it once the sun is well below the horizon. A
+        // full-strength source at -45° still leaked enough high-altitude scattering to keep the
+        // night sky bright even though direct lighting had correctly switched to the moon.
+        let twilight_sun = smoothstep(-0.16, 0.04, sun_direction.y);
+        let sun_illuminance = [
+            // Whether that source reaches an atmospheric sample is still decided by the LUT light
+            // ray, which rejects paths blocked by the planet. Direct surface/cloud lighting stays
+            // on `active_illuminance` and therefore switches to the moon at night.
+            sun_color[0] * intensity * twilight_sun,
+            sun_color[1] * intensity * twilight_sun,
+            sun_color[2] * intensity * twilight_sun,
+        ];
+        let moon_illuminance = [
+            moon_color[0] * intensity * if is_day { 0.0 } else { direct_strength },
+            moon_color[1] * intensity * if is_day { 0.0 } else { direct_strength },
+            moon_color[2] * intensity * if is_day { 0.0 } else { direct_strength },
+        ];
         let ambient_strength = 0.045 + daylight * 0.955 + moonlight * phase_brightness * 0.08;
+        let ambient_scale = AMBIENT_STRENGTH * self.ambient_scale.max(0.0) * ambient_strength;
 
         const NIGHT_ZENITH: [f32; 3] = [0.002, 0.004, 0.018];
         const DAY_ZENITH: [f32; 3] = [0.08, 0.31, 2.55];
@@ -170,9 +202,17 @@ impl SunSettings {
             sun_direction,
             moon_direction,
             active_direction,
+            sun_illuminance,
+            moon_illuminance,
+            active_illuminance: if is_day {
+                sun_illuminance
+            } else {
+                moon_illuminance
+            },
             active_color: if is_day { sun_color } else { moon_color },
             direct_strength,
             ambient_strength,
+            ambient_scale,
             daylight,
             moonlight,
             zenith,
@@ -232,5 +272,36 @@ mod tests {
         };
         settings.advance_day_cycle(11.0);
         assert!((settings.day_phase - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn physical_and_active_illuminance_are_separate_at_night() {
+        let night = SunSettings {
+            day_phase: 0.0,
+            ..SunSettings::default()
+        }
+        .environment_frame();
+        assert!(night.sun_illuminance.iter().all(|value| *value == 0.0));
+        assert!(night.active_illuminance.iter().any(|value| *value > 0.0));
+        assert_eq!(night.active_illuminance, night.moon_illuminance);
+    }
+
+    #[test]
+    fn twilight_keeps_a_low_sun_atmosphere_source_but_deep_night_is_dark() {
+        let sunset = SunSettings {
+            day_phase: 0.75,
+            ..SunSettings::default()
+        }
+        .environment_frame();
+        assert!(sunset.sun_direction.y.abs() < 1.0e-6);
+        assert!(sunset.sun_illuminance.iter().all(|value| *value > 0.0));
+
+        let night = SunSettings {
+            day_phase: 0.0,
+            ..SunSettings::default()
+        }
+        .environment_frame();
+        assert!(night.sun_direction.y < -0.7);
+        assert!(night.sun_illuminance.iter().all(|value| *value == 0.0));
     }
 }

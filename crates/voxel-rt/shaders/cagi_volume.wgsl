@@ -114,6 +114,23 @@ const CAGI_ENABLED: bool = true;
 const CAGI_SAMPLE_NEAREST: u32 = 0u;
 const CAGI_SAMPLE_TRILINEAR: u32 = 1u;
 const CAGI_SAMPLE_MODE: u32 = 1u;
+// CAGI_LAYOUT (docs/cagi-directional-banks-plan.md) — how the light volume
+// stores a cell:
+//   0  isotropic — ONE light word per cell, the shipped layout;
+//   1  banks6 — SIX directional light words per cell (+X,-X,+Y,-Y,+Z,-Z as
+//      banks 0-5, the direction the light TRAVELS), stored as SoA planes:
+//      bank b of cell i lives at i + b * cell_count. The D2 transport in
+//      cagi.wgsl propagates each bank directionally; omnidirectional reads
+//      (fog, the pre-D4 sampler) SUM the banks.
+const CAGI_LAYOUT_ISOTROPIC: u32 = 0u;
+const CAGI_LAYOUT_BANKS6: u32 = 1u;
+const CAGI_LAYOUT: u32 = 0u;
+// Fraction of the sky's radiance the four HORIZONTAL banks carry for a
+// sky-seeing cell (the downward bank always carries the full value) — the
+// horizon's share of the sky hemisphere. Shared because BOTH halves need it:
+// the CA injects with it, and the D4 sampler's above-the-volume sky reads must
+// agree with what the CA would have injected there.
+const CAGI_BANKS_SKY_HORIZONTAL: f32 = 0.25;
 
 // Cell attribute bits (see the header): albedo in the low 24, solid flag at 24,
 // the M2 transmittance in bits 25-28, and the S3b event-response index in 29-31.
@@ -138,6 +155,48 @@ fn cagi_cell_index(cell: vec3<u32>) -> u32 {
     return cell.x
         + cell.y * cagi_volume_meta.grid_size.x
         + cell.z * cagi_volume_meta.grid_size.x * cagi_volume_meta.grid_size.y;
+}
+
+// Cells in the whole volume — the SoA plane stride of the banks6 layout.
+// Computed from the uniform's grid size rather than carried as another uniform
+// field: the meta struct's offset table is a documented contract (src/cagi.rs)
+// and two multiplies per call are cheaper than getting that table wrong.
+fn cagi_cell_count() -> u32 {
+    return cagi_volume_meta.grid_size.x
+        * cagi_volume_meta.grid_size.y
+        * cagi_volume_meta.grid_size.z;
+}
+
+// The light-buffer index of `bank` for the cell at `cell_index`. Bank 0 aliases
+// the isotropic index in BOTH layouts, so callers that mean "the cell's only
+// word" under isotropic can pass bank 0 unconditionally.
+fn cagi_light_index(cell_index: u32, bank: u32) -> u32 {
+    if (CAGI_LAYOUT == CAGI_LAYOUT_BANKS6) {
+        return cell_index + bank * cagi_cell_count();
+    }
+    return cell_index;
+}
+
+// Bank order: +X, -X, +Y, -Y, +Z, -Z — the direction the bank's light is
+// TRAVELLING (not arriving from). `bank ^ 1u` is therefore the reversed bank,
+// which is what a D3 bounce reflects into.
+fn cagi_bank_direction(bank: u32) -> vec3<i32> {
+    let axis = bank >> 1u;
+    let sign = select(1, -1, (bank & 1u) == 1u);
+    if (axis == 0u) {
+        return vec3<i32>(sign, 0, 0);
+    }
+    if (axis == 1u) {
+        return vec3<i32>(0, sign, 0);
+    }
+    return vec3<i32>(0, 0, sign);
+}
+
+// The bank whose direction is `direction` (must be a unit face offset).
+fn cagi_direction_bank(direction: vec3<i32>) -> u32 {
+    let axis = select(select(2u, 1u, direction.y != 0), 0u, direction.x != 0);
+    let component = direction.x + direction.y + direction.z;
+    return axis * 2u + select(0u, 1u, component < 0);
 }
 
 fn cagi_pack(light: vec3<u32>) -> u32 {
@@ -181,14 +240,26 @@ fn cagi_quantize(radiance: vec3<f32>) -> vec3<u32> {
 // and what a sample above the volume's clamped top reads. Same hemisphere
 // constants the E1c ambient used, so switching CAGI on cannot change the overall
 // exposure of open ground, only its distribution.
-fn cagi_sky_radiance() -> vec3<f32> {
-    // Sky-visible cells receive the same LUT-derived zenith irradiance as the
-    // surface path. CAGI then transports this value only through neighbours.
-    return environment_hillaire_sky(vec3<f32>(0.0, 1.0, 0.0)) * lighting.sky_ambient.w;
+// Takes a CELL, because the sky a cell sees depends on whether a cloud is over that cell.
+//
+// This used to read `environment_hillaire_sky(vec3(0, 1, 0))` — the zenith, so blue at sunset
+// while the warm light sits at the horizon — and it was blind to the deck, so an overcast sky
+// injected full clear-sky radiance into the volume. Both are fixed by routing through the same
+// `environment_sky_ambient_at` the surface path uses: one definition of "what light comes from
+// above", so the volume and the surface cannot disagree about the weather.
+fn cagi_sky_radiance(cell: vec3<i32>) -> vec3<f32> {
+    // The cell centre computed HERE rather than through `cagi_cell_center_voxels`: that helper
+    // lives in `cagi.wgsl`, which this module is imported BY rather than imports, and it is absent
+    // from the shading pass entirely. Two lines beats inverting the dependency.
+    let centre_voxels = (vec3<f32>(cell) + vec3<f32>(0.5)) * cagi_volume_meta.cell_size_voxels;
+    return environment_sky_ambient_at(
+        centre_voxels * brickmap.voxel_size_meters,
+        vec3<f32>(0.0, 1.0, 0.0),
+    ) * atmosphere.ambient_scale;
 }
 
-fn cagi_sky_light() -> vec3<u32> {
-    return cagi_quantize(cagi_sky_radiance());
+fn cagi_sky_light(cell: vec3<i32>) -> vec3<u32> {
+    return cagi_quantize(cagi_sky_radiance(cell));
 }
 
 // A cell's static attributes (out of grid = solid, so nothing leaks in from
@@ -229,22 +300,127 @@ fn cagi_cell_albedo(attributes: u32) -> vec3<f32> {
 }
 
 // Light stored in one cell, in [0, CAGI_RADIANCE_MAX] radiance. Out of grid: black, except
-// ABOVE the volume's clamped top, which is open sky. Solid cells always hold 0
-// (the CA writes it every iteration), so no attribute read is needed here.
+// ABOVE the volume's clamped top, which is open sky. No attribute read: under
+// isotropic a solid cell holds 0 (or its M2/E5b hand-back, which is what a
+// reader SHOULD see); under banks a solid holds its outgoing bounce banks —
+// samplers that must not read through surfaces drop solid taps themselves
+// (`cagi_sample_trilinear`, `cagi_banks_sample_trilinear`).
+//
+// Under banks6 this is the SUM of the six directional banks. The D2 injection
+// discipline is "sum over banks ~= the isotropic word" (an emitter splits its
+// radiance across the banks it feeds), so summing here keeps every consumer —
+// the surface sampler until D4, fog, the debug readouts — at the same overall
+// exposure as the isotropic layout. D4 replaces the surface path with a
+// normal-weighted blend; this stays the omnidirectional read.
 fn cagi_cell_radiance(cell: vec3<i32>) -> vec3<f32> {
     let grid = vec3<i32>(cagi_volume_meta.grid_size);
     if (cell.y >= grid.y) {
-        return cagi_sky_radiance();
+        return cagi_sky_radiance(cell);
     }
     if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= grid)) {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
-    return cagi_radiance(cagi_unpack(light_volume[cagi_cell_index(vec3<u32>(cell))]));
+    let cell_index = cagi_cell_index(vec3<u32>(cell));
+    if (CAGI_LAYOUT == CAGI_LAYOUT_BANKS6) {
+        var light = vec3<u32>(0u, 0u, 0u);
+        for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+            light = light + cagi_unpack(light_volume[cagi_light_index(cell_index, bank)]);
+        }
+        return cagi_radiance(light);
+    }
+    return cagi_radiance(cagi_unpack(light_volume[cell_index]));
 }
 
 // Cell coordinate containing a point given in VOXEL units.
 fn cagi_cell_of(position_voxels: vec3<f32>) -> vec3<i32> {
     return vec3<i32>(floor(position_voxels / cagi_volume_meta.cell_size_voxels));
+}
+
+// ---- D4: the directional surface read (banks6) ---------------------------------
+// A surface with outward `normal` receives bank d in proportion to how squarely
+// d's light arrives INTO the face: weight = max(0, dot(-normal, direction_d)).
+// For the axis banks those weights are just the clamped components of -normal,
+// so at most three banks contribute for any normal. No normalization constant,
+// deliberately: ground under open sky reads the downward bank at weight 1 —
+// the full sky value, exactly what the isotropic layout's flooded cell held —
+// while a wall reads the horizon share. Directionality changes WALLS, not the
+// overall exposure anchor.
+//
+// The radiance arriving at a face with `normal`, stored in one cell.
+// Above-the-volume reads reconstruct what the CA injects at the boundary (full
+// sky downward, the horizon fraction horizontally), so a sample against the
+// clamped top agrees with the transport.
+fn cagi_cell_arriving_radiance(cell: vec3<i32>, normal: vec3<f32>) -> vec3<f32> {
+    let toward_face = -normal;
+    let positive = max(toward_face, vec3<f32>(0.0)); // weights of banks +X, +Y, +Z
+    let negative = max(-toward_face, vec3<f32>(0.0)); // weights of banks -X, -Y, -Z
+    let grid = vec3<i32>(cagi_volume_meta.grid_size);
+    if (cell.y >= grid.y) {
+        let sky = cagi_sky_radiance(cell);
+        let horizontal_weight = positive.x + negative.x + positive.z + negative.z;
+        return sky * (negative.y + horizontal_weight * CAGI_BANKS_SKY_HORIZONTAL);
+    }
+    if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= grid)) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let cell_index = cagi_cell_index(vec3<u32>(cell));
+    // Unrolled per axis with STATIC bank indices — a dynamically indexed local
+    // array spills to scratch memory under naga/Metal, and this function runs
+    // 8x per surface sample. An axis-aligned voxel face takes exactly ONE of
+    // the six loads, the same count as the isotropic sampler.
+    let stride = cagi_cell_count();
+    var light = vec3<f32>(0.0, 0.0, 0.0);
+    if (positive.x > 0.0) {
+        light = light + cagi_radiance(cagi_unpack(light_volume[cell_index])) * positive.x;
+    } else if (negative.x > 0.0) {
+        light = light
+            + cagi_radiance(cagi_unpack(light_volume[cell_index + stride])) * negative.x;
+    }
+    if (positive.y > 0.0) {
+        light = light
+            + cagi_radiance(cagi_unpack(light_volume[cell_index + 2u * stride])) * positive.y;
+    } else if (negative.y > 0.0) {
+        light = light
+            + cagi_radiance(cagi_unpack(light_volume[cell_index + 3u * stride])) * negative.y;
+    }
+    if (positive.z > 0.0) {
+        light = light
+            + cagi_radiance(cagi_unpack(light_volume[cell_index + 4u * stride])) * positive.z;
+    } else if (negative.z > 0.0) {
+        light = light
+            + cagi_radiance(cagi_unpack(light_volume[cell_index + 5u * stride])) * negative.z;
+    }
+    return light;
+}
+
+// The banks twin of `cagi_sample_trilinear`: the same 8-tap stencil, the same
+// dropped-solid-tap renormalization, but each tap is the directional arriving
+// read instead of the omnidirectional sum.
+fn cagi_banks_sample_trilinear(position_voxels: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let cell_space = position_voxels / cagi_volume_meta.cell_size_voxels - vec3<f32>(0.5);
+    let base = vec3<i32>(floor(cell_space));
+    let fraction = cell_space - floor(cell_space);
+    var radiance_sum = vec3<f32>(0.0, 0.0, 0.0);
+    var weight_sum = 0.0;
+    for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+        let offset = vec3<i32>(i32(corner & 1u), i32((corner >> 1u) & 1u),
+                               i32((corner >> 2u) & 1u));
+        let cell = base + offset;
+        let blend = select(vec3<f32>(1.0) - fraction, fraction, offset == vec3<i32>(1, 1, 1));
+        let weight = blend.x * blend.y * blend.z;
+        if (weight <= 0.0) {
+            continue;
+        }
+        if (cell.y < i32(cagi_volume_meta.grid_size.y) && cagi_cell_is_solid(cell)) {
+            continue;
+        }
+        radiance_sum = radiance_sum + cagi_cell_arriving_radiance(cell, normal) * weight;
+        weight_sum = weight_sum + weight;
+    }
+    if (weight_sum <= 1e-4) {
+        return cagi_cell_arriving_radiance(cagi_cell_of(position_voxels), normal);
+    }
+    return radiance_sum / weight_sum;
 }
 
 // Trilinear blend of the eight cells around `position_voxels`, with SOLID taps
@@ -291,6 +467,12 @@ fn cagi_sample_surface(surface_point: vec3<f32>, normal: vec3<f32>) -> vec3<f32>
             break;
         }
         position = position + step;
+    }
+    if (CAGI_LAYOUT == CAGI_LAYOUT_BANKS6) {
+        if (CAGI_SAMPLE_MODE == CAGI_SAMPLE_TRILINEAR) {
+            return cagi_banks_sample_trilinear(position, normal);
+        }
+        return cagi_cell_arriving_radiance(cagi_cell_of(position), normal);
     }
     if (CAGI_SAMPLE_MODE == CAGI_SAMPLE_TRILINEAR) {
         return cagi_sample_trilinear(position);

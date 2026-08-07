@@ -397,9 +397,18 @@ mod tests {
         };
         let mut bytes = Vec::new();
         data.write_vox(&mut bytes).expect("write");
+        // Distinct per call AND per process. The thread name alone is not enough: it is the
+        // *test* name, so it is stable across runs, and two concurrent `cargo test` invocations
+        // — a second agent working in the same tree, or two CI jobs — land on the identical path
+        // and one deletes the file while the other is loading it. Observed as an intermittent
+        // failure of `the_refractive_index_has_the_format_offset_removed`, which passed in
+        // isolation every time. The pid separates processes; the counter separates calls within
+        // one test.
+        static CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let call = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "voxel_core_vox_test_{}.vox",
-            // Distinct per call so parallel tests cannot collide on one path.
+            "voxel_core_vox_test_{}_{}_{call}.vox",
+            std::process::id(),
             std::thread::current()
                 .name()
                 .unwrap_or("unnamed")

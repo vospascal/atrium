@@ -12,6 +12,7 @@ pub mod color_ramp;
 pub mod constant_color;
 pub mod constant_scalar;
 pub mod direction;
+pub mod displacement;
 pub mod dot_vector;
 pub mod emission;
 pub mod emission_strength;
@@ -29,6 +30,7 @@ pub mod oscillator;
 pub mod output;
 pub mod passthrough_scalar;
 pub mod pattern_checker;
+pub mod pattern_edge_band;
 pub mod pattern_flat;
 pub mod pattern_layer;
 pub mod pattern_noise;
@@ -85,6 +87,8 @@ pub const NODES: &[NodeDeclaration] = &[
     pattern_worley_smooth::DECLARATION,
     pattern_wave::DECLARATION,
     pattern_checker::DECLARATION,
+    pattern_edge_band::DECLARATION,
+    displacement::DECLARATION,
     pattern_tile_tone::DECLARATION,
     pattern_tile_edge::DECLARATION,
     tessellation::DECLARATION,

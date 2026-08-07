@@ -161,6 +161,85 @@ const CAGI_EVENT_LIGHT: bool = true;
 // Fixed-point shift of both diffusion numerators (see CagiVolumeMeta).
 const CAGI_DIFFUSION_SHIFT: u32 = 12u;
 
+// ---- D2: directional-banks transport levers (CAGI_LAYOUT = banks6 only) -------
+// docs/cagi-directional-banks-plan.md. All three are UNMEASURED defaults, tuned
+// at the D2 app gate and given verdicts by D5's bench. Per-METER like every other
+// transport constant here, so the resolution lever cannot change the physics.
+//
+// Subtractive loss per meter travelled along a bank's own direction. x1m4's rule:
+// loss is subtractive, not multiplicative (`max(LOSS, L) - LOSS`), which is what
+// lets a beam reach an exact 0 that dirty-region culling (D6) can test.
+//
+// This is the convergence EPSILON, not the falloff — the reference kernel's
+// `saturating_sub(1)`. The D3 gate showed why the hierarchy matters: with the
+// subtractive term as the primary loss, radiance decays as a straight line and
+// the lit region ends at a hard visible terminator (the same artifact the
+// isotropic max-decrement rule's verdict records). The multiplicative
+// per-meter transmission below is the falloff; this just trims the tail to an
+// exact 0.
+const CAGI_BANKS_LOSS_PER_METER: f32 = 1.0;
+// The lateral pull's loss, as a multiple of the direct loss. Light travelling +X
+// also seeps into the +X banks of side neighbours — the heat-conduction spread —
+// but with a steeper falloff, so a beam widens without dissolving.
+const CAGI_BANKS_SIDE_LOSS_MULTIPLIER: f32 = 4.0;
+// Per-METER fraction of a bank that scatters into the four PERPENDICULAR banks
+// each step (a quarter each) — the direction-decay term of x1m4's per-axis
+// diffusion, which D2 first shipped without: transport keeps a beam's label
+// forever, so lava's upward column stayed "upward light" after wrapping over a
+// wall and painted every bottom face behind it.
+//
+// PERPENDICULAR, deliberately NOT the opposite bank, and this is a measured
+// deviation from the literal `mix(lightpy, lightny, x)` reading: opposite-bank
+// mixing manufactures backward-travelling light along every beam, which is
+// exactly the bank the surface behind a wall samples — the D4 gate showed it
+// as light "coming through everywhere". Real air scattering is small-angle:
+// sideways is common, full reversal is not. With perpendicular scatter a beam
+// still forgets its direction (reversal takes two hops, mix^2 per meter
+// squared — negligible), but no wall face ever gets fed directly.
+const CAGI_BANKS_DIRECTION_MIX: f32 = 0.08;
+// The corner-seal's PARTIAL tier (TML's DIAGONAL_PARTIAL_OCCLUDED_ATTENUATION):
+// the fraction of a lateral seep that survives grazing a wall edge — the seep
+// into cell C of bank d from lateral neighbour L cuts the diagonal bracketed
+// by C-d and L; both solid seals it to ZERO (the classic flood-fill
+// wall-join leak), exactly one solid pays this fraction. This is what stops
+// the over-the-wall wrap band from re-seeding beams down a wall's shadow face
+// at full strength — the D4 gate's "comes through everywhere".
+const CAGI_BANKS_SEAL_PARTIAL: f32 = 0.25;
+const CAGI_BANKS_SEAL_PARTIAL_NUMERATOR: u32 = u32(CAGI_BANKS_SEAL_PARTIAL * 4096.0);
+// CAGI_BANKS_SKY_HORIZONTAL lives in cagi_volume.wgsl since D4: the sampler's
+// above-the-volume sky reads must agree with what the CA injects.
+// Multiplicative transmission per meter of air, applied to the transport ON TOP
+// of the subtractive losses — the reference kernel carries both (its DECAY plus
+// DIRECT/SIDE attenuations), and the D3 gate showed why: with subtractive loss
+// alone, reach scales LINEARLY with injected energy, so a lava cell at the HDR
+// ceiling (level 8184) out-reaches the sky (level ~1023) eight to one and eats
+// the scene. Exponential decay caps bright point sources at a sane radius while
+// open-air sky light, re-injected at every sky-seeing cell, is untouched.
+//
+// 0.7 is MEASURED (CPU probe, 2026-08-07, lava-vs-wall scene): the isotropic
+// path's 0.884 was calibrated for a rule whose /6 averaging did the real
+// attenuation; under max-transport banks it left the shadow behind a 10-cell
+// wall at 1/4-1/10 of the lit side. At 0.7 the shadow floor is level <=30
+// (a soft rim hugging the wall edges) while the lit side keeps levels
+// 500-1800 at 6-7 m; at 0.6 the shadow is exactly 0 but the emitter radius
+// visibly halves.
+const CAGI_BANKS_TRANSMISSION_PER_METER: f32 = 0.7;
+// D3: the propagated bounce's energy fraction, ON TOP of the surface albedo —
+// the stand-in for the solid angle a bounce surface subtends (the isotropic
+// E5b note records why interreflection must lose energy to geometry, not only
+// to albedo: at snow's 0.92 albedo an un-penalized bounce turns a corridor
+// into a light pipe). Loop gain = albedo * this, always below one, so the
+// reflect-and-return flood contracts to a fixed point.
+const CAGI_BANKS_BOUNCE: f32 = 0.5;
+// Fixed-point form of the fractions the banks path multiplies with.
+const CAGI_BANKS_SKY_HORIZONTAL_NUMERATOR: u32 =
+    u32(CAGI_BANKS_SKY_HORIZONTAL * 4096.0);
+const CAGI_BANKS_BOUNCE_NUMERATOR: u32 = u32(CAGI_BANKS_BOUNCE * 4096.0);
+// 1/6 in the diffusion fixed point: an omnidirectional emitter splits its
+// radiance evenly over the six banks, keeping "sum over banks ~= the isotropic
+// word" true for every consumer that sums (fog, the interim sampler).
+const CAGI_BANKS_SIXTH_NUMERATOR: u32 = 683u;
+
 // Light in a neighbour cell as an integer level. One load per neighbour is the
 // whole cost of the stencil: no attribute read is needed, because a solid cell's
 // own light word already encodes what it contributes — 0 without
@@ -168,7 +247,7 @@ const CAGI_DIFFUSION_SHIFT: u32 = 12u;
 fn cagi_neighbour_light(cell: vec3<i32>) -> vec3<u32> {
     let grid = vec3<i32>(cagi_volume_meta.grid_size);
     if (cell.y >= grid.y) {
-        return cagi_sky_light(); // above the clamped volume top: open sky
+        return cagi_sky_light(cell); // above the clamped volume top: open sky
     }
     if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= grid)) {
         return vec3<u32>(0u, 0u, 0u);
@@ -344,7 +423,10 @@ fn cagi_sun_bounce(cell: vec3<i32>) -> vec3<f32> {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
     let cell_world_position = cagi_cell_center_voxels(cell) * brickmap.voxel_size_meters;
-    let transmittance = environment_sun_transmittance_at(
+    // Atmosphere AND cloud deck. The `_with_clouds` form is the same lookup with the shadow
+    // map folded in, so a cloud passing overhead dims what this cell injects — which is what
+    // propagates the shadow down through the volume rather than only darkening the surface.
+    let transmittance = environment_sun_transmittance_with_clouds(
         cell_world_position,
         lighting.sun_direction,
     );
@@ -480,6 +562,270 @@ fn cagi_emitter_bounce(cell: vec3<i32>) -> vec3<f32> {
     return brightest;
 }
 
+// ---- D2: the directional-banks transport (CAGI_LAYOUT = banks6) ---------------
+// docs/cagi-directional-banks-plan.md. Bank d holds light TRAVELLING in
+// direction d. Transport per bank: the beam continues from the upstream
+// neighbour's same bank (direct), and seeps in from the four lateral
+// neighbours' same bank with a steeper loss (the heat-conduction spread). Both
+// losses are SUBTRACTIVE — max(L, loss) - loss — per x1m4's rule, composed with
+// max like everything else in this volume so the flood converges to a fixed
+// point and can reach an exact 0.
+
+// Per-step integer losses (direct, side), derived from the per-meter levers so
+// the resolution lever cannot change the reach.
+fn cagi_banks_losses() -> vec2<u32> {
+    let cell_meters = cagi_volume_meta.cell_size_voxels * brickmap.voxel_size_meters;
+    let direct = max(1u, u32(round(CAGI_BANKS_LOSS_PER_METER * cell_meters)));
+    let side = max(direct + 1u,
+        u32(round(CAGI_BANKS_LOSS_PER_METER * CAGI_BANKS_SIDE_LOSS_MULTIPLIER * cell_meters)));
+    return vec2<u32>(direct, side);
+}
+
+// The multiplicative per-step transmission, in the diffusion fixed point.
+fn cagi_banks_transmission_numerator() -> u32 {
+    let cell_meters = cagi_volume_meta.cell_size_voxels * brickmap.voxel_size_meters;
+    return u32(pow(CAGI_BANKS_TRANSMISSION_PER_METER, cell_meters) * 4096.0);
+}
+
+// The per-step opposing-bank mix, in the diffusion fixed point. Per meter like
+// every other transport constant: the per-step retention is
+// (1 - mix_per_meter)^cell_meters, so the direction half-life is resolution
+// independent.
+fn cagi_banks_direction_mix_numerator() -> u32 {
+    let cell_meters = cagi_volume_meta.cell_size_voxels * brickmap.voxel_size_meters;
+    let retained = pow(1.0 - CAGI_BANKS_DIRECTION_MIX, cell_meters);
+    return u32((1.0 - retained) * 4096.0);
+}
+
+// Bank `bank` of a neighbour cell. Above the volume's clamped top is open sky:
+// the downward bank reads the full sky, the four horizontal banks its horizon
+// fraction, and the upward bank nothing — the directional split of what
+// `cagi_neighbour_light` answers isotropically. Everywhere else out of grid is
+// black, exactly like the isotropic rule.
+fn cagi_banks_neighbour_light(cell: vec3<i32>, bank: u32) -> vec3<u32> {
+    let grid = vec3<i32>(cagi_volume_meta.grid_size);
+    if (cell.y >= grid.y) {
+        if (bank == 3u) {
+            return cagi_sky_light(cell);
+        }
+        if (bank != 2u) {
+            return (cagi_sky_light(cell) * CAGI_BANKS_SKY_HORIZONTAL_NUMERATOR)
+                >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+        }
+        return vec3<u32>(0u, 0u, 0u);
+    }
+    if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= grid)) {
+        return vec3<u32>(0u, 0u, 0u);
+    }
+    let cell_index = cagi_cell_index(vec3<u32>(cell));
+    return cagi_unpack(light_volume[cagi_light_index(cell_index, bank)]);
+}
+
+// The banks path of the CA, one cell per call. Writes all six bank words.
+fn cagi_banks_main(index: u32, cell: vec3<i32>, attributes: u32) {
+    if ((attributes & CAGI_CELL_SOLID) != 0u) {
+        // An emissive solid radiates from every face: a sixth per bank keeps the
+        // banks' sum equal to the isotropic word the E5 path would have pinned.
+        var emission_sixth = vec3<u32>(0u, 0u, 0u);
+        if (CAGI_EMISSIVE) {
+            let emission = cagi_cell_emission_live(index, attributes, cell);
+            if (any(emission > vec3<f32>(0.0))) {
+                emission_sixth = (cagi_quantize(emission) * CAGI_BANKS_SIXTH_NUMERATOR)
+                    >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+            }
+        }
+        // D3: what a solid cell hands back to the volume, PER BANK — this is
+        // where banks pay off. Its bank d holds light LEAVING it travelling d:
+        //
+        //   * E5b reflectance — TooManyLimits' kernel, `input[(dir+2)%4] *
+        //     color`: the light that ARRIVED travelling d's reverse (read from
+        //     the neighbour that light came through, at cell + dir(d), bank
+        //     d^1), tinted by the albedo and cut by CAGI_BANKS_BOUNCE. The
+        //     direction REVERSAL is what makes a bounce read as a bounce; air
+        //     cells pick it up as their ordinary direct-upstream term at full
+        //     strength, so no isotropic-style direct-read bypass is needed.
+        //     At the volume top this reflects the sky's downward bank upward —
+        //     ground bounce, directional, for free.
+        //   * M2 transmission — bank d continues THROUGH from the upstream
+        //     neighbour at cell - dir(d), scaled by the material's transmitted
+        //     fraction (foliage), direction preserved.
+        //
+        // Combined per bank with max (a photon transmits or reflects, never
+        // both) and paying the direct step loss, so a bounce can never outrun
+        // direct light. Both factors are below one: the flood still contracts.
+        var albedo_numerator = vec3<u32>(0u, 0u, 0u);
+        if (CAGI_REFLECTANCE) {
+            albedo_numerator = vec3<u32>(
+                cagi_cell_albedo(attributes) * f32(CAGI_BANKS_BOUNCE_NUMERATOR));
+        }
+        var transmit_numerator = 0u;
+        if (CAGI_TRANSMISSION) {
+            transmit_numerator = u32(cagi_cell_transmittance(attributes) * 4096.0);
+        }
+        let direct_loss = vec3<u32>(cagi_banks_losses().x);
+        for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+            var outgoing = vec3<u32>(0u, 0u, 0u);
+            if (CAGI_REFLECTANCE && any(albedo_numerator > vec3<u32>(0u))) {
+                let arriving = cagi_banks_neighbour_light(
+                    cell + cagi_bank_direction(bank), bank ^ 1u);
+                outgoing = (arriving * albedo_numerator) >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+            }
+            if (CAGI_TRANSMISSION && transmit_numerator > 0u) {
+                let through = cagi_banks_neighbour_light(
+                    cell - cagi_bank_direction(bank), bank);
+                outgoing = max(outgoing,
+                    (through * transmit_numerator) >> vec3<u32>(CAGI_DIFFUSION_SHIFT));
+            }
+            outgoing = max(outgoing, direct_loss) - direct_loss;
+            light_volume_out[cagi_light_index(index, bank)] =
+                cagi_pack(max(outgoing, emission_sixth));
+        }
+        return;
+    }
+
+    // ---- Injection, gathered per bank before the transport loop ----
+    var injected: array<vec3<u32>, 6>;
+    for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+        injected[bank] = vec3<u32>(0u, 0u, 0u);
+    }
+    if (cagi_cell_sees_sky(cell)) {
+        let sky = cagi_sky_light(cell);
+        injected[3u] = sky; // downward
+        let horizontal = (sky * CAGI_BANKS_SKY_HORIZONTAL_NUMERATOR)
+            >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+        injected[0u] = horizontal;
+        injected[1u] = horizontal;
+        injected[4u] = horizontal;
+        injected[5u] = horizontal;
+    }
+    // A thin-cover emitter is omnidirectional: a sixth per bank (sum ~= E).
+    if (CAGI_EMISSIVE) {
+        let own = cagi_quantize(cagi_cell_emission_live(index, attributes, cell));
+        if (any(own > vec3<u32>(0u))) {
+            let sixth = (own * CAGI_BANKS_SIXTH_NUMERATOR) >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+            for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+                injected[bank] = max(injected[bank], sixth);
+            }
+        }
+    }
+    // The directional injections: both walk the six solid face neighbours, and
+    // both inject into the bank pointing FROM the neighbour INTO this cell —
+    // the bounce surface's normal. This is where banks EARN their memory: the
+    // sun bounce and an emissive wall light the air directionally instead of
+    // dissolving into an average.
+    let sun = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w;
+    var sun_transmittance = vec3<f32>(-1.0, -1.0, -1.0); // lazily fetched once
+    let grid = vec3<i32>(cagi_volume_meta.grid_size);
+    // One attribute read per face neighbour, shared by this injection walk and
+    // the transport loop's corner seal — which previously re-read the same six
+    // cells up to 30 times per cell. Out of grid reads as solid, which is what
+    // the seal wants; the injection paths below still bounds-check before
+    // touching cell_data.
+    var neighbour_attribute: array<u32, 6>;
+    for (var direction = 0u; direction < 6u; direction = direction + 1u) {
+        neighbour_attribute[direction] =
+            cagi_attributes_of(cell + cagi_bank_direction(direction));
+    }
+    for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+        let offset = cagi_bank_direction(bank);
+        let neighbour = cell + offset;
+        if (any(neighbour < vec3<i32>(0, 0, 0)) || any(neighbour >= grid)) {
+            continue;
+        }
+        let neighbour_attributes = neighbour_attribute[bank];
+        if ((neighbour_attributes & CAGI_CELL_SOLID) == 0u) {
+            continue;
+        }
+        let neighbour_index = cagi_cell_index(vec3<u32>(neighbour));
+        // Light leaves the surface travelling opposite the offset that reached it.
+        let into_cell = bank ^ 1u;
+        // E5c, directional: the emissive neighbour's radiance enters ONE bank at
+        // full strength — the directional version of `cagi_emitter_bounce`.
+        if (CAGI_EMISSIVE && CAGI_EMITTER_BOUNCE) {
+            let emission = cagi_cell_emission_live(
+                neighbour_index, neighbour_attributes, neighbour);
+            injected[into_cell] = max(injected[into_cell], cagi_quantize(emission));
+        }
+        // Sun bounce, directional: same LUT-transmittance injection as the
+        // isotropic `cagi_sun_bounce`, but each surface feeds only the bank its
+        // normal points along, and no lambert-mean is needed — banks keep the
+        // per-surface terms separate by construction.
+        let normal = -vec3<f32>(offset);
+        let lambert = max(dot(normal, lighting.sun_direction), 0.0);
+        if (lambert > 0.0) {
+            if (sun_transmittance.x < 0.0) {
+                let cell_world_position =
+                    cagi_cell_center_voxels(cell) * brickmap.voxel_size_meters;
+                sun_transmittance = environment_sun_transmittance_with_clouds(
+                    cell_world_position, lighting.sun_direction);
+            }
+            let bounce = sun * sun_transmittance * lighting.gi_params.z
+                * cagi_cell_albedo(neighbour_attributes) * lambert;
+            injected[into_cell] = max(injected[into_cell], cagi_quantize(bounce));
+        }
+    }
+
+    // ---- Transport, per bank ----
+    let losses = cagi_banks_losses();
+    let transmission = cagi_banks_transmission_numerator();
+    var banks: array<vec3<u32>, 6>;
+    for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+        let direction = cagi_bank_direction(bank);
+        let direct = (cagi_banks_neighbour_light(cell - direction, bank) * transmission)
+            >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+        // Corner-seal bracket, half one: the cell's own upstream along the
+        // beam (the hoisted attribute of the REVERSED direction's neighbour).
+        // Solid means this cell sits in the beam's shadow pocket (just behind
+        // a wall crest) and a lateral seep would be cutting the corner.
+        let upstream_solid = (neighbour_attribute[bank ^ 1u] & CAGI_CELL_SOLID) != 0u;
+        var side = vec3<u32>(0u, 0u, 0u);
+        for (var lateral = 0u; lateral < 6u; lateral = lateral + 1u) {
+            if ((lateral >> 1u) == (bank >> 1u)) {
+                continue; // own axis: upstream is the direct term, downstream is behind the beam
+            }
+            // Bracket half two: the lateral source itself (solid only when its
+            // light is a bounce hand-back).
+            let lateral_solid = (neighbour_attribute[lateral] & CAGI_CELL_SOLID) != 0u;
+            if (upstream_solid && lateral_solid) {
+                continue; // sealed corner: light cannot cut the wall join
+            }
+            var seep = cagi_banks_neighbour_light(cell + cagi_bank_direction(lateral), bank);
+            if (upstream_solid || lateral_solid) {
+                seep = (seep * CAGI_BANKS_SEAL_PARTIAL_NUMERATOR)
+                    >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+            }
+            side = max(side, seep);
+        }
+        side = (side * transmission) >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+        let direct_loss = vec3<u32>(losses.x);
+        let side_loss = vec3<u32>(losses.y);
+        let propagated = max(
+            max(direct, direct_loss) - direct_loss,
+            max(side, side_loss) - side_loss,
+        );
+        banks[bank] = max(propagated, injected[bank]);
+    }
+    // ---- Direction decay + write ----
+    // Each bank keeps (1 - mix) of itself and receives a quarter of the mix
+    // fraction from each of its four PERPENDICULAR banks (see the lever note:
+    // never the opposite — that feeds the faces behind walls). The perpendicular
+    // sum is total - own - opposite. Conservative across the six banks, so the
+    // bank SUM (fog, exposure) is untouched.
+    let mix_numerator = cagi_banks_direction_mix_numerator();
+    let keep_numerator = 4096u - mix_numerator;
+    let quarter_mix = mix_numerator >> 2u;
+    var total = vec3<u32>(0u, 0u, 0u);
+    for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+        total = total + banks[bank];
+    }
+    for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+        let perpendicular = total - banks[bank] - banks[bank ^ 1u];
+        let mixed = (banks[bank] * keep_numerator + perpendicular * quarter_mix)
+            >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
+        light_volume_out[cagi_light_index(index, bank)] = cagi_pack(mixed);
+    }
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let grid = cagi_volume_meta.grid_size;
@@ -490,6 +836,10 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let cell = vec3<i32>(invocation);
 
     let attributes = cagi_cell_attribute(index);
+    if (CAGI_LAYOUT == CAGI_LAYOUT_BANKS6) {
+        cagi_banks_main(index, cell, attributes);
+        return;
+    }
     if ((attributes & CAGI_CELL_SOLID) != 0u) {
         // An emissive solid is a SOURCE, not an absorber: it pins its own
         // radiance every iteration so the air cells around it read it as a
@@ -544,7 +894,7 @@ fn cagi_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
 
     var emission = vec3<u32>(0u, 0u, 0u);
     if (cagi_cell_sees_sky(cell)) {
-        emission = cagi_sky_light();
+        emission = cagi_sky_light(cell);
     }
     // A thin-cover emitter (berries) rarely reaches the quarter-fill solid
     // threshold, so it lands here instead: same injection, clamped from below

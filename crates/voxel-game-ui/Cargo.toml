@@ -9,6 +9,7 @@ description = "Game-facing panels: the settings window and the performance reado
 [dependencies]
 atrium-profile = { path = "../profile", features = ["gpu"] }
 egui = "0.35"
+voxel-core = { path = "../voxel-core" }
 voxel-color = { path = "../voxel-color" }
 voxel-environment = { path = "../voxel-environment" }
 voxel-rt = { path = "../voxel-rt" }

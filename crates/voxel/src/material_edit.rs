@@ -53,11 +53,79 @@ pub const WORLD_HOTBAR_BLOCKS: [Voxel; 9] = [
     Voxel::Lava,
 ];
 
+/// Temporary renderer inspection modes. These never modify the authored
+/// material; they only change what the DDA pass displays for debugging.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaterialDebugView {
+    Lit,
+    BaseColor,
+    Specular,
+    AmbientOcclusion,
+    Displacement,
+    Roughness,
+    Normal,
+    Emission,
+    Lod,
+}
+
+impl Default for MaterialDebugView {
+    fn default() -> Self {
+        Self::Lit
+    }
+}
+
+impl MaterialDebugView {
+    pub const ALL: [Self; 9] = [
+        Self::Lit,
+        Self::BaseColor,
+        Self::Specular,
+        Self::AmbientOcclusion,
+        Self::Displacement,
+        Self::Roughness,
+        Self::Normal,
+        Self::Emission,
+        Self::Lod,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Lit => "Lit material",
+            Self::BaseColor => "Base color",
+            Self::Specular => "Specular",
+            Self::AmbientOcclusion => "Ambient occlusion",
+            Self::Displacement => "Displacement / height",
+            Self::Roughness => "Roughness",
+            Self::Normal => "Normal",
+            Self::Emission => "Emission",
+            Self::Lod => "Pattern LOD",
+        }
+    }
+
+    pub const fn shader_mode(self) -> u32 {
+        match self {
+            Self::Lit => 0,
+            Self::BaseColor => 1,
+            Self::Specular => 2,
+            Self::AmbientOcclusion => 3,
+            Self::Displacement => 4,
+            Self::Roughness => 5,
+            Self::Normal => 6,
+            Self::Emission => 7,
+            Self::Lod => 8,
+        }
+    }
+}
+
 /// The panel's own UI state — what is selected and what it has asked for.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MaterialPanelState {
     /// Material id currently being edited.
     pub selected: u8,
+    /// Temporary renderer inspection switch. Bit 0 is pattern layer 1, bit 1
+    /// layer 2, and so on. Four bits are enough for the renderer's fixed stack.
+    pub debug_layers_enabled: bool,
+    pub debug_layer_mask: u8,
+    pub debug_view: MaterialDebugView,
     /// The eyedropper is armed: the next world pick selects that voxel's row
     /// instead of editing the world.
     pub eyedropper_armed: bool,
@@ -69,6 +137,31 @@ pub struct MaterialPanelState {
     /// pose, because servicing it means rebuilding the world, which the platform
     /// layer owns; the pose itself lives on [`voxel_rt::studio::StudioScene`].
     pub studio_pose_requested: Option<StudioPose>,
+    /// S2 — the user asked for the studio's ground plate to be there or not. Also
+    /// one-shot, and for the same reason: the plate is world geometry, so hiding it
+    /// is a rebuild rather than a draw flag.
+    pub studio_plate_requested: Option<bool>,
+    /// S2 — the user picked what the studio's ground plate is made of. Separate from
+    /// [`Self::selected`] on purpose: the floor is scenery, the selection is the row
+    /// being EDITED, and the studio subject follows the latter.
+    pub studio_plate_material_requested: Option<u8>,
+}
+
+impl Default for MaterialPanelState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            debug_layers_enabled: false,
+            debug_layer_mask: 0b1111,
+            debug_view: MaterialDebugView::Lit,
+            eyedropper_armed: false,
+            repack_gi_requested: false,
+            import: VoxImportState::default(),
+            studio_pose_requested: None,
+            studio_plate_requested: None,
+            studio_plate_material_requested: None,
+        }
+    }
 }
 
 /// S0b — the `.vox` import panel.

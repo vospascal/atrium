@@ -8,5 +8,6 @@ pub mod noise;
 pub mod terrain_import;
 pub mod vox;
 pub mod water_sim;
+pub mod weather;
 pub mod wind;
 pub mod world;

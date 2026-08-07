@@ -24,7 +24,8 @@
 //! 4. **Presentation** — vsync and the whole output-depth / tonemap path.
 //! 5. **Quality** — the lever registry and its presets.
 //! 6. **Sun** — the day/night cycle and light scaling.
-//! 7. **Studio** — asset and project panel.
+//! 7. **Weather** — the cloud deck: named conditions, then its dials.
+//! 8. **Studio** — asset and project panel.
 //!
 //! The leaf drawing functions for 4, 5, 7 and the movement readout live here, with the two
 //! readout structs they render ([`MovementReadout`], [`WorldEditReadout`]).
@@ -39,11 +40,13 @@
 use voxel_color::{
     ColorSpaceOutcome, DisplayHeadroom, HeadroomChoice, OutputDepth, OutputSupport, TonemapCurve,
 };
+use voxel_core::weather::WeatherKind;
 use voxel_environment::SunSettings;
 
 use voxel_rt::ao::AoMode;
 use voxel_rt::character::Submersion;
 use voxel_rt::shadows::ShadowMode;
+use voxel_rt::sky_weather::SkyWeather;
 use voxel_rt::studio_assets::StudioAssetPanelState;
 use voxel_rt::variants::{
     levers_of, Lever, LeverId, LeverRange, LeverSubsystem, LeverValue, QualityPreset,
@@ -83,6 +86,9 @@ pub struct SettingsContext<'frame> {
     pub content_peak: &'frame mut f32,
     pub exposure: &'frame mut f32,
     pub sun_settings: &'frame mut SunSettings,
+    /// The cloud deck and the weather driving it. Next to the sun because they are one sky:
+    /// coverage changes what the sun delivers, and judging either alone is misleading.
+    pub sky_weather: &'frame mut SkyWeather,
     pub quality: &'frame mut RenderQuality,
     pub studio_assets: &'frame mut StudioAssetPanelState,
 }
@@ -146,6 +152,7 @@ fn draw_body(ui: &mut egui::Ui, settings: SettingsContext<'_>) {
         content_peak,
         exposure,
         sun_settings,
+        sky_weather,
         quality,
         studio_assets,
     } = settings;
@@ -231,6 +238,8 @@ fn draw_body(ui: &mut egui::Ui, settings: SettingsContext<'_>) {
 
     ui.collapsing("Sun", |ui| draw_sun_section(ui, sun_settings));
 
+    ui.collapsing("Weather", |ui| draw_weather_section(ui, sky_weather));
+
     ui.collapsing("Studio", |ui| {
         draw_studio_assets_section(ui, studio_assets);
         ui.label("Material authoring is defined by nodes in Graph Studio.");
@@ -292,6 +301,158 @@ fn draw_sun_section(ui: &mut egui::Ui, sun_settings: &mut SunSettings) {
          surface, so an emitter's own contribution stays \
          invisible until this comes down too.",
     );
+}
+
+/// The cloud deck: the four named conditions, then the dials.
+///
+/// Conditions first because that is how you *look* at clouds — pick a sky, watch it arrive,
+/// and only then reach for a slider. The dials below are split into two groups on purpose:
+/// **weather** values are overwritten every frame by the condition, so editing them is a
+/// preview that a transition will undo; **look** and **cost** values are authored and survive
+/// any weather change.
+fn draw_weather_section(ui: &mut egui::Ui, sky: &mut SkyWeather) {
+    ui.horizontal(|ui| {
+        ui.label("condition:");
+        for (kind, label) in [
+            (WeatherKind::Clear, "clear"),
+            (WeatherKind::Scattered, "scattered"),
+            (WeatherKind::Overcast, "overcast"),
+            (WeatherKind::Storm, "storm"),
+        ] {
+            let selected = sky.state.target == kind;
+            if ui.selectable_label(selected, label).clicked() {
+                sky.set_target(kind);
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        if sky.state.transitioning() {
+            ui.label("transitioning…");
+        } else {
+            ui.label("settled");
+        }
+        ui.label(format!(
+            "wind {:.1} m/s toward {:.0}°",
+            sky.deck.wind[0].hypot(sky.deck.wind[1]),
+            sky.wind_direction_degrees
+        ));
+    });
+    let mut wind_speed = sky.wind_speed_meters_per_second();
+    if ui
+        .add(
+            egui::Slider::new(&mut wind_speed, 0.0..=30.0)
+                .text("wind speed")
+                .suffix(" m/s"),
+        )
+        .on_hover_text(
+            "Cloud advection speed in metres per second. The weather condition remains the base model, so storms naturally retain stronger wind than clear skies.",
+        )
+        .changed()
+    {
+        sky.set_wind_speed_meters_per_second(wind_speed);
+    }
+    ui.add(
+        egui::Slider::new(&mut sky.wind_direction_degrees, -180.0..=180.0)
+            .text("wind direction")
+            .suffix("°"),
+    )
+    .on_hover_text(
+        "Direction the clouds move toward: 0° is +X, 90° is +Z. The same direction is used by the weather-driven deck.",
+    );
+    ui.add(
+        egui::Slider::new(&mut sky.state.transition_seconds, 1.0..=600.0)
+            .logarithmic(true)
+            .text("seconds per change"),
+    )
+    .on_hover_text(
+        "Turn this down to a few seconds to compare conditions quickly. \
+         The shipped 120 s is what reads as weather rather than as a switch.",
+    );
+
+    ui.separator();
+    ui.checkbox(&mut sky.deck.enabled, "clouds")
+        .on_hover_text("Off skips the march entirely and every cloud term returns its identity, so the image is the pre-cloud one.");
+
+    ui.checkbox(&mut sky.manual, "hand-dial the deck")
+        .on_hover_text(
+            "The weather rewrites the five values below EVERY frame — the wind's slow channel \
+             breathes coverage continuously — so without this they are dead controls. Picking \
+             a condition above turns this back off. The deck still drifts either way.",
+        );
+    ui.add_enabled_ui(sky.manual, |ui| {
+        ui.add(egui::Slider::new(&mut sky.deck.coverage, 0.0..=1.0).text("coverage"))
+            .on_hover_text(
+                "Erodes the deck from the edges inward rather than fading it, which is how a \
+             clearing sky behaves. Also dims the sun and bends the ambient curve.",
+            );
+        ui.add(egui::Slider::new(&mut sky.deck.cloud_type, 0.0..=1.0).text("cloud type"))
+            .on_hover_text(
+                "0 stratus (flat slab), 0.5 cumulus (billowing), 1 cumulonimbus (towering).",
+            );
+        ui.add(egui::Slider::new(&mut sky.deck.bottom_world, 40.0..=800.0).text("deck base"));
+        ui.add(
+            egui::Slider::new(&mut sky.deck.thickness_world, 20.0..=800.0).text("deck thickness"),
+        );
+        ui.add(
+            egui::Slider::new(&mut sky.deck.extinction, 0.005..=0.4)
+                .logarithmic(true)
+                .text("extinction sigma_t"),
+        );
+    });
+
+    ui.separator();
+    ui.label("look (authored — survives a weather change):");
+    ui.add(egui::Slider::new(&mut sky.deck.weather_variation, 0.0..=1.0).text("weather variation"))
+        .on_hover_text(
+            "How much coverage varies ACROSS the sky. At zero the whole sky gets one coverage \
+             number and the deck reads as a single continuous mass — Nubis calls coverage \
+             \"a FUNCTION of our weather system\", i.e. a 2D map, not a scalar. Turn it up for \
+             distinct cloud groups with real sky between them.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.density_scale, 0.2..=4.0).text("density scale"))
+        .on_hover_text(
+            "Scales the shaped density so cores SATURATE. The noise supplies the shape, this \
+             supplies the substance. Below ~1 the deck returns to looking like mist, because the \
+             density chain's natural peak is only about 0.37.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.detail_strength, 0.0..=1.5).text("erosion"))
+        .on_hover_text(
+            "High-frequency Worley carving. Up frays the deck; down leaves rounded blobs.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.powder_strength, 0.0..=1.0).text("powder rim"))
+        .on_hover_text(
+            "Beer-Powder. Beer's law alone makes cloud EDGES dark, because thin cloud transmits \
+             nearly everything; this restores the bright rim. Non-physical and aesthetic.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.forward_scatter, 0.0..=0.95).text("forward scatter"))
+        .on_hover_text("Henyey-Greenstein forward lobe: the silver lining looking toward the sun.");
+    ui.add(egui::Slider::new(&mut sky.deck.back_scatter, -0.95..=0.0).text("back scatter"))
+        .on_hover_text(
+            "The weaker back lobe. The PAIR is what makes cloud read as cloud rather than fog.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.ambient_density, 0.0..=1.5).text("ambient occlusion"))
+        .on_hover_text(
+            "Extinction on the three upward sky-occlusion taps. Zero makes shadowed cloud flat; \
+             high makes undersides heavy.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.albedo, 0.0..=1.0).text("albedo sigma_s/sigma_t"))
+        .on_hover_text(
+            "Cloud sits at ~0.999. Drop it toward 0.3 and the deck renders as SMOKE — this is \
+             the field that keeps the two from sharing one coefficient.",
+        );
+
+    ui.separator();
+    ui.label("cost:");
+    ui.add(egui::Slider::new(&mut sky.deck.primary_steps, 4..=128).text("primary steps"))
+        .on_hover_text(
+            "View-ray samples, distributed logarithmically so near cloud gets more. THE dominant \
+         cost, and the first lever to reach for.",
+        );
+    ui.add(egui::Slider::new(&mut sky.deck.light_steps, 1..=16).text("light taps"))
+        .on_hover_text(
+            "Cone taps toward the sun per in-cloud sample. Multiplies the primary count, so \
+             this is the second-order cost — and it early-outs on an exact transmittance threshold.",
+        );
 }
 
 /// What the overlay shows about movement (E2b). Flat and pre-read so the panel
@@ -683,6 +844,21 @@ fn lever_is_relevant(quality: &RenderQuality, lever_id: LeverId) -> bool {
                 && quality.water.bounce_levers_have_an_effect()
         }
         LeverId::WaterUnderwaterInterface => quality.water.mode != WaterMode::Opaque,
+        // E7: turbidity and the bounce light both need water that is not drawn opaque, and
+        // caustics additionally need the sun to reach through the liquid at all — they scale
+        // that sun term and there is nothing to scale without it.
+        LeverId::WaterVisibilityDepth | LeverId::WaterBounceLight => {
+            quality.water.mode != WaterMode::Opaque
+        }
+        // The milkiness split has nothing to split while turbidity is off.
+        LeverId::WaterTurbidityScattering => {
+            quality.water.mode != WaterMode::Opaque && quality.water.visibility_depth_blocks > 0.0
+        }
+        LeverId::WaterCaustics => {
+            quality.water.mode != WaterMode::Opaque
+                && quality.water.sun_through_liquid
+                && quality.water.waves
+        }
         // E2: the box radius only means something for the bounded strategy, and
         // re-flooding needs a light volume to flood.
         LeverId::EditClearanceRadius => {

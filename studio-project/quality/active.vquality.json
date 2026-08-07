@@ -190,7 +190,7 @@
     },
     "MaterialPatternGeneratorMask": {
       "type": "count",
-      "value": 16383
+      "value": 32767
     },
     "MaterialPatternMaxLayers": {
       "type": "count",

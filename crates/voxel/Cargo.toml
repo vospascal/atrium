@@ -17,6 +17,9 @@ egui = "0.35"
 egui-wgpu = "0.35"
 egui-winit = "0.35"
 glam = "0.30"
+# Movement sounds ship as Ogg files. Keep decoder support narrow instead of
+# bringing in every optional audio format.
+rodio = { version = "0.20", default-features = false, features = ["vorbis"] }
 serde_json = "1"
 voxel-color = { path = "../voxel-color" }
 voxel-core = { path = "../voxel-core" }
@@ -27,6 +30,6 @@ voxel-material-graph = { path = "../voxel-material-graph" }
 voxel-game-ui = { path = "../voxel-game-ui" }
 voxel-rt = { path = "../voxel-rt" }
 voxel-studio = { path = "../voxel-studio" }
+voxel-sound = { path = "../voxel-sound" }
 wgpu = { version = "29", features = ["naga-ir"] }
 winit = "0.30"
-

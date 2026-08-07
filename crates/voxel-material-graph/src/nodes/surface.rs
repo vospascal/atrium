@@ -10,7 +10,7 @@ const MATERIAL_SURFACE_IN: &[SocketDeclarationStatic] = &[
     socket!(
         "base_color",
         "Base Color",
-        "Diffuse albedo of the material in linear RGBA, before pattern layers.",
+        "Diffuse albedo of the material in authored sRGB RGBA, before pattern layers.",
         SocketType::Color,
         EvaluationRate::PerSample,
         Cardinality::OPTIONAL_SINGLE
@@ -21,6 +21,30 @@ const MATERIAL_SURFACE_IN: &[SocketDeclarationStatic] = &[
         "Microsurface roughness before pattern layers, 0 mirror-smooth to 1 fully \
          diffuse.",
         SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "specular",
+        "Specular",
+        "Specular reflectance at normal incidence (F0), before pattern layers.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "ambient_occlusion",
+        "Ambient Occlusion",
+        "Material-authored occlusion multiplier: 1 is open, 0 is fully occluded.",
+        SocketType::Scalar,
+        EvaluationRate::PerSample,
+        Cardinality::OPTIONAL_SINGLE
+    ),
+    socket!(
+        "normal",
+        "Normal",
+        "Optional world-space normal override; zero leaves the displacement normal unchanged.",
+        SocketType::Vector3,
         EvaluationRate::PerSample,
         Cardinality::OPTIONAL_SINGLE
     ),
@@ -36,8 +60,8 @@ const MATERIAL_SURFACE_IN: &[SocketDeclarationStatic] = &[
 
 const MATERIAL_SURFACE_OUT: &[SocketDeclarationStatic] = &[socket!(
     "surface",
-    "Surface",
-    "The intrinsic surface, ready for pattern layers or straight into the \
+    "PBR Surface",
+    "The intrinsic PBR surface, ready for pattern layers or straight into the \
      Material Output.",
     SocketType::MaterialSurface,
     EvaluationRate::PerMaterial,
@@ -70,6 +94,42 @@ const MATERIAL_OUTPUT_FIELDS: &[FieldDeclarationStatic] = &[
         false,
     ),
     field(
+        "specular",
+        "Specular",
+        "Specular reflectance at normal incidence.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(0.04),
+        UNIT,
+        UNIT,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "ambient_occlusion",
+        "Ambient Occlusion",
+        "Material-authored occlusion multiplier.",
+        FieldTarget::InputSocket,
+        FieldDefault::Scalar(1.0),
+        UNIT,
+        UNIT,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
+        "normal",
+        "Normal",
+        "Optional normal override. A zero vector keeps the geometric normal.",
+        FieldTarget::InputSocket,
+        FieldDefault::Vector3([0.0; 3]),
+        NONE,
+        NONE,
+        Some(0.01),
+        EMPTY_CHOICES,
+        false,
+    ),
+    field(
         "emission",
         "Emission",
         "Surface emitted color.",
@@ -86,8 +146,8 @@ const MATERIAL_OUTPUT_FIELDS: &[FieldDeclarationStatic] = &[
 pub const DECLARATION: NodeDeclaration = node!(
     "material.surface",
     MaterialNodeOperation::Surface,
-    "Material Surface",
-    "Intrinsic surface values before ordered pattern layers.",
+    "PBR Surface",
+    "Complete specular-roughness surface state before ordered pattern layers.",
     NodeCategory::MaterialOutput,
     NodePreview::MaterialSphere,
     MATERIAL,

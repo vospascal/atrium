@@ -269,10 +269,6 @@
       "path": "graphs/material-04.vgraph.json"
     },
     {
-      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
-      "path": "graphs/material-01.vgraph.json"
-    },
-    {
       "id": "vx-000000000000000018c7af1e2e9f8568-000000000000004d",
       "path": "graphs/material-26.vgraph.json"
     },
@@ -335,6 +331,10 @@
     {
       "id": "vx-000000000000000018c869d759277d58-0000000000000038",
       "path": "graphs/material-39.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
+      "path": "graphs/material-01.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",

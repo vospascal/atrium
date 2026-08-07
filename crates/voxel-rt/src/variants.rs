@@ -29,14 +29,16 @@
 //! place a shader source is assembled.
 
 use crate::ao::{AoDirectionMode, AoMode, AoSettings};
-use crate::cagi::{CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
+use crate::cagi::{CagiLayout, CagiRule, CagiSampleMode, CagiSettings, CagiSkyTest};
 use crate::lighting::{
     AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams, WaterParams,
 };
 use crate::shader_consts::{float_literal, ShaderConstSink, ShaderDefs, SourcePatcher};
 use crate::shadows::{ShadowMode, ShadowSettings};
 use crate::traversal::TraversalSettings;
-use crate::water::{WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface};
+use crate::water::{
+    WaterMode, WaterSettings, WaterTirFallback, WaterUnderwaterInterface, WaveField,
+};
 use crate::world_edit::{ClearanceUpdateMode, WorldEditSettings};
 use voxel_material::animation_clock::AnimationClockSample;
 use voxel_material::pattern::{
@@ -101,6 +103,14 @@ pub enum LeverId {
     // CAGI global illumination (E4).
     GiEnabled,
     GiResolution,
+    GiLayout,
+    GiBanksLossPerMeter,
+    GiBanksSideLossMultiplier,
+    GiBanksSkyHorizontal,
+    GiBanksBounce,
+    GiBanksTransmission,
+    GiBanksDirectionMix,
+    GiBanksSealPartial,
     GiRule,
     GiSkyTest,
     GiSunCache,
@@ -124,6 +134,12 @@ pub enum LeverId {
     WaterScattering,
     WaterRayCutoff,
     WaterSunThroughLiquid,
+    WaterWaves,
+    WaterWaveAmplitude,
+    WaterVisibilityDepth,
+    WaterCaustics,
+    WaterBounceLight,
+    WaterTurbidityScattering,
     // World edits (E2) — all runtime; an edit changes buffer contents, never a
     // shader.
     EditWorldThread,
@@ -139,6 +155,10 @@ pub enum LeverId {
     MaterialPatternAnimation,
     MaterialPatternGeneratorMask,
     MaterialPatternStrength,
+    MaterialParallax,
+    MaterialParallaxSamples,
+    MaterialParallaxShadowSamples,
+    MaterialParallaxEnd,
     MaterialPatternMaxLayers,
     MaterialPatternOctaveLod,
     MaterialPatternFadeStart,
@@ -403,6 +423,26 @@ impl LeverId {
             LeverId::ShadowPenumbraScale => LeverValue::Scalar(shadows.penumbra_scale),
             LeverId::GiEnabled => LeverValue::Flag(global_illumination.enabled),
             LeverId::GiResolution => LeverValue::Count(global_illumination.cell_voxels),
+            LeverId::GiLayout => LeverValue::Mode(global_illumination.layout.shader_value()),
+            LeverId::GiBanksLossPerMeter => {
+                LeverValue::Scalar(global_illumination.banks_loss_per_meter)
+            }
+            LeverId::GiBanksSideLossMultiplier => {
+                LeverValue::Scalar(global_illumination.banks_side_loss_multiplier)
+            }
+            LeverId::GiBanksSkyHorizontal => {
+                LeverValue::Scalar(global_illumination.banks_sky_horizontal)
+            }
+            LeverId::GiBanksBounce => LeverValue::Scalar(global_illumination.banks_bounce),
+            LeverId::GiBanksTransmission => {
+                LeverValue::Scalar(global_illumination.banks_transmission_per_meter)
+            }
+            LeverId::GiBanksDirectionMix => {
+                LeverValue::Scalar(global_illumination.banks_direction_mix)
+            }
+            LeverId::GiBanksSealPartial => {
+                LeverValue::Scalar(global_illumination.banks_seal_partial)
+            }
             LeverId::GiRule => LeverValue::Mode(global_illumination.rule.shader_value()),
             LeverId::GiSkyTest => LeverValue::Mode(global_illumination.sky_test.shader_value()),
             LeverId::GiSunCache => LeverValue::Flag(global_illumination.sun_cache),
@@ -433,6 +473,16 @@ impl LeverId {
             LeverId::WaterScattering => LeverValue::Scalar(quality.water.scattering_scale),
             LeverId::WaterRayCutoff => LeverValue::Scalar(quality.water.ray_cutoff),
             LeverId::WaterSunThroughLiquid => LeverValue::Flag(quality.water.sun_through_liquid),
+            LeverId::WaterWaves => LeverValue::Flag(quality.water.waves),
+            LeverId::WaterWaveAmplitude => LeverValue::Scalar(quality.water.wave_amplitude_scale),
+            LeverId::WaterVisibilityDepth => {
+                LeverValue::Scalar(quality.water.visibility_depth_blocks)
+            }
+            LeverId::WaterCaustics => LeverValue::Flag(quality.water.caustics),
+            LeverId::WaterBounceLight => LeverValue::Flag(quality.water.bounce_light),
+            LeverId::WaterTurbidityScattering => {
+                LeverValue::Scalar(quality.water.turbidity_scattering_fraction)
+            }
             LeverId::EditWorldThread => LeverValue::Flag(quality.world_edit.world_thread),
             LeverId::EditClearanceUpdate => {
                 LeverValue::Mode(quality.world_edit.clearance_update.shader_value())
@@ -458,6 +508,16 @@ impl LeverId {
             }
             LeverId::MaterialPatternStrength => {
                 LeverValue::Scalar(quality.materials.pattern_strength)
+            }
+            LeverId::MaterialParallax => LeverValue::Flag(quality.materials.parallax),
+            LeverId::MaterialParallaxSamples => {
+                LeverValue::Count(quality.materials.parallax_samples)
+            }
+            LeverId::MaterialParallaxShadowSamples => {
+                LeverValue::Count(quality.materials.parallax_shadow_samples)
+            }
+            LeverId::MaterialParallaxEnd => {
+                LeverValue::Scalar(quality.materials.parallax_end_meters)
             }
             LeverId::MaterialPatternMaxLayers => {
                 LeverValue::Count(quality.materials.pattern_max_layers)
@@ -534,6 +594,34 @@ impl LeverId {
             LeverId::GiResolution => {
                 global_illumination.cell_voxels = value.expect_count(self);
             }
+            LeverId::GiLayout => {
+                global_illumination.layout = CagiLayout::from_shader_value(value.expect_mode(self));
+            }
+            LeverId::GiBanksLossPerMeter => {
+                global_illumination.banks_loss_per_meter =
+                    value.expect_scalar(self).clamp(0.1, 64.0);
+            }
+            LeverId::GiBanksSideLossMultiplier => {
+                global_illumination.banks_side_loss_multiplier =
+                    value.expect_scalar(self).clamp(1.0, 16.0);
+            }
+            LeverId::GiBanksSkyHorizontal => {
+                global_illumination.banks_sky_horizontal =
+                    value.expect_scalar(self).clamp(0.0, 1.0);
+            }
+            LeverId::GiBanksBounce => {
+                global_illumination.banks_bounce = value.expect_scalar(self).clamp(0.0, 1.0);
+            }
+            LeverId::GiBanksTransmission => {
+                global_illumination.banks_transmission_per_meter =
+                    value.expect_scalar(self).clamp(0.25, 1.0);
+            }
+            LeverId::GiBanksDirectionMix => {
+                global_illumination.banks_direction_mix = value.expect_scalar(self).clamp(0.0, 0.5);
+            }
+            LeverId::GiBanksSealPartial => {
+                global_illumination.banks_seal_partial = value.expect_scalar(self).clamp(0.0, 1.0);
+            }
             LeverId::GiRule => {
                 global_illumination.rule = CagiRule::from_shader_value(value.expect_mode(self));
             }
@@ -592,6 +680,18 @@ impl LeverId {
             LeverId::WaterSunThroughLiquid => {
                 quality.water.sun_through_liquid = value.expect_flag(self);
             }
+            LeverId::WaterWaves => quality.water.waves = value.expect_flag(self),
+            LeverId::WaterWaveAmplitude => {
+                quality.water.wave_amplitude_scale = value.expect_scalar(self);
+            }
+            LeverId::WaterVisibilityDepth => {
+                quality.water.visibility_depth_blocks = value.expect_scalar(self);
+            }
+            LeverId::WaterCaustics => quality.water.caustics = value.expect_flag(self),
+            LeverId::WaterBounceLight => quality.water.bounce_light = value.expect_flag(self),
+            LeverId::WaterTurbidityScattering => {
+                quality.water.turbidity_scattering_fraction = value.expect_scalar(self);
+            }
             LeverId::EditWorldThread => {
                 quality.world_edit.world_thread = value.expect_flag(self);
             }
@@ -626,6 +726,18 @@ impl LeverId {
             }
             LeverId::MaterialPatternStrength => {
                 quality.materials.pattern_strength = value.expect_scalar(self).clamp(0.0, 1.0);
+            }
+            LeverId::MaterialParallax => {
+                quality.materials.parallax = value.expect_flag(self);
+            }
+            LeverId::MaterialParallaxSamples => {
+                quality.materials.parallax_samples = value.expect_count(self).min(128);
+            }
+            LeverId::MaterialParallaxShadowSamples => {
+                quality.materials.parallax_shadow_samples = value.expect_count(self).min(128);
+            }
+            LeverId::MaterialParallaxEnd => {
+                quality.materials.parallax_end_meters = value.expect_scalar(self).clamp(0.0, 512.0);
             }
             LeverId::MaterialPatternMaxLayers => {
                 // Not clamped here: `apply` and `read` must round-trip, and
@@ -1304,6 +1416,272 @@ pub const REGISTRY: &[Lever] = &[
         ],
     },
     Lever {
+        id: LeverId::GiLayout,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_LAYOUT"),
+        label: "volume layout",
+        default_value: LeverValue::Mode(0),
+        range: LeverRange::Discrete,
+        verdict: "MEASURED (bench section 5, 2026-08-07), arc at D5 \
+                  (docs/cagi-directional-banks-plan.md). At the reference pairing \
+                  (banks6 + 8-voxel cells) the CA pass costs 0.97-1.10 ms — CHEAPER \
+                  than the shipped isotropic-at-4's 1.33-1.47 ms — at 20.9 MiB vs \
+                  45.8 (3.3x isotropic-at-8's 0.27-0.32 ms, the price of 36 light \
+                  reads per cell). The directional sampler adds ~0.6 ms to the DDA \
+                  pass at 1440p (5.47-6.33 vs 4.85-5.68, after unrolling the \
+                  dynamically-indexed bank-weight array that spilled to scratch \
+                  memory — it was +1.5 ms before) and scales with pixels. \
+                  Look: banks at defaults stays NEAR the shipped image (max channel \
+                  delta 11-12, vs 43 for every isotropic rule variant) while walls, \
+                  shadows and bounces become directional; the D4 gates verified \
+                  black walled shadows and no leaks. Banks at 4-voxel cells is NOT \
+                  measured as a pairing — extrapolates to ~7 ms of CA.",
+        mode_options: &[
+            ModeOption {
+                value: 0,
+                label: "isotropic",
+                verdict: "One light word per cell — the shipped volume. Cannot represent \
+                          a directional bounce: reflected light deposits directionlessly \
+                          and reads as glow.",
+            },
+            ModeOption {
+                value: 1,
+                label: "banks 6",
+                verdict: "x1m4's reference design: six directional banks per cell \
+                          (10-bit RGB each), SoA planes. Pairs with 8-voxel cells \
+                          (~24 MB both ping-pong buffers vs ~200 MB at 4-voxel cells). \
+                          UNMEASURED until D5.",
+            },
+        ],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks6",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                // The reference pairing: banks at 8-voxel cells (x1m4's 1/8 res).
+                (LeverId::GiResolution, LeverValue::Count(8)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksLossPerMeter,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_LOSS_PER_METER"),
+        label: "banks direct loss (/m)",
+        default_value: LeverValue::Scalar(1.0),
+        range: LeverRange::Continuous {
+            minimum: 0.1,
+            maximum: 64.0,
+            logarithmic: true,
+        },
+        verdict: "UNMEASURED — D2/D3 (banks6 only; inert under the isotropic \
+                  layout). The convergence EPSILON, the reference kernel's \
+                  saturating_sub(1): subtractive loss per meter that trims the \
+                  exponential tail to an exact 0 (what D6 dirty-culling will \
+                  test). NOT the falloff — that is banks air transmission. The D3 \
+                  gate measured the wrong hierarchy: at 8.0/m the subtractive \
+                  term dominates, radiance decays as a straight line, and the lit \
+                  region ends at a hard terminator. Raise this to harden the \
+                  edge, raise transmission to push the horizon out.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-loss-hard",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                // The D3 gate's hard-terminator configuration, kept as the A/B.
+                (LeverId::GiBanksLossPerMeter, LeverValue::Scalar(8.0)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksSideLossMultiplier,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_SIDE_LOSS_MULTIPLIER"),
+        label: "banks side loss (x direct)",
+        default_value: LeverValue::Scalar(4.0),
+        range: LeverRange::Continuous {
+            minimum: 1.0,
+            maximum: 16.0,
+            logarithmic: false,
+        },
+        verdict: "UNMEASURED — D2's beam-spread knob (banks6 only). The lateral \
+                  seep's loss as a multiple of the direct loss: 1.0 dissolves a \
+                  beam into an isotropic flood, 16.0 keeps it a laser. The \
+                  heat-conduction term of x1m4's quoted rule.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-side-tight",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                (LeverId::GiBanksSideLossMultiplier, LeverValue::Scalar(8.0)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksSkyHorizontal,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_SKY_HORIZONTAL"),
+        label: "banks sky horizontal share",
+        default_value: LeverValue::Scalar(0.25),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "UNMEASURED — D2 (banks6 only). The horizon's share of the sky: \
+                  what fraction of the sky radiance a sky-seeing cell injects into \
+                  its four horizontal banks (the downward bank always gets the \
+                  full value). 0 makes walls facing the horizon sky-black; 1 \
+                  double-counts the hemisphere.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-sky-flat",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                (LeverId::GiBanksSkyHorizontal, LeverValue::Scalar(0.0)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksBounce,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_BOUNCE"),
+        label: "banks bounce fraction",
+        default_value: LeverValue::Scalar(0.5),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "UNMEASURED — D3 (banks6 + reflectance only). The propagated \
+                  bounce's energy fraction ON TOP of the surface albedo: the \
+                  geometry share interreflection must lose (the E5b snow-corridor \
+                  light-pipe note). Loop gain is albedo x this, so anything below \
+                  1.0 contracts; 1.0 trusts albedo alone to converge, which snow \
+                  makes visibly slow.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-bounce",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                (LeverId::GiReflectance, LeverValue::Flag(true)),
+                (LeverId::GiBanksBounce, LeverValue::Scalar(0.25)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksTransmission,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_TRANSMISSION_PER_METER"),
+        label: "banks air transmission (/m)",
+        default_value: LeverValue::Scalar(0.7),
+        range: LeverRange::Continuous {
+            minimum: 0.25,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "MEASURED (CPU probe, lava-vs-10-cell-wall, 2026-08-07) — the \
+                  banks' line-of-sight knob. Multiplicative air transmission per \
+                  meter on top of the subtractive losses; without it reach is \
+                  LINEAR in injected energy and a ceiling-level lava out-reached \
+                  the sky 8:1. The isotropic 0.884 leaves the wall's shadow at \
+                  1/4-1/10 of the lit side (wrap light cruises: half-life 5.6 m); \
+                  0.7 floors the shadow at level <=30 — a soft rim hugging the \
+                  wall edges, black core — while the lit side keeps levels \
+                  500-1800 at 6-7 m; 0.6 zeroes the shadow exactly but halves the \
+                  emitter's visible radius. 1.0 = pure-subtractive behaviour.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-clear-air",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                (LeverId::GiBanksTransmission, LeverValue::Scalar(0.95)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksDirectionMix,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_DIRECTION_MIX"),
+        label: "banks direction decay (/m)",
+        default_value: LeverValue::Scalar(0.08),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 0.5,
+            logarithmic: false,
+        },
+        verdict: "UNMEASURED — D4's wrapped-light fix (banks6 only). The per-meter \
+                  fraction each bank scatters into its four PERPENDICULAR banks — \
+                  how fast a beam forgets its direction. Perpendicular and never \
+                  the opposite, a measured deviation from the literal \
+                  mix(lightpy, lightny, x): opposite-mixing manufactures \
+                  backward light along every beam, which is exactly the bank a \
+                  wall's dark face samples — measured in-app as light 'coming \
+                  through everywhere'. Conservative across the six banks, so \
+                  exposure and fog are untouched. 0 restores forever-directional \
+                  beams (lava's wrapped up-column painted bottom faces orange); \
+                  0.5/m is near-isotropic within a couple of cells.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-no-direction-decay",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                (LeverId::GiBanksDirectionMix, LeverValue::Scalar(0.0)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::GiBanksSealPartial,
+        subsystem: LeverSubsystem::GlobalIllumination,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("CAGI_BANKS_SEAL_PARTIAL"),
+        label: "banks corner-seal partial",
+        default_value: LeverValue::Scalar(0.25),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "UNMEASURED — D4's face-occlusion gate on the lateral seep, the \
+                  reference kernel's three-tier corner seal (its porting notes \
+                  call this THE leak fix). A seep from lateral neighbour L into \
+                  cell C cuts the diagonal bracketed by C-upstream and L: both \
+                  solid = sealed to zero (the wall-join leak); exactly one solid \
+                  = this fraction survives (grazing a wall edge — what stops the \
+                  over-the-wall wrap band re-seeding beams down the shadow face); \
+                  neither = the full side term. 1.0 disables the partial tier \
+                  (D2-D4a behaviour); 0.0 makes every edge a hard shadow line.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Cagi,
+            label: "gi-banks-no-corner-seal",
+            overrides: &[
+                (LeverId::GiLayout, LeverValue::Mode(1)),
+                (LeverId::GiResolution, LeverValue::Count(8)),
+                (LeverId::GiBanksSealPartial, LeverValue::Scalar(1.0)),
+            ],
+        }],
+    },
+    Lever {
         id: LeverId::GiRule,
         subsystem: LeverSubsystem::GlobalIllumination,
         kind: LeverKind::ShaderConst,
@@ -1841,7 +2219,7 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::Runtime,
         shader_const: None,
         label: "absorption scale",
-        default_value: LeverValue::Scalar(1.0),
+        default_value: LeverValue::Scalar(0.0),
         range: LeverRange::Continuous {
             minimum: 0.0,
             maximum: 4.0,
@@ -1856,7 +2234,12 @@ pub const REGISTRY: &[Lever] = &[
                   and transmittance at the pool's 5 m at (0.105, 0.549, 0.741) — red \
                   nearly gone, blue mostly intact, i.e. depth reads as colour. 0 turns \
                   the water into clear glass, which is how to check the refraction \
-                  geometry independently of the medium.",
+                  geometry independently of the medium. \
+                  SHIPPED AT 0 (dialled in the app, 2026-08-06). That is not a bug: with \
+                  water's own absorption off, the medium's extinction is E7's TURBIDITY \
+                  almost entirely, and turbidity is grey — so the water darkens without \
+                  colouring, which is this instinct carried to its conclusion rather than \
+                  away from it. Raise it to bring back the steep blue of pure water.",
         mode_options: &[],
         bench: &[],
     },
@@ -1866,7 +2249,7 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::Runtime,
         shader_const: None,
         label: "scattering scale",
-        default_value: LeverValue::Scalar(1.0),
+        default_value: LeverValue::Scalar(0.15),
         range: LeverRange::Continuous {
             minimum: 0.0,
             maximum: 4.0,
@@ -1884,7 +2267,11 @@ pub const REGISTRY: &[Lever] = &[
                   absorption-only and the depths go black, which is physically \
                   incomplete and reads as a hole. Deliberately NOT sampled from the CAGI \
                   volume: E4 marks a cell absorbing at a quarter fill, so cells inside a \
-                  body of water hold zero light and every pool would be black.",
+                  body of water hold zero light and every pool would be black. \
+                  SHIPPED AT 0.15 (dialled in the app, 2026-08-06), in proportion with the \
+                  absorption scale beside it, which ships at 0. The medium's colour therefore \
+                  comes from turbidity rather than from these coefficients, and measures a \
+                  near-neutral albedo of (0.152, 0.166, 0.174).",
         mode_options: &[],
         bench: &[],
     },
@@ -1995,7 +2382,7 @@ pub const REGISTRY: &[Lever] = &[
         kind: LeverKind::Runtime,
         shader_const: None,
         label: "ray cutoff (Fresnel weight)",
-        default_value: LeverValue::Scalar(0.04),
+        default_value: LeverValue::Scalar(0.0),
         range: LeverRange::Continuous {
             minimum: 0.0,
             maximum: 0.5,
@@ -2018,7 +2405,11 @@ pub const REGISTRY: &[Lever] = &[
                   one. 0.04 cuts the reflection ray for incidences steeper than ~57 \
                   degrees off the normal, which is most of an aerial view, and the \
                   substituted sky differs from the traced mirror by at most 4% of the \
-                  pixel. 0 = always trace, which is the row this is measured against.",
+                  pixel. 0 = always trace, which is the row this is measured against. \
+                  SHIPPED AT 0 (dialled in the app, 2026-08-06) — i.e. ALWAYS TRACE. The \
+                  stand-ins are visible on a surface being judged this closely, so the \
+                  measured -7.1% above is now a cost being paid deliberately. It is the \
+                  first thing to raise if the water pass needs time back.",
         mode_options: &[],
         bench: &[BenchPoint {
             section: BenchSection::Water,
@@ -2059,6 +2450,218 @@ pub const REGISTRY: &[Lever] = &[
             section: BenchSection::Water,
             label: "water-full-sunblocked",
             overrides: &[(LeverId::WaterSunThroughLiquid, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterWaves,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_WAVES"),
+        label: "wind waves on the surface",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "NOT YET MEASURED (W1/W2) — the bench row exists so the sweep prices \
+                  it, and the number replaces this sentence. \
+                  WHAT IT FIXES: a water voxel's surface is a perfectly flat \
+                  axis-aligned face, which makes its Fresnel mirror a PERFECT mirror. \
+                  Consequences: no sun glitter (the single strongest cue that a \
+                  surface is liquid), and a reflected shoreline that never moves. ON, \
+                  the surface normal comes from the analytic gradient of a sum of four \
+                  directional gravity waves whose wind is the SAME history that drives \
+                  the cloud deck and the weather — waves are its third consumer, not a \
+                  fourth noise field. \
+                  WHY IT SHOULD BE CHEAP: four sin/cos pairs and a dot each, ~30 ALU \
+                  per water-surface pixel, zero memory traffic and no extra rays — \
+                  against the 2.25-3.55 ms E1 measured for the marginal full-res \
+                  secondary ray the same pixel already pays for. If the sweep says \
+                  otherwise, that is the finding. \
+                  OFF folds the whole field away and the surface is the flat face the \
+                  pre-E6-waves renderer shaded, bit for bit, which is the isolation \
+                  rule's requirement and the no-regression anchor.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-full-flat",
+            overrides: &[(LeverId::WaterWaves, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterWaveAmplitude,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "wave amplitude",
+        default_value: LeverValue::Scalar(0.21),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "LOOK KNOB, runtime (water_optics.z), no rebuild — draggable while the \
+                  app runs, which is the only way to judge glitter. 1.0 is the shipped \
+                  look and 0.0 is exactly flat water. \
+                  There is deliberately NO value above 1: WAVE_MAX_STEEPNESS (0.35) is \
+                  a PHYSICAL ceiling — a deep-water wave breaks at the Stokes limiting \
+                  steepness A*k ~ 0.443 — and it is also what guarantees the shading \
+                  path's two safety properties (the normal tilts at most 19.3 degrees, \
+                  so a mirror ray is thrown at most 38.6 degrees below the face and a \
+                  refracted ray always stays under it). A slider that walked past the \
+                  cap would quietly break both. Wanting rougher water is a change to \
+                  that constant and to its argument, not a wider slider. \
+                  SHIPPED AT 0.21 (dialled in the app, 2026-08-06). Cox & Munk describes \
+                  OPEN water; a courtyard pool is nearly still, and the field at full \
+                  amplitude reads as chop at this scale. The cap's argument is untouched — \
+                  this only asks for less of what the wind justifies, never more.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::WaterVisibilityDepth,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "visibility depth (blocks)",
+        default_value: LeverValue::Scalar(10.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 24.0,
+            logarithmic: false,
+        },
+        verdict: "LOOK KNOB, runtime (water_optics.w via `water::turbidity_per_meter`), no \
+                  rebuild — and it costs NOTHING: turbidity is two adds in the coefficient \
+                  accessors the medium march already calls, so every setting prices the \
+                  same. \
+                  WHAT IT FIXES: the material table carries PURE water, and pure water is \
+                  far clearer than any pond. Measured against the look Pascal asked for \
+                  (\"not more then 3 blocks deep and should fade deeper you go\"): at 3 m \
+                  our blue channel still passed 0.835 where the reference passes 0.050 — \
+                  16.8x too see-through, so a shallow bed read as one flat cyan sheet to \
+                  the horizon with no fade at all. What hides a real lake's bed is \
+                  SUSPENDED SEDIMENT, a term the model simply did not have. \
+                  WHY IT IS ITS OWN GREY TERM rather than a scale on the spectral pair: \
+                  reaching a 3 m blue horizon by scaling needs 16.6x, which takes red to \
+                  0.001 within ONE block — the bed goes blue-black instantly instead of \
+                  fading through its own colour. Sediment is broadband because the \
+                  particles are much larger than the wavelength, and scattering-dominant \
+                  (85%) for the same reason, which is also what keeps murky depths MILKY \
+                  rather than black. \
+                  At the shipped 3 blocks the total is (1.218, 0.888, 0.828)/m: a bed keeps \
+                  0.30/0.41/0.44 at one block and 0.026/0.070/0.083 at three. 0 disables \
+                  turbidity entirely and restores the pure-water model exactly, which is \
+                  the isolation anchor rather than a setting anyone wants. \
+                  SHIPPED AT 10 BLOCKS (dialled in the app, 2026-08-06), not the 3 the first \
+                  E7 build shipped. Once the fade was actually VISIBLE it wanted to be much \
+                  further out: 3 blocks hid the bed almost immediately, and what was wanted \
+                  was water you can see into but not through. At 10, with the scales beside \
+                  it, a bed keeps 0.79 of its light at one block, 0.49 at three and 0.10 at \
+                  ten.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::WaterTurbidityScattering,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "turbidity milkiness (scattering share)",
+        default_value: LeverValue::Scalar(0.15),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 1.0,
+            logarithmic: false,
+        },
+        verdict: "LOOK KNOB, runtime (water_params.w), no rebuild, and free — turbidity is \
+                  two adds either way, so this only moves WHERE the extinction goes. \
+                  WHAT IT IS: turbidity's split between scattering and absorption, which is \
+                  a choice of what is SUSPENDED rather than a number to derive. Mineral silt \
+                  is much larger than the wavelength, so it scatters broadband and absorbs \
+                  little — a silty river genuinely is milky-bright, and 0.85 renders exactly \
+                  that. What limits visibility in most standing water is instead dissolved \
+                  organic matter and phytoplankton, which ABSORB: a pond you cannot see the \
+                  bottom of is dark, not white. \
+                  WHY IT EXISTS: the first E7 build shipped 0.85 and Pascal's report was \
+                  \"now it looks al hazy and white\". Measured, that is exactly right — at \
+                  0.85 ONE block of water in-scatters 0.38-0.47 of the sky's radiance, so \
+                  even shallow water reads as a white sheet. At the shipped 0.15 it is \
+                  0.07-0.11 and the deep-water albedo lands at (0.10, 0.16, 0.19) — dark, \
+                  still ordered blue-over-green-over-red, and the bed shows through the top \
+                  block. \
+                  0 makes turbidity purely absorbing: the depths go nearly black and keep \
+                  water's own steep blue tint. 1 is full milk. This is the dial to drag \
+                  against a real pool, because how milky water should look is not something \
+                  the model can decide.",
+        mode_options: &[],
+        bench: &[],
+    },
+    Lever {
+        id: LeverId::WaterCaustics,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_CAUSTICS"),
+        label: "caustics on submerged surfaces",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "NOT YET MEASURED (E7) — the bench row exists so the sweep prices it. \
+                  WHY IT SHOULD BE NEARLY FREE, and the reason to expect that rather than \
+                  hope it: caustics ride on `water_sun_transmission`, which has ALREADY \
+                  marched from the bed up to the surface for the sun's own transmittance. \
+                  The entry point and the depth are in hand, so the added work is one \
+                  HESSIAN of the wave field — the same four-component loop the gradient \
+                  runs, with sin instead of cos — and no extra ray. It is therefore gated \
+                  behind WATER_SUN_THROUGH_LIQUID, which is the expensive part. \
+                  WHAT IT FIXES: a sunlit pool bed was uniformly lit, which reads as a \
+                  photograph rather than water. Caustics are the focusing of the refracted \
+                  sun by the surface's CURVATURE, so with W1's analytic height field in \
+                  hand they are a Jacobian (`1 / |det(I + d(1 - 1/n)H)|`) rather than a \
+                  noise texture — which means they respond to wind speed, bearing and \
+                  wavelength for free, and the reference Shadertoy's two Perlin lobes \
+                  could respond to none of the three. \
+                  Measured, one block down: mean gain 1.01 at 1 m/s (range 0.86-1.19) and \
+                  1.19 at 12 m/s (range 0.36-4.00) — light MOVED, not manufactured. \
+                  OFF returns the sun term untouched, bit for bit.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-full-no-caustics",
+            overrides: &[(LeverId::WaterCaustics, LeverValue::Flag(false))],
+        }],
+    },
+    Lever {
+        id: LeverId::WaterBounceLight,
+        subsystem: LeverSubsystem::Water,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("WATER_BOUNCE_LIGHT"),
+        label: "water bounce light on terrain",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "NOT YET MEASURED (E7), and the one E7 lever that could genuinely cost — \
+                  the bench row is here because it must be priced before it is trusted. \
+                  IT SPENDS A RAY PER SHADED SURFACE, capped at \
+                  WATER_BOUNCE_MAX_DISTANCE_METERS (16 m) and skipped outright for surfaces \
+                  facing away from the mirrored sun, for liquids, and for submerged points. \
+                  Note it also fires on SECONDARY hits (`shade_secondary` calls \
+                  `shade_surface`), so a water pixel with a traced mirror pays it twice; if \
+                  the sweep says that is the cost, restricting it to primary hits is the \
+                  first thing to try. \
+                  WHAT IT FIXES: the wobbling bright band a pool throws onto the wall \
+                  beside it. Nothing else in the renderer produces it — CAGI's volume \
+                  carries DIFFUSE bounce, and a mirror-smooth specular bounce is not \
+                  diffuse, so without this a bank next to bright water is lit as if the \
+                  water were matte. \
+                  THE TRICK that makes it one ray: for a flat plane the reflected sun is a \
+                  virtual sun BELOW it, so the direction toward that reflection is the sun \
+                  direction mirrored in Y. The reflected direction then comes off the WAVE \
+                  normal, which is what makes the band shimmer with the same field the \
+                  surface glitters with. \
+                  ITS APPROXIMATION IS STATED: one sample cannot know the solid angle the \
+                  water subtends, so WATER_BOUNCE_STRENGTH (0.35) stands in for it. That is \
+                  a look bound, not a derived quantity, and it is the reason this ships as \
+                  a lever rather than as physics.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Water,
+            label: "water-full-no-bounce-light",
+            overrides: &[(LeverId::WaterBounceLight, LeverValue::Flag(false))],
         }],
     },
     // ---- World edits (E2) ----
@@ -2617,6 +3220,112 @@ pub const REGISTRY: &[Lever] = &[
         }],
     },
     Lever {
+        id: LeverId::MaterialParallax,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PARALLAX"),
+        label: "parallax occlusion mapping",
+        default_value: LeverValue::Flag(false),
+        range: LeverRange::Discrete,
+        verdict: "P1 — march the primary ray through the relief height field so \
+                  the shading point lands on the raised plates: parallax, plates \
+                  occluding what is behind them, and visible plate sides. A \
+                  shading effect only — voxel silhouettes stay straight. Costs \
+                  nothing on materials without displacement (the ceiling test \
+                  folds it away) and the texel cache serves the march's height \
+                  taps, so the price scales with relief coverage on screen.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-parallax-off",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialParallax, LeverValue::Flag(false)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialParallaxSamples,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PARALLAX_SAMPLES"),
+        label: "parallax march samples",
+        default_value: LeverValue::Count(24),
+        // Zero is the march disabled with the flag still on — the row that
+        // prices the ceiling test alone. LabPBR packs recommend 64 for
+        // texture-sampled height fields; a texel-quantised procedural field
+        // resolves plateau tops with fewer because the binary refine finishes
+        // the job.
+        range: LeverRange::Rungs(&[0, 8, 16, 24, 32, 64]),
+        verdict: "Linear search steps from the relief ceiling to the face. Too \
+                  few misses THIN walls at grazing angles (a plate edge sliver \
+                  between two samples); the refine then never sees it. 24 holds \
+                  up at plate scale; dense sub-texel relief wants more.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-parallax-8-samples",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialParallax, LeverValue::Flag(true)),
+                (LeverId::MaterialParallaxSamples, LeverValue::Count(8)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialParallaxShadowSamples,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PARALLAX_SHADOW_SAMPLES"),
+        label: "parallax self-shadow samples",
+        default_value: LeverValue::Count(16),
+        range: LeverRange::Rungs(&[0, 8, 16, 32]),
+        verdict: "P2 — height-field march from the displaced point toward the \
+                  sun, multiplying DIRECT sun visibility only. Soft by \
+                  penetration depth, so plate joints get contact shadows without \
+                  a second shadow map. Zero disables self-shadowing and leaves \
+                  the traced voxel shadow untouched.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-parallax-shadow-off",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialParallax, LeverValue::Flag(true)),
+                (LeverId::MaterialParallaxShadowSamples, LeverValue::Count(0)),
+            ],
+        }],
+    },
+    Lever {
+        id: LeverId::MaterialParallaxEnd,
+        subsystem: LeverSubsystem::Materials,
+        kind: LeverKind::ShaderConst,
+        shader_const: Some("MATERIAL_PARALLAX_END_METERS"),
+        label: "parallax distance cap (m)",
+        default_value: LeverValue::Scalar(48.0),
+        range: LeverRange::Continuous {
+            minimum: 0.0,
+            maximum: 256.0,
+            logarithmic: false,
+        },
+        verdict: "THE parallax perf knob. The march used to run to the pattern \
+                  fade — hundreds of metres of terrain marching at full budget \
+                  for sub-pixel offsets, which is what turned the DDA pass into \
+                  10 ms on a grass world. A 5 cm relief offset at 48 m is about \
+                  a pixel; past that the march is cost without picture. Zero \
+                  disables parallax by distance alone.",
+        mode_options: &[],
+        bench: &[BenchPoint {
+            section: BenchSection::Materials,
+            label: "material-parallax-16m-cap",
+            overrides: &[
+                (LeverId::MaterialPatterns, LeverValue::Flag(true)),
+                (LeverId::MaterialParallax, LeverValue::Flag(true)),
+                (LeverId::MaterialParallaxEnd, LeverValue::Scalar(16.0)),
+            ],
+        }],
+    },
+    Lever {
         id: LeverId::MaterialPatternMaxLayers,
         subsystem: LeverSubsystem::Materials,
         kind: LeverKind::ShaderConst,
@@ -2984,6 +3693,16 @@ pub struct MaterialSettings {
     pub pattern_entry_probe: u32,
     /// S2 — global scale on every layer's amount, `0.0..=1.0`. The taste knob.
     pub pattern_strength: f32,
+    /// P1 — parallax occlusion mapping: march the shading point onto the relief.
+    pub parallax: bool,
+    /// P1 — linear march steps from the relief ceiling to the face; 0 disables
+    /// the march with the flag still compiled in.
+    pub parallax_samples: u32,
+    /// P2 — self-shadow march steps toward the sun; 0 disables self-shadowing.
+    pub parallax_shadow_samples: u32,
+    /// Camera distance in metres past which the march is skipped; the parallax
+    /// perf knob, since terrain is mostly far pixels.
+    pub parallax_end_meters: f32,
     /// S2 — layers evaluated per hit, whatever the row authored. The tier knob, and
     /// the only one of the three that buys frames.
     pub pattern_max_layers: u32,
@@ -3025,6 +3744,10 @@ impl MaterialSettings {
             || self.pattern_animation != applied.pattern_animation
             || self.pattern_generator_mask != applied.pattern_generator_mask
             || self.pattern_strength != applied.pattern_strength
+            || self.parallax != applied.parallax
+            || self.parallax_samples != applied.parallax_samples
+            || self.parallax_shadow_samples != applied.parallax_shadow_samples
+            || self.parallax_end_meters != applied.parallax_end_meters
             || self.pattern_max_layers != applied.pattern_max_layers
             || self.pattern_octave_lod != applied.pattern_octave_lod
     }
@@ -3051,6 +3774,13 @@ impl MaterialSettings {
             self.pattern_generator_mask & voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL,
         );
         sink.scaled_float("MATERIAL_PATTERN_STRENGTH", self.pattern_strength, 1000);
+        sink.boolean("MATERIAL_PARALLAX", self.parallax);
+        sink.unsigned("MATERIAL_PARALLAX_SAMPLES", self.parallax_samples.min(128));
+        sink.unsigned(
+            "MATERIAL_PARALLAX_SHADOW_SAMPLES",
+            self.parallax_shadow_samples.min(128),
+        );
+        sink.scaled_float("MATERIAL_PARALLAX_END_METERS", self.parallax_end_meters, 10);
         sink.unsigned(
             "MATERIAL_PATTERN_MAX_LAYERS",
             self.pattern_max_layers.min(MAX_PATTERN_LAYERS as u32),
@@ -3081,6 +3811,10 @@ impl Default for MaterialSettings {
             pattern_animation: true,
             pattern_generator_mask: voxel_material::pattern::PATTERN_GENERATOR_MASK_ALL,
             pattern_strength: 1.0,
+            parallax: false,
+            parallax_samples: 24,
+            parallax_shadow_samples: 16,
+            parallax_end_meters: 48.0,
             pattern_max_layers: MAX_PATTERN_LAYERS as u32,
             pattern_octave_lod: false,
             animation_speed: 1.0,
@@ -3319,10 +4053,28 @@ impl RenderQuality {
             absorption_scale: self.water.absorption_scale,
             scattering_scale: self.water.scattering_scale,
             ray_cutoff: self.water.ray_cutoff,
-            reserved_flow: 0.0,
+            turbidity_scattering_fraction: self.water.turbidity_scattering_fraction,
             // E6 step 3 turns this into a registry lever (the window-width dial);
             // until then it stays at the physical index, so no taste is shipped.
             refraction_strength: 1.0,
+            // E7: the lever is a visibility depth in BLOCKS and the shader wants a
+            // per-metre coefficient, so the conversion happens once here rather than per
+            // pixel — and it is the tested `water::turbidity_per_meter`, not a second
+            // expression of the same relation.
+            turbidity_per_meter: crate::water::turbidity_per_meter(
+                self.water.visibility_depth_blocks,
+            ),
+            // The amplitude LEVER is a quality setting and belongs here; the WIND is
+            // not, and this module has none. The app attaches it with
+            // `WaterParams::with_wind`, the same seam argument
+            // `LightingUniform::with_output_params` makes: of the callers of this
+            // function only the windowed app has a wind history, and the omission
+            // fails safe — a caller that forgets leaves flat water rather than
+            // inventing a breeze.
+            waves: WaveField {
+                amplitude_scale: self.water.wave_amplitude_scale,
+                ..WaveField::FLAT
+            },
         }
     }
 
@@ -3362,6 +4114,14 @@ mod tests {
         // fixed-point shift are structure, not levers.
         "CAGI_SAMPLE_NEAREST",
         "CAGI_SAMPLE_TRILINEAR",
+        "CAGI_LAYOUT_ISOTROPIC",
+        "CAGI_LAYOUT_BANKS6",
+        // D2/D3 banks: fixed-point forms derived from the levers above them, and
+        // the 1/6 emitter split — structure, not levers.
+        "CAGI_BANKS_SKY_HORIZONTAL_NUMERATOR",
+        "CAGI_BANKS_BOUNCE_NUMERATOR",
+        "CAGI_BANKS_SEAL_PARTIAL_NUMERATOR",
+        "CAGI_BANKS_SIXTH_NUMERATOR",
         "CAGI_RULE_MAX_DECREMENT",
         "CAGI_RULE_DIFFUSION_6",
         "CAGI_RULE_DIFFUSION_26",
@@ -3404,6 +4164,22 @@ mod tests {
         "WATER_TIR_STANDIN",
         "WATER_INTERFACE_FRESNEL",
         "WATER_INTERFACE_TRANSPARENT",
+        // W2: structure, in the same sense SHADOW_BIAS is. It is how far above the
+        // geometric face a mirror ray must leave so the DDA does not immediately
+        // re-enter the water it is bouncing off; a slider on it would only offer a
+        // choice between "correct" and "black speckles".
+        "WATER_REFLECTION_MIN_COSINE",
+        // E7 turbidity: the scattering/absorption split of suspended sediment is a
+        // property of the particles (they are much larger than the wavelength, so they
+        // scatter broadband and absorb little), not a dial. The DEPTH is the lever —
+        // LeverId::WaterVisibilityDepth, which sets `water_optics.w`.
+        // E7 caustics and bounce light: the divergence guard at a focus, and the bounce
+        // ray's reach and single-sample strength. Stated bounds on approximations, not
+        // dials — the two ON/OFF levers are WATER_CAUSTICS and WATER_BOUNCE_LIGHT.
+        "WATER_CAUSTIC_MAX_GAIN",
+        "WATER_BOUNCE_MAX_DISTANCE_METERS",
+        "WATER_BOUNCE_STRENGTH",
+        "WATER_BOUNCE_MIN_LOBE_RADIANS",
     ];
 
     /// Both pass shader sources — a lever's const lives in exactly one of them
@@ -3743,6 +4519,10 @@ mod tests {
             pattern_animation,
             pattern_generator_mask,
             pattern_strength,
+            parallax,
+            parallax_samples,
+            parallax_shadow_samples,
+            parallax_end_meters,
             pattern_max_layers,
             pattern_octave_lod,
             pattern_fade_start_meters,
@@ -3780,6 +4560,14 @@ mod tests {
         let CagiSettings {
             enabled: gi_enabled,
             cell_voxels,
+            layout: gi_layout,
+            banks_loss_per_meter,
+            banks_side_loss_multiplier,
+            banks_sky_horizontal,
+            banks_bounce,
+            banks_transmission_per_meter,
+            banks_direction_mix,
+            banks_seal_partial,
             rule,
             sample_mode,
             sky_test,
@@ -3804,6 +4592,12 @@ mod tests {
             scattering_scale,
             ray_cutoff,
             sun_through_liquid,
+            waves,
+            wave_amplitude_scale,
+            visibility_depth_blocks,
+            caustics,
+            bounce_light,
+            turbidity_scattering_fraction,
         } = water;
         let WorldEditSettings {
             world_thread,
@@ -3869,6 +4663,35 @@ mod tests {
             ),
             (LeverId::GiEnabled, LeverValue::Flag(gi_enabled)),
             (LeverId::GiResolution, LeverValue::Count(cell_voxels)),
+            (
+                LeverId::GiLayout,
+                LeverValue::Mode(gi_layout.shader_value()),
+            ),
+            (
+                LeverId::GiBanksLossPerMeter,
+                LeverValue::Scalar(banks_loss_per_meter),
+            ),
+            (
+                LeverId::GiBanksSideLossMultiplier,
+                LeverValue::Scalar(banks_side_loss_multiplier),
+            ),
+            (
+                LeverId::GiBanksSkyHorizontal,
+                LeverValue::Scalar(banks_sky_horizontal),
+            ),
+            (LeverId::GiBanksBounce, LeverValue::Scalar(banks_bounce)),
+            (
+                LeverId::GiBanksTransmission,
+                LeverValue::Scalar(banks_transmission_per_meter),
+            ),
+            (
+                LeverId::GiBanksDirectionMix,
+                LeverValue::Scalar(banks_direction_mix),
+            ),
+            (
+                LeverId::GiBanksSealPartial,
+                LeverValue::Scalar(banks_seal_partial),
+            ),
             (LeverId::GiRule, LeverValue::Mode(rule.shader_value())),
             (
                 LeverId::GiSkyTest,
@@ -3918,6 +4741,21 @@ mod tests {
                 LeverId::WaterSunThroughLiquid,
                 LeverValue::Flag(sun_through_liquid),
             ),
+            (LeverId::WaterWaves, LeverValue::Flag(waves)),
+            (
+                LeverId::WaterWaveAmplitude,
+                LeverValue::Scalar(wave_amplitude_scale),
+            ),
+            (
+                LeverId::WaterVisibilityDepth,
+                LeverValue::Scalar(visibility_depth_blocks),
+            ),
+            (LeverId::WaterCaustics, LeverValue::Flag(caustics)),
+            (LeverId::WaterBounceLight, LeverValue::Flag(bounce_light)),
+            (
+                LeverId::WaterTurbidityScattering,
+                LeverValue::Scalar(turbidity_scattering_fraction),
+            ),
             (LeverId::EditWorldThread, LeverValue::Flag(world_thread)),
             (
                 LeverId::EditClearanceUpdate,
@@ -3953,6 +4791,19 @@ mod tests {
             (
                 LeverId::MaterialPatternStrength,
                 LeverValue::Scalar(pattern_strength),
+            ),
+            (LeverId::MaterialParallax, LeverValue::Flag(parallax)),
+            (
+                LeverId::MaterialParallaxSamples,
+                LeverValue::Count(parallax_samples),
+            ),
+            (
+                LeverId::MaterialParallaxShadowSamples,
+                LeverValue::Count(parallax_shadow_samples),
+            ),
+            (
+                LeverId::MaterialParallaxEnd,
+                LeverValue::Scalar(parallax_end_meters),
             ),
             (
                 LeverId::MaterialPatternMaxLayers,

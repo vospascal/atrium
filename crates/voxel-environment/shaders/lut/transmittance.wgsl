@@ -10,7 +10,9 @@ fn atmosphere_transmittance_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let origin = atmosphere_origin_at_height(uv.y);
     let mu = uv.x * 2.0 - 1.0;
     let direction = normalize(vec3<f32>(sqrt(max(1.0 - mu * mu, 0.0)), mu, 0.0));
-    let distance = atmosphere_ray_distance(origin, direction);
-    let transmittance = atmosphere_transmittance_segment(origin, direction, distance);
+    // This LUT is used both for looking out through the atmosphere and for testing whether a
+    // directional source reaches a point. Store zero for below-horizon source directions instead
+    // of the transmittance to the ground; otherwise CAGI/cloud lighting can see through the planet.
+    let transmittance = atmosphere_light_transmittance(origin, direction);
     textureStore(transmittance_out, vec2<i32>(id.xy), vec4<f32>(transmittance, 1.0));
 }

@@ -626,7 +626,25 @@ fn create_bind_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cagi::{CagiRule, CagiSampleMode, CagiSkyTest};
+    use crate::cagi::{CagiLayout, CagiRule, CagiSampleMode, CagiSkyTest};
+
+    /// The composed CA source must be naga-valid at every preset.
+    ///
+    /// The DDA side has had this since the animation nodes landed
+    /// (`animation_nodes_lower_to_naga_valid_wgsl_in_the_full_dda_source`); the CA side had
+    /// only text assertions, which cannot catch a call to a function the composition does not
+    /// actually bring into scope. That became a real gap when this pass started calling
+    /// `environment_sun_transmittance_with_clouds` — a name that lives in `voxel-environment`'s
+    /// cloud fragment, three splices away, where a missing include is invisible to `contains`.
+    #[test]
+    fn the_composed_ca_source_is_naga_valid_at_every_preset() {
+        for spec in crate::variants::QUALITY_PRESETS {
+            let source = build_shader_source(&spec.resolve());
+            naga::front::wgsl::parse_str(&source).unwrap_or_else(|error| {
+                panic!("{} CA source is not naga-valid: {error}", spec.label)
+            });
+        }
+    }
 
     /// Every writer of binding 13 must lay a cell down in exactly
     /// [`CELL_DATA_WORDS`], because the byte offsets are computed in cell strides.
@@ -731,7 +749,29 @@ mod tests {
         let settings = CagiSettings::default();
         let world_bindings = WorldBindings::new(&device, &brickmap);
         let mut light_volume = LightVolume::new(&device, &brickmap, &settings, &attributes);
-        let cagi_pass = CagiPass::new(&device, &world_bindings, &light_volume);
+        // Sky OFF at the environment seam, not only in the lighting uniform.
+        // `cagi_sky_radiance` reads the environment's own `ambient_scale` (the
+        // control deliberately moved there when `dispatch.wgsl` stopped reaching
+        // into `lighting.sky_ambient.w`), so a default-constructed environment
+        // injects real sky into every open cell and the emitter's contribution
+        // drowns in daylight — the exact comparison this test exists to avoid.
+        let mut environment = HillaireEnvironment::new(&device);
+        {
+            let request = voxel_environment::EnvironmentRequest {
+                sun_illuminance: [0.0; 3],
+                moon_illuminance: [0.0; 3],
+                active_light_illuminance: [0.0; 3],
+                ambient_scale: 0.0,
+                ..voxel_environment::EnvironmentRequest::default()
+            };
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("s3b gate environment"),
+            });
+            environment.submit(&queue, &mut encoder, &request);
+            queue.submit([encoder.finish()]);
+        }
+        let cagi_pass =
+            CagiPass::new_with_environment(&device, &world_bindings, &light_volume, &environment);
         let grid = light_volume.grid();
 
         // The cell just above the block: air, touching an emissive face, and the
@@ -916,6 +956,20 @@ mod tests {
                         // delete the `world_event_sense` call and the response
                         // table read entirely, which is the shape that can break.
                         let event_light = sample_mode == CagiSampleMode::Trilinear;
+                        // D1: the banks layout must compile against every rule —
+                        // pairing it with `sun_cache` sweeps both values without
+                        // another nesting level.
+                        let layout = if sun_cache {
+                            CagiLayout::Isotropic
+                        } else {
+                            CagiLayout::Banks6
+                        };
+                        // D3: reflectance and transmission gate real code in BOTH
+                        // layouts (the banks bounce and the banks pass-through) —
+                        // pair them with existing axes so every combination of
+                        // (layout, bounce paths) compiles somewhere in the sweep.
+                        let transmission = sky_test == CagiSkyTest::UpwardTrace;
+                        let reflectance = sample_mode == CagiSampleMode::Nearest;
                         let quality = RenderQuality {
                             global_illumination: CagiSettings {
                                 rule,
@@ -924,6 +978,9 @@ mod tests {
                                 sample_mode,
                                 emitter_bounce,
                                 event_light,
+                                layout,
+                                transmission,
+                                reflectance,
                                 ..CagiSettings::default()
                             },
                             ..RenderQuality::default()

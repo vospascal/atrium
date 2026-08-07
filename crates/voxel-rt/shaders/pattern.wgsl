@@ -82,7 +82,35 @@ const PATTERN_ENTRY_NO_LAYERS: u32 = 11u;
 const MATERIAL_PATTERN_ENTRY_PROBE: u32 = 0u;
 
 // One bit per generator code, all set. See `pattern_generator_enabled`.
-const MATERIAL_PATTERN_GENERATOR_MASK: u32 = 16383u;
+const MATERIAL_PATTERN_GENERATOR_MASK: u32 = 32767u;
+
+// P1 — parallax occlusion march over the relief height field. The derived
+// normal alone reads painted-on at oblique angles: nothing slides, nothing
+// occludes. The march moves the SHADING POINT to where the ray actually lands
+// on the raised plates, which is what buys parallax, plates hiding what is
+// behind them, and visible plate sides. Voxel silhouettes stay straight —
+// this is a shading effect, not traversal geometry.
+//
+// OFF in the shipped default: even budgeted it multiplies the pattern-entry
+// cost on every relief pixel, and that is a per-project trade the panel's
+// materials group opts into, not a tax every world pays.
+const MATERIAL_PARALLAX: bool = false;
+// Linear search steps from the relief ceiling down to the face. The height
+// field is piecewise constant, so a fixed budget plus the binary refine below
+// finds plateau tops exactly; more samples only tighten thin walls.
+const MATERIAL_PARALLAX_SAMPLES: u32 = 24u;
+// Height-field shadow steps from the displaced point toward the sun; 0
+// disables relief self-shadowing.
+const MATERIAL_PARALLAX_SHADOW_SAMPLES: u32 = 16u;
+// Camera distance past which the march is skipped outright. A 5 cm relief
+// offset at 48 m is around a pixel: past it the march is all cost and no
+// picture, and terrain is MOSTLY far pixels — this cap, not the sample
+// count, is the difference between "parallax on the block in front of you"
+// and "parallax on the whole landscape".
+const MATERIAL_PARALLAX_END_METERS: f32 = 48.0;
+// Binary refinement iterations between the last two linear samples. Fixed:
+// five bisections resolve 1/32 of a step, already sub-texel everywhere.
+const MATERIAL_PARALLAX_REFINE: u32 = 5u;
 
 // Global scale on every layer's amount, 0..1. The tier knob: it turns detail down
 // everywhere without editing 26 rows, which is what a Quest preset needs.
@@ -95,7 +123,7 @@ const MATERIAL_PATTERN_MAX_LAYERS: u32 = 4u;
 
 // Absolute fade-start distance in metres from the runtime registry.
 
-// Generators. Mirrors `PatternGenerator::code`. FOUR BITS — 16 codes, 12 spent.
+// Generators. Mirrors `PatternGenerator::code`. FOUR BITS — 16 codes, 15 spent.
 // It was three bits and 8 until the generator library grew past it; widening it
 // shifted every accessor below, which is why they are all written out from the
 // same table rather than derived.
@@ -125,6 +153,7 @@ const PATTERN_GENERATOR_WAVE: u32 = 10u;
 const PATTERN_GENERATOR_CHECKER: u32 = 11u;
 const PATTERN_GENERATOR_TILE_TONE: u32 = 12u;
 const PATTERN_GENERATOR_TILE_EDGE: u32 = 13u;
+const PATTERN_GENERATOR_EDGE_BAND: u32 = 14u;
 
 // Tier 1b — drop octaves whose feature size has fallen below a pixel.
 //
@@ -153,6 +182,28 @@ const PATTERN_TARGET_ALBEDO: u32 = 0u;
 const PATTERN_TARGET_ROUGHNESS: u32 = 1u;
 const PATTERN_TARGET_EMISSION: u32 = 2u;
 
+// Runtime inspection bits packed into Lighting.material_params.w by the
+// windowed app. They are deliberately a renderer override: graph assets and
+// material rows remain unchanged while a layer or output channel is inspected.
+fn material_debug_word() -> u32 {
+    return u32(max(lighting.material_params.w, 0.0));
+}
+
+fn material_debug_enabled() -> bool {
+    return (material_debug_word() & 1u) != 0u;
+}
+
+fn material_debug_layer_enabled(slot: u32) -> bool {
+    if (!material_debug_enabled()) {
+        return true;
+    }
+    return (material_debug_word() & (1u << (slot + 1u))) != 0u;
+}
+
+fn material_debug_view() -> u32 {
+    return (material_debug_word() >> 5u) & 0x0fu;
+}
+
 // Blends. Mirrors `PatternBlend::code`.
 const PATTERN_BLEND_MULTIPLY: u32 = 0u;
 const PATTERN_BLEND_MIX_TO_COLOR: u32 = 1u;
@@ -164,12 +215,25 @@ const PATTERN_BLEND_ADD: u32 = 2u;
 //   0-3   generator (4 bits, 12 of 16 used)
 //   4-5   frame          6-7   target        8-9   blend
 //   10-12 face mask      13-15 octaves       16-23 texels per voxel
-//   24    vary per face  25    domain warp   26-31 free
+//   24    vary per face  25    domain warp   26    edge band grows from bottom
+//   27-29 displacement face mask          30 displacement normal  31 relief invert
 fn pattern_generator(layer: PatternLayer) -> u32 { return layer.packed & 0xfu; }
 fn pattern_frame(layer: PatternLayer) -> u32 { return (layer.packed >> 4u) & 0x3u; }
 fn pattern_target(layer: PatternLayer) -> u32 { return (layer.packed >> 6u) & 0x3u; }
 fn pattern_blend(layer: PatternLayer) -> u32 { return (layer.packed >> 8u) & 0x3u; }
 fn pattern_face_mask(layer: PatternLayer) -> u32 { return (layer.packed >> 10u) & 0x7u; }
+fn pattern_relief_face_mask(layer: PatternLayer) -> u32 {
+    return (layer.packed >> 27u) & 0x7u;
+}
+fn pattern_relief_normal_enabled(layer: PatternLayer) -> bool {
+    return (layer.packed & (1u << 30u)) != 0u;
+}
+// Bit 31: the relief mask is inverted — the LOW end of the generator is the
+// raised one. The colour blend keeps the un-inverted value, so a layer that
+// darkens where the mask is high can still raise its LIGHT texels.
+fn pattern_relief_inverted(layer: PatternLayer) -> bool {
+    return (layer.packed & (1u << 31u)) != 0u;
+}
 fn pattern_octaves(layer: PatternLayer) -> u32 { return (layer.packed >> 13u) & 0x7u; }
 // Texels per voxel edge, 0 = continuous. Bits 16-23, so up to 255 fits even though
 // TEXEL_RUNGS stops at 32.
@@ -179,11 +243,20 @@ fn pattern_varies_per_face(layer: PatternLayer) -> bool { return (layer.packed &
 // Bit 25: push the sample point through a noise field before the generator reads
 // it (iq, "domain warping"). Strength rides in `param_b`.
 fn pattern_warps(layer: PatternLayer) -> bool { return (layer.packed & (1u << 25u)) != 0u; }
+// Bit 26: EdgeBand grows from the bottom instead of the top.
+fn pattern_edge_band_from_bottom(layer: PatternLayer) -> bool {
+    return (layer.packed & (1u << 26u)) != 0u;
+}
 
 // Where a hit is, in every form the frames need. Built once per hit by
 // `pattern_sample` below, then shared by every layer in the stack — the
 // coordinate mapping is per layer (it depends on the period) but the position it
 // maps is not.
+// Mirrors EXPOSURE_TOP / EXPOSURE_BOTTOM / EXPOSURE_ALL in pattern.rs.
+const PATTERN_EXPOSURE_TOP: u32 = 1u;
+const PATTERN_EXPOSURE_BOTTOM: u32 = 2u;
+const PATTERN_EXPOSURE_ALL: u32 = 3u;
+
 struct PatternSample {
     // The hit point in world METRES, not voxel units. The traced space is voxel
     // units (dda.wgsl divides the camera position by voxel_size before tracing),
@@ -193,6 +266,12 @@ struct PatternSample {
     voxel: vec3<i32>,
     // Face axis: 0 = x, 1 = y, 2 = z.
     axis: u32,
+    // Column exposure at the hit's one-metre block: bit 0 set when the block
+    // ABOVE is empty (an exposed column top), bit 1 when the one BELOW is.
+    // Filled from the occupancy grid by `pattern_sample`; the CPU mirror has
+    // no world and defaults to fully exposed. The edge band reads it so a lip
+    // only draws where the column actually ends.
+    exposure: u32,
     // Sign of the ray along that axis. The TOP face is axis 1 with a NEGATIVE
     // sign — see `material_face_albedo` in world.wgsl for why that reads backwards.
     axis_sign: f32,
@@ -714,6 +793,38 @@ fn pattern_texels_at(layer: PatternLayer, distance_meters: f32) -> u32 {
     return max(texels >> min(steps, 7u), 1u);
 }
 
+// Normalised distance-LOD amount for the inspection view: 0 is the authored
+// close-up grid and 1 is the coarsest grid the runtime can select. This exposes
+// the actual texel LOD path, rather than an unrelated artistic noise value.
+fn pattern_lod_level(layer: PatternLayer, distance_meters: f32) -> f32 {
+    let authored = pattern_texels(layer);
+    if (authored <= 1u) {
+        return 0.0;
+    }
+    let sampled_texels = pattern_texels_at(layer, distance_meters);
+    return clamp(log2(f32(authored) / f32(max(sampled_texels, 1u))) / 7.0, 0.0, 1.0);
+}
+
+fn pattern_debug_lod(material: u32, sample: PatternSample) -> f32 {
+    let flags = materials[material].flags;
+    if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return 0.0;
+    }
+    let count = min(
+        min(material_pattern_count(flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    var level = 0.0;
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        if (!material_debug_layer_enabled(slot)) {
+            continue;
+        }
+        level = max(level, pattern_lod_level(
+            materials[material].patterns[slot], sample.distance_meters));
+    }
+    return level;
+}
+
 fn pattern_snap_to_texels(meters: vec3<f32>, texels: u32,
                           voxel_size_meters: f32) -> vec3<f32> {
     if (MATERIAL_PATTERN_ENTRY_PROBE >= PATTERN_ENTRY_NO_SNAP || texels == 0u) {
@@ -1009,13 +1120,18 @@ fn pattern_cache_hashes(layer: PatternLayer, point: vec3<f32>, salt: u32,
     tag_key = tag_key * 0x165667c5u ^ (layer.packed | (octaves << 26u));
     tag_key = tag_key * 0xd3a2646du ^ bitcast<u32>(layer.period_meters);
 
-    // `param_a` is density, distortion or edge sharpness depending on the
-    // generator; `param_b` is domain-warp strength. Both affect the raw answer,
+    // `param_a` is density, distortion, edge sharpness or band width depending on
+    // the generator; `param_b` is domain-warp strength except for EdgeBand, where
+    // it is jaggedness. Both affect the raw answer,
     // and omitting them would leave stale entries behind after an authored edit.
     key = key * 0xd3a2646du ^ bitcast<u32>(layer.param_a);
     key = key * 0xfd7046c5u ^ bitcast<u32>(layer.param_b);
     tag_key = tag_key * 0xfd7046d7u ^ bitcast<u32>(layer.param_b);
     tag_key = tag_key * 0xb55a4f0du ^ bitcast<u32>(layer.param_a);
+    // The extra flag word changes the raw answer (grid averaging), so toggling
+    // it must move the key or the panel would serve stale point samples.
+    key = key * 0x9e3779b1u ^ layer.flags_extra;
+    tag_key = tag_key * 0x85ebca7bu ^ layer.flags_extra;
     return vec2<u32>(pattern_hash_u32(key), pattern_hash_u32(tag_key));
 }
 
@@ -1048,7 +1164,8 @@ fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
         // ever agree on a key and the cache would be pure overhead. That is a
         // property of the LAYER, read from its own configuration — no material,
         // slot or generator is named anywhere in this path.
-        return pattern_generator_at(layer, sample, drift_meters, raw_point, salt, octaves);
+        return pattern_generator_resolved(
+            layer, sample, drift_meters, raw_point, salt, octaves, voxel_size_meters);
     }
     let hashes = pattern_cache_hashes(layer, raw_point, salt, octaves);
     let slot = hashes.x & PATTERN_CACHE_MASK;
@@ -1058,7 +1175,8 @@ fn pattern_generator_value(layer: PatternLayer, sample: PatternSample,
     if ((stored >> 16u) == tag) {
         return f32(stored & 0xffffu) * (1.0 / 65535.0);
     }
-    let value = pattern_generator_at(layer, sample, drift_meters, raw_point, salt, octaves);
+    let value = pattern_generator_resolved(
+        layer, sample, drift_meters, raw_point, salt, octaves, voxel_size_meters);
     let quantised = u32(clamp(value, 0.0, 1.0) * 65535.0 + 0.5);
     // ONE atomic 32-bit store, so an entry can never be seen half-written and
     // concurrent invocations cannot data-race. Same-key writers store the same
@@ -1089,11 +1207,63 @@ fn pattern_generator_enabled(generator: u32) -> bool {
     return (MATERIAL_PATTERN_GENERATOR_MASK & (1u << generator)) != 0u;
 }
 
+// A grass-side mask: one stable random edge height per horizontal face column,
+// quantised to the layer's texel grid. The Pattern Layer's face mask restricts
+// the result to sides; this function also returns zero for Y faces so the
+// generator remains well-defined when previewed on its own.
+fn pattern_edge_band_value(layer: PatternLayer, sample: PatternSample,
+                           voxel_size_meters: f32, salt: u32) -> f32 {
+    if (sample.axis == 1u) {
+        return 0.0;
+    }
+    // A band is the exposed lip of a COLUMN, not a decal on every block:
+    // stacked blocks only band where the column meets air. Mirrors the same
+    // gate in `edge_band_value` (pattern.rs), whose CPU samples default to
+    // fully exposed.
+    if (pattern_edge_band_from_bottom(layer)) {
+        if ((sample.exposure & PATTERN_EXPOSURE_BOTTOM) == 0u) {
+            return 0.0;
+        }
+    } else if ((sample.exposure & PATTERN_EXPOSURE_TOP) == 0u) {
+        return 0.0;
+    }
+    let world_voxel_size = voxel_size_meters * BRICK_SIZE;
+    var local_u = 0.0;
+    if (sample.axis == 0u) {
+        local_u = fract(sample.world_meters.z / world_voxel_size);
+    } else {
+        local_u = fract(sample.world_meters.x / world_voxel_size);
+    }
+    let texels = max(pattern_texels(layer), 1u);
+    let column = i32(floor(local_u * f32(texels)));
+    let local_y = fract(sample.world_meters.y / world_voxel_size);
+    let quantised_y = (floor(local_y * f32(texels)) + 0.5) / f32(texels);
+    let block = vec3<i32>(floor(sample.world_meters / world_voxel_size));
+    var cell = vec3<i32>(0, 0, 0);
+    if (sample.axis == 0u) {
+        cell = vec3<i32>(block.x, block.y, column);
+    } else {
+        cell = vec3<i32>(column, block.y, block.z);
+    }
+    let jitter = pattern_hash_cell(cell, salt) * 2.0 - 1.0;
+    let width = clamp(layer.param_a, 0.0, 1.0);
+    let jaggedness = clamp(layer.param_b, 0.0, 1.0);
+    let edge = clamp(width * (1.0 + jitter * jaggedness), 0.0, 1.0);
+    if (pattern_edge_band_from_bottom(layer)) {
+        return select(0.0, 1.0, quantised_y <= edge);
+    }
+    return select(0.0, 1.0, quantised_y >= 1.0 - edge);
+}
+
 fn pattern_generator_at(layer: PatternLayer, sample: PatternSample,
                         drift_meters: vec3<f32>, raw_point: vec3<f32>, salt: u32,
                         octaves: u32) -> f32 {
-    let point = pattern_warp(raw_point, layer, salt);
     let generator = pattern_generator(layer);
+    if (pattern_generator_enabled(PATTERN_GENERATOR_EDGE_BAND)
+        && generator == PATTERN_GENERATOR_EDGE_BAND) {
+        return pattern_edge_band_value(layer, sample, brickmap.voxel_size_meters, salt);
+    }
+    let point = pattern_warp(raw_point, layer, salt);
     if (pattern_generator_enabled(PATTERN_GENERATOR_NOISE) && generator == PATTERN_GENERATOR_NOISE) {
         return pattern_fractal_noise(point, octaves, salt);
     }
@@ -1139,6 +1309,72 @@ fn pattern_generator_at(layer: PatternLayer, sample: PatternSample,
             pattern_tile_of(layer, sample, drift_meters).w, layer.param_a);
     }
     return pattern_hash_cell(vec3<i32>(floor(point)), salt ^ PATTERN_FLAT_SALT);
+}
+
+// ---- Grid-average sampling ----------------------------------------------------
+//
+// The generator's EIGHT-OCTANT MEAN over the texel cell instead of the centre
+// point sample. A point sample of a sub-texel-period noise hands every texel one
+// independent random draw at FULL contrast; the mean concentrates the values
+// around the field's local average — the calmer, solid-tone look. The taps sit at
+// the centres of the cell's eight octants (±texel/4 along each axis around the
+// snapped centre), the stratified box-filter estimate.
+//
+// Cost note: the result is a pure function of the snapped coordinate like every
+// other generator value, so the texel cache holds it and the eightfold work is
+// paid once per texel rather than once per pixel.
+
+// Whether grid averaging changes anything for this layer. The tessellation
+// readouts and the edge band ignore the mapped coordinate — their values are
+// already constant per tile or per column, so eight taps would return eight
+// copies of one number. Mirrors `grid_averaging_applies` and the generator
+// early-returns in `generator_value_animated` on the CPU side.
+fn pattern_grid_average_applies(layer: PatternLayer) -> bool {
+    if ((layer.flags_extra & 1u) == 0u || pattern_texels(layer) == 0u
+        || pattern_frame(layer) == PATTERN_FRAME_TILE) {
+        return false;
+    }
+    let generator = pattern_generator(layer);
+    return generator != PATTERN_GENERATOR_TILE_TONE
+        && generator != PATTERN_GENERATOR_TILE_EDGE
+        && generator != PATTERN_GENERATOR_EDGE_BAND;
+}
+
+// Mirrors `grid_averaged_value` in pattern.rs. One deliberate divergence: the
+// offsets are sized from the ACTIVE texel grid, so a distance-coarsened cell is
+// averaged over its own extent rather than over an eighth of it — the CPU
+// reference has no texel LOD to coarsen.
+fn pattern_grid_averaged_value(layer: PatternLayer, sample: PatternSample,
+                               drift_meters: vec3<f32>, raw_point: vec3<f32>,
+                               salt: u32, octaves: u32,
+                               voxel_size_meters: f32) -> f32 {
+    let texels = pattern_texels_at(layer, sample.distance_meters);
+    let texel_meters = (voxel_size_meters * BRICK_SIZE) / f32(max(texels, 1u));
+    let quarter = texel_meters * 0.25 / max(layer.period_meters, 1e-4);
+    var total = 0.0;
+    for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+        let tap = raw_point + quarter * vec3<f32>(
+            select(-1.0, 1.0, (corner & 1u) != 0u),
+            select(-1.0, 1.0, (corner & 2u) != 0u),
+            select(-1.0, 1.0, (corner & 4u) != 0u),
+        );
+        total = total
+            + pattern_generator_at(layer, sample, drift_meters, tap, salt, octaves);
+    }
+    return total * 0.125;
+}
+
+// The generator value with the layer's sampling mode applied — the one call site
+// the cached and uncached paths share, so neither can forget the average.
+fn pattern_generator_resolved(layer: PatternLayer, sample: PatternSample,
+                              drift_meters: vec3<f32>, raw_point: vec3<f32>,
+                              salt: u32, octaves: u32,
+                              voxel_size_meters: f32) -> f32 {
+    if (pattern_grid_average_applies(layer)) {
+        return pattern_grid_averaged_value(
+            layer, sample, drift_meters, raw_point, salt, octaves, voxel_size_meters);
+    }
+    return pattern_generator_at(layer, sample, drift_meters, raw_point, salt, octaves);
 }
 
 // Domain warping (iq, "domain warping"): sample a noise field at the point and
@@ -1227,6 +1463,17 @@ fn pattern_covers_face(layer: PatternLayer, axis: u32, axis_sign: f32) -> bool {
     return (mask & 4u) != 0u;
 }
 
+fn pattern_relief_covers_face(layer: PatternLayer, axis: u32, axis_sign: f32) -> bool {
+    let mask = pattern_relief_face_mask(layer);
+    if (axis != 1u) {
+        return (mask & 2u) != 0u;
+    }
+    if (axis_sign < 0.0) {
+        return (mask & 1u) != 0u;
+    }
+    return (mask & 4u) != 0u;
+}
+
 // The layer's effective strength at this sample: its amount, globally scaled,
 // faded, and zero on a face the mask excludes.
 fn pattern_strength(layer: PatternLayer, sample: PatternSample, gain: f32) -> f32 {
@@ -1247,6 +1494,412 @@ fn pattern_strength(layer: PatternLayer, sample: PatternSample, gain: f32) -> f3
         * max(gain, 0.0)
         * MATERIAL_PATTERN_STRENGTH
         * pattern_fade(layer, sample.distance_meters);
+}
+
+// Displacement is a separate modifier from channel blending, so its mask is not
+// scaled by a Pattern Layer's albedo/roughness/emission amount. The node owns the
+// physical height; this helper only applies face scope, distance fade, and graph
+// animation to that height field.
+fn pattern_relief_strength(layer: PatternLayer, sample: PatternSample, gain: f32) -> f32 {
+    if (!pattern_relief_covers_face(layer, sample.axis, sample.axis_sign)) {
+        return 0.0;
+    }
+    return max(gain, 0.0)
+        * MATERIAL_PATTERN_STRENGTH
+        * pattern_fade(layer, sample.distance_meters);
+}
+
+// The generator as a HEIGHT mask: the raw value, or its complement when the
+// displacement asked for the low end of the mask to be the raised one, then
+// quantised into `relief_steps` flat levels. The quantise is what turns a
+// continuous mask — every texel border a small random tilt, a face of wash —
+// into plateaus with few, full-strength bevels: the normal-map look. Mirrors
+// `relief_mask_value` in pattern.rs.
+fn pattern_relief_value(layer: PatternLayer, sample: PatternSample,
+                        voxel_size_meters: f32, drift_meters: vec3<f32>) -> f32 {
+    var value = pattern_generator_value(layer, sample, voxel_size_meters, drift_meters);
+    if (pattern_relief_inverted(layer)) {
+        value = 1.0 - value;
+    }
+    if (layer.relief_steps >= 2u) {
+        let count = f32(layer.relief_steps);
+        value = floor(min(value * count, count - 1.0)) / (count - 1.0);
+    }
+    return value;
+}
+
+fn pattern_relief_height(material: u32, sample: PatternSample,
+                         voxel_size_meters: f32,
+                         animation: PatternAnimation) -> f32 {
+    let flags = materials[material].flags;
+    if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return 0.0;
+    }
+    let count = min(
+        min(material_pattern_count(flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    var height = 0.0;
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        if (!material_debug_layer_enabled(slot)) {
+            continue;
+        }
+        let layer = materials[material].patterns[slot];
+        // Height is the displacement output. It remains active even when the
+        // author disables the optional derived normal.
+        if (layer.relief_height_meters <= 0.0) {
+            continue;
+        }
+        let gain = pattern_animation_gain(animation, slot);
+        let strength = pattern_relief_strength(layer, sample, gain);
+        let drift = pattern_animation_drift(animation, slot);
+        let drift_meters = pattern_drift_meters(
+            layer, drift, voxel_size_meters, sample.distance_meters);
+        let value = pattern_relief_value(layer, sample, voxel_size_meters, drift_meters);
+        height = height + layer.relief_height_meters * strength * value;
+    }
+    return height;
+}
+
+// Derive a tangent-space normal from the same snapped generator mask that drives
+// albedo, roughness, and emission. This is an embossed-material experiment: the
+// voxel silhouette stays unchanged, while the light responds as if selected
+// texels were raised above the face. Because the height lives on PatternLayer,
+// an emission speckle or any other mask can opt into the same relief independently.
+fn pattern_relief_normal(material: u32, sample: PatternSample,
+                         base_normal: vec3<f32>, voxel_size_meters: f32,
+                         animation: PatternAnimation) -> vec3<f32> {
+    let flags = materials[material].flags;
+    if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return base_normal;
+    }
+    let count = min(
+        min(material_pattern_count(flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    var tangent_u = vec3<f32>(1.0, 0.0, 0.0);
+    var tangent_v = vec3<f32>(0.0, 1.0, 0.0);
+    if (sample.axis == 0u) {
+        tangent_u = vec3<f32>(0.0, 0.0, 1.0);
+    } else if (sample.axis == 1u) {
+        tangent_v = vec3<f32>(0.0, 0.0, 1.0);
+    }
+    var result = base_normal;
+    let world_voxel_size = voxel_size_meters * BRICK_SIZE;
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        if (!material_debug_layer_enabled(slot)) {
+            continue;
+        }
+        let layer = materials[material].patterns[slot];
+        // Normal derivation is an independent opt-in. The same height field
+        // may still lift the surface while leaving its lighting normal alone.
+        if (layer.relief_height_meters <= 0.0 || !pattern_relief_normal_enabled(layer)) {
+            continue;
+        }
+        let texels = pattern_texels_at(layer, sample.distance_meters);
+        // SUB-texel step. The height field is held flat across each texel, so a
+        // full-texel step reads two neighbouring plateaus from everywhere inside
+        // a texel and smears the discontinuity into a weak rolling gradient. A
+        // fractional step keeps texel interiors flat (both taps land on the same
+        // plateau) and concentrates the full height difference into a bevel
+        // 2x this step wide at the borders — the emboss look. The fraction is
+        // per-layer, authored on the Displacement node (at a full-texel step the
+        // grass relief measured a mean tilt of 2.9 degrees — invisible; at 1/8
+        // texel the same heights measure p95 29 degrees).
+        let step = world_voxel_size / f32(max(texels, 1u))
+            * layer.relief_bevel_fraction;
+        let height_scale = layer.relief_height_meters
+            * pattern_relief_strength(layer, sample, pattern_animation_gain(animation, slot));
+        if (height_scale <= 0.0) {
+            continue;
+        }
+        var u_plus = sample;
+        var u_minus = sample;
+        var v_plus = sample;
+        var v_minus = sample;
+        u_plus.world_meters = u_plus.world_meters + tangent_u * step;
+        u_minus.world_meters = u_minus.world_meters - tangent_u * step;
+        v_plus.world_meters = v_plus.world_meters + tangent_v * step;
+        v_minus.world_meters = v_minus.world_meters - tangent_v * step;
+        let drift = pattern_animation_drift(animation, slot);
+        let drift_meters = pattern_drift_meters(
+            layer, drift, voxel_size_meters, sample.distance_meters);
+        let h_u_plus = pattern_relief_value(
+            layer, u_plus, voxel_size_meters, drift_meters) * height_scale;
+        let h_u_minus = pattern_relief_value(
+            layer, u_minus, voxel_size_meters, drift_meters) * height_scale;
+        let h_v_plus = pattern_relief_value(
+            layer, v_plus, voxel_size_meters, drift_meters) * height_scale;
+        let h_v_minus = pattern_relief_value(
+            layer, v_minus, voxel_size_meters, drift_meters) * height_scale;
+        // The strength multiplies the TILT rather than the height, so it shapes
+        // the emboss lighting without feeding back into the height response the
+        // traversal reads.
+        let du = (h_u_plus - h_u_minus) / max(2.0 * step, 1e-5)
+            * layer.relief_normal_strength;
+        let dv = (h_v_plus - h_v_minus) / max(2.0 * step, 1e-5)
+            * layer.relief_normal_strength;
+        result = normalize(result - tangent_u * du - tangent_v * dv);
+    }
+    return result;
+}
+
+// ---- P1: the parallax occlusion march -----------------------------------------
+//
+// Classic POM adapted to a procedural, texel-quantised height field: intersect
+// the ray with the virtual CEILING plane (face + tallest possible relief), walk
+// it down toward the face sampling `pattern_relief_height`, and refine the
+// crossing. Every tap goes through the texel cache, so marching the same wall
+// costs generator work once per texel, not once per pixel.
+
+// The tallest the material's relief can be (the sum of the authored heights —
+// an upper bound; strength, faces and masks only lower it), plus the finest
+// texel grid any relief layer samples on. The march prices itself from both:
+// the ceiling bounds the offset, the grid tells it how many DISTINCT height
+// values a tangential slide can even cross.
+struct ReliefProfile {
+    ceiling_meters: f32,
+    finest_texels: u32,
+}
+
+fn pattern_relief_profile(material: u32) -> ReliefProfile {
+    var profile: ReliefProfile;
+    profile.ceiling_meters = 0.0;
+    profile.finest_texels = 1u;
+    let flags = materials[material].flags;
+    if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
+        return profile;
+    }
+    let count = min(
+        min(material_pattern_count(flags), MATERIAL_PATTERN_MAX_LAYERS),
+        MAX_PATTERN_LAYERS,
+    );
+    for (var slot = 0u; slot < count; slot = slot + 1u) {
+        // Inactive slots author zero height, so summing the fixed row is safe.
+        let height = materials[material].patterns[slot].relief_height_meters;
+        if (height <= 0.0) {
+            continue;
+        }
+        profile.ceiling_meters = profile.ceiling_meters + height;
+        // A continuous (texels 0) relief layer — the tile plates — changes at
+        // tile joints rather than texel borders; treat it as the default grid
+        // so the budget stays honest without pricing every joint.
+        var texels = pattern_texels(materials[material].patterns[slot]);
+        if (texels == 0u) {
+            texels = 8u;
+        }
+        profile.finest_texels = max(profile.finest_texels, texels);
+    }
+    return profile;
+}
+
+struct ReliefMarch {
+    // Whether the march moved the shading point at all.
+    displaced: bool,
+    // The sample to shade with: `world_meters` slid along the face plane to
+    // where the ray lands on the relief. Voxel, face and distance are the
+    // original hit's — a P1 simplification that leaves voxel- and face-frame
+    // layers unaware of a cross-voxel slide; world-frame layers, which are what
+    // plate materials author, continue seamlessly.
+    sample: PatternSample,
+    // Height of the landing point above the face, in metres. The self-shadow
+    // march starts here.
+    height_meters: f32,
+    // The landing surface: a plateau top keeps the face's derived normal; a
+    // plate SIDE gets the wall's own axis normal.
+    hit_wall: bool,
+    wall_normal: vec3<f32>,
+}
+
+// The two world axes spanning the face, matching `pattern_relief_normal`.
+fn pattern_face_tangent_u(axis: u32) -> vec3<f32> {
+    if (axis == 0u) { return vec3<f32>(0.0, 0.0, 1.0); }
+    return vec3<f32>(1.0, 0.0, 0.0);
+}
+
+fn pattern_face_tangent_v(axis: u32) -> vec3<f32> {
+    if (axis == 1u) { return vec3<f32>(0.0, 0.0, 1.0); }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+fn pattern_parallax_march(material: u32, base_sample: PatternSample,
+                          geometric_normal: vec3<f32>, ray_direction: vec3<f32>,
+                          voxel_size_meters: f32,
+                          animation: PatternAnimation) -> ReliefMarch {
+    var result: ReliefMarch;
+    result.displaced = false;
+    result.sample = base_sample;
+    result.height_meters = 0.0;
+    result.hit_wall = false;
+    result.wall_normal = geometric_normal;
+    if (!MATERIAL_PARALLAX || MATERIAL_PARALLAX_SAMPLES == 0u) {
+        return result;
+    }
+    // The distance cap comes BEFORE the profile loop: far pixels are most
+    // pixels, and they should pay one compare, not a row walk.
+    if (base_sample.distance_meters > MATERIAL_PARALLAX_END_METERS) {
+        return result;
+    }
+    let profile = pattern_relief_profile(material);
+    let ceiling = profile.ceiling_meters;
+    if (ceiling <= 0.0) {
+        return result;
+    }
+    // How fast the ray descends toward the face; a grazing ray gets a huge
+    // lateral slide per metre of height, which the sample budget still bounds.
+    let descent = -dot(ray_direction, geometric_normal);
+    if (descent <= 1e-4) {
+        return result;
+    }
+    // Tangential slide per metre of height ABOVE the face: walking the ray
+    // backwards from the face hit, staying on the face plane.
+    let slide = -(ray_direction / descent + geometric_normal);
+    // Probes are CLAMPED to the hit block's own face, the way Minecraft POM
+    // works per block. Unclamped, a slide across the block boundary wraps every
+    // voxel-local generator — the edge band drew its lip in the middle of the
+    // face — and marches phantom relief where no neighbour exists. World-frame
+    // plates give up cross-block parallax continuity for it, which reads fine.
+    let world_voxel_size = voxel_size_meters * BRICK_SIZE;
+    let block_min = vec3<f32>((base_sample.voxel / vec3<i32>(8)) * vec3<i32>(8))
+        * voxel_size_meters;
+    // The upper bound backs off a hair: a probe clamped EXACTLY onto the block
+    // boundary wraps every `fract`-based local coordinate to zero — the edge
+    // band's field vanished at the top edge and the march tunnelled straight
+    // past the lip it was supposed to land on.
+    let block_max = block_min + vec3<f32>(world_voxel_size - 1e-4);
+    // The budget prices the march by what it can actually resolve: the field is
+    // piecewise constant on the finest relief grid, so a slide crossing two
+    // texel columns cannot need twenty-four taps. Near-perpendicular views —
+    // most terrain pixels — collapse to the floor of four; the authored cap
+    // only pays off at grazing angles, where the slide really does cross many
+    // columns. Two taps per column: one to find the plateau, one for the refine
+    // to bracket its wall.
+    let texel_meters = world_voxel_size / f32(profile.finest_texels);
+    let slide_texels = length(slide) * ceiling / texel_meters;
+    let samples = clamp(u32(slide_texels * 2.0) + 2u, 4u, MATERIAL_PARALLAX_SAMPLES);
+    var above_height = ceiling;
+    var below_height = -1.0;
+    for (var step = 1u; step <= samples; step = step + 1u) {
+        let height = ceiling * (1.0 - f32(step) / f32(samples));
+        var probe = base_sample;
+        probe.world_meters = clamp(
+            base_sample.world_meters + slide * height, block_min, block_max);
+        let field = pattern_relief_height(material, probe, voxel_size_meters, animation);
+        if (field >= height) {
+            below_height = height;
+            break;
+        }
+        above_height = height;
+    }
+    if (below_height < 0.0) {
+        // The ray reached the face without meeting the relief: shade the
+        // original hit.
+        return result;
+    }
+    // Binary refine between the last point above the field and the first at or
+    // below it.
+    var low = below_height;
+    var high = above_height;
+    for (var iteration = 0u; iteration < MATERIAL_PARALLAX_REFINE;
+         iteration = iteration + 1u) {
+        let middle = 0.5 * (low + high);
+        var probe = base_sample;
+        probe.world_meters = clamp(
+            base_sample.world_meters + slide * middle, block_min, block_max);
+        let field = pattern_relief_height(material, probe, voxel_size_meters, animation);
+        if (field >= middle) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    var landed = base_sample;
+    landed.world_meters = clamp(
+        base_sample.world_meters + slide * low, block_min, block_max);
+    let landed_field = pattern_relief_height(material, landed, voxel_size_meters, animation);
+    result.displaced = true;
+    result.sample = landed;
+    result.height_meters = low;
+    // A landing point well BELOW the local plateau top means the ray stopped on
+    // the vertical wall between two plateaus rather than on a top. The wall
+    // faces back against the ray's slide, along the slide's dominant axis.
+    if (landed_field - low > max(0.002, 0.02 * ceiling)) {
+        result.hit_wall = true;
+        let tangent_u = pattern_face_tangent_u(base_sample.axis);
+        let tangent_v = pattern_face_tangent_v(base_sample.axis);
+        let slide_u = dot(slide, tangent_u);
+        let slide_v = dot(slide, tangent_v);
+        // The march advances tangentially OPPOSITE the slide (the slide walks
+        // the ray backwards), so a blocking wall faces ALONG the slide — back
+        // toward the camera. The first version had this negated, and every
+        // crevice wall was backfacing: no sun, no ambient, pure black cracks.
+        if (abs(slide_u) >= abs(slide_v)) {
+            result.wall_normal = tangent_u * sign(slide_u);
+        } else {
+            result.wall_normal = tangent_v * sign(slide_v);
+        }
+    }
+    return result;
+}
+
+// P2 — relief self-shadowing: march from the displaced point toward the sun
+// through the same height field. Returns a visibility factor for the DIRECT sun
+// term only; ambient and GI stay untouched. Soft rather than binary: the
+// deeper the sun ray dips below a blocking plateau, the darker, which reads as
+// a contact shadow at plate joints without a second shadow map.
+fn pattern_parallax_sun_shadow(material: u32, displaced_sample: PatternSample,
+                               start_height_meters: f32,
+                               geometric_normal: vec3<f32>,
+                               sun_direction: vec3<f32>,
+                               voxel_size_meters: f32,
+                               animation: PatternAnimation) -> f32 {
+    if (!MATERIAL_PARALLAX || MATERIAL_PARALLAX_SHADOW_SAMPLES == 0u) {
+        return 1.0;
+    }
+    // Same order as the march: one compare before any row walk.
+    if (displaced_sample.distance_meters > MATERIAL_PARALLAX_END_METERS) {
+        return 1.0;
+    }
+    let profile = pattern_relief_profile(material);
+    let ceiling = profile.ceiling_meters;
+    if (ceiling <= 0.0) {
+        return 1.0;
+    }
+    let ascent = dot(sun_direction, geometric_normal);
+    if (ascent <= 1e-4) {
+        // The face's own n·l already handles a sun at or below its horizon.
+        return 1.0;
+    }
+    // Tangential slide of the sun ray per metre of CLIMB above the face.
+    let slide = sun_direction / ascent - geometric_normal;
+    let climb_total = ceiling - start_height_meters;
+    if (climb_total <= 0.0) {
+        return 1.0;
+    }
+    // The same per-block clamp the march applies, for the same reasons —
+    // including the backed-off upper bound that keeps `fract` from wrapping.
+    let world_voxel_size = voxel_size_meters * BRICK_SIZE;
+    let block_min = vec3<f32>((displaced_sample.voxel / vec3<i32>(8)) * vec3<i32>(8))
+        * voxel_size_meters;
+    let block_max = block_min + vec3<f32>(world_voxel_size - 1e-4);
+    // Budgeted like the view march: the shadow ray's tangential run, priced in
+    // finest-grid texels.
+    let texel_meters = world_voxel_size / f32(profile.finest_texels);
+    let slide_texels = length(slide) * climb_total / texel_meters;
+    let samples = clamp(
+        u32(slide_texels * 2.0) + 2u, 4u, MATERIAL_PARALLAX_SHADOW_SAMPLES);
+    var deepest = 0.0;
+    for (var step = 1u; step <= samples; step = step + 1u) {
+        let climb = climb_total * f32(step) / f32(samples);
+        let height = start_height_meters + climb;
+        var probe = displaced_sample;
+        probe.world_meters = clamp(
+            displaced_sample.world_meters + slide * climb, block_min, block_max);
+        let field = pattern_relief_height(material, probe, voxel_size_meters, animation);
+        deepest = max(deepest, field - height);
+    }
+    // Full shadow once the sun ray is buried a quarter of the relief ceiling.
+    return clamp(1.0 - deepest / max(0.25 * ceiling, 1e-4), 0.0, 1.0);
 }
 
 // ---- Blends -----------------------------------------------------------------
@@ -1315,6 +1968,23 @@ fn pattern_sample(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> 
     sample.axis = hit.axis;
     sample.axis_sign = hit.axis_sign;
     sample.distance_meters = max(hit.distance, 0.0) * brickmap.voxel_size_meters;
+    // Column exposure, side faces only (a top face needs no lip). One
+    // occupancy probe per neighbour, at the hit's own detail column just past
+    // the block boundary — out-of-world counts as empty, which is the right
+    // answer at the world's rim.
+    sample.exposure = PATTERN_EXPOSURE_ALL;
+    if (hit.axis != 1u) {
+        let block_bottom = (hit.voxel.y / 8) * 8;
+        let above = vec3<i32>(hit.voxel.x, block_bottom + 8, hit.voxel.z);
+        let below = vec3<i32>(hit.voxel.x, block_bottom - 1, hit.voxel.z);
+        sample.exposure = 0u;
+        if (!voxel_occupied(above)) {
+            sample.exposure = sample.exposure | PATTERN_EXPOSURE_TOP;
+        }
+        if (!voxel_occupied(below)) {
+            sample.exposure = sample.exposure | PATTERN_EXPOSURE_BOTTOM;
+        }
+    }
     return sample;
 }
 
@@ -1350,20 +2020,24 @@ fn pattern_sample(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>) -> 
 //
 // `animation` carries the per-slot gain and drift a material graph supplied;
 // `pattern_animation_identity()` is the un-animated case and folds away.
-struct PatternSurface {
-    albedo: vec3<f32>,
+// The complete surface payload that reaches the lighting model. Pattern layers
+// currently author base color, roughness, and emission; the other PBR channels
+// still travel through this same value unchanged. Keeping the payload intact is
+// important: a modifier must not accidentally turn a PBR surface back into a
+// loose collection of shader locals.
+struct PbrSurface {
+    base_color: vec3<f32>,
     roughness: f32,
+    specular: f32,
+    ambient_occlusion: f32,
+    normal: vec3<f32>,
     emission: vec3<f32>,
 }
 
 fn material_pattern_surface_from_base(material: u32, sample: PatternSample,
-                                      albedo_base: vec3<f32>, roughness_base: f32,
-                                      emission_base: vec3<f32>,
-                                      animation: PatternAnimation) -> PatternSurface {
-    var surface: PatternSurface;
-    surface.albedo = albedo_base;
-    surface.roughness = roughness_base;
-    surface.emission = emission_base;
+                                      base: PbrSurface,
+                                      animation: PatternAnimation) -> PbrSurface {
+    var surface = base;
     let flags = materials[material].flags;
     if (!MATERIAL_PATTERNS || (flags & MATERIAL_FLAG_PATTERNS) == 0u) {
         return surface;
@@ -1381,13 +2055,16 @@ fn material_pattern_surface_from_base(material: u32, sample: PatternSample,
     }
     let voxel_size_meters = brickmap.voxel_size_meters;
     for (var slot = 0u; slot < count; slot = slot + 1u) {
+        if (!material_debug_layer_enabled(slot)) {
+            continue;
+        }
         let layer = materials[material].patterns[slot];
         let layer_target = pattern_target(layer);
         let gain = pattern_animation_gain(animation, slot);
         let drift = pattern_animation_drift(animation, slot);
         if (layer_target == PATTERN_TARGET_ALBEDO) {
-            surface.albedo = pattern_apply_color(
-                layer, surface.albedo, sample, voxel_size_meters, gain, drift);
+            surface.base_color = pattern_apply_color(
+                layer, surface.base_color, sample, voxel_size_meters, gain, drift);
         } else if (layer_target == PATTERN_TARGET_EMISSION) {
             surface.emission = pattern_apply_color(
                 layer, surface.emission, sample, voxel_size_meters, gain, drift);
@@ -1401,13 +2078,18 @@ fn material_pattern_surface_from_base(material: u32, sample: PatternSample,
 
 // The row's own bases, for a material with no graph. One call, so the layer loop
 // above stays the single implementation.
-fn material_pattern_surface(material: u32, sample: PatternSample) -> PatternSurface {
+fn material_pattern_surface(material: u32, sample: PatternSample) -> PbrSurface {
+    var base: PbrSurface;
+    base.base_color = material_face_albedo(material, sample.axis, sample.axis_sign);
+    base.roughness = material_face_roughness(material, sample.axis, sample.axis_sign);
+    base.specular = materials[material].specular;
+    base.ambient_occlusion = 1.0;
+    base.normal = vec3<f32>(0.0);
+    base.emission = materials[material].emission;
     return material_pattern_surface_from_base(
         material,
         sample,
-        material_face_albedo(material, sample.axis, sample.axis_sign),
-        material_face_roughness(material, sample.axis, sample.axis_sign),
-        materials[material].emission,
+        base,
         pattern_animation_identity(),
     );
 }

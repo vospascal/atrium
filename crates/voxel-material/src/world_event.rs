@@ -44,6 +44,10 @@ pub const MAX_EVENT_LIFETIME_SECONDS: f32 = 8.0;
 /// The presence channel: an entity simply being somewhere. Channel ids are
 /// authored on the sensor node, so new kinds cost nothing here.
 pub const CHANNEL_PRESENCE: u32 = 0;
+/// A one-shot water-entry impact. Unlike presence, this is raised and released
+/// at the instant an entity falls into water; the shader uses its start stamp
+/// to animate a short-lived ripple.
+pub const CHANNEL_SPLASH: u32 = 1;
 
 /// Identifies an event across frames, so a re-raise is recognised as the same
 /// event rather than a new arrival. Producers own their key space.

@@ -41,7 +41,156 @@
         "roughness": 0.97
       }
     },
-    "patterns": [],
+    "patterns": [
+      {
+        "generator": {
+          "kind": "noise",
+          "octaves": 4
+        },
+        "frame": "world",
+        "period_meters": 0.02,
+        "target": "albedo",
+        "blend": "mix_to_color",
+        "amount": 0.41,
+        "target_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "faces": {
+          "top": false,
+          "side": true,
+          "bottom": true
+        },
+        "relief_faces": null,
+        "texels_per_voxel": 16,
+        "vary_per_face": true,
+        "domain_warp": 0.0,
+        "tile_aspect": 1.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0,
+        "relief_height_meters": 0.0,
+        "relief_normal": null,
+        "relief_invert": false,
+        "relief_bevel_fraction": 0.125,
+        "relief_normal_strength": 1.0,
+        "grid_average": false,
+        "relief_steps": 0
+      },
+      {
+        "generator": {
+          "kind": "edge_band",
+          "direction": "top",
+          "width": 0.25,
+          "jaggedness": 0.7
+        },
+        "frame": "face",
+        "period_meters": 1.0,
+        "target": "albedo",
+        "blend": "mix_to_color",
+        "amount": 0.85,
+        "target_color": [
+          0.12,
+          0.09,
+          0.055
+        ],
+        "faces": {
+          "top": false,
+          "side": true,
+          "bottom": false
+        },
+        "relief_faces": null,
+        "texels_per_voxel": 16,
+        "vary_per_face": true,
+        "domain_warp": 0.0,
+        "tile_aspect": 1.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0,
+        "relief_height_meters": 0.0,
+        "relief_normal": null,
+        "relief_invert": false,
+        "relief_bevel_fraction": 0.125,
+        "relief_normal_strength": 1.0,
+        "grid_average": false,
+        "relief_steps": 0
+      },
+      {
+        "generator": {
+          "kind": "edge_band",
+          "direction": "top",
+          "width": 0.1875,
+          "jaggedness": 0.7
+        },
+        "frame": "face",
+        "period_meters": 1.0,
+        "target": "albedo",
+        "blend": "mix_to_color",
+        "amount": 1.0,
+        "target_color": [
+          0.41,
+          0.52,
+          0.29
+        ],
+        "faces": {
+          "top": false,
+          "side": true,
+          "bottom": false
+        },
+        "relief_faces": null,
+        "texels_per_voxel": 16,
+        "vary_per_face": true,
+        "domain_warp": 0.0,
+        "tile_aspect": 1.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0,
+        "relief_height_meters": 0.0,
+        "relief_normal": null,
+        "relief_invert": false,
+        "relief_bevel_fraction": 0.125,
+        "relief_normal_strength": 1.0,
+        "grid_average": false,
+        "relief_steps": 0
+      },
+      {
+        "generator": {
+          "kind": "noise",
+          "octaves": 4
+        },
+        "frame": "world",
+        "period_meters": 0.02,
+        "target": "albedo",
+        "blend": "mix_to_color",
+        "amount": 0.61,
+        "target_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "faces": {
+          "top": true,
+          "side": false,
+          "bottom": false
+        },
+        "relief_faces": null,
+        "texels_per_voxel": 8,
+        "vary_per_face": true,
+        "domain_warp": 0.0,
+        "tile_aspect": 1.0,
+        "tile_bond": 0.5,
+        "tile_gap": 0.06,
+        "emission_intensity": 1.0,
+        "relief_height_meters": 0.0,
+        "relief_normal": null,
+        "relief_invert": false,
+        "relief_bevel_fraction": 0.125,
+        "relief_normal_strength": 1.0,
+        "grid_average": false,
+        "relief_steps": 0
+      }
+    ],
     "acoustic_alpha": [
       0.1,
       0.2,

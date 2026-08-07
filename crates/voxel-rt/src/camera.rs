@@ -155,6 +155,9 @@ pub struct CameraInput {
     pub right: bool,
     pub up: bool,
     pub down: bool,
+    /// Grounded slow-movement intent. The fly camera ignores it; the character
+    /// uses it to enter its sneak speed while keeping `down` available to dive.
+    pub sneak: bool,
     /// Mouse motion this frame, pixels (+x right, +y down — raw winit delta).
     pub mouse_delta: (f32, f32),
     /// Speed scale, 1.0 = normal (e.g. shift-to-sprint maps to > 1.0).
@@ -170,6 +173,7 @@ impl Default for CameraInput {
             right: false,
             up: false,
             down: false,
+            sneak: false,
             mouse_delta: (0.0, 0.0),
             speed_multiplier: 1.0,
         }
@@ -224,7 +228,7 @@ impl Default for FlyCamera {
             ),
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: -0.33,
-            movement_speed: 4.0,
+            movement_speed: 10.79,
             mouse_sensitivity: 0.0025,
             vertical_fov_radians: DEFAULT_VERTICAL_FOV_RADIANS,
         }
@@ -348,5 +352,10 @@ mod tests {
         assert!(camera.position.x > 0.0 && camera.position.x < world_x);
         assert!(camera.position.z > 0.0 && camera.position.z < world_z);
         assert!(camera.position.y > WATER_LEVEL as f32 * VOXEL_SIZE);
+    }
+
+    #[test]
+    fn default_fly_speed_matches_the_minecraft_target() {
+        assert!((FlyCamera::default().movement_speed - 10.79).abs() < f32::EPSILON);
     }
 }

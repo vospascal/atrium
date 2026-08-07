@@ -7,12 +7,20 @@
 //! drift, and no build script needed to produce one.
 
 /// The LUT-generation module. One file per lookup table, plus shared helpers.
+///
+/// `clouds/density.wgsl` is spliced here *and* into [`WGSL`]: the shadow map integrates the
+/// same deck the camera marches, and one density model is what keeps a shadow from landing
+/// where there is no cloud. It declares no bindings, so it composes into both.
 pub const LUT_WGSL: &str = concat!(
     include_str!("../../shaders/lut/common.wgsl"),
+    include_str!("../../shaders/clouds/density.wgsl"),
     include_str!("../../shaders/lut/transmittance.wgsl"),
     include_str!("../../shaders/lut/multiple_scattering.wgsl"),
     include_str!("../../shaders/lut/sky_view.wgsl"),
     include_str!("../../shaders/lut/aerial_perspective.wgsl"),
+    include_str!("../../shaders/lut/cloud_ndf.wgsl"),
+    include_str!("../../shaders/lut/cloud_noise.wgsl"),
+    include_str!("../../shaders/lut/cloud_shadow.wgsl"),
 );
 
 /// The sampling module consumed by DDA, water and CAGI. It contains no per-camera ray
@@ -23,7 +31,9 @@ pub const LUT_WGSL: &str = concat!(
 /// functions consumers actually call, and everything they resolve to appears above them.
 pub const WGSL: &str = concat!(
     include_str!("../../shaders/environment/common.wgsl"),
+    include_str!("../../shaders/clouds/density.wgsl"),
     include_str!("../../shaders/environment/hillaire.wgsl"),
+    include_str!("../../shaders/environment/clouds.wgsl"),
     include_str!("../../shaders/environment/appearance.wgsl"),
     include_str!("../../shaders/environment/dispatch.wgsl"),
 );

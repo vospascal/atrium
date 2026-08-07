@@ -4,9 +4,9 @@
 // shaders/lut/. DDA, water and CAGI only perform filtered LUT reads here; there is no
 // per-camera-pixel atmosphere ray march in this module.
 //
-// Everything in this file is PHYSICAL: it is the radiance CAGI and diffuse lighting
-// share. Visual-only decoration belongs in `appearance.wgsl`, so that improving
-// transport here cannot change the authored backdrop, and vice versa.
+// Everything in this file is PHYSICAL: it is the radiance CAGI, diffuse lighting and the
+// default sky presentation share. Visual-only celestial sources belong in `appearance.wgsl`,
+// but they are attenuated by this module's atmosphere transmittance before compositing.
 
 fn atmosphere_sky_view_uv(direction: vec3<f32>) -> vec2<f32> {
     let azimuth = atan2(direction.z, direction.x) / (2.0 * 3.141592653589793) + 0.5;
@@ -34,6 +34,18 @@ fn atmosphere_transmittance_uv(direction: vec3<f32>) -> vec2<f32> {
 
 fn environment_sun_transmittance(direction: vec3<f32>) -> vec3<f32> {
     return environment_sun_transmittance_at(atmosphere.camera_position, direction);
+}
+
+// View-direction transmittance for distant celestial sources. Stars are not part of the
+// atmosphere LUT's in-scattered radiance because they are external point sources rather than
+// atmospheric emitters, but they still have to cross the atmosphere before reaching the camera.
+fn environment_view_transmittance(direction: vec3<f32>) -> vec3<f32> {
+    return textureSampleLevel(
+        atmosphere_transmittance_lut,
+        atmosphere_lut_sampler,
+        atmosphere_transmittance_uv(normalize(direction)),
+        0.0,
+    ).rgb;
 }
 
 // CAGI source cells are expressed in renderer world metres rather than camera
@@ -74,7 +86,18 @@ fn environment_hillaire_sky(direction: vec3<f32>) -> vec3<f32> {
         atmosphere_multiple_scattering_lut,
         atmosphere_lut_sampler,
         vec2<f32>(
-            dot(view, normalize(atmosphere.sun_direction)) * 0.5 + 0.5,
+            // The SUN'S ELEVATION, not the view-sun angle.
+            //
+            // `lut/multiple_scattering.wgsl` writes this table indexed by `sun_mu = uv.x * 2 - 1`,
+            // used as the sun direction's Y — so U is the sun's height above the horizon and the
+            // table has no view dependence at all. This read used `dot(view, sun_direction)`, a
+            // different quantity entirely, so every lookup landed on an arbitrary row.
+            //
+            // It matters far more than its name suggests: measured, multiple scattering is 94% of
+            // the zenith sample and 47% of the sunward-horizon sample of the sky the CLOUDS are lit
+            // by, and the wrongly-indexed value had r/b 0.88 against the correct sky's 1.97. So the
+            // dominant term of cloud ambient was pulling it toward neutral.
+            normalize(atmosphere.sun_direction).y * 0.5 + 0.5,
             clamp(
                 atmosphere.camera_position.y / atmosphere.from_kilometers_scale
                     / (atmosphere.top_radius_km - atmosphere.bottom_radius_km),
@@ -84,9 +107,10 @@ fn environment_hillaire_sky(direction: vec3<f32>) -> vec3<f32> {
         ),
         0.0,
     ).rgb;
-    let toward_sun = max(dot(view, normalize(atmosphere.sun_direction)), 0.0);
-    let sun_disk = smoothstep(0.99955, 0.99985, toward_sun);
-    return max(sky + multiple + atmosphere.sun_illuminance * sun_disk * 4.0, vec3<f32>(0.0));
+    // Resolved sun and moon discs are external celestial sources and are composited by
+    // `appearance.wgsl` after this atmospheric background. Keeping them out of this function
+    // prevents the resolved sun from being added again when clouds sample physical sky radiance.
+    return max(sky + multiple, vec3<f32>(0.0));
 }
 
 fn atmosphere_froxel_uv(direction: vec3<f32>) -> vec2<f32> {
@@ -126,4 +150,16 @@ fn environment_aerial_perspective(direction: vec3<f32>, distance_world: f32) -> 
     // RGB is inscattered radiance; alpha stores the red-channel transmittance
     // from the compact LUT representation.
     return aerial.rgb + environment_hillaire_sky(view) * aerial.a;
+}
+
+fn environment_aerial_transmittance(direction: vec3<f32>, distance_world: f32) -> f32 {
+    let view = normalize(direction);
+    let distance_uv = clamp(atmosphere_froxel_depth(distance_world), 0.0, 1.0);
+    let view_uv = atmosphere_froxel_uv(view);
+    return textureSampleLevel(
+        atmosphere_aerial_perspective_lut,
+        atmosphere_lut_sampler,
+        vec3<f32>(view_uv, distance_uv),
+        0.0,
+    ).a;
 }

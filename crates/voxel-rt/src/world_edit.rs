@@ -287,6 +287,7 @@ fn light_cells_in_voxel_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cagi::CagiLayout;
     use voxel_core::world::{Voxel, VoxelWorld, WORLD_SIZE_Y};
     use voxel_material::material::material_id;
 
@@ -320,7 +321,11 @@ mod tests {
     fn a_delta_carries_exactly_the_edited_words() {
         let mut brickmap = island();
         let settings = WorldEditSettings::default();
-        let grid = CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y);
+        let grid = CagiGrid::for_world(
+            4,
+            CagiLayout::Isotropic,
+            brickmap.metadata().max_occupied_brick_y,
+        );
         let surface_y = (0..WORLD_SIZE_Y as i32)
             .rev()
             .find(|y| brickmap.is_occupied(500, *y, 500))
@@ -401,7 +406,11 @@ mod tests {
     fn light_cell_deltas_match_a_full_attribute_rebuild() {
         let mut brickmap = island();
         let settings = WorldEditSettings::default();
-        let grid = CagiGrid::for_world(4, brickmap.metadata().max_occupied_brick_y);
+        let grid = CagiGrid::for_world(
+            4,
+            CagiLayout::Isotropic,
+            brickmap.metadata().max_occupied_brick_y,
+        );
         let surface_y = (0..WORLD_SIZE_Y as i32)
             .rev()
             .find(|y| brickmap.is_occupied(500, *y, 500))

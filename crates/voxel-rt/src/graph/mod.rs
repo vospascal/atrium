@@ -1214,6 +1214,7 @@ mod tests {
             producers,
             [
                 "material.pattern_checker",
+                "material.pattern_edge_band",
                 "material.pattern_flat",
                 "material.pattern_noise",
                 "material.pattern_perlin",

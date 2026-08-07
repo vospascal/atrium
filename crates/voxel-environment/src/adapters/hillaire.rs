@@ -5,10 +5,9 @@
 //! file per concern (`lut.rs`, `resources.rs`, `shaders.rs`), and none of it is reachable
 //! from outside the crate.
 
-use crate::api::{EnvironmentFrame, EnvironmentInvalidation, EnvironmentRequest};
+use crate::api::{EnvironmentInvalidation, EnvironmentRequest};
 use crate::gpu::EnvironmentGpu;
 use crate::hillaire::{shaders, AtmosphereBindings, AtmosphereLutPasses};
-use crate::SunSettings;
 
 pub use crate::hillaire::LutConfig;
 
@@ -20,7 +19,6 @@ pub use crate::hillaire::LutConfig;
 pub struct HillaireEnvironment {
     bindings: AtmosphereBindings,
     lut_passes: AtmosphereLutPasses,
-    settings: SunSettings,
     /// `None` until the first [`EnvironmentGpu::submit`] — which is exactly the condition
     /// that makes the view-independent tables stale, so it doubles as the first-frame flag.
     submitted: Option<EnvironmentRequest>,
@@ -50,25 +48,15 @@ impl HillaireEnvironment {
         Self {
             bindings,
             lut_passes,
-            settings: SunSettings::default(),
             submitted: None,
         }
     }
 
-    /// The sun/day-night state this adapter evaluates from.
-    pub fn settings_mut(&mut self) -> &mut SunSettings {
-        &mut self.settings
-    }
-
-    /// This adapter's current sun/day-night inputs.
-    pub fn settings(&self) -> SunSettings {
-        self.settings
-    }
-
-    /// The CPU environment state for this frame.
-    pub fn frame(&self) -> EnvironmentFrame {
-        self.settings.environment_frame()
-    }
+    // There is deliberately NO sun state on this adapter, and no `settings`/`settings_mut`/
+    // `frame` accessors. It held a `SunSettings` that nothing in the workspace ever wrote, so
+    // every reader got a default noon sun forever — which is what froze the cloud deck's ground
+    // bounce. The sun arrives per frame on `EnvironmentRequest` and nowhere else; a second copy
+    // to keep in sync is a bug waiting to happen, not a convenience.
 
     /// How many times the atmosphere uniform has been rewritten. A counter that does *not*
     /// advance while the viewer stands still under a frozen sun, which is the cheapest way

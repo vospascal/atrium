@@ -124,6 +124,18 @@ const AO_DISTANCE_FADE: bool = false;
 const AO_SUN_AWARE_RAY_BUDGET: bool = false;
 const AO_SUN_BUDGET_THRESHOLD: f32 = 0.5;
 
+// Runtime material inspection views. The packed selector is decoded in
+// pattern.wgsl so layer filtering and channel display share one override.
+const MATERIAL_DEBUG_LIT: u32 = 0u;
+const MATERIAL_DEBUG_BASE_COLOR: u32 = 1u;
+const MATERIAL_DEBUG_SPECULAR: u32 = 2u;
+const MATERIAL_DEBUG_AMBIENT_OCCLUSION: u32 = 3u;
+const MATERIAL_DEBUG_DISPLACEMENT: u32 = 4u;
+const MATERIAL_DEBUG_ROUGHNESS: u32 = 5u;
+const MATERIAL_DEBUG_NORMAL: u32 = 6u;
+const MATERIAL_DEBUG_EMISSION: u32 = 7u;
+const MATERIAL_DEBUG_LOD: u32 = 8u;
+
 // ---- Directional miss radiance (VGI, I3D'11 §5.1 / Fig. 7 point C) -----------
 // Thiedemann et al.'s near-field gather reads an ENVIRONMENT MAP when an
 // occlusion ray finds nothing within its search radius, instead of falling back
@@ -179,19 +191,6 @@ const AO_MISS_RADIANCE: bool = false;
 // the wrong curve silently — a wiring bug wearing a rendering bug's clothes. One crate,
 // one test.
 
-
-// Face normal from the DDA hit record (axis-aligned, opposing the ray).
-fn hit_normal(hit: Hit) -> vec3<f32> {
-    var normal = vec3<f32>(0.0, 0.0, 0.0);
-    if (hit.axis == 0u) {
-        normal.x = -hit.axis_sign;
-    } else if (hit.axis == 1u) {
-        normal.y = -hit.axis_sign;
-    } else {
-        normal.z = -hit.axis_sign;
-    }
-    return normal;
-}
 
 // Robust secondary-ray origin (shadow AND AO rays). Reconstructing the hit
 // point as
@@ -332,7 +331,13 @@ fn ray_traced_occlusion(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32
             // sees the environment — sampled in ITS OWN direction, not the
             // normal's. The "environment map" is the hemisphere term itself, so
             // the colours stay inside the range the look was tuned for.
-            sky_sum += ambient_light(direction);
+            // The ray's own direction for the hemisphere lookup, the HIT's position for the
+            // cloud lookup: this ray sees the sky from where the surface is, not from wherever
+            // the ray happens to have reached.
+            sky_sum += ambient_light(
+                (ray_origin + ray_direction * hit.distance) * brickmap.voxel_size_meters,
+                direction,
+            );
         }
     }
     var estimate: RayTracedAo;
@@ -557,7 +562,10 @@ fn ambient_estimate(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 // — reassociating float multiplies would move the S2 pixel gate.
 fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                   normal: vec3<f32>, ambient: AmbientEstimate) -> vec3<f32> {
-    let hemisphere = ambient_light(normal);
+    let hemisphere = ambient_light(
+        (ray_origin + ray_direction * hit.distance) * brickmap.voxel_size_meters,
+        normal,
+    );
     if (!AO_MISS_RADIANCE) {
         if (!CAGI_ENABLED) {
             return hemisphere * ambient.factor;
@@ -581,6 +589,118 @@ fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     return directional * lighting.gi_params.y + volume * ambient.factor;
 }
 
+// ---- E7: the water bounce light ----------------------------------------------
+//
+// The wobbling bright band a pool throws onto the wall beside it: the sun's SPECULAR
+// reflection off the water surface, landing on nearby terrain. Nothing else in the
+// renderer produces it — CAGI's volume carries diffuse bounce, and a mirror-smooth
+// specular bounce is not diffuse.
+//
+// The trick that makes it one ray instead of an integral: for a flat water plane the
+// reflected sun is a virtual sun BELOW the plane, so the direction from a surface toward
+// it is just the sun direction MIRRORED IN Y. Look that way; if water is there, that
+// water is showing you the sun.
+//
+// **It is a SECOND SUN, and it is built from the sun's own radiance** rather than from
+// `sky_color`. Two reasons, and both are load-bearing:
+//
+//   * UNITS. `sky_color` carries the sun disc, whose radiance is enormous because the disc
+//     subtends 6.8e-5 sr. A diffuse surface integrates radiance over solid angle, so
+//     multiplying disc radiance by a made-up factor would be thousands of times too
+//     bright. Reusing `sun_color_intensity` — the same term the direct sun uses — makes the
+//     units right by construction: the mirrored sun's irradiance is the sun's, times what
+//     the water reflects (Fresnel), which is physical rather than chosen.
+//   * COST. `sky_color` runs a cloud march. Calling it once per shaded surface would put a
+//     volumetric trace on every pixel in the frame.
+//
+// The lobe is where the waves come in. A flat surface reflects the sun into exactly one
+// direction — `toward_mirror` — so the band would be a hard-edged spot. A normal tilted by
+// `s` deflects the reflection by `2s`, so the lobe's width is `2 * wave_rms_slope()`:
+// DERIVED from the same Cox-Munk roughness the glitter path uses, not a gloss parameter. It
+// is why a choppy pool throws a broad soft band and a still one throws a tight bright one.
+const WATER_BOUNCE_LIGHT: bool = true;
+
+// How far a surface may be from the water and still catch its reflection, in METRES.
+//
+// A cap, because this is a ray per shaded pixel and an uncapped one would march the whole
+// world from every surface that happens to face down-sun. 16 m also has a physical reading:
+// the single sample stands in for a patch of water whose apparent size falls off with
+// distance, so beyond a point the estimate is wrong anyway.
+const WATER_BOUNCE_MAX_DISTANCE_METERS: f32 = 16.0;
+
+// The share of the mirrored sun a facing surface receives.
+//
+// The one place a constant is unavoidable: a single sample cannot know how much of the
+// glitter path the surface actually sees, which is what the correct factor would integrate.
+// Everything else in this function is physical — the magnitude is the sun's, the reflected
+// fraction is Fresnel's, the lobe width is the wave field's — so this is the whole of the
+// approximation, in one number. 0.35 keeps a sunlit bank clearly brighter without letting a
+// second-hand light out-compete the direct sun.
+const WATER_BOUNCE_STRENGTH: f32 = 0.35;
+
+// Floor on the lobe's half-width, radians. Dead-flat water would otherwise reflect the sun
+// into a mathematically exact direction and the band would alias into a one-pixel line.
+// 0.02 rad is about a degree — a touch wider than the sun's own 0.53 deg disc, which is the
+// physical floor on how sharp any solar reflection can be.
+const WATER_BOUNCE_MIN_LOBE_RADIANS: f32 = 0.02;
+
+fn water_bounce_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
+                      normal: vec3<f32>) -> vec3<f32> {
+    if (!WATER_BOUNCE_LIGHT || WATER_MODE == WATER_MODE_OPAQUE) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    // Water lighting water is the reflection path's job, and a SUBMERGED surface already
+    // receives the sun through the surface (with E7's caustics on it) — adding a bounce
+    // there would count the same light twice.
+    if (material_is_liquid(hit.material)) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let surface_point = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
+    if (point_is_submerged(surface_point)) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+
+    // Toward the virtual sun below the water plane.
+    let sun = lighting.sun_direction;
+    let toward_mirror = normalize(vec3<f32>(sun.x, -sun.y, sun.z));
+    let facing = dot(normal, toward_mirror);
+    if (facing <= 0.0 || toward_mirror.y >= 0.0) {
+        return vec3<f32>(0.0, 0.0, 0.0); // faces away, or the sun is already below us
+    }
+
+    let reach = WATER_BOUNCE_MAX_DISTANCE_METERS / brickmap.voxel_size_meters;
+    let water = trace(surface_point, toward_mirror, reach, false);
+    if (water.material == 0u || !material_is_liquid(water.material)) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+
+    // The wave normal at the point of the water we are looking at — the reason the band
+    // moves. `water_surface_normal` returns the flat face when the field is calm, so a still
+    // pool still throws a band, it just does not shimmer.
+    let water_point = shadow_ray_origin(water, surface_point, toward_mirror,
+                                        hit_normal(water));
+    let optics = water_surface_normal(water, water_point);
+
+    // How close this patch of water actually throws the sun at us. Exactly 1 for flat water
+    // (the mirror direction IS the sun), and it wanders as the waves tilt — which is the
+    // wobble. `1 - cos(theta) ~ theta^2 / 2`, so this is a Gaussian in the angle.
+    let reflected = reflect(toward_mirror, optics);
+    let alignment = clamp(dot(reflected, sun), -1.0, 1.0);
+    let lobe_radians = max(2.0 * wave_rms_slope(), WATER_BOUNCE_MIN_LOBE_RADIANS);
+    let lobe = exp(-2.0 * (1.0 - alignment) / (lobe_radians * lobe_radians));
+    if (lobe <= 0.0) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+
+    // Fresnel at the WATER — the fraction it reflects rather than swallows — and the
+    // receiving surface's own cosine. The magnitude is the SUN's, so this term is in the
+    // same units as the direct sun above and cannot be off by a scale factor.
+    let fresnel = fresnel_schlick(max(-dot(toward_mirror, optics), 0.0),
+                                  material_index_of_refraction(water.material));
+    let sun_radiance = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w;
+    return sun_radiance * (fresnel * facing * lobe * WATER_BOUNCE_STRENGTH);
+}
+
 // Linear-space shading of an ORDINARY surface: albedo * (sun lambert *
 // visibility + indirect * AO). One shadow ray per hit through
 // `trace_shadow_visibility` (binary in hard mode, a penumbra factor in soft
@@ -598,13 +718,37 @@ fn indirect_light(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 // THIS function is the "water is an opaque diffuse surface" fallback — what
 // WATER_MODE_OPAQUE ships and what the two half-modes use for the half they do
 // not trace.
+const PBR_PI: f32 = 3.14159265359;
+
+fn pbr_fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    let one_minus_cos = 1.0 - clamp(cos_theta, 0.0, 1.0);
+    let factor = one_minus_cos * one_minus_cos * one_minus_cos * one_minus_cos * one_minus_cos;
+    return f0 + (vec3<f32>(1.0) - f0) * factor;
+}
+
+fn pbr_distribution_ggx(n_dot_h: f32, alpha: f32) -> f32 {
+    let alpha_squared = alpha * alpha;
+    let denominator_term = n_dot_h * n_dot_h * (alpha_squared - 1.0) + 1.0;
+    return alpha_squared / max(PBR_PI * denominator_term * denominator_term, 1e-6);
+}
+
+fn pbr_visibility_schlick_ggx(n_dot_x: f32, roughness: f32) -> f32 {
+    let k = (roughness + 1.0) * (roughness + 1.0) * 0.125;
+    return n_dot_x / max(n_dot_x * (1.0 - k) + k, 1e-5);
+}
+
+fn pbr_visibility_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+    return pbr_visibility_schlick_ggx(n_dot_v, roughness)
+        * pbr_visibility_schlick_ggx(n_dot_l, roughness);
+}
+
 fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                  pixel: vec2<f32>, sun_transmission: vec3<f32>) -> vec3<f32> {
-    let normal = hit_normal(hit);
+    let geometric_normal = hit_normal(hit);
     let graph_material = material_graph_surface(
         hit.material,
         ray_origin + ray_direction * hit.distance,
-        normal,
+        geometric_normal,
     );
     // S1 + S2: the per-face albedo with the row's albedo pattern layers applied.
     // Identical to the row's base albedo unless the row authored roles or layers AND
@@ -613,47 +757,129 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     //
     // The sample is built once and shared by albedo and emission: the frames need a
     // world position, a voxel and a face, and none of that changes between targets.
-    let pattern = pattern_sample(hit, ray_origin, ray_direction);
+    let flat_pattern = pattern_sample(hit, ray_origin, ray_direction);
     // Pick the bases FIRST, then run the layer stack once over them. The graph
     // branch used to sit after an unconditional `material_pattern_albedo` call and
     // throw its result away, so every graph-active material walked the whole layer
     // stack twice — once for a row base it did not want. Choosing the base is a
     // handful of selects; evaluating the stack is the expensive part, and it now
     // happens exactly once whether or not a graph is driving the surface.
-    var albedo_base = material_face_albedo(hit.material, pattern.axis, pattern.axis_sign);
-    var roughness_base = material_face_roughness(hit.material, pattern.axis, pattern.axis_sign);
-    var emission_base = materials[hit.material].emission;
+    var pbr_base: PbrSurface;
+    pbr_base.base_color = material_face_albedo(
+        hit.material, flat_pattern.axis, flat_pattern.axis_sign);
+    pbr_base.roughness = material_face_roughness(
+        hit.material, flat_pattern.axis, flat_pattern.axis_sign);
+    pbr_base.specular = materials[hit.material].specular;
+    pbr_base.ambient_occlusion = 1.0;
+    pbr_base.normal = vec3<f32>(0.0);
+    pbr_base.emission = materials[hit.material].emission;
     var animation = pattern_animation_identity();
     if (graph_material.graph_active) {
-        albedo_base = graph_material.base_color.rgb;
+        pbr_base.base_color = graph_material.base_color.rgb;
         // Graphs authored before face-role nodes existed used a flat base color.
         // Let those graphs retain the material table's directional appearance;
         // an explicit face_color node opts into graph-owned face semantics.
         if (!graph_material.face_color_active && MATERIAL_FACE_ROLES
             && (materials[hit.material].flags & MATERIAL_FLAG_FACE_ROLES) != 0u) {
-            albedo_base = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
+            pbr_base.base_color = material_face_albedo(hit.material, hit.axis, hit.axis_sign);
         }
-        roughness_base = graph_material.roughness;
-        emission_base = graph_material.emission.rgb;
+        pbr_base.roughness = graph_material.roughness;
+        pbr_base.emission = graph_material.emission.rgb;
+        pbr_base.specular = clamp(graph_material.specular, 0.0, 1.0);
+        pbr_base.ambient_occlusion = clamp(graph_material.ambient_occlusion, 0.0, 1.0);
+        pbr_base.normal = graph_material.normal;
         animation = graph_material.animation;
     }
-    let surface = material_pattern_surface_from_base(
-        hit.material, pattern, albedo_base, roughness_base, emission_base, animation);
-    let albedo = srgb_decode(surface.albedo);
+    // P1 — the parallax march slides the shading point to where the ray really
+    // lands on the relief; every pattern read below (color, roughness, emission,
+    // height, normal) then happens at the DISPLACED point, which is what glues
+    // plate tones to their plates under camera motion.
+    let march = pattern_parallax_march(
+        hit.material, flat_pattern, geometric_normal, ray_direction,
+        brickmap.voxel_size_meters, animation);
+    let pattern = march.sample;
+    let relief_height_meters = pattern_relief_height(
+        hit.material, pattern, brickmap.voxel_size_meters, animation);
+    let displacement_meters = clamp(relief_height_meters, -0.25, 0.25);
+    let displacement_offset_voxels = displacement_meters
+        / max(brickmap.voxel_size_meters, 1e-5);
+    var normal = pattern_relief_normal(
+        hit.material, pattern, geometric_normal, brickmap.voxel_size_meters, animation);
+    if (march.hit_wall) {
+        // The march landed on a plate SIDE: the wall's own axis normal, not a
+        // gradient of the top surface.
+        normal = march.wall_normal;
+    }
+    if (length(pbr_base.normal) > 0.0001) {
+        // The graph normal is a full world-space normal. Add its deviation from
+        // the geometric face to the relief normal so connecting the built-in
+        // Normal node does not accidentally erase displacement detail.
+        normal = normalize(normal + normalize(pbr_base.normal) - geometric_normal);
+    }
+    var surface = material_pattern_surface_from_base(
+        hit.material, pattern, pbr_base, animation);
+    surface.normal = normal;
+
+    // Keep inspection after the complete material stack and relief-normal
+    // derivation. In particular, Normal is the normal that lighting would use,
+    // not the graph's optional raw normal output painted over the base color.
+    if (material_debug_enabled()) {
+        let debug_view = material_debug_view();
+        if (debug_view == MATERIAL_DEBUG_BASE_COLOR) {
+            return srgb_decode(surface.base_color);
+        } else if (debug_view == MATERIAL_DEBUG_SPECULAR) {
+            return vec3<f32>(surface.specular);
+        } else if (debug_view == MATERIAL_DEBUG_AMBIENT_OCCLUSION) {
+            return vec3<f32>(surface.ambient_occlusion);
+        } else if (debug_view == MATERIAL_DEBUG_DISPLACEMENT) {
+            return vec3<f32>(clamp(relief_height_meters / 0.05, 0.0, 1.0));
+        } else if (debug_view == MATERIAL_DEBUG_ROUGHNESS) {
+            return vec3<f32>(surface.roughness);
+        } else if (debug_view == MATERIAL_DEBUG_NORMAL) {
+            return surface.normal * 0.5 + vec3<f32>(0.5);
+        } else if (debug_view == MATERIAL_DEBUG_EMISSION) {
+            return max(surface.emission, vec3<f32>(0.0));
+        } else if (debug_view == MATERIAL_DEBUG_LOD) {
+            let lod = pattern_debug_lod(hit.material, pattern);
+            return vec3<f32>(lod, 1.0 - lod, 0.05);
+        }
+    }
+    let albedo = srgb_decode(surface.base_color);
 
     var sun_visibility = 0.0;
     let sun_facing = dot(normal, lighting.sun_direction);
     if (sun_facing > 0.0) {
-        let shadow_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
+        let shadow_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal)
+            + geometric_normal * displacement_offset_voxels;
         sun_visibility = trace_shadow_visibility(shadow_origin, lighting.sun_direction);
+        // P2 — relief self-shadowing: plates shade their own joints and the
+        // ground behind them. Direct sun only; ambient and GI are untouched.
+        sun_visibility = sun_visibility * pattern_parallax_sun_shadow(
+            hit.material, pattern, march.height_meters, geometric_normal,
+            lighting.sun_direction, brickmap.voxel_size_meters, animation);
     }
     // `sun_transmission` is the transmittance of the sun's own path through any
     // medium in front of it (E6): exactly vec3(1.0) for every ray in air, so the
     // multiply is the float identity and this stays bit-identical off the water
     // path, and the per-channel attenuation of the water above a submerged surface
     // when there is one.
-    let sun = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
-        * max(sun_facing, 0.0) * sun_visibility * sun_transmission;
+    // The cloud deck's transmittance along the sun axis, from the shadow map. Folded into the
+    // existing multiply rather than added as a second lighting term: a cloud shadow IS reduced
+    // sun visibility, and treating it as anything else would double-count the ambient a
+    // shadowed surface still receives.
+    //
+    // Costs one texture fetch, and returns exactly 1.0 when the deck is off — so this stays
+    // bit-identical with clouds disabled, the same property `sun_transmission` has off water.
+    // Voxel units -> world metres, the same conversion CAGI applies before this lookup. The
+    // shadow map is indexed in world space because it is world-anchored; handing it voxel
+    // coordinates would scale the whole cloud shadow by `voxel_size_meters`.
+    let surface_voxels = ray_origin + ray_direction * hit.distance
+        + geometric_normal * displacement_offset_voxels;
+    let cloud_sun_visibility = cloud_shadow_at(surface_voxels * brickmap.voxel_size_meters);
+    let n_dot_l = max(dot(normal, lighting.sun_direction), 0.0);
+    let sun_irradiance = lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
+        * sun_visibility * sun_transmission * cloud_sun_visibility;
+    let sun = sun_irradiance * n_dot_l;
     var ambient: AmbientEstimate;
     ambient.factor = 1.0;
     ambient.sky_radiance = vec3<f32>(0.0, 0.0, 0.0);
@@ -662,7 +888,23 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
         ambient = ambient_estimate(hit, ray_origin, ray_direction, normal, pixel,
                                    max(sun_facing, 0.0) * sun_visibility);
     }
+    ambient.factor = ambient.factor * surface.ambient_occlusion;
     let indirect = indirect_light(hit, ray_origin, ray_direction, normal, ambient);
+    let view_direction = normalize(-ray_direction);
+    let n_dot_v = max(dot(normal, view_direction), 0.0);
+    let half_direction = normalize(lighting.sun_direction + view_direction);
+    let n_dot_h = max(dot(normal, half_direction), 0.0);
+    let v_dot_h = max(dot(view_direction, half_direction), 0.0);
+    let roughness = clamp(surface.roughness, 0.04, 1.0);
+    let alpha = max(roughness * roughness, 0.0025);
+    let fresnel_view = pbr_fresnel_schlick(n_dot_v, vec3<f32>(surface.specular));
+    let fresnel_light = pbr_fresnel_schlick(v_dot_h, vec3<f32>(surface.specular));
+    let distribution = pbr_distribution_ggx(n_dot_h, alpha);
+    let visibility = pbr_visibility_smith(n_dot_v, n_dot_l, roughness);
+    let specular_brdf = distribution * visibility * fresnel_light
+        / max(4.0 * n_dot_v * n_dot_l, 1e-5);
+    let direct_specular = sun_irradiance * n_dot_l * specular_brdf;
+    let diffuse_weight = vec3<f32>(1.0) - fresnel_view;
     // E5: an emitter's own radiance is ADDED, not modulated by albedo or by any
     // occlusion term — the surface is a source, so it looks the same lit or
     // shadowed. gi_params.w scales it in step with what the CA injects, so the
@@ -671,7 +913,9 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
     // rock, a rune in a wall. Identical to the row's flat emission with the lever
     // off, and identical on every row that authors no emission layer.
     let emission = surface.emission * lighting.gi_params.w;
-    return albedo * (sun + indirect) + emission;
+    let bounce = water_bounce_light(hit, ray_origin, ray_direction, normal);
+    return albedo * (diffuse_weight * (sun + indirect + bounce))
+        + direct_specular + emission;
 }
 
 // ---- E6: the water model, composed ------------------------------------------
@@ -704,10 +948,22 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
 // Two documented simplifications: it is uniform inside the body (no attenuation
 // with depth below the surface, which would need the local surface height) and
 // unshadowed (one evaluation per pixel, not per point along the ray).
+// Evaluated at the CAMERA's column for the cloud terms, deliberately.
+//
+// The ambient contract now needs a position, and threading a real per-point one through the water
+// chain would mean rethreading `water_in_scattered_radiance` and `water_cheap_surface_radiance`
+// and their five call sites inside the reflection and refraction paths — measured E6 code, for a
+// quantity this function *already* documents as one evaluation per pixel rather than per point
+// along the ray. Using the camera column keeps the approximation at exactly the level the rest of
+// this function is written to, instead of making one term precise and leaving the others coarse.
+//
+// The visible consequence: a distant pool takes the cloud cover above the viewer rather than above
+// itself. Correct per-point water shadowing is tracked as its own stage.
 fn water_downwelling_radiance() -> vec3<f32> {
+    let cloud_sun = cloud_shadow_at(atmosphere.camera_position);
     return lighting.sun_color_intensity.rgb * lighting.sun_color_intensity.w
-        * max(lighting.sun_direction.y, 0.0)
-        + ambient_light(vec3<f32>(0.0, 1.0, 0.0));
+        * max(lighting.sun_direction.y, 0.0) * cloud_sun
+        + ambient_light(atmosphere.camera_position, vec3<f32>(0.0, 1.0, 0.0));
 }
 
 // The radiance a ray picks UP over a path through the medium — the in-scattered
@@ -746,7 +1002,12 @@ fn water_sun_transmission(surface_point: vec3<f32>, water_material: u32) -> vec3
         return vec3<f32>(1.0, 1.0, 1.0);
     }
     let medium = water_medium_march(surface_point, lighting.sun_direction);
-    return water_transmittance(water_material, medium.distance_voxels);
+    // E7: caustics ride HERE rather than in a pass of their own, because they are a
+    // redistribution of the sun's own path through the surface — the same path this
+    // transmittance integrates — and this march has already reached that surface, so the
+    // entry point and the depth come free. See `water_caustic_gain`.
+    return water_transmittance(water_material, medium.distance_voxels)
+        * water_caustic_gain(medium, water_material);
 }
 
 // Terminal radiance of a SECONDARY ray's hit. Ordinary surfaces get the full
@@ -945,19 +1206,50 @@ fn water_medium_radiance(entry_origin: vec3<f32>, entry_direction: vec3<f32>,
 // the mirror term falls back to the analytic sky function (which already carries
 // the sun glint, so a grazing water surface still glares), and the transmitted
 // term falls back to the surface's own diffuse shading.
+// W2 — the two normals, and why there are two.
+//
+// `geometric` is the voxel face. `optics` is the face plus the wave field's gradient
+// (`water_surface_normal`), and it is what makes a water pixel look like water: a flat
+// normal is a PERFECT mirror, which is why this surface had no sun glitter and a
+// reflected shoreline that never moved.
+//
+// The split is not stylistic. `geometric` still does every job that is about GEOMETRY —
+// offsetting a secondary ray off the face it is escaping (`shadow_ray_origin`,
+// `water_interior_origin`) and bounding where those rays may point. `optics` does every
+// job that is about LIGHT — Fresnel's weight, the mirror direction, Snell's bend. Mixing
+// them up self-intersects rays against the face they just left.
 fn water_surface_radiance(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                           pixel: vec2<f32>) -> vec3<f32> {
-    let normal = hit_normal(hit);
+    let geometric = hit_normal(hit);
+
+    // ONE robust reconstruction of the point on the face, used for both the wave phase
+    // and the mirror ray's origin. `ray_origin + ray_direction * hit.distance` alone
+    // carries accumulated float error at large t, which for a wave field would read as
+    // phase jitter on distant water; `shadow_ray_origin` clamps into the voxel and snaps
+    // the face coordinate, and its bias is along the normal — i.e. it moves only Y on a
+    // top face, and the wave field reads XZ.
+    let face_point = shadow_ray_origin(hit, ray_origin, ray_direction, geometric);
+    let optics = water_surface_normal(hit, face_point);
+
     let medium_index = material_index_of_refraction(hit.material);
-    let fresnel = fresnel_schlick(max(-dot(ray_direction, normal), 0.0), medium_index);
-    let reflected_direction = reflect(ray_direction, normal);
+    let fresnel = fresnel_schlick(max(-dot(ray_direction, optics), 0.0), medium_index);
+
+    // The reflected ray must stay ABOVE the face it leaves, or it starts inside the water
+    // body, `trace` hits liquid at t ~ 0 and the pixel goes black — the classic
+    // wave-normal sparkle-of-black-dots. The steepness cap bounds how bad this gets (the
+    // normal tilts at most atan(0.35) = 19.3 degrees, so a grazing ray is thrown at most
+    // 38.6 degrees below the plane) and `water_lift_reflection` closes the remainder. It
+    // is inert on a flat surface, which is what keeps the no-waves image untouched.
+    let reflected_direction =
+        water_lift_reflection(reflect(ray_direction, optics), geometric, optics);
 
     var mirrored = sky_color(reflected_direction);
     if (WATER_TRACES_REFLECTION && water_ray_is_worth_tracing(fresnel)) {
-        let mirror_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal);
-        let mirror = trace(mirror_origin, reflected_direction, MAX_TRACE_DISTANCE, false);
+        // Biased along the GEOMETRIC normal, because that offset is about escaping the
+        // face rather than about where the light goes.
+        let mirror = trace(face_point, reflected_direction, MAX_TRACE_DISTANCE, false);
         if (mirror.material != 0u) {
-            mirrored = shade_secondary(mirror, mirror_origin, reflected_direction, pixel,
+            mirrored = shade_secondary(mirror, face_point, reflected_direction, pixel,
                                        WATER_NO_MEDIUM);
         }
     }
@@ -966,9 +1258,15 @@ fn water_surface_radiance(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f
     if (WATER_TRACES_REFRACTION && water_ray_is_worth_tracing(1.0 - fresnel)) {
         // Entering the denser medium can never totally reflect, so the
         // `total_internal_reflection` branch of `refract_at` is unreachable here.
-        let refraction = refract_at(ray_direction, normal,
+        //
+        // The refracted ray needs no counterpart to the mirror's guard, and the
+        // steepness cap is why: refraction bends TOWARD the normal, so with eta = 0.75
+        // the transmitted ray sits within 48.6 degrees of -optics, and optics is itself
+        // within 19.3 degrees of straight down. 48.6 + 19.3 = 67.9 degrees from
+        // vertical, so it is always comfortably below the face.
+        let refraction = refract_at(ray_direction, optics,
                                     WATER_AIR_INDEX / medium_index);
-        let interior_origin = water_interior_origin(hit, ray_origin, ray_direction, normal);
+        let interior_origin = water_interior_origin(hit, ray_origin, ray_direction, geometric);
         transmitted = water_medium_radiance(interior_origin, refraction.direction,
                                             hit.material, pixel);
     }

@@ -19,6 +19,10 @@ struct GraphMaterial {
     base_color: vec4<f32>,
     roughness: f32,
     emission: vec4<f32>,
+    specular: f32,
+    ambient_occlusion: f32,
+    normal: vec3<f32>,
+    specular_active: bool,
     graph_active: bool,
     face_color_active: bool,
     face_roughness_active: bool,
@@ -98,16 +102,10 @@ fn graph_animation_seconds() -> f32 {
         + lighting.animation_params.x;
 }
 
-// An oscillator's phase in turns, [0, 1).
-//
-// The epoch term is `fract(rate * EPOCH) * epoch` rather than
-// `rate * epoch * EPOCH`: the inner fract is a per-rate constant, so the phase
-// is continuous across an epoch boundary instead of stepping there.
-fn graph_oscillator_phase(rate_hz: f32) -> f32 {
-    let per_epoch = fract(rate_hz * ANIMATION_EPOCH_SECONDS);
-    return fract(rate_hz * lighting.animation_params.x
-        + per_epoch * lighting.animation_params.y);
-}
+// The oscillator phase itself is `animation_oscillator_phase` in `world.wgsl`, beside
+// the epoch const — it has two consumers now (this file's oscillator node and the
+// water wave field), and water physics must not import the material-graph prelude to
+// ask what time it is.
 
 // Speed and two angles to a velocity vector.
 //
@@ -228,7 +226,7 @@ fn graph_oscillator(
     normal: vec3<f32>,
 ) -> f32 {
     let sync_offset = graph_phase_offset(sync, seed, position, normal);
-    let phase = graph_oscillator_phase(rate_hz) + phase_offset + sync_offset;
+    let phase = animation_oscillator_phase(rate_hz) + phase_offset + sync_offset;
     return low + (high - low) * graph_wave(wave, phase, duty, seed);
 }
 

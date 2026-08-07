@@ -1,9 +1,9 @@
-// The camera-only appearance layer: horizon/zenith palette, stars, moon, sun glow.
+// Celestial presentation on top of the Hillaire atmosphere.
 //
-// None of this enters CAGI, diffuse lighting or the transmittance LUT. That separation
-// is deliberate and load-bearing — it is what lets the physical transport in
-// `hillaire.wgsl` improve without flattening the authored backdrop, and it is why the
-// `visual_*` uniform fields exist alongside the physical `sun_*` ones.
+// The atmosphere LUTs own the sky's physical in-scattered radiance. This module only adds
+// distant sources that are not represented by those LUTs: stars and the resolved sun/moon
+// discs. They are still evaluated in physical order: source radiance is attenuated by the
+// atmosphere here, and the cloud march in `dispatch.wgsl` attenuates the complete backdrop.
 
 fn sky_hash(point: vec3<f32>) -> f32 {
     var q = fract(point * vec3<f32>(0.1031, 0.1030, 0.0973));
@@ -22,6 +22,7 @@ fn rotate_sky_y(direction: vec3<f32>, angle: f32) -> vec3<f32> {
 }
 
 fn environment_star_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
+    let view = normalize(direction);
     if (direction.y <= -0.02 || daylight >= 0.98) {
         return vec3<f32>(0.0);
     }
@@ -39,49 +40,49 @@ fn environment_star_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
     let radius = length(fract(rotated * 180.0) - offset);
     let core = smoothstep(0.24, 0.0, radius);
     let brightness = (seed - 0.992) / 0.008;
-    let visibility = (1.0 - daylight) * (1.0 - daylight)
+    let visibility = smoothstep(0.18, 0.98, 1.0 - daylight)
         * smoothstep(-0.02, 0.12, direction.y);
     let tint = mix(vec3<f32>(0.55, 0.72, 1.0), vec3<f32>(1.0, 0.82, 0.58),
         step(0.72, brightness));
-    return tint * core * (0.3 + 5.0 * brightness * brightness) * visibility;
+    return tint * core * (0.3 + 5.0 * brightness * brightness) * visibility
+        * environment_view_transmittance(view);
 }
 
 fn environment_moon_radiance(direction: vec3<f32>, daylight: f32) -> vec3<f32> {
-    let moon_direction = atmosphere.visual_moon.xyz;
+    let moon_direction = normalize(atmosphere.moon_direction);
     if (moon_direction.y < -0.06) {
         return vec3<f32>(0.0);
     }
     let disc = smoothstep(0.99915, 0.99972, dot(direction, moon_direction));
-    let lit_fraction = 0.5 - 0.5 * cos(atmosphere.visual_moon.w * 6.28318530718);
-    return vec3<f32>(0.48, 0.62, 1.0) * disc
-        * (0.035 + 4.0 * lit_fraction) * (1.0 - daylight * 0.9);
+    let visibility = smoothstep(0.02, 0.45, 1.0 - daylight);
+    // The moon source is already phase-scaled by the CPU environment model. Keeping the disc
+    // tied to that same source prevents a bright visual moon from lighting clouds and terrain
+    // with a different phase or colour.
+    return atmosphere.moon_illuminance * disc * 6.0 * visibility
+        * environment_view_transmittance(direction);
 }
 
 fn environment_celestial_detail(direction: vec3<f32>) -> vec3<f32> {
     let daylight = atmosphere.visual_sun.w;
     let view = normalize(direction);
-    // Visual-only celestial detail restored from the previous implementation.
-    // These terms never enter CAGI or the atmosphere transmittance LUT.
-    let toward_sun = max(dot(view, atmosphere.visual_sun.xyz), 0.0);
-    let sun_glow = pow(toward_sun, 6.0) * 0.22 + pow(toward_sun, 48.0) * 0.55;
+    // Resolved celestial detail is presentation-only and does not enter CAGI or the LUT-generated
+    // atmospheric in-scattered radiance. Its distant-source radiance does use the transmittance
+    // LUT below, so the camera sees the same atmosphere that attenuates the physical sky.
+    let toward_sun = max(dot(view, normalize(atmosphere.sun_direction)), 0.0);
+    let sun_glow = pow(toward_sun, 6.0) * 0.12 + pow(toward_sun, 48.0) * 0.30;
     let sun_disc = smoothstep(0.99955, 0.99985, toward_sun);
-    var detail = vec3<f32>(1.0, 0.72, 0.42) * sun_glow * daylight;
-    detail += vec3<f32>(12.0, 8.5, 5.0) * sun_disc * daylight;
-    detail += environment_moon_radiance(view, daylight) * (1.0 + atmosphere.visual_horizon.w);
+    let sun_transmittance = environment_view_transmittance(view);
+    var detail = atmosphere.sun_illuminance * sun_glow * sun_transmittance * daylight;
+    detail += atmosphere.sun_illuminance * sun_disc * 6.0 * sun_transmittance * daylight;
+    detail += environment_moon_radiance(view, daylight);
     detail += environment_star_radiance(view, daylight);
     return detail;
 }
 
 fn environment_sky_radiance(direction: vec3<f32>) -> vec3<f32> {
     let view = normalize(direction);
-    // Camera appearance layer restored from the previous implementation. This
-    // authored palette is intentionally independent from the LUT radiance used
-    // by CAGI, so improving physical transport cannot flatten the backdrop.
-    let up = clamp(view.y, 0.0, 1.0);
-    let palette = mix(
-        atmosphere.visual_horizon.rgb,
-        atmosphere.visual_zenith.rgb,
-        pow(up, 0.55),
-    );
-    return palette + environment_celestial_detail(view);
+    // Hillaire is the primary sky model. The authored zenith/horizon fields remain available
+    // as metadata for compatibility and tuning, but they no longer replace physical sky
+    // radiance in the default presentation path.
+    return environment_hillaire_sky(view) + environment_celestial_detail(view);
 }

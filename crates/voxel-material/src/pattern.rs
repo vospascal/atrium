@@ -103,12 +103,22 @@ pub const PATTERN_FADE_START_METERS: f32 = 10.0;
 pub const PATTERN_FADE_END_METERS: f32 = 50.0;
 
 /// Every generator bit set — the shipped default, mirroring
-/// `MATERIAL_PATTERN_GENERATOR_MASK` in `voxel-rt`'s `shaders/pattern.wgsl`. Fourteen codes.
+/// `MATERIAL_PATTERN_GENERATOR_MASK` in `voxel-rt`'s `shaders/pattern.wgsl`. Fifteen codes.
 ///
 /// Lives here rather than with the renderer's levers because it is DERIVED from the
 /// generators below — `every_generator_owns_a_distinct_mask_bit` asserts it is exactly their
 /// union, in both directions. The lever that dials it reads this value; it does not define it.
-pub const PATTERN_GENERATOR_MASK_ALL: u32 = (1 << 14) - 1;
+pub const PATTERN_GENERATOR_MASK_ALL: u32 = (1 << 15) - 1;
+
+/// Which edge of a vertical face an [`PatternGenerator::EdgeBand`] grows from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EdgeBandDirection {
+    /// Grow down from the top of the face — the grass-overhang case.
+    #[default]
+    Top,
+    /// Grow up from the bottom of the face — useful for a lower lip or shadow.
+    Bottom,
+}
 
 /// The generator: what shape a layer draws, before any frame or blend.
 ///
@@ -204,6 +214,18 @@ pub enum PatternGenerator {
         /// grout in a real wall looks like.
         sharpness: f32,
     },
+    /// A pixel-stepped strip along an edge of a vertical face, with a stable
+    /// per-column height variation. This is the procedural equivalent of the
+    /// grass-side texture: the base face stays dirt and the layer supplies the
+    /// overhang or lower-shadow mask.
+    EdgeBand {
+        /// The face edge from which the band grows.
+        direction: EdgeBandDirection,
+        /// Approximate band width as a fraction of the face height.
+        width: f32,
+        /// How much the per-column edge can vary, from straight to jagged.
+        jaggedness: f32,
+    },
 }
 
 /// How much a generator costs per layer, as a band the authoring UI can show.
@@ -294,6 +316,7 @@ impl PatternGenerator {
             PatternGenerator::Checker => 11,
             PatternGenerator::TileTone => 12,
             PatternGenerator::TileEdge { .. } => 13,
+            PatternGenerator::EdgeBand { .. } => 14,
         }
     }
 
@@ -381,6 +404,7 @@ impl PatternGenerator {
             // threshold, so it reads Cheap, but a quiet machine will call it Free.
             PatternGenerator::TileTone => 0.029,
             PatternGenerator::TileEdge { .. } => 0.052,
+            PatternGenerator::EdgeBand { .. } => 0.000,
             PatternGenerator::Worley => 1.003,
             PatternGenerator::WorleySmooth => 1.114,
             PatternGenerator::WorleyEdge => 1.076,
@@ -417,13 +441,17 @@ impl PatternGenerator {
             PatternGenerator::Checker => "checker (tiles)",
             PatternGenerator::TileTone => "tile tone (per-block shade)",
             PatternGenerator::TileEdge { .. } => "tile edge (grout / bevel)",
+            PatternGenerator::EdgeBand { direction, .. } => match direction {
+                EdgeBandDirection::Top => "edge band (grass overhang)",
+                EdgeBandDirection::Bottom => "edge band (lower lip / shadow)",
+            },
         }
     }
 
     /// Every generator, with representative parameters — what the panel offers as
     /// a starting point. "Generate, then hand-tune" is the authoring loop, so these
     /// are seeds and not presets.
-    pub const ALL: [PatternGenerator; 14] = [
+    pub const ALL: [PatternGenerator; 15] = [
         PatternGenerator::Flat,
         PatternGenerator::Noise { octaves: 3 },
         PatternGenerator::Speckle { density: 0.25 },
@@ -438,6 +466,11 @@ impl PatternGenerator {
         PatternGenerator::Checker,
         PatternGenerator::TileTone,
         PatternGenerator::TileEdge { sharpness: 0.6 },
+        PatternGenerator::EdgeBand {
+            direction: EdgeBandDirection::Top,
+            width: 0.1875,
+            jaggedness: 0.7,
+        },
     ];
 }
 
@@ -670,6 +703,9 @@ pub struct PatternLayer {
     /// * [`PatternTarget::Roughness`] — the first channel only, as a scalar 0..1.
     pub target_color: [f32; 3],
     pub faces: PatternFaces,
+    /// Face scope for the independent displacement modifier. Kept separate from
+    /// `faces` so a relief node cannot silently change the colour layer's scope.
+    pub relief_faces: PatternFaces,
     /// **Texels per voxel edge**, or `0` for a continuous field.
     ///
     /// The generator is sampled once per texel and held flat across it, so the result
@@ -777,11 +813,83 @@ pub struct PatternLayer {
     /// needed no change at all. Which is also why it keeps full `f32` precision rather
     /// than being quantised into a spare corner of the packed word.
     pub emission_intensity: f32,
+    /// Height of the mask-driven micro-relief in metres. Zero leaves the surface
+    /// flat; positive values raise the pattern along the face normal and derive a
+    /// matching normal for lighting. This is deliberately a material-scale effect,
+    /// not a change to voxel topology.
+    pub relief_height_meters: f32,
+    /// Whether this height field contributes to the derived lighting normal.
+    /// Height remains available for the relief/shadow path when this is false,
+    /// so authors can independently choose geometry-like lift and normal detail.
+    pub relief_normal: bool,
+    /// Whether the relief reads the COMPLEMENT of the generator: the low end of
+    /// the mask is the raised one. The colour blend keeps the un-inverted value,
+    /// so a layer that darkens where the mask is high (mix toward black) can
+    /// still raise its light texels — the polarity image-based normal-map tools
+    /// flip by default for exactly this reason.
+    pub relief_invert: bool,
+    /// Half-width of the relief bevel, as a fraction of one texel — the
+    /// finite-difference step the derived normal is sampled at. The height field
+    /// is texel-quantised (flat plateaus), so the step must stay SUB-texel or the
+    /// plateau structure smears into an invisible rolling gradient: at a full
+    /// texel the grass relief measured a mean tilt of 2.9°, at 1/8 texel the same
+    /// heights measure p95 29° — the crisp emboss. Small values are a hard chisel
+    /// edge, large values a soft pillowed bevel; the visible bevel spans 2× this
+    /// fraction of a texel.
+    pub relief_bevel_fraction: f32,
+    /// Multiplier on the derived lighting normal's tilt, independent of the
+    /// height response the traversal reads. `1.0` is the physically-derived
+    /// gradient; above it the emboss lighting exaggerates without lifting the
+    /// surface any further — the "strength" divisor every image-based normal-map
+    /// tool exposes next to its Sobel step.
+    pub relief_normal_strength: f32,
+    /// Average the generator over each texel cell instead of point-sampling the
+    /// cell centre. Eight taps, one per octant of the cell, so every texel
+    /// becomes the MEAN of the noise it covers — a calmer, solid tone rather
+    /// than one random draw with full contrast. Only meaningful with a texel
+    /// grid (`texels_per_voxel > 0`) and ignored by the tile frame and the
+    /// tessellation readouts, whose values are already cell-constant. The texel
+    /// cache keys on the snapped coordinate, so the eightfold cost is paid once
+    /// per texel and amortises to nothing.
+    pub grid_average: bool,
+    /// Quantise the relief mask into this many flat levels, `0` (or `1`) for the
+    /// continuous mask. THE normal-map-look control: a continuous mask gives
+    /// every texel border a small random height difference — a face covered in
+    /// weak edges that reads as wash — where a stepped mask gives flat plateaus
+    /// and concentrates the full height into few, full-strength bevels. `2` is
+    /// raised-or-not; applied AFTER the invert, and to the relief only — the
+    /// colour blend keeps the continuous value.
+    pub relief_steps: u32,
 }
 
 /// Ceiling on [`PatternLayer::emission_intensity`], matching the range the row's own
 /// `emission` field is authored in.
 pub const MAX_EMISSION_INTENSITY: f32 = 16.0;
+
+/// Maximum graph-authored micro-relief height. Keeping this below a voxel edge
+/// makes the effect read as raised surface detail instead of changing the block's
+/// silhouette or requiring a second geometry representation.
+pub const MAX_RELIEF_HEIGHT_METERS: f32 = 0.25;
+
+/// Default relief bevel half-width: 1/8 texel, the measured crisp-emboss value
+/// (p95 tilt 29° on the grass relief, versus 2.9° at a full texel).
+pub const DEFAULT_RELIEF_BEVEL_FRACTION: f32 = 0.125;
+
+/// Bounds on [`PatternLayer::relief_bevel_fraction`]. Below 0.05 the two taps
+/// straddle float precision at fine texel grids; 0.5 is a full-texel step, which
+/// reproduces the old invisible smear and is the honest ceiling.
+pub const MINIMUM_RELIEF_BEVEL_FRACTION: f32 = 0.05;
+pub const MAXIMUM_RELIEF_BEVEL_FRACTION: f32 = 0.5;
+
+/// Ceiling on [`PatternLayer::relief_normal_strength`]. At 4× the derived tilt
+/// the emboss already reads as carved; past it the normal folds against the
+/// silhouette and lighting inverts.
+pub const MAXIMUM_RELIEF_NORMAL_STRENGTH: f32 = 4.0;
+
+/// Ceiling on [`PatternLayer::relief_steps`]. Past eight levels the plateaus are
+/// closer together than the bevel can articulate and the mask reads as
+/// continuous again.
+pub const MAX_RELIEF_STEPS: u32 = 8;
 
 /// Texel-grid rungs the panel offers, and what the bench sweeps.
 ///
@@ -852,9 +960,17 @@ impl PatternLayer {
         tile_bond: 0.5,
         tile_gap: 0.06,
         faces: PatternFaces::ALL,
+        relief_faces: PatternFaces::ALL,
         texels_per_voxel: DEFAULT_TEXELS_PER_VOXEL,
         vary_per_face: true,
         emission_intensity: 1.0,
+        relief_height_meters: 0.0,
+        relief_normal: true,
+        relief_invert: false,
+        relief_bevel_fraction: DEFAULT_RELIEF_BEVEL_FRACTION,
+        relief_normal_strength: 1.0,
+        grid_average: false,
+        relief_steps: 0,
     };
 
     /// The panel's newly-added layer: same shared 8×8/2 cm defaults, but fully
@@ -884,8 +1000,37 @@ impl PatternLayer {
                 .clamp(MINIMUM_TILE_ASPECT, MAXIMUM_TILE_ASPECT),
             tile_bond: self.tile_bond.rem_euclid(1.0),
             tile_gap: self.tile_gap.clamp(0.0, MAXIMUM_TILE_GAP),
-            pad_row_b: 0.0,
+            // `pad_row_b` is the explicit tail padding of the old 48-byte layout.
+            // Relief height claimed it before row 3 existed; moving it now would
+            // shuffle every consumer for no return.
+            pad_row_b: self
+                .relief_height_meters
+                .clamp(0.0, MAX_RELIEF_HEIGHT_METERS),
+            relief_bevel_fraction: self
+                .relief_bevel_fraction
+                .clamp(MINIMUM_RELIEF_BEVEL_FRACTION, MAXIMUM_RELIEF_BEVEL_FRACTION),
+            relief_normal_strength: self
+                .relief_normal_strength
+                .clamp(0.0, MAXIMUM_RELIEF_NORMAL_STRENGTH),
+            flags_extra: self.grid_average as u32,
+            relief_steps: self.relief_steps.min(MAX_RELIEF_STEPS),
         }
+    }
+
+    /// The relief mask at this sample: the generator value, inverted when the
+    /// displacement asked for the low end to be raised, then quantised into
+    /// [`Self::relief_steps`] flat levels. Mirrors `pattern_relief_value` in
+    /// `shaders/pattern.wgsl`.
+    pub fn relief_mask_value(&self, sample: &PatternSample) -> f32 {
+        let mut value = self.generator_value(sample);
+        if self.relief_invert {
+            value = 1.0 - value;
+        }
+        if self.relief_steps >= 2 {
+            let count = self.relief_steps.min(MAX_RELIEF_STEPS) as f32;
+            value = (value * count).min(count - 1.0).floor() / (count - 1.0);
+        }
+        value
     }
 
     /// The discriminants and the octave count, in one word.
@@ -899,7 +1044,7 @@ impl PatternLayer {
     /// | 4-5 | frame | 16-23 | texels per voxel |
     /// | 6-7 | target | 24 | vary per face |
     /// | 8-9 | blend | 25 | domain warp |
-    /// | 10-12 | face mask | 26-31 | free |
+    /// | 10-12 | face mask | 26 | edge band grows from bottom | 27-29 | displacement face mask | 30 | displacement normal | 31 | relief invert |
     ///
     /// The generator field was three bits until the library grew past eight codes.
     /// Widening it shifted everything above, which is the kind of change that is
@@ -916,6 +1061,17 @@ impl PatternLayer {
             | (self.texels_per_voxel.min(MAX_TEXELS_PER_VOXEL) << 16)
             | ((self.vary_per_face as u32) << 24)
             | ((self.domain_warp > 0.0) as u32) << 25
+            | (matches!(
+                self.generator,
+                PatternGenerator::EdgeBand {
+                    direction: EdgeBandDirection::Bottom,
+                    ..
+                }
+            ) as u32)
+                << 26
+            | (self.relief_faces.bits() << 27)
+            | ((self.relief_normal as u32) << 30)
+            | ((self.relief_invert as u32) << 31)
     }
 
     /// The blend's second operand: [`Self::target_color`], scaled by
@@ -949,9 +1105,14 @@ impl PatternLayer {
             PatternGenerator::Speckle { density } => density.clamp(0.0, 1.0),
             PatternGenerator::Wave { distortion } => distortion.max(0.0),
             PatternGenerator::TileEdge { sharpness } => sharpness.clamp(0.0, 1.0),
+            PatternGenerator::EdgeBand { width, .. } => width.clamp(0.0, 1.0),
             _ => 0.0,
         };
-        (generator_param, self.domain_warp.max(0.0))
+        let secondary_param = match self.generator {
+            PatternGenerator::EdgeBand { jaggedness, .. } => jaggedness.clamp(0.0, 1.0),
+            _ => self.domain_warp.max(0.0),
+        };
+        (generator_param, secondary_param)
     }
 }
 
@@ -1110,9 +1271,22 @@ pub struct GpuPatternLayer {
     pub tile_bond: f32,
     /// Grout width as a fraction of the tile's short edge.
     pub tile_gap: f32,
-    /// Explicit tail padding to close the third row. Named rather than implicit,
-    /// the discipline [`crate::world_event::GpuWorldEvent`] documents.
+    /// The mask-driven relief height in metres. Named for the padding slot it
+    /// originally reused; row 3 below is where later relief fields went.
     pub pad_row_b: f32,
+    // row 3 — relief shaping and the extra flag word.
+    /// Sub-texel finite-difference step for the derived normal, as a fraction
+    /// of one texel. Clamped on upload like the tessellation trio.
+    pub relief_bevel_fraction: f32,
+    /// Multiplier on the derived normal's tilt. `1.0` is the physical gradient.
+    pub relief_normal_strength: f32,
+    /// Bit 0: grid-average sampling — the generator returns the eight-octant
+    /// mean over the texel cell instead of the centre point sample. A separate
+    /// word because `packed` spent its thirty-second bit on relief invert.
+    pub flags_extra: u32,
+    /// Relief mask quantisation level count; `0` and `1` are the continuous
+    /// mask. Clamped to [`MAX_RELIEF_STEPS`] on upload.
+    pub relief_steps: u32,
 }
 
 impl GpuPatternLayer {
@@ -1129,6 +1303,10 @@ impl GpuPatternLayer {
         tile_bond: 0.0,
         tile_gap: 0.0,
         pad_row_b: 0.0,
+        relief_bevel_fraction: DEFAULT_RELIEF_BEVEL_FRACTION,
+        relief_normal_strength: 1.0,
+        flags_extra: 0,
+        relief_steps: 0,
     };
 }
 
@@ -1157,7 +1335,22 @@ pub struct PatternSample {
     pub axis_sign: f32,
     /// How far the camera is from the hit, in metres. Drives the fade only.
     pub distance_meters: f32,
+    /// Column exposure at the hit's one-metre block: bit 0 set when the block
+    /// ABOVE is empty (an exposed column top), bit 1 when the one BELOW is.
+    /// The shader fills this from the occupancy grid (`pattern_sample` in
+    /// pattern.wgsl); CPU previews have no world and default to
+    /// [`EXPOSURE_ALL`], which reproduces the single-block case. The edge band
+    /// reads it so a lip only draws where the column actually ends — a block
+    /// with another on top has no overhang.
+    pub exposure: u32,
 }
+
+/// Bit 0 of [`PatternSample::exposure`]: the block above the hit's is empty.
+pub const EXPOSURE_TOP: u32 = 1;
+/// Bit 1 of [`PatternSample::exposure`]: the block below the hit's is empty.
+pub const EXPOSURE_BOTTOM: u32 = 2;
+/// Both neighbours empty — the free-standing block every preview renders.
+pub const EXPOSURE_ALL: u32 = EXPOSURE_TOP | EXPOSURE_BOTTOM;
 
 /// The per-layer animation values a material graph supplies, as the reference
 /// evaluator takes them. Mirrors one slot of `PatternAnimation` in
@@ -1340,11 +1533,53 @@ impl PatternLayer {
             PatternGenerator::TileEdge { sharpness } => {
                 return tile_edge_shaped(self.tile_at(sample, drift_meters)[3], sharpness)
             }
+            PatternGenerator::EdgeBand {
+                direction,
+                width,
+                jaggedness,
+            } => return self.edge_band_value(sample, direction, width, jaggedness),
             _ => {}
         }
         let raw_point = self.coordinate_animated(sample, drift_meters);
         let salt = self.variation_salt(sample);
-        self.raw_generator_value(raw_point, salt)
+        if !self.grid_averaging_applies() {
+            return self.raw_generator_value(raw_point, salt);
+        }
+        self.grid_averaged_value(raw_point, salt)
+    }
+
+    /// Whether [`Self::grid_average`] changes anything for this layer.
+    ///
+    /// Continuous layers have no cell to average over, and the tile frame's
+    /// coordinate comes from the tessellation rather than the texel snap — its
+    /// value is already constant per tile. Mirrors the same gate in
+    /// `pattern_generator_at`.
+    pub fn grid_averaging_applies(&self) -> bool {
+        self.grid_average && self.texels_per_voxel != 0 && self.frame != PatternFrame::Tile
+    }
+
+    /// The eight-octant mean of the generator over the texel cell centred on
+    /// `raw_point`. Mirrors `pattern_grid_averaged_value` in
+    /// `shaders/pattern.wgsl`.
+    ///
+    /// The taps sit at the centres of the cell's eight octants — `±texel/4`
+    /// along each axis around the snapped centre — the stratified box-filter
+    /// estimate. Each tap runs the FULL generator, domain warp included, so the
+    /// result is the mean of the field the point sample would have drawn from.
+    pub fn grid_averaged_value(&self, raw_point: [f32; 3], salt: u32) -> f32 {
+        let texel_meters =
+            WORLD_VOXEL_SIZE_METERS / self.texels_per_voxel.min(MAX_TEXELS_PER_VOXEL) as f32;
+        let quarter = texel_meters * 0.25 / self.period_meters.max(MINIMUM_PERIOD_METERS);
+        let mut total = 0.0;
+        for corner in 0..8_u32 {
+            let tap = [
+                raw_point[0] + quarter * if corner & 1 == 0 { -1.0 } else { 1.0 },
+                raw_point[1] + quarter * if corner & 2 == 0 { -1.0 } else { 1.0 },
+                raw_point[2] + quarter * if corner & 4 == 0 { -1.0 } else { 1.0 },
+            ];
+            total += self.raw_generator_value(tap, salt);
+        }
+        total / 8.0
     }
 
     /// This layer's tessellation at this sample. Mirrors `pattern_tile_of`.
@@ -1411,7 +1646,71 @@ impl PatternLayer {
             // Handled by `generator_value_animated`, which has the sample the
             // tessellation needs. Reaching here means a caller evaluated a tile
             // generator through the raw path, where there is no wall to tile.
-            PatternGenerator::TileTone | PatternGenerator::TileEdge { .. } => 0.0,
+            PatternGenerator::TileTone
+            | PatternGenerator::TileEdge { .. }
+            | PatternGenerator::EdgeBand { .. } => 0.0,
+        }
+    }
+
+    /// The grass-side mask: quantise the face's horizontal coordinate into
+    /// columns, then vary the height of the edge strip once per column. The
+    /// layer's face mask keeps this generator on vertical faces; returning zero
+    /// for a Y face also makes the generator safe to inspect independently.
+    fn edge_band_value(
+        &self,
+        sample: &PatternSample,
+        direction: EdgeBandDirection,
+        width: f32,
+        jaggedness: f32,
+    ) -> f32 {
+        if sample.axis == 1 {
+            return 0.0;
+        }
+        // A band is the exposed lip of a COLUMN, not a decal on every block:
+        // stacked blocks only band where the column meets air. Mirrors the
+        // same gate in `pattern_edge_band_value`.
+        let required_exposure = match direction {
+            EdgeBandDirection::Bottom => EXPOSURE_BOTTOM,
+            _ => EXPOSURE_TOP,
+        };
+        if sample.exposure & required_exposure == 0 {
+            return 0.0;
+        }
+        let local_u = match sample.axis {
+            0 => (sample.world_meters[2] / WORLD_VOXEL_SIZE_METERS).rem_euclid(1.0),
+            _ => (sample.world_meters[0] / WORLD_VOXEL_SIZE_METERS).rem_euclid(1.0),
+        };
+        let texels = self.texels_per_voxel.clamp(1, MAX_TEXELS_PER_VOXEL) as f32;
+        let column = (local_u * texels).floor() as i32;
+        let local_y = (sample.world_meters[1] / WORLD_VOXEL_SIZE_METERS).rem_euclid(1.0);
+        let local_y = ((local_y * texels).floor() + 0.5) / texels;
+        let block = sample
+            .world_meters
+            .map(|coordinate| (coordinate / WORLD_VOXEL_SIZE_METERS).floor() as i32);
+        let cell = if sample.axis == 0 {
+            [block[0], block[1], column]
+        } else {
+            [column, block[1], block[2]]
+        };
+        let jitter = hash_cell(cell, self.variation_salt(sample)) * 2.0 - 1.0;
+        let width = width.clamp(0.0, 1.0);
+        let jaggedness = jaggedness.clamp(0.0, 1.0);
+        let edge = (width * (1.0 + jitter * jaggedness)).clamp(0.0, 1.0);
+        match direction {
+            EdgeBandDirection::Top => {
+                if local_y >= 1.0 - edge {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            EdgeBandDirection::Bottom => {
+                if local_y <= edge {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         }
     }
 
@@ -1652,6 +1951,7 @@ mod tests {
             axis: 1,
             axis_sign: -1.0,
             distance_meters: 0.0,
+            exposure: EXPOSURE_ALL,
         }
     }
 
@@ -1771,6 +2071,7 @@ mod tests {
                     axis: 0,
                     axis_sign: 1.0,
                     distance_meters: 0.0,
+                    exposure: EXPOSURE_ALL,
                 },
                 LayerAnimationSample {
                     gain: 1.0,
@@ -1832,6 +2133,7 @@ mod tests {
                 axis: 0,
                 axis_sign: 1.0,
                 distance_meters: 0.0,
+                exposure: EXPOSURE_ALL,
             })
         };
         // World frame: the block index does not enter the coordinate at all, so
@@ -1876,6 +2178,7 @@ mod tests {
                     axis: 0,
                     axis_sign: 1.0,
                     distance_meters: 0.0,
+                    exposure: EXPOSURE_ALL,
                 },
                 LayerAnimationSample {
                     gain: 1.0,
@@ -1974,6 +2277,7 @@ mod tests {
             axis: 1,
             axis_sign: -1.0,
             distance_meters: 0.0,
+            exposure: EXPOSURE_ALL,
         };
         let still = layer.generator_value(&sample);
         let drifted = layer.generator_value_animated(
@@ -2017,14 +2321,66 @@ mod tests {
             axis: 1,
             axis_sign: -1.0,
             distance_meters: 1.0,
+            exposure: EXPOSURE_ALL,
         }
     }
 
-    /// The GPU layer must be exactly two std430 rows with no implicit padding, or
+    #[test]
+    fn edge_band_is_a_quantised_top_strip_on_sides_only() {
+        let layer = PatternLayer {
+            generator: PatternGenerator::EdgeBand {
+                direction: EdgeBandDirection::Top,
+                width: 0.1875,
+                jaggedness: 0.0,
+            },
+            frame: PatternFrame::Face,
+            texels_per_voxel: 16,
+            ..PatternLayer::IDENTITY
+        };
+        let high = PatternSample {
+            world_meters: [0.2, 0.9, 0.3],
+            voxel: [1, 1, 1],
+            axis: 0,
+            axis_sign: -1.0,
+            distance_meters: 1.0,
+            exposure: EXPOSURE_ALL,
+        };
+        let low = PatternSample {
+            world_meters: [0.2, 0.7, 0.3],
+            ..high
+        };
+        let top = PatternSample {
+            axis: 1,
+            axis_sign: -1.0,
+            ..high
+        };
+        assert_eq!(layer.generator_value(&high), 1.0);
+        assert_eq!(layer.generator_value(&low), 0.0);
+        assert_eq!(layer.generator_value(&top), 0.0);
+
+        let bottom = PatternLayer {
+            generator: PatternGenerator::EdgeBand {
+                direction: EdgeBandDirection::Bottom,
+                width: 0.1875,
+                jaggedness: 0.0,
+            },
+            ..layer
+        };
+        let bottom_low = PatternSample {
+            world_meters: [0.2, 0.1, 0.3],
+            ..high
+        };
+        assert_eq!(bottom.generator_value(&bottom_low), 1.0);
+        assert_eq!(bottom.generator_value(&high), 0.0);
+        assert_eq!(layer.to_gpu().packed & (1 << 26), 0);
+        assert_ne!(bottom.to_gpu().packed & (1 << 26), 0);
+    }
+
+    /// The GPU layer must be exactly four std430 rows with no implicit padding, or
     /// the whole uploaded material row shifts under it.
     #[test]
-    fn the_gpu_layer_is_two_std430_rows() {
-        assert_eq!(std::mem::size_of::<GpuPatternLayer>(), 48);
+    fn the_gpu_layer_is_four_std430_rows() {
+        assert_eq!(std::mem::size_of::<GpuPatternLayer>(), 64);
         assert_eq!(std::mem::align_of::<GpuPatternLayer>(), 4);
     }
 
@@ -2057,6 +2413,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn relief_face_scope_is_independent_from_color_scope() {
+        let layer = PatternLayer {
+            faces: PatternFaces::TOP,
+            relief_faces: PatternFaces::SIDES,
+            ..PatternLayer::IDENTITY
+        };
+        let packed = layer.to_gpu().packed;
+        assert_eq!((packed >> 10) & 0x7, PatternFaces::TOP.bits());
+        assert_eq!((packed >> 27) & 0x7, PatternFaces::SIDES.bits());
+    }
+
+    /// Bit 31 is the relief-invert flag — the shader's `pattern_relief_inverted`
+    /// reads exactly this bit, and it must not disturb its neighbours.
+    #[test]
+    fn relief_invert_packs_bit_31() {
+        assert_eq!(PatternLayer::IDENTITY.to_gpu().packed & (1 << 31), 0);
+        let inverted = PatternLayer {
+            relief_invert: true,
+            ..PatternLayer::IDENTITY
+        };
+        assert_ne!(inverted.to_gpu().packed & (1 << 31), 0);
+        assert_eq!(
+            inverted.to_gpu().packed & !(1 << 31),
+            PatternLayer::IDENTITY.to_gpu().packed,
+            "the invert flag must flip bit 31 and nothing else"
+        );
     }
 
     /// The octave field must carry the count and must clamp, since the shader loops
@@ -2268,6 +2653,7 @@ mod tests {
                 axis: 1,
                 axis_sign: -1.0,
                 distance_meters: 1.0,
+                exposure: EXPOSURE_ALL,
             })
         };
         let first = at_voxel([512, 256, 512]);
@@ -2293,6 +2679,7 @@ mod tests {
                 axis,
                 axis_sign: sign,
                 distance_meters: 1.0,
+                exposure: EXPOSURE_ALL,
             })
         };
         let mut seen = Vec::new();
@@ -2338,6 +2725,7 @@ mod tests {
                 axis: 1,
                 axis_sign: -1.0,
                 distance_meters: 1.0,
+                exposure: EXPOSURE_ALL,
             })
         };
         let first = at_voxel([512, 256, 512]);
@@ -2375,6 +2763,7 @@ mod tests {
                     axis,
                     axis_sign: sign,
                     distance_meters: 1.0,
+                    exposure: EXPOSURE_ALL,
                 };
                 assert_eq!(varied.variation_salt(&sample), 0, "{frame:?} got a salt");
                 assert_eq!(
@@ -2424,6 +2813,279 @@ mod tests {
         assert_eq!(absurd.target_value()[0], MAX_EMISSION_INTENSITY);
     }
 
+    #[test]
+    fn relief_height_reaches_the_existing_gpu_tail_slot() {
+        let layer = PatternLayer {
+            relief_height_meters: 0.04,
+            ..PatternLayer::IDENTITY
+        };
+        assert_eq!(layer.to_gpu().pad_row_b, 0.04);
+        let clamped = PatternLayer {
+            relief_height_meters: MAX_RELIEF_HEIGHT_METERS * 2.0,
+            ..layer
+        };
+        assert_eq!(clamped.to_gpu().pad_row_b, MAX_RELIEF_HEIGHT_METERS);
+    }
+
+    /// Row 3: the relief-shaping pair clamps on upload and the grid-average flag
+    /// lands on bit 0 of the extra word — the shader's `pattern_grid_average_applies`
+    /// reads exactly that bit.
+    #[test]
+    fn relief_shaping_reaches_gpu_row_3_clamped() {
+        let layer = PatternLayer {
+            relief_bevel_fraction: 0.25,
+            relief_normal_strength: 2.0,
+            grid_average: true,
+            ..PatternLayer::IDENTITY
+        };
+        let gpu = layer.to_gpu();
+        assert_eq!(gpu.relief_bevel_fraction, 0.25);
+        assert_eq!(gpu.relief_normal_strength, 2.0);
+        assert_eq!(gpu.flags_extra, 1);
+        assert_eq!(PatternLayer::IDENTITY.to_gpu().flags_extra, 0);
+
+        let wild = PatternLayer {
+            relief_bevel_fraction: 3.0,
+            relief_normal_strength: -1.0,
+            ..layer
+        };
+        let clamped = wild.to_gpu();
+        assert_eq!(clamped.relief_bevel_fraction, MAXIMUM_RELIEF_BEVEL_FRACTION);
+        assert_eq!(clamped.relief_normal_strength, 0.0);
+        let tiny = PatternLayer {
+            relief_bevel_fraction: 0.0,
+            ..layer
+        };
+        assert_eq!(
+            tiny.to_gpu().relief_bevel_fraction,
+            MINIMUM_RELIEF_BEVEL_FRACTION
+        );
+    }
+
+    /// A band is a COLUMN lip, not a per-block decal: a sample whose block has
+    /// another on top draws nothing, whatever the mask said. The shader fills
+    /// `exposure` from the occupancy grid; this pins the gate's polarity.
+    #[test]
+    fn edge_band_needs_an_exposed_column_end() {
+        let layer = PatternLayer {
+            generator: PatternGenerator::EdgeBand {
+                direction: EdgeBandDirection::Top,
+                width: 0.5,
+                jaggedness: 0.0,
+            },
+            frame: PatternFrame::Face,
+            texels_per_voxel: 16,
+            amount: 1.0,
+            ..PatternLayer::IDENTITY
+        };
+        let mut sample = sample_at([0.4, 0.97, 0.0], [3, 7, 0]);
+        sample.axis = 0;
+        assert!(
+            layer.generator_value(&sample) > 0.0,
+            "an exposed column top must band near the top of the face"
+        );
+        let covered = PatternSample {
+            exposure: EXPOSURE_BOTTOM,
+            ..sample
+        };
+        assert_eq!(
+            layer.generator_value(&covered),
+            0.0,
+            "a block with another on top has no lip"
+        );
+        let buried = PatternSample {
+            exposure: 0,
+            ..sample
+        };
+        assert_eq!(layer.generator_value(&buried), 0.0);
+    }
+
+    /// The steps quantiser: the relief mask collapses onto N flat levels, the
+    /// endpoints stay pinned at 0 and 1, and the colour path never sees it.
+    #[test]
+    fn relief_steps_quantise_the_mask_only() {
+        let layer = PatternLayer {
+            generator: PatternGenerator::Noise { octaves: 3 },
+            period_meters: 0.25,
+            texels_per_voxel: 8,
+            relief_steps: 2,
+            amount: 1.0,
+            ..PatternLayer::IDENTITY
+        };
+        for index in 0..64 {
+            let sample = sample_at([index as f32 * 0.17, 1.0, index as f32 * 0.29], [0, 7, 0]);
+            let mask = layer.relief_mask_value(&sample);
+            assert!(
+                mask == 0.0 || mask == 1.0,
+                "two steps must be binary, got {mask}"
+            );
+            // The colour value stays continuous — steps shape the relief only.
+            assert_eq!(
+                layer.generator_value(&sample),
+                PatternLayer {
+                    relief_steps: 0,
+                    ..layer
+                }
+                .generator_value(&sample)
+            );
+        }
+        // Four levels: only the quarters appear, and both endpoints are reachable.
+        let stepped = PatternLayer {
+            relief_steps: 4,
+            ..layer
+        };
+        for index in 0..256 {
+            let sample = sample_at([index as f32 * 0.11, 1.0, index as f32 * 0.07], [0, 7, 0]);
+            let mask = stepped.relief_mask_value(&sample);
+            let levels = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
+            assert!(
+                levels.iter().any(|level| (mask - level).abs() < 1e-6),
+                "mask {mask} is not one of four levels"
+            );
+        }
+        // Invert applies BEFORE the quantise, so the raised set is the complement.
+        let inverted = PatternLayer {
+            relief_invert: true,
+            ..layer
+        };
+        let sample = sample_at([0.4, 1.0, 0.7], [0, 7, 0]);
+        assert_eq!(
+            layer.relief_mask_value(&sample),
+            1.0 - inverted.relief_mask_value(&sample)
+        );
+        // And the count reaches the GPU row clamped.
+        let wild = PatternLayer {
+            relief_steps: 99,
+            ..layer
+        };
+        assert_eq!(wild.to_gpu().relief_steps, MAX_RELIEF_STEPS);
+        assert_eq!(layer.to_gpu().relief_steps, 2);
+    }
+
+    /// Grid averaging is the octant mean: eight taps at ±texel/4 around the
+    /// snapped centre, averaged. Pinned against a hand-rolled loop so the WGSL
+    /// mirror has one exact definition to agree with.
+    #[test]
+    fn grid_average_is_the_octant_mean() {
+        let layer = PatternLayer {
+            generator: PatternGenerator::Noise { octaves: 3 },
+            period_meters: 0.02,
+            texels_per_voxel: 8,
+            grid_average: true,
+            amount: 1.0,
+            ..PatternLayer::IDENTITY
+        };
+        let sample = sample_at([0.4, 1.0, 0.7], [3, 7, 5]);
+        let raw_point = layer.coordinate_animated(&sample, [0.0; 3]);
+        let salt = layer.variation_salt(&sample);
+        let quarter = (WORLD_VOXEL_SIZE_METERS / 8.0) * 0.25 / layer.period_meters;
+        let mut expected = 0.0;
+        for corner in 0..8_u32 {
+            let tap = [
+                raw_point[0] + quarter * if corner & 1 == 0 { -1.0 } else { 1.0 },
+                raw_point[1] + quarter * if corner & 2 == 0 { -1.0 } else { 1.0 },
+                raw_point[2] + quarter * if corner & 4 == 0 { -1.0 } else { 1.0 },
+            ];
+            expected += layer.raw_generator_value(tap, salt);
+        }
+        expected /= 8.0;
+        assert_eq!(layer.generator_value(&sample), expected);
+        // And it differs from the point sample, or the option changed nothing.
+        let point_sampled = PatternLayer {
+            grid_average: false,
+            ..layer
+        };
+        assert_ne!(
+            layer.generator_value(&sample),
+            point_sampled.generator_value(&sample)
+        );
+    }
+
+    /// The gate: a continuous layer has no cell to average over, and the tile
+    /// frame's coordinate is already constant per tile.
+    #[test]
+    fn grid_averaging_gates_on_texels_and_frame() {
+        let averaged = PatternLayer {
+            grid_average: true,
+            texels_per_voxel: 8,
+            ..PatternLayer::IDENTITY
+        };
+        assert!(averaged.grid_averaging_applies());
+        let continuous = PatternLayer {
+            texels_per_voxel: 0,
+            ..averaged
+        };
+        assert!(!continuous.grid_averaging_applies());
+        let tiled = PatternLayer {
+            frame: PatternFrame::Tile,
+            ..averaged
+        };
+        assert!(!tiled.grid_averaging_applies());
+        let off = PatternLayer {
+            grid_average: false,
+            ..averaged
+        };
+        assert!(!off.grid_averaging_applies());
+    }
+
+    /// The look claim, measured: for a noise whose period is smaller than a
+    /// texel, the point sample hands every texel one independent draw at full
+    /// contrast, and the octant mean concentrates values around the field's
+    /// average — the same mean, visibly less spread. The numbers are what make
+    /// "calmer, solid tone" checkable rather than an impression.
+    #[test]
+    fn grid_average_reduces_per_texel_contrast() {
+        let point_sampled = PatternLayer {
+            generator: PatternGenerator::Noise { octaves: 3 },
+            period_meters: 0.02,
+            texels_per_voxel: 8,
+            amount: 1.0,
+            ..PatternLayer::IDENTITY
+        };
+        let averaged = PatternLayer {
+            grid_average: true,
+            ..point_sampled
+        };
+        let texel = WORLD_VOXEL_SIZE_METERS / 8.0;
+        let mut point_values = Vec::new();
+        let mut averaged_values = Vec::new();
+        for row in 0..32 {
+            for column in 0..32 {
+                let sample = sample_at(
+                    [
+                        (column as f32 + 0.5) * texel,
+                        1.0,
+                        (row as f32 + 0.5) * texel,
+                    ],
+                    [column / 8, 7, row / 8],
+                );
+                point_values.push(point_sampled.generator_value(&sample));
+                averaged_values.push(averaged.generator_value(&sample));
+            }
+        }
+        let mean = |values: &[f32]| values.iter().sum::<f32>() / values.len() as f32;
+        let variance = |values: &[f32]| {
+            let centre = mean(values);
+            values
+                .iter()
+                .map(|value| (value - centre) * (value - centre))
+                .sum::<f32>()
+                / values.len() as f32
+        };
+        let point_mean = mean(&point_values);
+        let averaged_mean = mean(&averaged_values);
+        assert!(
+            (point_mean - averaged_mean).abs() < 0.05,
+            "averaging moved the mean: {point_mean} vs {averaged_mean}"
+        );
+        let point_variance = variance(&point_values);
+        let averaged_variance = variance(&averaged_values);
+        assert!(
+            averaged_variance < point_variance * 0.6,
+            "averaging did not calm the field: {averaged_variance} vs {point_variance}"
+        );
+    }
+
     /// A NON-emission target must ignore the intensity entirely — an albedo above 1 is
     /// not a thing, and silently scaling one would blow out a colour the picker says is
     /// safe.
@@ -2458,7 +3120,7 @@ mod tests {
             ..dim
         };
         assert_eq!(dim.packed(), bright.packed());
-        assert_eq!(std::mem::size_of::<GpuPatternLayer>(), 48);
+        assert_eq!(std::mem::size_of::<GpuPatternLayer>(), 64);
     }
 
     /// The face mask must name the faces S1 names, including the inverted Y sign.
@@ -2606,6 +3268,7 @@ mod tests {
                         axis: step % 3,
                         axis_sign: if step % 2 == 0 { -1.0 } else { 1.0 },
                         distance_meters: 1.0,
+                        exposure: EXPOSURE_ALL,
                     };
                     let value = layer.generator_value(&sample);
                     assert!(

@@ -10,6 +10,7 @@ fn material_graph_surface(material: u32, position: vec3<f32>, normal: vec3<f32>)
     // GRAPH_DISPATCH_POINT
     let row = materials[material];
     return GraphMaterial(vec4<f32>(row.albedo, 1.0), row.roughness,
-                         vec4<f32>(row.emission, 1.0), false, false, false,
+                         vec4<f32>(row.emission, 1.0), row.specular, 1.0,
+                         vec3<f32>(0.0), false, false, false, false,
                          pattern_animation_identity());
 }

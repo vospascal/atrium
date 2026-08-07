@@ -80,6 +80,7 @@ macro_rules! pattern_fields {
             PATTERN_FRAME_FIELD,
             PATTERN_PERIOD_FIELD,
             PATTERN_TEXELS_FIELD,
+            PATTERN_GRID_AVERAGE_FIELD,
             PATTERN_VARIATION_FIELD,
             PATTERN_WARP_FIELD,
         ];
@@ -89,6 +90,7 @@ macro_rules! pattern_fields {
             PATTERN_FRAME_FIELD,
             PATTERN_PERIOD_FIELD,
             PATTERN_TEXELS_FIELD,
+            PATTERN_GRID_AVERAGE_FIELD,
             PATTERN_VARIATION_FIELD,
             PATTERN_WARP_FIELD,
             $extra,
@@ -218,6 +220,24 @@ pub const PATTERN_TEXELS_FIELD: FieldDeclarationStatic = field(
     false,
 );
 
+pub const PATTERN_GRID_AVERAGE_FIELD: FieldDeclarationStatic = field(
+    "grid_average",
+    "Grid Average",
+    "Average the pattern over each texel cell instead of point-sampling its \
+     centre — every texel becomes the MEAN of the noise it covers, a calmer \
+     solid tone instead of one random draw at full contrast. Needs a texel \
+     grid (Texels Per Voxel above 0); the tile frame ignores it, its value is \
+     already constant per tile. The texel cache pays the eight taps once per \
+     texel, so it costs almost nothing.",
+    FieldTarget::Property,
+    FieldDefault::Boolean(false),
+    NONE,
+    NONE,
+    None,
+    EMPTY_CHOICES,
+    false,
+);
+
 pub const PATTERN_VARIATION_FIELD: FieldDeclarationStatic = field(
     "vary_per_face",
     "Vary Per Face",
@@ -308,6 +328,48 @@ pub const PATTERN_SHARPNESS_FIELD: FieldDeclarationStatic = field(
     UNIT,
     Some(0.01),
     EMPTY_CHOICES,
+    false,
+);
+
+pub const PATTERN_EDGE_WIDTH_FIELD: FieldDeclarationStatic = field(
+    "width",
+    "Band Width",
+    "Width of the edge band as a fraction of the face height.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.1875),
+    UNIT,
+    UNIT,
+    Some(0.01),
+    EMPTY_CHOICES,
+    false,
+);
+
+pub const PATTERN_EDGE_JAGGEDNESS_FIELD: FieldDeclarationStatic = field(
+    "jaggedness",
+    "Jaggedness",
+    "How much each pixel column varies the band height.",
+    FieldTarget::Property,
+    FieldDefault::Scalar(0.7),
+    UNIT,
+    UNIT,
+    Some(0.01),
+    EMPTY_CHOICES,
+    false,
+);
+
+pub const PATTERN_EDGE_DIRECTION_FIELD: FieldDeclarationStatic = field(
+    "direction",
+    "Direction",
+    "Which edge of the vertical face the band grows from.",
+    FieldTarget::Property,
+    FieldDefault::Text("top"),
+    NONE,
+    NONE,
+    None,
+    &[
+        choice("top", "Top", "Grow down from the top edge."),
+        choice("bottom", "Bottom", "Grow up from the bottom edge."),
+    ],
     false,
 );
 

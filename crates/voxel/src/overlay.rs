@@ -19,7 +19,7 @@
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-use crate::material_edit::{MaterialPanelState, WORLD_HOTBAR_BLOCKS};
+use crate::material_edit::{MaterialDebugView, MaterialPanelState, WORLD_HOTBAR_BLOCKS};
 use voxel_color::{
     ColorSpaceOutcome, DisplayHeadroom, HeadroomChoice, OutputDepth, OutputSupport, TonemapCurve,
 };
@@ -32,6 +32,7 @@ use voxel_material::material::{self, MATERIAL_COUNT};
 use voxel_material_graph::lowering::GraphEditorState;
 use voxel_rt::material_table::MaterialTable;
 use voxel_rt::profiling::FrameTimings;
+use voxel_rt::studio::StudioPose;
 use voxel_rt::studio_assets::StudioAssetPanelState;
 use voxel_rt::variants::RenderQuality;
 use voxel_studio::{draw_graph_drawer, graph_drawer_height};
@@ -49,6 +50,22 @@ pub struct OverlayFrameData {
     /// The editable face currently under the crosshair, projected to the overlay
     /// so the player gets a precise placement preview before editing it.
     pub target: Option<TargetHighlightReadout>,
+    /// S2 — `Some` only in the material studio, where the example-scene bar lives.
+    pub studio: Option<StudioPoseReadout>,
+}
+
+/// S2 — what the studio's example-scene bar has to mark as current.
+///
+/// `active` is `None` while an imported `.vox` subject is on screen: the subject
+/// overrides every built-in pose, so highlighting one would claim you are looking
+/// at a shape you are not.
+pub struct StudioPoseReadout {
+    pub active: Option<StudioPose>,
+    /// Whether the ground plate is currently part of the scene — the eye's state.
+    pub plate_shown: bool,
+    /// What the ground plate is made of — the floor picker's state. Not the row being
+    /// edited: that is `MaterialPanelState::selected`, and Graph Studio owns it.
+    pub plate_material: u8,
 }
 
 /// Read-only target data prepared by the platform layer. Keeping screen-space
@@ -225,6 +242,7 @@ impl Overlay {
         content_peak: &mut f32,
         exposure: &mut f32,
         sun_settings: &mut SunSettings,
+        sky_weather: &mut voxel_rt::sky_weather::SkyWeather,
         quality: &mut RenderQuality,
         material_table: &mut MaterialTable,
         material_panel: &mut MaterialPanelState,
@@ -253,8 +271,21 @@ impl Overlay {
             performance.draw(root_ui.ctx());
             draw_graph_drawer(root_ui, graph_editor, material_table);
             draw_target_highlight(root_ui, frame_data.target.as_ref(), material_table);
-            let drawer_height = graph_drawer_height(root_ui, graph_editor);
-            draw_block_hotbar(root_ui, material_table, material_panel, drawer_height);
+            if let Some(studio) = &frame_data.studio {
+                draw_studio_pose_bar(root_ui, studio, material_panel, material_table);
+            } else {
+                draw_material_debug_bar(root_ui, material_panel, material_table);
+            }
+            // Not in the studio: it is a PLACEMENT bar, and the studio does not
+            // place — `ControlMode::StudioOrbit::allows_world_edits` is false, so
+            // "Right-click: place selected" was advertising a click that does
+            // nothing while covering the bottom of the subject. The studio picks its
+            // material from the row being edited (see
+            // `follow_selected_row_in_the_studio`), not from a hotbar.
+            if frame_data.studio.is_none() {
+                let drawer_height = graph_drawer_height(root_ui, graph_editor);
+                draw_block_hotbar(root_ui, material_table, material_panel, drawer_height);
+            }
             // The ONLY permanently visible readout: one line. Everything that used
             // to live here — resolutions, edit counters, movement, vsync, output
             // depth, quality levers, the sun section — moved into the O window,
@@ -302,6 +333,7 @@ impl Overlay {
                     content_peak,
                     exposure,
                     sun_settings,
+                    sky_weather,
                     quality,
                     studio_assets,
                 },
@@ -400,6 +432,377 @@ fn draw_target_highlight(
         egui::TextStyle::Small.resolve(ui.style()),
         egui::Color32::from_rgb(255, 239, 167),
     );
+}
+
+/// The yellow the overlay already uses for "this is the current one" — target
+/// highlight and hotbar selection both mark with it, so the pose bar does too.
+const OVERLAY_ACCENT: egui::Color32 = egui::Color32::from_rgb(255, 226, 92);
+
+/// S2 — the studio's example scenes as four one-click icons, top right.
+///
+/// Drawn shapes rather than words: what you want to know before clicking is which
+/// SHAPE the material will be shown on, and four labels is four labels to read
+/// every time. Writes a one-shot request instead of the pose itself, because
+/// servicing it rebuilds the world and that is the platform layer's job.
+///
+/// The eye takes the ground plate out of the scene, which is the one part of the
+/// studio you sometimes need gone: it is what the subject casts its shadow onto and
+/// bounces light off, so a material judged against white snow is not the same
+/// material judged against sky.
+fn draw_studio_pose_bar(
+    ui: &mut egui::Ui,
+    studio: &StudioPoseReadout,
+    material_panel: &mut MaterialPanelState,
+    material_table: &MaterialTable,
+) {
+    egui::Area::new(egui::Id::new("studio_pose_bar"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if studio_eye_icon(ui, studio.plate_shown)
+                        .on_hover_text(if studio.plate_shown {
+                            "Hide the ground plate under the subject"
+                        } else {
+                            "Show the ground plate under the subject"
+                        })
+                        .clicked()
+                    {
+                        material_panel.studio_plate_requested = Some(!studio.plate_shown);
+                    }
+                    for pose in StudioPose::EXAMPLES {
+                        let response = studio_pose_icon(ui, pose, studio.active == Some(pose));
+                        if response.on_hover_text(pose.label()).clicked() {
+                            material_panel.studio_pose_requested = Some(pose);
+                        }
+                    }
+                    draw_studio_base_picker(ui, studio, material_panel, material_table);
+                    draw_material_debug_menu(ui, material_panel, material_table);
+                });
+            });
+        });
+}
+
+/// The same temporary material inspection controls are available over the world
+/// renderer as over the studio. Keeping this state in the platform panel means a
+/// user can isolate a grass layer on the cube, then walk into the world with the
+/// exact same channel view still active.
+fn draw_material_debug_bar(
+    ui: &mut egui::Ui,
+    material_panel: &mut MaterialPanelState,
+    material_table: &MaterialTable,
+) {
+    egui::Area::new(egui::Id::new("material_debug_bar"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                draw_material_debug_menu(ui, material_panel, material_table);
+            });
+        });
+}
+
+/// Temporary renderer inspection controls. They deliberately do not edit the
+/// graph or the material table: the mask is a per-frame shader override, which
+/// makes "all layers", "no layers", and "only this layer" useful comparisons.
+fn draw_material_debug_menu(
+    ui: &mut egui::Ui,
+    material_panel: &mut MaterialPanelState,
+    material_table: &MaterialTable,
+) {
+    let active_layers = material_table
+        .row(material_panel.selected)
+        .map_or(0, |row| row.patterns.active_count())
+        .min(4);
+    let debug_active =
+        material_panel.debug_layers_enabled || material_panel.debug_view != MaterialDebugView::Lit;
+    let button_label = if debug_active { "debug •" } else { "debug" };
+
+    ui.menu_button(button_label, |menu| {
+        menu.checkbox(
+            &mut material_panel.debug_layers_enabled,
+            "Enable layer override",
+        )
+        .on_hover_text(
+            "Temporarily controls which pattern layers reach the renderer. The saved graph is unchanged.",
+        );
+        menu.separator();
+        menu.label("Preview channel");
+        for view in MaterialDebugView::ALL {
+            menu.selectable_value(&mut material_panel.debug_view, view, view.label());
+        }
+        menu.separator();
+        menu.label(format!("Pattern layers ({active_layers})"));
+        menu.horizontal(|row| {
+            if row.button("all").clicked() {
+                material_panel.debug_layer_mask = if active_layers == 0 {
+                    0
+                } else {
+                    (1u8 << active_layers) - 1
+                };
+            }
+            if row.button("none").clicked() {
+                material_panel.debug_layer_mask = 0;
+            }
+        });
+        for slot in 0..active_layers {
+            let bit = 1u8 << slot;
+            let mut enabled = (material_panel.debug_layer_mask & bit) != 0;
+            row_layer_toggle(
+                menu,
+                slot,
+                &mut enabled,
+                &mut material_panel.debug_layer_mask,
+            );
+        }
+        menu.small("Use one checked layer for an isolated preview.");
+    });
+}
+
+fn row_layer_toggle(menu: &mut egui::Ui, slot: usize, enabled: &mut bool, mask: &mut u8) {
+    if menu
+        .checkbox(enabled, format!("Layer {}", slot + 1))
+        .changed()
+    {
+        let bit = 1u8 << slot;
+        if *enabled {
+            *mask |= bit;
+        } else {
+            *mask &= !bit;
+        }
+    }
+}
+
+/// What the base plate under the subject is made of.
+///
+/// Called "base", not "floor": [`StudioPose::Floor`] is a floor too, and that one is
+/// the SUBJECT — the 9x9 slab of the row you are editing. This picker is the
+/// backdrop it stands on, casts onto, and bounces light off.
+///
+/// Deliberately NOT a subject picker: the block being previewed is the row being
+/// edited, and Graph Studio's material slot is where that is chosen (it writes
+/// `MaterialPanelState::selected`, which the studio subject follows).
+fn draw_studio_base_picker(
+    ui: &mut egui::Ui,
+    studio: &StudioPoseReadout,
+    material_panel: &mut MaterialPanelState,
+    material_table: &MaterialTable,
+) {
+    let plate_name = material_table
+        .row(studio.plate_material)
+        .map_or("unknown", |row| row.name);
+    // Greyed out with the plate hidden: picking a base you cannot see would look
+    // like the box doing nothing.
+    ui.add_enabled_ui(studio.plate_shown, |ui| {
+        ui.label("base");
+        let (swatch_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 44.0), egui::Sense::hover());
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(swatch_rect.center(), egui::vec2(14.0, 28.0)),
+            3.0,
+            material_swatch(material_table, studio.plate_material),
+        );
+        let mut chosen = studio.plate_material;
+        egui::ComboBox::from_id_salt("studio_plate_material")
+            .selected_text(format!("{plate_name} ▾"))
+            .width(112.0)
+            .show_ui(ui, |ui| {
+                for id in 1..MATERIAL_COUNT as u8 {
+                    let name = material_table.row(id).map_or("unknown", |row| row.name);
+                    ui.selectable_value(&mut chosen, id, format!("{id:>2}  {name}"));
+                }
+            })
+            .response
+            .on_hover_text(
+                "Which row the base plate is built from. Same table as everything \
+                 else, so editing that row changes the base too — exactly as it does \
+                 in the world.",
+            );
+        if chosen != studio.plate_material {
+            material_panel.studio_plate_material_requested = Some(chosen);
+        }
+    });
+}
+
+/// The plate's show/hide eye. Narrower than a pose icon: it is a toggle for the
+/// scene, not a fifth example to pick.
+fn studio_eye_icon(ui: &mut egui::Ui, shown: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 44.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, 4.0, egui::Color32::from_gray(58));
+    }
+    let ink = if shown {
+        egui::Color32::from_gray(220)
+    } else {
+        egui::Color32::from_gray(140)
+    };
+    let stroke = egui::Stroke::new(1.4, ink);
+    let center = rect.center();
+    painter.add(egui::Shape::ellipse_stroke(
+        center,
+        egui::vec2(9.0, 5.5),
+        stroke,
+    ));
+    painter.circle_filled(center, 2.6, ink);
+    if !shown {
+        // The struck-through eye is the state that has to read at a glance: it is
+        // what answers "why is my subject floating in the sky?".
+        painter.line_segment(
+            [
+                center + egui::vec2(-8.0, 6.0),
+                center + egui::vec2(8.0, -6.0),
+            ],
+            egui::Stroke::new(1.6, ink),
+        );
+    }
+    response
+}
+
+/// One example-scene button: a small isometric drawing of the pose's geometry.
+fn studio_pose_icon(ui: &mut egui::Ui, pose: StudioPose, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let background = match (selected, response.hovered()) {
+        (true, _) => egui::Color32::from_rgb(58, 52, 26),
+        (false, true) => egui::Color32::from_gray(58),
+        (false, false) => egui::Color32::from_gray(38),
+    };
+    painter.rect_filled(rect, 4.0, background);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        if selected {
+            egui::Stroke::new(2.0, OVERLAY_ACCENT)
+        } else {
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70))
+        },
+        egui::StrokeKind::Inside,
+    );
+
+    // Everything below is in normalised icon space, so the drawing scales with the
+    // button rather than being a table of pixel offsets.
+    let art = rect.shrink(8.0);
+    let at =
+        |x: f32, y: f32| egui::pos2(art.left() + x * art.width(), art.top() + y * art.height());
+    let lit = if selected {
+        OVERLAY_ACCENT
+    } else {
+        egui::Color32::from_gray(238)
+    };
+    let front = if selected {
+        OVERLAY_ACCENT.gamma_multiply(0.62)
+    } else {
+        egui::Color32::from_gray(168)
+    };
+    let side = if selected {
+        OVERLAY_ACCENT.gamma_multiply(0.4)
+    } else {
+        egui::Color32::from_gray(112)
+    };
+    let seam = egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120));
+    let ground = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60));
+
+    match pose {
+        // A ground plane in perspective: near edge wide and low, far edge narrow
+        // and high, with the grid that makes it read as a surface and not a shape.
+        StudioPose::Floor => {
+            let far_left = 0.26;
+            let far_right = 0.74;
+            let far_y = 0.30;
+            let near_y = 0.80;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    at(far_left, far_y),
+                    at(far_right, far_y),
+                    at(1.0, near_y),
+                    at(0.0, near_y),
+                ],
+                lit.gamma_multiply(0.8),
+                seam,
+            ));
+            for step in 1..3 {
+                let t = step as f32 / 3.0;
+                let y = far_y + (near_y - far_y) * t;
+                let left = far_left * (1.0 - t);
+                let right = far_right + (1.0 - far_right) * t;
+                painter.line_segment([at(left, y), at(right, y)], seam);
+            }
+            for step in 1..3 {
+                let t = step as f32 / 3.0;
+                painter.line_segment(
+                    [
+                        at(far_left + (far_right - far_left) * t, far_y),
+                        at(t, near_y),
+                    ],
+                    seam,
+                );
+            }
+        }
+        // The three solid poses share one drawing: a front face divided into its
+        // one-metre voxels, plus a top and a right face so the depth is visible —
+        // which is the only thing that separates the 1-deep wall from the cube.
+        pose => {
+            let [columns, rows, layers] = pose.extent();
+            let (left, right, top, bottom, depth) = match pose {
+                StudioPose::Single => (0.30, 0.60, 0.40, 0.70, 0.22),
+                StudioPose::Cube => (0.08, 0.68, 0.24, 0.84, 0.24),
+                _ => (0.04, 0.78, 0.16, 0.90, 0.09),
+            };
+            let lift = depth * 0.78;
+            let shift = |x: f32, y: f32| at(x + depth, y - lift);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    at(left, top),
+                    at(right, top),
+                    shift(right, top),
+                    shift(left, top),
+                ],
+                lit,
+                seam,
+            ));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    at(right, top),
+                    shift(right, top),
+                    shift(right, bottom),
+                    at(right, bottom),
+                ],
+                side,
+                seam,
+            ));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    at(left, top),
+                    at(right, top),
+                    at(right, bottom),
+                    at(left, bottom),
+                ],
+                front,
+                seam,
+            ));
+            for column in 1..columns {
+                let x = left + (right - left) * column as f32 / columns as f32;
+                painter.line_segment([at(x, top), at(x, bottom)], seam);
+            }
+            for row in 1..rows {
+                let y = top + (bottom - top) * row as f32 / rows as f32;
+                painter.line_segment([at(left, y), at(right, y)], seam);
+            }
+            // Depth divisions on the top face, so a 3-deep cube is not drawn as a
+            // 1-deep slab with a taller lid.
+            for layer in 1..layers {
+                let t = layer as f32 / layers as f32;
+                painter.line_segment(
+                    [
+                        at(left + depth * t, top - lift * t),
+                        at(right + depth * t, top - lift * t),
+                    ],
+                    seam,
+                );
+            }
+            painter.line_segment([at(0.0, bottom + 0.06), at(1.0, bottom + 0.06)], ground);
+        }
+    }
+    response
 }
 
 fn material_swatch(table: &MaterialTable, id: u8) -> egui::Color32 {

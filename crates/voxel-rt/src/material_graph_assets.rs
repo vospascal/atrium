@@ -283,6 +283,7 @@ mod tests {
             axis: 1,
             axis_sign: -1.0,
             distance_meters: 3.0,
+            exposure: voxel_material::pattern::EXPOSURE_ALL,
         };
         let at = |seconds: f32| {
             layer.generator_value_animated(

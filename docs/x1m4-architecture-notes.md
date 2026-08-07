@@ -163,11 +163,40 @@ reads for wind response (§5). One solve, four consumers.
 > ▸ *"usually you can get rid of these by adding some slight **jittering when sampling** from
 > your light volume/probes"* (2026-07-24, on visible banding in an RC implementation)
 
-**Gap:** the actual update rule — neighbourhood, integer packing, per-channel handling,
-how many iterations/frame, how emissive injection and occlusion work — is *not* in this
-export. He says where it is: ▸ *"I have explained it multiple times on the voxelgamedev
-server, if you dig through the message history there then you should find it"*, keyword
-▸ *"cagi"* (2026-08-03). See §10.
+### The rule's properties, in his own words
+
+His direct answer when asked about the update rule (2026-08-06, verbatim):
+
+> ▸ *"Yes it's using **Moore neighborhood** to transfer and bounce light energy. For energy
+> diffusion it uses **heat conduction**. The simulation is **stable (no oscillation), energy
+> conservative, deterministic** and only uses **Integer math with the min/max functions**."*
+
+○ What this settles, against our reconstruction (`crates/voxel-rt/shaders/cagi.wgsl`):
+
+- **Moore neighbourhood (26).** Reconciles with the face-wise per-axis propagation quoted
+  2025-12-24 (`x1m4-graphics-programming-channel.md` §CAGI): the full rule is face
+  propagation PLUS diagonal terms — diagonal injection (his own square-halo bug fix,
+  2024-03-20) and the diagonal attenuation tiers in TooManyLimits' matching kernel
+  (`docs/cagi-reference-implementation.md`). Face + diagonals = Moore. Our default
+  `CAGI_RULE = 1` (6-face gather) has no diagonal terms at all.
+- **Heat conduction** confirms the diffusion family over max-decrement flood (rule 0).
+- **"Energy conservative" means never *creates* energy**, not strict conservation: the
+  quoted rule loses energy by design (subtractive loss `max(LOSS, LIGHT) - LOSS`,
+  2024-02-28; the build guide's three conservation answers all destroy energy
+  monotonically). Read it as "bounded and monotone — no gateway-to-heaven blowups", the
+  failure he hit in the 2023 float radiance cache (2023-03-28).
+- **"Stable, no oscillation" + "min/max"** matches the quoted `max(src, neighbor) * loss`
+  propagation — a max-based flood converges to a fixed point instead of ringing, the same
+  property our `cagi.wgsl` reflect-and-return term leans on.
+
+**Remaining gap** has narrowed: the rule's *shape* is quoted (2025-12-24, see the
+graphics-programming doc — per-axis max-propagation, per-axis `mix` diffusion, directional
+bounce `light * neighbor_solid_color * bounce_loss`, 6 directional banks of 10-bit RGB at
+1/8 res). Still missing: the exact constants (propagation_loss, bounce_loss, diffusion
+factor), per-channel handling, iterations/frame, and the occlusion/injection details. He
+says where the full explanations are: ▸ *"I have explained it multiple times on the
+voxelgamedev server, if you dig through the message history there then you should find
+it"*, keyword ▸ *"cagi"* (2026-08-03). See §10.
 
 ---
 
@@ -498,7 +527,10 @@ destination is ecosystems:
 
 ## 10. What this export does *not* contain, and how to get it
 
-**The CAGI update rule is missing.** He told you exactly where it is:
+**The CAGI update rule is missing** — though as of 2026-08-06 its *properties* are
+confirmed in his own words (Moore neighbourhood, heat conduction, stable, energy
+conservative, deterministic, integer min/max — see §3). The exact transfer function still
+isn't. He told you exactly where it is:
 
 > ▸ *"I have explained it multiple times on the **voxelgamedev server**, if you dig through
 > the message history there then you should find it"* → keyword ▸ *"cagi"* (2026-08-03)

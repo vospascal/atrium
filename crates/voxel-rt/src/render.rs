@@ -31,7 +31,9 @@ use crate::profiling::{FrameTimers, GPU_BLIT, GPU_CAGI, GPU_DDA};
 use crate::variants::{MAX_RENDER_SCALE, MIN_RENDER_SCALE};
 use crate::world_edit::WorldDelta;
 use voxel_color::OutputFormat;
-use voxel_environment::{EnvironmentGpu, EnvironmentRequest, FroxelCamera, HillaireEnvironment};
+use voxel_environment::{
+    EnvironmentFrame, EnvironmentGpu, EnvironmentRequest, FroxelCamera, HillaireEnvironment,
+};
 use voxel_material::material::GpuMaterial;
 use voxel_material::world_event::{GpuWorldEvent, MAX_WORLD_EVENTS};
 
@@ -62,6 +64,11 @@ pub struct Renderer {
     /// it has a bind group, some WGSL and a per-frame `submit`; how many lookup tables sit
     /// behind that, and which of them a head turn invalidates, is the adapter's business.
     environment: HillaireEnvironment,
+    /// This frame's cloud deck, stated by the app via [`Renderer::set_clouds`].
+    clouds: voxel_environment::CloudRequest,
+    /// The single CPU environment evaluation shared by lighting, clouds, CAGI input and the
+    /// atmosphere adapter.
+    environment_frame: EnvironmentFrame,
     light_volume: LightVolume,
     cagi_pass: CagiPass,
     dda_pass: DdaPass,
@@ -108,6 +115,8 @@ impl Renderer {
             surface_width: width,
             surface_height: height,
             render_scale,
+            clouds: voxel_environment::CloudRequest::default(),
+            environment_frame: voxel_environment::SunSettings::default().environment_frame(),
             viewport_height: height,
             world_bindings,
             environment,
@@ -425,18 +434,55 @@ impl Renderer {
     /// transmittance table integrate. The `celestial_*`/`sky_*` half is the camera-only
     /// appearance layer: [`LightingUniform`] still carries it for surface shading, so it is
     /// mirrored across here rather than being resolved twice from [`SunSettings`].
+    /// State this frame's cloud deck.
+    ///
+    /// Set by the app rather than owned here, for the same reason [`SunSettings`] is: the deck
+    /// is authored state driven by weather, and the renderer's job is to submit it, not to
+    /// decide it. The ground-bounce coefficients are the exception — those are derived from the
+    /// lighting the renderer already has, so [`environment_request`](Self::environment_request)
+    /// fills them in and a caller cannot get them wrong.
+    pub fn set_clouds(&mut self, clouds: voxel_environment::CloudRequest) {
+        self.clouds = clouds;
+    }
+
+    /// State this frame's physical and active celestial lights. The app evaluates its
+    /// [`SunSettings`] once and sends the resulting frame here so the renderer never reconstructs
+    /// a second, slightly different version from the shading uniform.
+    pub fn set_environment_frame(&mut self, frame: EnvironmentFrame) {
+        self.environment_frame = frame;
+    }
+
+    /// The cloud deck currently submitted.
+    pub fn clouds(&self) -> voxel_environment::CloudRequest {
+        self.clouds
+    }
+
     fn environment_request(
+        environment_frame: EnvironmentFrame,
         lighting_uniform: &LightingUniform,
         camera_uniform: &CameraUniform,
+        clouds: voxel_environment::CloudRequest,
     ) -> EnvironmentRequest {
-        let intensity = lighting_uniform.sun_color_intensity[3];
         EnvironmentRequest {
-            sun_direction: lighting_uniform.sun_direction,
-            sun_illuminance: [
-                lighting_uniform.sun_color_intensity[0] * intensity,
-                lighting_uniform.sun_color_intensity[1] * intensity,
-                lighting_uniform.sun_color_intensity[2] * intensity,
-            ],
+            // The SUN, not the active light.
+            //
+            // `lighting_uniform.sun_direction` is `active_direction`, which FLIPS TO THE MOON
+            // after sunset — correct for the shading it was built for, since the moon is what
+            // casts shadows at night. But this field drives the physical atmosphere: the
+            // transmittance and sky-view LUTs, the cloud sun-march, and the "sunward horizon" tap
+            // that gives cloud its warm ambient. Handing it the moon integrates the whole
+            // atmosphere with the sun 180 degrees from where it is, so the sky and every cloud lit
+            // by it are coloured for the wrong hemisphere.
+            //
+            // `celestial_sun.xyz` is the real sun and is already in this uniform, so this is a
+            // re-route rather than new data. The active light keeps its own path to the shading.
+            sun_direction: environment_frame.sun_direction.to_array(),
+            sun_illuminance: environment_frame.sun_illuminance,
+            moon_direction: environment_frame.moon_direction.to_array(),
+            moon_illuminance: environment_frame.moon_illuminance,
+            active_light_direction: environment_frame.active_direction.to_array(),
+            active_light_illuminance: environment_frame.active_illuminance,
+            active_light_is_sun: environment_frame.daylight,
             celestial_sun: lighting_uniform.celestial_sun,
             celestial_moon: lighting_uniform.celestial_moon,
             sky_zenith: lighting_uniform.sky_zenith,
@@ -445,7 +491,7 @@ impl Renderer {
             // The identical number the environment's shader used to reach into
             // `lighting.sky_ambient.w` for. Passing it rather than recomputing it is what makes
             // this a pure re-route: the value the diffuse term multiplies by cannot drift.
-            ambient_scale: lighting_uniform.sky_ambient[3],
+            ambient_scale: environment_frame.ambient_scale,
             camera: FroxelCamera {
                 forward: camera_uniform.forward,
                 right_scaled: camera_uniform.right_scaled,
@@ -453,6 +499,7 @@ impl Renderer {
                 near_world: 0.1,
                 far_world: FROXEL_FAR_KILOMETERS * voxel_environment::FROM_KILOMETERS_SCALE,
             },
+            clouds,
         }
     }
 
@@ -480,7 +527,18 @@ impl Renderer {
         // State the environment's inputs; the adapter decides what they invalidated and
         // encodes only that. Whether this frame costs four compute dispatches, two, or
         // none is not a decision this file makes any more.
-        let environment_request = Self::environment_request(lighting_uniform, camera_uniform);
+        // The ground bounce arrives ALREADY STATED on the cloud request, from whoever owns the
+        // real sun. It used to be derived here from `HillaireEnvironment::frame()`, which read a
+        // second `SunSettings` that nothing ever wrote — a frozen default noon sun, and up to 96%
+        // of a cloud's ambient at sunset. The comment here claimed it came from "the lighting
+        // state this function already holds"; it did not, and that mismatch is exactly why it
+        // survived. This function no longer has a sun of its own to get wrong.
+        let environment_request = Self::environment_request(
+            self.environment_frame,
+            lighting_uniform,
+            camera_uniform,
+            self.clouds,
+        );
         self.environment
             .submit(queue, encoder, &environment_request);
         self.cagi_pass.encode(
@@ -550,4 +608,142 @@ fn create_storage_texture(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (view, width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lighting::{
+        lighting_uniform, AnimationParams, EventParams, GiParams, MaterialParams, ShadingParams,
+        WaterParams,
+    };
+    use voxel_environment::SunSettings;
+
+    fn uniform_at(day_phase: f32) -> LightingUniform {
+        let sun = SunSettings {
+            day_night_enabled: true,
+            day_phase,
+            ..SunSettings::default()
+        };
+        // Every param vector is irrelevant here — only the two sun directions are asserted — but
+        // they are stated rather than defaulted because these structs deliberately have no
+        // `Default`: their field order is a GPU vector's component order.
+        lighting_uniform(
+            &sun,
+            ShadingParams {
+                ambient_occlusion_strength: 0.8,
+                shadow_penumbra_scale: 1.0,
+                ambient_occlusion_fade_start_voxels: 240.0,
+                ambient_occlusion_fade_end_voxels: 480.0,
+            },
+            GiParams {
+                strength: 1.0,
+                ambient_floor: 0.0,
+                sun_bounce: 0.35,
+                emissive_scale: 0.0,
+            },
+            WaterParams {
+                absorption_scale: 1.0,
+                scattering_scale: 1.0,
+                ray_cutoff: 0.02,
+                turbidity_scattering_fraction: crate::water::WaterSettings::default()
+                    .turbidity_scattering_fraction,
+                refraction_strength: 1.0,
+                // E7: the shipped visibility horizon, so an offscreen render of a pool
+                // matches what the window shows. Unlike wind, turbidity is not a property
+                // of the running world — there is no history to attach.
+                turbidity_per_meter: crate::water::turbidity_per_meter(
+                    crate::water::WaterSettings::default().visibility_depth_blocks,
+                ),
+                // Offscreen caller with no wind history — flat water. `with_wind`
+                // is how the app attaches one.
+                waves: crate::water::WaveField::FLAT,
+            },
+            MaterialParams {
+                pattern_fade_start_meters: 64.0,
+                pattern_fade_end_meters: 192.0,
+                pixel_footprint_at_one_meter: 0.001,
+            },
+            AnimationParams {
+                remainder_seconds: 0.0,
+                epoch: 0.0,
+                reserved_flow: 0.0,
+                reserved: 0.0,
+            },
+            EventParams {
+                remainder_seconds: 0.0,
+                epoch: 0.0,
+                event_count: 0.0,
+            },
+        )
+    }
+
+    /// The atmosphere must be driven by the SUN, never by the active light.
+    ///
+    /// `LightingUniform::sun_direction` carries `active_direction`, which flips to the MOON after
+    /// sunset. That is right for shading — the moon is what casts shadows at night — but this field
+    /// also feeds the transmittance and sky-view LUTs, the cloud sun-march, and the sunward-horizon
+    /// tap that gives cloud its warm ambient. Handing it the moon integrates the entire atmosphere
+    /// with the sun 180 degrees from where it is.
+    ///
+    /// Pinned here rather than in `lighting.rs` because the defect was the WIRING, not either value:
+    /// both directions were correct, and the wrong one was selected.
+    #[test]
+    fn the_atmosphere_is_driven_by_the_sun_not_the_active_light() {
+        let camera: CameraUniform = bytemuck::Zeroable::zeroed();
+        let clouds = voxel_environment::CloudRequest::default();
+
+        // Deep night, where the active light is unambiguously the moon.
+        let night_settings = SunSettings {
+            day_night_enabled: true,
+            day_phase: 0.0,
+            ..SunSettings::default()
+        };
+        let night = uniform_at(0.0);
+        let night_frame = night_settings.environment_frame();
+        let moon = night.sun_direction;
+        let sun = [
+            night.celestial_sun[0],
+            night.celestial_sun[1],
+            night.celestial_sun[2],
+        ];
+        // The precondition: at night these genuinely differ, or the test proves nothing.
+        assert!(
+            (moon[0] - sun[0]).abs() + (moon[1] - sun[1]).abs() + (moon[2] - sun[2]).abs() > 0.5,
+            "expected the active light ({moon:?}) to differ from the sun ({sun:?}) at night"
+        );
+
+        let request = Renderer::environment_request(night_frame, &night, &camera, clouds);
+        assert_eq!(
+            request.sun_direction, sun,
+            "the atmosphere received the active light instead of the sun"
+        );
+        assert_eq!(request.sun_illuminance, night_frame.sun_illuminance);
+        assert_eq!(
+            request.moon_direction,
+            night_frame.moon_direction.to_array()
+        );
+        assert_eq!(request.moon_illuminance, night_frame.moon_illuminance);
+        assert_eq!(
+            request.active_light_illuminance,
+            night_frame.active_illuminance
+        );
+        assert_eq!(request.active_light_is_sun, 0.0);
+
+        // And by day the two coincide, so the fix cannot have broken the shipped daylight look.
+        let noon = uniform_at(0.5);
+        let noon_frame = SunSettings {
+            day_night_enabled: true,
+            day_phase: 0.5,
+            ..SunSettings::default()
+        }
+        .environment_frame();
+        let noon_request = Renderer::environment_request(noon_frame, &noon, &camera, clouds);
+        for axis in 0..3 {
+            assert!(
+                (noon_request.sun_direction[axis] - noon.sun_direction[axis]).abs() < 1.0e-6,
+                "by day the sun and the active light must agree"
+            );
+        }
+    }
 }

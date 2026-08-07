@@ -349,6 +349,7 @@ fn world_thread_main(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cagi::CagiLayout;
     use voxel_core::world::{
         Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, WORLD_SIZE_Y,
     };
@@ -484,7 +485,11 @@ mod tests {
     #[test]
     fn light_attributes_rebuild_off_frame() {
         let mut host = island_host();
-        let grid = CagiGrid::for_world(8, host.read().metadata().max_occupied_brick_y);
+        let grid = CagiGrid::for_world(
+            8,
+            CagiLayout::Isotropic,
+            host.read().metadata().max_occupied_brick_y,
+        );
         host.request_light_attributes(grid, MaterialAttributes::compiled());
         let inline = host.drain();
         let WorldUpdate::LightAttributes {

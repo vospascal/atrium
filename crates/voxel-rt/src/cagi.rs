@@ -168,6 +168,51 @@ impl CagiRule {
     }
 }
 
+/// How the volume stores light — mirrors `CAGI_LAYOUT` in
+/// `shaders/cagi_volume.wgsl`.
+///
+/// `docs/cagi-directional-banks-plan.md`: [`Banks6`] is x1m4's reference
+/// design — six directional banks per cell (+X, -X, +Y, -Y, +Z, -Z, the
+/// direction the light TRAVELS), each a packed 10-bit-RGB word, stored as six
+/// SoA planes (`index = cell_index + bank * cell_count`). D2's transport runs
+/// each bank as a subtractive-loss max-flood with a lateral seep; sky feeds the
+/// downward bank, sun and emitter bounces feed the bank their surface's normal
+/// points along.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CagiLayout {
+    /// One light word per cell — the shipped isotropic volume.
+    Isotropic,
+    /// Six directional light words per cell. Pairs with 8-voxel cells: at the
+    /// default 4-voxel cells the two ping-pong buffers cost ~200 MB, at 8
+    /// voxels ~24 MB (the resolution x1m4 runs).
+    Banks6,
+}
+
+impl CagiLayout {
+    pub(crate) fn shader_value(self) -> u32 {
+        match self {
+            CagiLayout::Isotropic => 0,
+            CagiLayout::Banks6 => 1,
+        }
+    }
+
+    pub(crate) fn from_shader_value(shader_value: u32) -> CagiLayout {
+        match shader_value {
+            0 => CagiLayout::Isotropic,
+            1 => CagiLayout::Banks6,
+            other => panic!("no CAGI_LAYOUT {other} in cagi_volume.wgsl"),
+        }
+    }
+
+    /// Light words per cell in ONE ping-pong buffer.
+    pub(crate) fn light_words_per_cell(self) -> usize {
+        match self {
+            CagiLayout::Isotropic => 1,
+            CagiLayout::Banks6 => 6,
+        }
+    }
+}
+
 /// How the shading pass reads the volume — mirrors `CAGI_SAMPLE_MODE` in
 /// `shaders/cagi_volume.wgsl`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,6 +281,8 @@ pub struct CagiSettings {
     pub enabled: bool,
     /// Voxels per cell edge: 2, 4 or 8. Must divide [`BRICK_SIZE`].
     pub cell_voxels: u32,
+    /// `CAGI_LAYOUT`: isotropic single-word cells or six directional banks.
+    pub layout: CagiLayout,
     /// `CAGI_RULE`.
     pub rule: CagiRule,
     /// `CAGI_SAMPLE_MODE`.
@@ -266,6 +313,31 @@ pub struct CagiSettings {
     /// tinted by its albedo — colour bleed. Off reproduces the v0 transport,
     /// where indirect light existed only where the sun already landed.
     pub reflectance: bool,
+    /// `CAGI_BANKS_LOSS_PER_METER` (D2, banks6 only): subtractive loss per meter
+    /// a bank's light pays travelling along its own direction.
+    pub banks_loss_per_meter: f32,
+    /// `CAGI_BANKS_SIDE_LOSS_MULTIPLIER` (D2): the lateral seep's loss as a
+    /// multiple of the direct loss — the heat-conduction spread's steepness.
+    pub banks_side_loss_multiplier: f32,
+    /// `CAGI_BANKS_SKY_HORIZONTAL` (D2): the horizon's share of the sky, i.e.
+    /// what fraction of the sky radiance the four horizontal banks receive.
+    pub banks_sky_horizontal: f32,
+    /// `CAGI_BANKS_BOUNCE` (D3): the propagated bounce's energy fraction on top
+    /// of the surface albedo — the geometry share interreflection must lose.
+    pub banks_bounce: f32,
+    /// `CAGI_BANKS_TRANSMISSION_PER_METER` (D3): multiplicative air transmission
+    /// per meter, on top of the subtractive losses — what keeps a bright
+    /// emitter's reach logarithmic in its energy instead of linear.
+    pub banks_transmission_per_meter: f32,
+    /// `CAGI_BANKS_DIRECTION_MIX` (D4): per-meter fraction of a bank that
+    /// scatters into its four perpendicular banks — how fast a beam forgets
+    /// its direction.
+    pub banks_direction_mix: f32,
+    /// `CAGI_BANKS_SEAL_PARTIAL` (D4): the corner-seal's partial tier — the
+    /// fraction of a lateral seep that survives grazing a wall edge (TML's
+    /// DIAGONAL_PARTIAL_OCCLUDED_ATTENUATION). A fully bracketed corner is
+    /// always sealed to zero.
+    pub banks_seal_partial: f32,
     /// CA iterations per frame (CPU-side dispatch count — no shader const).
     pub iterations_per_frame: u32,
     /// Multiplier on the sampled volume (`gi_params.x`).
@@ -286,6 +358,9 @@ impl Default for CagiSettings {
         CagiSettings {
             enabled: true,
             cell_voxels: 4,
+            // Isotropic until the directional-banks arc lands its D5 verdict
+            // (docs/cagi-directional-banks-plan.md).
+            layout: CagiLayout::Isotropic,
             rule: CagiRule::Diffusion6,
             sample_mode: CagiSampleMode::Trilinear,
             sky_test: CagiSkyTest::ColumnMax,
@@ -297,6 +372,22 @@ impl Default for CagiSettings {
             // Off pending bench section 15's verdict, following the same rule
             // `transmission` states: a lever's default follows a measurement.
             reflectance: false,
+            // The D2 banks-transport coefficients: UNMEASURED defaults, tuned at
+            // the D2 app gate, verdicts at D5 (docs/cagi-directional-banks-plan.md).
+            // The convergence epsilon (the reference kernel's saturating_sub(1)),
+            // NOT the falloff — that is banks_transmission_per_meter. A large
+            // subtractive loss makes the lit region end at a hard terminator.
+            banks_loss_per_meter: 1.0,
+            banks_side_loss_multiplier: 4.0,
+            banks_sky_horizontal: 0.25,
+            banks_bounce: 0.5,
+            // MEASURED (the D4 CPU probe): 0.884 — the isotropic constant —
+            // cannot darken a 10-cell shadow under max transport; 0.7 leaves a
+            // soft rim at wall edges and a black shadow core while an emitter
+            // still lights 6-7 m convincingly.
+            banks_transmission_per_meter: 0.7,
+            banks_direction_mix: 0.08,
+            banks_seal_partial: 0.25,
             iterations_per_frame: 2,
             strength: 1.0,
             // No unoccluded readability light: sealed spaces without an
@@ -314,7 +405,11 @@ impl CagiSettings {
     /// shaders include, so this applies to both sources.
     pub(crate) fn declare_volume_consts(&self, sink: &mut dyn ShaderConstSink) {
         sink.boolean("CAGI_ENABLED", self.enabled);
+        sink.unsigned("CAGI_LAYOUT", self.layout.shader_value());
         sink.unsigned("CAGI_SAMPLE_MODE", self.sample_mode.shader_value());
+        // Shared since D4: the CA injects with it and the sampler's sky reads
+        // must agree.
+        sink.scaled_float("CAGI_BANKS_SKY_HORIZONTAL", self.banks_sky_horizontal, 1000);
     }
 
     pub fn patch_volume_consts(&self, shader_source: &str) -> String {
@@ -333,6 +428,20 @@ impl CagiSettings {
         sink.boolean("CAGI_EMISSIVE", self.emissive);
         sink.boolean("CAGI_EMITTER_BOUNCE", self.emitter_bounce);
         sink.boolean("CAGI_EVENT_LIGHT", self.event_light);
+        sink.scaled_float("CAGI_BANKS_LOSS_PER_METER", self.banks_loss_per_meter, 100);
+        sink.scaled_float(
+            "CAGI_BANKS_SIDE_LOSS_MULTIPLIER",
+            self.banks_side_loss_multiplier,
+            100,
+        );
+        sink.scaled_float("CAGI_BANKS_BOUNCE", self.banks_bounce, 1000);
+        sink.scaled_float(
+            "CAGI_BANKS_TRANSMISSION_PER_METER",
+            self.banks_transmission_per_meter,
+            1000,
+        );
+        sink.scaled_float("CAGI_BANKS_DIRECTION_MIX", self.banks_direction_mix, 1000);
+        sink.scaled_float("CAGI_BANKS_SEAL_PARTIAL", self.banks_seal_partial, 1000);
     }
 
     pub fn patch_propagation_consts(&self, shader_source: &str) -> String {
@@ -344,6 +453,7 @@ impl CagiSettings {
     /// Whether switching from `applied` to `self` changes a compile-time const.
     pub fn requires_pipeline_rebuild(&self, applied: &CagiSettings) -> bool {
         self.enabled != applied.enabled
+            || self.layout != applied.layout
             || self.sample_mode != applied.sample_mode
             || self.rule != applied.rule
             || self.sky_test != applied.sky_test
@@ -353,12 +463,21 @@ impl CagiSettings {
             || self.emissive != applied.emissive
             || self.emitter_bounce != applied.emitter_bounce
             || self.event_light != applied.event_light
+            || self.banks_loss_per_meter != applied.banks_loss_per_meter
+            || self.banks_side_loss_multiplier != applied.banks_side_loss_multiplier
+            || self.banks_sky_horizontal != applied.banks_sky_horizontal
+            || self.banks_bounce != applied.banks_bounce
+            || self.banks_transmission_per_meter != applied.banks_transmission_per_meter
+            || self.banks_direction_mix != applied.banks_direction_mix
+            || self.banks_seal_partial != applied.banks_seal_partial
     }
 
     /// Whether switching from `applied` to `self` needs the GPU volume rebuilt
     /// (its size or its static attributes change).
     pub(crate) fn requires_volume_rebuild(&self, applied: &CagiSettings) -> bool {
-        self.enabled != applied.enabled || self.cell_voxels != applied.cell_voxels
+        self.enabled != applied.enabled
+            || self.cell_voxels != applied.cell_voxels
+            || self.layout != applied.layout
     }
 
     /// The grid this configuration wants for `brickmap`'s world.
@@ -366,7 +485,11 @@ impl CagiSettings {
         if !self.enabled {
             return CagiGrid::placeholder();
         }
-        CagiGrid::for_world(self.cell_voxels, brickmap.metadata().max_occupied_brick_y)
+        CagiGrid::for_world(
+            self.cell_voxels,
+            self.layout,
+            brickmap.metadata().max_occupied_brick_y,
+        )
     }
 }
 
@@ -376,6 +499,8 @@ impl CagiSettings {
 pub struct CagiGrid {
     /// Voxels per cell edge.
     pub cell_voxels: u32,
+    /// Light storage layout: how many light words each cell owns.
+    pub layout: CagiLayout,
     /// Cells along x, y, z. Y is clamped to the occupied height (see the module
     /// docs).
     pub size: [u32; 3],
@@ -385,7 +510,7 @@ impl CagiGrid {
     /// The grid for the island world at `cell_voxels`, vertically clamped to
     /// `max_occupied_brick_y` (the brickmap's own world-height metadata;
     /// [`EMPTY_COLUMN`] for an empty world) plus [`SKY_MARGIN_CELLS`].
-    pub fn for_world(cell_voxels: u32, max_occupied_brick_y: u32) -> CagiGrid {
+    pub fn for_world(cell_voxels: u32, layout: CagiLayout, max_occupied_brick_y: u32) -> CagiGrid {
         assert!(
             cell_voxels > 0 && (BRICK_SIZE as u32).is_multiple_of(cell_voxels),
             "cell_voxels {cell_voxels} must divide the {BRICK_SIZE}-voxel brick"
@@ -399,6 +524,7 @@ impl CagiGrid {
         let clamped_height_cells = occupied_voxel_height.div_ceil(cell_voxels) + SKY_MARGIN_CELLS;
         CagiGrid {
             cell_voxels,
+            layout,
             size: [
                 (WORLD_SIZE_X as u32).div_ceil(cell_voxels),
                 clamped_height_cells.min(full_height_cells).max(1),
@@ -413,6 +539,7 @@ impl CagiGrid {
     pub(crate) fn placeholder() -> CagiGrid {
         CagiGrid {
             cell_voxels: BRICK_SIZE as u32,
+            layout: CagiLayout::Isotropic,
             size: [1, 1, 1],
         }
     }
@@ -434,16 +561,17 @@ impl CagiGrid {
         self.cell_voxels as f32 * VOXEL_SIZE
     }
 
-    /// Bytes of ONE ping-pong buffer.
+    /// Bytes of ONE ping-pong buffer: one light word per cell per bank.
     pub fn volume_bytes(&self) -> usize {
-        self.cell_count() * 4
+        self.cell_count() * self.layout.light_words_per_cell() * 4
     }
 
     /// Total GPU bytes: both ping-pong buffers plus the packed attribute/emission data.
     pub fn total_bytes(&self) -> usize {
-        // Two light ping-pong buffers (8 bytes/cell) plus two packed words:
-        // attributes and E5b's HDR emission (8 bytes/cell).
-        self.volume_bytes() * 4
+        // Two light ping-pong buffers (layout-dependent) plus two packed words
+        // that do NOT scale with the bank count: attributes and E5b's HDR
+        // emission (8 bytes/cell).
+        self.volume_bytes() * 2 + self.cell_count() * 8
     }
 
     /// Max-decrement attenuation per cell step, derived from the per-meter
@@ -1475,7 +1603,7 @@ mod tests {
     /// every other grid in this renderer.
     #[test]
     fn grid_indexing_round_trips() {
-        let grid = CagiGrid::for_world(4, 24);
+        let grid = CagiGrid::for_world(4, CagiLayout::Isotropic, 24);
         assert_eq!(grid.size[0], 250);
         assert_eq!(grid.size[2], 250);
         assert_eq!(grid.cell_index([0, 0, 0]), 0);
@@ -1500,22 +1628,22 @@ mod tests {
     /// more.
     #[test]
     fn vertical_extent_is_clamped_to_the_occupied_height() {
-        let grid = CagiGrid::for_world(4, 24);
+        let grid = CagiGrid::for_world(4, CagiLayout::Isotropic, 24);
         // 25 brick rows = 200 voxels = 50 cells, plus 2 margin cells.
         assert_eq!(grid.size[1], 52);
         // Never taller than the world.
-        let tall = CagiGrid::for_world(4, 31);
+        let tall = CagiGrid::for_world(4, CagiLayout::Isotropic, 31);
         assert_eq!(tall.size[1], (WORLD_SIZE_Y as u32) / 4);
         // An empty world still gets a usable grid.
-        let empty = CagiGrid::for_world(8, EMPTY_COLUMN);
+        let empty = CagiGrid::for_world(8, CagiLayout::Isotropic, EMPTY_COLUMN);
         assert_eq!(empty.size[1], SKY_MARGIN_CELLS);
     }
 
     #[test]
     fn memory_scales_as_the_cube_of_the_resolution() {
-        let fine = CagiGrid::for_world(2, 24);
-        let medium = CagiGrid::for_world(4, 24);
-        let coarse = CagiGrid::for_world(8, 24);
+        let fine = CagiGrid::for_world(2, CagiLayout::Isotropic, 24);
+        let medium = CagiGrid::for_world(4, CagiLayout::Isotropic, 24);
+        let coarse = CagiGrid::for_world(8, CagiLayout::Isotropic, 24);
         assert_eq!(medium.volume_bytes() * 4, medium.total_bytes());
         // Each step doubles the cell edge, so cells fall by ~8x.
         assert!(fine.cell_count() > medium.cell_count() * 7);
@@ -1524,13 +1652,31 @@ mod tests {
         assert!(fine.volume_bytes() < 256 * 1024 * 1024);
     }
 
+    /// The directional-banks layout scales ONLY the light buffers: six words per
+    /// cell per ping-pong buffer, while the packed attribute/emission words stay
+    /// at 8 bytes per cell (D1 of docs/cagi-directional-banks-plan.md).
+    #[test]
+    fn banks_layout_scales_light_buffers_only() {
+        let isotropic = CagiGrid::for_world(8, CagiLayout::Isotropic, 24);
+        let banks = CagiGrid::for_world(8, CagiLayout::Banks6, 24);
+        assert_eq!(banks.cell_count(), isotropic.cell_count());
+        assert_eq!(banks.volume_bytes(), isotropic.volume_bytes() * 6);
+        assert_eq!(
+            banks.total_bytes(),
+            isotropic.volume_bytes() * 12 + isotropic.cell_count() * 8
+        );
+        // The reference configuration (8-voxel cells) must stay far under one
+        // wgpu binding even with six banks double-buffered.
+        assert!(banks.volume_bytes() < 128 * 1024 * 1024);
+    }
+
     /// The physics must not change when the resolution lever moves: the reach of
     /// the max-decrement flood and the per-meter transmission of the diffusion
     /// rule are defined per METER and quantized per cell.
     #[test]
     fn transport_coefficients_are_resolution_independent() {
         for cell_voxels in [2, 4, 8] {
-            let grid = CagiGrid::for_world(cell_voxels, 24);
+            let grid = CagiGrid::for_world(cell_voxels, CagiLayout::Isotropic, 24);
             let reach_meters = CHANNEL_MAX as f32 / grid.attenuation() as f32 * grid.cell_meters();
             assert!(
                 (reach_meters - CHANNEL_MAX as f32 / ATTENUATION_PER_METER).abs() < 1.0,
@@ -1552,7 +1698,7 @@ mod tests {
     #[test]
     fn diffusion_arithmetic_cannot_overflow() {
         for cell_voxels in [2, 4, 8] {
-            let grid = CagiGrid::for_world(cell_voxels, 24);
+            let grid = CagiGrid::for_world(cell_voxels, CagiLayout::Isotropic, 24);
             let worst_6 = (CHANNEL_MAX * 6) as u64 * grid.diffusion_numerator() as u64;
             let worst_26 = (CHANNEL_MAX * NEIGHBOUR_26_WEIGHT_SUM) as u64
                 * grid.diffusion_26_numerator() as u64;
@@ -1561,11 +1707,172 @@ mod tests {
         }
     }
 
+    /// The D4/D5 banks-transport reference: a mono-channel CPU mirror of
+    /// `cagi_banks_main` run to convergence on the leak scene that closed the
+    /// D4 gate — an HDR-ceiling emitter (lava) against a 10-cell wall.
+    ///
+    /// Every constant derives from [`CagiSettings::default`], so this is the
+    /// guard that makes the banks lever defaults MEASURED: change a default
+    /// without re-running the measurement and this fails. The two pinned
+    /// findings (probe, 2026-08-07):
+    ///
+    ///   * the shadow core behind the wall stays black — at the old 0.884/m
+    ///     air transmission it held levels 600-2000 against a ~7000 lit side;
+    ///   * the emitter still lights its own side convincingly at 6-7 m.
+    ///
+    /// Mono-channel and sky-free on purpose: it pins the TRANSPORT (losses,
+    /// seal, scatter), not the packing or the injection gates, which have
+    /// their own tests. NOTE: mirrors the banks kernel in cagi.wgsl — change
+    /// one, change both.
+    #[test]
+    fn banks_transport_keeps_walled_shadows_dark() {
+        const NX: i32 = 28;
+        const NY: i32 = 16;
+        const NZ: i32 = 24;
+        const WALL_X: i32 = 14;
+        const EMITTER: [i32; 3] = [7, 1, 12];
+        const EMISSION: u64 = (CHANNEL_MAX * 8) as u64; // the HDR ceiling
+        const DIRECTIONS: [[i32; 3]; 6] = [
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            [0, 0, -1],
+        ];
+
+        let settings = CagiSettings::default();
+        let cell_meters = 1.0_f32; // the reference pairing: 8-voxel cells
+        let shift = DIFFUSION_SHIFT;
+        let direct_loss = (settings.banks_loss_per_meter * cell_meters)
+            .round()
+            .max(1.0) as u64;
+        let side_loss =
+            ((settings.banks_loss_per_meter * settings.banks_side_loss_multiplier * cell_meters)
+                .round() as u64)
+                .max(direct_loss + 1);
+        let transmission =
+            (settings.banks_transmission_per_meter.powf(cell_meters) * 4096.0) as u64;
+        let mix = ((1.0 - (1.0 - settings.banks_direction_mix).powf(cell_meters)) * 4096.0) as u64;
+        let keep = 4096 - mix;
+        let quarter_mix = mix / 4;
+        let seal_partial = (settings.banks_seal_partial * 4096.0) as u64;
+
+        let solid = |x: i32, y: i32, z: i32| -> bool {
+            y == -1
+                || (x == WALL_X && (0..10).contains(&y) && (6..18).contains(&z))
+                || [x, y, z] == EMITTER
+        };
+        let index = |x: i32, y: i32, z: i32, bank: usize| -> usize {
+            (((z * NY + y) * NX + x) as usize) * 6 + bank
+        };
+        let in_grid =
+            |x: i32, y: i32, z: i32| x >= 0 && y >= 0 && z >= 0 && x < NX && y < NY && z < NZ;
+
+        let cells = (NX * NY * NZ) as usize * 6;
+        let mut front = vec![0u64; cells];
+        let mut back = vec![0u64; cells];
+        for _ in 0..400 {
+            for z in 0..NZ {
+                for y in 0..NY {
+                    for x in 0..NX {
+                        if solid(x, y, z) {
+                            let pinned = if [x, y, z] == EMITTER {
+                                EMISSION / 6
+                            } else {
+                                0
+                            };
+                            for bank in 0..6 {
+                                back[index(x, y, z, bank)] = pinned;
+                            }
+                            continue;
+                        }
+                        let read = |x: i32, y: i32, z: i32, bank: usize| -> u64 {
+                            if in_grid(x, y, z) {
+                                front[index(x, y, z, bank)]
+                            } else {
+                                0 // night, no sky term
+                            }
+                        };
+                        let mut banks = [0u64; 6];
+                        for (bank, direction) in DIRECTIONS.iter().enumerate() {
+                            let upstream = [x - direction[0], y - direction[1], z - direction[2]];
+                            let direct = (read(upstream[0], upstream[1], upstream[2], bank)
+                                * transmission)
+                                >> shift;
+                            let upstream_solid = solid(upstream[0], upstream[1], upstream[2]);
+                            let mut side = 0u64;
+                            for (lateral, lateral_direction) in DIRECTIONS.iter().enumerate() {
+                                if lateral / 2 == bank / 2 {
+                                    continue;
+                                }
+                                let lx = x + lateral_direction[0];
+                                let ly = y + lateral_direction[1];
+                                let lz = z + lateral_direction[2];
+                                let lateral_solid = solid(lx, ly, lz);
+                                if upstream_solid && lateral_solid {
+                                    continue; // sealed corner
+                                }
+                                let mut seep = read(lx, ly, lz, bank);
+                                if upstream_solid || lateral_solid {
+                                    seep = (seep * seal_partial) >> shift;
+                                }
+                                side = side.max(seep);
+                            }
+                            side = (side * transmission) >> shift;
+                            let propagated = direct
+                                .max(direct_loss)
+                                .saturating_sub(direct_loss)
+                                .max(side.max(side_loss) - side_loss);
+                            let injected = if upstream == EMITTER { EMISSION } else { 0 };
+                            banks[bank] = propagated.max(injected);
+                        }
+                        let total: u64 = banks.iter().sum();
+                        for bank in 0..6 {
+                            let perpendicular = total - banks[bank] - banks[bank ^ 1];
+                            back[index(x, y, z, bank)] =
+                                (banks[bank] * keep + perpendicular * quarter_mix) >> shift;
+                        }
+                    }
+                }
+            }
+            std::mem::swap(&mut front, &mut back);
+        }
+
+        // Finding 1: the shadow core (behind the wall, inside its footprint,
+        // below the crest) is black to the eye. Levels are 1/1023 radiance
+        // steps; 40 ~= 0.04 radiance, the soft-rim ceiling the probe measured.
+        let mut shadow_max = 0u64;
+        for z in 7..17 {
+            for y in 0..9 {
+                for x in (WALL_X + 1)..NX {
+                    for bank in 0..6 {
+                        shadow_max = shadow_max.max(front[index(x, y, z, bank)]);
+                    }
+                }
+            }
+        }
+        assert!(
+            shadow_max <= 40,
+            "walled shadow leaks: max level {shadow_max} (the D4 gate's bug was 600-2000)"
+        );
+
+        // Finding 2: the emitter's own side still reads convincingly lit at
+        // 6 m — the calibration must not buy the shadow by killing the light.
+        let lit: u64 = (0..6)
+            .map(|bank| front[index(WALL_X - 1, 2, 12, bank)])
+            .sum();
+        assert!(
+            lit >= 400,
+            "emitter radius collapsed: 6 m bank sum {lit} (probe measured ~1800 at 0.7/m)"
+        );
+    }
+
     /// Hand-computed reference values for each rule — the CPU reference the bench
     /// cross-checks the GPU against must itself be pinned.
     #[test]
     fn reference_rules_match_hand_computed_values() {
-        let grid = CagiGrid::for_world(4, 24);
+        let grid = CagiGrid::for_world(4, CagiLayout::Isotropic, 24);
         let attenuation = grid.attenuation();
         assert_eq!(attenuation, 40); // 80/m at 0.5 m cells
 
@@ -1625,7 +1932,11 @@ mod tests {
         let world = voxel_core::world::VoxelWorld::generate(1234, 0.0);
         let brickmap = Brickmap::build(&world);
         for cell_voxels in [4, 8] {
-            let grid = CagiGrid::for_world(cell_voxels, brickmap.metadata().max_occupied_brick_y);
+            let grid = CagiGrid::for_world(
+                cell_voxels,
+                CagiLayout::Isotropic,
+                brickmap.metadata().max_occupied_brick_y,
+            );
             let (built, _) = build_cell_attributes_with_emission(
                 &brickmap,
                 &grid,
@@ -2042,7 +2353,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "must divide")]
     fn a_cell_size_that_straddles_bricks_panics() {
-        CagiGrid::for_world(3, 24);
+        CagiGrid::for_world(3, CagiLayout::Isotropic, 24);
     }
     // ---- S2: a live-edited material must reach the light volume ----------------
 
@@ -2110,6 +2421,7 @@ mod tests {
                     amount: 1.0,
                     target_color: [1.0, 0.0, 1.0],
                     faces: PatternFaces::ALL,
+                    relief_faces: PatternFaces::ALL,
                     texels_per_voxel: 8,
                     vary_per_face: true,
                     domain_warp: 0.0,
@@ -2117,6 +2429,13 @@ mod tests {
                     tile_bond: 0.5,
                     tile_gap: 0.06,
                     emission_intensity: 16.0,
+                    relief_height_meters: 0.0,
+                    relief_normal: true,
+                    relief_invert: false,
+                    relief_bevel_fraction: voxel_material::pattern::DEFAULT_RELIEF_BEVEL_FRACTION,
+                    relief_normal_strength: 1.0,
+                    grid_average: false,
+                    relief_steps: 0,
                 }]);
                 let mean = material_attribute_table(&rows, &[]).emission(stone);
                 assert!(
