@@ -69,15 +69,17 @@ struct CagiVolumeMeta {
     attenuation: u32,
     // Diffusion rule: L = (sum_of_6_neighbours * numerator) >> 12.
     diffusion_numerator: u32,
-    // Diffusion rule, 26-neighbour variant: the weighted sum (face 4, edge 2,
-    // corner 1) times this, >> 12.
-    diffusion_26_numerator: u32,
+    // Explicit pad where the pruned 26-neighbour rule's numerator lived: the
+    // response array below must start at 32 (16-byte element alignment), and
+    // the Rust `#[repr(C)]` twin has no implicit padding — so the slot is
+    // spelled out in BOTH rather than left to WGSL's silent alignment.
+    padding: u32,
     // S3b — row 0 is identity ("this cell does not answer events"); rows 1-7 are
     // allocated by src/cagi.rs and indexed by CAGI_CELL_EVENT_RESPONSE_MASK.
     //
-    // Starts at offset 32 with no padding before it: the geometry half above
-    // ends there, and 32 already satisfies the 16-byte alignment an array of
-    // 16-byte-aligned elements demands. Do not "helpfully" insert a pad.
+    // Starts at exactly offset 32 (the explicit pad above closes the geometry
+    // half there), which is the 16-byte alignment an array of 16-byte-aligned
+    // elements demands. Do not add any further padding.
     event_responses: array<CagiEventResponse, 8>,
 }
 

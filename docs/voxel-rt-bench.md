@@ -372,9 +372,10 @@ E4 CAGI levers (details in the E4 section):
 - **Cell size 4 voxels** (0.5 m, 33 MB) — 8 voxels is the Quest tier (4.3 MB,
   5.8× cheaper), 2 voxels is dead (258 MB, 6× the cost).
 - `CAGI_RULE` **1 = diffusion 6** — same cost as the max-decrement flood (the pass
-  is bandwidth-bound), better gradient; `2 = diffusion 26` off (2.1–2.7× for a
-  mean 0.5/255 — the isotropy fix buys nothing at this world's transport
-  distances, keep for E5's point lights).
+  is bandwidth-bound), better gradient. `diffusion 26` PRUNED 2026-08-07
+  (2.1–2.7× for a mean 0.5/255 — the isotropy fix bought nothing, its
+  keep-for-E5 rationale died when the emitter bounce made point lights
+  rule-independent, and the banks layout owns directionality).
 - `CAGI_SKY_TEST` **0 = column max** — free (reuses binding 8) vs +33–53% for the
   exact upward trace, which disagrees on 33% of the frame at mean 2.1/255.
 - `CAGI_SUN_CACHE` **on** — caches the shadow-ray RESULT (not the value): −10 to
@@ -1200,8 +1201,9 @@ zoom over three fixed regions of the ground-level views: `near-ground`,
    sampled — an anisotropic *front* never gets far enough to form. The max-decrement
    rule's L1 iso-surfaces are the honest negative here: they are octahedral by
    construction, and the rule is only free of visible artifacts for the same reason.
-   **Re-test at E5 with a point source**; that is where anisotropy will show, and
-   where `diffusion 26` earns its 2.7x.
+   **Resolved without it**: E5c's emitter bounce made point lights rule-independent
+   and the D5 banks layout took over directionality, so `diffusion 26` never earned
+   its 2.7x — pruned 2026-08-07.
 3. **Over-diffusion / "glowing walls" — NOT PRESENT, structurally prevented, at the
    cost of a documented approximation.** Solid cells are written to 0 every iteration
    and the trilinear sampler drops solid taps, so a wall never brightens its own

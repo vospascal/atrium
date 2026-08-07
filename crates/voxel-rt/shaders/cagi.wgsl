@@ -47,12 +47,10 @@
 //      the falloff reads as a hard-edged reach rather than a soft gradient.
 //   1  diffusion over the 6 face neighbours: L = (sum_n L_n) * transmit / 6.
 //      The dossier's reconstructed equation, softer and more GI-like.
-//   2  diffusion over all 26 neighbours (face 4 / edge 2 / corner 1 weights) —
-//      the isotropy contender: 26 loads instead of 6, but the propagation front
-//      is a rounded cube instead of an octahedron.
+// (A 26-neighbour diffusion variant was PRUNED 2026-08-07: 2.1-2.7x the cost
+// for a mean 0.5/255 look change, and the banks layout owns directionality now.)
 const CAGI_RULE_MAX_DECREMENT: u32 = 0u;
 const CAGI_RULE_DIFFUSION_6: u32 = 1u;
-const CAGI_RULE_DIFFUSION_26: u32 = 2u;
 const CAGI_RULE: u32 = 1u;
 // CAGI_SKY_TEST — how a cell decides it can see the sky:
 //   0  column max: one load of the per-XZ-brick-column max occupied brick Y
@@ -285,37 +283,13 @@ fn cagi_propagate_diffusion_6(cell: vec3<i32>) -> vec3<u32> {
     return (sum * cagi_volume_meta.diffusion_numerator) >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
 }
 
-// Rule 2: the same diffusion over all 26 neighbours, weighted 4 / 2 / 1 by
-// face / edge / corner adjacency (the integer stand-in for 1/distance), which
-// is the isotropy contender against rule 1's axis-aligned stencil.
-fn cagi_propagate_diffusion_26(cell: vec3<i32>) -> vec3<u32> {
-    var sum = vec3<u32>(0u, 0u, 0u);
-    for (var offset_z = -1; offset_z <= 1; offset_z = offset_z + 1) {
-        for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
-            for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
-                let axis_count = abs(offset_x) + abs(offset_y) + abs(offset_z);
-                if (axis_count == 0) {
-                    continue;
-                }
-                // face 1 -> 4, edge 2 -> 2, corner 3 -> 1
-                let weight = u32(select(select(1, 2, axis_count == 2), 4, axis_count == 1));
-                sum = sum + cagi_neighbour_light(cell + vec3<i32>(offset_x, offset_y, offset_z))
-                    * weight;
-            }
-        }
-    }
-    return (sum * cagi_volume_meta.diffusion_26_numerator) >> vec3<u32>(CAGI_DIFFUSION_SHIFT);
-}
-
 // The configured propagation rule (CAGI_RULE). Shared by the air path and the
 // M2 transmitting-solid path so both always agree on the stencil.
 fn cagi_propagate(cell: vec3<i32>) -> vec3<u32> {
     if (CAGI_RULE == CAGI_RULE_MAX_DECREMENT) {
         return cagi_propagate_max_decrement(cell);
-    } else if (CAGI_RULE == CAGI_RULE_DIFFUSION_6) {
-        return cagi_propagate_diffusion_6(cell);
     }
-    return cagi_propagate_diffusion_26(cell);
+    return cagi_propagate_diffusion_6(cell);
 }
 
 // The center of a cell, in voxel units — the origin of its sun / sky rays.

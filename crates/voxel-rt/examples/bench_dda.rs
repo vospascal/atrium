@@ -1363,11 +1363,7 @@ fn report_emitter_probes(device: &wgpu::Device, queue: &wgpu::Queue) {
         "rule / bounce", "pin", "+1", "+2", "+3", "sky", "peak", "half"
     );
 
-    for rule in [
-        CagiRule::MaxDecrement,
-        CagiRule::Diffusion6,
-        CagiRule::Diffusion26,
-    ] {
+    for rule in [CagiRule::MaxDecrement, CagiRule::Diffusion6] {
         for emitter_bounce in [true, false] {
             let mut quality = RenderQuality::default();
             quality.global_illumination.rule = rule;
@@ -2595,11 +2591,7 @@ fn report_cagi_cpu_cross_check(
     println!("== E4 CPU cross-check of the propagation rule ==");
     let scenarios = build_scenarios(&[]);
     let scenario = &scenarios[2];
-    for rule in [
-        CagiRule::Diffusion6,
-        CagiRule::MaxDecrement,
-        CagiRule::Diffusion26,
-    ] {
+    for rule in [CagiRule::Diffusion6, CagiRule::MaxDecrement] {
         let quality = RenderQuality {
             global_illumination: CagiSettings {
                 rule,

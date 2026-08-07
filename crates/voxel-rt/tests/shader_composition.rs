@@ -318,7 +318,7 @@ fn no_fragment_imports_from_an_entry_point() {
 /// padding had to be renamed and `pattern_hash_u32` did not.
 ///
 /// Entry points are exempt: they are never composable modules, so `dda.wgsl` keeps `_pad0.._pad4`
-/// and `cagi.wgsl` keeps `CAGI_RULE_DIFFUSION_26`.
+/// and `cagi.wgsl` keeps `CAGI_RULE_DIFFUSION_6`.
 #[test]
 fn no_composable_module_declares_a_digit_terminated_struct_member() {
     for fragment in all_fragments() {

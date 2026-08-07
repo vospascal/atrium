@@ -109,10 +109,6 @@ pub(crate) const RADIANCE_MAX: f32 = 8.0;
 pub(crate) const RADIANCE_MAX_EXPONENT: u32 = 3;
 /// Fixed-point shift of the diffusion numerators (mirrors `CAGI_DIFFUSION_SHIFT`).
 pub(crate) const DIFFUSION_SHIFT: u32 = 12;
-/// Weight sum of the 26-neighbour stencil: 6 faces x 4 + 12 edges x 2 + 8
-/// corners x 1.
-pub(crate) const NEIGHBOUR_26_WEIGHT_SUM: u32 = 56;
-
 /// A cell absorbs once a quarter of its voxels are occupied. Binary absorption is
 /// the documented v0 simplification, but the THRESHOLD matters more than it
 /// sounds: with "any occupied voxel" a single grass tuft or leaf would seal a
@@ -143,10 +139,10 @@ pub enum CagiRule {
     MaxDecrement,
     /// `L = sum(6 face neighbours) * transmission / 6`: the dossier's
     /// reconstructed diffusion equation.
+    ///
+    /// (A 26-neighbour variant was PRUNED 2026-08-07: 2.1-2.7x the cost for a
+    /// mean 0.5/255 look change, and the banks layout owns directionality.)
     Diffusion6,
-    /// The same diffusion over all 26 neighbours (face 4 / edge 2 / corner 1) —
-    /// the isotropy contender.
-    Diffusion26,
 }
 
 impl CagiRule {
@@ -154,7 +150,6 @@ impl CagiRule {
         match self {
             CagiRule::MaxDecrement => 0,
             CagiRule::Diffusion6 => 1,
-            CagiRule::Diffusion26 => 2,
         }
     }
 
@@ -162,7 +157,6 @@ impl CagiRule {
         match shader_value {
             0 => CagiRule::MaxDecrement,
             1 => CagiRule::Diffusion6,
-            2 => CagiRule::Diffusion26,
             other => panic!("no CAGI_RULE {other} in cagi.wgsl"),
         }
     }
@@ -595,12 +589,6 @@ impl CagiGrid {
         ((self.transmission() / 6.0) * (1u32 << DIFFUSION_SHIFT) as f32).round() as u32
     }
 
-    /// The same for the 26-neighbour weighted stencil.
-    pub(crate) fn diffusion_26_numerator(&self) -> u32 {
-        ((self.transmission() / NEIGHBOUR_26_WEIGHT_SUM as f32) * (1u32 << DIFFUSION_SHIFT) as f32)
-            .round() as u32
-    }
-
     /// The GPU uniform describing this volume, with the S3b response table the
     /// caller's material set produced.
     ///
@@ -614,7 +602,7 @@ impl CagiGrid {
             cell_size_voxels: self.cell_voxels as f32,
             attenuation: self.attenuation(),
             diffusion_numerator: self.diffusion_numerator(),
-            diffusion_26_numerator: self.diffusion_26_numerator(),
+            padding: 0,
             event_responses: attributes.responses,
         }
     }
@@ -688,7 +676,7 @@ unsafe impl bytemuck::Pod for GpuEventResponse {}
 /// | 16     | `cell_size_voxels`       | `f32`                         |
 /// | 20     | `attenuation`            | `u32`                         |
 /// | 24     | `diffusion_numerator`    | `u32`                         |
-/// | 28     | `diffusion_26_numerator` | `u32`                         |
+/// | 28     | `padding`                | `u32`                         |
 /// | 32     | `event_responses`        | `array<CagiEventResponse, 8>` |
 ///
 /// No padding between the two halves, and that is worth stating because it is
@@ -711,7 +699,10 @@ pub struct CagiVolumeUniform {
     pub cell_size_voxels: f32,
     pub attenuation: u32,
     pub diffusion_numerator: u32,
-    pub diffusion_26_numerator: u32,
+    /// Explicit pad where the pruned 26-neighbour rule's numerator lived —
+    /// keeps `event_responses` at offset 32 in BOTH layouts (see the note
+    /// above about the array's 16-byte alignment).
+    pub padding: u32,
     pub event_responses: [GpuEventResponse; EVENT_RESPONSE_SLOTS],
 }
 
@@ -1320,38 +1311,6 @@ pub fn propagate_reference(
                 (sum[2] * numerator) >> DIFFUSION_SHIFT,
             ]
         }
-        CagiRule::Diffusion26 => {
-            let numerator = grid.diffusion_26_numerator();
-            let mut sum = [0_u32; 3];
-            for offset_z in -1..=1_i32 {
-                for offset_y in -1..=1_i32 {
-                    for offset_x in -1..=1_i32 {
-                        let axis_count = offset_x.abs() + offset_y.abs() + offset_z.abs();
-                        if axis_count == 0 {
-                            continue;
-                        }
-                        let weight = match axis_count {
-                            1 => 4,
-                            2 => 2,
-                            _ => 1,
-                        };
-                        let neighbour = neighbour_light([
-                            cell[0] + offset_x,
-                            cell[1] + offset_y,
-                            cell[2] + offset_z,
-                        ]);
-                        for channel in 0..3 {
-                            sum[channel] += neighbour[channel] * weight;
-                        }
-                    }
-                }
-            }
-            [
-                (sum[0] * numerator) >> DIFFUSION_SHIFT,
-                (sum[1] * numerator) >> DIFFUSION_SHIFT,
-                (sum[2] * numerator) >> DIFFUSION_SHIFT,
-            ]
-        }
     }
 }
 
@@ -1521,7 +1480,7 @@ mod tests {
         let settings = CagiSettings {
             enabled: false,
             cell_voxels: 8,
-            rule: CagiRule::Diffusion26,
+            rule: CagiRule::MaxDecrement,
             sample_mode: CagiSampleMode::Nearest,
             sky_test: CagiSkyTest::UpwardTrace,
             sun_cache: false,
@@ -1531,7 +1490,7 @@ mod tests {
         assert!(volume.contains("const CAGI_ENABLED: bool = false;"));
         assert!(volume.contains("const CAGI_SAMPLE_MODE: u32 = 0u;"));
         let propagation = settings.patch_propagation_consts(&CAGI_SHADER_SOURCE);
-        assert!(propagation.contains("const CAGI_RULE: u32 = 2u;"));
+        assert!(propagation.contains("const CAGI_RULE: u32 = 0u;"));
         assert!(propagation.contains("const CAGI_SKY_TEST: u32 = 1u;"));
         assert!(propagation.contains("const CAGI_SUN_CACHE: bool = false;"));
         // The mode NAME constants must survive their own patching.
@@ -1693,21 +1652,17 @@ mod tests {
             );
             // The fixed-point numerators must round to something usable.
             assert!(grid.diffusion_numerator() > 0);
-            assert!(grid.diffusion_26_numerator() > 0);
         }
     }
 
-    /// The diffusion rule's fixed-point sum can never overflow u32: six (or the
-    /// 26-neighbour weighted sum of) saturated channels times the numerator.
+    /// The diffusion rule's fixed-point sum can never overflow u32: six
+    /// saturated channels times the numerator.
     #[test]
     fn diffusion_arithmetic_cannot_overflow() {
         for cell_voxels in [2, 4, 8] {
             let grid = CagiGrid::for_world(cell_voxels, CagiLayout::Isotropic, 24);
             let worst_6 = (CHANNEL_MAX * 6) as u64 * grid.diffusion_numerator() as u64;
-            let worst_26 = (CHANNEL_MAX * NEIGHBOUR_26_WEIGHT_SUM) as u64
-                * grid.diffusion_26_numerator() as u64;
             assert!(worst_6 < u32::MAX as u64, "6-neighbour sum overflows");
-            assert!(worst_26 < u32::MAX as u64, "26-neighbour sum overflows");
         }
     }
 
@@ -2349,16 +2304,6 @@ mod tests {
         let diffused = propagate_reference(CagiRule::Diffusion6, &grid, [0, 0, 0], &mut uniform);
         assert_eq!(diffused[0], (3600 * numerator) >> DIFFUSION_SHIFT);
         assert!(diffused[0] < 600 && diffused[0] > 550);
-        // The 26-neighbour rule reaches the same equilibrium from a uniform
-        // neighbourhood — it differs in SHAPE, not in energy.
-        let diffused_26 =
-            propagate_reference(CagiRule::Diffusion26, &grid, [0, 0, 0], &mut uniform);
-        assert!(
-            diffused_26[0].abs_diff(diffused[0]) <= 2,
-            "26-neighbour equilibrium {} vs 6-neighbour {}",
-            diffused_26[0],
-            diffused[0]
-        );
     }
 
     /// E2: the single-cell attribute recompute must agree with the full build on
@@ -3127,11 +3072,7 @@ mod tests {
         };
 
         // With the bounce on, every rule delivers at least the emitter's own mean.
-        for rule in [
-            CagiRule::MaxDecrement,
-            CagiRule::Diffusion6,
-            CagiRule::Diffusion26,
-        ] {
+        for rule in [CagiRule::MaxDecrement, CagiRule::Diffusion6] {
             let lit = relax(rule, true);
             assert!(
                 lit >= quantized[0],

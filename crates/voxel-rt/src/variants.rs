@@ -1713,12 +1713,15 @@ pub const REGISTRY: &[Lever] = &[
         label: "propagation rule",
         default_value: LeverValue::Mode(1),
         range: LeverRange::Discrete,
-        verdict: "The E4 A/B. Cost: diffusion-6 and max-decrement are the SAME price \
+        verdict: "The E4 A/B, isotropic layout only (the banks transport has its own \
+                  kernel). Cost: diffusion-6 and max-decrement are the SAME price \
                   (0.92-1.53 ms per frame — both read 6 neighbours and the pass is \
-                  bandwidth-bound), 26-neighbour is 2.1-2.7x. Look: diffusion vs \
-                  max-decrement differs on 66% of the frame (mean 8.8/255), diffusion-6 \
-                  vs -26 on 26% at mean 0.5/255. So the rule is a free look choice and \
-                  the isotropy upgrade is not worth 2.7x.",
+                  bandwidth-bound), so the rule is a free look choice. Look: the two \
+                  differ on 66% of the frame (mean 8.8/255). A 26-neighbour isotropy \
+                  variant was PRUNED 2026-08-07: 2.1-2.7x the cost (2.64-3.27 ms) for \
+                  a mean 0.5/255 change, its keep-for-E5 rationale died when \
+                  GiEmitterBounce made emitters rule-independent, and the banks \
+                  layout owns directionality now.",
         mode_options: &[
             ModeOption {
                 value: 0,
@@ -1742,27 +1745,12 @@ pub const REGISTRY: &[Lever] = &[
                           can DECREASE it converges downward after a sun change (the flood can \
                           too, since it excludes its own previous value).",
             },
-            ModeOption {
-                value: 2,
-                label: "diffusion 26",
-                verdict: "LOSER on terrain, off: the same diffusion over all 26 neighbours \
-                          (face 4 / edge 2 / corner 1) costs 2.1-2.7x (2.64-3.27 ms per frame) and \
-                          changes the image by a mean 0.5/255 (max 9) — the isotropy fix buys \
-                          nothing here because sky light is everywhere above the terrain and \
-                          transport distances are 1-3 cells, too short for the front's shape to \
-                          show. Keep for E5, where a lantern makes transport distance large.",
-            },
         ],
         bench: &[
             BenchPoint {
                 section: BenchSection::Cagi,
                 label: "gi-max-decrement",
                 overrides: &[(LeverId::GiRule, LeverValue::Mode(0))],
-            },
-            BenchPoint {
-                section: BenchSection::Cagi,
-                label: "gi-diffusion26",
-                overrides: &[(LeverId::GiRule, LeverValue::Mode(2))],
             },
         ],
     },
@@ -4155,7 +4143,6 @@ mod tests {
         "CAGI_BANKS_SIXTH_NUMERATOR",
         "CAGI_RULE_MAX_DECREMENT",
         "CAGI_RULE_DIFFUSION_6",
-        "CAGI_RULE_DIFFUSION_26",
         "CAGI_SKY_TEST_COLUMN_MAX",
         "CAGI_SKY_TEST_UPWARD_TRACE",
         "CAGI_CELL_SOLID",

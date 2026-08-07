@@ -936,11 +936,7 @@ mod tests {
             return;
         };
         let bind_group_layout = create_bind_group_layout(&device);
-        for rule in [
-            CagiRule::MaxDecrement,
-            CagiRule::Diffusion6,
-            CagiRule::Diffusion26,
-        ] {
+        for rule in [CagiRule::MaxDecrement, CagiRule::Diffusion6] {
             for sky_test in [CagiSkyTest::ColumnMax, CagiSkyTest::UpwardTrace] {
                 for sun_cache in [true, false] {
                     for sample_mode in [CagiSampleMode::Nearest, CagiSampleMode::Trilinear] {
