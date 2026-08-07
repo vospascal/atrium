@@ -66,6 +66,12 @@ pub enum MaterialDebugView {
     Normal,
     Emission,
     Lod,
+    /// The light volume's luminance at each surface, as a log heat ramp —
+    /// black 0.008, red ~1, yellow ~16, white 64 (the storage ceiling).
+    GiHeat,
+    /// Where the volume's light FLOWS: hue = travel direction, saturation =
+    /// anisotropy (banks6 only; isotropic reads white), brightness = magnitude.
+    GiFlow,
 }
 
 impl Default for MaterialDebugView {
@@ -75,7 +81,7 @@ impl Default for MaterialDebugView {
 }
 
 impl MaterialDebugView {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Lit,
         Self::BaseColor,
         Self::Specular,
@@ -85,6 +91,8 @@ impl MaterialDebugView {
         Self::Normal,
         Self::Emission,
         Self::Lod,
+        Self::GiHeat,
+        Self::GiFlow,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -98,6 +106,8 @@ impl MaterialDebugView {
             Self::Normal => "Normal",
             Self::Emission => "Emission",
             Self::Lod => "Pattern LOD",
+            Self::GiHeat => "GI heat (light volume)",
+            Self::GiFlow => "GI flow (light direction)",
         }
     }
 
@@ -112,6 +122,8 @@ impl MaterialDebugView {
             Self::Normal => 6,
             Self::Emission => 7,
             Self::Lod => 8,
+            Self::GiHeat => 9,
+            Self::GiFlow => 10,
         }
     }
 }

@@ -131,6 +131,11 @@ const MATERIAL_DEBUG_ROUGHNESS: u32 = 5u;
 const MATERIAL_DEBUG_NORMAL: u32 = 6u;
 const MATERIAL_DEBUG_EMISSION: u32 = 7u;
 const MATERIAL_DEBUG_LOD: u32 = 8u;
+// The CAGI inspectors (2026-08-07): what the light volume holds at each
+// surface, independent of albedo, sun and AO — the view that would have
+// caught "the project table shadowed the authored light" in one glance.
+const MATERIAL_DEBUG_GI_HEAT: u32 = 9u;
+const MATERIAL_DEBUG_GI_FLOW: u32 = 10u;
 
 // ---- Directional miss radiance (VGI, I3D'11 §5.1 / Fig. 7 point C) -----------
 // Thiedemann et al.'s near-field gather reads an ENVIRONMENT MAP when an
@@ -197,6 +202,15 @@ const AO_MISS_RADIANCE: bool = false;
 // column at shared edges/corners — no light leaks), snap the normal-axis
 // component exactly onto the hit-face plane, then lift the point off the
 // face by SHADOW_BIAS along the normal (never inside the solid — no acne).
+// Debug heat ramp over log2 luminance: black at 2^-7 (~0.008, the flood's
+// visibility floor) through red and yellow to white at 2^6 = 64, the storage
+// ceiling — so a saturated-white cell IS at the ceiling, not merely bright.
+fn debug_heat_ramp(luminance: f32) -> vec3<f32> {
+    let t = clamp((log2(max(luminance, 1e-4)) + 7.0) / 13.0, 0.0, 1.0);
+    return clamp(vec3<f32>(t * 3.0, t * 3.0 - 1.0, t * 3.0 - 2.0),
+                 vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
+}
+
 fn shadow_ray_origin(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
                      normal: vec3<f32>) -> vec3<f32> {
     let voxel_min = vec3<f32>(hit.voxel);
@@ -802,6 +816,32 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
         } else if (debug_view == MATERIAL_DEBUG_LOD) {
             let lod = pattern_debug_lod(hit.material, pattern);
             return vec3<f32>(lod, 1.0 - lod, 0.05);
+        } else if (debug_view == MATERIAL_DEBUG_GI_HEAT) {
+            if (!CAGI_ENABLED) {
+                return vec3<f32>(0.0, 0.0, 0.0);
+            }
+            let sampled = cagi_sample_surface(
+                shadow_ray_origin(hit, ray_origin, ray_direction, normal), normal);
+            return debug_heat_ramp(
+                dot(sampled, vec3<f32>(0.2126, 0.7152, 0.0722)));
+        } else if (debug_view == MATERIAL_DEBUG_GI_FLOW) {
+            if (!CAGI_ENABLED) {
+                return vec3<f32>(0.0, 0.0, 0.0);
+            }
+            let flux = cagi_debug_flux(
+                shadow_ray_origin(hit, ray_origin, ray_direction, normal), normal);
+            if (flux.w <= 1e-4) {
+                return vec3<f32>(0.0, 0.0, 0.0);
+            }
+            // Hue = the direction light travels (+X red / +Y green / +Z blue,
+            // like the Normal view), saturation = how directional the cell's
+            // light is (isotropic ambience reads white), brightness = the
+            // heat ramp's log magnitude.
+            let anisotropy = length(flux.xyz) / flux.w;
+            let hue = normalize(flux.xyz + vec3<f32>(1e-6)) * 0.5 + vec3<f32>(0.5);
+            let magnitude =
+                clamp((log2(max(flux.w, 1e-4)) + 7.0) / 13.0, 0.0, 1.0);
+            return mix(vec3<f32>(1.0, 1.0, 1.0), hue, anisotropy) * magnitude;
         }
     }
     let albedo = srgb_decode(surface.base_color);

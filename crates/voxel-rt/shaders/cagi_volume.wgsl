@@ -467,6 +467,49 @@ fn cagi_sample_trilinear(position_voxels: vec3<f32>) -> vec3<f32> {
 // cell, then sample. Never samples inside a solid cell, which is what keeps the
 // volume's absorbing cells from printing themselves onto the surfaces in front
 // of them.
+// Debug (the emission heat/flow inspector): the light in the air cell in
+// front of a surface, as (net directional flux xyz, total luminance w). Flux
+// sums each bank's luminance along its travel direction, so it points where
+// the light FLOWS — x1m4's light-as-fluid picture, made visible. The
+// isotropic layout stores no direction: zero flux, luminance in w. Above the
+// volume top the sky flows straight down.
+fn cagi_debug_flux(surface_point: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
+    let step = normal * cagi_volume_meta.cell_size_voxels;
+    var position = surface_point + step * 0.5;
+    for (var search = 0u; search < CAGI_SAMPLE_SEARCH_STEPS; search = search + 1u) {
+        if (!cagi_cell_is_solid(cagi_cell_of(position))) {
+            break;
+        }
+        position = position + step;
+    }
+    let luminance_weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let cell = cagi_cell_of(position);
+    let grid = vec3<i32>(cagi_volume_meta.grid_size);
+    if (cell.y >= grid.y) {
+        let sky = dot(cagi_sky_radiance(cell), luminance_weights);
+        return vec4<f32>(0.0, -sky, 0.0, sky);
+    }
+    if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= grid)) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    if (CAGI_LAYOUT != CAGI_LAYOUT_BANKS6) {
+        let luminance = dot(cagi_cell_radiance(cell), luminance_weights);
+        return vec4<f32>(0.0, 0.0, 0.0, luminance);
+    }
+    let cell_index = cagi_cell_index(vec3<u32>(cell));
+    let stride = cagi_cell_count();
+    var flux = vec3<f32>(0.0, 0.0, 0.0);
+    var total = 0.0;
+    for (var bank = 0u; bank < 6u; bank = bank + 1u) {
+        let radiance =
+            cagi_radiance(cagi_unpack(light_volume[cell_index + bank * stride]));
+        let luminance = dot(radiance, luminance_weights);
+        flux = flux + vec3<f32>(cagi_bank_direction(bank)) * luminance;
+        total = total + luminance;
+    }
+    return vec4<f32>(flux, total);
+}
+
 fn cagi_sample_surface(surface_point: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let step = normal * cagi_volume_meta.cell_size_voxels;
     var position = surface_point + step * 0.5;
