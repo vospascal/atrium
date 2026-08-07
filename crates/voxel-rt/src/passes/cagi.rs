@@ -447,25 +447,13 @@ impl CagiPass {
         )
     }
 
-    /// Build the pass from an explicit program — the benchmark's entry
-    /// point for A/B variants (patched copies of [`CAGI_SHADER_SOURCE`]).
-    pub fn new_with_program(
-        device: &wgpu::Device,
-        world_bindings: &WorldBindings,
-        light_volume: &LightVolume,
-        program: &ShaderProgram,
-    ) -> Self {
-        let environment = HillaireEnvironment::new(device);
-        Self::new_with_environment_and_program(
-            device,
-            world_bindings,
-            light_volume,
-            &environment,
-            program,
-        )
-    }
-
-    pub(crate) fn new_with_environment_and_program(
+    /// Build the pass from an explicit program and a CALLER-OWNED environment —
+    /// the benchmark's entry point for A/B variants (patched copies of
+    /// [`CAGI_SHADER_SOURCE`]). Public deliberately: a constructor that builds
+    /// its own environment builds one whose LUTs nobody ever bakes, and the sky
+    /// injection then floods BLACK (the 2026-08-07 bench blackout). The caller
+    /// must own the environment and `submit()` it for the sun in use.
+    pub fn new_with_environment_and_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,

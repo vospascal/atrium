@@ -457,7 +457,10 @@ impl Renderer {
         self.clouds
     }
 
-    fn environment_request(
+    /// Public so the bench can bake the SAME request the app submits — a second
+    /// hand-rolled request builder is how the froxel camera or the ambient scale
+    /// would silently drift between the two.
+    pub fn environment_request(
         environment_frame: EnvironmentFrame,
         lighting_uniform: &LightingUniform,
         camera_uniform: &CameraUniform,

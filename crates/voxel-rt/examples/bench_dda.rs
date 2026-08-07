@@ -90,7 +90,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use std::path::PathBuf;
-use voxel_environment::SunSettings;
+use voxel_environment::{EnvironmentGpu, SunSettings};
 use voxel_material::animation_clock::AnimationClockSample;
 use voxel_material::material::{GpuMaterial, MaterialKind, MATERIALS};
 use voxel_material::pattern::{
@@ -4129,6 +4129,28 @@ fn measure_section(
                 scenario,
             );
         }
+        // Sanity gate: a GI-enabled variant's volume must not be BLACK after
+        // convergence. Un-baked LUTs (the 2026-08-07 blackout) or a broken
+        // flood would otherwise zero every coverage row below and read as
+        // "no look difference" instead of as the bug it is.
+        if let Some(variant_index) = section
+            .variants
+            .iter()
+            .position(|variant| variant.quality.global_illumination.enabled)
+        {
+            let volume = read_back_volume(
+                device,
+                queue,
+                &variant_resources[variant_index].light_volume,
+            );
+            assert!(
+                volume.iter().any(|&word| word != 0),
+                "light volume all-zero after convergence ({} / {}): the indirect \
+                 path is dark — are the atmosphere LUTs baked?",
+                section.variants[variant_index].label,
+                scenario.label
+            );
+        }
         let mut samples: Vec<Vec<f32>> =
             vec![Vec::with_capacity(BATCH_COUNT); variant_resources.len()];
         let mut cagi_samples: Vec<Vec<f32>> =
@@ -4259,6 +4281,15 @@ struct VariantResources {
     dda_pass: DdaPass,
 }
 
+/// The ONE environment every variant binds, baked per scenario sun in
+/// [`VariantResources::flood_to_convergence`]. Shared and caller-baked on
+/// purpose: each pass used to build its own `HillaireEnvironment` whose LUTs
+/// nobody ever submitted, so sky ambient — and with it CAGI's sky injection,
+/// the hemisphere fallback and everything AO multiplies — was ZERO in every
+/// bench image from the 2026-08-05 environment reroute until 2026-08-07.
+static ENVIRONMENT: std::sync::Mutex<Option<voxel_environment::HillaireEnvironment>> =
+    std::sync::Mutex::new(None);
+
 impl VariantResources {
     fn new(
         device: &wgpu::Device,
@@ -4273,18 +4304,23 @@ impl VariantResources {
             &variant.quality.global_illumination,
             &voxel_rt::cagi::MaterialAttributes::compiled(),
         );
+        let mut guard = ENVIRONMENT.lock().unwrap();
+        let environment =
+            guard.get_or_insert_with(|| voxel_environment::HillaireEnvironment::new(device));
         VariantResources {
-            cagi_pass: CagiPass::new_with_program(
+            cagi_pass: CagiPass::new_with_environment_and_program(
                 device,
                 world_bindings,
                 &light_volume,
+                environment,
                 &variant.cagi_program(),
             ),
-            dda_pass: DdaPass::new_with_program(
+            dda_pass: DdaPass::new_with_environment_and_program(
                 device,
                 world_bindings,
                 &light_volume,
                 output_view,
+                environment,
                 &variant.dda_program(),
                 // The bench measures the shipped 8-bit output path; output depth is
                 // a display property and orthogonal to everything it sweeps.
@@ -4305,6 +4341,28 @@ impl VariantResources {
         variant: &Variant,
         scenario: &Scenario,
     ) {
+        // Bake the atmosphere LUTs for THIS scenario's sun first — and before
+        // the GI-off early return, because the DDA's hemisphere ambient reads
+        // them too. The environment's own invalidation makes a repeat request
+        // free, and queue ordering makes the bake visible to every dispatch
+        // below without a poll.
+        let request = voxel_rt::render::Renderer::environment_request(
+            scenario.sun.environment_frame(),
+            &scenario.lighting_uniform(&variant.quality),
+            &scenario.camera_uniform(variant.resolution()),
+            voxel_environment::CloudRequest::default(),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("bench environment bake"),
+        });
+        ENVIRONMENT
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("the first VariantResources::new creates the environment")
+            .submit(queue, &mut encoder, &request);
+        queue.submit([encoder.finish()]);
+
         if !variant.quality.global_illumination.enabled {
             return;
         }

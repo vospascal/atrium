@@ -181,27 +181,11 @@ impl DdaPass {
 
     /// Build the pass from an explicit program — the benchmark's entry point for A/B variants.
     /// Everything else (buffers, layout, bind groups) is identical to [`DdaPass::new`].
-    pub fn new_with_program(
-        device: &wgpu::Device,
-        world_bindings: &WorldBindings,
-        light_volume: &LightVolume,
-        output_view: &wgpu::TextureView,
-        program: &ShaderProgram,
-        output_format: voxel_color::OutputFormat,
-    ) -> Self {
-        let environment = HillaireEnvironment::new(device);
-        Self::new_with_environment_and_program(
-            device,
-            world_bindings,
-            light_volume,
-            output_view,
-            &environment,
-            program,
-            output_format,
-        )
-    }
-
-    pub(crate) fn new_with_environment_and_program(
+    /// Build the pass from an explicit program and a CALLER-OWNED environment.
+    /// Public deliberately — see `CagiPass::new_with_environment_and_program`:
+    /// a self-built environment is one whose LUTs nobody bakes, and the whole
+    /// indirect term then shades BLACK.
+    pub fn new_with_environment_and_program(
         device: &wgpu::Device,
         world_bindings: &WorldBindings,
         light_volume: &LightVolume,
