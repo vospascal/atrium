@@ -545,6 +545,14 @@ pub struct Material {
     /// genuinely composes with any kind: `glow_block` is an emitting `Solid` and
     /// `glow_berry` an emitting `Cover`.
     pub emission: Option<[f32; 3]>,
+    /// The radiance this row injects into the LIGHT VOLUME, when it differs
+    /// from what its own surface shows. `None` — the common case — means "cast
+    /// exactly what you display" ([`Self::emission`]). Authoring both splits an
+    /// emitter's look from its throw: a bright little crystal that casts a
+    /// modest glow, or an unassuming ember block that floods a cavern
+    /// (Pascal, 2026-08-07). Only read by the CAGI injection path
+    /// ([`Self::mean_injected_radiance`]); the shading pass never sees it.
+    pub light: Option<[f32; 3]>,
     /// S1 — per-face overrides, or `None` for a row whose faces are all alike.
     ///
     /// `None` rather than a `FaceRoles` holding three copies of the base values, so
@@ -665,7 +673,7 @@ impl Material {
     /// Consumer: [`crate::cagi`]'s E5b material table. The row's mean is later
     /// weighted by exposed area into a per-cell emission value.
     pub const fn is_emissive(&self) -> bool {
-        self.emission.is_some() || self.has_emission_layers()
+        self.emission.is_some() || self.light.is_some() || self.has_emission_layers()
     }
 
     /// Whether any pattern layer targets emission with a non-zero amount.
@@ -719,6 +727,28 @@ impl Material {
     /// Costs nothing on the rows that do not use the feature — it returns
     /// [`Self::emitted_radiance`] immediately unless an emission layer exists, and
     /// there are at most a handful of those.
+    /// The radiance this row injects into the light volume: the look/light
+    /// split's LIGHT half. With no authored [`Self::light`] this is exactly
+    /// [`Self::mean_emitted_radiance`] — cast what you display. With one, the
+    /// authored light replaces the base emission and the pattern-layer stack
+    /// composes on top of it, so a speckled ember block's throw still averages
+    /// its speckles.
+    ///
+    /// Event-gated emitters (S3b) are deliberately outside the split for now:
+    /// voxel-rt's CAGI attribute build re-means their authored per-state event
+    /// emissions directly and ignores `light`.
+    pub fn mean_injected_radiance(&self) -> [f32; 3] {
+        match self.light {
+            Some(light) => {
+                let mut row = *self;
+                row.emission = Some(light);
+                row.light = None;
+                row.mean_emitted_radiance()
+            }
+            None => self.mean_emitted_radiance(),
+        }
+    }
+
     pub fn mean_emitted_radiance(&self) -> [f32; 3] {
         let base = self.emitted_radiance();
         if !self.has_emission_layers() {
@@ -1049,6 +1079,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.03,
             kind: MaterialKind::Cover { transmittance },
             emission: None,
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
@@ -1069,6 +1100,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular,
             kind: MaterialKind::Solid,
             emission: None,
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha,
@@ -1084,6 +1116,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.0,
             kind: MaterialKind::Air,
             emission: None,
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: [0.0; 6],
@@ -1107,6 +1140,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.02,
             kind: MaterialKind::Solid,
             emission: None,
+            light: None,
             face_roles: Some(FaceRoles {
                 // Green only where the sky can reach.
                 top: FaceOverride {
@@ -1160,6 +1194,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 transmittance: 0.85,
             }),
             emission: None,
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_WATER,
@@ -1191,6 +1226,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.04,
             kind: MaterialKind::Solid,
             emission: Some([3.00, 2.80, 2.40]),
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
@@ -1206,6 +1242,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
                 transmittance: 0.20,
             },
             emission: Some([0.50, 1.10, 0.80]),
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_FOLIAGE,
@@ -1220,6 +1257,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.03,
             kind: MaterialKind::Solid,
             emission: Some([1.20, 0.16, 0.015]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Noise { octaves: 2 },
@@ -1279,6 +1317,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.04,
             kind: MaterialKind::Solid,
             emission: None,
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[
                 PatternLayer {
@@ -1445,6 +1484,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             // #FF0000 at SDR reference white: linear 1.0 = 100 nits.
             emission: Some([1.0, 0.0, 0.0]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Speckle { density: 0.3 },
@@ -1487,6 +1527,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             // #00FF00 at SDR reference white: linear 1.0 = 100 nits.
             emission: Some([0.0, 1.0, 0.0]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Speckle { density: 0.3 },
@@ -1529,6 +1570,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             // #0000FF at SDR reference white: linear 1.0 = 100 nits.
             emission: Some([0.0, 0.0, 1.0]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Speckle { density: 0.3 },
@@ -1571,6 +1613,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             // #00FFFF at SDR reference white: linear 1.0 = 100 nits.
             emission: Some([0.0, 1.0, 1.0]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Speckle { density: 0.3 },
@@ -1613,6 +1656,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             // #FF00FF at SDR reference white: linear 1.0 = 100 nits.
             emission: Some([1.0, 0.0, 1.0]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Speckle { density: 0.3 },
@@ -1655,6 +1699,7 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             kind: MaterialKind::Solid,
             // #FFFF00 at SDR reference white: linear 1.0 = 100 nits.
             emission: Some([1.0, 1.0, 0.0]),
+            light: None,
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Speckle { density: 0.3 },
@@ -2755,6 +2800,7 @@ mod tests {
                 transmittance: 0.95,
             }),
             emission: None,
+            light: None,
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: [0.03; 6],
@@ -2788,7 +2834,8 @@ mod tests {
     #[test]
     fn only_the_emissive_rows_emit() {
         for material in &MATERIALS {
-            let emits = material.emitted_radiance().iter().any(|c| *c > 0.0);
+            let emits =
+                material.emitted_radiance().iter().any(|c| *c > 0.0) || material.light.is_some();
             assert_eq!(
                 emits,
                 material.is_emissive(),
@@ -2805,6 +2852,46 @@ mod tests {
              to worry about: `cagi.rs` states E5b carries every material's mean \
              separately rather than indexing a slot table."
         );
+    }
+
+    /// The look/light split (2026-08-07): `light` redirects what a row CASTS
+    /// into the light volume without touching what its own face SHOWS. No
+    /// authored light means the two halves are the same number — every
+    /// pre-split row behaves bit-identically.
+    #[test]
+    fn light_splits_the_cast_from_the_look() {
+        let glow_block = MATERIALS[material_id(Voxel::GlowBlock) as usize];
+        assert_eq!(glow_block.light, None);
+        assert_eq!(
+            glow_block.mean_injected_radiance(),
+            glow_block.mean_emitted_radiance(),
+            "no authored light: cast exactly what you display"
+        );
+
+        let mut ember = glow_block;
+        ember.emission = Some([1.5, 0.4, 0.1]);
+        ember.light = Some([24.0, 6.0, 1.5]);
+        assert_eq!(ember.emitted_radiance(), [1.5, 0.4, 0.1], "the look half");
+        assert_eq!(
+            ember.mean_injected_radiance(),
+            [24.0, 6.0, 1.5],
+            "the light half"
+        );
+        assert!(ember.is_emissive());
+
+        let mut hidden = glow_block;
+        hidden.emission = None;
+        hidden.light = Some([4.0, 4.0, 4.0]);
+        assert!(
+            hidden.is_emissive(),
+            "a light-only row still joins the emitter set"
+        );
+        assert_eq!(
+            hidden.emitted_radiance(),
+            [0.0; 3],
+            "...but its face shows nothing"
+        );
+        assert_eq!(hidden.mean_injected_radiance(), [4.0; 3]);
     }
 
     /// The two emitters are deliberately a contrasting PAIR: one occludes, one

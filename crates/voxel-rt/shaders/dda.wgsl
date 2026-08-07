@@ -812,6 +812,11 @@ fn shade_surface(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
         let shadow_origin = shadow_ray_origin(hit, ray_origin, ray_direction, normal)
             + geometric_normal * displacement_offset_voxels;
         sun_visibility = trace_shadow_visibility(shadow_origin, lighting.sun_direction);
+        // Runtime sun-shadow lever (shading_params.y): 1 = shadows, 0 = fully
+        // sunlit. A look toggle for isolating the direct-shadow system next to
+        // AO and CAGI — the ray above still traces, and CAGI's own per-cell
+        // sun test is deliberately unaffected.
+        sun_visibility = mix(1.0, sun_visibility, lighting.shading_params.y);
         // P2 — relief self-shadowing: plates shade their own joints and the
         // ground behind them. Direct sun only; ambient and GI are untouched.
         sun_visibility = sun_visibility * pattern_parallax_sun_shadow(

@@ -139,6 +139,11 @@ pub struct SavedMaterial {
     pub specular: f32,
     pub kind: SavedMaterialKind,
     pub emission: Option<[f32; 3]>,
+    /// Injected light-volume radiance when split from the surface look
+    /// (`Material::light`). `serde(default)` so projects saved before the
+    /// split load as "cast what you display".
+    #[serde(default)]
+    pub light: Option<[f32; 3]>,
     pub face_roles: Option<SavedFaceRoles>,
     pub patterns: Vec<SavedPatternLayer>,
     pub acoustic_alpha: [f32; 6],
@@ -350,6 +355,7 @@ impl From<&Material> for SavedMaterial {
             specular: material.specular,
             kind: SavedMaterialKind::from(material.kind),
             emission: material.emission,
+            light: material.light,
             face_roles: material.face_roles.map(SavedFaceRoles::from),
             patterns: material
                 .patterns
@@ -377,6 +383,9 @@ impl SavedMaterial {
         if let Some(emission) = self.emission {
             validate_finite("emission", &emission)?;
         }
+        if let Some(light) = self.light {
+            validate_finite("light", &light)?;
+        }
 
         let mut patterns = PatternStack {
             layers: [None; MAX_PATTERN_LAYERS],
@@ -394,6 +403,7 @@ impl SavedMaterial {
             specular: self.specular,
             kind: self.kind.to_material_kind()?,
             emission: self.emission,
+            light: self.light,
             face_roles: self
                 .face_roles
                 .as_ref()

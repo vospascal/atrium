@@ -635,7 +635,7 @@ mod tests {
             &sun,
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
-                padding_y: 0.0,
+                sun_shadow: 1.0,
                 ambient_occlusion_fade_start_voxels: 240.0,
                 ambient_occlusion_fade_end_voxels: 480.0,
             },

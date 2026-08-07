@@ -130,9 +130,11 @@ impl LightingUniform {
 pub struct ShadingParams {
     /// `x` — AO attenuation scale in [0, 1] (E1).
     pub ambient_occlusion_strength: f32,
-    /// `y` — the pruned E1b soft-shadow penumbra slot (2026-08-07). Kept as
-    /// explicit padding so `z`/`w` stay at the components the shader reads.
-    pub padding_y: f32,
+    /// `y` — the traced sun shadow as a runtime mix weight: 1.0 = shadows, 0.0
+    /// = every sun-facing surface fully sunlit (a look lever; the ray still
+    /// traces). Reuses the slot the pruned E1b penumbra scale vacated
+    /// (2026-08-07).
+    pub sun_shadow: f32,
     /// `z` — start of the AO distance-fade ramp, voxel units (E1b lever 2,
     /// moved out of the shader consts in E1c). Ignored when the fade is
     /// compiled off.
@@ -146,7 +148,7 @@ impl ShadingParams {
     fn to_array(self) -> [f32; 4] {
         [
             self.ambient_occlusion_strength,
-            self.padding_y,
+            self.sun_shadow,
             self.ambient_occlusion_fade_start_voxels,
             self.ambient_occlusion_fade_end_voxels,
         ]
@@ -542,7 +544,7 @@ mod tests {
             &sun,
             ShadingParams {
                 ambient_occlusion_strength: 0.8,
-                padding_y: 0.0,
+                sun_shadow: 1.0,
                 ambient_occlusion_fade_start_voxels: 240.0,
                 ambient_occlusion_fade_end_voxels: 480.0,
             },
@@ -691,7 +693,7 @@ mod tests {
         let uniform = probe_uniform();
         assert_eq!(uniform.gi_params, [1.0, 0.0, 0.35, 0.0]);
         // ...and the E1 knobs must be untouched by the new vector.
-        assert_eq!(uniform.shading_params, [0.8, 0.0, 240.0, 480.0]);
+        assert_eq!(uniform.shading_params, [0.8, 1.0, 240.0, 480.0]);
     }
 
     /// E6: the water knobs must land in their own slots too, and must not
@@ -702,7 +704,7 @@ mod tests {
         assert_eq!(uniform.water_params, [1.0, 1.0, 0.04, 0.0]);
         assert_eq!(uniform.water_optics, [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(uniform.gi_params, [1.0, 0.0, 0.35, 0.0]);
-        assert_eq!(uniform.shading_params, [0.8, 0.0, 240.0, 480.0]);
+        assert_eq!(uniform.shading_params, [0.8, 1.0, 240.0, 480.0]);
     }
 
     /// The runtime knobs must land in their own slots of the shared
@@ -710,7 +712,7 @@ mod tests {
     /// control the penumbra width.
     #[test]
     fn shading_params_keep_their_vector_components() {
-        assert_eq!(probe_uniform().shading_params, [0.8, 0.0, 240.0, 480.0]);
+        assert_eq!(probe_uniform().shading_params, [0.8, 1.0, 240.0, 480.0]);
     }
 
     #[test]

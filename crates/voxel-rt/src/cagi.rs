@@ -790,7 +790,7 @@ pub(crate) fn material_attribute_table(
         table.words[slot] =
             packed_albedo(material.albedo) | quantize_transmittance(material.transmittance());
         let Some(response) = emission_responses.get(slot).copied().flatten() else {
-            table.emissions[slot] = material.mean_emitted_radiance();
+            table.emissions[slot] = material.mean_injected_radiance();
             table.resting_emissions[slot] = table.emissions[slot];
             continue;
         };
