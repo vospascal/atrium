@@ -159,6 +159,8 @@ pub enum LeverId {
     MaterialPatternFadeEnd,
     MaterialAnimationSpeed,
     MaterialAnimationDeterministic,
+    // Direct lighting.
+    SunShadow,
     // Resolution (S0).
     RenderScale,
 }
@@ -170,6 +172,9 @@ pub enum LeverSubsystem {
     AmbientOcclusion,
     /// E4 — the CAGI light volume.
     GlobalIllumination,
+    /// Direct sun in the shading pass — the third light system next to AO and
+    /// CAGI (one lever today: the traced sun shadow).
+    Lighting,
     /// E6 — water reflection, refraction and extinction.
     Water,
     /// E2 — world authority, threading and the edit pipeline.
@@ -185,6 +190,7 @@ impl LeverSubsystem {
             LeverSubsystem::Traversal => "Traversal",
             LeverSubsystem::AmbientOcclusion => "AO",
             LeverSubsystem::GlobalIllumination => "GI (CAGI)",
+            LeverSubsystem::Lighting => "Direct light",
             LeverSubsystem::Water => "Water",
             LeverSubsystem::WorldEdit => "World edits",
             LeverSubsystem::Materials => "Materials",
@@ -193,10 +199,11 @@ impl LeverSubsystem {
     }
 
     /// Panel order.
-    pub const ALL: [LeverSubsystem; 7] = [
+    pub const ALL: [LeverSubsystem; 8] = [
         LeverSubsystem::Traversal,
         LeverSubsystem::AmbientOcclusion,
         LeverSubsystem::GlobalIllumination,
+        LeverSubsystem::Lighting,
         LeverSubsystem::Water,
         LeverSubsystem::WorldEdit,
         LeverSubsystem::Materials,
@@ -523,6 +530,7 @@ impl LeverId {
             LeverId::MaterialAnimationDeterministic => {
                 LeverValue::Flag(quality.materials.animation_deterministic)
             }
+            LeverId::SunShadow => LeverValue::Flag(quality.sun_shadow),
             LeverId::RenderScale => LeverValue::Scalar(quality.render_scale),
         }
     }
@@ -739,6 +747,7 @@ impl LeverId {
             LeverId::MaterialAnimationDeterministic => {
                 quality.materials.animation_deterministic = value.expect_flag(self);
             }
+            LeverId::SunShadow => quality.sun_shadow = value.expect_flag(self),
             LeverId::RenderScale => {
                 quality.render_scale = value
                     .expect_scalar(self)
@@ -3329,6 +3338,25 @@ pub const REGISTRY: &[Lever] = &[
         mode_options: &[],
         bench: &[],
     },
+    // ---- Direct lighting ----
+    Lever {
+        id: LeverId::SunShadow,
+        subsystem: LeverSubsystem::Lighting,
+        kind: LeverKind::Runtime,
+        shader_const: None,
+        label: "sun shadow",
+        default_value: LeverValue::Flag(true),
+        range: LeverRange::Discrete,
+        verdict: "LOOK lever, on (shading_params.y — the slot the pruned penumbra \
+                  scale vacated): the shading pass's traced sun shadow. Off renders \
+                  every sun-facing surface fully sunlit, isolating what the shadow \
+                  ray contributes next to AO and CAGI. Runtime mix, so the ray \
+                  still traces when off — a look toggle, not a perf lever. CAGI's \
+                  per-cell sun test and relief self-shadowing are deliberately \
+                  untouched.",
+        mode_options: &[],
+        bench: &[],
+    },
     // ---- Resolution (S0) ----
     Lever {
         id: LeverId::RenderScale,
@@ -3697,6 +3725,9 @@ pub struct RenderQuality {
     pub world_edit: WorldEditSettings,
     /// S1 — the material model.
     pub materials: MaterialSettings,
+    /// The shading pass's traced sun shadow (runtime, `shading_params.y`).
+    /// A look lever: off renders sun-facing surfaces fully sunlit.
+    pub sun_shadow: bool,
     /// Storage-texture size / surface size (1.0 = native).
     pub render_scale: f32,
 }
@@ -3771,6 +3802,7 @@ impl RenderQuality {
             water: WaterSettings::default(),
             materials: MaterialSettings::default(),
             world_edit: WorldEditSettings::default(),
+            sun_shadow: true,
             render_scale: MAX_RENDER_SCALE,
         }
     }
@@ -3833,7 +3865,7 @@ impl RenderQuality {
     pub fn shading_params(&self) -> ShadingParams {
         ShadingParams {
             ambient_occlusion_strength: self.ambient_occlusion.strength,
-            padding_y: 0.0,
+            sun_shadow: if self.sun_shadow { 1.0 } else { 0.0 },
             ambient_occlusion_fade_start_voxels: self.ambient_occlusion.fade_start_voxels as f32,
             ambient_occlusion_fade_end_voxels: self.ambient_occlusion.fade_end_voxels as f32,
         }
@@ -4348,6 +4380,7 @@ mod tests {
             water,
             world_edit,
             materials,
+            sun_shadow,
             render_scale,
         } = baseline;
         let MaterialSettings {
@@ -4650,6 +4683,7 @@ mod tests {
                 LeverId::MaterialAnimationDeterministic,
                 LeverValue::Flag(animation_deterministic),
             ),
+            (LeverId::SunShadow, LeverValue::Flag(sun_shadow)),
             (LeverId::RenderScale, LeverValue::Scalar(render_scale)),
         ];
 
