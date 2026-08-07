@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c869d755d4cfe8-0000000000000023",
   "name": "albedo_red",
   "voxel_material_slot": 34,
@@ -15,6 +15,7 @@
       "kind": "solid"
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

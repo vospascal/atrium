@@ -12,9 +12,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// The first on-disk asset format. Future readers migrate old documents before resolving
-/// them into runtime objects.
-pub const STUDIO_ASSET_SCHEMA_VERSION: u32 = 2;
+/// The on-disk asset format. Readers migrate old documents before resolving
+/// them into runtime objects. History: 3 = the material look/light split
+/// (2026-08-07) — older saves inherit the compiled `light` defaults on load,
+/// because their `None` means "field did not exist", not "authored no cast".
+pub const STUDIO_ASSET_SCHEMA_VERSION: u32 = 3;
 
 static NEXT_ASSET_ID: AtomicU64 = AtomicU64::new(1);
 

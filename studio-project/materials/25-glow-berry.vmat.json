@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c777673441db18-000000000000004d",
   "name": "glow_berry",
   "voxel_material_slot": 25,
@@ -20,6 +20,7 @@
       1.1,
       0.8
     ],
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

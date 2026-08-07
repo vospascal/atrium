@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c77767302b3d80-000000000000002f",
   "name": "flower_white",
   "voxel_material_slot": 15,
@@ -16,6 +16,7 @@
       "transmittance": 0.3
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

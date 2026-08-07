@@ -121,7 +121,15 @@ impl MaterialAsset {
         let Some(base) = table.row(self.voxel_material_slot).copied() else {
             return Err(AssetError::InvalidMaterialSlot(self.voxel_material_slot));
         };
-        let restored = self.material.to_material(base)?;
+        let mut restored = self.material.to_material(base)?;
+        // Schema <=2 predates the look/light split (2026-08-07): those saves
+        // cannot have authored a light override, so `None` means "the field
+        // did not exist yet", not "cast what you show" — the row inherits the
+        // compiled default instead of silently downgrading the shipped
+        // emitters. From schema 3 on, an authored `None` is honoured.
+        if self.schema_version < 3 && restored.light.is_none() {
+            restored.light = base.light;
+        }
         let target = table
             .row_mut(self.voxel_material_slot)
             .expect("a checked material slot remains valid");
@@ -1777,6 +1785,50 @@ mod tests {
         assert_eq!(
             table.row(lava_slot).unwrap(),
             &MATERIALS[lava_slot as usize]
+        );
+    }
+
+    /// The schema-2 -> 3 migration: saves from before the look/light split
+    /// carry `light: None` because the field did not exist, and loading one
+    /// must NOT downgrade a shipped emitter to cast-what-you-show — that was
+    /// the 2026-08-07 in-app bug (lava lighting nothing at night, because the
+    /// project's pre-split rows shadowed the authored table). A schema-3 save
+    /// with an explicit `None` is an authored choice and stays.
+    #[test]
+    fn pre_split_saves_inherit_the_compiled_light_defaults() {
+        let lava_slot = material_id(voxel_core::world::Voxel::Lava);
+        let compiled_light = MATERIALS[lava_slot as usize].light;
+        assert!(
+            compiled_light.is_some(),
+            "lava must author a light override"
+        );
+
+        let mut old_save = MaterialAsset::from_material(
+            lava_slot,
+            &MATERIALS[lava_slot as usize],
+            AssetId("graph-lava".into()),
+        );
+        old_save.schema_version = 2;
+        old_save.material.light = None; // the field predates schema 3
+        let mut table = MaterialTable::default();
+        old_save.apply_to_table(&mut table).unwrap();
+        assert_eq!(
+            table.row(lava_slot).unwrap().light,
+            compiled_light,
+            "a pre-split save inherits the compiled default"
+        );
+
+        let mut authored_none = MaterialAsset::from_material(
+            lava_slot,
+            &MATERIALS[lava_slot as usize],
+            AssetId("graph-lava".into()),
+        );
+        authored_none.material.light = None;
+        authored_none.apply_to_table(&mut table).unwrap();
+        assert_eq!(
+            table.row(lava_slot).unwrap().light,
+            None,
+            "a schema-3 None is an authored choice and is honoured"
         );
     }
 

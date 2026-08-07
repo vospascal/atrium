@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7776733e36b50-000000000000004a",
   "name": "glow_block",
   "voxel_material_slot": 24,
@@ -18,6 +18,11 @@
       3.0,
       2.8,
       2.4
+    ],
+    "light": [
+      24.0,
+      22.4,
+      19.2
     ],
     "face_roles": null,
     "patterns": [],

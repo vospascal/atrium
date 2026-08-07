@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c869d755d4fec8-0000000000000024",
   "name": "albedo_red Material Graph",
   "kind": "material",

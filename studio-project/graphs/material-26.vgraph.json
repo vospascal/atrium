@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7af1e2e9f8568-000000000000004d",
   "name": "lava Material Graph",
   "kind": "material",

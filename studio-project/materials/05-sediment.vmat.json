@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c777672b931f90-0000000000000011",
   "name": "sediment",
   "voxel_material_slot": 5,
@@ -15,6 +15,7 @@
       "kind": "solid"
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

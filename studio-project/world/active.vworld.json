@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "world-default-v2",
   "name": "Atrium Temperate World",
   "biomes": {

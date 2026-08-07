@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7776732831030-0000000000000041",
   "name": "reed",
   "voxel_material_slot": 21,
@@ -16,6 +16,7 @@
       "transmittance": 0.3
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c85cf6f35e08d0-000000000000001d",
   "name": "hdr_red",
   "voxel_material_slot": 28,
@@ -19,6 +19,7 @@
       0.0,
       0.0
     ],
+    "light": null,
     "face_roles": null,
     "patterns": [
       {

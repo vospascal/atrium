@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c777672a184730-0000000000000005",
   "name": "grass",
   "voxel_material_slot": 1,
@@ -15,6 +15,7 @@
       "kind": "solid"
     },
     "emission": null,
+    "light": null,
     "face_roles": {
       "top": {
         "albedo": [

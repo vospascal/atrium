@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c777672fdff410-000000000000002c",
   "name": "flower_pink",
   "voxel_material_slot": 14,
@@ -16,6 +16,7 @@
       "transmittance": 0.3
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

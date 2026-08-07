@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c85cf6f4a99f88-000000000000002a",
   "name": "hdr_cyan Material Graph",
   "kind": "material",

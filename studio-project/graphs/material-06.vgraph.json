@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7af1e33d85fc8-000000000000005d",
   "name": "stone Material Graph",
   "kind": "material",

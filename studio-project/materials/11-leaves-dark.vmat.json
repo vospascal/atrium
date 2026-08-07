@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c777672eda24a0-0000000000000023",
   "name": "leaves_dark",
   "voxel_material_slot": 11,
@@ -16,6 +16,7 @@
       "transmittance": 0.2
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

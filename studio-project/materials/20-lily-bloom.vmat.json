@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7776731fdc330-000000000000003e",
   "name": "lily_bloom",
   "voxel_material_slot": 20,
@@ -16,6 +16,7 @@
       "transmittance": 0.25
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

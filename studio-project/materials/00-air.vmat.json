@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7776729b79d18-0000000000000002",
   "name": "air",
   "voxel_material_slot": 0,
@@ -15,6 +15,7 @@
       "kind": "air"
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

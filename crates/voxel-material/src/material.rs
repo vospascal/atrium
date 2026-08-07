@@ -1226,7 +1226,12 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.04,
             kind: MaterialKind::Solid,
             emission: Some([3.00, 2.80, 2.40]),
-            light: None,
+            // The look/light split's first customer (2026-08-07): the face
+            // shows 3.0 (already past paper white) while the volume receives
+            // 8x that, so a corridor wall 1 m away reads like a sunlit
+            // surface instead of near-black. UNMEASURED — tuned at the arc's
+            // in-app gate; the stride-2 ceiling is 64.
+            light: Some([24.0, 22.4, 19.2]),
             face_roles: None,
             patterns: NO_PATTERNS,
             acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
@@ -1257,7 +1262,10 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             specular: 0.03,
             kind: MaterialKind::Solid,
             emission: Some([1.20, 0.16, 0.015]),
-            light: None,
+            // Molten rock throws far more than its crusted surface shows: 8x
+            // the base, same hue; the pattern layers still compose on top.
+            // UNMEASURED — tuned at the arc's in-app gate.
+            light: Some([9.60, 1.28, 0.12]),
             face_roles: None,
             patterns: PatternStack::of(&[PatternLayer {
                 generator: PatternGenerator::Noise { octaves: 2 },
@@ -2860,13 +2868,19 @@ mod tests {
     /// pre-split row behaves bit-identically.
     #[test]
     fn light_splits_the_cast_from_the_look() {
-        let glow_block = MATERIALS[material_id(Voxel::GlowBlock) as usize];
-        assert_eq!(glow_block.light, None);
+        let glow_berry = MATERIALS[material_id(Voxel::GlowBerry) as usize];
+        assert_eq!(glow_berry.light, None);
         assert_eq!(
-            glow_block.mean_injected_radiance(),
-            glow_block.mean_emitted_radiance(),
+            glow_berry.mean_injected_radiance(),
+            glow_berry.mean_emitted_radiance(),
             "no authored light: cast exactly what you display"
         );
+
+        // The shipped bright emitter is the split's first customer: it throws
+        // 8x what its face shows.
+        let glow_block = MATERIALS[material_id(Voxel::GlowBlock) as usize];
+        assert_eq!(glow_block.emitted_radiance(), [3.00, 2.80, 2.40]);
+        assert_eq!(glow_block.mean_injected_radiance(), [24.0, 22.4, 19.2]);
 
         let mut ember = glow_block;
         ember.emission = Some([1.5, 0.4, 0.1]);

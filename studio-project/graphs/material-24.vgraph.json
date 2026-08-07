@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7af1e2c154c60-0000000000000045",
   "name": "glow_block Material Graph",
   "kind": "material",

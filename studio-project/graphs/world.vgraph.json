@@ -1,17 +1,73 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "world-main-v3",
   "name": "Atrium World",
   "kind": "world",
-  "interface": { "inputs": {}, "outputs": {} },
+  "interface": {
+    "inputs": {},
+    "outputs": {}
+  },
   "nodes": {
-    "terrain": { "node_type": "world.generated_terrain", "node_type_version": 1, "properties": {}, "socket_defaults": {}, "unknown_payload": null },
-    "compose": { "node_type": "world.compose", "node_type_version": 1, "properties": {}, "socket_defaults": {}, "unknown_payload": null },
-    "output": { "node_type": "world.output", "node_type_version": 1, "properties": {}, "socket_defaults": {}, "unknown_payload": null }
+    "terrain": {
+      "node_type": "world.generated_terrain",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "compose": {
+      "node_type": "world.compose",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "output": {
+      "node_type": "world.output",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    }
   },
   "links": {
-    "terrain-compose": { "from": { "node": "terrain", "socket": "world" }, "to": { "node": "compose", "socket": "world" }, "order": 0 },
-    "compose-output": { "from": { "node": "compose", "socket": "world" }, "to": { "node": "output", "socket": "world" }, "order": 0 }
+    "terrain-compose": {
+      "from": {
+        "node": "terrain",
+        "socket": "world"
+      },
+      "to": {
+        "node": "compose",
+        "socket": "world"
+      },
+      "order": 0
+    },
+    "compose-output": {
+      "from": {
+        "node": "compose",
+        "socket": "world"
+      },
+      "to": {
+        "node": "output",
+        "socket": "world"
+      },
+      "order": 0
+    }
   },
-  "layout": { "positions": { "terrain": [0.0, 0.0], "compose": [280.0, 0.0], "output": [560.0, 0.0] } }
+  "layout": {
+    "positions": {
+      "terrain": [
+        0.0,
+        0.0
+      ],
+      "compose": [
+        280.0,
+        0.0
+      ],
+      "output": [
+        560.0,
+        0.0
+      ]
+    }
+  }
 }

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7af1e36324d88-0000000000000065",
   "name": "trunk Material Graph",
   "kind": "material",

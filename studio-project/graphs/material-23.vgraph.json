@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7af1e2ad5e6c0-0000000000000041",
   "name": "snow Material Graph",
   "kind": "material",

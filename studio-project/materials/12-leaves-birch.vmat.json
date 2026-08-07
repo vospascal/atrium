@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c777672f39b578-0000000000000026",
   "name": "leaves_birch",
   "voxel_material_slot": 12,
@@ -16,6 +16,7 @@
       "transmittance": 0.28
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c7776731395608-0000000000000038",
   "name": "water_weed",
   "voxel_material_slot": 18,
@@ -16,6 +16,7 @@
       "transmittance": 0.35
     },
     "emission": null,
+    "light": null,
     "face_roles": null,
     "patterns": [],
     "acoustic_alpha": [

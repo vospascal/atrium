@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "vx-000000000000000018c85cf6f35e0cb8-000000000000001e",
   "name": "hdr_red Material Graph",
   "kind": "material",
