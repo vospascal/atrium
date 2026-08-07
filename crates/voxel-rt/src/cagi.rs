@@ -2697,6 +2697,10 @@ mod tests {
         });
         let resting = [0.4, 0.3, 0.2];
         rows[glow].emission = Some(resting);
+        // The event path re-means authored EMISSION states and ignores the
+        // look/light split; clear the shipped row's authored light so the
+        // baseline is the emission stack this test authors.
+        rows[glow].light = None;
         let before = material_attribute_table(&rows, &[]).emission(glow as u8);
         assert!(before[0] > 0.0, "the baseline must not be trivially zero");
 
@@ -2969,9 +2973,16 @@ mod tests {
         let emission =
             cell_attribute(&brickmap, &grid, cell, &MaterialAttributes::compiled()).emission;
         let full = MATERIALS[voxel_material::material::material_id(Voxel::GlowBlock) as usize]
-            .mean_emitted_radiance();
+            .mean_injected_radiance();
         for channel in 0..3 {
-            assert!((emission[channel] - full[channel]).abs() < 1e-5);
+            // Relative tolerance: the area-weighted accumulation's float error
+            // scales with the radiance, and authored light now reaches 24.
+            assert!(
+                (emission[channel] - full[channel]).abs() < 1e-5 * full[channel].max(1.0),
+                "channel {channel}: cell {} vs material {}",
+                emission[channel],
+                full[channel]
+            );
         }
     }
 
