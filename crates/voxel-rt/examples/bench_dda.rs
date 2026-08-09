@@ -2433,7 +2433,7 @@ const CONVERGENCE_ITERATIONS: u32 = 160;
 /// decision.
 fn report_light_volume_memory(brickmap: &Brickmap) {
     println!();
-    println!("== E4 light volume memory (125x32x125 m world; 1000x256x1000 detail grid) ==");
+    println!("== E4 light volume memory (125x64x125 m world; 1000x512x1000 detail grid) ==");
     println!(
         "{:<12} {:>18} {:>12} {:>14} {:>14} {:>12} {:>14}",
         "cell voxels", "grid", "cells", "one buffer", "ping-pong", "total", "CPU attr build"
@@ -3931,7 +3931,7 @@ fn read_back_volume(
 // ---- Scenarios ---------------------------------------------------------------
 
 /// The four fixed poses. Derivations (voxel-core constants, 0.125 m/voxel:
-/// world 125 m x 32 m x 125 m, water plane at 10.5 m):
+/// world 125 m x 64 m x 125 m, water plane at 32.9 m):
 ///
 /// - Top-down: island center x/z (62.5, 62.5), 60 m altitude (nearly twice
 ///   the 32 m world ceiling), pitch -(PI/2 - 0.01) — straight down minus the

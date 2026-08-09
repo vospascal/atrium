@@ -1,0 +1,284 @@
+{
+  "schema_version": 3,
+  "id": "biome-main-v1",
+  "name": "Biome Graph",
+  "kind": "biome",
+  "interface": {
+    "inputs": {},
+    "outputs": {}
+  },
+  "nodes": {
+    "blend": {
+      "node_type": "biome.blend",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "cleanup": {
+      "node_type": "biome.cellular_cleanup",
+      "node_type_version": 1,
+      "properties": {
+        "cleanup_iterations": {
+          "type": "integer",
+          "value": 2
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "connect": {
+      "node_type": "biome.cellular_connect",
+      "node_type_version": 1,
+      "properties": {
+        "corridor_radius": {
+          "type": "integer",
+          "value": 1
+        },
+        "min_room_cells": {
+          "type": "integer",
+          "value": 12
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "definition": {
+      "node_type": "biome.definition",
+      "node_type_version": 1,
+      "properties": {
+        "biome_type": {
+          "type": "text",
+          "value": "surface"
+        },
+        "id": {
+          "type": "text",
+          "value": "surface"
+        },
+        "name": {
+          "type": "text",
+          "value": "Surface"
+        },
+        "priority": {
+          "type": "integer",
+          "value": 0
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "noise": {
+      "node_type": "biome.noise",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {
+        "octaves": {
+          "type": "scalar",
+          "value": 3.0
+        },
+        "position": {
+          "type": "vector3",
+          "value": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "roughness": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "scale": {
+          "type": "scalar",
+          "value": 1280.0
+        }
+      },
+      "unknown_payload": null
+    },
+    "output": {
+      "node_type": "biome.output",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "sample": {
+      "node_type": "biome.sample",
+      "node_type_version": 1,
+      "properties": {},
+      "socket_defaults": {
+        "noise": {
+          "type": "scalar",
+          "value": 0.5
+        }
+      },
+      "unknown_payload": null
+    },
+    "seed": {
+      "node_type": "biome.cellular_seed",
+      "node_type_version": 1,
+      "properties": {
+        "cellular_cell_size": {
+          "type": "integer",
+          "value": 2
+        },
+        "cellular_fill": {
+          "type": "scalar",
+          "value": 0.4
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "smooth": {
+      "node_type": "biome.cellular_smooth",
+      "node_type_version": 1,
+      "properties": {
+        "iterations": {
+          "type": "integer",
+          "value": 8
+        },
+        "r1_cutoff": {
+          "type": "integer",
+          "value": 5
+        },
+        "r2_cutoff": {
+          "type": "integer",
+          "value": 2
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    }
+  },
+  "links": {
+    "blend-seed": {
+      "from": {
+        "node": "blend",
+        "socket": "biomes"
+      },
+      "to": {
+        "node": "seed",
+        "socket": "biomes"
+      },
+      "order": 0
+    },
+    "cleanup-connect": {
+      "from": {
+        "node": "cleanup",
+        "socket": "biomes"
+      },
+      "to": {
+        "node": "connect",
+        "socket": "biomes"
+      },
+      "order": 0
+    },
+    "connect-output": {
+      "from": {
+        "node": "connect",
+        "socket": "biomes"
+      },
+      "to": {
+        "node": "output",
+        "socket": "biomes"
+      },
+      "order": 0
+    },
+    "definition-output": {
+      "from": {
+        "node": "definition",
+        "socket": "biome"
+      },
+      "to": {
+        "node": "output",
+        "socket": "biome"
+      },
+      "order": 0
+    },
+    "noise-sample": {
+      "from": {
+        "node": "noise",
+        "socket": "factor"
+      },
+      "to": {
+        "node": "sample",
+        "socket": "noise"
+      },
+      "order": 0
+    },
+    "sample-blend": {
+      "from": {
+        "node": "sample",
+        "socket": "biomes"
+      },
+      "to": {
+        "node": "blend",
+        "socket": "biomes"
+      },
+      "order": 0
+    },
+    "seed-smooth": {
+      "from": {
+        "node": "seed",
+        "socket": "biomes"
+      },
+      "to": {
+        "node": "smooth",
+        "socket": "biomes"
+      },
+      "order": 0
+    },
+    "smooth-cleanup": {
+      "from": {
+        "node": "smooth",
+        "socket": "biomes"
+      },
+      "to": {
+        "node": "cleanup",
+        "socket": "biomes"
+      },
+      "order": 0
+    }
+  },
+  "layout": {
+    "positions": {
+      "blend": [
+        520.0,
+        200.0
+      ],
+      "cleanup": [
+        1300.0,
+        200.0
+      ],
+      "connect": [
+        1560.0,
+        200.0
+      ],
+      "definition": [
+        0.0,
+        0.0
+      ],
+      "noise": [
+        0.0,
+        200.0
+      ],
+      "output": [
+        1820.0,
+        80.0
+      ],
+      "sample": [
+        260.0,
+        200.0
+      ],
+      "seed": [
+        780.0,
+        200.0
+      ],
+      "smooth": [
+        1040.0,
+        200.0
+      ]
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schema_version": 3,
+  "id": "vx-000000000000000018c9ef2c323c3b80-0000000000000032",
+  "name": "cave_crystal",
+  "voxel_material_slot": 43,
+  "material": {
+    "albedo": [
+      0.32,
+      0.48,
+      0.62
+    ],
+    "roughness": 0.18,
+    "specular": 0.06,
+    "kind": {
+      "kind": "solid"
+    },
+    "emission": [
+      0.22,
+      0.55,
+      0.95
+    ],
+    "light": [
+      1.76,
+      4.4,
+      7.6
+    ],
+    "face_roles": null,
+    "patterns": [],
+    "acoustic_alpha": [
+      0.02,
+      0.02,
+      0.03,
+      0.03,
+      0.04,
+      0.05
+    ]
+  },
+  "graph": "vx-000000000000000018c9ef2c323c3b80-0000000000000033"
+}

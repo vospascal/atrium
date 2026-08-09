@@ -8,3 +8,4 @@
 
 pub mod performance_panel;
 pub mod settings_panel;
+pub mod worldgen_panel;

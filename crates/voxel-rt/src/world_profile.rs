@@ -1189,6 +1189,7 @@ mod tests {
                 biomes: vec![BiomeDefinition {
                     id: BiomeId::new("temperate-forest"),
                     name: "Temperate Forest".into(),
+                    biome_type: voxel_core::chunk::BiomeKind::Surface,
                     selector: BiomeSelector {
                         constraints: vec![FieldConstraint {
                             channel: EnvironmentChannel::Temperature,

@@ -129,7 +129,7 @@ pub const WATER_SCATTERING_PER_METER: [f32; 3] = [0.004, 0.030, 0.045];
 pub const NOT_A_MEDIUM: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Number of material ids (== number of `Voxel` variants, Air included).
-pub const MATERIAL_COUNT: usize = 40;
+pub const MATERIAL_COUNT: usize = 45;
 
 /// Air's material id, and the DDA's miss sentinel — the shading path is only ever
 /// called on an occupied voxel, so row 0 is never sampled on a hit.
@@ -186,6 +186,11 @@ pub fn material_id(voxel: Voxel) -> u8 {
         Voxel::AlbedoCyan => 37,
         Voxel::AlbedoMagenta => 38,
         Voxel::AlbedoYellow => 39,
+        Voxel::CaveMoss => 40,
+        Voxel::CaveMushroom => 41,
+        Voxel::CaveVine => 42,
+        Voxel::CaveCrystal => 43,
+        Voxel::FlareEmber => 44,
     }
 }
 
@@ -237,6 +242,11 @@ pub fn material_voxel(material: u8) -> Voxel {
         37 => Voxel::AlbedoCyan,
         38 => Voxel::AlbedoMagenta,
         39 => Voxel::AlbedoYellow,
+        40 => Voxel::CaveMoss,
+        41 => Voxel::CaveMushroom,
+        42 => Voxel::CaveVine,
+        43 => Voxel::CaveCrystal,
+        44 => Voxel::FlareEmber,
         _ => Voxel::Air,
     }
 }
@@ -1781,6 +1791,52 @@ pub const MATERIALS: [Material; MATERIAL_COUNT] = {
             0.0,
             ACOUSTIC_STONE,
         ),
+        // ---- 40-43  Cave decoration, placed by generation pass two -----------
+        //
+        // Placeholder LOOKS, real PLACEMENT. The scatter pass authors where these
+        // go and how densely; these rows only have to be distinguishable from
+        // each other and from rock while that placement is tuned in-app. They are
+        // `Cover` so a body walks through them, like every other thin decoration
+        // in the table.
+        //
+        // Deliberately no pattern layers yet: a pattern stack authored against a
+        // placeholder albedo would have to be thrown away when the row is really
+        // designed, and it would make these rows look finished when they are not.
+        foliage("cave_moss", [0.16, 0.29, 0.17], 0.95, 0.35),
+        foliage("cave_mushroom", [0.78, 0.72, 0.58], 0.85, 0.20),
+        foliage("cave_vine", [0.19, 0.26, 0.15], 0.90, 0.40),
+        // 43  Cave crystal — the one decoration row that earns emission, because
+        // it is what makes an unlit cave readable. Emits a cool blue; `light`
+        // throws harder than the surface shows so a sparse scatter still lifts a
+        // chamber, the same look/throw split the emitter arc established.
+        // UNMEASURED — tuned at this arc's in-app gate.
+        Material {
+            name: "cave_crystal",
+            albedo: [0.32, 0.48, 0.62],
+            roughness: 0.18,
+            specular: 0.06,
+            kind: MaterialKind::Solid,
+            emission: Some([0.22, 0.55, 0.95]),
+            light: Some([1.76, 4.40, 7.60]),
+            face_roles: None,
+            patterns: NO_PATTERNS,
+            acoustic_alpha: ACOUSTIC_STONE,
+        },
+        // 44  Flare ember — the thrown flare's own row, so a flare stops being
+        // authored as lava. Warm and bright: it is a hand-thrown light source,
+        // and its whole job is to be visible where nothing else is.
+        Material {
+            name: "flare_ember",
+            albedo: [0.46, 0.20, 0.05],
+            roughness: 0.55,
+            specular: 0.03,
+            kind: MaterialKind::Solid,
+            emission: Some([1.60, 0.62, 0.10]),
+            light: Some([9.60, 3.72, 0.60]),
+            face_roles: None,
+            patterns: NO_PATTERNS,
+            acoustic_alpha: ACOUSTIC_GLOW_BLOCK,
+        },
     ]
 };
 
@@ -2514,14 +2570,16 @@ mod tests {
         // 10 KB of table (up from 3.3 when the slot was 32 bytes), which is the
         // argument for putting detail on the material rather than on the voxel
         // restated as a number.
-        // 40 rows: 28 shipped, six `hdr_*` output-depth test targets, and six
-        // `albedo_*` reflectors for L0's indirect-light fixture. Absolute, not
-        // derived, so that a row silently changing size shows up here rather than
-        // nowhere.
+        // 45 rows: 28 shipped, six `hdr_*` output-depth test targets, six
+        // `albedo_*` reflectors for L0's indirect-light fixture, four cave
+        // decoration rows placed by generation pass two, and the flare's own
+        // ember row. Absolute, not derived, so that a row silently changing size
+        // shows up here rather than nowhere.
         //
-        // The `albedo_*` six are appended past `PINNED_ROW_COUNT`, so they cannot
-        // weaken `UPLOAD_PIN` and no pinned row had to be recomputed for them.
-        assert_eq!(MATERIAL_TABLE_BYTES, 15360);
+        // Everything past the `albedo_*` six is likewise appended beyond
+        // `PINNED_ROW_COUNT`, so it cannot weaken `UPLOAD_PIN` and no pinned row
+        // had to be recomputed for it.
+        assert_eq!(MATERIAL_TABLE_BYTES, 17280);
         // The pattern slots must account for two thirds of the row, or the WGSL's
         // fixed-size array has drifted from `MAX_PATTERN_LAYERS`.
         assert_eq!(
@@ -2853,12 +2911,15 @@ mod tests {
         }
         assert_eq!(
             MATERIALS.iter().filter(|m| m.is_emissive()).count(),
-            9,
-            "Three shipped emitters (glow_block, glow_berry, lava) plus six \
-             DIAGNOSTIC ones — the `hdr_*` hue blocks, which are emissive so their \
-             radiance does not depend on irradiance. There is NO emitter-palette cap \
-             to worry about: `cagi.rs` states E5b carries every material's mean \
-             separately rather than indexing a slot table."
+            11,
+            "Five shipped emitters (glow_block, glow_berry, lava, cave_crystal, \
+             flare_ember) plus six DIAGNOSTIC ones — the `hdr_*` hue blocks, which \
+             are emissive so their radiance does not depend on irradiance. \
+             `cave_crystal` and `flare_ember` are the two the cave arc added: the \
+             crystal is what makes an unlit cave readable, and the ember stopped \
+             the thrown flare from being authored as lava. There is NO \
+             emitter-palette cap to worry about: `cagi.rs` states E5b carries every \
+             material's mean separately rather than indexing a slot table."
         );
     }
 

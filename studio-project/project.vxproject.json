@@ -2,6 +2,7 @@
   "schema_version": 3,
   "id": "vx-000000000000000018c77765202f9ec8-0000000000000001",
   "name": "Voxel Studio",
+  "world_seed": 1,
   "material_assignments": {
     "0": {
       "id": "vx-000000000000000018c7776729b79d18-0000000000000002",
@@ -142,6 +143,26 @@
     "4": {
       "id": "vx-000000000000000018c777672b457c90-000000000000000e",
       "path": "materials/04-sand.vmat.json"
+    },
+    "40": {
+      "id": "vx-000000000000000018c9ef2c30412700-0000000000000029",
+      "path": "materials/40-cave-moss.vmat.json"
+    },
+    "41": {
+      "id": "vx-000000000000000018c9ef2c30a63618-000000000000002c",
+      "path": "materials/41-cave-mushroom.vmat.json"
+    },
+    "42": {
+      "id": "vx-000000000000000018c9ef2c30f09cf8-000000000000002f",
+      "path": "materials/42-cave-vine.vmat.json"
+    },
+    "43": {
+      "id": "vx-000000000000000018c9ef2c323c3b80-0000000000000032",
+      "path": "materials/43-cave-crystal.vmat.json"
+    },
+    "44": {
+      "id": "vx-000000000000000018c9ef2c32c5c288-0000000000000035",
+      "path": "materials/44-flare-ember.vmat.json"
     },
     "5": {
       "id": "vx-000000000000000018c777672b931f90-0000000000000011",
@@ -335,6 +356,30 @@
     {
       "id": "vx-000000000000000018c77d2217356f88-0000000000000001",
       "path": "graphs/material-01.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c9ef2c3041bf58-000000000000002a",
+      "path": "graphs/material-40.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c9ef2c30a63a00-000000000000002d",
+      "path": "graphs/material-41.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c9ef2c30f0a0e0-0000000000000030",
+      "path": "graphs/material-42.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c9ef2c323c3b80-0000000000000033",
+      "path": "graphs/material-43.vgraph.json"
+    },
+    {
+      "id": "vx-000000000000000018c9ef2c32c5ca58-0000000000000036",
+      "path": "graphs/material-44.vgraph.json"
+    },
+    {
+      "id": "biome-main-v1",
+      "path": "graphs/biomes.vgraph.json"
     }
   ],
   "active_world_graph": "world-main-v3",
@@ -345,5 +390,6 @@
     }
   ],
   "active_world_profile": "world-default-v2",
-  "runtime_assets": []
+  "runtime_assets": [],
+  "active_biome_graph": "biome-main-v1"
 }

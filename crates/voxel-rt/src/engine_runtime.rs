@@ -9,6 +9,7 @@ use voxel_core::world::VoxelWorld;
 
 use crate::brickmap::Brickmap;
 use crate::environment::{RuntimeEnvironmentState, Season};
+use crate::graph::lowering::GenerationProgram;
 use crate::material_graph_assets::MaterialGraphAssetService;
 use crate::material_table::MaterialTable;
 use crate::studio::StudioScene;
@@ -16,9 +17,6 @@ use crate::studio_assets::{AssetError, StudioProject, StudioProjectStore};
 use crate::variants::RenderQuality;
 use voxel_graph::{GraphAsset, GraphKind};
 use voxel_material_graph::lowering::MaterialGraphShaderSet;
-
-pub(crate) const DEFAULT_WORLD_SEED: u32 = 1;
-pub(crate) const DEFAULT_WORLD_SEASON: f32 = 0.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeMode {
@@ -213,9 +211,28 @@ impl ProjectRuntime {
     }
 }
 
+/// What one world build produced: the totals, and what each stage did.
+///
+/// One value rather than two returned side by side, because every consumer wants
+/// both and threading them separately is how a readout ends up showing totals from
+/// one build next to stages from another.
+#[derive(Clone, Debug)]
+pub struct GenerationOutcome {
+    pub stats: voxel_core::chunk::GenerationStats,
+    pub report: voxel_core::stage_report::StageReport,
+}
+
+/// What the active world graph compiled to.
+///
+/// One `Generated` variant carrying a whole [`GenerationProgram`], rather than the
+/// previous `Generated`/`GeneratedWithCaves` pair. The pair forced every consumer
+/// to match on whether caves existed, and `apply_biome_graph` used that to
+/// silently promote a cave-less world into a cave-bearing one — a graph edit in a
+/// different tab changing what the world graph said. Caves on or off is now a flag
+/// inside the program, where the graph put it.
 #[derive(Clone, Debug)]
 pub enum CompiledWorldProgram {
-    Generated,
+    Generated(GenerationProgram),
     StudioPreview,
 }
 
@@ -240,19 +257,70 @@ impl CompiledWorldProgram {
         if node_types.contains(&"world.studio_preview") {
             Ok(Self::StudioPreview)
         } else if node_types.contains(&"world.generated_terrain") {
-            Ok(Self::Generated)
+            Ok(Self::Generated(crate::graph::lowering::generation_program(
+                graph,
+            )))
         } else {
             Err("world graph has no registered world source".to_string())
         }
     }
 
-    pub fn build(&self, studio_scene: &StudioScene) -> Brickmap {
+    /// The generation program, for a graph-backed world.
+    pub fn generation_program(&self) -> Option<&GenerationProgram> {
         match self {
-            Self::Generated => Brickmap::build(&VoxelWorld::generate(
-                DEFAULT_WORLD_SEED,
-                DEFAULT_WORLD_SEASON,
-            )),
-            Self::StudioPreview => studio_scene.build(),
+            Self::Generated(program) => Some(program),
+            Self::StudioPreview => None,
+        }
+    }
+
+    pub fn build(&self, studio_scene: &StudioScene, world_seed: u64) -> Brickmap {
+        self.build_reporting(studio_scene, world_seed).0
+    }
+
+    /// Build the world and report what generation produced.
+    ///
+    /// The stats are measured during generation, so the generation window shows
+    /// the world on screen rather than a second pass that could disagree with it.
+    /// `None` for the studio preview, which generates no world at all.
+    pub fn build_reporting(
+        &self,
+        studio_scene: &StudioScene,
+        world_seed: u64,
+    ) -> (Brickmap, Option<GenerationOutcome>) {
+        match self {
+            Self::Generated(program) => {
+                let (world, stats, report) = VoxelWorld::from_chunk_generator_reporting(
+                    &program.chunk_generator(world_seed),
+                );
+                (
+                    Brickmap::build(&world),
+                    Some(GenerationOutcome { stats, report }),
+                )
+            }
+            Self::StudioPreview => (studio_scene.build(), None),
+        }
+    }
+
+    /// Apply the authored biome cave recipe to the executable cave pass.
+    ///
+    /// One call into the shared lowering, which the Studio previews use too — the
+    /// preview and the built world cannot disagree about what a biome graph means
+    /// because there is only one mapping left.
+    pub fn apply_biome_graph(&mut self, graph: &GraphAsset) -> Result<(), String> {
+        if graph.kind != GraphKind::Biome {
+            return Err("biome update received a non-biome graph".to_string());
+        }
+        let resolved = graph.resolve(&crate::graph::CATALOGUE);
+        if let Some(error) = resolved
+            .diagnostics
+            .iter()
+            .find(|item| item.severity == voxel_graph::DiagnosticSeverity::Error)
+        {
+            return Err(error.message.clone());
+        }
+        match self {
+            Self::Generated(program) => crate::graph::lowering::apply_biome_graph(program, graph),
+            Self::StudioPreview => Ok(()),
         }
     }
 }
@@ -270,7 +338,11 @@ impl VoxelEngineRuntime {
         let program = match config.mode {
             RuntimeMode::StudioEdit => CompiledWorldProgram::StudioPreview,
             RuntimeMode::WorldEdit => {
-                Self::load_world_program(&project).unwrap_or(CompiledWorldProgram::Generated)
+                // A project with no readable world graph still gets a world: the
+                // default generation program is the registered fallback.
+                Self::load_world_program(&project).unwrap_or_else(|_| {
+                    CompiledWorldProgram::Generated(GenerationProgram::default())
+                })
             }
         };
         Self {
@@ -293,13 +365,35 @@ impl VoxelEngineRuntime {
             .load_active_world_graph(&store)
             .map_err(|error| error.to_string())?
         else {
-            return Ok(CompiledWorldProgram::Generated);
+            return Ok(CompiledWorldProgram::Generated(GenerationProgram::default()));
         };
-        CompiledWorldProgram::compile(&graph)
+        let mut program = CompiledWorldProgram::compile(&graph)?;
+        // A registered biome graph is authored data like any other, so it applies
+        // at load. Before this, the biome graph was applied only by the Biomes
+        // tab's Update World button and lived purely in memory: the caves you
+        // tuned and saved were silently replaced by the world graph's own recipe
+        // on the next launch.
+        if let Some(biome_graph) = project
+            .project
+            .load_active_biome_graph(&store)
+            .map_err(|error| error.to_string())?
+        {
+            program.apply_biome_graph(&biome_graph)?;
+        }
+        Ok(program)
     }
 
     pub fn build_world(&self, studio_scene: &StudioScene) -> Brickmap {
-        self.program.build(studio_scene)
+        self.build_world_reporting(studio_scene).0
+    }
+
+    /// Build the world and report what generation produced, for the debug window.
+    pub fn build_world_reporting(
+        &self,
+        studio_scene: &StudioScene,
+    ) -> (Brickmap, Option<GenerationOutcome>) {
+        self.program
+            .build_reporting(studio_scene, self.project.project.manifest.world_seed)
     }
 }
 
@@ -393,12 +487,101 @@ mod tests {
             light_fixture: None,
         };
         let runtime = VoxelEngineRuntime::load(config);
-        assert!(matches!(runtime.program, CompiledWorldProgram::Generated));
+        let program = runtime
+            .program
+            .generation_program()
+            .expect("the checked-in graph is a generated world");
+        assert!(program.caves_enabled, "the checked-in graph carves caves");
+        assert_eq!(
+            program.cave_program.shape,
+            voxel_core::cave::CaveShape::CellularAutomata
+        );
         assert!(runtime
             .project
             .diagnostics
             .iter()
             .all(|item| !item.fallback_active));
+    }
+
+    #[test]
+    fn checked_in_biome_graph_lowers_cellular_controls_into_the_world_program() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let json = std::fs::read_to_string(root.join("graphs/biomes.vgraph.json")).unwrap();
+        let graph: GraphAsset = serde_json::from_str(&json).unwrap();
+        let mut program =
+            CompiledWorldProgram::Generated(crate::graph::lowering::GenerationProgram::default());
+        program.apply_biome_graph(&graph).unwrap();
+        let lowered = program
+            .generation_program()
+            .expect("applying a biome graph keeps a generated world");
+        let cave_program = &lowered.cave_program;
+        assert!(lowered.caves_enabled);
+        assert_eq!(
+            cave_program.shape,
+            voxel_core::cave::CaveShape::CellularAutomata
+        );
+        assert_eq!(cave_program.cellular_iterations, 8);
+        assert_eq!(cave_program.cellular_cleanup_iterations, 2);
+        assert_eq!(cave_program.cellular_cell_size, 2);
+        assert!((cave_program.cellular_fill - 0.40).abs() < f32::EPSILON);
+        assert!((cave_program.cellular_worley_scale - 0.05).abs() < f32::EPSILON);
+        assert!((cave_program.cellular_billow_scale - 0.08).abs() < f32::EPSILON);
+        assert!((cave_program.cellular_billow_strength - 0.40).abs() < f32::EPSILON);
+        assert_eq!(cave_program.cellular_billow_octaves, 3);
+    }
+
+    /// The registered biome graph must apply at LOAD, not only when the Biomes
+    /// tab's button is pressed. Before it was registered, a tuned and saved cave
+    /// recipe silently stopped affecting the world after a restart: startup
+    /// compiled the world graph alone (4 iterations) while the biome graph the
+    /// author had been working against says 8.
+    #[test]
+    fn the_registered_biome_graph_is_applied_at_startup() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let runtime = VoxelEngineRuntime::load(VoxelEngineConfig {
+            mode: RuntimeMode::WorldEdit,
+            project_root: root.clone(),
+            light_fixture: None,
+        });
+        let program = runtime
+            .program
+            .generation_program()
+            .expect("the checked-in project is a generated world");
+        let world_graph_iterations = 4;
+        assert_ne!(
+            program.cave_program.cellular_iterations, world_graph_iterations,
+            "the biome graph was not applied at load"
+        );
+        assert_eq!(program.cave_program.cellular_iterations, 8);
+        // ...and it must not have relocated the cave band the world graph owns.
+        let world_json = std::fs::read_to_string(root.join("graphs/world.vgraph.json")).unwrap();
+        let world_graph: GraphAsset = serde_json::from_str(&world_json).unwrap();
+        let authored = crate::graph::lowering::generation_program(&world_graph);
+        assert_eq!(program.cave_program.min_y, authored.cave_program.min_y);
+        assert_eq!(program.cave_program.max_y, authored.cave_program.max_y);
+        assert_eq!(program.cave_fluids, authored.cave_fluids);
+    }
+
+    /// Pass two must be authored by the checked-in graph, not merely defaulted on.
+    #[test]
+    fn the_checked_in_graph_authors_generation_pass_two() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../studio-project");
+        let json = std::fs::read_to_string(root.join("graphs/world.vgraph.json")).unwrap();
+        let graph: GraphAsset = serde_json::from_str(&json).unwrap();
+        assert!(
+            graph
+                .nodes
+                .values()
+                .any(|node| node.node_type.0 == "world.scatter"),
+            "the world graph has no scatter node, so decoration is not authored"
+        );
+        let program = crate::graph::lowering::generation_program(&graph);
+        assert!(program.scatter.enabled);
+        assert!(program.cave_fluids.enabled);
+        assert!(
+            program.terrain.base_height - program.terrain.relief / 2 < program.terrain.sea_level,
+            "the authored terrain never reaches below sea level, so it has no coastline"
+        );
     }
 
     #[test]

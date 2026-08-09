@@ -11,10 +11,11 @@
 //! verdict, and reads/writes go through [`LeverId::read`] / [`LeverId::apply`].
 //! Adding a lever row therefore adds its control here automatically.
 //!
-//! Seam: the overlay only mutates the state it is handed (`vsync_enabled`,
-//! [`SunSettings`], [`RenderQuality`]) — reconfiguring the surface, resizing the
-//! storage texture, writing the lighting uniform, and switching the pipeline on
-//! a compile-time lever change all stay in the platform layer.
+//! Seam: the overlay only mutates the state it is handed (`vsync_enabled`, the
+//! explicit `debug_no_clip_flight` flag, [`SunSettings`], [`RenderQuality`]) —
+//! reconfiguring the surface, resizing the storage texture, writing the lighting
+//! uniform, and switching the pipeline on a compile-time lever change all stay
+//! in the platform layer.
 
 use winit::event::WindowEvent;
 use winit::window::Window;
@@ -28,6 +29,7 @@ use voxel_game_ui::performance_panel::PerformancePanel;
 use voxel_game_ui::settings_panel::{
     MovementReadout, SettingsContext, SettingsPanel, WorldEditReadout,
 };
+use voxel_game_ui::worldgen_panel::{WorldgenContext, WorldgenPanel};
 use voxel_material::material::{self, MATERIAL_COUNT};
 use voxel_material_graph::lowering::GraphEditorState;
 use voxel_rt::material_table::MaterialTable;
@@ -35,7 +37,7 @@ use voxel_rt::profiling::FrameTimings;
 use voxel_rt::studio::StudioPose;
 use voxel_rt::studio_assets::StudioAssetPanelState;
 use voxel_rt::variants::RenderQuality;
-use voxel_studio::{draw_graph_drawer, graph_drawer_height};
+use voxel_studio::{draw_graph_drawer, draw_graph_viewport_preview, graph_drawer_height, GraphTab};
 
 /// Read-only per-frame display data for the stats panel.
 pub struct OverlayFrameData {
@@ -52,6 +54,22 @@ pub struct OverlayFrameData {
     pub target: Option<TargetHighlightReadout>,
     /// S2 — `Some` only in the material studio, where the example-scene bar lives.
     pub studio: Option<StudioPoseReadout>,
+    /// What the last world build produced, for the generation window. `None` in
+    /// the material studio, which generates no world at all.
+    pub worldgen: Option<WorldgenReadout>,
+}
+
+/// The generator the live world was built from, and what it produced.
+///
+/// Borrowed from the app rather than recomputed, so the window cannot report a
+/// world other than the one on screen.
+pub struct WorldgenReadout {
+    pub generator: voxel_core::chunk::ChunkGenerator,
+    pub stats: voxel_core::chunk::GenerationStats,
+    /// What each generation stage did, so the window can show the pipeline as
+    /// layers rather than only the finished totals.
+    pub report: voxel_core::stage_report::StageReport,
+    pub world_seed: u64,
 }
 
 /// S2 — what the studio's example-scene bar has to mark as current.
@@ -91,6 +109,8 @@ pub struct Overlay {
     performance: PerformancePanel,
     /// Press O. Holds everything that used to be permanently on screen.
     settings: SettingsPanel,
+    /// Press G. What generation produced, and a slice through the cave field.
+    worldgen: WorldgenPanel,
 }
 
 impl Overlay {
@@ -121,6 +141,7 @@ impl Overlay {
             surface_format,
             performance: PerformancePanel::new(),
             settings: SettingsPanel::new(),
+            worldgen: WorldgenPanel::new(),
         }
     }
 
@@ -171,6 +192,11 @@ impl Overlay {
     /// O — show or hide the settings and debug window.
     pub fn toggle_settings_panel(&mut self) {
         self.settings.toggle();
+    }
+
+    /// G — show or hide the world-generation window.
+    pub fn toggle_worldgen_panel(&mut self) {
+        self.worldgen.toggle();
     }
 
     /// Drop perf history after a deliberate discontinuity (vsync toggle, output
@@ -229,6 +255,7 @@ impl Overlay {
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
         frame_data: &OverlayFrameData,
+        debug_no_clip_flight: &mut bool,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
         vsync_enabled: &mut bool,
         output_depth: &mut OutputDepth,
@@ -248,6 +275,8 @@ impl Overlay {
         material_panel: &mut MaterialPanelState,
         studio_assets: &mut StudioAssetPanelState,
         graph_editor: &mut GraphEditorState,
+        biome_graph_editor: &mut GraphEditorState,
+        graph_tab: &mut GraphTab,
     ) {
         // The one number that stays permanently on screen. Everything else moved
         // into the P window: per-span cost is something you go looking for, and
@@ -267,9 +296,16 @@ impl Overlay {
         let context = self.context.clone();
         let performance = &mut self.performance;
         let settings = &mut self.settings;
+        let worldgen = &mut self.worldgen;
         let full_output = context.run_ui(raw_input, |root_ui| {
             performance.draw(root_ui.ctx());
-            draw_graph_drawer(root_ui, graph_editor, material_table);
+            draw_graph_drawer(
+                root_ui,
+                graph_editor,
+                biome_graph_editor,
+                material_table,
+                graph_tab,
+            );
             draw_target_highlight(root_ui, frame_data.target.as_ref(), material_table);
             if let Some(studio) = &frame_data.studio {
                 draw_studio_pose_bar(root_ui, studio, material_panel, material_table);
@@ -282,10 +318,27 @@ impl Overlay {
             // nothing while covering the bottom of the subject. The studio picks its
             // material from the row being edited (see
             // `follow_selected_row_in_the_studio`), not from a hotbar.
-            if frame_data.studio.is_none() {
+            let graph_preview_open = match *graph_tab {
+                GraphTab::Materials => graph_editor.preview_open,
+                GraphTab::Biomes => biome_graph_editor.preview_open,
+            };
+            if frame_data.studio.is_none() && !graph_preview_open {
                 let drawer_height = graph_drawer_height(root_ui, graph_editor);
                 draw_block_hotbar(root_ui, material_table, material_panel, drawer_height);
             }
+            let active_graph = match *graph_tab {
+                GraphTab::Materials => &mut *graph_editor,
+                GraphTab::Biomes => &mut *biome_graph_editor,
+            };
+            let viewport = root_ui.ctx().viewport_rect();
+            let preview_rect = egui::Rect::from_min_max(
+                viewport.min,
+                egui::pos2(
+                    viewport.max.x,
+                    viewport.max.y - graph_drawer_height(root_ui, active_graph),
+                ),
+            );
+            draw_graph_viewport_preview(root_ui, active_graph, preview_rect);
             // The ONLY permanently visible readout: one line. Everything that used
             // to live here — resolutions, edit counters, movement, vsync, output
             // depth, quality levers, the sun section — moved into the O window,
@@ -313,6 +366,17 @@ impl Overlay {
                         );
                     });
                 });
+            if let Some(readout) = &frame_data.worldgen {
+                worldgen.draw(
+                    root_ui.ctx(),
+                    WorldgenContext {
+                        generator: &readout.generator,
+                        stats: &readout.stats,
+                        report: &readout.report,
+                        world_seed: readout.world_seed,
+                    },
+                );
+            }
             settings.draw(
                 root_ui.ctx(),
                 SettingsContext {
@@ -322,6 +386,7 @@ impl Overlay {
                     scale_factor,
                     world_edit: &frame_data.world_edit,
                     movement: &frame_data.movement,
+                    debug_no_clip_flight,
                     vsync_enabled,
                     output_depth,
                     output_support,

@@ -30,9 +30,18 @@
 //
 // Own bindings (group 0), on top of the shared ones documented in world.wgsl
 // and cagi_volume.wgsl:
-//   0  uniform  Camera        — camera.rs CameraUniform (80 bytes; position
+//   0  uniform  Camera        — camera.rs CameraUniform (608 bytes; position
 //                               in world meters, ray basis vectors, resolution)
 //   6  texture  output        — rgba8unorm storage texture, write-only
+
+const MAX_FLYING_FLARES: u32 = 16u;
+
+struct Flare {
+    head: vec3<f32>,        // VOXEL units, already divided on the CPU
+    head_radius: f32,
+    tail: vec3<f32>,
+    tail_radius: f32,       // zero marks an unused slot
+}
 
 struct Camera {
     position: vec3<f32>,      // eye, world METERS
@@ -44,7 +53,13 @@ struct Camera {
     up_scaled: vec3<f32>,     // up * tan(fov_y/2)
     _pad3: f32,
     resolution: vec2<f32>,    // output size, pixels
-    _pad4: vec2<f32>,
+    debug_no_clip: f32,       // primary rays escape enclosing solid for debug flight
+    _pad4: f32,
+    flare_count: u32,
+    _flare_pad0: u32,
+    _flare_pad1: u32,
+    _flare_pad2: u32,
+    flares: array<Flare, 16>, // in-flight flare entities, VOXEL units
 }
 
 @group(G_WORLD) @binding(B_CAMERA) var<uniform> camera: Camera;
@@ -1281,11 +1296,97 @@ fn water_surface_radiance(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f
 // The shading dispatch: a liquid is a medium boundary, everything else is a
 // surface. One compare, folded away when water is off.
 fn shade_hit(hit: Hit, ray_origin: vec3<f32>, ray_direction: vec3<f32>,
-             pixel: vec2<f32>) -> vec3<f32> {
+            pixel: vec2<f32>) -> vec3<f32> {
     if (WATER_MODE != WATER_MODE_OPAQUE && material_is_liquid(hit.material)) {
         return water_surface_radiance(hit, ray_origin, ray_direction, pixel);
     }
     return shade_surface(hit, ray_origin, ray_direction, pixel, WATER_NO_MEDIUM);
+}
+
+// In debug no-clip flight the camera may sit inside rock. A normal closest-hit
+// trace therefore reports the starting voxel at t=0, with no meaningful
+// surface normal or lighting. Walk just far enough to leave the contiguous
+// occupied volume, then let the normal primary trace find the cave's lit,
+// air-facing surfaces. The coarse pass skips whole uniform bricks; only the
+// boundary brick needs the fine 8^3 traversal.
+//
+// Returns a distance just inside the first empty voxel, or -1 when this ray
+// never leaves solid inside the trace range.
+fn escape_enclosing_solid(origin: vec3<f32>, direction: vec3<f32>,
+                          max_distance: f32) -> f32 {
+    let inverse_direction = vec3<f32>(
+        safe_inverse(direction.x),
+        safe_inverse(direction.y),
+        safe_inverse(direction.z),
+    );
+    let bounds = intersect_world_bounds(origin, inverse_direction);
+    if (bounds.x > bounds.y) {
+        return -1.0;
+    }
+
+    let grid_size = vec3<i32>(brickmap.brick_grid_size);
+    var state = dda_setup(origin, direction, inverse_direction, bounds.x, BRICK_SIZE,
+                          vec3<i32>(0, 0, 0), grid_size - vec3<i32>(1, 1, 1));
+    let t_limit = min(bounds.y, max_distance);
+    for (var brick_step = 0u; brick_step < MAX_BRICK_STEPS; brick_step = brick_step + 1u) {
+        if (any(state.cell < vec3<i32>(0, 0, 0)) || any(state.cell >= grid_size)
+            || state.t > t_limit) {
+            break;
+        }
+        let cell_index = brick_cell_index(state.cell);
+        if (!brick_occupied(cell_index)) {
+            return state.t + RAY_EPSILON;
+        }
+
+        let pointer = brick_indices[cell_index];
+        if (!brick_is_uniform(pointer)) {
+            let brick_min_cell = state.cell * 8;
+            let brick_max_cell = brick_min_cell + vec3<i32>(7, 7, 7);
+            let brick_exit = min(min(state.t_max.x, state.t_max.y), state.t_max.z);
+            var fine = dda_setup(origin, direction, inverse_direction, state.t, 1.0,
+                                 brick_min_cell, brick_max_cell);
+            for (var voxel_step = 0u; voxel_step < MAX_VOXEL_STEPS;
+                 voxel_step = voxel_step + 1u) {
+                if (!occupancy_bit_set(pointer, local_bit_index(fine.cell, state.cell))) {
+                    return fine.t + RAY_EPSILON;
+                }
+                dda_step(&fine);
+                if (any(fine.cell < brick_min_cell) || any(fine.cell > brick_max_cell)
+                    || fine.t > brick_exit + RAY_EPSILON) {
+                    break;
+                }
+            }
+        }
+        dda_step(&state);
+    }
+    return -1.0;
+}
+
+/// First positive ray/sphere intersection, or a negative value for a miss.
+/// The head and tail spheres together keep a 2-texel flying flare legible
+/// without rewriting brickmap geometry every frame.
+fn flare_particle_distance(
+    origin: vec3<f32>,
+    direction: vec3<f32>,
+    centre: vec3<f32>,
+    radius: f32,
+) -> f32 {
+    let offset = origin - centre;
+    let half_b = dot(offset, direction);
+    let discriminant = half_b * half_b - (dot(offset, offset) - radius * radius);
+    if (discriminant < 0.0) {
+        return -1.0;
+    }
+    let root = sqrt(discriminant);
+    let near = -half_b - root;
+    if (near > 0.0) {
+        return near;
+    }
+    let far = -half_b + root;
+    if (far > 0.0) {
+        return far;
+    }
+    return -1.0;
 }
 
 // ---- Entry point ------------------------------------------------------------
@@ -1319,13 +1420,67 @@ fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
         let eye_material = voxel_material_at(vec3<i32>(floor(origin)));
         color = water_medium_radiance(origin, direction, eye_material, pixel);
     } else {
-        let hit = trace(origin, direction, MAX_TRACE_DISTANCE, false);
-        if (hit.material == 0u) {
+        var trace_origin = origin;
+        var skipped_distance = 0.0;
+        if (camera.debug_no_clip > 0.5 && voxel_occupied(vec3<i32>(floor(origin)))) {
+            let escape_distance = escape_enclosing_solid(origin, direction, MAX_TRACE_DISTANCE);
+            if (escape_distance > 0.0) {
+                trace_origin = origin + direction * escape_distance;
+                skipped_distance = escape_distance;
+            }
+        }
+        var hit = trace(trace_origin, direction, MAX_TRACE_DISTANCE - skipped_distance, false);
+        var flare_distance = MAX_TRACE_DISTANCE + 1.0;
+        var flare_is_head = false;
+        for (var index = 0u; index < MAX_FLYING_FLARES; index = index + 1u) {
+            if (index >= camera.flare_count) {
+                break;
+            }
+            let flare = camera.flares[index];
+            if (flare.tail_radius <= 0.0) {
+                continue;
+            }
+            // Voxel-space centres and radii arrive ready to use: the metre->voxel
+            // conversion is constant over the whole image, so it belongs on the CPU
+            // and not in a loop that runs once per flare per pixel.
+            let head_distance = flare_particle_distance(
+                trace_origin,
+                direction,
+                flare.head,
+                flare.head_radius,
+            );
+            let tail_distance = flare_particle_distance(
+                trace_origin,
+                direction,
+                flare.tail,
+                flare.tail_radius,
+            );
+            if (head_distance > 0.0 && head_distance < flare_distance) {
+                flare_distance = head_distance;
+                flare_is_head = true;
+            }
+            if (tail_distance > 0.0 && tail_distance < flare_distance) {
+                flare_distance = tail_distance;
+                flare_is_head = false;
+            }
+        }
+        let flare_visible = flare_distance <= MAX_TRACE_DISTANCE
+            && (hit.material == 0u || flare_distance < hit.distance);
+        if (flare_visible) {
+            // A hot yellow head and smaller red ember tail make the flight
+            // visible even in an otherwise black cave.
+            color = select(
+                vec3<f32>(18.0, 1.8, 0.08),
+                vec3<f32>(42.0, 9.0, 0.35),
+                flare_is_head,
+            );
+        } else if (hit.material == 0u) {
             color = sky_color_at_distance(
                 direction,
                 MAX_TRACE_DISTANCE * brickmap.voxel_size_meters,
             );
         } else {
+            hit.distance = hit.distance + skipped_distance;
             color = shade_hit(hit, origin, direction, pixel);
         }
     }

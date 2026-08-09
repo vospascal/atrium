@@ -7,6 +7,7 @@
 
 use voxel_graph::NodeDeclaration;
 
+pub(crate) mod biome;
 pub mod world;
 
 /// The families `voxel-rt` itself declares. The material family is
@@ -14,9 +15,24 @@ pub mod world;
 /// restate another crate's nodes.
 pub static BUILTIN_NODES: &[NodeDeclaration] = &[
     world::generated_terrain::DECLARATION,
+    world::cave_carver::DECLARATION,
+    world::cave_chambers::DECLARATION,
+    world::cave_detail::DECLARATION,
+    world::cave_fluids::DECLARATION,
+    world::scatter_rule::DECLARATION,
+    world::scatter::DECLARATION,
     world::compose::DECLARATION,
     world::output::DECLARATION,
     world::studio_preview::DECLARATION,
+    biome::definition::DECLARATION,
+    biome::noise::DECLARATION,
+    biome::blend::DECLARATION,
+    biome::cellular_seed::DECLARATION,
+    biome::cellular_smooth::DECLARATION,
+    biome::cellular_cleanup::DECLARATION,
+    biome::cellular_connect::DECLARATION,
+    biome::output::DECLARATION,
+    biome::sample::DECLARATION,
 ];
 
 #[cfg(test)]
@@ -30,7 +46,8 @@ mod tests {
     /// nothing else would complain.
     #[test]
     fn catalogue_matches_the_family_arrays() {
-        let families: Vec<&NodeDeclaration> = world::NODES.iter().collect();
+        let families: Vec<&NodeDeclaration> =
+            world::NODES.iter().chain(biome::NODES.iter()).collect();
         let flat: Vec<&NodeDeclaration> = BUILTIN_NODES.iter().collect();
         assert_eq!(
             flat.len(),
@@ -54,7 +71,7 @@ mod tests {
     #[test]
     fn every_node_file_is_declared_in_its_family() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/graph/nodes");
-        for (family, declared) in [("world", world::NODES)] {
+        for (family, declared) in [("world", world::NODES), ("biome", biome::NODES)] {
             let mut files: Vec<String> = std::fs::read_dir(root.join(family))
                 .expect("family directory")
                 .map(|entry| {

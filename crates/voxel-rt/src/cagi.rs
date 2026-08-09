@@ -1618,8 +1618,11 @@ mod tests {
         let grid = CagiGrid::for_world(4, CagiLayout::Isotropic, 24);
         // 25 brick rows = 200 voxels = 50 cells, plus 2 margin cells.
         assert_eq!(grid.size[1], 52);
-        // Never taller than the world.
-        let tall = CagiGrid::for_world(4, CagiLayout::Isotropic, 31);
+        // Never taller than the world: occupancy in the topmost brick row asks
+        // for the full world height PLUS the margin, and the clamp must give
+        // back exactly the world height.
+        let topmost_brick_row = BRICK_GRID_Y as u32 - 1;
+        let tall = CagiGrid::for_world(4, CagiLayout::Isotropic, topmost_brick_row);
         assert_eq!(tall.size[1], (WORLD_SIZE_Y as u32) / 4);
         // An empty world still gets a usable grid.
         let empty = CagiGrid::for_world(8, CagiLayout::Isotropic, EMPTY_COLUMN);

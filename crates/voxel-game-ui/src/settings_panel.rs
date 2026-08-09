@@ -21,11 +21,12 @@
 //! 1. **Display** — window, physical and render resolutions (the Retina trap).
 //! 2. **World (E2)** — edit counters and world-thread state.
 //! 3. **Movement (E2b)** — which model drives the view and what the body is doing.
-//! 4. **Presentation** — vsync and the whole output-depth / tonemap path.
-//! 5. **Quality** — the lever registry and its presets.
-//! 6. **Sun** — the day/night cycle and light scaling.
-//! 7. **Weather** — the cloud deck: named conditions, then its dials.
-//! 8. **Studio** — asset and project panel.
+//! 4. **Debug** — explicit no-clip flight for inspecting generated cave volumes.
+//! 5. **Presentation** — vsync and the whole output-depth / tonemap path.
+//! 6. **Quality** — the lever registry and its presets.
+//! 7. **Sun** — the day/night cycle and light scaling.
+//! 8. **Weather** — the cloud deck: named conditions, then its dials.
+//! 9. **Studio** — asset and project panel.
 //!
 //! The leaf drawing functions for 4, 5, 7 and the movement readout live here, with the two
 //! readout structs they render ([`MovementReadout`], [`WorldEditReadout`]).
@@ -73,6 +74,9 @@ pub struct SettingsContext<'frame> {
     pub scale_factor: f64,
     pub world_edit: &'frame WorldEditReadout,
     pub movement: &'frame MovementReadout,
+    /// Explicit debug override: let the fly-camera eye pass through solid
+    /// voxels.  Normal fly mode resolves the eye against the world first.
+    pub debug_no_clip_flight: &'frame mut bool,
     pub vsync_enabled: &'frame mut bool,
     pub output_depth: &'frame mut OutputDepth,
     pub output_support: OutputSupport,
@@ -140,6 +144,7 @@ fn draw_body(ui: &mut egui::Ui, settings: SettingsContext<'_>) {
         scale_factor,
         world_edit,
         movement,
+        debug_no_clip_flight,
         vsync_enabled,
         output_depth,
         output_support,
@@ -207,6 +212,20 @@ fn draw_body(ui: &mut egui::Ui, settings: SettingsContext<'_>) {
 
     ui.collapsing("Movement (E2b)", |ui| {
         draw_movement_readout(ui, movement);
+    });
+
+    ui.collapsing("Debug", |ui| {
+        ui.checkbox(debug_no_clip_flight, "No-clip flight")
+            .on_hover_text(
+                "When enabled, F enters fly mode without voxel collision. This is useful for \
+                 inspecting cave generation from inside solid terrain; disable it for ordinary \
+                 cave exploration.",
+            );
+        ui.label(if *debug_no_clip_flight {
+            "F: fly through solid voxels (debug)"
+        } else {
+            "F: fly camera stops at solid voxels"
+        });
     });
 
     ui.collapsing("Presentation", |ui| {

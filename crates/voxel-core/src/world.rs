@@ -1,16 +1,18 @@
 //! One-metre voxel world authority.
 //!
 //! Gameplay, generation, destruction and construction operate on a
-//! `125 × 32 × 125` lattice of indivisible one-metre voxels. Renderers may
+//! `125 × 64 × 125` lattice of indivisible one-metre voxels. Renderers may
 //! represent one world voxel with an `8 × 8 × 8` detail tile, but that tile is
 //! an implementation detail used only by authored assets and material detail.
 //! Procedural terrain never writes individual detail cells.
 
+use crate::cave::CellularFieldCache;
+use crate::chunk::{ChunkCoord, ChunkGenerator};
 use crate::noise::{fractal_noise_2d, smoothstep};
 
 /// Physical world dimensions and ordinary gameplay-voxel counts.
 pub const WORLD_VOXELS_X: usize = 125;
-pub const WORLD_VOXELS_Y: usize = 32;
+pub const WORLD_VOXELS_Y: usize = 64;
 pub const WORLD_VOXELS_Z: usize = 125;
 pub const WORLD_VOXEL_SIZE_METERS: f32 = 1.0;
 
@@ -33,12 +35,12 @@ pub const WORLD_SIZE_Z: usize = DETAIL_GRID_SIZE_Z;
 pub const VOXEL_SIZE: f32 = DETAIL_CELL_SIZE_METERS;
 
 /// Water occupies complete world voxels through this logical Y coordinate.
-pub const WATER_LEVEL_WORLD: i32 = 10;
+pub const WATER_LEVEL_WORLD: i32 = 32;
 /// Last detail cell belonging to [`WATER_LEVEL_WORLD`].
 pub const WATER_LEVEL: i32 = (WATER_LEVEL_WORLD + 1) * DETAIL_CELLS_PER_WORLD_VOXEL as i32 - 1;
 
 /// The floating island's rim underside in world-voxel coordinates.
-pub const PLATEAU_FLOOR_WORLD: i32 = 6;
+pub const PLATEAU_FLOOR_WORLD: i32 = 4;
 /// First detail layer at that logical height.
 pub const PLATEAU_FLOOR: i32 = PLATEAU_FLOOR_WORLD * DETAIL_CELLS_PER_WORLD_VOXEL as i32;
 
@@ -145,9 +147,78 @@ pub enum Voxel {
     AlbedoCyan,
     AlbedoMagenta,
     AlbedoYellow,
+    // ---- Cave decoration, scattered by generation pass two -------------------
+    //
+    // Deliberately crude rows: this arc's work is that the PLACEMENT is authored
+    // and deterministic, so the look can be re-authored in Studio later without
+    // touching the generator. `CaveCrystal` is the exception that earns its
+    // emission — it is what makes a cave readable without a torch.
+    CaveMoss,
+    CaveMushroom,
+    CaveVine,
+    CaveCrystal,
+    /// The thrown flare's own material. It exists so a flare stops masquerading
+    /// as [`Voxel::Lava`]: sharing that row meant the eyedropper picked "lava"
+    /// off a flare and any retune of molten rock restyled every flare with it.
+    FlareEmber,
 }
 
 impl Voxel {
+    /// Every voxel kind, in discriminant order.
+    ///
+    /// Needed by anything that has to present a distribution over voxels — the
+    /// generation window's material composition, for one — because a count keyed
+    /// by discriminant is otherwise a number nobody can name. A test asserts this
+    /// list is complete and in order, so a new variant that is not added here
+    /// fails rather than silently vanishing from every readout.
+    pub const ALL: [Self; 45] = [
+        Self::Air,
+        Self::Grass,
+        Self::TallGrass,
+        Self::Dirt,
+        Self::Sand,
+        Self::Sediment,
+        Self::Stone,
+        Self::Water,
+        Self::Trunk,
+        Self::TrunkBirch,
+        Self::Leaves,
+        Self::LeavesDark,
+        Self::LeavesBirch,
+        Self::LeavesPine,
+        Self::FlowerPink,
+        Self::FlowerWhite,
+        Self::FlowerYellow,
+        Self::FlowerBlue,
+        Self::WaterWeed,
+        Self::LilyPad,
+        Self::LilyBloom,
+        Self::Reed,
+        Self::CattailHead,
+        Self::Snow,
+        Self::GlowBlock,
+        Self::GlowBerry,
+        Self::Lava,
+        Self::SlateTile,
+        Self::HdrRed,
+        Self::HdrGreen,
+        Self::HdrBlue,
+        Self::HdrCyan,
+        Self::HdrMagenta,
+        Self::HdrYellow,
+        Self::AlbedoRed,
+        Self::AlbedoGreen,
+        Self::AlbedoBlue,
+        Self::AlbedoCyan,
+        Self::AlbedoMagenta,
+        Self::AlbedoYellow,
+        Self::CaveMoss,
+        Self::CaveMushroom,
+        Self::CaveVine,
+        Self::CaveCrystal,
+        Self::FlareEmber,
+    ];
+
     pub fn is_solid(self) -> bool {
         !matches!(
             self,
@@ -164,7 +235,36 @@ impl Voxel {
                 | Voxel::Reed
                 | Voxel::CattailHead
                 | Voxel::GlowBerry
+                | Voxel::CaveMoss
+                | Voxel::CaveMushroom
+                | Voxel::CaveVine
         )
+    }
+
+    /// Whether this voxel is decoration placed by generation pass two.
+    ///
+    /// Pass two must be able to recognise its own output, so re-running it over a
+    /// world it already decorated replaces cover rather than stacking on it.
+    pub fn is_scatter_cover(self) -> bool {
+        matches!(
+            self,
+            Voxel::TallGrass
+                | Voxel::FlowerPink
+                | Voxel::FlowerWhite
+                | Voxel::FlowerYellow
+                | Voxel::FlowerBlue
+                | Voxel::CaveMoss
+                | Voxel::CaveMushroom
+                | Voxel::CaveVine
+                | Voxel::CaveCrystal
+        )
+    }
+
+    /// Whether a ray and a body both pass through this voxel, i.e. it is air or a
+    /// liquid. The generator's cave passes use this to decide what counts as an
+    /// open void, so water already placed in a cave does not read as rock.
+    pub fn is_open_space(self) -> bool {
+        matches!(self, Voxel::Air | Voxel::Water | Voxel::Lava)
     }
 }
 
@@ -188,6 +288,81 @@ impl VoxelWorld {
     pub fn generate(seed: u32, _season: f32) -> Self {
         let heights = generated_heightmap(seed);
         Self::from_heightmap(&heights, seed)
+    }
+
+    /// Build the renderer-sized region from a complete generator configuration.
+    ///
+    /// One constructor rather than the three stacked wrappers this replaced. Each
+    /// of those existed only to fill in a default the next one down needed, so
+    /// every new authored control — `surface_headroom` was the last one — meant
+    /// editing three signatures in lockstep. Taking the configuration itself means
+    /// the terrain shape, cave, fluid and scatter programs arrive together and
+    /// adding the next one changes nothing here.
+    pub fn from_chunk_generator(generator: &ChunkGenerator) -> Self {
+        Self::from_chunk_generator_reporting(generator).0
+    }
+
+    /// Build the region and report what generation produced.
+    ///
+    /// The stats are measured during generation, so the debug window shows the
+    /// world that exists rather than a second pass over it that could disagree.
+    pub fn from_chunk_generator_reporting(
+        generator: &ChunkGenerator,
+    ) -> (
+        Self,
+        crate::chunk::GenerationStats,
+        crate::stage_report::StageReport,
+    ) {
+        let generator = ChunkGenerator {
+            height: WORLD_VOXELS_Y,
+            ..generator.clone()
+        };
+        // One field cache for the whole region: the cellular field is a function
+        // of (region, band), so all 64 chunks of this world share four of them.
+        let mut cache = CellularFieldCache::new();
+        let mut chunks = std::collections::BTreeMap::new();
+        let mut blocks = vec![Voxel::Air; WORLD_VOXELS_X * WORLD_VOXELS_Y * WORLD_VOXELS_Z];
+        for z in 0..WORLD_VOXELS_Z {
+            for x in 0..WORLD_VOXELS_X {
+                let coordinate = WorldVoxelCoord::new(x as i32, 0, z as i32);
+                let chunk_coord = ChunkCoord::from_world(coordinate.x, coordinate.z);
+                let chunk = chunks
+                    .entry(chunk_coord)
+                    .or_insert_with(|| generator.generate_with_cache(chunk_coord, &mut cache));
+                for y in 0..WORLD_VOXELS_Y {
+                    blocks[world_index(x, y, z)] =
+                        chunk.world_voxel(coordinate.x, y as i32, coordinate.z);
+                }
+            }
+        }
+        let mut stats = crate::chunk::GenerationStats::new();
+        let mut report = crate::stage_report::StageReport::new(generator.min_y, generator.height);
+        for chunk in chunks.values() {
+            stats.merge(chunk.stats());
+            report.merge(chunk.stage_report());
+        }
+        (
+            Self::from_world_voxels(
+                &blocks,
+                vec![0.5; WORLD_VOXELS_X * WORLD_VOXELS_Z],
+                vec![f32::MAX; WORLD_VOXELS_X * WORLD_VOXELS_Z],
+            ),
+            stats,
+            report,
+        )
+    }
+
+    /// Build a default-shaped region for one seed, with caves on or off.
+    ///
+    /// The convenience the tests and the cave-less world path want; anything that
+    /// authors terrain shape, fluids or scatter goes through
+    /// [`Self::from_chunk_generator`] instead.
+    pub fn generate_chunked(world_seed: u64, caves_enabled: bool) -> Self {
+        Self::from_chunk_generator(&ChunkGenerator {
+            world_seed,
+            caves_enabled,
+            ..ChunkGenerator::default()
+        })
     }
 
     /// Imported heights are metres relative to the water plane and are sampled
@@ -427,7 +602,7 @@ fn generated_heightmap(seed: u32) -> Vec<i32> {
             let broad = fractal_noise_2d(x as f32 * 0.025, z as f32 * 0.025, 5, seed);
             let detail = fractal_noise_2d(x as f32 * 0.085, z as f32 * 0.085, 3, seed + 41);
             let rim_falloff = smoothstep(radius, radius * 0.72, radial);
-            let altitude = 2.0 + broad * 8.0 + detail * 3.0 + rim_falloff * 2.0;
+            let altitude = 12.0 + broad * 8.0 + detail * 3.0 + rim_falloff * 2.0;
             let mut top = WATER_LEVEL_WORLD + altitude.round() as i32;
 
             // A block-wide winding river provides water without returning to
@@ -437,7 +612,8 @@ fn generated_heightmap(seed: u32) -> Vec<i32> {
             if (world_z - river_z).abs() < river_width && radial < radius * 0.82 {
                 top = WATER_LEVEL_WORLD - 2;
             }
-            heights[z * WORLD_VOXELS_X + x] = top.clamp(PLATEAU_FLOOR_WORLD, 27);
+            heights[z * WORLD_VOXELS_X + x] =
+                top.clamp(PLATEAU_FLOOR_WORLD, WORLD_VOXELS_Y as i32 - 11);
         }
     }
     heights
@@ -507,9 +683,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn physical_world_is_125_by_32_by_125_metres() {
+    fn physical_world_is_125_by_64_by_125_metres() {
         assert_eq!(WORLD_VOXELS_X, 125);
-        assert_eq!(WORLD_VOXELS_Y, 32);
+        assert_eq!(WORLD_VOXELS_Y, 64);
         assert_eq!(WORLD_VOXELS_Z, 125);
         assert_eq!(WORLD_VOXEL_SIZE_METERS, 1.0);
         assert_eq!(DETAIL_CELLS_PER_WORLD_VOXEL, 8);
@@ -540,9 +716,77 @@ mod tests {
         }
     }
 
+    /// Carving is a replayable function of the seed, and turning caves off is
+    /// the same world minus the carve — the invariant the deleted `with_caves`
+    /// bridge used to test, now checked against the real generation path instead
+    /// of a second carving implementation that could drift from it.
     #[test]
-    fn generation_contains_no_asset_detail_materials() {
-        let world = VoxelWorld::generate(7, 0.0);
+    fn cave_carving_is_replayable_and_only_removes_solid_voxels() {
+        let generator = ChunkGenerator {
+            world_seed: 0x0123_4567_89AB_CDEF,
+            cave_program: crate::cave::CaveProgram {
+                shape: crate::cave::CaveShape::CellularAutomata,
+                ..crate::cave::CaveProgram::default()
+            },
+            // Fluids and decoration off: this test is about the carve alone.
+            cave_fluids: crate::cave::CaveFluids {
+                enabled: false,
+                ..crate::cave::CaveFluids::default()
+            },
+            scatter: crate::scatter::ScatterProgram {
+                enabled: false,
+                ..crate::scatter::ScatterProgram::default()
+            },
+            ..ChunkGenerator::default()
+        };
+        let solid = VoxelWorld::from_chunk_generator(&ChunkGenerator {
+            caves_enabled: false,
+            ..generator.clone()
+        });
+        let first = VoxelWorld::from_chunk_generator(&generator);
+        let second = VoxelWorld::from_chunk_generator(&generator);
+        let mut carved = 0;
+        for z in (0..WORLD_VOXELS_Z as i32).step_by(5) {
+            for y in 0..WORLD_VOXELS_Y as i32 {
+                for x in (0..WORLD_VOXELS_X as i32).step_by(5) {
+                    let coordinate = WorldVoxelCoord::new(x, y, z);
+                    assert_eq!(
+                        first.world_voxel(coordinate),
+                        second.world_voxel(coordinate),
+                        "carving must replay exactly for one seed"
+                    );
+                    let before = solid.world_voxel(coordinate);
+                    let after = first.world_voxel(coordinate);
+                    if before == after {
+                        continue;
+                    }
+                    // The only difference a carve may make is solid becoming air.
+                    assert!(
+                        before.is_solid() && after == Voxel::Air,
+                        "carving turned {before:?} into {after:?} at {coordinate:?}"
+                    );
+                    carved += 1;
+                }
+            }
+        }
+        assert!(
+            carved > 0,
+            "the cellular cave program did not carve any sample"
+        );
+    }
+
+    /// Generation writes terrain, fluids, and the decoration its scatter pass
+    /// authors — and nothing that is an ASSET.
+    ///
+    /// The list shrank when generation pass two landed: tall grass, flowers, and
+    /// cave cover are now generated on purpose, and cave lava is a generated
+    /// fluid. Trees and water plants stay asset-only, which is the distinction
+    /// this test actually defends. It also still pins the original rule that
+    /// procedural generation fills whole one-metre voxels rather than writing
+    /// individual detail cells.
+    #[test]
+    fn generation_writes_no_asset_only_materials() {
+        let world = VoxelWorld::generate_chunked(7, true);
         let mut solid_world_voxels = 0_usize;
         for z in 0..WORLD_VOXELS_Z as i32 {
             for y in 0..WORLD_VOXELS_Y as i32 {
@@ -551,28 +795,53 @@ mod tests {
                         usize::from(world.world_voxel(WorldVoxelCoord::new(x, y, z)) != Voxel::Air);
                     assert!(!matches!(
                         world.world_voxel(WorldVoxelCoord::new(x, y, z)),
-                        Voxel::TallGrass
-                            | Voxel::Trunk
+                        Voxel::Trunk
                             | Voxel::TrunkBirch
                             | Voxel::Leaves
                             | Voxel::LeavesDark
                             | Voxel::LeavesBirch
                             | Voxel::LeavesPine
-                            | Voxel::FlowerPink
-                            | Voxel::FlowerWhite
-                            | Voxel::FlowerYellow
-                            | Voxel::FlowerBlue
                             | Voxel::WaterWeed
                             | Voxel::LilyPad
                             | Voxel::LilyBloom
                             | Voxel::Reed
                             | Voxel::CattailHead
+                            | Voxel::GlowBlock
                             | Voxel::GlowBerry
                     ));
                 }
             }
         }
         assert!(solid_world_voxels > 0, "generation must produce terrain");
+        // The scatter pass is on by default, so its own output must be present —
+        // otherwise this test would keep passing if pass two silently stopped
+        // running.
+        let scattered = (0..WORLD_VOXELS_Z as i32)
+            .flat_map(|z| (0..WORLD_VOXELS_Y as i32).map(move |y| (y, z)))
+            .flat_map(|(y, z)| (0..WORLD_VOXELS_X as i32).map(move |x| (x, y, z)))
+            .filter(|&(x, y, z)| {
+                world
+                    .world_voxel(WorldVoxelCoord::new(x, y, z))
+                    .is_scatter_cover()
+            })
+            .count();
+        assert!(scattered > 0, "generation pass two placed no decoration");
+    }
+
+    /// `Voxel::ALL` must list every variant exactly once, in discriminant order.
+    /// A missing entry would silently drop that material from every distribution
+    /// readout, which is the kind of gap that reads as "the world contains none".
+    #[test]
+    fn the_voxel_list_is_complete_and_in_discriminant_order() {
+        for (index, voxel) in Voxel::ALL.iter().enumerate() {
+            assert_eq!(
+                *voxel as usize, index,
+                "Voxel::ALL is out of order at index {index}"
+            );
+        }
+        // The last variant's discriminant pins the length: if a variant is added
+        // to the enum and not to ALL, this fails.
+        assert_eq!(Voxel::FlareEmber as usize, Voxel::ALL.len() - 1);
     }
 
     #[test]

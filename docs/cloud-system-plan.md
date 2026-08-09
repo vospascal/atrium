@@ -654,7 +654,7 @@ Prompted by Pascal asking whether the scaling was right. Units were correct; one
 
 **Units check out.** `camera_position` is world **metres** (`camera.rs`: "Eye position, world
 meters"), matching `FROM_KILOMETERS_SCALE = 1000`. So the Stormscapes-derived altitudes are genuine
-metres. The world itself is **125 × 32 × 125 m** (`WORLD_VOXELS 125×32×125` at 1 m per world voxel).
+metres. The world itself is **125 × 64 × 125 m** (`WORLD_VOXELS 125×64×125` at 1 m per world voxel).
 
 **`CLOUD_SHADOW_EXTENT_WORLD` was 8x too coarse.** 4096 m across 512 texels is 8 m per texel, so the
 entire 125 m world spanned about **fifteen texels** — the ground received a smooth wash rather than

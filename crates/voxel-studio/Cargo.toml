@@ -12,6 +12,7 @@ description = "The Graph Studio: the material-graph node editor"
 # They are siblings composed by `voxel`.
 [dependencies]
 egui = "0.35"
+voxel-core = { path = "../voxel-core" }
 voxel-graph = { path = "../voxel-graph" }
 voxel-material-graph = { path = "../voxel-material-graph" }
 voxel-rt = { path = "../voxel-rt" }

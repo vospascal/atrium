@@ -10,6 +10,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use voxel_core::chunk::BiomeKind;
+
 use crate::environment::{EnvironmentChannel, EnvironmentContext};
 
 macro_rules! semantic_id {
@@ -148,10 +150,23 @@ pub enum BiomeTrait {
     Custom(String),
 }
 
+// The physical domain a biome describes is `voxel_core::chunk::BiomeKind`, which
+// generation already stamps onto every voxel. A second two-variant enum here
+// meaning the same thing would need a mapping function between them the moment
+// either gained a third variant — and this crate already depends on voxel-core.
+//
+// `Underground` remains a [`BiomeTrait`] because it is a broad classification that
+// can also apply to non-cave underground regions. `BiomeKind::Cave` is different:
+// it is the explicit routing key that selects cave carving and material programs
+// rather than surface terrain programs.
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BiomeDefinition {
     pub id: BiomeId,
     pub name: String,
+    /// Defaults to `surface` when loading older world profiles.
+    #[serde(default)]
+    pub biome_type: BiomeKind,
     pub selector: BiomeSelector,
     pub traits: BTreeSet<BiomeTrait>,
     pub surface_profile: SurfaceProfileId,
@@ -159,6 +174,12 @@ pub struct BiomeDefinition {
     pub feature_sets: Vec<FeatureSetId>,
     pub audio_profile: Option<AudioProfileId>,
     pub animation_profile: Option<AnimationProfileId>,
+}
+
+impl BiomeDefinition {
+    pub fn is_cave(&self) -> bool {
+        self.biome_type == BiomeKind::Cave
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -308,6 +329,7 @@ mod tests {
         BiomeDefinition {
             id: BiomeId::new(id),
             name: id.to_string(),
+            biome_type: BiomeKind::Surface,
             selector: BiomeSelector {
                 constraints: vec![FieldConstraint {
                     channel: EnvironmentChannel::Temperature,
@@ -323,6 +345,30 @@ mod tests {
             audio_profile: None,
             animation_profile: None,
         }
+    }
+
+    #[test]
+    fn cave_is_an_explicit_biome_type_and_old_profiles_default_to_surface() {
+        let mut cave = biome(
+            "cave",
+            FieldRange {
+                min: -1.0,
+                max: 1.0,
+                falloff: 0.0,
+            },
+        );
+        cave.biome_type = BiomeKind::Cave;
+        assert!(cave.is_cave());
+        assert_eq!(cave.biome_type, BiomeKind::Cave);
+
+        let json = serde_json::to_string(&cave).unwrap();
+        let restored: BiomeDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.biome_type, BiomeKind::Cave);
+
+        let mut legacy = serde_json::to_value(&cave).unwrap();
+        legacy.as_object_mut().unwrap().remove("biome_type");
+        let restored_legacy: BiomeDefinition = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored_legacy.biome_type, BiomeKind::Surface);
     }
 
     fn context(temperature: f32) -> EnvironmentContext {

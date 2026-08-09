@@ -1,17 +1,62 @@
 {
   "schema_version": 3,
   "id": "world-main-v3",
-  "name": "Atrium World",
+  "name": "World",
   "kind": "world",
   "interface": {
     "inputs": {},
     "outputs": {}
   },
   "nodes": {
-    "terrain": {
-      "node_type": "world.generated_terrain",
+    "caves": {
+      "node_type": "world.cave_carver",
       "node_type_version": 1,
-      "properties": {},
+      "properties": {
+        "horizontal_scale": {
+          "type": "scalar",
+          "value": 40.0
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 44
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 4
+        },
+        "salt": {
+          "type": "integer",
+          "value": 3405643777
+        },
+        "shape": {
+          "type": "text",
+          "value": "cellular_automata"
+        },
+        "threshold": {
+          "type": "scalar",
+          "value": 0.7
+        },
+        "vertical_scale": {
+          "type": "scalar",
+          "value": 20.0
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "chambers": {
+      "node_type": "world.cave_chambers",
+      "node_type_version": 1,
+      "properties": {
+        "cellular_openness": {
+          "type": "scalar",
+          "value": 0.72
+        },
+        "cellular_worley_scale": {
+          "type": "scalar",
+          "value": 0.05
+        }
+      },
       "socket_defaults": {},
       "unknown_payload": null
     },
@@ -22,22 +67,309 @@
       "socket_defaults": {},
       "unknown_payload": null
     },
+    "crystals": {
+      "node_type": "world.scatter_rule",
+      "node_type_version": 1,
+      "properties": {
+        "class": {
+          "type": "text",
+          "value": "cave_crystal"
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 4096
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 0
+        },
+        "patch_coverage": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "patch_scale": {
+          "type": "scalar",
+          "value": 0.06
+        },
+        "rate": {
+          "type": "scalar",
+          "value": 0.035
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "detail": {
+      "node_type": "world.cave_detail",
+      "node_type_version": 1,
+      "properties": {
+        "cellular_billow_octaves": {
+          "type": "integer",
+          "value": 3
+        },
+        "cellular_billow_scale": {
+          "type": "scalar",
+          "value": 0.08
+        },
+        "cellular_billow_strength": {
+          "type": "scalar",
+          "value": 0.4
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "flowers": {
+      "node_type": "world.scatter_rule",
+      "node_type_version": 1,
+      "properties": {
+        "class": {
+          "type": "text",
+          "value": "flowers"
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 4096
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 0
+        },
+        "patch_coverage": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "patch_scale": {
+          "type": "scalar",
+          "value": 0.06
+        },
+        "rate": {
+          "type": "scalar",
+          "value": 0.05
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "fluids": {
+      "node_type": "world.cave_fluids",
+      "node_type_version": 1,
+      "properties": {
+        "fluid_min_y": {
+          "type": "integer",
+          "value": 2
+        },
+        "fluids_enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "lava_level": {
+          "type": "integer",
+          "value": 14
+        },
+        "water_level": {
+          "type": "integer",
+          "value": 24
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "grass": {
+      "node_type": "world.scatter_rule",
+      "node_type_version": 1,
+      "properties": {
+        "class": {
+          "type": "text",
+          "value": "tall_grass"
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 4096
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 0
+        },
+        "patch_coverage": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "patch_scale": {
+          "type": "scalar",
+          "value": 0.06
+        },
+        "rate": {
+          "type": "scalar",
+          "value": 0.28
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "moss": {
+      "node_type": "world.scatter_rule",
+      "node_type_version": 1,
+      "properties": {
+        "class": {
+          "type": "text",
+          "value": "cave_moss"
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 4096
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 0
+        },
+        "patch_coverage": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "patch_scale": {
+          "type": "scalar",
+          "value": 0.06
+        },
+        "rate": {
+          "type": "scalar",
+          "value": 0.22
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "mushrooms": {
+      "node_type": "world.scatter_rule",
+      "node_type_version": 1,
+      "properties": {
+        "class": {
+          "type": "text",
+          "value": "cave_mushroom"
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 4096
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 0
+        },
+        "patch_coverage": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "patch_scale": {
+          "type": "scalar",
+          "value": 0.06
+        },
+        "rate": {
+          "type": "scalar",
+          "value": 0.08
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
     "output": {
       "node_type": "world.output",
       "node_type_version": 1,
       "properties": {},
       "socket_defaults": {},
       "unknown_payload": null
+    },
+    "scatter": {
+      "node_type": "world.scatter",
+      "node_type_version": 1,
+      "properties": {
+        "clumping": {
+          "type": "scalar",
+          "value": 1.0
+        },
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "terrain": {
+      "node_type": "world.generated_terrain",
+      "node_type_version": 1,
+      "properties": {
+        "base_height": {
+          "type": "integer",
+          "value": 34
+        },
+        "relief": {
+          "type": "integer",
+          "value": 20
+        },
+        "sea_level": {
+          "type": "integer",
+          "value": 32
+        },
+        "surface_headroom": {
+          "type": "integer",
+          "value": 10
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
+    },
+    "vines": {
+      "node_type": "world.scatter_rule",
+      "node_type_version": 1,
+      "properties": {
+        "class": {
+          "type": "text",
+          "value": "cave_vine"
+        },
+        "max_y": {
+          "type": "integer",
+          "value": 4096
+        },
+        "min_y": {
+          "type": "integer",
+          "value": 0
+        },
+        "patch_coverage": {
+          "type": "scalar",
+          "value": 0.5
+        },
+        "patch_scale": {
+          "type": "scalar",
+          "value": 0.06
+        },
+        "rate": {
+          "type": "scalar",
+          "value": 0.14
+        }
+      },
+      "socket_defaults": {},
+      "unknown_payload": null
     }
   },
   "links": {
-    "terrain-compose": {
+    "caves-chambers": {
       "from": {
-        "node": "terrain",
+        "node": "caves",
         "socket": "world"
       },
       "to": {
-        "node": "compose",
+        "node": "chambers",
+        "socket": "world"
+      },
+      "order": 0
+    },
+    "chambers-detail": {
+      "from": {
+        "node": "chambers",
+        "socket": "world"
+      },
+      "to": {
+        "node": "detail",
         "socket": "world"
       },
       "order": 0
@@ -52,21 +384,175 @@
         "socket": "world"
       },
       "order": 0
+    },
+    "crystals-scatter": {
+      "from": {
+        "node": "crystals",
+        "socket": "rules"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "rules"
+      },
+      "order": 0
+    },
+    "detail-fluids": {
+      "from": {
+        "node": "detail",
+        "socket": "world"
+      },
+      "to": {
+        "node": "fluids",
+        "socket": "world"
+      },
+      "order": 0
+    },
+    "flowers-scatter": {
+      "from": {
+        "node": "flowers",
+        "socket": "rules"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "rules"
+      },
+      "order": 0
+    },
+    "fluids-scatter": {
+      "from": {
+        "node": "fluids",
+        "socket": "world"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "world"
+      },
+      "order": 0
+    },
+    "grass-scatter": {
+      "from": {
+        "node": "grass",
+        "socket": "rules"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "rules"
+      },
+      "order": 0
+    },
+    "moss-scatter": {
+      "from": {
+        "node": "moss",
+        "socket": "rules"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "rules"
+      },
+      "order": 0
+    },
+    "mushrooms-scatter": {
+      "from": {
+        "node": "mushrooms",
+        "socket": "rules"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "rules"
+      },
+      "order": 0
+    },
+    "scatter-compose": {
+      "from": {
+        "node": "scatter",
+        "socket": "world"
+      },
+      "to": {
+        "node": "compose",
+        "socket": "world"
+      },
+      "order": 0
+    },
+    "terrain-caves": {
+      "from": {
+        "node": "terrain",
+        "socket": "world"
+      },
+      "to": {
+        "node": "caves",
+        "socket": "world"
+      },
+      "order": 0
+    },
+    "vines-scatter": {
+      "from": {
+        "node": "vines",
+        "socket": "rules"
+      },
+      "to": {
+        "node": "scatter",
+        "socket": "rules"
+      },
+      "order": 0
     }
   },
   "layout": {
     "positions": {
+      "caves": [
+        260.0,
+        0.0
+      ],
+      "chambers": [
+        520.0,
+        0.0
+      ],
+      "compose": [
+        1560.0,
+        0.0
+      ],
+      "crystals": [
+        1300.0,
+        700.0
+      ],
+      "detail": [
+        780.0,
+        0.0
+      ],
+      "flowers": [
+        1300.0,
+        300.0
+      ],
+      "fluids": [
+        1040.0,
+        0.0
+      ],
+      "grass": [
+        1300.0,
+        200.0
+      ],
+      "moss": [
+        1300.0,
+        400.0
+      ],
+      "mushrooms": [
+        1300.0,
+        500.0
+      ],
+      "output": [
+        1820.0,
+        0.0
+      ],
+      "scatter": [
+        1300.0,
+        0.0
+      ],
       "terrain": [
         0.0,
         0.0
       ],
-      "compose": [
-        280.0,
-        0.0
-      ],
-      "output": [
-        560.0,
-        0.0
+      "vines": [
+        1300.0,
+        600.0
       ]
     }
   }

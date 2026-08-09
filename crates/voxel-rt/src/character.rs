@@ -168,6 +168,14 @@ pub(crate) const SWIM_MAX_VERTICAL_SPEED: f32 = 2.0;
 /// enough that float error cannot re-enter the voxel, small enough to be
 /// invisible (1 mm = 1/125 of a voxel).
 pub(crate) const COLLISION_SKIN_METERS: f32 = 1.0e-3;
+/// Radius of the collision volume around the free-fly camera eye, meters.
+///
+/// This is intentionally much smaller than the walking body: fly mode needs to
+/// fit through narrow caves and around placed blocks, but its ray origin must
+/// never enter a solid voxel.  Treating the eye as a small cube also gives it
+/// a stable clearance from a wall instead of allowing the ray origin to land
+/// exactly on a voxel face.
+pub const FLY_CAMERA_RADIUS_METERS: f32 = 0.05;
 /// How far below the feet the ground test looks, meters. Must exceed
 /// [`COLLISION_SKIN_METERS`] (or a resting body reads as airborne) and stay well
 /// under a voxel (or it grabs ground that is not there).
@@ -865,6 +873,55 @@ pub fn body_overlaps_solid(
     any_blocking_voxel(brickmap, &body_spans(feet_position.to_array(), settings))
 }
 
+/// Sweep the free-fly camera eye through the voxel world without entering solid
+/// geometry.
+///
+/// The fly camera owns look input and requested movement; this function only
+/// resolves that requested translation against the same authoritative world
+/// and material-blocking predicate as [`CharacterController`].  Its collider
+/// is a small cube centred on the eye, so it preserves free vertical movement
+/// and cave-scale manoeuvrability without letting the ray-traced view begin
+/// inside terrain.
+pub fn sweep_fly_camera(brickmap: &Brickmap, eye_position: &mut Vec3, requested_translation: Vec3) {
+    if !eye_position.is_finite() || !requested_translation.is_finite() {
+        return;
+    }
+
+    let radius = FLY_CAMERA_RADIUS_METERS;
+    let settings = CharacterSettings {
+        body_width_meters: radius * 2.0,
+        body_height_meters: radius * 2.0,
+        ..CharacterSettings::default()
+    };
+    // `sweep_axis` uses a base-centred box.  Shift it down by one radius so
+    // that its box is centred on the eye rather than extending upward from it.
+    let mut collider_base = *eye_position - Vec3::Y * radius;
+    let mut position = collider_base.to_array();
+    sweep_axis(
+        brickmap,
+        &mut position,
+        &settings,
+        AXIS_X,
+        requested_translation.x,
+    );
+    sweep_axis(
+        brickmap,
+        &mut position,
+        &settings,
+        AXIS_Y,
+        requested_translation.y,
+    );
+    sweep_axis(
+        brickmap,
+        &mut position,
+        &settings,
+        AXIS_Z,
+        requested_translation.z,
+    );
+    collider_base = Vec3::from_array(position);
+    *eye_position = collider_base + Vec3::Y * radius;
+}
+
 /// Lower/upper offsets of the body box from the feet position, per axis. Y is
 /// asymmetric (the origin is the base), X and Z are half-widths.
 fn extent_offsets(settings: &CharacterSettings) -> ([f32; 3], [f32; 3]) {
@@ -987,7 +1044,7 @@ mod tests {
     use crate::brickmap::ClearanceUpdate;
     use voxel_core::world::{
         Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, WATER_LEVEL,
-        WORLD_VOXELS_Y,
+        WATER_LEVEL_WORLD, WORLD_VOXELS_Y,
     };
 
     /// The island every test walks on. NOTE: generates the full world — run the
@@ -1058,15 +1115,21 @@ mod tests {
             centre_voxel_x: centre_world[0] * detail + detail / 2,
             centre_voxel_z: centre_world[1] * detail + detail / 2,
         };
+        // Every height is measured DOWN from the world's water plane so the
+        // basin cannot go stale when `WATER_LEVEL_WORLD` moves: the outer ring's
+        // bed meets the surface (a dry shore block to wade in from), the next two
+        // rings step down one metre each, and the middle sits 5 m under —
+        // deeper than the body is tall, so swimming is reachable.
         for dz in -4_i32..=4 {
             for dx in -4_i32..=4 {
                 let radius = dx.abs().max(dz.abs());
-                let bed_y = match radius {
-                    4 => 10,
-                    3 => 9,
-                    2 => 8,
+                let metres_below_surface = match radius {
+                    4 => 0,
+                    3 => 1,
+                    2 => 2,
                     _ => 5,
                 };
+                let bed_y = WATER_LEVEL_WORLD - metres_below_surface;
                 let x = centre_world[0] + dx;
                 let z = centre_world[1] + dz;
                 brickmap.set_world_voxel(
@@ -1081,7 +1144,7 @@ mod tests {
                         TEST_CLEARANCE,
                     );
                 }
-                for y in (bed_y + 1)..=10 {
+                for y in (bed_y + 1)..=WATER_LEVEL_WORLD {
                     brickmap.set_world_voxel(
                         WorldVoxelCoord::new(x, y, z),
                         Voxel::Water,
@@ -1089,7 +1152,7 @@ mod tests {
                     );
                 }
                 brickmap.set_world_voxel(
-                    WorldVoxelCoord::new(x, 11, z),
+                    WorldVoxelCoord::new(x, WATER_LEVEL_WORLD + 1, z),
                     Voxel::Air,
                     TEST_CLEARANCE,
                 );
@@ -1568,6 +1631,33 @@ mod tests {
             (body.feet_position.y - water_surface).abs() < 0.02,
             "feet at {:.3} m, expected water-level ledge at {water_surface:.3} m",
             body.feet_position.y
+        );
+    }
+
+    #[test]
+    fn fly_camera_stops_before_a_solid_wall() {
+        let mut brickmap = island();
+        let (floor_y, floor_top) = flat_walkway(&mut brickmap, (480, 530), 500);
+        let wall_x = 508;
+        fill_box(
+            &mut brickmap,
+            [wall_x, floor_y + 1, 492],
+            [wall_x, floor_y + 20, 508],
+            Voxel::Stone,
+        );
+        let mut eye = Vec3::new(
+            (500.5_f32) * VOXEL_SIZE,
+            floor_top + 1.0,
+            (500.5_f32) * VOXEL_SIZE,
+        );
+
+        sweep_fly_camera(&brickmap, &mut eye, Vec3::X * 3.0);
+
+        let wall_min = wall_x as f32 * VOXEL_SIZE;
+        assert!(
+            eye.x <= wall_min - FLY_CAMERA_RADIUS_METERS - COLLISION_SKIN_METERS + 1.0e-5,
+            "fly eye crossed the wall: eye {}, wall starts {wall_min}",
+            eye.x
         );
     }
 

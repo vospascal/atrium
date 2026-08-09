@@ -102,6 +102,8 @@ pub const MATERIAL: &[GraphKind] = &[GraphKind::Material];
 
 pub const WORLD: &[GraphKind] = &[GraphKind::World];
 
+pub const BIOME: &[GraphKind] = &[GraphKind::Biome];
+
 pub const VECTOR_BINARY_FIELDS: &[FieldDeclarationStatic] = &[
     field(
         "a",

@@ -109,6 +109,24 @@ pub struct VoxelEdit {
     pub material_attributes: MaterialAttributes,
 }
 
+/// A small, deliberately detail-resolution edit.
+///
+/// Gameplay construction still uses [`VoxelEdit`] and replaces a complete
+/// one-metre voxel. This is the other honest unit the brickmap exposes: a tiny
+/// authored object such as a flare can occupy individual 12.5 cm cells without
+/// pretending it is a metre-sized building block. All cells are applied as one
+/// authority request, so their GPU writes and CAGI attributes describe one
+/// finished object rather than an observable half-flare.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetailVoxelEdit {
+    /// Detail cells to set. Callers keep these close together; this is not a
+    /// bulk terrain API.
+    pub voxels: Vec<[i32; 3]>,
+    pub material: voxel_core::world::Voxel,
+    pub light_grid: Option<CagiGrid>,
+    pub material_attributes: MaterialAttributes,
+}
+
 /// A contiguous word payload for one of the brickmap's GPU buffers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArrayWrite {
@@ -131,7 +149,8 @@ pub struct WorldDelta {
     /// readout).
     pub voxel: [i32; 3],
     pub material: u8,
-    /// How many one-metre world voxels this delta covers.
+    /// How many cells this delta covers. Ordinary edits write one one-metre
+    /// world voxel; a compact detail edit counts each texel it writes.
     pub voxels_written: usize,
     /// Word payloads for the brickmap buffers.
     pub writes: Vec<ArrayWrite>,
@@ -214,6 +233,76 @@ pub fn apply(
         arrays_grew: applied.arrays_grew,
         clearance_cells_written: applied.clearance_cells_written,
         apply_micros,
+    })
+}
+
+/// Apply a small set of detail-cell edits as one atomic authority operation.
+///
+/// `Brickmap::set_voxel` remains the single-cell primitive that repairs every
+/// derived brickmap field. This wrapper only batches its already-owned dirty
+/// ranges, then derives CAGI data once from the completed geometry.
+pub fn apply_detail(
+    brickmap: &mut Brickmap,
+    edit: &DetailVoxelEdit,
+    settings: &WorldEditSettings,
+) -> Option<WorldDelta> {
+    let started = std::time::Instant::now();
+    let mut applied = Vec::with_capacity(edit.voxels.len());
+    for voxel in &edit.voxels {
+        if let Some(change) = brickmap.set_voxel(
+            voxel[0],
+            voxel[1],
+            voxel[2],
+            edit.material,
+            settings.clearance(),
+        ) {
+            applied.push(change);
+        }
+    }
+    let first = applied.first()?;
+    let material = first.material;
+    let mut low = first.voxel;
+    let mut high = first.voxel;
+    let mut writes = Vec::new();
+    let mut metadata_changed = false;
+    let mut arrays_grew = false;
+    let mut clearance_cells_written = 0;
+    for change in &applied {
+        for axis in 0..3 {
+            low[axis] = low[axis].min(change.voxel[axis]);
+            high[axis] = high[axis].max(change.voxel[axis]);
+        }
+        metadata_changed |= change.metadata_changed;
+        arrays_grew |= change.arrays_grew;
+        clearance_cells_written += change.clearance_cells_written;
+        writes.extend(change.dirty.iter().map(|range| {
+            ArrayWrite {
+                array: range.array,
+                first_word: range.first_word,
+                words: brickmap.array_words(range.array)
+                    [range.first_word..range.first_word + range.word_count]
+                    .to_vec(),
+            }
+        }));
+    }
+    let light_cells = light_cells_in_voxel_box(
+        brickmap,
+        edit.light_grid,
+        low,
+        high,
+        &edit.material_attributes,
+    );
+    Some(WorldDelta {
+        voxel: first.voxel,
+        material,
+        voxels_written: applied.len(),
+        writes,
+        light_cells,
+        light_grid: edit.light_grid,
+        metadata: metadata_changed.then(|| brickmap.metadata()),
+        arrays_grew,
+        clearance_cells_written,
+        apply_micros: started.elapsed().as_secs_f32() * 1e6,
     })
 }
 
@@ -451,5 +540,53 @@ mod tests {
                 "cell {cell_index}'s incremental emission drifted from the rebuild"
             );
         }
+    }
+
+    #[test]
+    fn a_detail_edit_keeps_a_two_texel_emitter_whole_and_lit() {
+        let mut brickmap = Brickmap::empty();
+        let settings = WorldEditSettings::default();
+        let grid = CagiGrid::for_world(
+            4,
+            CagiLayout::Isotropic,
+            brickmap.metadata().max_occupied_brick_y,
+        );
+        let flare = [[16, 1, 16], [17, 1, 16]];
+        let delta = apply_detail(
+            &mut brickmap,
+            &DetailVoxelEdit {
+                voxels: flare.to_vec(),
+                material: Voxel::Lava,
+                light_grid: Some(grid),
+                material_attributes: MaterialAttributes::compiled(),
+            },
+            &settings,
+        )
+        .expect("the two empty detail cells accept a flare");
+
+        assert_eq!(delta.voxels_written, flare.len());
+        for voxel in flare {
+            assert_eq!(
+                brickmap.get(voxel[0], voxel[1], voxel[2]),
+                material_id(Voxel::Lava)
+            );
+        }
+        let flare_cell = grid.cell_index([4, 0, 4]);
+        let update = delta
+            .light_cells
+            .iter()
+            .find(|update| update.index == flare_cell)
+            .expect("the flare's CAGI cell is incrementally refreshed");
+        assert!(
+            update.emission.iter().take(3).any(|channel| *channel > 0.0),
+            "the attached flare must inject light"
+        );
+        let (attributes, emissions) = crate::cagi::build_cell_attributes_with_emission(
+            &brickmap,
+            &grid,
+            &MaterialAttributes::compiled(),
+        );
+        assert_eq!(update.attribute, attributes[flare_cell]);
+        assert_eq!(update.emission, emissions[flare_cell]);
     }
 }

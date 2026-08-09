@@ -2,29 +2,114 @@
 //!
 //! Split out of `voxel`'s overlay, where it was 4033 of that file's 4292 lines: the "overlay"
 //! was in practice the node editor with an egui container wrapped around it. Two entry points
-//! remain, both called by `voxel`'s `Overlay` — [`draw_graph_drawer`] and
-//! [`graph_drawer_height`] — so the container composes the editor rather than containing it.
+//! remain, all called by `voxel`'s `Overlay` — [`draw_graph_drawer`],
+//! [`draw_graph_viewport_preview`] and [`graph_drawer_height`] — so the container composes the
+//! editor rather than containing it.
 //!
 //! This is the studio half of the UI. The game-facing panels (quality levers, output depth,
 //! performance) live in the `voxel-game-ui` crate; nothing here
 //! is reachable from them, which is what makes the two separable into their own crates.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Event, Key, MouseWheelUnit};
 
+use voxel_core::cave::{
+    CaveProgram, CaveShape, CellularAutomataField, CellularFieldCache, CorridorLink,
+    CELLULAR_Y_BAND_SIZE,
+};
+use voxel_core::chunk::{BiomeKind, Chunk, ChunkCoord, ChunkGenerator, CHUNK_SIZE};
+use voxel_core::stage_report::GenerationStage;
+use voxel_core::world::Voxel;
 use voxel_graph::{
     node_reachability, Cardinality, ConnectionError, FieldDeclarationStatic, FieldTarget,
-    GraphAsset, GraphCommand, InputPin, LinkId, NodeCategory, NodeDeclaration, NodeId, NodePreview,
-    NodeRecord, NodeRegistry, NodeTypeId, NumericRange, OutputPin, PropertyValue,
-    SocketDeclarationStatic, SocketKey, SocketType,
+    GraphAsset, GraphCommand, GraphKind, InputPin, LinkId, LinkRecord, NodeCategory,
+    NodeDeclaration, NodeId, NodePreview, NodeRecord, NodeRegistry, NodeTypeId, NumericRange,
+    OutputPin, PropertyValue, SocketDeclarationStatic, SocketKey, SocketType,
 };
 use voxel_material_graph::lowering::{
     compile, ConnectorDrag, GraphEditorState, GraphPreviewTarget, MaterialSampleContext,
 };
 use voxel_rt::material_table::MaterialTable;
 
-const GRAPH_NODE_CONTROL_ZOOM: f32 = 0.95;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GraphTab {
+    #[default]
+    Materials,
+    Biomes,
+}
+
+/// Starter graph shown by the Biomes tab. It is intentionally a real graph
+/// asset, not a UI mock: the same catalogue/contract resolver validates it.
+pub fn new_biome_graph() -> GraphAsset {
+    // A data table plus two loops, rather than six copy-pasted insert blocks and
+    // six more link blocks. The repetition it replaces re-created `NodeId`s from
+    // strings at the link and layout sites even though the same ids were already
+    // bound to variables, which is precisely where a typo produces a dangling link
+    // that only shows up as a generic diagnostic.
+    const NODES: &[(&str, &str, [f32; 2])] = &[
+        ("definition", "biome.definition", [0.0, 0.0]),
+        ("noise", "biome.noise", [0.0, 200.0]),
+        ("sample", "biome.sample", [260.0, 200.0]),
+        ("blend", "biome.blend", [520.0, 200.0]),
+        // The cave recipe is a chain of one-decision nodes, so a starter graph has
+        // to lay the whole chain out — a single node would leave an author with no
+        // hint that smoothing and connection are separate, tunable steps.
+        ("seed", "biome.cellular_seed", [780.0, 200.0]),
+        ("smooth", "biome.cellular_smooth", [1040.0, 200.0]),
+        ("cleanup", "biome.cellular_cleanup", [1300.0, 200.0]),
+        ("connect", "biome.cellular_connect", [1560.0, 200.0]),
+        ("output", "biome.output", [1820.0, 80.0]),
+    ];
+    /// `(link id, from node, from socket, to node, to socket)`.
+    const LINKS: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "definition-output",
+            "definition",
+            "biome",
+            "output",
+            "biome",
+        ),
+        ("noise-sample", "noise", "factor", "sample", "noise"),
+        ("sample-blend", "sample", "biomes", "blend", "biomes"),
+        ("blend-seed", "blend", "biomes", "seed", "biomes"),
+        ("seed-smooth", "seed", "biomes", "smooth", "biomes"),
+        ("smooth-cleanup", "smooth", "biomes", "cleanup", "biomes"),
+        ("cleanup-connect", "cleanup", "biomes", "connect", "biomes"),
+        ("connect-output", "connect", "biomes", "output", "biomes"),
+    ];
+
+    let mut graph = GraphAsset::new("Biome Graph", GraphKind::Biome);
+    for (id, node_type, position) in NODES {
+        let node = NodeId((*id).into());
+        graph.nodes.insert(
+            node.clone(),
+            voxel_rt::graph::CATALOGUE
+                .find(&NodeTypeId((*node_type).into()))
+                .unwrap_or_else(|| panic!("{node_type} is registered"))
+                .new_record(),
+        );
+        graph.layout.positions.insert(node, *position);
+    }
+    for (id, from_node, from_socket, to_node, to_socket) in LINKS {
+        graph.links.insert(
+            LinkId((*id).into()),
+            LinkRecord {
+                from: OutputPin {
+                    node: NodeId((*from_node).into()),
+                    socket: SocketKey((*from_socket).into()),
+                },
+                to: InputPin {
+                    node: NodeId((*to_node).into()),
+                    socket: SocketKey((*to_socket).into()),
+                },
+                order: 0,
+            },
+        );
+    }
+    graph
+}
 
 /// Keep overlay controls aligned with the same panel geometry that reserves the
 /// Graph Studio drawer. `draw_graph_drawer` clamps expanded panels to 80% of
@@ -44,11 +129,22 @@ pub fn graph_drawer_height(ui: &egui::Ui, state: &GraphEditorState) -> f32 {
 /// other.
 pub fn draw_graph_drawer(
     ui: &mut egui::Ui,
-    state: &mut GraphEditorState,
+    material_state: &mut GraphEditorState,
+    biome_state: &mut GraphEditorState,
     material_table: &MaterialTable,
+    active_tab: &mut GraphTab,
 ) {
+    // The drawer's geometry belongs to ONE owner: `material_state`. Both tabs
+    // share the same panel, so a second copy of "how tall is the drawer" can only
+    // ever disagree with the first — and it did. The resize handler used to write
+    // whichever tab was active, then this function's tail copied `material_state`
+    // over the biome copy, so every drag on the Biomes tab was discarded on the
+    // frame that produced it and the drawer simply would not resize.
+    biome_state.visible = material_state.visible;
+    biome_state.drawer_height = material_state.drawer_height;
+    biome_state.drawer_resize_last_y = material_state.drawer_resize_last_y;
     let max_height = (ui.ctx().viewport_rect().height() * 0.8).max(320.0);
-    let mut expanded = state.visible;
+    let mut expanded = material_state.visible;
     let mut toggle_requested = false;
     // The v2 ids intentionally discard the oversized panel state created by
     // the first drawer implementation. The compact default should apply on
@@ -58,7 +154,7 @@ pub fn draw_graph_drawer(
         .exact_size(34.0);
     let expanded_panel = egui::Panel::bottom(egui::Id::new("graph_studio_expanded_v3"))
         .resizable(false)
-        .exact_size(state.drawer_height.clamp(120.0, max_height));
+        .exact_size(material_state.drawer_height.clamp(120.0, max_height));
     let _panel = egui::Panel::show_switched(
         ui,
         &mut expanded,
@@ -74,12 +170,22 @@ pub fn draw_graph_drawer(
                 if ui.button(toggle_label).clicked() {
                     toggle_requested = true;
                 }
-                ui.label(format!("Material {:02}", state.material_slot));
+                ui.selectable_value(active_tab, GraphTab::Materials, "Materials");
+                ui.selectable_value(active_tab, GraphTab::Biomes, "Biomes");
+                ui.separator();
+                if *active_tab == GraphTab::Materials {
+                    ui.label(format!("Material {:02}", material_state.material_slot));
+                } else {
+                    ui.label("Biome graph");
+                }
                 if !is_expanded {
                     ui.label("click to open node editor");
                 }
                 ui.separator();
-                ui.label(&state.status);
+                ui.label(match *active_tab {
+                    GraphTab::Materials => &material_state.status,
+                    GraphTab::Biomes => &biome_state.status,
+                });
             });
             if is_expanded {
                 let handle_rect = egui::Rect::from_min_size(
@@ -92,22 +198,24 @@ pub fn draw_graph_drawer(
                     egui::Sense::click_and_drag(),
                 );
                 let pointer_y = ui.input(|input| input.pointer.hover_pos().map(|pos| pos.y));
+                // No per-tab branch: the panel is one panel, so the drag moves
+                // the one owner regardless of which tab is showing.
                 if handle_response.drag_started() {
-                    state.drawer_resize_last_y = pointer_y;
+                    material_state.drawer_resize_last_y = pointer_y;
                 }
                 if handle_response.dragged() {
                     if let (Some(previous_y), Some(current_y)) =
-                        (state.drawer_resize_last_y, pointer_y)
+                        (material_state.drawer_resize_last_y, pointer_y)
                     {
                         let delta = current_y - previous_y;
-                        state.drawer_height =
-                            (state.drawer_height - delta).clamp(120.0, max_height);
-                        state.drawer_resize_last_y = Some(current_y);
+                        material_state.drawer_height =
+                            (material_state.drawer_height - delta).clamp(120.0, max_height);
+                        material_state.drawer_resize_last_y = Some(current_y);
                         ui.ctx().request_repaint();
                     }
                 }
                 if handle_response.drag_stopped() {
-                    state.drawer_resize_last_y = None;
+                    material_state.drawer_resize_last_y = None;
                 }
                 ui.painter().rect_filled(
                     handle_rect,
@@ -120,14 +228,24 @@ pub fn draw_graph_drawer(
                 );
                 ui.advance_cursor_after_rect(handle_rect);
                 ui.separator();
-                draw_graph_section_contents(ui, state, material_table);
+                match *active_tab {
+                    GraphTab::Materials => {
+                        draw_graph_section_contents(ui, material_state, material_table)
+                    }
+                    GraphTab::Biomes => {
+                        draw_graph_section_contents(ui, biome_state, material_table)
+                    }
+                }
             }
         },
     );
     if toggle_requested {
         expanded = !expanded;
     }
-    state.visible = expanded;
+    material_state.visible = expanded;
+    biome_state.visible = expanded;
+    biome_state.drawer_height = material_state.drawer_height;
+    biome_state.drawer_resize_last_y = material_state.drawer_resize_last_y;
 }
 
 /// First Graph Studio canvas. It intentionally uses egui primitives rather
@@ -139,6 +257,7 @@ fn draw_graph_section_contents(
     material_table: &MaterialTable,
 ) {
     let registry = voxel_rt::graph::CATALOGUE;
+    let is_biome = state.graph.kind == GraphKind::Biome;
     // Scope the dwell to Graph Studio: sockets sit a few pixels apart, so
     // egui's default instant tooltip strobes while a connector is dragged
     // across a node. The delay is read from the GLOBAL style when a tooltip is
@@ -155,7 +274,7 @@ fn draw_graph_section_contents(
         if ui.button("Redo").clicked() {
             state.redo(&registry);
         }
-        if ui.button("Open").clicked() {
+        if !is_biome && ui.button("Open").clicked() {
             state.open_requested = true;
         }
         let graph_valid = !state
@@ -169,15 +288,16 @@ fn draw_graph_section_contents(
         {
             state.save_requested = true;
         }
-        if ui.button("Duplicate").clicked() {
+        if !is_biome && ui.button("Duplicate").clicked() {
             state.duplicate_requested = true;
         }
         if ui.button("Copy").clicked() {
             state.copy_selected();
         }
-        if ui
-            .add_enabled(state.can_paste(), egui::Button::new("Paste"))
-            .clicked()
+        if !is_biome
+            && ui
+                .add_enabled(state.can_paste(), egui::Button::new("Paste"))
+                .clicked()
         {
             state.paste_clipboard(&registry);
         }
@@ -213,21 +333,35 @@ fn draw_graph_section_contents(
                 state.preview_node = state.selected_node.clone();
             }
         }
-        ui.separator();
-        ui.label("material");
-        egui::ComboBox::from_id_salt("graph-material-slot")
-            .selected_text(graph_material_label(material_table, state.material_slot))
-            .show_ui(ui, |ui| {
-                for slot in 0..material_table.rows().len() as u8 {
-                    ui.selectable_value(
-                        &mut state.material_slot,
-                        slot,
-                        graph_material_label(material_table, slot),
-                    );
-                }
-            });
+        if is_biome {
+            ui.separator();
+            ui.label("World classification and cave routing");
+            if ui.button("Update World").clicked() {
+                state.save_requested = true;
+                state.compile_requested = true;
+                state.world_update_requested = true;
+                state.status = "Biome graph update queued".to_string();
+            }
+        } else {
+            ui.separator();
+            ui.label("material");
+            egui::ComboBox::from_id_salt("graph-material-slot")
+                .selected_text(graph_material_label(material_table, state.material_slot))
+                .show_ui(ui, |ui| {
+                    for slot in 0..material_table.rows().len() as u8 {
+                        ui.selectable_value(
+                            &mut state.material_slot,
+                            slot,
+                            graph_material_label(material_table, slot),
+                        );
+                    }
+                });
+        }
     });
-    if state.material_slot != previous_material_slot {
+    if is_biome {
+        draw_biome_generation_steps(ui);
+    }
+    if !is_biome && state.material_slot != previous_material_slot {
         state.material_select_requested = Some(state.material_slot);
         state.status = format!(
             "Selected {} — loading graph",
@@ -1276,27 +1410,13 @@ fn draw_graph_section_contents(
                     .get(field.key)
                     .cloned()
                     .unwrap_or_else(|| field.default.value());
-                let changed = if zoom < GRAPH_NODE_CONTROL_ZOOM {
-                    let response = ui.interact(
-                        property_rect,
-                        egui::Id::new((
-                            "graph-node-property-summary",
-                            node_id.0.as_str(),
-                            field.key,
-                        )),
-                        egui::Sense::hover(),
-                    );
-                    response.on_hover_ui(|hover_ui| {
-                        graph_tooltip_body(hover_ui, &graph_field_tooltip(field, &value));
-                        hover_ui.colored_label(
-                            GRAPH_TOOLTIP_KEY_COLOR,
-                            "Zoom to 100% to edit this property",
-                        );
-                    });
-                    draw_graph_property_summary(&painter, property_rect, field, &value, zoom);
-                    false
-                } else {
-                    ui.push_id(
+                // Keep authored controls live at every graph zoom. The old
+                // summary branch made a framed graph look editable while
+                // silently swallowing input until the user discovered the
+                // zoom gesture. The controls scale with the node, so they can
+                // remain interactive without changing the graph contract.
+                let changed = ui
+                    .push_id(
                         ("graph-node-property", node_id.0.as_str(), field.key),
                         |ui| {
                             ui.scope_builder(
@@ -1313,8 +1433,7 @@ fn draw_graph_section_contents(
                             .inner
                         },
                     )
-                    .inner
-                };
+                    .inner;
                 if changed {
                     state.apply(
                         GraphCommand::SetProperty {
@@ -1420,7 +1539,9 @@ fn draw_graph_section_contents(
     if let Some(node_id) = state.selected_node.clone() {
         draw_graph_inspector(ui, state, &registry, &node_id);
     }
-    draw_graph_preview_window(ui.ctx(), state, &registry);
+    // Biome graphs use the same selected-node inspection surface as material
+    // graphs. Previously this was material-only, so selecting a biome node
+    // appeared to do nothing even though the node state was changing.
     for diagnostic in &state.diagnostics {
         ui.colored_label(
             if diagnostic.severity == voxel_graph::DiagnosticSeverity::Error {
@@ -1434,6 +1555,75 @@ fn draw_graph_section_contents(
 
     ui.ctx().all_styles_mut(|style| {
         style.interaction.tooltip_delay = previous_tooltip_delay;
+    });
+}
+
+/// A compact visual legend for the executable world-generation passes. The
+/// graph remains the source of truth; this strip makes the runtime order
+/// legible when the graph is zoomed out or spread across a large canvas.
+fn draw_biome_generation_steps(ui: &mut egui::Ui) {
+    const STEPS: &[(&str, &str, &str, egui::Color32)] = &[
+        (
+            "1",
+            "Noise",
+            "seeded field",
+            egui::Color32::from_rgb(95, 150, 220),
+        ),
+        (
+            "2",
+            "Biome sample",
+            "choose cells",
+            egui::Color32::from_rgb(105, 190, 150),
+        ),
+        (
+            "3",
+            "Blend",
+            "resolve borders",
+            egui::Color32::from_rgb(220, 170, 90),
+        ),
+        (
+            "4",
+            "CA smooth",
+            "rooms from mask",
+            egui::Color32::from_rgb(180, 120, 220),
+        ),
+        (
+            "5",
+            "Regions + links",
+            "connect caves",
+            egui::Color32::from_rgb(220, 115, 115),
+        ),
+        (
+            "6",
+            "Voxel output",
+            "carve stone",
+            egui::Color32::from_rgb(150, 160, 175),
+        ),
+    ];
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Generation passes").strong());
+        ui.horizontal_wrapped(|ui| {
+            for (index, (number, title, detail, color)) in STEPS.iter().enumerate() {
+                ui.vertical(|ui| {
+                    ui.colored_label(*color, egui::RichText::new(*number).strong());
+                    ui.label(egui::RichText::new(*title).strong());
+                    ui.small(*detail);
+                })
+                .response
+                .on_hover_text(match *number {
+                    "1" => "Deterministic noise is evaluated from the world seed.",
+                    "2" => "The biome definition receives the sampled field.",
+                    "3" => "Neighbouring biome candidates are resolved into one field.",
+                    "4" => "Cellular automata smooths seeded walls into cave rooms.",
+                    "5" => "Large regions are retained and connected by bounded corridors.",
+                    _ => "The final mask is applied to solid terrain voxels.",
+                });
+                if index + 1 < STEPS.len() {
+                    ui.label(egui::RichText::new("→").color(egui::Color32::from_gray(120)));
+                }
+            }
+        });
+        ui.small("Select a node and choose Preview selected to inspect its intermediate value.");
     });
 }
 
@@ -1515,59 +1705,748 @@ fn draw_graph_canvas_context_menu(
     });
 }
 
-/// A deliberately separate inspection surface for the graph. The node cards
-/// remain useful for orientation, while this window makes one intermediate
-/// step large enough to compare against a reference texture and debug wiring.
-fn draw_graph_preview_window(
-    ctx: &egui::Context,
+/// Draw the selected graph preview into the renderer viewport above Graph
+/// Studio. This keeps spatial and texture previews large enough to inspect,
+/// while the node graph stays open in the drawer below.
+pub fn draw_graph_viewport_preview(
+    ui: &mut egui::Ui,
     state: &mut GraphEditorState,
-    registry: &voxel_graph::NodeRegistry,
+    viewport_rect: egui::Rect,
 ) {
     if !state.preview_open {
         return;
     }
-    let mut open = state.preview_open;
-    egui::Window::new("Graph Preview")
-        .id(egui::Id::new("graph_preview_window"))
-        .default_size(egui::vec2(360.0, 430.0))
-        .resizable(true)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("inspect");
-                egui::ComboBox::from_id_salt("graph-preview-target")
-                    .selected_text(graph_preview_target_label(state.preview_target))
-                    .show_ui(ui, |ui| {
-                        for target in [
-                            GraphPreviewTarget::SelectedNode,
-                            GraphPreviewTarget::Final,
-                            GraphPreviewTarget::BaseColor,
-                            GraphPreviewTarget::Specular,
-                            GraphPreviewTarget::AmbientOcclusion,
-                            GraphPreviewTarget::Displacement,
-                            GraphPreviewTarget::Roughness,
-                            GraphPreviewTarget::Normal,
-                            GraphPreviewTarget::Emission,
-                        ] {
-                            ui.selectable_value(
-                                &mut state.preview_target,
-                                target,
-                                graph_preview_target_label(target),
-                            );
+    let registry = voxel_rt::graph::CATALOGUE;
+    egui::Area::new(egui::Id::new("graph_viewport_preview"))
+        .fixed_pos(viewport_rect.min)
+        .default_size(viewport_rect.size())
+        .constrain_to(viewport_rect)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_size(viewport_rect.size());
+            ui.set_max_size(viewport_rect.size());
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(7, 10, 16))
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(if state.graph.kind == GraphKind::Biome {
+                                "Biome World Preview"
+                            } else {
+                                "Graph Preview"
+                            })
+                            .strong()
+                            .size(18.0),
+                        );
+                        ui.separator();
+                        ui.label("render viewport preview");
+                        if ui.button("Return to render").clicked() {
+                            state.preview_open = false;
                         }
                     });
-            });
-            ui.separator();
+                    ui.separator();
+                    if state.preview_open && state.graph.kind == GraphKind::Biome {
+                        ui.label(
+                            egui::RichText::new("World preview · authored cellular cave field")
+                                .strong(),
+                        );
+                        let preview_mode_id = egui::Id::new("biome_preview_mode");
+                        let mut preview_mode = ui
+                            .ctx()
+                            .data(|data| data.get_temp(preview_mode_id))
+                            .unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut preview_mode,
+                                CavePreviewMode::Volume3d,
+                                "3D",
+                            );
+                            ui.selectable_value(
+                                &mut preview_mode,
+                                CavePreviewMode::Plan2d,
+                                "2D",
+                            );
+                        });
+                        ui.ctx()
+                            .data_mut(|data| data.insert_temp(preview_mode_id, preview_mode));
+                        match preview_mode {
+                            CavePreviewMode::Volume3d => {
+                                ui.label(
+                                    "One generated chunk, every voxel coloured by the stage that produced it. Drag to orbit; use the wheel to zoom.",
+                                );
+                                draw_graph_cave_3d_preview(ui, state, true);
+                            }
+                            CavePreviewMode::Plan2d => {
+                                ui.label("Top-down cave plan for the selected cellular layer.");
+                                draw_graph_cave_plan_preview(ui, state, true);
+                            }
+                        }
+                    } else if state.preview_open {
+                        ui.horizontal(|ui| {
+                            ui.label("inspect");
+                            egui::ComboBox::from_id_salt("graph-preview-target")
+                                .selected_text(graph_preview_target_label(state.preview_target))
+                                .show_ui(ui, |ui| {
+                                    for target in [
+                                        GraphPreviewTarget::SelectedNode,
+                                        GraphPreviewTarget::Final,
+                                        GraphPreviewTarget::BaseColor,
+                                        GraphPreviewTarget::Specular,
+                                        GraphPreviewTarget::AmbientOcclusion,
+                                        GraphPreviewTarget::Displacement,
+                                        GraphPreviewTarget::Roughness,
+                                        GraphPreviewTarget::Normal,
+                                        GraphPreviewTarget::Emission,
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut state.preview_target,
+                                            target,
+                                            graph_preview_target_label(target),
+                                        );
+                                    }
+                                });
+                        });
+                        ui.separator();
 
-            if state.preview_target == GraphPreviewTarget::SelectedNode
-                || state.preview_target == GraphPreviewTarget::Displacement
-            {
-                draw_graph_selected_node_preview(ui, state, registry);
-            } else {
-                draw_graph_material_channel_preview(ui, state, registry);
-            }
+                        if state.preview_target == GraphPreviewTarget::SelectedNode
+                            || state.preview_target == GraphPreviewTarget::Displacement
+                        {
+                            draw_graph_selected_node_preview(ui, state, &registry, true);
+                        } else {
+                            draw_graph_material_channel_preview(ui, state, &registry, true);
+                        }
+                    }
+                });
         });
-    state.preview_open = open;
+}
+
+/// The seed the previews sample.
+///
+/// A preview is a shape study, not the shipped world: it shows what the authored
+/// recipe DOES, at a fixed seed, so dragging a slider changes the picture for the
+/// reason you dragged it and not because the seed moved with it. The generation
+/// window (G) is where the real world's seed and its measured output are read.
+const BIOME_PREVIEW_SEED: u64 = 1;
+
+/// The cave program the Biomes tab is authoring, through the shared lowering.
+///
+/// `voxel_rt::graph::lowering` is the only place a node record becomes a program.
+/// This function used to carry its own field-by-field copy of that mapping —
+/// including the same magic remaps and clamps — which is why the preview could
+/// show caves the world did not generate the moment either copy was tuned.
+fn authored_biome_cave_program(state: &GraphEditorState) -> Option<CaveProgram> {
+    // The recipe is a CHAIN now — seed, smoothing, cleanup, connect — so the
+    // preview applies every cellular node the graph holds instead of reading one
+    // monolithic record. A graph with none of them describes no cave recipe, which
+    // is `None` rather than a defaulted preview that would imply otherwise.
+    let mut program = CaveProgram {
+        shape: CaveShape::CellularAutomata,
+        ..CaveProgram::default()
+    };
+    let applied = voxel_rt::graph::lowering::apply_cave_nodes(&mut program, &state.graph);
+    (applied > 0).then_some(program)
+}
+
+/// Memoised cellular fields for the previews, keyed by program and band.
+///
+/// A thread-local rather than a field on `GraphEditorState`: that type lives in
+/// `voxel-material-graph`, which knows nothing about caves and should not gain a
+/// `voxel-core` dependency to hold a UI cache. This is egui state on the UI
+/// thread, and it memoises a pure function — the same field, for the same program
+/// and band, is bit-identical every time.
+///
+/// It exists because the previews rebuilt every band's field on EVERY repaint.
+/// The field runs the CA iterations, two flood fills and an O(regions²) corridor
+/// search, so an orbit drag burned milliseconds of UI thread per frame redrawing a
+/// picture that only changes when a property does.
+struct CavePreviewCache {
+    program: CaveProgram,
+    fields: BTreeMap<i32, CellularAutomataField>,
+}
+
+thread_local! {
+    static CAVE_PREVIEW_CACHE: RefCell<Option<CavePreviewCache>> = const { RefCell::new(None) };
+}
+
+/// Run `read` against the cellular field for one preview height.
+///
+/// A closure rather than a returned reference: the field lives inside a
+/// `RefCell`, so the borrow has to end before the next call can refresh it.
+fn with_preview_field<Output>(
+    program: &CaveProgram,
+    world_y: i32,
+    read: impl FnOnce(&CellularAutomataField) -> Output,
+) -> Output {
+    let band = world_y.div_euclid(CELLULAR_Y_BAND_SIZE);
+    CAVE_PREVIEW_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let cache = cache.get_or_insert_with(|| CavePreviewCache {
+            program: program.clone(),
+            fields: BTreeMap::new(),
+        });
+        if cache.program != *program {
+            cache.program = program.clone();
+            cache.fields.clear();
+        }
+        let field = cache
+            .fields
+            .entry(band)
+            .or_insert_with(|| program.cellular_field_at(BIOME_PREVIEW_SEED, world_y, 0, 0));
+        read(field)
+    })
+}
+
+/// The generator the 3D preview builds its chunk with.
+///
+/// Everything except the authored cave program comes from `ChunkGenerator::default`
+/// so that terrain, fluids and scatter are the REAL defaults: a preview that ran a
+/// stripped generator would show a cave hanging in a void, and the question the
+/// author is asking — how much rock is left, where the water sits, what the
+/// decoration reaches — is only answerable against a whole world.
+fn preview_generator(program: &CaveProgram) -> ChunkGenerator {
+    ChunkGenerator {
+        world_seed: BIOME_PREVIEW_SEED,
+        caves_enabled: true,
+        cave_program: program.clone(),
+        ..ChunkGenerator::default()
+    }
+}
+
+/// The generated preview chunk, memoised on the program that produced it.
+///
+/// Same reasoning as [`CavePreviewCache`], with a harder cost: generating a chunk
+/// runs both passes over 16×16×64 voxels including the cellular fields, and the 3D
+/// preview repaints continuously for the whole of an orbit drag. Keying on the
+/// program is sufficient because the seed and every other generator input are
+/// constants here, so the chunk is a pure function of the program.
+struct PreviewChunkCache {
+    program: CaveProgram,
+    chunk: Chunk,
+}
+
+thread_local! {
+    static PREVIEW_CHUNK_CACHE: RefCell<Option<PreviewChunkCache>> = const { RefCell::new(None) };
+    /// Which stages the 3D preview draws.
+    ///
+    /// Not a field on `GraphEditorState`: that type lives in `voxel-material-graph`,
+    /// which knows nothing about world generation and must not gain a `voxel-core`
+    /// dependency to carry four checkboxes for one view. Thread-local rather than
+    /// `egui`'s temp store for the same reason the field cache is — it is typed, it
+    /// is on the UI thread by construction, and it lives next to the data it filters.
+    static PREVIEW_STAGE_VISIBILITY: RefCell<StageVisibility> =
+        const { RefCell::new(StageVisibility::ALL_SHOWN) };
+}
+
+/// Per-stage draw flags for the 3D preview, indexed by [`GenerationStage`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StageVisibility {
+    shown: [bool; GenerationStage::ALL.len()],
+}
+
+impl StageVisibility {
+    const ALL_SHOWN: Self = Self {
+        shown: [true; GenerationStage::ALL.len()],
+    };
+
+    const fn shows(&self, stage: GenerationStage) -> bool {
+        self.shown[stage as usize]
+    }
+
+    fn shows_any(&self, stage: Option<GenerationStage>) -> bool {
+        stage.is_some_and(|stage| self.shows(stage))
+    }
+}
+
+/// Run `read` against the generated preview chunk for one cave program.
+///
+/// A closure for the same reason [`with_preview_field`] takes one: the chunk lives
+/// inside a `RefCell` and the borrow has to end before the next call can replace it.
+fn with_preview_chunk<Output>(
+    program: &CaveProgram,
+    read: impl FnOnce(&Chunk) -> Output,
+) -> Output {
+    PREVIEW_CHUNK_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let needs_build = cache
+            .as_ref()
+            .is_none_or(|cached| cached.program != *program);
+        if needs_build {
+            let generator = preview_generator(program);
+            let mut fields = CellularFieldCache::new();
+            let chunk = generator.generate_with_cache(ChunkCoord::new(0, 0), &mut fields);
+            *cache = Some(PreviewChunkCache {
+                program: program.clone(),
+                chunk,
+            });
+        }
+        // Just built or already present, so the expect cannot fire.
+        read(&cache.as_ref().expect("preview chunk was just built").chunk)
+    })
+}
+
+/// Which stage produced a finished voxel, for colouring the 3D preview.
+///
+/// The generated chunk stores what exists, not who wrote it, so the stage is
+/// recovered from the voxel plus its biome. The biome is what separates the two
+/// kinds of air: `Cave` air is what Carve removed, `Surface` air is the sky nobody
+/// ever touched, and drawing the second would fill the box with a solid block.
+///
+/// Water and lava are attributed to `Fluids` even where the open-air ocean placed
+/// them by Terrain. `voxel-core`'s own layer view makes the same choice, so the
+/// preview and the generation window agree; the alternative paints the sea in the
+/// rock's colour, which is worse than the imprecision it fixes.
+fn preview_voxel_stage(voxel: Voxel, biome: BiomeKind) -> Option<GenerationStage> {
+    if matches!(voxel, Voxel::Water | Voxel::Lava) {
+        Some(GenerationStage::Fluids)
+    } else if voxel.is_scatter_cover() {
+        // Ahead of the solid test: a cave crystal is rock AND decoration, and pass
+        // two is the more useful of the two answers.
+        Some(GenerationStage::Scatter)
+    } else if voxel.is_solid() {
+        Some(GenerationStage::Terrain)
+    } else if voxel == Voxel::Air {
+        (biome == BiomeKind::Cave).then_some(GenerationStage::Carve)
+    } else {
+        // Non-solid plant life pass two placed without `is_scatter_cover` claiming it.
+        Some(GenerationStage::Scatter)
+    }
+}
+
+/// A stage's shared colour as an egui colour, so the preview, its legend and the
+/// generation window are the same picture in three places.
+fn stage_preview_color(stage: GenerationStage) -> egui::Color32 {
+    let [red, green, blue] = stage.color();
+    egui::Color32::from_rgb(red, green, blue)
+}
+
+/// The stage that produced every voxel of the preview chunk, as a dense grid.
+///
+/// Built once per repaint rather than queried through [`Chunk`] six times per face:
+/// face culling asks about all six neighbours of every voxel, and the classification
+/// is the same answer each time.
+struct PreviewStageGrid {
+    min_y: i32,
+    height: usize,
+    stages: Vec<Option<GenerationStage>>,
+}
+
+impl PreviewStageGrid {
+    fn from_chunk(chunk: &Chunk) -> Self {
+        let min_y = chunk.min_y();
+        let height = (chunk.max_y_exclusive() - min_y).max(0) as usize;
+        let (origin_x, origin_z) = chunk.coord().origin();
+        let mut stages = Vec::with_capacity(CHUNK_SIZE * height * CHUNK_SIZE);
+        for offset in 0..height {
+            let world_y = min_y + offset as i32;
+            for local_z in 0..CHUNK_SIZE as i32 {
+                for local_x in 0..CHUNK_SIZE as i32 {
+                    stages.push(preview_voxel_stage(
+                        chunk.get(local_x, world_y, local_z),
+                        chunk.biome_at(origin_x + local_x, world_y, origin_z + local_z),
+                    ));
+                }
+            }
+        }
+        Self {
+            min_y,
+            height,
+            stages,
+        }
+    }
+
+    /// Out-of-bounds reads answer `None`, which makes the chunk's outer shell drawn
+    /// rather than culled — the alternative is a box with no sides.
+    fn stage(&self, local_x: i32, world_y: i32, local_z: i32) -> Option<GenerationStage> {
+        if !(0..CHUNK_SIZE as i32).contains(&local_x)
+            || !(0..CHUNK_SIZE as i32).contains(&local_z)
+            || !(self.min_y..self.min_y + self.height as i32).contains(&world_y)
+        {
+            return None;
+        }
+        let offset = (world_y - self.min_y) as usize;
+        self.stages[(offset * CHUNK_SIZE + local_z as usize) * CHUNK_SIZE + local_x as usize]
+    }
+
+    /// Lowest and highest world Y that any shown stage occupies, inclusive.
+    ///
+    /// The view crops to this rather than to the chunk: half a default column is
+    /// empty sky, and spending half the widget's height on it is what makes the
+    /// caves too small to read.
+    fn occupied_range(&self, visible: &StageVisibility) -> Option<(i32, i32)> {
+        let mut range: Option<(i32, i32)> = None;
+        for offset in 0..self.height {
+            let base = offset * CHUNK_SIZE * CHUNK_SIZE;
+            let occupied = self.stages[base..base + CHUNK_SIZE * CHUNK_SIZE]
+                .iter()
+                .any(|stage| visible.shows_any(*stage));
+            if !occupied {
+                continue;
+            }
+            let world_y = self.min_y + offset as i32;
+            range = Some(match range {
+                Some((lowest, _)) => (lowest, world_y),
+                None => (world_y, world_y),
+            });
+        }
+        range
+    }
+}
+
+/// The open/wall mask for one preview height, and the corridors carved into it.
+///
+/// Both come from ONE field build. The plan preview used to call this and then
+/// build the identical field a second time in the same frame just to read the
+/// corridor links.
+fn preview_cave_mask(
+    program: &CaveProgram,
+    y: i32,
+    columns: usize,
+    rows: usize,
+) -> (Vec<bool>, Vec<CorridorLink>) {
+    let cell_size = program.cellular_cell_size.max(1) as i32;
+    with_preview_field(program, y, |field| {
+        let mut mask = Vec::with_capacity(columns * rows);
+        for row in 0..rows {
+            for column in 0..columns {
+                let x = column as i32 * cell_size;
+                let z = row as i32 * cell_size;
+                mask.push(!field.is_wall(x, z));
+            }
+        }
+        (mask, field.corridor_links().to_vec())
+    })
+}
+
+/// The height the plan view slices at. Inside the default cave band, so the plan
+/// shows rooms rather than the solid rock above or below them.
+const PLAN_PREVIEW_Y: i32 = 12;
+
+fn draw_graph_cave_plan_preview(ui: &mut egui::Ui, state: &GraphEditorState, fill_viewport: bool) {
+    const COLUMNS: usize = 64;
+    const ROWS: usize = 64;
+    let Some(program) = authored_biome_cave_program(state) else {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Add a Biome Cellular Automata node to preview caves.",
+        );
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!(
+            "X/Z plan · {}×{} CA cells · cell size {} · {} room + {} cleanup passes",
+            COLUMNS,
+            ROWS,
+            program.cellular_cell_size,
+            program.cellular_iterations,
+            program.cellular_cleanup_iterations
+        ));
+        ui.label(format!("fill {:.2}", program.cellular_fill));
+    });
+    let (mask, corridors) = preview_cave_mask(&program, PLAN_PREVIEW_Y, COLUMNS, ROWS);
+    let side = if fill_viewport {
+        ui.available_width().min(ui.available_height()).max(180.0)
+    } else {
+        ui.available_width().clamp(480.0, 920.0)
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(4, 5, 7));
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            if !mask[row * COLUMNS + column] {
+                continue;
+            }
+            let cell = egui::Rect::from_min_max(
+                egui::pos2(
+                    rect.left() + rect.width() * column as f32 / COLUMNS as f32,
+                    rect.top() + rect.height() * row as f32 / ROWS as f32,
+                ),
+                egui::pos2(
+                    rect.left() + rect.width() * (column + 1) as f32 / COLUMNS as f32 + 0.5,
+                    rect.top() + rect.height() * (row + 1) as f32 / ROWS as f32 + 0.5,
+                ),
+            );
+            painter.rect_filled(cell, 0.0, egui::Color32::from_rgb(104, 106, 110));
+        }
+    }
+    for &((start_x, start_z), (target_x, target_z)) in &corridors {
+        let point = |x: usize, z: usize| {
+            egui::pos2(
+                rect.left() + rect.width() * (x as f32 + 0.5) / COLUMNS as f32,
+                rect.top() + rect.height() * (z as f32 + 0.5) / ROWS as f32,
+            )
+        };
+        painter.line_segment(
+            [point(start_x, start_z), point(target_x, target_z)],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 235, 120)),
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(8.0, 7.0),
+        egui::Align2::LEFT_TOP,
+        format!("Y = {PLAN_PREVIEW_Y} · open cave space"),
+        egui::FontId::monospace(12.0),
+        egui::Color32::from_gray(220),
+    );
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum CavePreviewMode {
+    #[default]
+    Volume3d,
+    Plan2d,
+}
+
+fn cave_preview_project(
+    point: [f32; 3],
+    center: egui::Pos2,
+    scale: f32,
+    yaw: f32,
+    pitch: f32,
+) -> (egui::Pos2, f32) {
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    let rotated_x = point[0] * cos_yaw - point[2] * sin_yaw;
+    let rotated_z = point[0] * sin_yaw + point[2] * cos_yaw;
+    let (sin_pitch, cos_pitch) = pitch.sin_cos();
+    let rotated_y = point[1] * cos_pitch - rotated_z * sin_pitch;
+    let depth = point[1] * sin_pitch + rotated_z * cos_pitch;
+    (
+        egui::pos2(center.x + rotated_x * scale, center.y - rotated_y * scale),
+        depth,
+    )
+}
+
+/// The Biomes-tab 3D view: a real generated chunk, coloured by the STAGE that
+/// produced each voxel.
+///
+/// It used to sample the cellular field per depth band and colour by band index,
+/// which drew the authored mask as a stack of rows — it showed where rooms COULD
+/// be, never what the pipeline actually built. So it could not show a cave with a
+/// lake in it, or where decoration ended up, and a band boundary read as a feature
+/// of the world rather than of the preview.
+///
+/// Now it generates one chunk through the real generator and draws what came out,
+/// stage-coloured, with per-stage visibility so the author can hide the rock and
+/// look at the caves alone. The generation window (G) shows the same stages for the
+/// live world, from the same measurements.
+fn draw_graph_cave_3d_preview(
+    ui: &mut egui::Ui,
+    state: &mut GraphEditorState,
+    fill_viewport: bool,
+) {
+    let Some(program) = authored_biome_cave_program(state) else {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Add the Cellular Seed / Smoothing / Cleanup / Connect nodes to preview caves.",
+        );
+        return;
+    };
+
+    let mut visibility = PREVIEW_STAGE_VISIBILITY.with(|cell| *cell.borrow());
+    ui.horizontal_wrapped(|ui| {
+        ui.label("layers:");
+        for stage in GenerationStage::ALL {
+            let mut shown = visibility.shows(stage);
+            // The checkbox carries the stage's own colour, so hiding a layer and
+            // reading the picture use one vocabulary.
+            let response = ui.add(egui::Checkbox::new(
+                &mut shown,
+                egui::RichText::new(format!("■ {}", stage.label()))
+                    .color(stage_preview_color(stage)),
+            ));
+            if response.changed() {
+                visibility.shown[stage as usize] = shown;
+            }
+        }
+        if ui.small_button("Reset view").clicked() {
+            state.preview_orbit = [0.72, 0.42];
+            state.preview_zoom = 1.0;
+        }
+    });
+    PREVIEW_STAGE_VISIBILITY.with(|cell| *cell.borrow_mut() = visibility);
+
+    // The percentages come off the generated chunk's own report, so this legend and
+    // the in-app generation window cannot disagree about what the pipeline did.
+    let (grid, summary) = with_preview_chunk(&program, |chunk| {
+        let report = chunk.stage_report();
+        let summary: Vec<(GenerationStage, u32, f32)> = GenerationStage::ALL
+            .iter()
+            .map(|stage| {
+                let count = report.stage(*stage);
+                (*stage, count.changed, count.hit_rate())
+            })
+            .collect();
+        (PreviewStageGrid::from_chunk(chunk), summary)
+    });
+    ui.horizontal_wrapped(|ui| {
+        for (stage, changed, hit_rate) in &summary {
+            if *changed == 0 {
+                continue;
+            }
+            ui.colored_label(
+                stage_preview_color(*stage),
+                format!("{} {changed} ({:.0}%)", stage.label(), hit_rate * 100.0),
+            );
+        }
+    });
+
+    let preview_size = if fill_viewport {
+        let available = ui.available_size();
+        egui::vec2(available.x.max(180.0), available.y.max(180.0))
+    } else {
+        let side = ui.available_width().clamp(360.0, 560.0);
+        egui::vec2(side, side * 0.82)
+    };
+    let (rect, response) = ui.allocate_exact_size(preview_size, egui::Sense::drag());
+    if response.dragged() {
+        let delta = response.drag_delta();
+        state.preview_orbit[0] += delta.x * 0.012;
+        state.preview_orbit[1] = (state.preview_orbit[1] + delta.y * 0.009).clamp(-1.15, 1.15);
+    }
+    if response.hovered() {
+        let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+        if scroll.abs() > f32::EPSILON {
+            state.preview_zoom = (state.preview_zoom * (1.0 + scroll * 0.0015)).clamp(0.55, 2.2);
+        }
+    }
+
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(5, 7, 11));
+    let Some((lowest_y, highest_y)) = grid.occupied_range(&visibility) else {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "every layer is hidden",
+            egui::FontId::monospace(13.0),
+            egui::Color32::from_gray(150),
+        );
+        return;
+    };
+
+    let center = rect.center() + egui::vec2(0.0, 4.0);
+    let scale = rect.width().min(rect.height()) * 0.42 * state.preview_zoom;
+    let span = CHUNK_SIZE as f32;
+    let drawn_height = (highest_y - lowest_y + 1) as f32;
+    let yaw = state.preview_orbit[0];
+    let pitch = state.preview_orbit[1];
+
+    // Painter's algorithm: every visible face with its depth, sorted far-to-near.
+    // Faces rather than whole cubes, because a cube's hidden faces are most of the
+    // work in a volume this dense.
+    let mut faces: Vec<(f32, [egui::Pos2; 4], egui::Color32)> = Vec::new();
+    for world_y in lowest_y..=highest_y {
+        for local_z in 0..CHUNK_SIZE as i32 {
+            for local_x in 0..CHUNK_SIZE as i32 {
+                let Some(stage) = grid.stage(local_x, world_y, local_z) else {
+                    continue;
+                };
+                if !visibility.shows(stage) {
+                    continue;
+                }
+                let x0 = -1.0 + local_x as f32 * 2.0 / span;
+                let x1 = -1.0 + (local_x as f32 + 1.0) * 2.0 / span;
+                let z0 = -1.0 + local_z as f32 * 2.0 / span;
+                let z1 = -1.0 + (local_z as f32 + 1.0) * 2.0 / span;
+                let y0 = -0.72 + (world_y - lowest_y) as f32 * 1.44 / drawn_height;
+                let y1 = -0.72 + (world_y + 1 - lowest_y) as f32 * 1.44 / drawn_height;
+                let project =
+                    |point: [f32; 3]| cave_preview_project(point, center, scale, yaw, pitch);
+                // A face is drawn only where its neighbour is absent or hidden, so
+                // toggling a layer off opens the volume up instead of leaving a
+                // shell of the layer that used to cover it.
+                let neighbour_hidden = |offset_x: i32, offset_y: i32, offset_z: i32| {
+                    let stage =
+                        grid.stage(local_x + offset_x, world_y + offset_y, local_z + offset_z);
+                    !visibility.shows_any(stage)
+                };
+                let base = stage_preview_color(stage);
+                let faces_to_draw: [(bool, [[f32; 3]; 4], f32); 6] = [
+                    // Top and bottom read brightest and darkest, which is what
+                    // gives the volume its shape under a single flat colour.
+                    (
+                        neighbour_hidden(0, 1, 0),
+                        [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
+                        1.0,
+                    ),
+                    (
+                        neighbour_hidden(0, -1, 0),
+                        [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+                        0.45,
+                    ),
+                    (
+                        neighbour_hidden(-1, 0, 0),
+                        [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]],
+                        0.70,
+                    ),
+                    (
+                        neighbour_hidden(1, 0, 0),
+                        [[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]],
+                        0.82,
+                    ),
+                    (
+                        neighbour_hidden(0, 0, -1),
+                        [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]],
+                        0.62,
+                    ),
+                    (
+                        neighbour_hidden(0, 0, 1),
+                        [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]],
+                        0.90,
+                    ),
+                ];
+                for (draw, corners, shade) in faces_to_draw {
+                    if !draw {
+                        continue;
+                    }
+                    let projected = corners.map(project);
+                    let depth = projected.iter().map(|(_, depth)| *depth).sum::<f32>() / 4.0;
+                    let color = egui::Color32::from_rgb(
+                        (base.r() as f32 * shade) as u8,
+                        (base.g() as f32 * shade) as u8,
+                        (base.b() as f32 * shade) as u8,
+                    );
+                    faces.push((
+                        depth,
+                        [
+                            projected[0].0,
+                            projected[1].0,
+                            projected[2].0,
+                            projected[3].0,
+                        ],
+                        color,
+                    ));
+                }
+            }
+        }
+    }
+    faces.sort_by(|left, right| left.0.total_cmp(&right.0));
+    for (_, corners, color) in faces {
+        painter.add(egui::Shape::convex_polygon(
+            corners.to_vec(),
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_top() + egui::vec2(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        format!("Y {lowest_y}–{highest_y} · drag: orbit · wheel: zoom"),
+        egui::FontId::monospace(12.0),
+        egui::Color32::from_gray(220),
+    );
 }
 
 fn graph_preview_target_label(target: GraphPreviewTarget) -> &'static str {
@@ -1588,6 +2467,7 @@ fn draw_graph_selected_node_preview(
     ui: &mut egui::Ui,
     state: &GraphEditorState,
     registry: &voxel_graph::NodeRegistry,
+    fill_viewport: bool,
 ) {
     let Some(node_id) = state.preview_node.as_ref().or(state.selected_node.as_ref()) else {
         ui.label("Select a node, then choose Preview selected.");
@@ -1619,8 +2499,16 @@ fn draw_graph_selected_node_preview(
         );
         return;
     };
-    let height = graph_node_preview_height(record, declaration).max(150.0);
-    let width = ui.available_width().min(330.0).max(180.0);
+    let height = if fill_viewport {
+        ui.available_height().max(150.0)
+    } else {
+        graph_node_preview_height(record, declaration).max(150.0)
+    };
+    let width = if fill_viewport {
+        ui.available_width().max(180.0)
+    } else {
+        ui.available_width().min(330.0).max(180.0)
+    };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     draw_graph_node_preview(ui.painter(), rect, record, declaration, preview_type);
     if declaration.preview == NodePreview::Noise {
@@ -1632,6 +2520,7 @@ fn draw_graph_material_channel_preview(
     ui: &mut egui::Ui,
     state: &GraphEditorState,
     registry: &voxel_graph::NodeRegistry,
+    fill_viewport: bool,
 ) {
     let program = match compile(&state.graph, registry) {
         Ok(program) => program,
@@ -1651,8 +2540,16 @@ fn draw_graph_material_channel_preview(
         .strong(),
     );
     ui.label("This map samples the same material program used for parity checks; it is not a final lit render.");
-    let width = ui.available_width().min(330.0).max(180.0);
-    let size = width.min(300.0);
+    let width = if fill_viewport {
+        ui.available_width().max(180.0)
+    } else {
+        ui.available_width().min(330.0).max(180.0)
+    };
+    let size = if fill_viewport {
+        width.min(ui.available_height()).max(180.0)
+    } else {
+        width.min(300.0)
+    };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     draw_graph_material_channel_map(ui.painter(), rect, &program, state.preview_target);
 }
@@ -3372,6 +4269,10 @@ fn draw_graph_node_preview(
         );
         return;
     }
+    if declaration.preview == NodePreview::Noise && declaration.id == "biome.cellular_automata" {
+        draw_graph_cellular_preview(painter, rect, record);
+        return;
+    }
     if declaration.preview == NodePreview::Noise {
         draw_graph_noise_preview(painter, rect, record);
         return;
@@ -3480,6 +4381,64 @@ fn draw_graph_noise_preview(painter: &egui::Painter, rect: egui::Rect, record: &
                 ),
             );
             painter.rect_filled(cell, 0.0, egui::Color32::from_gray(shade));
+        }
+    }
+}
+
+/// The cellular node's card thumbnail: a slice of the REAL field.
+///
+/// It used to reimplement the automaton with a different rule set — fill derived
+/// from `randomness`, a birth/survival-fraction rule, and no reading of
+/// `cellular_fill`, `cell_size`, `r1_cutoff` or `r2_cutoff` at all. So the
+/// always-visible thumbnail responded to exactly the sliders generation ignored
+/// and ignored the ones it used: dragging Openness or R1 changed the world and not
+/// the picture, while dragging Randomness changed the picture and not the world.
+/// Tuning against it steered authors backwards.
+///
+/// Now it lowers the record through the shared lowering and samples the same
+/// cached field the viewport previews and the generator use, so the card, the
+/// preview and the built world cannot disagree.
+fn draw_graph_cellular_preview(painter: &egui::Painter, rect: egui::Rect, record: &NodeRecord) {
+    const COLUMNS: usize = 28;
+    const ROWS: usize = 12;
+    // One record, so the thumbnail shows what THIS node contributes on top of the
+    // defaults — which is the honest picture for a card that can only see itself.
+    let mut program = CaveProgram {
+        shape: CaveShape::CellularAutomata,
+        ..CaveProgram::default()
+    };
+    voxel_rt::graph::lowering::apply_cave_node(&mut program, record);
+    let cell_size = program.cellular_cell_size.max(1) as i32;
+    // A thumbnail is a window ONTO the field, not a scaled copy of it: sampling
+    // one cell per pixel column keeps the rooms the size they really are, so the
+    // card reads as a detail of the plan view rather than a different world.
+    let walls = with_preview_field(&program, PLAN_PREVIEW_Y, |field| {
+        (0..ROWS)
+            .flat_map(|row| (0..COLUMNS).map(move |column| (column, row)))
+            .map(|(column, row)| field.is_wall(column as i32 * cell_size, row as i32 * cell_size))
+            .collect::<Vec<_>>()
+    });
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            let cell = egui::Rect::from_min_max(
+                egui::pos2(
+                    rect.left() + rect.width() * column as f32 / COLUMNS as f32,
+                    rect.top() + rect.height() * row as f32 / ROWS as f32,
+                ),
+                egui::pos2(
+                    rect.left() + rect.width() * (column + 1) as f32 / COLUMNS as f32 + 0.4,
+                    rect.top() + rect.height() * (row + 1) as f32 / ROWS as f32 + 0.4,
+                ),
+            );
+            painter.rect_filled(
+                cell,
+                0.0,
+                if walls[row * COLUMNS + column] {
+                    egui::Color32::from_rgb(38, 42, 50)
+                } else {
+                    egui::Color32::from_rgb(128, 170, 205)
+                },
+            );
         }
     }
 }
@@ -3973,45 +4932,6 @@ fn draw_graph_property(
     *value != before
 }
 
-fn draw_graph_property_summary(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    field: &FieldDeclarationStatic,
-    value: &PropertyValue,
-    zoom: f32,
-) {
-    let summary = match value {
-        PropertyValue::Scalar(value) => format!("{}  {value:.3}", field.label),
-        PropertyValue::Color([red, green, blue, _]) => format!(
-            "{}  #{:02X}{:02X}{:02X}",
-            field.label,
-            (red.clamp(0.0, 1.0) * 255.0) as u8,
-            (green.clamp(0.0, 1.0) * 255.0) as u8,
-            (blue.clamp(0.0, 1.0) * 255.0) as u8,
-        ),
-        PropertyValue::Vector3([x, y, z]) => format!("{}  {x:.1}, {y:.1}, {z:.1}", field.label),
-        PropertyValue::Boolean(value) => {
-            format!("{}  {}", field.label, if *value { "on" } else { "off" })
-        }
-        PropertyValue::Integer(value) => format!("{}  {value}", field.label),
-        PropertyValue::Text(value) => format!(
-            "{}  {}",
-            field.label,
-            field
-                .choice(value.as_str())
-                .map_or(value.as_str(), |choice| choice.label)
-        ),
-        PropertyValue::Asset(value) => format!("{}  {}", field.label, value.0),
-    };
-    painter.with_clip_rect(rect).text(
-        rect.left_center() + egui::vec2(4.0 * zoom, 0.0),
-        egui::Align2::LEFT_CENTER,
-        summary,
-        egui::FontId::proportional((11.0 * zoom).max(5.0)),
-        egui::Color32::from_gray(205),
-    );
-}
-
 fn draw_property(
     ui: &mut egui::Ui,
     field: &FieldDeclarationStatic,
@@ -4119,5 +5039,19 @@ mod tests {
             25,
             "a socket type was added — list it in ALL_SOCKET_TYPES and give it its own colour",
         );
+    }
+
+    #[test]
+    fn biome_tab_starts_with_a_valid_definition_to_output_graph() {
+        let graph = new_biome_graph();
+        assert_eq!(graph.kind, GraphKind::Biome);
+        let resolved = graph.resolve(&voxel_rt::graph::CATALOGUE);
+        let errors: Vec<&str> = resolved
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == voxel_graph::DiagnosticSeverity::Error)
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert!(errors.is_empty(), "starter graph is invalid: {errors:?}");
     }
 }

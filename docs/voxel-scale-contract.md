@@ -4,8 +4,8 @@ This is the current authority for world and detail scale.
 
 ## World geometry
 
-- The physical world is **125 × 32 × 125 metres**.
-- The authoritative gameplay lattice is **125 × 32 × 125 world voxels**.
+- The physical world is **125 × 64 × 125 metres**.
+- The authoritative gameplay lattice is **125 × 64 × 125 world voxels**.
 - One world voxel is an indivisible **1 × 1 × 1 metre block**.
 - World generation, click add/remove, world profiles, collision geometry, and
   future gameplay mutations address this lattice.

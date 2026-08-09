@@ -6927,6 +6927,7 @@ name = "voxel-studio"
 version = "0.1.0"
 dependencies = [
  "egui 0.35.0",
+ "voxel-core",
  "voxel-graph",
  "voxel-material-graph",
  "voxel-rt",

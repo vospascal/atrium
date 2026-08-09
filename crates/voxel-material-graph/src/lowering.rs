@@ -2734,6 +2734,11 @@ pub struct GraphEditorState {
     pub preview_open: bool,
     pub preview_target: GraphPreviewTarget,
     pub preview_node: Option<NodeId>,
+    /// Orbit camera for the biome cave preview: yaw, pitch, and zoom.
+    /// Kept in editor state so the small 3D inspection view stays oriented
+    /// while graph values are edited or the window is redrawn.
+    pub preview_orbit: [f32; 2],
+    pub preview_zoom: f32,
     /// All selected nodes. `selected_node` remains the active/inspected node
     /// for compatibility with the inspector and material bridge.
     pub selected_nodes: BTreeSet<NodeId>,
@@ -2752,6 +2757,9 @@ pub struct GraphEditorState {
     pub status: String,
     pub diagnostics: Vec<Diagnostic>,
     pub compile_requested: bool,
+    /// Explicit world-generation commit. Graph edits only request validation;
+    /// the Biomes tab sets this when the user presses Update World.
+    pub world_update_requested: bool,
     pub save_requested: bool,
     pub open_requested: bool,
     pub duplicate_requested: bool,
@@ -2803,6 +2811,8 @@ impl GraphEditorState {
             preview_open: false,
             preview_target: GraphPreviewTarget::SelectedNode,
             preview_node: None,
+            preview_orbit: [0.72, 0.42],
+            preview_zoom: 1.0,
             selected_nodes: BTreeSet::new(),
             search: String::new(),
             node_type: "material.output".to_string(),
@@ -2817,6 +2827,7 @@ impl GraphEditorState {
             status: "Create a node graph or open a saved graph".to_string(),
             diagnostics: Vec::new(),
             compile_requested: false,
+            world_update_requested: false,
             save_requested: false,
             open_requested: false,
             duplicate_requested: false,
@@ -2894,6 +2905,7 @@ impl GraphEditorState {
         self.clipboard = None;
         self.diagnostics.clear();
         self.compile_requested = true;
+        self.world_update_requested = false;
         self.status = "Graph opened — compiling".to_string();
     }
 
@@ -2922,6 +2934,7 @@ impl GraphEditorState {
         self.clipboard = None;
         self.diagnostics.clear();
         self.compile_requested = true;
+        self.world_update_requested = false;
         self.status = "New graph".to_string();
     }
 

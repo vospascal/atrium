@@ -31,6 +31,7 @@ use voxel_graph::{
     NodeDeclaration, NodeRegistry, OperationTag, SocketType,
 };
 
+pub mod lowering;
 pub mod nodes;
 
 /// What a node does, as a typed value.
@@ -56,6 +57,12 @@ pub enum NodeOperation {
 pub enum WorldNodeOperation {
     Output,
     GeneratedTerrain,
+    CaveCarver,
+    CaveChambers,
+    CaveDetail,
+    CaveFluids,
+    ScatterRule,
+    Scatter,
     Compose,
     StudioPreview,
 }
@@ -68,7 +75,13 @@ pub enum EnvironmentNodeOperation {
 pub enum BiomeNodeOperation {
     Output,
     Definition,
+    Noise,
+    Sample,
     Blend,
+    CellularSeed,
+    CellularSmooth,
+    CellularCleanup,
+    CellularConnect,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceNodeOperation {
@@ -93,6 +106,12 @@ impl WorldNodeOperation {
         match self {
             Self::Output => OperationTag("world.output"),
             Self::GeneratedTerrain => OperationTag("world.generated_terrain"),
+            Self::CaveCarver => OperationTag("world.cave_carver"),
+            Self::CaveChambers => OperationTag("world.cave_chambers"),
+            Self::CaveDetail => OperationTag("world.cave_detail"),
+            Self::CaveFluids => OperationTag("world.cave_fluids"),
+            Self::ScatterRule => OperationTag("world.scatter_rule"),
+            Self::Scatter => OperationTag("world.scatter"),
             Self::Compose => OperationTag("world.compose"),
             Self::StudioPreview => OperationTag("world.studio_preview"),
         }
@@ -102,6 +121,12 @@ impl WorldNodeOperation {
         match label {
             "world.output" => Some(Self::Output),
             "world.generated_terrain" => Some(Self::GeneratedTerrain),
+            "world.cave_carver" => Some(Self::CaveCarver),
+            "world.cave_chambers" => Some(Self::CaveChambers),
+            "world.cave_detail" => Some(Self::CaveDetail),
+            "world.cave_fluids" => Some(Self::CaveFluids),
+            "world.scatter_rule" => Some(Self::ScatterRule),
+            "world.scatter" => Some(Self::Scatter),
             "world.compose" => Some(Self::Compose),
             "world.studio_preview" => Some(Self::StudioPreview),
             _ => None,
@@ -135,7 +160,13 @@ impl BiomeNodeOperation {
         match self {
             Self::Output => OperationTag("biome.output"),
             Self::Definition => OperationTag("biome.definition"),
+            Self::Noise => OperationTag("biome.noise"),
+            Self::Sample => OperationTag("biome.sample"),
             Self::Blend => OperationTag("biome.blend"),
+            Self::CellularSeed => OperationTag("biome.cellular_seed"),
+            Self::CellularSmooth => OperationTag("biome.cellular_smooth"),
+            Self::CellularCleanup => OperationTag("biome.cellular_cleanup"),
+            Self::CellularConnect => OperationTag("biome.cellular_connect"),
         }
     }
 
@@ -143,7 +174,13 @@ impl BiomeNodeOperation {
         match label {
             "biome.output" => Some(Self::Output),
             "biome.definition" => Some(Self::Definition),
+            "biome.noise" => Some(Self::Noise),
+            "biome.sample" => Some(Self::Sample),
             "biome.blend" => Some(Self::Blend),
+            "biome.cellular_seed" => Some(Self::CellularSeed),
+            "biome.cellular_smooth" => Some(Self::CellularSmooth),
+            "biome.cellular_cleanup" => Some(Self::CellularCleanup),
+            "biome.cellular_connect" => Some(Self::CellularConnect),
             _ => None,
         }
     }
@@ -260,9 +297,42 @@ const WORLD_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[NodeConstraintStatic {
 const WORLD_FLOWS: &[FlowConstraintStatic] = &[FlowConstraintStatic {
     value_type: SocketType::VoxelField,
     source: NodeOperation::World(WorldNodeOperation::GeneratedTerrain).tag(),
-    intermediates: &[NodeOperation::World(WorldNodeOperation::Compose).tag()],
+    intermediates: &[
+        NodeOperation::World(WorldNodeOperation::CaveCarver).tag(),
+        NodeOperation::World(WorldNodeOperation::CaveChambers).tag(),
+        NodeOperation::World(WorldNodeOperation::CaveDetail).tag(),
+        NodeOperation::World(WorldNodeOperation::CaveFluids).tag(),
+        NodeOperation::World(WorldNodeOperation::Scatter).tag(),
+        NodeOperation::World(WorldNodeOperation::Compose).tag(),
+    ],
     sink: NodeOperation::World(WorldNodeOperation::Output).tag(),
 }];
+
+const BIOME_NODE_CONSTRAINTS: &[NodeConstraintStatic] = &[NodeConstraintStatic {
+    operation: NodeOperation::Biome(BiomeNodeOperation::Output).tag(),
+    cardinality: Cardinality::EXACTLY_ONE,
+}];
+
+const BIOME_FLOWS: &[FlowConstraintStatic] = &[
+    FlowConstraintStatic {
+        value_type: SocketType::BiomeDefinition,
+        source: NodeOperation::Biome(BiomeNodeOperation::Definition).tag(),
+        intermediates: &[],
+        sink: NodeOperation::Biome(BiomeNodeOperation::Output).tag(),
+    },
+    FlowConstraintStatic {
+        value_type: SocketType::BiomeField,
+        source: NodeOperation::Biome(BiomeNodeOperation::Sample).tag(),
+        intermediates: &[
+            NodeOperation::Biome(BiomeNodeOperation::Blend).tag(),
+            NodeOperation::Biome(BiomeNodeOperation::CellularSeed).tag(),
+            NodeOperation::Biome(BiomeNodeOperation::CellularSmooth).tag(),
+            NodeOperation::Biome(BiomeNodeOperation::CellularCleanup).tag(),
+            NodeOperation::Biome(BiomeNodeOperation::CellularConnect).tag(),
+        ],
+        sink: NodeOperation::Biome(BiomeNodeOperation::Output).tag(),
+    },
+];
 
 /// The contracts for the families `voxel-rt` itself declares. The material contracts belong
 /// to `voxel-material-graph`; `CATALOGUE` composes both.
@@ -270,6 +340,12 @@ pub(crate) static WORLD_CONTRACTS: &[GraphContractStatic] = &[GraphContractStati
     kind: GraphKind::World,
     nodes: WORLD_NODE_CONSTRAINTS,
     flows: WORLD_FLOWS,
+}];
+
+pub(crate) static BIOME_CONTRACTS: &[GraphContractStatic] = &[GraphContractStatic {
+    kind: GraphKind::Biome,
+    nodes: BIOME_NODE_CONSTRAINTS,
+    flows: BIOME_FLOWS,
 }];
 
 /// Canonical node schemas. Backends register execution independently, but node
@@ -286,9 +362,16 @@ pub const CATALOGUE: NodeRegistry = NodeRegistry::new(FAMILIES, CONTRACT_SETS);
 /// Every family in the shipped catalogue. Adding a domain — textures, audio — is one entry
 /// here plus its crate; nothing existing changes. That composition is the whole reason
 /// `NodeRegistry` takes families rather than one flat slice.
-static FAMILIES: &[&[NodeDeclaration]] = &[voxel_material_graph::NODES, nodes::world::NODES];
-static CONTRACT_SETS: &[&[GraphContractStatic]] =
-    &[voxel_material_graph::CONTRACTS, WORLD_CONTRACTS];
+static FAMILIES: &[&[NodeDeclaration]] = &[
+    voxel_material_graph::NODES,
+    nodes::world::NODES,
+    nodes::biome::NODES,
+];
+static CONTRACT_SETS: &[&[GraphContractStatic]] = &[
+    voxel_material_graph::CONTRACTS,
+    WORLD_CONTRACTS,
+    BIOME_CONTRACTS,
+];
 
 #[cfg(test)]
 mod tests {
@@ -438,6 +521,10 @@ mod tests {
                                 | SocketType::SurfaceProfile
                                 | SocketType::SurfaceRule
                                 | SocketType::MaterialBinding
+                                // A feature set is a chain of authored rule
+                                // nodes, not a value with a widget: there is
+                                // nothing for a default to stand in for.
+                                | SocketType::FeatureSet
                         ),
                     "primitive input {} on {} has no default/UI schema",
                     input.key,

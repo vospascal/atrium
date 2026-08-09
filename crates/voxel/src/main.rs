@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use voxel_core::world::{Voxel, VoxelWorld, WorldVoxelCoord};
+use voxel_core::world::{Voxel, WorldVoxelCoord};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{
@@ -41,9 +41,8 @@ use voxel_material_graph::lowering::{
     compile as compile_material_graph, GraphEditorState, MaterialGraphShaderSet,
     MaterialSampleContext,
 };
-use voxel_rt::brickmap::Brickmap;
-use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera};
-use voxel_rt::character::CharacterController;
+use voxel_rt::camera::{CameraInput, CameraPose, FlyCamera, GpuFlare, MAX_FLYING_FLARES};
+use voxel_rt::character::{sweep_fly_camera, CharacterController};
 use voxel_rt::engine_runtime::{RuntimeMode, VoxelEngineConfig, VoxelEngineRuntime};
 use voxel_rt::environment::{RuntimeEnvironmentState, Season};
 use voxel_rt::gpu::GpuContext;
@@ -65,14 +64,19 @@ use voxel_rt::variants::{QualityPreset, RenderQuality, QUALITY_PRESETS};
 use voxel_rt::vox_material;
 use voxel_rt::voxel_dda;
 use voxel_rt::water;
-use voxel_rt::world_edit::VoxelEdit;
+use voxel_rt::world_edit::{DetailVoxelEdit, VoxelEdit};
 use voxel_rt::world_host::{WorldHost, WorldUpdate};
 use voxel_rt::world_profile::CompiledWorldProfile;
 use voxel_rt::world_profile_runtime::apply_initial_generation_profile;
+use voxel_studio::{new_biome_graph, GraphTab};
 
 /// Deterministic world-generation defaults.
-const WORLD_SEED: u32 = 1;
-const WORLD_SEASON: f32 = 0.0;
+/// The world seed lives on [`ProjectManifest`], never in a constant here.
+///
+/// A `const WORLD_SEED` used to sit at this line, and `rebuild_generated_world_from_profile`
+/// passed it while startup passed the manifest's seed — so pressing Update World
+/// on a project with any other seed silently swapped the whole terrain for the
+/// seed-1 terrain. One seed, read from one place.
 
 /// Movement speed multiplier while a Ctrl key is held in fly mode. The walking
 /// controller applies its own 1.3x sprint cap to the same sprint intent.
@@ -82,6 +86,33 @@ const BOOST_SPEED_MULTIPLIER: f32 = 2.0;
 /// build across a clearing, short enough that a click always has an obvious
 /// target.
 const EDIT_REACH_METERS: f32 = 24.0;
+
+/// A flare is a shot, not a construction action: it can travel through a cave
+/// well beyond the short, deliberate reach used for digging and block placement.
+const FLARE_REACH_METERS: f32 = 96.0;
+
+/// Explicit physical speed, so a shot crosses the cave over time instead of
+/// appearing at its DDA impact on the next frame.
+const FLARE_SPEED_METERS_PER_SECOND: f32 = 18.0;
+const FLARE_TRAIL_LENGTH_METERS: f32 = 0.25;
+
+/// How far ahead of the eye the flare becomes visible, world meters. Drawing the
+/// head at the eye itself would fill the frame with a sphere the viewer is inside.
+///
+/// It is a DRAWING offset only. Collision starts at the eye, so the shot is tested
+/// over this first quarter metre as well: without that, a point-blank shot spawned
+/// its head inside solid rock (attach then dropped it on the zero face normal and
+/// the flare silently vanished) and any wall thinner than the gap was shot clean
+/// through.
+const FLARE_MUZZLE_OFFSET_METERS: f32 = 0.25;
+
+/// Radii of the two spheres the shader draws for a flying flare, world meters.
+/// Stated here rather than in the shader because they are frame constants, and the
+/// GPU wants them in voxel units — one conversion per flare per frame instead of
+/// one per pixel.
+const FLARE_HEAD_RADIUS_METERS: f32 = 0.095;
+/// The trailing ember reads as a trail because it is visibly smaller than the head.
+const FLARE_TAIL_RADIUS_METERS: f32 = FLARE_HEAD_RADIUS_METERS * 0.78;
 
 /// Hold-to-repeat rate for place/remove, edits per second. 8/s is fast enough to
 /// carve a tunnel by holding the button and slow enough that one click is one
@@ -189,16 +220,33 @@ fn graph_slot_to_follow(control_mode: ControlMode, selected: u8, current_slot: u
     Some(selected)
 }
 
-/// What the L key places (M1b): a plain light-emitting block, so the emissive
-/// table rows are reachable in the app and not only from tests.
+/// The flare's always-on orange emissive material. Its tiny shape is authored
+/// by the detail-cell edit below; a flare is not a disguised one-metre lamp
+/// block. `GlowBlock` is deliberately proximity-gated, which makes it the
+/// wrong source for a flare the player has walked away from.
 ///
-/// It does NOT glow yet — the CA has no emissive injection rule (E5), so this
-/// currently builds a pale solid block. Placing one is what gives E5 something
-/// to light the world with.
-const GLOW_BLOCK_MATERIAL: Voxel = Voxel::GlowBlock;
+/// A row of its own rather than borrowing lava's, which is what it did first. Two
+/// things a shared row cannot do: the eyedropper reported "lava" for a flare stuck
+/// in a wall, and every retune of molten rock — its colour, its emission, its CAGI
+/// attributes — restyled every flare in the world along with it. A flare and a lake
+/// of lava are not the same material and must be tunable apart.
+const FLARE_MATERIAL: Voxel = Voxel::FlareEmber;
+
+/// Whether a voxel coordinate names a cell that exists.
+///
+/// The brickmap's own readers answer "air" and its writers answer "nothing happened"
+/// for coordinates outside the world, which is right for a ray but wrong for a
+/// multi-cell edit: an all-or-nothing shape has to know the difference between a
+/// free cell and no cell at all, or it commits the half of itself that landed
+/// inside.
+fn cell_is_inside_the_world(cell: [i32; 3]) -> bool {
+    (0..voxel_core::world::WORLD_SIZE_X as i32).contains(&cell[0])
+        && (0..voxel_core::world::WORLD_SIZE_Y as i32).contains(&cell[1])
+        && (0..voxel_core::world::WORLD_SIZE_Z as i32).contains(&cell[2])
+}
 
 /// E2b — how far below the camera entering walk mode looks for ground, world
-/// meters. The world is only 32 m tall, so this always reaches the terrain (or
+/// meters. The world is only 64 m tall, so this always reaches the terrain (or
 /// proves there is none, over the void outside the island).
 const WALK_GROUND_SEARCH_METERS: f32 = 64.0;
 
@@ -306,6 +354,27 @@ impl InputState {
     }
 }
 
+/// One emitted projectile entity. It becomes authoritative world geometry only
+/// if it reaches a DDA impact.
+#[derive(Clone, Copy, Debug)]
+struct FlareProjectile {
+    origin_meters: glam::Vec3,
+    direction: glam::Vec3,
+    travelled_meters: f32,
+    max_distance_meters: f32,
+}
+
+impl FlareProjectile {
+    fn head(&self) -> glam::Vec3 {
+        self.origin_meters + self.direction * self.travelled_meters
+    }
+
+    fn tail(&self) -> glam::Vec3 {
+        self.origin_meters
+            + self.direction * (self.travelled_meters - FLARE_TRAIL_LENGTH_METERS).max(0.0)
+    }
+}
+
 struct AppState {
     window: Arc<Window>,
     gpu_context: GpuContext,
@@ -320,6 +389,14 @@ struct AppState {
     /// overlay then reports the readout as unavailable).
     frame_timers: Option<FrameTimers>,
     fly_camera: FlyCamera,
+    /// Current platform command modifier. On macOS this is ⌘; on other desktop
+    /// platforms it is the system/super key.
+    command_held: bool,
+    flare_projectiles: Vec<FlareProjectile>,
+    /// Deliberate debug escape hatch for inspecting generated cave volumes.
+    /// Normal fly mode keeps the ray origin out of solid voxels; this restores
+    /// the original free/no-clip camera when the Settings & Debug checkbox is on.
+    debug_no_clip_flight: bool,
     /// E2b — the walking body. Rebuilt from the fly camera's eye every time walk
     /// mode is entered, so it never holds a stale pose.
     character: CharacterController,
@@ -400,11 +477,20 @@ struct AppState {
     /// Validated composition root for biome, generation, presentation, audio,
     /// and animation resolution. Authored assets remain the source of truth.
     world_profile: Option<CompiledWorldProfile>,
+    world_program: voxel_rt::engine_runtime::CompiledWorldProgram,
+    /// The project manifest's world seed: the single seed every build and rebuild
+    /// uses, so a rebuild reproduces the world the session started with.
+    world_seed: u64,
+    /// What the last world build produced, measured during generation. `None` in
+    /// the material studio, which generates no world.
+    worldgen_outcome: Option<voxel_rt::engine_runtime::GenerationOutcome>,
     environment_runtime: RuntimeEnvironmentState,
     studio_assets: StudioAssetPanelState,
     /// Phase 2 — successfully compiled graph functions selected by material slot.
     material_graph_shaders: MaterialGraphShaderSet,
     graph_editor: GraphEditorState,
+    biome_graph_editor: GraphEditorState,
+    graph_tab: GraphTab,
     /// Content-aware autosave debounce. Renderer cache changes never enter this
     /// fingerprint, so a quiet project does not keep rewriting JSON every frame.
     observed_project_fingerprint: Option<u64>,
@@ -435,18 +521,42 @@ impl AppState {
         let studio_mode = engine_config.mode == RuntimeMode::StudioEdit;
         let studio_scene = studio::StudioScene::default();
         let engine_runtime = VoxelEngineRuntime::load(engine_config.clone());
+        let world_program = engine_runtime.program.clone();
+        let world_seed = engine_runtime.project.project.manifest.world_seed;
         let brickmap_start = Instant::now();
-        let mut brickmap = engine_runtime.build_world(&studio_scene);
+        let (mut brickmap, worldgen_outcome) = engine_runtime.build_world_reporting(&studio_scene);
         println!(
-            "{} graph built in {:.2?} ({} occupied bricks)",
+            "{} graph built in {:.2?} ({} detail brick slots, terrain up to brick row {})",
             if studio_mode {
                 "studio preview"
             } else {
                 "world"
             },
             brickmap_start.elapsed(),
-            brickmap.occupied_brick_count()
+            // Detail SLOTS, not world content: procedural generation fills whole
+            // one-metre voxels, so every brick is uniform-collapsed and this is
+            // legitimately zero for a freshly generated world. Reporting it alone
+            // read as "the world is empty" — the brick row and the generation
+            // summary below are what actually say whether anything was built.
+            brickmap.occupied_brick_count(),
+            brickmap.metadata().max_occupied_brick_y
         );
+        if let Some(stats) = worldgen_outcome.as_ref().map(|outcome| &outcome.stats) {
+            println!(
+                "  terrain surface Y {:?} vs sea level, {} solid, {} cave, water {}+{} cave, lava {}",
+                stats.surface_range(),
+                stats.solid_voxels,
+                stats.cave_voxels,
+                stats.open_air_water,
+                stats.cave_water,
+                stats.cave_lava
+            );
+            println!(
+                "  scatter {} placed across {} classes (G opens the generation window)",
+                stats.scatter.total(),
+                voxel_core::scatter::ScatterClass::ALL.len()
+            );
+        }
         let voxel_rt::engine_runtime::ProjectRuntime {
             materials: mut material_table,
             mut quality,
@@ -485,7 +595,7 @@ impl AppState {
                     &mut brickmap,
                     profile,
                     &environment_runtime,
-                    u64::from(WORLD_SEED),
+                    world_seed,
                 )
                 .unwrap_or_else(|error| panic!("world profile generation failed: {error}"));
                 println!(
@@ -651,6 +761,13 @@ impl AppState {
             }
             Err(error) => graph_editor.status = format!("Could not open graph: {error}"),
         }
+        let mut biome_graph_editor = GraphEditorState::new(0);
+        biome_graph_editor.open_graph(
+            0,
+            load_biome_graph(&studio_project, &StudioProjectStore::new(&project_path))
+                .unwrap_or_else(new_biome_graph),
+        );
+        biome_graph_editor.node_type = "biome.definition".to_string();
 
         // The fixture's camera and sun, or the ordinary island's. Both come from
         // `RainbowCorridor` so the interactive view and bench section 15 cannot
@@ -680,6 +797,9 @@ impl AppState {
             overlay,
             frame_timers,
             fly_camera,
+            command_held: false,
+            flare_projectiles: Vec::new(),
+            debug_no_clip_flight: false,
             character: character_from_fly_camera(&fly_camera),
             control_mode: if studio_mode {
                 ControlMode::StudioOrbit
@@ -727,6 +847,9 @@ impl AppState {
             loaded_vox: None,
             studio_project,
             world_profile,
+            world_program,
+            world_seed,
+            worldgen_outcome,
             environment_runtime,
             studio_assets: StudioAssetPanelState {
                 status: project_status,
@@ -735,6 +858,8 @@ impl AppState {
             },
             material_graph_shaders,
             graph_editor,
+            biome_graph_editor,
+            graph_tab: GraphTab::Materials,
             observed_project_fingerprint: project_fingerprint,
             saved_project_fingerprint: None,
             autosave_due_at: None,
@@ -1014,6 +1139,28 @@ impl AppState {
         }
     }
 
+    /// Validate the authored biome graph without changing the active world.
+    ///
+    /// World generation is an explicit commit, requested by the Biomes tab's
+    /// `Update World` button. Keeping validation separate means dragging a
+    /// node or changing a parameter cannot rebuild the live world on every
+    /// editor step.
+    fn compile_biome_graph_editor(&mut self) -> bool {
+        let registry = voxel_rt::graph::CATALOGUE;
+        let diagnostics = self.biome_graph_editor.graph.resolve(&registry).diagnostics;
+        let has_error = diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == voxel_graph::DiagnosticSeverity::Error);
+        self.biome_graph_editor.diagnostics = diagnostics;
+        if has_error {
+            self.biome_graph_editor.status = "Biome graph has validation errors".to_string();
+            return false;
+        }
+        self.biome_graph_editor.status =
+            "Biome graph validated — press Update World to apply".to_string();
+        true
+    }
+
     fn open_graph_editor_graph(&mut self) {
         let slot = self.graph_editor.material_slot;
         let project_path = PathBuf::from(self.studio_assets.project_path.trim());
@@ -1055,6 +1202,29 @@ impl AppState {
             }
             Err(error) => self.graph_editor.status = format!("Save graph failed: {error}"),
         }
+    }
+
+    /// Save the biome graph as a registered project asset.
+    ///
+    /// Through the store rather than `std::fs`, so it gets the atomic temp+rename
+    /// write, schema validation, and a manifest entry — the same guarantees every
+    /// other asset has. The raw-write version this replaced could be truncated by
+    /// a crash mid-save with no recovery snapshot, and left the graph invisible to
+    /// the manifest, which is why it was never applied at startup.
+    fn save_biome_graph_editor(&mut self) {
+        let root = PathBuf::from(self.studio_assets.project_path.trim());
+        let store = StudioProjectStore::new(&root);
+        let path = PathBuf::from("graphs").join(BIOME_GRAPH_FILE);
+        let result = self.studio_project.set_active_biome_graph(
+            &store,
+            path.clone(),
+            &self.biome_graph_editor.graph,
+        );
+        self.biome_graph_editor.save_requested = false;
+        self.biome_graph_editor.status = match result {
+            Ok(()) => format!("Saved biome graph to {}", root.join(&path).display()),
+            Err(error) => format!("Could not save biome graph: {error}"),
+        };
     }
 
     fn duplicate_graph_editor_graph(&mut self) {
@@ -1162,6 +1332,11 @@ impl AppState {
                     self.overlay.toggle_settings_panel();
                 }
             }
+            KeyCode::KeyG => {
+                if pressed {
+                    self.overlay.toggle_worldgen_panel();
+                }
+            }
             // P for performance: spans, pacing and wave detection. A WINDOW, not
             // another always-on corner — the overlay already costs too much
             // permanent screen area for a number you consult occasionally.
@@ -1170,13 +1345,14 @@ impl AppState {
                     self.overlay.toggle_performance_panel();
                 }
             }
-            // M1b: L places a glow block against the aimed face — the same edit
-            // a right click makes, with the emissive material instead of stone.
-            // Deliberately NOT hold-to-repeat: a light source is placed one at a
-            // time, and repeating would stack a column of them on one hold.
+            // L fires a two-texel flare. It lands against the first surface under
+            // the crosshair and deliberately has no hold-to-repeat: one key press
+            // is one projectile, not a column of overlapping flares. The dispatch
+            // site drops the OS auto-repeat stream, which is what used to turn a held
+            // L into a burst that evicted its own shots out of the 16 renderer slots.
             KeyCode::KeyL => {
                 if pressed {
-                    self.edit_at_crosshair(Some(GLOW_BLOCK_MATERIAL));
+                    self.shoot_flare();
                 }
             }
             _ => {}
@@ -1532,6 +1708,142 @@ impl AppState {
         );
     }
 
+    /// Fire an animated flare. It crosses the cave at a stated metres-per-second
+    /// speed, then only changes the world if it reaches a surface to attach to.
+    fn shoot_flare(&mut self) {
+        if !self.world_edits_allowed() {
+            return;
+        }
+        let pose = self.active_pose();
+        let direction = pose.forward.normalize();
+        // The muzzle offset is where the flare starts being DRAWN, not where it
+        // starts existing: collision has to cover the eye->muzzle segment too, or a
+        // shot at a wall closer than 25 cm spawns its head already inside the rock.
+        // Walking it once here, at spawn, completes the continuous-collision chain —
+        // every later segment is walked by `advance_flare_projectiles`.
+        let muzzle_impact = {
+            let brickmap = self.world_host.read();
+            voxel_dda::cast(
+                &brickmap,
+                pose.position.to_array(),
+                direction.to_array(),
+                FLARE_MUZZLE_OFFSET_METERS,
+                voxel_dda::CastTarget::EditableVoxel,
+            )
+        };
+        if let Some(hit) = muzzle_impact {
+            self.attach_flare(hit);
+            return;
+        }
+        // Each click emits its own projectile entity. Retain the latest fixed
+        // renderer capacity rather than replacing the previous shot.
+        if self.flare_projectiles.len() == MAX_FLYING_FLARES {
+            self.flare_projectiles.remove(0);
+        }
+        self.flare_projectiles.push(FlareProjectile {
+            origin_meters: pose.position,
+            direction,
+            travelled_meters: FLARE_MUZZLE_OFFSET_METERS,
+            max_distance_meters: FLARE_REACH_METERS,
+        });
+    }
+
+    /// Make the completed projectile the persistent 1 × 1 × 2 detail-cell
+    /// emitter. The DDA face gives us the empty cell immediately in front of
+    /// the wall, then the face normal extends the flare outward into the cave.
+    fn attach_flare(&mut self, hit: voxel_dda::VoxelHit) {
+        if hit.face_normal == [0, 0, 0] {
+            return;
+        }
+        let cells = [
+            hit.face_voxel,
+            [
+                hit.face_voxel[0] + hit.face_normal[0],
+                hit.face_voxel[1] + hit.face_normal[1],
+                hit.face_voxel[2] + hit.face_normal[2],
+            ],
+        ];
+        // A flare either attaches in its complete two-texel shape or does nothing.
+        // Two ways that contract used to break:
+        //
+        // * `Brickmap::get` reports 0 for coordinates OUTSIDE the world, so a second
+        //   cell past the border read as free, passed this guard, and was then
+        //   silently dropped by `set_voxel`'s own bounds check — leaving the
+        //   in-bounds half of the flare committed on its own. Out of the world is not
+        //   air; it is nowhere, and there is nothing there to attach to.
+        // * emptiness was `get(...) != 0`, which counts a water cell as occupied. The
+        //   impact cast passes THROUGH liquids, so a shot at a submerged surface
+        //   always hands back a water cell in front of the bed — and this guard then
+        //   rejected it after `advance_flare_projectiles` had already retired the
+        //   projectile, so the flare vanished mid-flight every time. To the editor
+        //   water IS air (`material_is_empty_for_edits`), which is the same rule the
+        //   click-to-place path follows, so a flare can now light a pool from above,
+        //   at the waterline and from the bed.
+        if cells.iter().any(|cell| !cell_is_inside_the_world(*cell)) {
+            return;
+        }
+        {
+            let brickmap = self.world_host.read();
+            if cells.iter().any(|cell| {
+                !material::material_is_empty_for_edits(brickmap.get(cell[0], cell[1], cell[2]))
+            }) {
+                return;
+            }
+        }
+        let light_grid = self
+            .quality
+            .global_illumination
+            .enabled
+            .then(|| self.renderer.light_volume_grid());
+        self.world_host.request_detail_edit(
+            DetailVoxelEdit {
+                voxels: cells.to_vec(),
+                material: FLARE_MATERIAL,
+                light_grid,
+                material_attributes: self.material_table.cagi_attributes(),
+            },
+            &self.quality.world_edit,
+        );
+    }
+
+    fn advance_flare_projectiles(&mut self, frame_time_seconds: f32) {
+        // No shots in flight is the overwhelmingly common case, and the world
+        // authority's read lock is contended with the world thread. Do not queue for
+        // it just to walk an empty list.
+        if self.flare_projectiles.is_empty() {
+            return;
+        }
+        let mut impacts = Vec::new();
+        {
+            let brickmap = self.world_host.read();
+            self.flare_projectiles.retain_mut(|flare| {
+                let step_meters = (FLARE_SPEED_METERS_PER_SECOND * frame_time_seconds.max(0.0))
+                    .min(flare.max_distance_meters - flare.travelled_meters);
+                if step_meters <= 0.0 {
+                    return false;
+                }
+                // Continuous collision detection: DDA walks the entire movement
+                // segment, so a fast 12.5 cm flare cannot tunnel through a cave
+                // wall between animation frames.
+                if let Some(hit) = voxel_dda::cast(
+                    &brickmap,
+                    flare.head().to_array(),
+                    flare.direction.to_array(),
+                    step_meters,
+                    voxel_dda::CastTarget::EditableVoxel,
+                ) {
+                    impacts.push(hit);
+                    return false;
+                }
+                flare.travelled_meters += step_meters;
+                flare.travelled_meters < flare.max_distance_meters
+            });
+        }
+        for hit in impacts {
+            self.attach_flare(hit);
+        }
+    }
+
     /// Select the material under the crosshair without changing the world.
     /// Middle-click uses this directly; the existing eyedropper calls the same
     /// selection path after consuming its next edit click.
@@ -1872,14 +2184,16 @@ impl AppState {
         if self.control_mode == ControlMode::StudioOrbit {
             return Ok(());
         }
-        let world = VoxelWorld::generate(WORLD_SEED, WORLD_SEASON);
-        let mut brickmap = Brickmap::build(&world);
+        let (mut brickmap, worldgen_outcome) = self
+            .world_program
+            .build_reporting(&self.studio_scene, self.world_seed);
+        self.worldgen_outcome = worldgen_outcome;
         if let Some(profile) = &self.world_profile {
             apply_initial_generation_profile(
                 &mut brickmap,
                 profile,
                 &self.environment_runtime,
-                u64::from(WORLD_SEED),
+                self.world_seed,
             )
             .map_err(|error| error.to_string())?;
         }
@@ -1890,6 +2204,22 @@ impl AppState {
             let brickmap = self.world_host.read();
             self.renderer
                 .reupload_world(&self.gpu_context.device, &brickmap);
+            // The eye kept its pose while the terrain under it changed completely, so
+            // the regenerated world may well be solid exactly where the camera is
+            // standing. Fly collision is always on, which means a buried eye cannot
+            // cross a cell boundary in any direction and is trapped for good. This is
+            // in the rebuild rather than at the button that triggered it, so every
+            // caller — the Update World button, the profile reload, the generator
+            // graph's own recompile — is covered by construction.
+            self.fly_camera.position =
+                voxel_rt::camera::eject_eye_from_solid(self.fly_camera.position, |point| {
+                    let cell = (point / voxel_core::world::VOXEL_SIZE).floor();
+                    !material::material_is_empty_for_edits(brickmap.get(
+                        cell.x as i32,
+                        cell.y as i32,
+                        cell.z as i32,
+                    ))
+                });
         }
         self.renderer.mark_light_volume_dirty();
         Ok(())
@@ -1988,7 +2318,13 @@ impl AppState {
 
     /// A mouse button changed: enter mouse-look, or start/stop a hold-to-repeat
     /// edit. All winit types stay in this file (platform-layer rule).
-    fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, egui_consumed: bool) {
+    fn handle_mouse_button(
+        &mut self,
+        button: MouseButton,
+        pressed: bool,
+        egui_consumed: bool,
+        flare_chord: bool,
+    ) {
         if button == MouseButton::Middle {
             if pressed && !egui_consumed && self.cursor_grabbed {
                 self.pick_material_at_crosshair();
@@ -2018,6 +2354,14 @@ impl AppState {
             // window to focus it never carves a hole in the world.
             if !place {
                 self.set_cursor_grabbed(true);
+            }
+            return;
+        }
+        // ⌘ + left-click is the flare gun. It is a one-shot action and must not
+        // arm the ordinary left-click dig repeat.
+        if !place && flare_chord {
+            if pressed {
+                self.shoot_flare();
             }
             return;
         }
@@ -2145,7 +2489,26 @@ impl AppState {
         let input_started = Instant::now();
         let camera_input = self.input_state.drain_camera_input();
         match self.control_mode {
-            ControlMode::Fly => self.fly_camera.update(&camera_input, frame_time_seconds),
+            ControlMode::Fly => {
+                let eye_before_move = self.fly_camera.position;
+                self.fly_camera.update(&camera_input, frame_time_seconds);
+                let requested_translation = self.fly_camera.position - eye_before_move;
+                if !self.debug_no_clip_flight {
+                    // Keep fly mode's unconstrained look and vertical freedom,
+                    // but resolve its eye through the voxel authority before
+                    // rendering. Otherwise a camera inside cave rock starts every
+                    // primary ray inside solid material, producing an unreadable
+                    // interior view. Debug no-clip deliberately keeps the original
+                    // movement intact so cave volume generation can be inspected.
+                    self.fly_camera.position = eye_before_move;
+                    let brickmap = self.world_host.read();
+                    sweep_fly_camera(
+                        &brickmap,
+                        &mut self.fly_camera.position,
+                        requested_translation,
+                    );
+                }
+            }
             ControlMode::Walk => {
                 // E2b: the body reads the authoritative brickmap (the same one
                 // picking and, at E8, the audio rays read) and holds the read lock
@@ -2186,6 +2549,7 @@ impl AppState {
         }
         // E2: edits are requested BEFORE the frame is encoded and their deltas are
         // uploaded right after, so a click shows up in the very next frame.
+        self.advance_flare_projectiles(frame_time_seconds);
         self.span_recorder
             .record(profiling::CPU_INPUT, input_started.elapsed());
 
@@ -2201,7 +2565,7 @@ impl AppState {
         // the remaining upper viewport so the Studio subject stays centered there.
         self.renderer
             .set_viewport_height(&self.gpu_context.device, self.rendered_viewport_height());
-        let camera_uniform = match self.control_mode {
+        let mut camera_uniform = match self.control_mode {
             ControlMode::Fly => self.fly_camera.gpu_uniform(self.renderer.resolution()),
             ControlMode::Walk => self.character.gpu_uniform(self.renderer.resolution()),
             // Built from the orbit pose itself rather than a camera struct, so
@@ -2212,6 +2576,20 @@ impl AppState {
                 self.renderer.resolution(),
             ),
         };
+        if self.control_mode == ControlMode::Fly && self.debug_no_clip_flight {
+            camera_uniform.debug_no_clip = 1.0;
+        }
+        camera_uniform.flare_count = self.flare_projectiles.len() as u32;
+        // Voxel units, because that is the space the shader intersects them in.
+        let voxels_per_meter = 1.0 / voxel_core::world::VOXEL_SIZE;
+        for (slot, flare) in self.flare_projectiles.iter().enumerate() {
+            camera_uniform.flares[slot] = GpuFlare {
+                head_voxels: (flare.head() * voxels_per_meter).to_array(),
+                head_radius_voxels: FLARE_HEAD_RADIUS_METERS * voxels_per_meter,
+                tail_voxels: (flare.tail() * voxels_per_meter).to_array(),
+                tail_radius_voxels: FLARE_TAIL_RADIUS_METERS * voxels_per_meter,
+            };
+        }
         self.sun_settings.advance_day_cycle(frame_time_seconds);
         self.environment_runtime.day_phase = self.sun_settings.day_phase;
         // Advance wind, weather and the deck's advection, then state the result.
@@ -2374,6 +2752,22 @@ impl AppState {
 
         let overlay_started = Instant::now();
         let frame_data = OverlayFrameData {
+            // Both halves come from the program that built the live world, so the
+            // window cannot report a world other than the one on screen.
+            worldgen: self
+                .worldgen_outcome
+                .as_ref()
+                .zip(
+                    self.world_program
+                        .generation_program()
+                        .map(|program| program.chunk_generator(self.world_seed)),
+                )
+                .map(|(outcome, generator)| overlay::WorldgenReadout {
+                    generator,
+                    stats: outcome.stats,
+                    report: outcome.report.clone(),
+                    world_seed: self.world_seed,
+                }),
             render_resolution: self.renderer.resolution(),
             world_edit: WorldEditReadout {
                 threaded: self.world_host.is_threaded(),
@@ -2416,6 +2810,7 @@ impl AppState {
             &mut encoder,
             &target_view,
             &frame_data,
+            &mut self.debug_no_clip_flight,
             self.frame_timers
                 .as_ref()
                 .map(|frame_timers| frame_timers.render_span_writes(GPU_OVERLAY)),
@@ -2436,6 +2831,8 @@ impl AppState {
             &mut self.material_panel,
             &mut self.studio_assets,
             &mut self.graph_editor,
+            &mut self.biome_graph_editor,
+            &mut self.graph_tab,
         );
         self.span_recorder
             .record(profiling::CPU_OVERLAY, overlay_started.elapsed());
@@ -2516,8 +2913,37 @@ impl AppState {
         if std::mem::take(&mut self.graph_editor.save_requested) {
             self.save_graph_editor_graph();
         }
+        if std::mem::take(&mut self.biome_graph_editor.save_requested) {
+            self.save_biome_graph_editor();
+        }
         if std::mem::take(&mut self.graph_editor.compile_requested) {
             self.compile_graph_editor();
+        }
+        if std::mem::take(&mut self.biome_graph_editor.compile_requested) {
+            self.compile_biome_graph_editor();
+        }
+        if std::mem::take(&mut self.biome_graph_editor.world_update_requested) {
+            if self.compile_biome_graph_editor() {
+                match self
+                    .world_program
+                    .apply_biome_graph(&self.biome_graph_editor.graph)
+                {
+                    Ok(()) => match self.rebuild_generated_world_from_profile() {
+                        Ok(()) => {
+                            self.biome_graph_editor.status =
+                                "Biome graph applied — world regenerated".to_string();
+                        }
+                        Err(error) => {
+                            self.biome_graph_editor.status =
+                                format!("Biome update failed: {error}");
+                        }
+                    },
+                    Err(error) => {
+                        self.biome_graph_editor.status =
+                            format!("Biome graph apply failed: {error}");
+                    }
+                }
+            }
         }
         self.update_project_autosave();
         self.upload_material_edits();
@@ -2666,14 +3092,28 @@ impl ApplicationHandler for App {
                     && !egui_consumed
                     && !state.overlay.wants_keyboard_input()
                 {
+                    // `event.repeat` is the OS auto-repeat stream a held key produces
+                    // at the system's typing rate — the same thing that inserts
+                    // "aaaaa" in a text field. It is not a debounce and there is no
+                    // timer here: the real press and the release still arrive, they
+                    // are just no longer joined by 15-30 synthetic presses a second.
+                    // Dropped for EVERY key rather than at one match arm, because
+                    // held movement keys are tracked by press/release state and any
+                    // action key (L's flare, F's mode swap, O and P's panels) means a
+                    // deliberate press, so not one of them wants the repeat stream.
                     if let PhysicalKey::Code(key_code) = event.physical_key {
-                        state.handle_keyboard(key_code, event.state == ElementState::Pressed);
+                        if !event.repeat {
+                            state.handle_keyboard(key_code, event.state == ElementState::Pressed);
+                        }
                     }
                 }
             }
-            // Left click enters mouse-look, then REMOVES the aimed voxel; right
-            // click PLACES one against the aimed face (E2). Both hold-to-repeat.
-            // L places a glow block the same way, single-shot (M1b).
+            // Left click enters mouse-look, then removes the aimed voxel; right
+            // click places one against the aimed face. Both hold-to-repeat.
+            // ⌘ + left-click fires a single attached flare instead.
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.command_held = modifiers.state().super_key();
+            }
             WindowEvent::MouseInput {
                 state: button_state,
                 button,
@@ -2686,6 +3126,7 @@ impl ApplicationHandler for App {
                     button,
                     button_state == ElementState::Pressed,
                     input_region != InputRegion::Viewport || egui_consumed,
+                    state.command_held,
                 );
             }
             // Mouse wheel tunes the ACTIVE mode's speed: 12 m/s was too fast to
@@ -2756,6 +3197,19 @@ impl ApplicationHandler for App {
     }
 }
 
+/// The project-relative file the biome graph lives in.
+const BIOME_GRAPH_FILE: &str = "biomes.vgraph.json";
+
+/// Load the project's registered biome graph.
+///
+/// The manifest is the only source consulted, so the graph the editor shows is
+/// exactly the one the runtime compiled at startup. A project with no registered
+/// biome graph opens the starter graph and registers it on first save — one code
+/// path, no migration step that could leave the two disagreeing.
+fn load_biome_graph(project: &StudioProject, store: &StudioProjectStore) -> Option<GraphAsset> {
+    project.load_active_biome_graph(store).ok().flatten()
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
     if arguments
@@ -2784,6 +3238,92 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flare burns on a row of its own. Sharing lava's row meant the eyedropper
+    /// reported "lava" for a flare stuck in a wall, and every retune of molten rock
+    /// restyled every flare in the world.
+    #[test]
+    fn the_flare_has_its_own_emissive_material_row() {
+        assert_ne!(FLARE_MATERIAL, Voxel::Lava);
+        let flare_id = material::material_id(FLARE_MATERIAL);
+        let row = &material::MATERIALS[flare_id as usize];
+        assert_eq!(row.name, "flare_ember");
+        assert!(
+            row.light.is_some(),
+            "a flare that casts no light is not a flare"
+        );
+        // The two-texel edit stamps geometry, so the row has to be something the
+        // edit path treats as a block and not as empty space.
+        assert!(!material::material_is_empty_for_edits(flare_id));
+    }
+
+    /// The two rules the flare's attach guard rests on: water is free space (the
+    /// impact cast passes through liquids, so a shot at a submerged surface ALWAYS
+    /// hands back a water cell in front of the bed) and rock is not.
+    #[test]
+    fn a_flare_treats_water_as_free_space_and_rock_as_occupied() {
+        assert!(material::material_is_empty_for_edits(
+            material::material_id(Voxel::Water)
+        ));
+        assert!(material::material_is_empty_for_edits(
+            material::material_id(Voxel::Air)
+        ));
+        assert!(!material::material_is_empty_for_edits(
+            material::material_id(Voxel::Stone)
+        ));
+    }
+
+    /// Outside the world is not air. The brickmap reads out-of-bounds as 0 and
+    /// writes there as a no-op, which together would commit half of a two-texel
+    /// flare at the world border and drop the other half.
+    #[test]
+    fn a_cell_outside_the_world_is_not_free_space() {
+        let last_x = voxel_core::world::WORLD_SIZE_X as i32 - 1;
+        let last_y = voxel_core::world::WORLD_SIZE_Y as i32 - 1;
+        let last_z = voxel_core::world::WORLD_SIZE_Z as i32 - 1;
+        assert!(cell_is_inside_the_world([0, 0, 0]));
+        assert!(cell_is_inside_the_world([last_x, last_y, last_z]));
+        for outside in [
+            [-1, 0, 0],
+            [0, -1, 0],
+            [0, 0, -1],
+            [last_x + 1, 0, 0],
+            [0, last_y + 1, 0],
+            [0, 0, last_z + 1],
+        ] {
+            assert!(
+                !cell_is_inside_the_world(outside),
+                "{outside:?} is outside the world"
+            );
+        }
+    }
+
+    /// The flare's drawn geometry, in the voxel units the shader now consumes
+    /// directly. Both spheres stay under one voxel across, so a flying flare reads
+    /// as the same size as the two-texel emitter it becomes on impact, and the
+    /// trailing ember stays visibly the smaller of the two.
+    #[test]
+    fn the_flare_spheres_convert_to_sub_voxel_radii() {
+        let voxels_per_meter = 1.0 / voxel_core::world::VOXEL_SIZE;
+        let head_radius_voxels = FLARE_HEAD_RADIUS_METERS * voxels_per_meter;
+        let tail_radius_voxels = FLARE_TAIL_RADIUS_METERS * voxels_per_meter;
+        assert!((head_radius_voxels - 0.76).abs() < 1e-4);
+        assert!((tail_radius_voxels - 0.5928).abs() < 1e-4);
+        assert!(tail_radius_voxels < head_radius_voxels);
+        // A zero radius is how the shader recognises an unused slot, so a live
+        // flare's radii must never round to it.
+        assert!(tail_radius_voxels > 0.0);
+    }
+
+    /// The muzzle offset must stay inside the trail length. The head is drawn one
+    /// muzzle offset from the eye and the tail one trail length behind it, so a
+    /// muzzle offset longer than the trail would put the tail behind the eye and
+    /// paint a sphere over the whole frame at the moment of firing.
+    #[test]
+    fn the_muzzle_offset_stays_within_the_trail() {
+        const { assert!(FLARE_MUZZLE_OFFSET_METERS > 0.0) };
+        const { assert!(FLARE_MUZZLE_OFFSET_METERS <= FLARE_TRAIL_LENGTH_METERS) };
+    }
 
     /// The studio must not be diggable, and the two world modes must stay editable.
     /// Spelled out per variant rather than as `!= StudioOrbit`, so adding a mode

@@ -41,7 +41,7 @@ pub const OCCUPANCY_WORDS_PER_BRICK: usize = VOXELS_PER_BRICK / 32;
 pub const MATERIAL_WORDS_PER_BRICK: usize = VOXELS_PER_BRICK / 4;
 
 /// Brick grid dimensions: world size padded up to a multiple of the brick
-/// size. 1000/8 = 125 and 256/8 = 32 divide exactly, so no padding bricks
+/// size. 1000/8 = 125 and 512/8 = 64 divide exactly, so no padding bricks
 /// actually exist today, but `div_ceil` keeps the math honest if the world
 /// constants ever change.
 pub(crate) const BRICK_GRID_X: usize = WORLD_SIZE_X.div_ceil(BRICK_SIZE);
@@ -197,12 +197,12 @@ pub(crate) const DIRTY_RANGE_GAP_WORDS: usize = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrickmapMetadata {
-    /// Brick grid dimensions (125, 32, 125).
+    /// Brick grid dimensions (125, 64, 125).
     pub brick_grid_size: [u32; 3],
     /// Allocated sculpted/detail brick payloads. Uniform world blocks are tagged
     /// directly in level 0 and do not contribute to this count.
     pub occupied_brick_count: u32,
-    /// Renderer detail-grid dimensions (1000, 256, 1000).
+    /// Renderer detail-grid dimensions (1000, 512, 1000).
     pub world_size_voxels: [u32; 3],
     /// Edge length of one renderer detail cell in metres (0.125).
     pub voxel_size_meters: f32,
@@ -276,7 +276,7 @@ pub struct Brickmap {
     pub brick_skip_distance_words: Vec<u32>,
     /// AADF (binding 11): six 5-bit directional bounds per brick cell, packed one
     /// `u32` per cell in [`BOUND_DIRECTIONS`] order. Built by
-    /// [`directional_bounds`]; 2 MB for the 125x32x125 grid.
+    /// [`directional_bounds`]; roughly 4 MB for the 125x64x125 grid.
     ///
     /// Carried ALONGSIDE the chebyshev bytes, not instead of them: chebyshev
     /// answers "how big is the empty cube here", which the soft-shadow penumbra
@@ -1676,7 +1676,7 @@ fn directional_bounds(
 /// Two chamfer sweeps over the 26-neighborhood with unit weights are EXACT
 /// for the chebyshev metric (any chebyshev-d path decomposes into d king
 /// moves, and each sweep direction covers one half-space of moves), so the
-/// whole transform is O(cells x 26) — ~13M relaxations for 125x32x125.
+/// whole transform is O(cells x 26) — ~27M relaxations for 125x64x125.
 /// Exactness is pinned by the brute-force test below.
 fn chebyshev_skip_distances(
     brick_indices: &[u32],
@@ -1792,7 +1792,7 @@ mod tests {
     /// Round trip: `Brickmap::get` must agree with `VoxelWorld::get` mapped
     /// through `material_id`, over a deterministic sample grid (~42k
     /// coordinates) heavy on brick boundaries, plus out-of-bounds probes.
-    /// NOTE: expands the 125x32x125 world through its 1000x256x1000 renderer grid,
+    /// NOTE: expands the 125x64x125 world through its 1000x512x1000 renderer grid,
     /// run with `--release` when iterating.
     #[test]
     fn brickmap_round_trips_generated_world() {
@@ -2120,8 +2120,15 @@ mod tests {
         let before_capacity = brickmap.brick_capacity();
         let before_count = brickmap.occupied_brick_count();
 
-        // High above the island, guaranteed empty air.
-        let voxel = [200, 250, 200];
+        // High above the island, guaranteed empty air: the brick row directly
+        // above whatever the generated terrain reaches, so this brick becomes
+        // the world's new occupied ceiling.
+        let new_ceiling_brick_y = brickmap.metadata().max_occupied_brick_y + 1;
+        assert!(
+            (new_ceiling_brick_y as usize) < BRICK_GRID_Y,
+            "the generated island already fills the brick grid to its top row"
+        );
+        let voxel = [200, new_ceiling_brick_y as i32 * BRICK_SIZE as i32 + 2, 200];
         assert!(!brickmap.is_occupied(voxel[0], voxel[1], voxel[2]));
         let placed = brickmap
             .set_voxel(voxel[0], voxel[1], voxel[2], Voxel::Stone, clearance)
@@ -2129,7 +2136,10 @@ mod tests {
         assert!(placed.brick_allocated && !placed.arrays_grew);
         assert_eq!(brickmap.occupied_brick_count(), before_count + 1);
         assert_eq!(brickmap.brick_capacity(), before_capacity);
-        assert_eq!(brickmap.metadata().max_occupied_brick_y, 250 / 8);
+        assert_eq!(
+            brickmap.metadata().max_occupied_brick_y,
+            new_ceiling_brick_y
+        );
         assert_derived_structures_are_consistent(&brickmap, true);
 
         let removed = brickmap

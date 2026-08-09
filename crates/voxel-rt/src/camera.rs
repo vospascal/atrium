@@ -18,7 +18,7 @@
 //! clamped just short of +/-90 degrees.
 
 use glam::Vec3;
-use voxel_core::world::{VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Z};
+use voxel_core::world::{VOXEL_SIZE, WATER_LEVEL, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 /// Vertical field of view used by the default camera, radians (~60 deg).
 pub const DEFAULT_VERTICAL_FOV_RADIANS: f32 = 60.0 * std::f32::consts::PI / 180.0;
@@ -52,7 +52,46 @@ pub(crate) fn pixel_footprint_at_one_meter(vertical_fov_radians: f32, height_pix
 /// (`right_scaled = right * tan(fov_y/2) * aspect`,
 /// `up_scaled = up * tan(fov_y/2)`).
 ///
-/// `#[repr(C)]` layout (80 bytes, 16-byte aligned — matches the WGSL
+/// Maximum independently visible flares. This stays fixed because the DDA
+/// camera uniform is a fixed-size GPU contract, not a growable scene buffer.
+pub const MAX_FLYING_FLARES: usize = 16;
+
+/// One transient flare slot in [`CameraUniform`]. The two vec3/f32 pairs are
+/// 16-byte aligned in both Rust and WGSL.
+///
+/// Everything here is in VOXEL UNITS, unlike the metres the rest of
+/// [`CameraUniform`] carries, and both sphere radii are stated rather than one
+/// being derived from the other. That is deliberate: the shader intersects flares
+/// in the traversal space it is already in, and the metre->voxel conversion is a
+/// frame constant. Converting on the CPU costs a handful of divides per frame;
+/// leaving it in the loop cost one divide per radius per flare per PIXEL, which at
+/// 1440p with a full slot table is a few hundred million divides a frame for a
+/// value that never varies across the image.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuFlare {
+    pub head_voxels: [f32; 3],
+    pub head_radius_voxels: f32,
+    pub tail_voxels: [f32; 3],
+    /// Also the slot's occupancy flag, which is why the shader tests it instead of
+    /// carrying a separate `enabled` float: a flare with no ember to draw is not a
+    /// flare, so a zero radius and an unused slot are the same state.
+    pub tail_radius_voxels: f32,
+}
+
+impl GpuFlare {
+    pub const INACTIVE: GpuFlare = GpuFlare {
+        head_voxels: [0.0; 3],
+        head_radius_voxels: 0.0,
+        tail_voxels: [0.0; 3],
+        tail_radius_voxels: 0.0,
+    };
+}
+
+unsafe impl bytemuck::Zeroable for GpuFlare {}
+unsafe impl bytemuck::Pod for GpuFlare {}
+
+/// `#[repr(C)]` layout (608 bytes, 16-byte aligned — matches the WGSL
 /// `Camera` struct in `shaders/dda.wgsl`; every `vec3<f32>` is padded to 16
 /// bytes with an explicit pad float):
 ///
@@ -67,7 +106,13 @@ pub(crate) fn pixel_footprint_at_one_meter(vertical_fov_radians: f32, height_pix
 /// | 48     | `up_scaled`    | `vec3<f32>` |
 /// | 60     | `_pad3`        | `f32`       |
 /// | 64     | `resolution`   | `vec2<f32>` (pixels)       |
-/// | 72     | `_pad4`        | `vec2<f32>` |
+/// | 72     | `debug_no_clip`| `f32`       |
+/// | 76     | `_pad4`        | `f32`       |
+/// | 80     | `flare_count`  | `u32`       |
+/// | 84     | `_flare_pad[0]`| `u32`       |
+/// | 88     | `_flare_pad[1]`| `u32`       |
+/// | 92     | `_flare_pad[2]`| `u32`       |
+/// | 96     | `flares`       | `array<GpuFlare, 16>` |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraUniform {
@@ -80,7 +125,16 @@ pub struct CameraUniform {
     pub up_scaled: [f32; 3],
     pub _pad3: f32,
     pub resolution: [f32; 2],
-    pub _pad4: [f32; 2],
+    /// Debug no-clip flight asks primary rays that begin in solid material to
+    /// skip that enclosing volume and resume at its first air cell.
+    pub debug_no_clip: f32,
+    pub _pad4: f32,
+    /// Prefix of [`Self::flares`] occupied this frame.
+    pub flare_count: u32,
+    pub _flare_pad: [u32; 3],
+    /// Renderer-only moving shots, in voxel units (see [`GpuFlare`]). Attached
+    /// flares become regular brickmap geometry after impact.
+    pub flares: [GpuFlare; MAX_FLYING_FLARES],
 }
 
 // Manual impls instead of derive so we do not depend on bytemuck's `derive`
@@ -140,7 +194,11 @@ impl CameraPose {
             up_scaled: (self.up * half_tangent).to_array(),
             _pad3: 0.0,
             resolution: [resolution.0 as f32, resolution.1 as f32],
-            _pad4: [0.0, 0.0],
+            debug_no_clip: 0.0,
+            _pad4: 0.0,
+            flare_count: 0,
+            _flare_pad: [0; 3],
+            flares: [GpuFlare::INACTIVE; MAX_FLYING_FLARES],
         }
     }
 }
@@ -198,6 +256,52 @@ pub struct FlyCamera {
     pub vertical_fov_radians: f32,
 }
 
+/// Vertical gap the ejected eye keeps above the first free cell it finds, world
+/// meters. Four voxels — enough that the eye is not resting on the surface it was
+/// buried in, and small enough that the view is still of that surface.
+pub const EJECT_CLEARANCE_METERS: f32 = 0.5;
+
+/// Lift an eye that solid material has closed around until it is in free space.
+///
+/// A regenerated world is a NEW world: nothing says the terrain under the eye is
+/// where it was before, and fly collision is always on, so an eye that a rebuild
+/// left inside rock cannot cross a single cell boundary to get out — it is trapped
+/// for the rest of the session while every primary ray starts inside solid
+/// material, which reads as a dead screen rather than as a camera that needs
+/// moving. Every path that replaces the brickmap owes the eye this.
+///
+/// Straight up rather than "back to where it came from": the previous pose is just
+/// as likely to be inside the new terrain, whereas up always terminates — worst
+/// case at the world ceiling, which is open sky. Both the landing cell and the
+/// clearance above it must be free, so a one-voxel seam inside the rock is not
+/// mistaken for the surface.
+///
+/// `cell_is_solid` answers for a point in world METERS and must answer FALSE for
+/// liquids: a submerged camera renders correctly (E6's water medium march), and
+/// being spat out of a lake by a world rebuild would be the surprising behaviour.
+pub fn eject_eye_from_solid(eye_position: Vec3, cell_is_solid: impl Fn(Vec3) -> bool) -> Vec3 {
+    if !cell_is_solid(eye_position) {
+        return eye_position;
+    }
+    let world_ceiling_meters = WORLD_SIZE_Y as f32 * VOXEL_SIZE;
+    let clearance = Vec3::Y * EJECT_CLEARANCE_METERS;
+    // One voxel per step: the coarsest stride that cannot step over a free cell.
+    let mut candidate = eye_position;
+    while candidate.y < world_ceiling_meters {
+        candidate.y += VOXEL_SIZE;
+        if !cell_is_solid(candidate) && !cell_is_solid(candidate + clearance) {
+            return candidate + clearance;
+        }
+    }
+    // A column solid to the ceiling has no surface to stand above. Above the world
+    // is always free, and the eye can fly back down wherever it likes from there.
+    Vec3::new(
+        eye_position.x,
+        world_ceiling_meters + EJECT_CLEARANCE_METERS,
+        eye_position.z,
+    )
+}
+
 /// Movement-speed band the mouse wheel can reach, meters per second. The floor
 /// is slow enough to line up a single 0.125 m voxel; the ceiling crosses the
 /// 125 m island in about two seconds.
@@ -209,11 +313,11 @@ impl Default for FlyCamera {
     /// island center.
     ///
     /// Derivation (voxel-core constants, 0.125 m/voxel): the world is
-    /// 125 m x 32 m x 125 m; the water plane sits at `WATER_LEVEL` (84
-    /// voxels) = 10.5 m and procedural peaks reach ~31 m only near the
-    /// center, while the rim stays near water level. Spawning at
-    /// x = 62.5 m (center), z = 107.5 m (0.86 * 125, above the low rim),
-    /// y = 28 m (17.5 m above the water plane) is safely clear of terrain;
+    /// 125 m x 64 m x 125 m; the water plane sits at `WATER_LEVEL` (263
+    /// detail cells) = 32.875 m and procedural peaks reach roughly 52 m,
+    /// while the rim stays near water level. Spawning at x = 62.5 m (center),
+    /// z = 107.5 m (0.86 * 125, above the low rim), y = 52.9 m (20 m above
+    /// the water plane) is safely clear of terrain;
     /// yaw = -PI/2 faces -Z toward the island center ~45 m away and
     /// pitch = -0.33 rad (~-19 deg) drops the view onto the terrain.
     fn default() -> FlyCamera {
@@ -223,7 +327,7 @@ impl Default for FlyCamera {
         FlyCamera {
             position: Vec3::new(
                 world_x_meters * 0.5,
-                water_meters + 17.5,
+                water_meters + 20.0,
                 world_z_meters * 0.86,
             ),
             yaw: -std::f32::consts::FRAC_PI_2,
@@ -302,7 +406,8 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_gpu_ready() {
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 80);
+        assert_eq!(std::mem::size_of::<GpuFlare>(), 32);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 608);
         assert_eq!(std::mem::align_of::<CameraUniform>(), 4);
     }
 
@@ -352,6 +457,52 @@ mod tests {
         assert!(camera.position.x > 0.0 && camera.position.x < world_x);
         assert!(camera.position.z > 0.0 && camera.position.z < world_z);
         assert!(camera.position.y > WATER_LEVEL as f32 * VOXEL_SIZE);
+    }
+
+    /// A buried eye comes out just above the surface it was buried in, and an eye
+    /// that is already free is left exactly where it is (a rebuild must not nudge a
+    /// camera that was fine).
+    #[test]
+    fn ejection_lands_just_above_the_surface() {
+        let terrain_top_meters = 10.0;
+        let solid_below_ten = |point: Vec3| point.y < terrain_top_meters;
+
+        let ejected = eject_eye_from_solid(Vec3::new(3.0, 5.0, 7.0), solid_below_ten);
+        assert_eq!(ejected.x, 3.0);
+        assert_eq!(ejected.z, 7.0);
+        assert_eq!(ejected.y, terrain_top_meters + EJECT_CLEARANCE_METERS);
+        assert!(!solid_below_ten(ejected));
+
+        let free = Vec3::new(3.0, 20.0, 7.0);
+        assert_eq!(eject_eye_from_solid(free, solid_below_ten), free);
+    }
+
+    /// A column that is solid all the way up has no surface to sit above, so the
+    /// only free space left is over the world. The search must terminate there
+    /// rather than scan forever.
+    #[test]
+    fn ejection_escapes_a_fully_solid_column() {
+        let world_ceiling_meters = WORLD_SIZE_Y as f32 * VOXEL_SIZE;
+        let ejected = eject_eye_from_solid(Vec3::new(1.0, 4.0, 2.0), |_| true);
+        assert_eq!(ejected.y, world_ceiling_meters + EJECT_CLEARANCE_METERS);
+        assert_eq!(ejected.x, 1.0);
+        assert_eq!(ejected.z, 2.0);
+    }
+
+    /// A one-voxel void inside the rock is not the surface. The eye must keep
+    /// climbing until the clearance above the landing cell is free too, otherwise
+    /// the ejection would leave it re-buried by its own clearance offset.
+    #[test]
+    fn ejection_skips_a_pocket_too_thin_to_stand_in() {
+        let pocket_y = 6.0;
+        let terrain_top_meters = 10.0;
+        let ejected = eject_eye_from_solid(Vec3::new(0.5, 2.0, 0.5), |point| {
+            if (point.y - pocket_y).abs() < VOXEL_SIZE * 0.5 {
+                return false;
+            }
+            point.y < terrain_top_meters
+        });
+        assert_eq!(ejected.y, terrain_top_meters + EJECT_CLEARANCE_METERS);
     }
 
     #[test]

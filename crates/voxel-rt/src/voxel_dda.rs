@@ -327,11 +327,22 @@ fn argmin(values: &[f32; 3]) -> usize {
 mod tests {
     use super::*;
     use crate::brickmap::ClearanceUpdate;
-    use voxel_core::world::{Voxel, VoxelWorld, WATER_LEVEL};
+    use voxel_core::world::{Voxel, VoxelWorld};
     use voxel_material::material::{material_id, material_is_liquid};
 
     /// The default query — spelled once so the miss assertions stay one-liners.
     const ANY: CastTarget = CastTarget::AnyVoxel;
+
+    /// The highest occupied detail cell in a column. The fixtures below place
+    /// their viewpoints and their "above the island" segments RELATIVE to this
+    /// rather than at a hardcoded altitude, so a change to `WORLD_VOXELS_Y` or
+    /// `WATER_LEVEL_WORLD` cannot silently sink them into the terrain.
+    fn surface_cell_y(brickmap: &Brickmap, cell_x: i32, cell_z: i32) -> i32 {
+        (0..WORLD_SIZE_Y as i32)
+            .rev()
+            .find(|y| brickmap.is_occupied(cell_x, *y, cell_z))
+            .expect("every island column has a surface")
+    }
 
     /// Brute-force reference: step the segment in fine increments and report the
     /// first voxel whose occupancy bit is set.
@@ -386,7 +397,13 @@ mod tests {
         // same class as the 19 tie pixels the shader's gate records), and both
         // answers are defensible. The axis-aligned cases are covered by the
         // dedicated tests below, whose origins are lattice-consistent.
-        let origin = [62.53, WATER_LEVEL as f32 * VOXEL_SIZE + 12.0, 100.07];
+        // 12 m of air above the column's own surface, so the viewpoint is outside
+        // solid geometry however tall the terrain grows.
+        let origin = [
+            62.53,
+            (surface_cell_y(&brickmap, 500, 800) + 1) as f32 * VOXEL_SIZE + 12.0,
+            100.07,
+        ];
         let max_distance = 90.0;
 
         let mut hits = 0_usize;
@@ -550,16 +567,25 @@ mod tests {
     fn path_is_clear_answers_the_audio_occlusion_query() {
         let world = VoxelWorld::generate(1234, 0.0);
         let mut brickmap = Brickmap::build(&world);
-        let above_left = [30.0, 28.0, 62.5];
-        let above_right = [95.0, 28.0, 62.5];
+        // "Above the island" is MEASURED: 2 m over the tallest column in the
+        // strip the segment actually crosses.
+        let left_x_meters = 30.0_f32;
+        let right_x_meters = 95.0_f32;
+        let segment_z_meters = 62.5_f32;
+        let segment_cell_z = (segment_z_meters / VOXEL_SIZE) as i32;
+        let strip_top_cell_y = ((left_x_meters / VOXEL_SIZE) as i32
+            ..=(right_x_meters / VOXEL_SIZE) as i32)
+            .map(|cell_x| surface_cell_y(&brickmap, cell_x, segment_cell_z))
+            .max()
+            .expect("the strip spans at least one column");
+        let clear_height_meters = (strip_top_cell_y + 1) as f32 * VOXEL_SIZE + 2.0;
+        let above_left = [left_x_meters, clear_height_meters, segment_z_meters];
+        let above_right = [right_x_meters, clear_height_meters, segment_z_meters];
         assert!(
             path_is_clear(&brickmap, above_left, above_right),
-            "a segment over the island at 28 m must be clear"
+            "a segment over the island at {clear_height_meters} m must be clear"
         );
-        let surface_y = (0..WORLD_SIZE_Y as i32)
-            .rev()
-            .find(|y| brickmap.is_occupied(500, *y, 500))
-            .expect("the column is occupied");
+        let surface_y = surface_cell_y(&brickmap, 500, 500);
         let through_hill_left = [30.0, surface_y as f32 * VOXEL_SIZE, 62.5];
         let through_hill_right = [95.0, surface_y as f32 * VOXEL_SIZE, 62.5];
         assert!(
@@ -568,7 +594,11 @@ mod tests {
         );
 
         // An edit moves the answer: drop one stone voxel into the clear path.
-        let blocker = [(62.5 / VOXEL_SIZE) as i32, (28.0 / VOXEL_SIZE) as i32, 500];
+        let blocker = [
+            (62.5 / VOXEL_SIZE) as i32,
+            (clear_height_meters / VOXEL_SIZE) as i32,
+            segment_cell_z,
+        ];
         brickmap.set_voxel(
             blocker[0],
             blocker[1],

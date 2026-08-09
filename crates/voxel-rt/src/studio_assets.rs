@@ -47,6 +47,11 @@ pub struct ProjectManifest {
     pub schema_version: u32,
     pub id: AssetId,
     pub name: String,
+    /// Stable generator seed. Keeping this in the manifest makes a world
+    /// reproducible across sessions; the graph/profile and generator version
+    /// must also remain unchanged for byte-identical terrain.
+    #[serde(default = "default_world_seed")]
+    pub world_seed: u64,
     /// Current voxel-material slots keyed as decimal strings. This is explicit
     /// during the fixed-27-row era; the values are still stable asset IDs.
     pub material_assignments: BTreeMap<String, AssetReference>,
@@ -61,6 +66,15 @@ pub struct ProjectManifest {
     /// surface for both World and Studio runtime modes.
     #[serde(default)]
     pub active_world_graph: Option<AssetId>,
+    /// The project's one canonical biome graph, if it has one.
+    ///
+    /// Registered exactly like the world graph. Before this existed the biome
+    /// graph was read and written by raw `std::fs` calls to a hardcoded path, so
+    /// it was invisible to the manifest, skipped schema validation, had no atomic
+    /// write, and — worst — was never applied at startup: a saved cave recipe
+    /// silently stopped affecting the world after a restart.
+    #[serde(default)]
+    pub active_biome_graph: Option<AssetId>,
     /// Reusable world-composition roots. Biomes, palettes, modifiers, features,
     /// audio, and animation are compiled from the active profile.
     pub world_profiles: Vec<AssetReference>,
@@ -77,16 +91,22 @@ impl ProjectManifest {
             schema_version: STUDIO_ASSET_SCHEMA_VERSION,
             id: AssetId::new(),
             name: name.into(),
+            world_seed: default_world_seed(),
             material_assignments: BTreeMap::new(),
             quality_recipes: Vec::new(),
             active_quality_recipe: None,
             graph_assets: Vec::new(),
             active_world_graph: None,
+            active_biome_graph: None,
             world_profiles: Vec::new(),
             active_world_profile: None,
             runtime_assets: Vec::new(),
         }
     }
+}
+
+const fn default_world_seed() -> u64 {
+    1
 }
 
 /// A concrete material identity plus its structural renderer metadata. Visual
@@ -1141,6 +1161,56 @@ impl StudioProject {
         Ok(Some(graph))
     }
 
+    /// Resolve the project's one canonical biome graph.
+    pub fn load_active_biome_graph(
+        &self,
+        store: &StudioProjectStore,
+    ) -> Result<Option<GraphAsset>, AssetError> {
+        let Some(active) = &self.manifest.active_biome_graph else {
+            return Ok(None);
+        };
+        let reference = self
+            .manifest
+            .graph_assets
+            .iter()
+            .find(|reference| &reference.id == active)
+            .ok_or_else(|| {
+                AssetError::InvalidGraph(format!(
+                    "active biome graph `{active}` is absent from the manifest"
+                ))
+            })?;
+        let graph = store.load_graph(&reference.path)?;
+        if graph.id != reference.id {
+            return Err(AssetError::InvalidGraph(format!(
+                "biome graph `{}` does not match its manifest identity",
+                reference.path.display()
+            )));
+        }
+        if graph.kind != voxel_graph::GraphKind::Biome {
+            return Err(AssetError::InvalidGraph(format!(
+                "active graph `{active}` is not a biome graph"
+            )));
+        }
+        Ok(Some(graph))
+    }
+
+    /// Register a graph and make it this project's active biome graph.
+    pub fn set_active_biome_graph(
+        &mut self,
+        store: &StudioProjectStore,
+        path: impl Into<PathBuf>,
+        graph: &GraphAsset,
+    ) -> Result<(), AssetError> {
+        if graph.kind != voxel_graph::GraphKind::Biome {
+            return Err(AssetError::InvalidGraph(
+                "the active biome graph must be a biome graph".to_string(),
+            ));
+        }
+        self.save_graph_asset(store, path, graph)?;
+        self.manifest.active_biome_graph = Some(graph.id.clone());
+        store.save_manifest(&self.manifest)
+    }
+
     /// Resolve every project-local identity required by world compilation.
     /// This is deliberately project-owned: a world profile cannot prove that
     /// its material, graph, or sound IDs exist without the manifest and store.
@@ -1730,6 +1800,7 @@ mod tests {
                 biomes: vec![BiomeDefinition {
                     id: BiomeId::new("world"),
                     name: "World".into(),
+                    biome_type: voxel_core::chunk::BiomeKind::Surface,
                     selector: BiomeSelector {
                         constraints: Vec::new(),
                         priority: 0,
@@ -2176,6 +2247,20 @@ mod tests {
         assert_eq!(restored_quality, quality);
         assert_eq!(loaded.manifest, project.manifest);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn world_seed_round_trips_and_legacy_manifests_default_it() {
+        let mut manifest = ProjectManifest::new("seeded world");
+        manifest.world_seed = 0x0123_4567_89ab_cdef;
+        let json = serde_json::to_string(&manifest).unwrap();
+        let restored: ProjectManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.world_seed, 0x0123_4567_89ab_cdef);
+
+        let mut legacy = serde_json::to_value(&manifest).unwrap();
+        legacy.as_object_mut().unwrap().remove("world_seed");
+        let restored_legacy: ProjectManifest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored_legacy.world_seed, 1);
     }
 
     #[test]

@@ -98,9 +98,9 @@
 // file; the audio-ray port will reuse the same helpers.
 
 struct BrickmapMeta {
-    brick_grid_size: vec3<u32>,   // (125, 32, 125)
+    brick_grid_size: vec3<u32>,   // (125, 64, 125)
     occupied_brick_count: u32,
-    world_size_voxels: vec3<u32>, // (1000, 256, 1000)
+    world_size_voxels: vec3<u32>, // (1000, 512, 1000)
     voxel_size_meters: f32,       // 0.125
     max_occupied_brick_y: u32,    // tallest occupied brick Y in the world
     pad_f: u32,

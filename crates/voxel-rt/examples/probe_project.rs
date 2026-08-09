@@ -242,7 +242,7 @@ fn describe_difference(compiled: &Material, loaded: &Material) -> String {
 /// Voxel count per material id across the world, sampled once per WORLD voxel at
 /// its detail origin.
 ///
-/// One sample per world voxel rather than per detail cell: 125x32x125 is half a
+/// One sample per world voxel rather than per detail cell: 125x64x125 is half a
 /// million reads (instant), where the detail grid is 512x that for a histogram
 /// whose shape would not change. Air is skipped — it is the miss sentinel, not a
 /// placed material.

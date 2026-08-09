@@ -33,7 +33,9 @@ use std::thread::JoinHandle;
 
 use crate::brickmap::Brickmap;
 use crate::cagi::{CagiGrid, GpuEventResponse, MaterialAttributes, EVENT_RESPONSE_SLOTS};
-use crate::world_edit::{apply, VoxelEdit, WorldDelta, WorldEditSettings};
+use crate::world_edit::{
+    apply, apply_detail, DetailVoxelEdit, VoxelEdit, WorldDelta, WorldEditSettings,
+};
 
 /// Something the render thread must apply, produced by the authority.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,7 +69,8 @@ pub enum WorldUpdate {
 pub struct WorldEditStats {
     pub edits_applied: u64,
     pub edits_ignored: u64,
-    /// One-metre world voxels changed.
+    /// Logical cells changed: one-metre world voxels for ordinary edits and
+    /// detail texels for compact props such as flares.
     pub voxels_written: u64,
     pub last_apply_micros: f32,
     pub last_upload_bytes: usize,
@@ -76,6 +79,7 @@ pub struct WorldEditStats {
 
 enum WorkerRequest {
     Edit(VoxelEdit, WorldEditSettings),
+    DetailEdit(DetailVoxelEdit, WorldEditSettings),
     LightAttributes(CagiGrid, MaterialAttributes),
     Stop,
 }
@@ -191,6 +195,31 @@ impl WorldHost {
                     .write()
                     .expect("the world lock is never poisoned");
                 match apply(&mut brickmap, &edit, settings) {
+                    Some(delta) => self.queued.push(WorldUpdate::Delta(delta)),
+                    None => self.stats.edits_ignored += 1,
+                }
+            }
+        }
+    }
+
+    /// Queue a compact detail-resolution edit. Used for attached props such as
+    /// flares; it shares the same CPU authority and GPU-delta path as ordinary
+    /// one-metre edits.
+    pub fn request_detail_edit(&mut self, edit: DetailVoxelEdit, settings: &WorldEditSettings) {
+        match &mut self.worker {
+            Some(worker) => {
+                worker.in_flight += 1;
+                worker
+                    .requests
+                    .send(WorkerRequest::DetailEdit(edit, *settings))
+                    .expect("the world thread outlives its sender");
+            }
+            None => {
+                let mut brickmap = self
+                    .brickmap
+                    .write()
+                    .expect("the world lock is never poisoned");
+                match apply_detail(&mut brickmap, &edit, settings) {
                     Some(delta) => self.queued.push(WorldUpdate::Delta(delta)),
                     None => self.stats.edits_ignored += 1,
                 }
@@ -321,6 +350,17 @@ fn world_thread_main(
                     }
                 }
             }
+            WorkerRequest::DetailEdit(edit, settings) => {
+                let delta = {
+                    let mut brickmap = brickmap.write().expect("the world lock is never poisoned");
+                    apply_detail(&mut brickmap, &edit, &settings)
+                };
+                if let Some(delta) = delta {
+                    if results.send(WorldUpdate::Delta(delta)).is_err() {
+                        break;
+                    }
+                }
+            }
             WorkerRequest::LightAttributes(grid, attribute_table) => {
                 let started = std::time::Instant::now();
                 let (attributes, emissions) = {
@@ -352,6 +392,7 @@ mod tests {
     use crate::cagi::CagiLayout;
     use voxel_core::world::{
         Voxel, VoxelWorld, WorldVoxelCoord, DETAIL_CELLS_PER_WORLD_VOXEL, WORLD_SIZE_Y,
+        WORLD_VOXELS_Y,
     };
     use voxel_material::material::material_id;
 
@@ -378,7 +419,13 @@ mod tests {
         threaded_host.set_world_thread(true);
         assert!(threaded_host.is_threaded() && !inline_host.is_threaded());
 
+        // Sixteen removals biting into the terrain from its own surface down, then
+        // eight placements into the world's topmost row — which is above the
+        // generator's height clamp and therefore guaranteed air. Both anchors are
+        // DERIVED: every one of the 24 edits has to change something for the
+        // update count below to equal the edit count.
         let base_y = surface_y(&inline_host, 500, 500) / DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let sky_y = WORLD_VOXELS_Y as i32 - 1;
         let edits: Vec<VoxelEdit> = (0..16)
             .map(|index| VoxelEdit {
                 voxel: [60 + index % 4, base_y - index / 4, 62],
@@ -387,7 +434,7 @@ mod tests {
                 material_attributes: MaterialAttributes::compiled(),
             })
             .chain((0..8).map(|index| VoxelEdit {
-                voxel: [25 + index, 31, 25],
+                voxel: [25 + index, sky_y, 25],
                 material: Voxel::Stone,
                 light_grid: None,
                 material_attributes: MaterialAttributes::compiled(),
@@ -432,12 +479,18 @@ mod tests {
             threaded_world.metadata(),
             "the two variants disagree about the world"
         );
+        // The first of the eight sky placements, read back at detail resolution.
+        let detail = DETAIL_CELLS_PER_WORLD_VOXEL as i32;
+        let placed_cell = [25 * detail, sky_y * detail, 25 * detail];
         assert_eq!(
-            inline_world.get(200, 248, 200),
+            inline_world.get(placed_cell[0], placed_cell[1], placed_cell[2]),
             material_id(Voxel::Stone),
             "the placed voxel is missing"
         );
-        assert_eq!(threaded_world.get(200, 248, 200), material_id(Voxel::Stone));
+        assert_eq!(
+            threaded_world.get(placed_cell[0], placed_cell[1], placed_cell[2]),
+            material_id(Voxel::Stone)
+        );
     }
 
     /// Switching the lever mid-session must not lose edits: whatever the worker

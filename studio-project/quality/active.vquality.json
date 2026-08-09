@@ -4,10 +4,6 @@
   "name": "active",
   "preset": "Balanced",
   "values": {
-    "AnyHitShadow": {
-      "type": "flag",
-      "value": false
-    },
     "AoBrickEarlyOut": {
       "type": "flag",
       "value": false
@@ -64,10 +60,6 @@
       "type": "flag",
       "value": false
     },
-    "DescendFastForward": {
-      "type": "flag",
-      "value": false
-    },
     "DirectionalSkip": {
       "type": "flag",
       "value": false
@@ -96,6 +88,34 @@
       "type": "scalar",
       "value": 0.0
     },
+    "GiBanksBounce": {
+      "type": "scalar",
+      "value": 0.5
+    },
+    "GiBanksDirectionMix": {
+      "type": "scalar",
+      "value": 0.08
+    },
+    "GiBanksLossPerMeter": {
+      "type": "scalar",
+      "value": 1.0
+    },
+    "GiBanksSealPartial": {
+      "type": "scalar",
+      "value": 0.25
+    },
+    "GiBanksSideLossMultiplier": {
+      "type": "scalar",
+      "value": 4.0
+    },
+    "GiBanksSkyHorizontal": {
+      "type": "scalar",
+      "value": 0.25
+    },
+    "GiBanksTransmission": {
+      "type": "scalar",
+      "value": 0.7
+    },
     "GiEmissive": {
       "type": "flag",
       "value": true
@@ -120,9 +140,17 @@
       "type": "count",
       "value": 2
     },
+    "GiLayout": {
+      "type": "mode",
+      "value": 1
+    },
+    "GiReflectance": {
+      "type": "flag",
+      "value": false
+    },
     "GiResolution": {
       "type": "count",
-      "value": 4
+      "value": 8
     },
     "GiRule": {
       "type": "mode",
@@ -167,6 +195,22 @@
     "MaterialFaceRoles": {
       "type": "flag",
       "value": true
+    },
+    "MaterialParallax": {
+      "type": "flag",
+      "value": false
+    },
+    "MaterialParallaxEnd": {
+      "type": "scalar",
+      "value": 48.0
+    },
+    "MaterialParallaxSamples": {
+      "type": "count",
+      "value": 24
+    },
+    "MaterialParallaxShadowSamples": {
+      "type": "count",
+      "value": 16
     },
     "MaterialPatternAnimation": {
       "type": "flag",
@@ -216,21 +260,25 @@
       "type": "scalar",
       "value": 1.0
     },
-    "ShadowMode": {
-      "type": "mode",
-      "value": 0
-    },
-    "ShadowPenumbraScale": {
-      "type": "scalar",
-      "value": 115.0
+    "SunShadow": {
+      "type": "flag",
+      "value": true
     },
     "WaterAbsorption": {
       "type": "scalar",
-      "value": 1.0
+      "value": 0.0
+    },
+    "WaterBounceLight": {
+      "type": "flag",
+      "value": true
     },
     "WaterBounces": {
       "type": "count",
       "value": 1
+    },
+    "WaterCaustics": {
+      "type": "flag",
+      "value": true
     },
     "WaterMode": {
       "type": "mode",
@@ -238,11 +286,11 @@
     },
     "WaterRayCutoff": {
       "type": "scalar",
-      "value": 0.04
+      "value": 0.0
     },
     "WaterScattering": {
       "type": "scalar",
-      "value": 1.0
+      "value": 0.15
     },
     "WaterSunThroughLiquid": {
       "type": "flag",
@@ -252,9 +300,25 @@
       "type": "mode",
       "value": 1
     },
+    "WaterTurbidityScattering": {
+      "type": "scalar",
+      "value": 0.15
+    },
     "WaterUnderwaterInterface": {
       "type": "mode",
       "value": 1
+    },
+    "WaterVisibilityDepth": {
+      "type": "scalar",
+      "value": 10.0
+    },
+    "WaterWaveAmplitude": {
+      "type": "scalar",
+      "value": 0.21
+    },
+    "WaterWaves": {
+      "type": "flag",
+      "value": true
     }
   }
 }
