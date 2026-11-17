@@ -53,7 +53,9 @@ impl SoundSource for SynthNode {
     }
 
     fn position(&self) -> Vec3 {
-        self.position
+        // Anchor plus whatever the generator has flown since (zero for
+        // stationary generators).
+        self.position + self.generator.motion_offset()
     }
 
     fn emitter_kind(&self) -> atrium_core::source::EmitterKind {

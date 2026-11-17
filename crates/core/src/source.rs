@@ -36,6 +36,14 @@ pub trait SoundSource: Send {
     /// Current world-space position.
     fn position(&self) -> Vec3;
 
+    /// Displacement from the source's anchor caused by its own motion.
+    ///
+    /// A generator that flies by itself (the wisp) reports where it currently is
+    /// relative to where it was placed; the scene wrapper adds this to the
+    /// anchor position. Stationary sources stay at zero.
+    fn motion_offset(&self) -> Vec3 {
+        Vec3::ZERO
+    }
     /// Spatial interpretation of this source. Existing sources remain point-like
     /// objects unless they explicitly opt into field rendering.
     fn emitter_kind(&self) -> EmitterKind {

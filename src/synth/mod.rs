@@ -17,6 +17,7 @@ pub mod river;
 pub mod soft_wind;
 pub mod storm_wind;
 pub mod wave;
+pub mod wisp;
 
 /// Envelope sample rate (Hz) used for analysis-resynthesis. High enough to keep
 /// the flutter (a few Hz) crisp; low enough that a multi-minute recording is a

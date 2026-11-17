@@ -1,0 +1,23 @@
+# Wisp — a small magical flying creature: a soft wing whirr.
+# It flies by itself: it hovers, then darts to a new spot inside its
+# territory. The scene's `position` is the centre of that territory at ground
+# level. See src/synth/wisp.rs.
+
+synth: wisp
+
+# ── Flight ──────────────────────────────────────────────────────────────────
+range: 6.0            # territory radius around the position (m)
+min_height: 0.6       # lowest flight height (m)
+max_height: 3.0       # highest flight height (m)
+max_speed: 7.0        # top speed in a dart (m/s)
+hover_time_min: 0.8   # shortest hover between darts (s)
+hover_time_max: 3.0   # longest hover between darts (s)
+
+# ── Sound ───────────────────────────────────────────────────────────────────
+wing_gain: 0.9        # wing whirr (noise pulsed at 48 Hz hovering, 82 Hz darting)
+hum_gain: 0.18        # pitched hum of the wingbeat
+master_gain: 1.0
+
+reference_spl: 62.0   # dB SPL at 1 m — a little louder than a real hummingbird (~55)
+directivity: omni
+spread: 0.0           # a point: it must be easy to place

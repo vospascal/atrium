@@ -31,6 +31,7 @@ use crate::synth::river::RiverSource;
 use crate::synth::soft_wind::SoftWindSource;
 use crate::synth::storm_wind::StormWindSource;
 use crate::synth::wave::WaveSource;
+use crate::synth::wisp::WispSource;
 use crate::world::room::{BoxRoom, Room};
 use crate::world::types::Vec3;
 use atrium_core::directivity::DirectivityPattern;
@@ -487,6 +488,7 @@ pub enum SynthSpec {
     RainV2(RainV2SynthParams),
     River(RiverSynthParams),
     Waves(WaveSynthParams),
+    Wisp(WispSynthParams),
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -642,6 +644,23 @@ pub struct WaveSynthParams {
     pub seed: Option<u64>,
 }
 
+/// A small flying creature with its own flight; see `crate::synth::wisp`.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct WispSynthParams {
+    /// Horizontal radius of its territory around the source position (m).
+    pub range: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_height: Option<f32>,
+    /// Top speed in a dart (m/s).
+    pub max_speed: Option<f32>,
+    pub hover_time_min: Option<f32>,
+    pub hover_time_max: Option<f32>,
+    pub wing_gain: Option<f32>,
+    pub hum_gain: Option<f32>,
+    pub master_gain: Option<f32>,
+    pub seed: Option<u64>,
+}
+
 impl SynthSpec {
     pub fn kind_name(&self) -> &'static str {
         match self {
@@ -653,6 +672,7 @@ impl SynthSpec {
             SynthSpec::RainV2(_) => "rain_v2",
             SynthSpec::River(_) => "river",
             SynthSpec::Waves(_) => "waves",
+            SynthSpec::Wisp(_) => "wisp",
         }
     }
 
@@ -991,6 +1011,37 @@ impl SynthSpec {
                 }
                 if let Some(value) = params.spray_gain {
                     generator.spray_gain = value.max(0.0);
+                }
+                if let Some(value) = params.master_gain {
+                    generator.master_gain = value.clamp(0.0, 2.0);
+                }
+                Box::new(generator)
+            }
+            SynthSpec::Wisp(params) => {
+                let mut generator = WispSource::new(position, params.seed.unwrap_or(default_seed));
+                if let Some(value) = params.range {
+                    generator.range = value.max(0.0);
+                }
+                if let Some(value) = params.min_height {
+                    generator.min_height = value.max(0.0);
+                }
+                if let Some(value) = params.max_height {
+                    generator.max_height = value.max(generator.min_height);
+                }
+                if let Some(value) = params.max_speed {
+                    generator.max_speed = value.max(0.1);
+                }
+                if let Some(value) = params.hover_time_min {
+                    generator.hover_time_min = value.max(0.0);
+                }
+                if let Some(value) = params.hover_time_max {
+                    generator.hover_time_max = value.max(generator.hover_time_min);
+                }
+                if let Some(value) = params.wing_gain {
+                    generator.wing_gain = value.max(0.0);
+                }
+                if let Some(value) = params.hum_gain {
+                    generator.hum_gain = value.max(0.0);
                 }
                 if let Some(value) = params.master_gain {
                     generator.master_gain = value.clamp(0.0, 2.0);
@@ -1835,6 +1886,7 @@ mod tests {
                 "synth: waves\nperiod: 6\ncrash_prob: 0.25\nreference_spl: 60\n",
                 "waves",
             ),
+            ("synth: wisp\nrange: 6\nmax_speed: 7\nreference_spl: 55\n", "wisp"),
         ];
         for (yaml, expected_kind) in cases {
             match serde_yaml::from_str::<SourceDef>(yaml)
@@ -2314,6 +2366,55 @@ mod tests {
             assert!(
                 tail_db > -60.0,
                 "{mode:?}: atrium tail missing 0.3 s after silence: {tail_db:.1} dB re playing"
+            );
+        }
+    }
+
+    /// The wisp flies by itself: rendered through a real scene, its reported
+    /// position moves, stays near its territory, and it makes sound in both
+    /// the speaker scene and the headphone scene.
+    #[test]
+    fn wisp_scenes_build_fly_and_sound() {
+        for path in ["scenes/wisp.yaml", "scenes/wisp-headphones.yaml"] {
+            let scene = SceneConfig::load(path).expect("scene should load");
+            let mut result = scene.build().expect("wisp scene should build");
+            assert_eq!(
+                result.source_names.first().map(String::as_str),
+                Some("Wisp")
+            );
+            let channels = result.scene.speaker_layout.total_channels();
+            result.scene.sample_rate = 48000.0;
+            result.scene.init_pipelines();
+
+            let anchor =
+                result.scene.sources[0].position() - result.scene.sources[0].motion_offset();
+            let start = result.scene.sources[0].position();
+            let mut buffer = vec![0.0f32; 480 * channels];
+            let mut energy = 0.0f32;
+            let mut farthest = 0.0f32;
+            let mut travelled = 0.0f32;
+            let mut previous = start;
+            for _ in 0..1500 {
+                result.scene.render(&mut buffer, channels);
+                energy += buffer.iter().map(|x| x * x).sum::<f32>();
+                assert!(
+                    buffer.iter().all(|x| x.is_finite()),
+                    "{path}: non-finite output"
+                );
+                let position = result.scene.sources[0].position();
+                travelled += position.distance_to(previous);
+                farthest = farthest.max(position.distance_to(anchor));
+                previous = position;
+            }
+            assert!(energy > 0.0, "{path}: wisp is silent");
+            assert!(
+                travelled > 10.0,
+                "{path}: wisp flew only {travelled:.1} m in 15 s"
+            );
+            // Territory radius 6 m, height up to 3 m, plus overshoot.
+            assert!(
+                farthest < 7.5,
+                "{path}: wisp strayed {farthest:.1} m from its anchor"
             );
         }
     }
