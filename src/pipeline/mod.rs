@@ -290,6 +290,7 @@ fn build_world_locked(p: &PipelineParams) -> RenderPipeline {
             self::renderers::world_locked::WorldLockedParams {
                 wall_reflectivity: p.er_wall_reflectivity,
                 reflection_capacity: reflection_buffer_capacity(p),
+                propagation_capacity: propagation_delay_capacity(p),
             },
         )),
         field_renderer: FieldRenderer::default(),
@@ -1552,6 +1553,9 @@ mod tests {
             wall_materials: &default_wall_materials(),
             measurement_mode: false,
         };
+        // The far speaker is 15 m away: the sound needs 2099 samples to arrive
+        // there, so the first 2048-frame buffer is still silent on that channel.
+        render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
         render_pipeline(&mut pipeline, &mut sources, &rp, &mut buffer);
 
         // Compare RMS of last quarter (filters settled)
