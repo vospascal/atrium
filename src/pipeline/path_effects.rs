@@ -8,6 +8,7 @@ use atrium_core::panner::DistanceModelType;
 
 use crate::audio::distance::DistanceModel;
 use crate::audio::filters::{AirAbsorptionFilter, Biquad};
+use crate::audio::propagation::{ground_effect_bands, GROUND_BAND_FREQUENCIES};
 use crate::pipeline::path::{PathEffect, PathEffectContext};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,35 +125,47 @@ impl PathEffect for DistanceAttenuationEffect {
 
 /// Per-path frequency-dependent ground effect (ISO 9613-2, Table 3).
 ///
-/// Uses three biquad filters to model the spectral shape of ground interaction:
+/// Fits three stages to the octave-band attenuation from
+/// [`ground_effect_bands`], which is the single source of truth shared with
+/// the broadband `ground_effect_gain` used by the WorldLocked renderer:
 ///
-/// 1. **Low shelf (~250 Hz):** ISO Table 3 low-freq behavior.
-///    Hard ground (G=0): -1.5 dB (constructive interference).
-///    Soft ground (G=1): -1.5 + (-3.0) = -4.5 dB.
+/// 1. **Broadband gain** = the 2–8 kHz band value (identical in Table 3).
+///    Hard ground: +3 dB (two regions × 1.5 dB of coherent reflection).
+///    Porous ground: 0 dB.
+/// 2. **Low shelf (~177 Hz)** = the 125 Hz band relative to the high bands.
+/// 3. **Mid peak** = the 250 Hz–1 kHz ground dip relative to the line between
+///    the 125 Hz and 2 kHz values, centred on the dip's log-frequency centroid.
 ///
-/// 2. **High shelf (~2 kHz):** ISO Table 3 high-freq behavior.
-///    Hard ground: -1.5 dB. Soft ground: -1.5 + 1.5 = 0 dB (absorption cancels reflection).
-///
-/// 3. **Parametric notch:** Height-dependent ground dip from destructive interference
-///    at f_dip = c / (4·h²/d), where h = average height, d = horizontal distance.
-///    ~1 octave bandwidth, depth proportional to G (soft ground = deeper dip).
-///
-/// For short distances (< 0.5 m) or zero heights, filters pass through unchanged.
+/// The attenuation is a loss in dB, so every stage gain is its negative.
+/// For short distances (< 0.5 m) the filter passes through unchanged.
 pub struct GroundEffectFilter {
     low_shelf: Biquad,
-    high_shelf: Biquad,
-    notch: Biquad,
+    mid_peak: Biquad,
+    broadband_gain: f32,
     sample_rate: f32,
 }
 
 impl GroundEffectFilter {
+    /// Corner between the 125 Hz and 250 Hz octave bands.
+    const LOW_SHELF_HZ: f32 = 177.0;
+    /// Roughly two octaves wide: the ISO dip spans 250 Hz–1 kHz.
+    const MID_PEAK_Q: f32 = 0.7;
+    /// Below this the dip is inaudible and the peak stage stays at unity.
+    const MIN_MID_EXCESS_DB: f32 = 0.25;
+
     pub fn new(sample_rate: f32) -> Self {
         Self {
             low_shelf: Biquad::unity(),
-            high_shelf: Biquad::unity(),
-            notch: Biquad::unity(),
+            mid_peak: Biquad::unity(),
+            broadband_gain: 1.0,
             sample_rate,
         }
+    }
+
+    fn set_unity(&mut self) {
+        self.low_shelf.set_unity();
+        self.mid_peak.set_unity();
+        self.broadband_gain = 1.0;
     }
 }
 
@@ -164,52 +177,60 @@ impl PathEffect for GroundEffectFilter {
         let dy = ctx.source_pos.y - ctx.target_pos.y;
         let horizontal_dist = (dx * dx + dy * dy).sqrt();
 
-        let h_source = ctx.source_pos.z.max(0.0);
-        let h_receiver = ctx.target_pos.z.max(0.0);
-
         if horizontal_dist < 0.5 {
-            // Too close — ground effect negligible, set filters to unity.
-            self.low_shelf.set_unity();
-            self.high_shelf.set_unity();
-            self.notch.set_unity();
+            // Too close — ground effect negligible.
+            self.set_unity();
             return;
         }
 
-        // Use average G across regions (simplified from full 3-region ISO model).
-        let g = ctx.ground.g_source * 0.5 + ctx.ground.g_receiver * 0.5;
+        let bands = ground_effect_bands(
+            horizontal_dist,
+            ctx.source_pos.z,
+            ctx.target_pos.z,
+            ctx.ground,
+        );
+        // Band indices: 1 = 125 Hz, 2..=4 = 250 Hz–1 kHz, 5..=7 = 2–8 kHz.
+        let low_db = bands[1];
+        let high_db = bands[5];
 
-        // ISO Table 3: low-freq correction = -1.5 + G * (-3.0) dB
-        // Gain relative to unity: -1.5 + G * (-3.0) dB → linear
-        let low_shelf_db = -1.5 + g * (-3.0);
+        self.broadband_gain = 10.0_f32.powf(-high_db / 20.0);
         self.low_shelf
-            .set_low_shelf(250.0, low_shelf_db, ctx.sample_rate);
+            .set_low_shelf(Self::LOW_SHELF_HZ, -(low_db - high_db), ctx.sample_rate);
 
-        // ISO Table 3: high-freq correction = -1.5 + G * 1.5 = -1.5(1-G) dB
-        let high_shelf_db = -1.5 * (1.0 - g);
-        self.high_shelf
-            .set_high_shelf(2000.0, high_shelf_db, ctx.sample_rate);
+        // Mid dip: how far 250 Hz–1 kHz sit above the 125 Hz → 2 kHz line.
+        let span = (GROUND_BAND_FREQUENCIES[5] / GROUND_BAND_FREQUENCIES[1]).ln();
+        let mut largest_excess_db = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        let mut weighted_log_frequency = 0.0f32;
+        for band in 2..=4 {
+            let frequency = GROUND_BAND_FREQUENCIES[band];
+            let fraction = (frequency / GROUND_BAND_FREQUENCIES[1]).ln() / span;
+            let baseline_db = low_db + (high_db - low_db) * fraction;
+            let excess_db = bands[band] - baseline_db;
+            if excess_db.abs() > largest_excess_db.abs() {
+                largest_excess_db = excess_db;
+            }
+            weight_sum += excess_db.abs();
+            weighted_log_frequency += excess_db.abs() * frequency.ln();
+        }
 
-        // Ground dip: destructive interference at f_dip = c / (4·h_avg²/d)
-        let h_avg = (h_source + h_receiver) * 0.5;
-        if h_avg > 0.05 && horizontal_dist > 1.0 {
-            let path_diff = 2.0 * h_avg * h_avg / horizontal_dist;
-            let f_dip = ctx.atmosphere.speed_of_sound() / (2.0 * path_diff);
-            let f_dip_clamped = f_dip.clamp(100.0, 10000.0);
-            // Dip depth: up to -6 dB for fully soft ground, proportional to G.
-            let dip_db = -6.0 * g;
-            // Q ≈ 0.7 gives roughly 1-octave bandwidth.
-            self.notch
-                .set_peak(f_dip_clamped, dip_db, 0.7, ctx.sample_rate);
+        if largest_excess_db.abs() < Self::MIN_MID_EXCESS_DB {
+            self.mid_peak.set_unity();
         } else {
-            self.notch.set_unity();
+            let centre_hz = (weighted_log_frequency / weight_sum).exp();
+            self.mid_peak.set_peak(
+                centre_hz,
+                -largest_excess_db,
+                Self::MID_PEAK_Q,
+                ctx.sample_rate,
+            );
         }
     }
 
     #[inline]
     fn process_sample(&mut self, sample: f32) -> f32 {
-        let s = self.low_shelf.process(sample);
-        let s = self.high_shelf.process(s);
-        self.notch.process(s)
+        let shelved = self.low_shelf.process(sample * self.broadband_gain);
+        self.mid_peak.process(shelved)
     }
 
     fn name(&self) -> &str {
@@ -218,8 +239,7 @@ impl PathEffect for GroundEffectFilter {
 
     fn reset(&mut self) {
         self.low_shelf.reset();
-        self.high_shelf.reset();
-        self.notch.reset();
+        self.mid_peak.reset();
     }
 }
 
@@ -1003,6 +1023,113 @@ mod tests {
             hard_out > soft_out,
             "hard ground ({hard_out}) should pass more than soft ground ({soft_out})"
         );
+    }
+
+    /// Steady-state gain in dB of the ground filter at one frequency.
+    fn ground_filter_response_db(
+        ground: &GroundProperties,
+        horizontal_distance: f32,
+        source_height: f32,
+        receiver_height: f32,
+        frequency: f32,
+    ) -> f32 {
+        let path = PathContribution {
+            kind: PathKind::Direct,
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            distance: horizontal_distance,
+            delay_seconds: 0.0,
+            gain: 1.0,
+            wall_index: None,
+        };
+        let atmosphere = AtmosphericParams::default();
+        let mut effect = GroundEffectFilter::new(48000.0);
+        effect.update(&PathEffectContext {
+            path: &path,
+            atmosphere: &atmosphere,
+            ground,
+            sample_rate: 48000.0,
+            source_pos: Vec3::new(0.0, 0.0, source_height),
+            target_pos: Vec3::new(horizontal_distance, 0.0, receiver_height),
+            wall_materials: &default_wall_materials(),
+        });
+        let total = 48000;
+        let settle = 24000;
+        let mut input_power = 0.0f64;
+        let mut output_power = 0.0f64;
+        for n in 0..total {
+            let input = (std::f32::consts::TAU * frequency * n as f32 / 48000.0).sin();
+            let output = effect.process_sample(input);
+            if n >= settle {
+                input_power += (input as f64).powi(2);
+                output_power += (output as f64).powi(2);
+            }
+        }
+        (10.0 * (output_power / input_power).log10()) as f32
+    }
+
+    /// Hard ground is a flat +3 dB (ISO 9613-2: −1.5 dB per region, every band).
+    /// The old filter applied the attenuation with the wrong sign and CUT by
+    /// 1.5 dB, disagreeing with the WorldLocked renderer's broadband gain.
+    #[test]
+    fn ground_filter_hard_ground_is_flat_plus_three_db() {
+        let hard = GroundProperties::hard();
+        for frequency in [63.0, 125.0, 500.0, 2000.0, 8000.0] {
+            let response = ground_filter_response_db(&hard, 10.0, 1.5, 1.5, frequency);
+            assert!(
+                (response - 3.0).abs() < 0.05,
+                "{frequency} Hz: expected +3.0 dB, got {response}"
+            );
+        }
+    }
+
+    /// The filter is a three-stage fit to the ISO octave-band table. It must
+    /// track the table within 3 dB from 125 Hz to 8 kHz (measured worst case: 2.9 dB,
+    /// where a deep 250–500 Hz dip leaks into the 125 Hz band), for porous and mixed
+    /// ground, at ear height and on the ground, near and far.
+    #[test]
+    fn ground_filter_tracks_iso_band_table() {
+        use crate::audio::propagation::{ground_effect_bands, GROUND_BAND_FREQUENCIES};
+        let mut worst = 0.0f32;
+        for ground in [GroundProperties::soft(), GroundProperties::mixed(0.5)] {
+            for (distance, source_height, receiver_height) in [
+                (10.0, 1.2, 1.2),
+                (20.0, 6.0, 1.2),
+                (10.0, 0.0, 1.2),
+                (60.0, 0.3, 1.2),
+                (3.0, 1.0, 1.7),
+            ] {
+                let bands = ground_effect_bands(distance, source_height, receiver_height, &ground);
+                for band in 1..8 {
+                    let frequency = GROUND_BAND_FREQUENCIES[band];
+                    let response = ground_filter_response_db(
+                        &ground,
+                        distance,
+                        source_height,
+                        receiver_height,
+                        frequency,
+                    );
+                    let error = response - (-bands[band]);
+                    worst = worst.max(error.abs());
+                    assert!(
+                        error.abs() < 3.0,
+                        "G={} d={distance} hs={source_height} hr={receiver_height} {frequency} Hz: \
+                         table {:.2} dB, filter {response:.2} dB",
+                        ground.g_source, -bands[band]
+                    );
+                }
+            }
+        }
+        eprintln!("ground filter worst deviation from ISO table: {worst:.2} dB");
+    }
+
+    /// Porous ground never boosts through the filter either.
+    #[test]
+    fn ground_filter_porous_ground_never_boosts() {
+        let soft = GroundProperties::soft();
+        for frequency in [125.0, 250.0, 500.0, 1000.0, 4000.0] {
+            let response = ground_filter_response_db(&soft, 15.0, 1.2, 1.2, frequency);
+            assert!(response < 0.5, "{frequency} Hz: {response} dB");
+        }
     }
 
     #[test]

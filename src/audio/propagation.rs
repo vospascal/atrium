@@ -129,172 +129,116 @@ impl GroundProperties {
     }
 }
 
-/// Compute ground effect attenuation in dB per octave band.
+/// Octave-band centre frequencies of ISO 9613-2 Table 3 (Hz).
+pub const GROUND_BAND_FREQUENCIES: [f32; 8] =
+    [63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
+
+/// Ground attenuation per octave band, ISO 9613-2 §7.3.1 (Table 3).
 ///
-/// Implements ISO 9613-2 §7.3 (detailed method) using the three-region
-/// decomposition with Table 3 anchor values:
+///   A_ground = A_s + A_r + A_m      (dB, positive = loss)
 ///
-///   A_ground = A_s + A_r + A_m
+/// Source and receiver regions (same expressions, own height and G):
 ///
-/// where:
-///   A_s = source region ground effect (within 30·h_s of source)
-///   A_r = receiver region ground effect (within 30·h_r of receiver)
-///   A_m = middle region ground effect (everything in between)
+/// | Band        | A_s or A_r            |
+/// |-------------|-----------------------|
+/// | 63 Hz       | −1.5                  |
+/// | 125 Hz      | −1.5 + G · a′(h)      |
+/// | 250 Hz      | −1.5 + G · b′(h)      |
+/// | 500 Hz      | −1.5 + G · c′(h)      |
+/// | 1 kHz       | −1.5 + G · d′(h)      |
+/// | 2, 4, 8 kHz | −1.5 · (1 − G)        |
 ///
-/// Source/receiver regions use the octave-band structure from Table 3:
-///   - f ≤ 125 Hz:  A = -1.5 - 3.0·G  (porous ground boosts low-freq reflections)
-///   - f ≥ 2000 Hz: A = -1.5·(1-G)     (porous ground absorbs high-freq reflections)
-///   - Transition zone (250–1000 Hz) includes a height-dependent ground dip
-///     from destructive interference at the frequency where path_diff ≈ λ/2.
+/// Every height function is ≥ 1.5, so porous ground (G = 1) never amplifies:
+/// the −1.5 dB reflection gain is cancelled or exceeded in every band. Hard
+/// ground (G = 0) is −1.5 dB per region in every band: a flat +3 dB boost.
 ///
-/// Middle region uses the ISO threshold at d = 30·(h_s + h_r), smoothed
-/// to avoid discontinuities in real-time rendering.
+/// Middle region: A_m = −3q at 63 Hz and −3q·(1 − G_m) above, with
+/// q = 0 while d_p ≤ 30·(h_s + h_r), else q = 1 − 30·(h_s + h_r)/d_p.
+/// The standard's own q is continuous, so no extra smoothing is needed.
 ///
-/// # Parameters
-/// - `distance`: horizontal distance source→receiver (m)
-/// - `h_source`: height of source above ground (m)
-/// - `h_receiver`: height of receiver above ground (m)
-/// - `ground`: ground surface properties
-/// - `freq_hz`: octave band center frequency (Hz)
+/// `distance` is the source→receiver distance projected on the ground (m).
+/// Returned values are indexed like [`GROUND_BAND_FREQUENCIES`].
+pub fn ground_effect_bands(
+    distance: f32,
+    h_source: f32,
+    h_receiver: f32,
+    ground: &GroundProperties,
+) -> [f32; 8] {
+    if distance < 0.01 {
+        return [0.0; 8];
+    }
+    let h_source = h_source.max(0.0);
+    let h_receiver = h_receiver.max(0.0);
+
+    let h_sum = h_source + h_receiver;
+    let q = if distance <= 30.0 * h_sum {
+        0.0
+    } else {
+        1.0 - 30.0 * h_sum / distance
+    };
+
+    std::array::from_fn(|band| {
+        let middle = if band == 0 {
+            -3.0 * q
+        } else {
+            -3.0 * q * (1.0 - ground.g_middle)
+        };
+        ground_region_band(ground.g_source, h_source, distance, band)
+            + ground_region_band(ground.g_receiver, h_receiver, distance, band)
+            + middle
+    })
+}
+
+/// Source- or receiver-region term of ISO 9613-2 Table 3 for one octave band.
+fn ground_region_band(g: f32, height: f32, distance: f32, band: usize) -> f32 {
+    // (1 − e^(−d_p/50)): the height functions grow in over the first ~100 m.
+    let range_term = 1.0 - (-distance / 50.0).exp();
+    let height_squared = height * height;
+    match band {
+        0 => -1.5,
+        1 => {
+            let a_prime = 1.5
+                + 3.0 * (-0.12 * (height - 5.0) * (height - 5.0)).exp() * range_term
+                + 5.7
+                    * (-0.09 * height_squared).exp()
+                    * (1.0 - (-2.8e-6 * distance * distance).exp());
+            -1.5 + g * a_prime
+        }
+        2 => -1.5 + g * (1.5 + 8.6 * (-0.09 * height_squared).exp() * range_term),
+        3 => -1.5 + g * (1.5 + 14.0 * (-0.46 * height_squared).exp() * range_term),
+        4 => -1.5 + g * (1.5 + 5.0 * (-0.9 * height_squared).exp() * range_term),
+        _ => -1.5 * (1.0 - g),
+    }
+}
+
+/// Ground attenuation in dB at an arbitrary frequency (positive = loss).
 ///
-/// # Returns
-/// Ground effect attenuation in dB (positive = loss, can be negative for
-/// constructive interference over reflective ground).
+/// Interpolates the ISO 9613-2 octave-band values of [`ground_effect_bands`]
+/// linearly in log-frequency; frequencies outside 63 Hz–8 kHz take the nearest
+/// band's value.
 pub fn ground_effect_db(
     distance: f32,
     h_source: f32,
     h_receiver: f32,
     ground: &GroundProperties,
     freq_hz: f32,
-    speed_of_sound: f32,
 ) -> f32 {
-    if distance < 0.01 {
-        return 0.0;
+    let bands = ground_effect_bands(distance, h_source, h_receiver, ground);
+    let last = GROUND_BAND_FREQUENCIES.len() - 1;
+    if freq_hz <= GROUND_BAND_FREQUENCIES[0] {
+        return bands[0];
     }
-
-    let a_s = ground_region_source(distance, h_source, ground.g_source, freq_hz, speed_of_sound);
-    let a_r = ground_region_receiver(
-        distance,
-        h_receiver,
-        ground.g_receiver,
-        freq_hz,
-        speed_of_sound,
-    );
-    let a_m = ground_region_middle(distance, h_source, h_receiver, ground.g_middle);
-
-    a_s + a_r + a_m
-}
-
-/// Source region ground effect (ISO 9613-2, Table 3).
-///
-/// Uses the octave-band anchor values from ISO 9613-2 Table 3:
-///   - f ≤ 125 Hz: A_s = -1.5 - 3.0·G_s  (porous ground boosts low-freq reflections)
-///   - f ≥ 2000 Hz: A_s = -1.5·(1 - G_s)  (porous ground absorbs high-freq reflections)
-///   - 125 < f < 2000 Hz: interpolation with height-dependent ground dip
-///
-/// The -1.5 dB base term is the coherent ground reflection gain (present for
-/// all surface types). The G-dependent correction captures how porous surfaces
-/// behave differently at low vs. high frequencies.
-fn ground_region_source(
-    distance: f32,
-    h_source: f32,
-    g_source: f32,
-    freq_hz: f32,
-    speed_of_sound: f32,
-) -> f32 {
-    iso_ground_region(g_source, freq_hz, h_source, distance, speed_of_sound)
-}
-
-/// Receiver region ground effect (ISO 9613-2, Table 3).
-///
-/// Symmetric to A_s but evaluated at the receiver height.
-fn ground_region_receiver(
-    distance: f32,
-    h_receiver: f32,
-    g_receiver: f32,
-    freq_hz: f32,
-    speed_of_sound: f32,
-) -> f32 {
-    iso_ground_region(g_receiver, freq_hz, h_receiver, distance, speed_of_sound)
-}
-
-/// Compute source or receiver region ground effect per ISO 9613-2 Table 3.
-///
-/// The attenuation has two components:
-///   A = -1.5 + G × C(f, h, d)
-///
-/// where C is a frequency-dependent correction factor:
-///   - C = -3.0 at f ≤ 125 Hz (Table 3 rows 63–125 Hz)
-///   - C = +1.5 at f ≥ 2000 Hz (Table 3 rows 2000–8000 Hz)
-///   - C interpolates through the transition zone (250–1000 Hz) where the
-///     "ground dip" occurs — destructive interference when the path difference
-///     between direct and ground-reflected waves ≈ λ/2.
-fn iso_ground_region(g: f32, freq_hz: f32, height: f32, distance: f32, speed_of_sound: f32) -> f32 {
-    // Table 3 anchor values for the G-dependent correction term
-    const C_LOW: f32 = -3.0; // f ≤ 125 Hz
-    const C_HIGH: f32 = 1.5; // f ≥ 2000 Hz
-
-    let correction = if freq_hz <= 125.0 {
-        C_LOW
-    } else if freq_hz >= 2000.0 {
-        C_HIGH
-    } else {
-        // Log-frequency interpolation between Table 3 anchor points
-        // ln(2000/125) = ln(16) ≈ 2.773
-        let t = (freq_hz / 125.0).ln() / (2000.0_f32 / 125.0).ln();
-        let base = C_LOW + (C_HIGH - C_LOW) * t;
-
-        // Ground dip: additional attenuation near the destructive interference
-        // frequency, where the path difference ≈ λ/2.
-        // This models the height-dependent terms in Table 3 rows 250–1000 Hz.
-        if distance > 0.1 && height > 0.01 {
-            // Path difference for ground reflection: δ ≈ 2h²/d (far-field approx)
-            let path_diff = 2.0 * height * height / distance;
-            let lambda = speed_of_sound / freq_hz;
-            let phase_ratio = path_diff / lambda;
-
-            // Gaussian peak centered at phase_ratio = 0.5 (half-wavelength)
-            // Width tuned so dip spans roughly one octave around the dip frequency
-            let dip = (-((phase_ratio - 0.5) * 4.0).powi(2)).exp() * 3.0;
-            base + dip
-        } else {
-            base
-        }
-    };
-
-    -1.5 + g * correction
-}
-
-/// Middle region ground effect (ISO 9613-2, §7.3, Equation 6).
-///
-///   A_m = -3 · q · (1 - G_m)
-///
-/// The middle region exists only when the propagation distance exceeds
-/// 30·(h_s + h_r) — i.e., source and receiver ground-interaction zones
-/// don't overlap. Over hard ground (G_m=0), A_m = -3·q (constructive
-/// interference adds energy). Over soft ground (G_m=1), A_m = 0.
-///
-/// ISO specifies a hard threshold at d = 30·(h_s + h_r). This implementation
-/// uses a smooth ramp (±20%) to avoid discontinuities in real-time rendering.
-fn ground_region_middle(distance: f32, h_source: f32, h_receiver: f32, g_middle: f32) -> f32 {
-    let h_sum = h_source + h_receiver;
-
-    // ISO 9613-2: middle region exists when d > 30·(h_s + h_r)
-    // Smoothed: linear ramp from 80% to 120% of threshold
-    let q = if h_sum > 0.001 {
-        let threshold = 30.0 * h_sum;
-        let ratio = distance / threshold;
-        ((ratio - 0.8) / 0.4).clamp(0.0, 1.0)
-    } else {
-        // Heights near zero → no ground interaction zones, full middle region
-        if distance > 0.01 {
-            1.0
-        } else {
-            0.0
-        }
-    };
-
-    -3.0 * q * (1.0 - g_middle)
+    if freq_hz >= GROUND_BAND_FREQUENCIES[last] {
+        return bands[last];
+    }
+    let upper = GROUND_BAND_FREQUENCIES
+        .iter()
+        .position(|&centre| centre >= freq_hz)
+        .unwrap_or(last);
+    let lower = upper - 1;
+    let fraction = (freq_hz / GROUND_BAND_FREQUENCIES[lower]).ln()
+        / (GROUND_BAND_FREQUENCIES[upper] / GROUND_BAND_FREQUENCIES[lower]).ln();
+    bands[lower] + (bands[upper] - bands[lower]) * fraction
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -517,14 +461,7 @@ pub fn total_attenuation_db(
     speed_of_sound: f32,
 ) -> AttenuationTerms {
     let a_div = geometric_divergence_db(distance);
-    let a_ground = ground_effect_db(
-        distance,
-        h_source,
-        h_receiver,
-        ground,
-        freq_hz,
-        speed_of_sound,
-    );
+    let a_ground = ground_effect_db(distance, h_source, h_receiver, ground, freq_hz);
     let a_bar = barrier
         .map(|b| barrier_attenuation_db(b, freq_hz, speed_of_sound))
         .unwrap_or(0.0);
@@ -542,37 +479,28 @@ pub fn total_attenuation_db(
 // Ground Effect — Real-time linear gain
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Compute a broadband ground effect as a linear gain multiplier for real-time use.
+/// Broadband ground effect as a linear gain multiplier for real-time use.
 ///
-/// Averages the ISO 9613-2 ground effect across octave bands (125 Hz – 4 kHz)
-/// and converts from dB to a linear amplitude factor. This is an approximation
-/// suitable for the per-source mixing loop where we don't have per-band processing.
+/// Averages the ISO 9613-2 ground attenuation (in dB) over the 125 Hz–4 kHz
+/// octave bands and converts to an amplitude factor. Used where a path has no
+/// per-band processing (the per-speaker WorldLocked renderer).
 ///
-/// Returns a gain in (0, ~1.5]. Values > 1.0 indicate constructive interference
-/// over hard ground. Values < 1.0 indicate absorption by soft ground.
+/// Hard ground gives +3 dB (×1.41) at short range and up to +6 dB once the
+/// middle region opens; porous ground gives ≤ 0 dB (never a boost).
 pub fn ground_effect_gain(
     distance: f32,
     h_source: f32,
     h_receiver: f32,
     ground: &GroundProperties,
-    speed_of_sound: f32,
 ) -> f32 {
     if distance < 0.01 {
         return 1.0;
     }
-
-    // Average ground effect across perceptually important octave bands
-    const BANDS: &[f32] = &[125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
-    let sum_db: f32 = BANDS
-        .iter()
-        .map(|&f| ground_effect_db(distance, h_source, h_receiver, ground, f, speed_of_sound))
-        .sum();
-    let avg_db = sum_db / BANDS.len() as f32;
-
-    // Convert dB attenuation to linear gain.
-    // ground_effect_db returns positive = loss, negative = gain,
-    // so gain = 10^(-avg_db / 20)
-    10.0_f32.powf(-avg_db / 20.0)
+    let bands = ground_effect_bands(distance, h_source, h_receiver, ground);
+    // Bands 1..=6 are 125 Hz–4 kHz.
+    let average_db = bands[1..=6].iter().sum::<f32>() / 6.0;
+    // Positive dB = loss, so gain = 10^(−dB/20).
+    10.0_f32.powf(-average_db / 20.0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -651,12 +579,119 @@ mod tests {
 
     const TEST_SPEED: f32 = 343.42;
 
+    // The pinned values below are worked by hand from ISO 9613-2 Table 3.
+
+    /// Hard ground (G = 0) is −1.5 dB per region in every band, and the middle
+    /// region is empty while d_p ≤ 30·(h_s + h_r): a flat −3 dB (a +3 dB boost).
+    #[test]
+    fn hard_ground_is_flat_minus_three_db_at_short_range() {
+        let bands = ground_effect_bands(10.0, 1.5, 1.5, &GroundProperties::hard());
+        for (band, value) in bands.iter().enumerate() {
+            assert!(
+                (value + 3.0).abs() < 1e-4,
+                "band {band}: expected -3.0 dB, got {value}"
+            );
+        }
+        let gain = ground_effect_gain(10.0, 1.5, 1.5, &GroundProperties::hard());
+        assert!((20.0 * gain.log10() - 3.0).abs() < 1e-3, "gain {gain}");
+    }
+
+    /// Hard ground with source and receiver on the ground: the middle region
+    /// covers the whole path (q = 1), adding −3 dB: −6 dB in total.
+    #[test]
+    fn hard_ground_at_zero_height_is_minus_six_db() {
+        let bands = ground_effect_bands(20.0, 0.0, 0.0, &GroundProperties::hard());
+        for value in bands {
+            assert!((value + 6.0).abs() < 1e-4, "expected -6.0 dB, got {value}");
+        }
+    }
+
+    /// Middle region factor q = 1 − 30·(h_s + h_r)/d_p. Heights 1 m + 1 m at
+    /// 120 m: q = 0.5, so hard ground gives −3 − 1.5 = −4.5 dB.
+    #[test]
+    fn middle_region_uses_iso_q() {
+        let bands = ground_effect_bands(120.0, 1.0, 1.0, &GroundProperties::hard());
+        assert!((bands[3] + 4.5).abs() < 1e-4, "got {}", bands[3]);
+        // At exactly the threshold (60 m) the middle region is still empty.
+        let at_threshold = ground_effect_bands(60.0, 1.0, 1.0, &GroundProperties::hard());
+        assert!(
+            (at_threshold[3] + 3.0).abs() < 1e-4,
+            "got {}",
+            at_threshold[3]
+        );
+    }
+
+    /// Porous ground, source and receiver on the ground, 1000 m (so the range
+    /// term 1 − e^(−d/50) ≈ 1). Per region:
+    ///   125 Hz: a′(0) − 1.5 = 3.0·e^(−3) + 5.7·(1 − e^(−2.8)) = 0.149 + 5.353 = 5.50
+    ///   250 Hz: b′(0) − 1.5 = 8.6
+    ///   500 Hz: c′(0) − 1.5 = 14.0
+    ///   1 kHz:  d′(0) − 1.5 = 5.0
+    ///   2 kHz+: 0
+    /// Two regions double each; the middle region is 0 for G = 1 above 63 Hz,
+    /// and −3 dB at 63 Hz on top of 2 × −1.5.
+    #[test]
+    fn porous_ground_matches_table_three_height_functions() {
+        let bands = ground_effect_bands(1000.0, 0.0, 0.0, &GroundProperties::soft());
+        let expected = [-6.0, 11.0, 17.2, 28.0, 10.0, 0.0, 0.0, 0.0];
+        for (band, (value, want)) in bands.iter().zip(expected).enumerate() {
+            assert!(
+                (value - want).abs() < 0.02,
+                "band {band} ({} Hz): expected {want} dB, got {value}",
+                GROUND_BAND_FREQUENCIES[band]
+            );
+        }
+    }
+
+    /// The bug this replaced: grass came out +3.8 dB louder than free field,
+    /// louder than concrete. Porous ground must never amplify from 125 Hz up,
+    /// at any geometry.
+    #[test]
+    fn porous_ground_never_amplifies() {
+        let soft = GroundProperties::soft();
+        let hard = GroundProperties::hard();
+        for distance in [0.5f32, 2.0, 10.0, 20.0, 60.0, 300.0] {
+            for h_source in [0.0f32, 0.3, 1.2, 6.0, 20.0] {
+                for h_receiver in [0.0f32, 1.2, 1.7] {
+                    let bands = ground_effect_bands(distance, h_source, h_receiver, &soft);
+                    for (band, value) in bands.iter().enumerate().skip(1) {
+                        assert!(
+                            *value >= -1e-4,
+                            "d={distance} hs={h_source} hr={h_receiver} band {band}: {value} dB"
+                        );
+                    }
+                    let soft_gain = ground_effect_gain(distance, h_source, h_receiver, &soft);
+                    let hard_gain = ground_effect_gain(distance, h_source, h_receiver, &hard);
+                    assert!(soft_gain <= 1.0 + 1e-5, "soft gain {soft_gain}");
+                    assert!(
+                        hard_gain > soft_gain,
+                        "hard {hard_gain} vs soft {soft_gain}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Between band centres the value is interpolated in log-frequency.
+    #[test]
+    fn ground_effect_db_interpolates_between_bands() {
+        let soft = GroundProperties::soft();
+        let bands = ground_effect_bands(1000.0, 0.0, 0.0, &soft);
+        let between = ground_effect_db(1000.0, 0.0, 0.0, &soft, (250.0f32 * 500.0).sqrt());
+        assert!(
+            (between - (bands[2] + bands[3]) / 2.0).abs() < 0.01,
+            "{between}"
+        );
+        assert_eq!(ground_effect_db(1000.0, 0.0, 0.0, &soft, 20.0), bands[0]);
+        assert_eq!(ground_effect_db(1000.0, 0.0, 0.0, &soft, 16000.0), bands[7]);
+    }
+
     #[test]
     fn hard_ground_effect_is_negative() {
         // Hard ground (G=0) should give negative A_ground (constructive
         // interference from ground reflection adds energy)
         let ground = GroundProperties::hard();
-        let a = ground_effect_db(10.0, 1.5, 1.5, &ground, 500.0, TEST_SPEED);
+        let a = ground_effect_db(10.0, 1.5, 1.5, &ground, 500.0);
         assert!(a < 0.0, "hard ground should give negative (gain), got {a}");
     }
 
@@ -665,8 +700,8 @@ mod tests {
         // Soft ground should have less constructive interference (more absorption)
         let hard = GroundProperties::hard();
         let soft = GroundProperties::soft();
-        let a_hard = ground_effect_db(10.0, 1.5, 1.5, &hard, 500.0, TEST_SPEED);
-        let a_soft = ground_effect_db(10.0, 1.5, 1.5, &soft, 500.0, TEST_SPEED);
+        let a_hard = ground_effect_db(10.0, 1.5, 1.5, &hard, 500.0);
+        let a_soft = ground_effect_db(10.0, 1.5, 1.5, &soft, 500.0);
         assert!(
             a_soft > a_hard,
             "soft ground ({a_soft}) should attenuate more than hard ({a_hard})"
@@ -676,17 +711,14 @@ mod tests {
     #[test]
     fn ground_effect_zero_distance() {
         let ground = GroundProperties::hard();
-        assert_eq!(
-            ground_effect_db(0.0, 1.5, 1.5, &ground, 500.0, TEST_SPEED),
-            0.0
-        );
+        assert_eq!(ground_effect_db(0.0, 1.5, 1.5, &ground, 500.0), 0.0);
     }
 
     #[test]
     fn ground_effect_gain_hard_boosts() {
         // Hard ground: constructive interference → gain > 1.0
         let ground = GroundProperties::hard();
-        let g = ground_effect_gain(10.0, 1.5, 1.5, &ground, TEST_SPEED);
+        let g = ground_effect_gain(10.0, 1.5, 1.5, &ground);
         assert!(g > 1.0, "hard ground should boost: got {g}");
     }
 
@@ -694,8 +726,8 @@ mod tests {
     fn ground_effect_gain_soft_attenuates_relative() {
         let hard = GroundProperties::hard();
         let soft = GroundProperties::soft();
-        let g_hard = ground_effect_gain(10.0, 1.5, 1.5, &hard, TEST_SPEED);
-        let g_soft = ground_effect_gain(10.0, 1.5, 1.5, &soft, TEST_SPEED);
+        let g_hard = ground_effect_gain(10.0, 1.5, 1.5, &hard);
+        let g_soft = ground_effect_gain(10.0, 1.5, 1.5, &soft);
         assert!(
             g_soft < g_hard,
             "soft ({g_soft}) should be less than hard ({g_hard})"
@@ -705,7 +737,7 @@ mod tests {
     #[test]
     fn ground_effect_gain_zero_distance_is_unity() {
         let ground = GroundProperties::soft();
-        assert_eq!(ground_effect_gain(0.0, 1.5, 1.5, &ground, TEST_SPEED), 1.0);
+        assert_eq!(ground_effect_gain(0.0, 1.5, 1.5, &ground), 1.0);
     }
 
     // ── Barrier Attenuation ──────────────────────────────────────────────
