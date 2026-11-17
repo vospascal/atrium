@@ -55,10 +55,10 @@ pub fn compute_telemetry(
         let dist = listener.position.distance_to(pos);
         let src_ref_dist = source.ref_distance();
 
-        let (gain_dist, gain_emit, gain_hear) = if source.emitter_kind() == EmitterKind::Field {
+        let (gain_dist, gain_emit) = if source.emitter_kind() == EmitterKind::Field {
             // Position remains useful as an editor anchor, but it has no
             // acoustic attenuation or directivity semantics for a field.
-            (1.0, 1.0, 1.0)
+            (1.0, 1.0)
         } else {
             let gain_dist = distance_gain_at_model(
                 listener.position,
@@ -74,11 +74,10 @@ pub fn compute_telemetry(
                 listener.position,
                 &source.directivity(),
             );
-            let gain_hear = listener.hearing_gain(pos);
-            (gain_dist, gain_emit, gain_hear)
+            (gain_dist, gain_emit)
         };
 
-        let gain_total = gain_dist * gain_emit * gain_hear;
+        let gain_total = gain_dist * gain_emit;
         let gain_db = if gain_total.is_finite() && gain_total > 0.0 {
             20.0 * gain_total.log10()
         } else {
@@ -95,7 +94,6 @@ pub fn compute_telemetry(
             distance: dist,
             gain_dist,
             gain_emit,
-            gain_hear,
             gain_total,
             gain_db,
             is_muted: source.is_muted(),
@@ -131,14 +129,13 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
         written += 1;
         let _ = write!(
             json,
-            r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"hear":{:.3},"total":{:.4},"db":{:.1},"muted":{},"perceptual":{:.3},"ox":{:.3},"oy":{:.3},"ocx":{:.2},"ocy":{:.2},"or":{:.2}}}"#,
+            r#"{{"x":{:.2},"y":{:.2},"z":{:.2},"distance":{:.2},"dist":{:.3},"emit":{:.3},"total":{:.4},"db":{:.1},"muted":{},"perceptual":{:.3},"ox":{:.3},"oy":{:.3},"ocx":{:.2},"ocy":{:.2},"or":{:.2}}}"#,
             s.x,
             s.y,
             s.z,
             s.distance,
             s.gain_dist,
             s.gain_emit,
-            s.gain_hear,
             s.gain_total,
             if s.gain_db.is_finite() {
                 s.gain_db
@@ -202,10 +199,8 @@ mod tests {
         Box::new(node)
     }
 
-    fn omni_listener(pos: Vec3) -> Listener {
-        let mut l = Listener::new(pos, 0.0);
-        l.hearing_cone.pattern = atrium_core::directivity::DirectivityPattern::Omni;
-        l
+    fn listener_at(pos: Vec3) -> Listener {
+        Listener::new(pos, 0.0)
     }
 
     fn default_distance() -> DistanceModel {
@@ -240,7 +235,7 @@ mod tests {
     #[test]
     fn telemetry_distance_matches_geometry() {
         let buf = sine_buffer();
-        let listener = omni_listener(Vec3::ZERO);
+        let listener = listener_at(Vec3::ZERO);
         let dist = default_distance();
         let sources: Vec<Box<dyn SoundSource>> =
             vec![make_source(&buf, 80.0, Vec3::new(5.0, 0.0, 0.0), 100.0)];
@@ -258,14 +253,13 @@ mod tests {
         assert!(source.distance > 90.0, "anchor distance remains observable");
         assert_eq!(source.gain_dist, 1.0);
         assert_eq!(source.gain_emit, 1.0);
-        assert_eq!(source.gain_hear, 1.0);
         assert_eq!(source.gain_total, 1.0);
     }
 
     #[test]
     fn telemetry_omni_sources_have_emit_one() {
         let buf = sine_buffer();
-        let listener = omni_listener(Vec3::ZERO);
+        let listener = listener_at(Vec3::ZERO);
         let dist = default_distance();
         let sources: Vec<Box<dyn SoundSource>> =
             vec![make_source(&buf, 80.0, Vec3::new(3.0, 2.0, 0.0), 100.0)];
@@ -273,30 +267,19 @@ mod tests {
         assert!((frame.sources[0].gain_emit - 1.0).abs() < 0.001);
     }
 
-    #[test]
-    fn telemetry_omni_listener_has_hear_one() {
-        let buf = sine_buffer();
-        let listener = omni_listener(Vec3::ZERO);
-        let dist = default_distance();
-        let sources: Vec<Box<dyn SoundSource>> =
-            vec![make_source(&buf, 80.0, Vec3::new(3.0, 2.0, 0.0), 100.0)];
-        let frame = compute_telemetry(&sources, &listener, &dist);
-        assert!((frame.sources[0].gain_hear - 1.0).abs() < 0.001);
-    }
-
     /// Two sources at 20 dB and 40 dB, same distance, same position.
-    /// The telemetry gain components should be identical (distance, emit, hear
+    /// The telemetry gain components should be identical (distance, emit
     /// depend on position/orientation, not SPL). The SPL difference only shows
     /// up in the amplitude (applied per-sample) and ref_distance (distance model).
     ///
     /// This test verifies that the UI's received SPL formula
-    ///   `spl - 20·log₁₀(distance) + 20·log₁₀(emit) + 20·log₁₀(hear)`
+    ///   `spl - 20·log₁₀(distance) + 20·log₁₀(emit)`
     /// correctly preserves the 20 dB difference.
     #[test]
     fn telemetry_spl_difference_preserved_at_same_distance() {
         let buf = sine_buffer();
         let pos = Vec3::new(5.0, 0.0, 0.0);
-        let listener = omni_listener(Vec3::ZERO);
+        let listener = listener_at(Vec3::ZERO);
         let dist = default_distance();
 
         // Source A: 20 dB SPL
@@ -316,12 +299,11 @@ mod tests {
         // Both at same distance
         assert!((ta.distance - tb.distance).abs() < 0.01);
 
-        // Emit and hear should be identical (both omni)
+        // Emit should be identical (both omni)
         assert!((ta.gain_emit - tb.gain_emit).abs() < 0.001);
-        assert!((ta.gain_hear - tb.gain_hear).abs() < 0.001);
 
-        // UI formula: received_spl = spl - 20*log10(distance) + 20*log10(emit) + 20*log10(hear)
-        // Since emit=1 and hear=1 for both, and distance is the same:
+        // UI formula: received_spl = spl - 20*log10(distance) + 20*log10(emit)
+        // Since emit=1 for both, and distance is the same:
         //   received_a = 20 - 20*log10(5) ≈ 20 - 14.0 = 6.0
         //   received_b = 40 - 20*log10(5) ≈ 40 - 14.0 = 26.0
         //   difference = 20 dB ✓
@@ -340,7 +322,7 @@ mod tests {
     #[test]
     fn telemetry_inverse_square_law_6db_per_doubling() {
         let buf = sine_buffer();
-        let listener = omni_listener(Vec3::ZERO);
+        let listener = listener_at(Vec3::ZERO);
         let dist = default_distance();
         let spl = 80.0;
 
@@ -388,7 +370,7 @@ mod tests {
         ] {
             // Place source at the analytically derived distance along +X
             let source_pos = Vec3::new(expected_distance, 0.0, 0.0);
-            let listener = omni_listener(Vec3::ZERO);
+            let listener = listener_at(Vec3::ZERO);
             let sources: Vec<Box<dyn SoundSource>> =
                 vec![make_source(&buf, spl, source_pos, 100.0)];
 
@@ -447,7 +429,7 @@ mod tests {
         let campfire_amp = campfire_profile.amplitude(buf.rms, target_rms, spl_reference);
         let purring_amp = purring_profile.amplitude(buf.rms, target_rms, spl_reference);
 
-        let listener = omni_listener(Vec3::ZERO);
+        let listener = listener_at(Vec3::ZERO);
 
         let campfire_sources: Vec<Box<dyn SoundSource>> = vec![make_source(
             &buf,
@@ -492,7 +474,7 @@ mod tests {
     #[test]
     fn telemetry_json_roundtrips() {
         let buf = sine_buffer();
-        let listener = omni_listener(Vec3::ZERO);
+        let listener = listener_at(Vec3::ZERO);
         let dist = default_distance();
         let sources: Vec<Box<dyn SoundSource>> =
             vec![make_source(&buf, 80.0, Vec3::new(3.0, 0.0, 0.0), 100.0)];

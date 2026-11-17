@@ -2,7 +2,7 @@
 //!
 //! Used by VBAP mode. Iterates over propagation paths from the PathResolver.
 //! For the **direct path**, computes full VBAP gains (angular panning +
-//! distance attenuation + directivity + hearing). For **reflection paths**,
+//! distance attenuation + directivity). For **reflection paths**,
 //! uses a pre-computed 1° gain lookup table for fast angular panning,
 //! with the reflection's energy carried by path.gain.
 //!
@@ -75,7 +75,7 @@ impl Renderer for MultichannelRenderer {
         for (pi, path) in path_slice.iter().enumerate() {
             let gains = match path.kind {
                 PathKind::Direct => {
-                    // Full VBAP gains: angular + distance + directivity + hearing
+                    // Full VBAP gains: angular + distance + directivity
                     let dist_params = atrium_core::speaker::DistanceParams {
                         ref_distance: ctx.source_ref_distance,
                         max_distance: ctx.distance_model.max_distance,

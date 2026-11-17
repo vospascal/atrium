@@ -552,8 +552,7 @@ impl SpeakerLayout {
             source_directivity,
         );
 
-        let hearing = listener.hearing_gain(source_pos);
-        let attenuation = dist * dir * hearing;
+        let attenuation = dist * dir;
         gains.gains[self.speakers[best_a].channel] += best_ga * attenuation;
         if best_b != best_a {
             gains.gains[self.speakers[best_b].channel] += best_gb * attenuation;
@@ -835,7 +834,7 @@ impl SpeakerLayout {
         let l_gain = angle.cos();
         let r_gain = angle.sin();
 
-        // Distance, directivity, hearing attenuation
+        // Distance and directivity attenuation
         let dist = distance_gain_at_model(
             listener.position,
             source_pos,
@@ -850,8 +849,7 @@ impl SpeakerLayout {
             listener.position,
             source_directivity,
         );
-        let hearing = listener.hearing_gain(source_pos);
-        let atten = dist * dir * hearing;
+        let atten = dist * dir;
 
         gains.gains[0] = l_gain * atten;
         gains.gains[1] = r_gain * atten;
@@ -888,8 +886,7 @@ impl SpeakerLayout {
             listener.position,
             source_directivity,
         );
-        let hearing = listener.hearing_gain(source_pos);
-        let atten = dist * dir * hearing;
+        let atten = dist * dir;
 
         // Equal gain to all spatial channels, normalized so total power ≈ atten²
         let per_channel = if self.count > 0 {
@@ -1409,7 +1406,7 @@ mod tests {
             );
 
             let power: f32 = gains.gains[..2].iter().map(|g| g * g).sum();
-            // Power = (distance_atten * directivity * hearing_cone)²
+            // Power = (distance_atten * directivity)²
             let expected_attenuation = distance_gain_at_model(
                 listener.position,
                 source_pos,
@@ -1418,9 +1415,7 @@ mod tests {
                 dist.rolloff,
                 dist.model,
             );
-            let hearing = listener.hearing_gain(source_pos);
-            let expected_power =
-                (expected_attenuation * hearing) * (expected_attenuation * hearing);
+            let expected_power = expected_attenuation * expected_attenuation;
             assert!(
                 (power - expected_power).abs() < 0.05,
                 "angle={}° power={} expected={}",
@@ -1431,8 +1426,12 @@ mod tests {
         }
     }
 
+    /// A source is as loud behind the listener as ahead of it. On speakers the
+    /// listener's own ears do the directional hearing; the renderer must not
+    /// add a second, virtual one. Regression: a "hearing cone" cut everything
+    /// more than 45° off the listener's nose to 0.3 (−10.5 dB).
     #[test]
-    fn vbap_hearing_cone_attenuates_rear_source() {
+    fn vbap_source_behind_is_as_loud_as_ahead() {
         let layout = vbap_5_1_layout();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), PI / 2.0); // facing +Y
         let dist = default_distance();
@@ -1451,8 +1450,8 @@ mod tests {
         let power_ahead: f32 = gains_ahead.gains[..6].iter().map(|g| g * g).sum();
         let power_behind: f32 = gains_behind.gains[..6].iter().map(|g| g * g).sum();
         assert!(
-            power_ahead > power_behind * 2.0,
-            "ahead power={power_ahead} should be much greater than behind power={power_behind}"
+            (power_ahead / power_behind - 1.0).abs() < 0.01,
+            "same distance ahead and behind must give equal power: ahead={power_ahead} behind={power_behind}"
         );
     }
 

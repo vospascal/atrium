@@ -349,8 +349,7 @@ impl AudioScene {
                             self.listener.position,
                             &source.directivity(),
                         );
-                        let hear_gain = self.listener.hearing_gain(pos);
-                        self.source_amplitudes[i] * dist_gain * emit_gain * hear_gain
+                        self.source_amplitudes[i] * dist_gain * emit_gain
                     }
                 } else {
                     0.0

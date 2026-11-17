@@ -1,5 +1,11 @@
 # Directivity Patterns and Energy Transfer Along Paths
 
+> **Status (2026-11-17): the listener hearing cone described below was removed from the engine.**
+> It cut every source more than 45° off the listener's facing direction to 0.3 (−10.5 dB) in
+> the VBAP speaker renderer. On speakers the listener's real ears already do the directional
+> hearing, and on headphones the HRTF does, so the cone double-counted it. Source directivity
+> is unchanged. This document is kept as the record of the original design.
+
 ## Background: What We Built in the Spatial Project
 
 The TypeScript spatial audio garden (`/spatial`) was our first pass at modeling
