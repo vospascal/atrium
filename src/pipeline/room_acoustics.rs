@@ -198,6 +198,30 @@ pub fn sabine_rt60_at_band(
     rt60.clamp(0.1, 10.0)
 }
 
+/// Minimum broadband energy reflectivity for a surface to count as reflective
+/// when deciding whether a space can hold a reverberant field.
+const REFLECTIVE_SURFACE_THRESHOLD: f32 = 0.05;
+
+/// Can this space sustain a reverberant (diffuse) field at all?
+///
+/// Sabine's equation assumes sound is trapped and bounces many times. That
+/// needs at least one pair of FACING reflective surfaces. An open field has
+/// only the ground: sound reflects once and leaves, so there is no late
+/// reverberation however large the bounding box is. Sabine cannot express
+/// this — with every wall fully absorbing (α = 1) it still returns
+/// RT60 = 0.161·V/S, which is 1.2 s for a 60×60×30 m meadow.
+///
+/// `wall_materials` uses the `[−X, +X, −Y, +Y, −Z, +Z]` convention, so the
+/// facing pairs are (0,1), (2,3) and (4,5).
+pub fn has_facing_reflective_surfaces(wall_materials: &[WallMaterial; 6]) -> bool {
+    let reflective = |index: usize| {
+        wall_materials[index].broadband_reflectivity() > REFLECTIVE_SURFACE_THRESHOLD
+    };
+    (reflective(0) && reflective(1))
+        || (reflective(2) && reflective(3))
+        || (reflective(4) && reflective(5))
+}
+
 /// Jot's per-delay-line feedback gain for a target RT60.
 ///
 /// g = 10^(-3 × delay_seconds / rt60)
@@ -302,6 +326,79 @@ pub fn compute_feedback_gains(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Reverberant-field precondition ───────────────────────────────
+
+    fn walls(materials: [WallMaterial; 6]) -> [WallMaterial; 6] {
+        materials
+    }
+
+    /// Wall order is [−X, +X, −Y, +Y, −Z (floor), +Z (ceiling)].
+    #[test]
+    fn open_field_with_ground_only_cannot_reverberate() {
+        let meadow = walls([
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::grass(),
+            WallMaterial::open(),
+        ]);
+        assert!(!has_facing_reflective_surfaces(&meadow));
+        let all_open: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::open());
+        assert!(!has_facing_reflective_surfaces(&all_open));
+    }
+
+    /// One wall plus the ground gives echoes but no trapped field.
+    #[test]
+    fn single_wall_and_ground_cannot_reverberate() {
+        let cliff = walls([
+            WallMaterial::hard_wall(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::grass(),
+            WallMaterial::open(),
+        ]);
+        assert!(!has_facing_reflective_surfaces(&cliff));
+    }
+
+    #[test]
+    fn facing_surfaces_can_reverberate() {
+        // A canyon: two facing walls, open ends, open sky.
+        let canyon = walls([
+            WallMaterial::hard_wall(),
+            WallMaterial::hard_wall(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::grass(),
+            WallMaterial::open(),
+        ]);
+        assert!(has_facing_reflective_surfaces(&canyon));
+        // A closed room.
+        let room: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::hard_wall());
+        assert!(has_facing_reflective_surfaces(&room));
+        // Floor and ceiling only (a covered terrace).
+        let terrace = walls([
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::open(),
+            WallMaterial::hard_wall(),
+            WallMaterial::hard_wall(),
+        ]);
+        assert!(has_facing_reflective_surfaces(&terrace));
+    }
+
+    /// Documents WHY the gate exists: Sabine alone gives the 60×60×30 m meadow
+    /// box a 1.2 s decay even with every surface fully absorbing.
+    #[test]
+    fn sabine_alone_gives_an_open_box_a_long_decay() {
+        let (volume, surface_area) =
+            room_geometry(Vec3::new(0.0, 0.0, 0.0), Vec3::new(60.0, 60.0, 30.0));
+        let rt60 = sabine_rt60(volume, surface_area, 0.0);
+        assert!((rt60 - 1.2075).abs() < 0.01, "got {rt60}");
+    }
 
     // ── Room geometry ────────────────────────────────────────────────
 

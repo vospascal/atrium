@@ -246,6 +246,10 @@ pub struct FdnReverbStage {
     /// to smear resonant modes, preventing metallic ringing.
     modulators: [DelayModulator; NUM_LINES],
     initialized: bool,
+    /// False when the environment cannot sustain a reverberant field (no pair
+    /// of facing reflective surfaces) and no RT60 was set explicitly. The
+    /// stage then leaves the buffer untouched: an open field has no tail.
+    reverberant: bool,
     measurement_mode: bool,
     // ── Configuration (resolved from the environment at build time) ──
     /// Explicit mid-band RT60 override (seconds); `None` = geometry-derived.
@@ -296,6 +300,7 @@ impl FdnReverbStage {
             output_normalization: 1.0,
             modulators: [DelayModulator::new(); NUM_LINES],
             initialized: false,
+            reverberant: true,
             measurement_mode: false,
             rt60_override: config.rt60_seconds,
             pre_delay_override_ms: config.pre_delay_ms,
@@ -524,6 +529,12 @@ impl MixStage for FdnReverbStage {
         self.measurement_mode = ctx.measurement_mode;
         self.compute_delays(ctx.sample_rate);
 
+        // An explicit RT60 is a designer's decision and always wins. Otherwise
+        // the geometry decides: without facing reflective surfaces there is no
+        // diffuse field for Sabine to describe.
+        self.reverberant = self.rt60_override.is_some_and(|rt60| rt60 > 0.0)
+            || room_acoustics::has_facing_reflective_surfaces(ctx.wall_materials);
+
         // Derive per-band RT60 from room geometry + wall materials via Sabine's equation.
         // RT60 at 500 Hz (band 2) sets the overall decay; RT60 at 4 kHz (band 5)
         // controls how much faster highs decay — driven by actual material absorption.
@@ -575,7 +586,7 @@ impl MixStage for FdnReverbStage {
     }
 
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
-        if !self.initialized {
+        if !self.initialized || !self.reverberant {
             return;
         }
 
