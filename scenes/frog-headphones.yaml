@@ -1,0 +1,46 @@
+# Scene: Frog only (headphones) — one source for head-tracking tests.
+# The frog sits front-right (45°). Turn your head right and it should move to
+# straight ahead; turn left and it should swing round to your right ear.
+#   cargo run --release -- --head-tracking=sony scenes/frog-headphones.yaml
+#
+# Positions are [x, y, z] in metres, listener-relative (offset by the meadow
+# spawn). Bearings are measured from +Y (north / "up" on the map), clockwise —
+# matching the angle read-out on each source card.
+
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]   # centre of the clearing, ears at 1.2 m
+  yaw_degrees: 90.0           # facing +Y (north / up on the map)
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0          # keep sources audible out to ~40 m
+  rolloff: 1.0
+
+speakers:
+  layout: "stereo"          # headphones
+  render_mode: hrtf          # binaural: direction, height and distance over two ears
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c:  [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0
+
+sources:
+  - source: sources/frog.yaml       # Frogs — NE, near the water
+    name: Frogs
+    color: "#6db33f"
+    position: [10.1, 10.1, 0.0]     # 14.3 m @ 45 deg
+
+atmosphere: atmospheres/default.yaml
