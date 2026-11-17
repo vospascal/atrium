@@ -1,5 +1,5 @@
 # Focused scene for the spectrum-derived soft-wind field.
-#   cargo run --features bevy --no-default-features -- --bevy scenes/soft-wind-only.yaml
+#   cargo run --release -- scenes/soft-wind-only.yaml
 
 environment: environments/meadow.yaml
 atrium: rooms/atrium_6x4.yaml

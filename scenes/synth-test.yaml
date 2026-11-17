@@ -12,7 +12,7 @@
 # Open meadow environment: no wall reflections, so what you hear is the raw
 # generator + distance/air model, not the room. Run with:
 #   cargo run -- scenes/synth-test.yaml
-#   cargo run --features bevy --no-default-features -- --bevy scenes/synth-test.yaml
+#   cargo run --release -- scenes/synth-test.yaml
 
 environment: environments/meadow.yaml
 atrium: rooms/atrium_6x4.yaml

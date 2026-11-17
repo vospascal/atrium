@@ -3,20 +3,6 @@ members = [
     ".",
     "crates/core",
     "crates/tui",
-    "crates/bevy-ui",
-    "crates/behavior",
-    "crates/profile",
-    "crates/voxel-color",
-    "crates/voxel-environment",
-    "crates/voxel-core",
-    "crates/voxel-graph",
-    "crates/voxel-material",
-    "crates/voxel-material-graph",
-    "crates/voxel-rt",
-    "crates/voxel-game-ui",
-    "crates/voxel-studio",
-    "crates/voxel-sound",
-    "crates/voxel",
 ]
 
 [package]
@@ -40,10 +26,6 @@ symphonia = { version = "0.5", features = ["mp3", "wav", "pcm", "aac", "ogg", "v
 sofar = "0.2.1"
 realfft = "3.5"
 atrium-tui = { path = "crates/tui", optional = true }
-atrium-bevy = { path = "crates/bevy-ui", optional = true }
-atrium-behavior = { path = "crates/behavior", optional = true }
-# Native file dialog for the "Browse…" add-source button (bevy UI only).
-rfd = { version = "0.15", optional = true }
 
 # Profiling (optional, zero-cost when disabled)
 tracing = { version = "0.1", optional = true }
@@ -54,23 +36,12 @@ tracing-flame = { version = "0.2", optional = true }
 [features]
 default = ["tui"]
 tui = ["dep:atrium-tui"]
-bevy = ["dep:atrium-bevy", "dep:atrium-behavior", "dep:rfd"]
 profiler = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-perfetto", "dep:tracing-flame"]
 memprof = []
 
-# Optimize deps in debug mode (essential for Bevy — unplayable without this)
+# Optimize deps in debug mode (DSP crates like realfft are unusably slow unoptimized)
 [profile.dev.package."*"]
 opt-level = 3
-
-# voxel-core holds the hot generation + noise math. The `*` glob above only covers dependencies, not
-# workspace members, so without this generation runs unoptimized (~20× slower).
-[profile.dev.package.voxel-core]
-opt-level = 2
-
-# voxel-rt traverses the voxel grid per pixel on the CPU side (brickmap builds,
-# uploads); same reasoning as voxel-core above.
-[profile.dev.package.voxel-rt]
-opt-level = 2
 
 [profile.profiling]
 inherits = "release"

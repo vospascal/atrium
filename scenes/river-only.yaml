@@ -1,5 +1,5 @@
 # Focused listening scene for the located procedural river.
-#   cargo run --features bevy --no-default-features -- --bevy scenes/river-only.yaml
+#   cargo run --release -- scenes/river-only.yaml
 
 environment: environments/meadow.yaml
 atrium: rooms/atrium_6x4.yaml

@@ -1,5 +1,5 @@
 # Focused listening scene for canopy wind.
-#   cargo run --features bevy --no-default-features -- --bevy scenes/canopy-wind-only.yaml
+#   cargo run --release -- scenes/canopy-wind-only.yaml
 
 environment: environments/meadow.yaml
 atrium: rooms/atrium_6x4.yaml

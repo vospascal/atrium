@@ -1,5 +1,5 @@
 # Focused listening scene for storm wind—no rain or thunder.
-#   cargo run --features bevy --no-default-features -- --bevy scenes/storm-wind-only.yaml
+#   cargo run --release -- scenes/storm-wind-only.yaml
 
 environment: environments/meadow.yaml
 atrium: rooms/atrium_6x4.yaml

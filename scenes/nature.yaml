@@ -2,7 +2,7 @@
 # Recreates the top-down "sound emission map" reference: a central listener in
 # an open ~60×60 m clearing, ringed by nature sound sources at the reference
 # bearings and distances. Run the 2D map with:
-#   cargo run --features bevy --no-default-features -- --bevy scenes/nature.yaml
+#   cargo run --release -- scenes/nature.yaml
 #
 # Positions are [x, y, z] in metres, listener-relative (offset by the meadow
 # spawn). Bearings are measured from +Y (north / "up" on the map), clockwise —

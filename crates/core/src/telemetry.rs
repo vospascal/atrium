@@ -1,8 +1,8 @@
-//! Telemetry frame types shared between the audio engine and visualization.
+//! Telemetry frame types shared between the audio engine and visualization clients.
 //!
 //! All types are fixed-size and Copy — no heap allocations, real-time safe.
-//! These live in `atrium-core` so both the engine (`atrium`) and the Bevy
-//! visualization (`atrium-bevy`) can use the same concrete types over rtrb.
+//! These live in `atrium-core` so the engine (`atrium`) and any
+//! visualization can use the same concrete types over rtrb.
 
 use crate::speaker::{ChannelMode, RenderMode};
 

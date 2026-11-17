@@ -1,21 +1,5 @@
 # Project instructions
 
-## WebGPU and WGSL references
-
-This repository vendors the `webgpu-specs` reference skill at
-`.claude/skills/webgpu-specs/` (from `gfx-rs/wgpu@7a65558`). For any task that
-implements, reviews, debugs, or explains WebGPU or WGSL behavior, read and
-follow `.claude/skills/webgpu-specs/SKILL.md`.
-
-When a specification check is needed, run:
-
-```sh
-sh .claude/skills/webgpu-specs/download.sh
-```
-
-Search the downloaded WebGPU and WGSL sources under `target/claude/`, and cite
-the relevant named GPUWeb specification anchor in user-facing explanations.
-
 ## Crate architecture: narrow seams, enforced by visibility
 
 A crate boundary exists for one reason: to bound the blast radius of a change. Everything
@@ -29,16 +13,15 @@ types outside the crate:
 rg -n "ImplType|OtherImplType" --glob '!crates/<crate>/**' --glob '!target/**' .
 ```
 
-Any hit means the boundary is decorative and the work is not done. Two worked examples in
-this repo, both instructive:
+Any hit means the boundary is decorative and the work is not done. Two lessons from the
+voxel crates (removed from this repo; last present at commit `de1754f`):
 
-- `voxel-environment` passes. Consumers name `EnvironmentRequest` and `EnvironmentGpu`;
-  changing the LUT set is a one-file edit. Before the seam existed, `voxel-rt` named
-  `AtmosphereBindings`, `AtmosphereUniform` and `LutConfig` across four files — the facade
-  was present and routed around.
-- `voxel-color` fails. `ColorAdapter` has five implementations and zero consumers outside
-  the crate; `voxel-rt` calls `OutputFormat::resolve` directly. Three of the five impls are
-  18-line presets delegating to a fourth. The crate is good; that layer of it is not.
+- A facade that is present but routed around is worse than none. A renderer crate named
+  three of a sibling crate's implementation types across four files while a four-method
+  facade sat unused. The grep above is what found it.
+- A trait layer with five implementations and zero consumers outside its crate, three of
+  them 18-line presets delegating to a fourth, is speculative surface. The crate was good;
+  that layer of it was not.
 
 This is an Atrium project convention layered on top of—not a replacement for—the
 [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/). Every crate must still
@@ -57,7 +40,6 @@ crates/<crate>/
     gpu.rs          # GPU/backend binding and resource conversion
     <domain>/       # one implementation file per mapping/provider/algorithm — PRIVATE
     adapters/       # only once a SECOND implementation exists; see below
-  shaders/<domain>/ # one WGSL file per implementation plus common/dispatch files
 ```
 
 Rules:
@@ -89,14 +71,9 @@ Rules:
   catch-all implementation file. Where Rust needs one exhaustive `match`, put it in a thin
   `dispatch.rs` that delegates to the per-implementation files — the compiler still refuses
   an unhandled variant, so completeness stays machine-checked while bodies stay separated.
-- WGSL follows the same split: shared helpers, one file per implementation, and a dispatch
-  file. If an aggregate shader is needed, generate it from those fragments — `concat!` of
-  `include_str!` keeps it a `&'static str` with no second source of truth and no build
-  script. Never `include_str!` across a crate boundary by relative path; that bypasses the
-  facade and breaks the moment the other crate reorganises its shaders.
 - **The crate README is a design record, not a summary.** State what is deliberate and
-  counter-intuitive so a future reader does not "fix" it — `voxel-color`'s "decisions that
-  look wrong and are right" is the model, and each entry should say what it cost to learn.
+  counter-intuitive so a future reader does not "fix" it — a "decisions that look wrong and are
+  right" section is the model, and each entry should say what it cost to learn.
   Record known gaps honestly, including what blocks them.
 - A plan is not completion evidence. Before reporting completion, verify the promised tree
   with `find`/`rg --files`, run the relevant crate tests, and run dependent crate checks. If
@@ -110,5 +87,5 @@ Rules:
 Rust forbids crate cycles, so a dependency cycle inside a crate is a boundary you cannot
 draw later. `scripts/dep-cycles.py` reports them. Two things it taught us worth
 remembering: strip comments and `#[cfg(test)]` before believing a dependency graph — doc
-links and test-only imports inflated `voxel-rt` from one cycle to an apparent 32-module
+links and test-only imports inflated one crate from a single cycle to an apparent 32-module
 tangle — and a cycle is usually one type living in the wrong module, not a design problem.

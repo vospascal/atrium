@@ -2,9 +2,9 @@
 //!
 //! The audio thread computes a `TelemetryFrame` every ~15 Hz and pushes it
 //! through an rtrb ring buffer to the main thread, which broadcasts it to
-//! WebSocket clients or the Bevy visualization.
+//! WebSocket clients.
 //!
-//! Type definitions live in `atrium_core::telemetry` (shared with atrium-bevy).
+//! Type definitions live in `atrium_core::telemetry` (shared with the engine).
 //! This module re-exports them and provides the compute/serialization functions.
 
 use crate::audio::distance::DistanceModel;

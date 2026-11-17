@@ -5,8 +5,8 @@ Rust forbids crate cycles, so a cycle between modules of one crate is a boundary
 cannot draw later — it is the thing that blocks extracting either module into its own
 crate. This finds them.
 
-    python3 scripts/dep-cycles.py                      # defaults to crates/voxel-rt/src
-    python3 scripts/dep-cycles.py crates/voxel-rt/src crates/core/src
+    python3 scripts/dep-cycles.py                      # defaults to src
+    python3 scripts/dep-cycles.py src crates/core/src
     python3 scripts/dep-cycles.py --raw                # do NOT strip comments/tests
 
 Exit code is 1 when a cycle is found, so this works as a check.
@@ -168,9 +168,9 @@ def main() -> int:
     parser.add_argument(
         "roots",
         nargs="*",
-        default=["crates/voxel-rt/src"],
+        default=["src"],
         type=pathlib.Path,
-        help="crate src directories to analyse (default: crates/voxel-rt/src)",
+        help="crate src directories to analyse (default: src)",
     )
     parser.add_argument(
         "--raw",

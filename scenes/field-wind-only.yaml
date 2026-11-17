@@ -1,5 +1,5 @@
 # Focused A/B scene for the new environmental field-wind architecture.
-#   cargo run --features bevy --no-default-features -- --bevy scenes/field-wind-only.yaml
+#   cargo run --release -- scenes/field-wind-only.yaml
 
 environment: environments/meadow.yaml
 atrium: rooms/atrium_6x4.yaml
