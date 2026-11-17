@@ -15,6 +15,7 @@ static ALLOC: atrium::engine::memprof::TrackingAllocator =
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let ui_enabled = cfg!(feature = "tui") && args.iter().any(|a| a == "--ui");
+    let head_tracker = atrium::head_tracking::tracker_from_args(&args)?;
     let scene_path = args
         .iter()
         .skip(1)
@@ -53,8 +54,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let channel_labels = result.channel_labels.clone();
 
     // Start audio output
+    let scene_listener_position = result.scene.listener.position;
+    let scene_listener_yaw = result.scene.listener.yaw;
     let (producer, consumer) = rtrb::RingBuffer::<Command>::new(256);
     let handle = CpalOutput.start(result.scene, consumer)?;
+    let producer = Arc::new(Mutex::new(producer));
+
+    // Head tracking (--head-tracking[=sony]): any tracker that sends OpenTrack
+    // UDP. Held until exit so a bridge the engine started stops with it.
+    let _head_tracking = match head_tracker {
+        Some(tracker) => Some(atrium::head_tracking::start(
+            tracker,
+            producer.clone(),
+            scene_listener_position,
+            scene_listener_yaw,
+        )?),
+        None => None,
+    };
 
     println!();
     println!("=== Atrium Spatial Audio ===");
@@ -137,7 +153,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start WebSocket server (blocks on main thread, keeps _handle alive)
-    let producer = Arc::new(Mutex::new(producer));
     let _handle = handle;
     run_server("0.0.0.0:3333", producer, result.scene_json, broadcast)?;
 
