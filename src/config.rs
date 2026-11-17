@@ -2237,4 +2237,13 @@ mod tests {
             atrium_core::source::EmitterKind::Object
         );
     }
+
+    #[test]
+    fn nature_headphones_scene_builds_binaural_stereo() {
+        let scene = SceneConfig::load("scenes/nature-headphones.yaml").expect("scene should load");
+        let result = scene.build().expect("nature headphones scene should build");
+        assert_eq!(result.scene.active_pipeline, RenderMode::Hrtf);
+        assert_eq!(result.scene.speaker_layout.total_channels(), 2);
+        assert_eq!(result.source_names.len(), 6);
+    }
 }
