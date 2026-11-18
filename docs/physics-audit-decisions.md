@@ -67,7 +67,9 @@ Each entry explains *why* a particular approach was chosen.
 
 **Sabine per-band formula**: `A(f) = Σᵢ Sᵢ × αᵢ(f) + 4 × m(f) × V`, where m(f) = ISO 9613 air absorption in Nepers/m (= α_dB/m / 4.343). `RT60(f) = 0.161 × V / A(f)`.
 
-**Band selection rationale**: 500 Hz (band 2) captures the room's broadband decay character. 4 kHz (band 5) captures HF-specific absorption from materials and air. These map directly to the Jot FDN's one-pole damping filter: g_dc from RT60_low, g_nyq from RT60_high.
+**Band selection rationale**: 500 Hz (band 2) captures the room's broadband decay character. 4 kHz (band 5) captures HF-specific absorption from materials and air.
+
+**Damping filter design (revised 2026-11)**: each line's one-pole damping filter `y = k·x + p·y[n−1]` meets the Jot per-pass gain `10^(−3·delay/(RT60·fs))` of RT60_low **at 500 Hz** and of RT60_high **at 4 kHz**, the frequencies the two RT60s are defined at. The first version put them at DC and Nyquist instead, and that was wrong, not a harmless simplification: a one-pole interpolates log-gain by ≈ (1 + cos ω)/2, so at 4 kHz / 48 kHz it is still 93 % of the way to its DC gain. A 2.0 s override that should decay in 1.2 s at 4 kHz measured 1.97 s, and a carpeted 6×4×3 m room that Sabine puts at 0.257 s measured 0.82 s. Closed form, with versine `v(ω) = 1 − cos ω` and `r = (g_low/g_high)²`: `(1 − p)²/(2p) = (v_4k − r·v_500)/(r − 1)`, stable root `p = 1 + s − √(s(2 + s))`, then `k = g_low·√((1 − p)² + 2p·v_500)`. Edge cases keep the 500 Hz gain exact: RT60_high ≥ RT60_low gives p = 0, and a one-pole spans at most ≈ 18 dB per pass between 500 Hz and 4 kHz. The filter peaks at DC (`k/(1 − p)`), which is capped at `min(g_low^(1/2), 0.9999)`: low frequencies decay at most 2 × the 500 Hz RT60 and no line is ever lossless. Without the cap, a strongly HF-absorbing room becomes a sub-bass drone. The output normalization uses the exact white-noise build-up of the filter, `mean_ω 1/(1 − |H|²) = 1 + k²/√(((1 − p)² − k²)((1 + p)² − k²))`, instead of the RMS of the DC and Nyquist gains. After the fix the measured octave-band RT60s are 2.01 s / 1.37 s (2.0 s override, frozen LFOs) and 1.37 s / 0.34 s (carpet), against targets of 2.0 / 1.2 and 1.31 / 0.257. The 4 kHz *band* still reads long: the one-pole's RT60 falls across the octave, and a T20 fit follows the slow edge. Hitting a band average more closely needs a higher-order absorption filter.
 
 **Hard walls**: α is nearly uniform (0.02–0.05), so RT60_high/RT60_low ratio is close to 1.0 (slightly below due to air absorption at 4 kHz).
 **Carpet**: α rises sharply with frequency (0.08 at 500 Hz → 0.40 at 4 kHz), so RT60_high/RT60_low < 0.5 — HF decays more than twice as fast.
@@ -124,6 +126,8 @@ LR4 guarantees `original = HP(original) + LP(original)`. Therefore `original - H
 
 **Decision**: Replaced single lowpass cutoff approach with two shelving filters (low shelf at 500 Hz, high shelf at 4 kHz) derived from ISO 9613-1 absorption coefficients. Removed `air_absorption_lp_cutoff()`, replaced with `air_absorption_shelf_gains()`.
 
+**Revised 2026-11**: the 500 Hz term was meant as a baseline for all frequencies but was realised as a low shelf, which only cut *below* 500 Hz: the bottom octaves lost α(500)·d (ISO: almost nothing) and 8 kHz fell short by the same amount (1.7 dB each at 300 m in −20 °C air). It is now `air_absorption_gains()`: a broadband gain −α(500)·d, a 177 Hz low shelf +(α(500) − α(63))·d that restores the lows, and the 4 kHz high shelf −(α(8k) − α(500))·d. Exact at 63 Hz, 500 Hz and 8 kHz.
+
 **Why the old approach was wrong**:
 The old code collapsed the entire frequency-dependent ISO 9613 absorption curve into a single LP cutoff frequency, derived from the 4 kHz absorption value. A lowpass filter applies its slope uniformly above the cutoff — but real atmospheric absorption has a frequency-squared relationship. The single-cutoff approach over-attenuated mid frequencies and under-represented the steep HF rolloff.
 
@@ -154,7 +158,7 @@ Using 4 kHz as the reference gave only -0.73 dB at 4 kHz and -2.26 dB at 8 kHz (
 **Hysteresis**: Shelf coefficients are only recomputed when the gain changes by > 0.5 dB (same approach as the old cutoff hysteresis, but in dB instead of percentage). Prevents unnecessary trig recomputation on small distance changes.
 
 **Files changed**:
-- `src/audio/atmosphere.rs`: `air_absorption_lp_cutoff()` → `air_absorption_shelf_gains()`
+- `src/audio/atmosphere.rs`: `air_absorption_lp_cutoff()` → `air_absorption_gains()`
 - `src/pipeline/stages/air_absorption.rs`: `AirAbsorptionFilter` changed from 1 LP biquad to 2 shelving biquads; `Biquad` struct gained `set_low_shelf()` and `set_high_shelf()` methods
 - Both consumers (`AirAbsorptionEffect`, WorldLockedRenderer) automatically use the new filter via the shared `AirAbsorptionFilter`.
 

@@ -28,7 +28,7 @@ This is primarily data plumbing. The physics (`WallMaterial` struct, absorption 
 - `src/pipeline/path_resolvers.rs` — `ImageSourceResolver` geometry queries
 - `src/pipeline/path_effects.rs` — `WallAbsorptionEffect` material lookup
 - `src/pipeline/mix_stage.rs` — `MixContext.wall_materials` type change
-- `src/pipeline/mod.rs` — pipeline construction
+- `src/pipeline/builders/` — pipeline construction, one file per render mode
 - `src/engine/scene.rs` — material storage
 - `crates/core/src/room.rs` — `Room` trait extension
 
@@ -44,8 +44,8 @@ pub trait PathResolver: Send {
     fn resolve(&self, ctx: &ResolveContext<'_>, out: &mut PathSet);
 }
 ```
-- `ResolveContext` carries: source_pos, target_pos, room_min, room_max, barriers, atmosphere
-- `PathSet` has fixed capacity of `MAX_PATHS = 12`
+- `ResolveContext` carries: source_pos, target_pos, and the `Environment` (bounds, wall materials, ground, atmosphere)
+- `PathSet` has fixed capacity of `MAX_PATHS = 7`
 - `ImageSourceResolver` produces 1 direct + up to 6 first-order reflections
 
 #### Room trait (`crates/core/src/room.rs`)
@@ -55,10 +55,10 @@ pub trait Room: Send {
     fn contains(&self, point: Vec3) -> bool;
 }
 ```
-- Only `BoxRoom` implementation — axis-aligned box with bounds + containment test
+- Only one geometry: `Environment`, an axis-aligned box with a material per face
 - **No ray intersection, no geometry database, no BVH**
 
-#### RenderPipeline (`src/pipeline/mod.rs:202-224`)
+#### RenderPipeline (`src/pipeline/render.rs`)
 - Each mode has one `resolver: Box<dyn PathResolver>`
 - Per-source path effects: `path_effects: Vec<[PathEffectChain; MAX_PATHS]>`
 - Reverb send buffer: mono bus written by renderer, read by FDN
@@ -116,7 +116,7 @@ Estimated scope: 2000–5000 lines for core ray tracer + BVH + resolver. The pip
 - `src/pipeline/path_resolvers.rs` — add `RayTraceResolver`
 - `src/pipeline/path.rs` — increase `MAX_PATHS` or make dynamic, extend `ResolveContext`
 - `crates/core/src/room.rs` — extend `Room` trait with intersection methods
-- `src/pipeline/mod.rs` — new pipeline variant using `RayTraceResolver`
+- `src/pipeline/builders/` — new pipeline variant using `RayTraceResolver`
 
 ---
 
@@ -171,7 +171,7 @@ Three types:
 
 ## 4. Current Architecture — Integration Point Summary
 
-### Pipeline composition (`src/pipeline/mod.rs`)
+### Pipeline composition (`src/pipeline/builders/`)
 
 | Mode | Resolver | Path Effects | Renderer | Mix Stages |
 |------|----------|--------------|----------|-----------|

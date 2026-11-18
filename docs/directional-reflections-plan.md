@@ -76,12 +76,12 @@ for each frame:
 ### Key files
 - `src/pipeline/stages/reflections.rs` — current ReflectionCore with image-source math (reuse)
 - `src/pipeline/renderers/multichannel.rs` — current MultichannelRenderer (base pattern)
-- `src/pipeline/mod.rs:295` — build_vbap() pipeline constructor
+- `src/pipeline/builders/vbap.rs` — the VBAP pipeline constructor
 - `src/pipeline/renderer.rs` — Renderer trait
 - `crates/core/src/speaker.rs:394` — compute_gains_vbap()
 
 ### Notes
 - Image sources use omnidirectional directivity (reflections scatter)
 - ReflectionCore::update() math can be extracted/reused for image source computation
-- Don't forget to update build_vbap() to wire the new renderer
+- Don't forget to update `builders/vbap.rs` to wire the new renderer
 - Profile before implementing to establish baseline timing

@@ -380,13 +380,13 @@ Our existing `compute_gains_vbap` already computes speaker directions from the l
 
 ### Distance Compensation
 
-Scale VBAP gains by inverse distance to each speaker to counteract level imbalance:
+Scale each VBAP gain by its speaker's distance, so a closer speaker (which would arrive louder) is turned down:
 
 ```
-g_i_compensated = g_i_vbap × (d_ref / d_i)
+g_i_compensated = g_i_vbap × (d_i / d_max)
 ```
 
-Where `d_ref` is the nominal listening distance (e.g., mean of all speaker distances) and `d_i` is the actual distance from listener to speaker `i`. Then re-normalize for constant power.
+Where `d_i` is the distance from the listener to speaker `i` and `d_max` is the distance to the farthest speaker in the whole layout. Do not re-normalize the pair afterwards: that cancels the compensation between pairs (it made a source straight ahead 5.1 dB louder than one at the side in the default room). The result is constant power on arrival, Σ(g_i/d_i)² = 1/d_max², at every azimuth.
 
 ### Delay Compensation
 
