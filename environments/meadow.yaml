@@ -14,4 +14,7 @@ wall_reflectivity: 0.0     # open air, no reflections
 
 walls:
   default: open
-  floor: grass             # grass ground surface
+  # The ground is modelled by the ISO 9613-2 ground effect (ground_factor
+  # above), which already contains the bounce off the grass. An open floor
+  # keeps that bounce from being rendered a second time as a reflection.
+  floor: open

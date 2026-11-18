@@ -156,6 +156,27 @@ mod tests {
         assert_eq!(riverside.rt60_seconds, None);
     }
 
+    /// Outdoors the ground is modelled by the ISO 9613-2 ground effect, which
+    /// already contains the bounce off the ground. So the outdoor environments
+    /// must give the floor no image (no face reflects at all), or that bounce
+    /// is rendered twice and `ground_factor` is switched off. Both are porous
+    /// ground: G = 1.
+    #[test]
+    fn outdoor_environments_leave_the_ground_to_the_iso_ground_effect() {
+        for path in ["environments/meadow.yaml", "environments/riverside.yaml"] {
+            let environment: EnvironmentConfig = load_yaml(path).expect("environment loads");
+            for (wall_index, wall) in build_wall_materials(&environment).iter().enumerate() {
+                assert_eq!(
+                    wall.broadband_reflection_gain(),
+                    0.0,
+                    "{path}: face {wall_index} ({}) must not reflect",
+                    wall.name
+                );
+            }
+            assert_eq!(environment.ground_factor, 1.0, "{path}: porous ground");
+        }
+    }
+
     /// The YAML wall names and the image-source walls must agree on which
     /// face is which: west −X (0), east +X (1), south −Y (2), north +Y (3),
     /// floor −Z (4), ceiling +Z (5). Checked through the resolver itself: the
