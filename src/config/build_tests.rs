@@ -1,0 +1,338 @@
+use atrium_core::panner::DistanceModelType;
+use atrium_core::speaker::RenderMode;
+use atrium_core::types::Vec3;
+
+use super::build::BuildResult;
+use super::scene::SceneConfig;
+
+/// The synth test scene must build end-to-end with calibrated sources.
+#[test]
+fn synth_test_scene_builds_with_calibrated_sources() {
+    let scene = SceneConfig::load("scenes/synth-test.yaml").expect("scene should load");
+    let result = scene.build().expect("scene should build");
+    let expected = ["Field Wind", "Waves", "Rain v2", "Rain v1"];
+    assert_eq!(&result.source_names[..expected.len()], &expected);
+    for (index, name) in expected.iter().enumerate() {
+        assert!(
+            result.scene.source_amplitudes[index] > 0.0,
+            "source {name} should have positive amplitude"
+        );
+    }
+}
+
+#[test]
+fn canopy_wind_scene_builds_end_to_end() {
+    let scene = SceneConfig::load("scenes/canopy-wind-only.yaml").expect("scene should load");
+    let result = scene.build().expect("canopy scene should build");
+    assert_eq!(
+        result.source_names.first().map(String::as_str),
+        Some("Canopy Wind")
+    );
+    assert!(result.scene.source_amplitudes[0] > 0.0);
+    assert_eq!(
+        result.scene.sources[0].emitter_kind(),
+        atrium_core::source::EmitterKind::Field
+    );
+}
+
+#[test]
+fn storm_wind_scene_builds_end_to_end() {
+    let scene = SceneConfig::load("scenes/storm-wind-only.yaml").expect("scene should load");
+    let result = scene.build().expect("storm scene should build");
+    assert_eq!(
+        result.source_names.first().map(String::as_str),
+        Some("Storm Wind")
+    );
+    assert!(result.scene.source_amplitudes[0] > 0.0);
+    assert_eq!(
+        result.scene.sources[0].emitter_kind(),
+        atrium_core::source::EmitterKind::Field
+    );
+}
+
+#[test]
+fn soft_wind_scene_builds_end_to_end() {
+    let scene = SceneConfig::load("scenes/soft-wind-only.yaml").expect("scene should load");
+    let result = scene.build().expect("soft-wind scene should build");
+    assert_eq!(
+        result.source_names.first().map(String::as_str),
+        Some("Soft Wind")
+    );
+    assert!(result.scene.source_amplitudes[0] > 0.0);
+    assert_eq!(
+        result.scene.sources[0].emitter_kind(),
+        atrium_core::source::EmitterKind::Field
+    );
+}
+
+#[test]
+fn river_scene_builds_end_to_end() {
+    let scene = SceneConfig::load("scenes/river-only.yaml").expect("scene should load");
+    let result = scene.build().expect("river scene should build");
+    assert_eq!(
+        result.source_names.first().map(String::as_str),
+        Some("River")
+    );
+    assert!(result.scene.source_amplitudes[0] > 0.0);
+    assert_eq!(
+        result.scene.sources[0].emitter_kind(),
+        atrium_core::source::EmitterKind::Object
+    );
+}
+
+#[test]
+fn nature_headphones_scene_builds_binaural_stereo() {
+    let scene = SceneConfig::load("scenes/nature-headphones.yaml").expect("scene should load");
+    let result = scene.build().expect("nature headphones scene should build");
+    assert_eq!(result.scene.active_pipeline, RenderMode::Hrtf);
+    assert_eq!(result.scene.speaker_layout.total_channels(), 2);
+    assert_eq!(result.source_names.len(), 6);
+}
+
+/// Render a scene in one mode, then silence every source. Returns the
+/// output power while playing and at 0.3 s after silence (sum over all
+/// channels, averaged over a 10 ms block).
+fn playing_and_tail_power(scene_path: &str, mode: atrium_core::speaker::RenderMode) -> (f32, f32) {
+    let scene = SceneConfig::load(scene_path).expect("scene should load");
+    let mut result = scene.build().expect("scene should build");
+    let channels = result.scene.speaker_layout.total_channels();
+    result.scene.sample_rate = 48000.0;
+    result.scene.active_pipeline = mode;
+    result.scene.init_pipelines();
+    let frames = 480;
+    let mut buffer = vec![0.0f32; frames * channels];
+    let power = |block: &[f32]| block.iter().map(|x| x * x).sum::<f32>() / frames as f32;
+
+    let mut playing = 0.0f32;
+    for block in 0..80 {
+        result.scene.render(&mut buffer, channels);
+        if block >= 30 {
+            playing += power(&buffer) / 50.0;
+        }
+    }
+    for source in result.scene.sources.iter_mut() {
+        source.set_muted(true);
+    }
+    // 0.3 s is far longer than any sound can still be in the air: the
+    // farthest meadow source is 19 m away (55 ms).
+    for _ in 0..30 {
+        result.scene.render(&mut buffer, channels);
+    }
+    result.scene.render(&mut buffer, channels);
+    (playing, power(&buffer))
+}
+
+/// An open meadow has no reverb tail, in every render mode. Before the
+/// fix the 5.1 scene was still only 25 dB down 0.3 s after silence, with a
+/// 1.2 s decay that Sabine's equation invents for a fully absorbing box.
+#[test]
+fn open_meadow_is_silent_after_sources_stop_in_every_mode() {
+    for mode in atrium_core::speaker::RenderMode::ALL {
+        let (playing, tail) = playing_and_tail_power("scenes/nature.yaml", mode);
+        assert!(playing > 0.0, "{mode:?}: scene should produce sound");
+        let tail_db = 10.0 * (tail / playing).max(1e-20).log10();
+        assert!(
+            tail_db < -100.0,
+            "{mode:?}: open field still ringing 0.3 s after silence: {tail_db:.1} dB re playing"
+        );
+    }
+}
+
+/// The glass atrium must still ring: the gate removes reverb only where
+/// the space cannot hold it. WorldLocked is excluded — it has no late
+/// reverb stage by design, only per-speaker early reflections.
+#[test]
+fn glass_atrium_still_rings_after_sources_stop() {
+    use atrium_core::speaker::RenderMode;
+    for mode in RenderMode::ALL {
+        if mode == RenderMode::WorldLocked {
+            continue;
+        }
+        let (playing, tail) = playing_and_tail_power("scenes/default.yaml", mode);
+        let tail_db = 10.0 * (tail / playing).max(1e-20).log10();
+        assert!(
+            tail_db > -60.0,
+            "{mode:?}: atrium tail missing 0.3 s after silence: {tail_db:.1} dB re playing"
+        );
+    }
+}
+
+/// The wisp flies by itself: rendered through a real scene, its reported
+/// position moves, stays near its territory, and it makes sound in both
+/// the speaker scene and the headphone scene.
+#[test]
+fn wisp_scenes_build_fly_and_sound() {
+    for path in ["scenes/wisp.yaml", "scenes/wisp-headphones.yaml"] {
+        let scene = SceneConfig::load(path).expect("scene should load");
+        let mut result = scene.build().expect("wisp scene should build");
+        assert_eq!(
+            result.source_names.first().map(String::as_str),
+            Some("Wisp")
+        );
+        let channels = result.scene.speaker_layout.total_channels();
+        result.scene.sample_rate = 48000.0;
+        result.scene.init_pipelines();
+
+        let anchor = result.scene.sources[0].position() - result.scene.sources[0].motion_offset();
+        let start = result.scene.sources[0].position();
+        let mut buffer = vec![0.0f32; 480 * channels];
+        let mut energy = 0.0f32;
+        let mut farthest = 0.0f32;
+        let mut travelled = 0.0f32;
+        let mut previous = start;
+        for _ in 0..1500 {
+            result.scene.render(&mut buffer, channels);
+            energy += buffer.iter().map(|x| x * x).sum::<f32>();
+            assert!(
+                buffer.iter().all(|x| x.is_finite()),
+                "{path}: non-finite output"
+            );
+            let position = result.scene.sources[0].position();
+            travelled += position.distance_to(previous);
+            farthest = farthest.max(position.distance_to(anchor));
+            previous = position;
+        }
+        assert!(energy > 0.0, "{path}: wisp is silent");
+        assert!(
+            travelled > 10.0,
+            "{path}: wisp flew only {travelled:.1} m in 15 s"
+        );
+        // Territory radius 6 m, height up to 3 m, plus overshoot.
+        assert!(
+            farthest < 7.5,
+            "{path}: wisp strayed {farthest:.1} m from its anchor"
+        );
+    }
+}
+
+// ── Config → engine parameter cascade ───────────────────────────────────
+
+/// A source-less scene (the pool is filled with silent placeholders), so
+/// building it decodes no audio and renders no synth preview.
+fn build_inline_scene(yaml: &str) -> BuildResult {
+    let scene: SceneConfig = serde_yaml::from_str(yaml).expect("inline scene should parse");
+    scene.build().expect("inline scene should build")
+}
+
+const SMALL_ATRIUM_SCENE: &str = "\
+environment: environments/small_atrium.yaml
+atmosphere: atmospheres/default.yaml
+listener:
+  position: [0.5, -0.25, 1.2]
+  yaw_degrees: 90
+master_gain: 0.5
+distance_model:
+  model: exponential
+  ref_distance: 2.0
+  max_distance: 50.0
+  rolloff: 1.5
+speakers:
+  layout: \"5.1\"
+  render_mode: dbap
+  dbap_rolloff_db: 4.5
+sources: []
+";
+
+/// Every unit conversion between the YAML and the engine, by hand:
+///   environments/small_atrium.yaml is 6 × 4 × 3 m with no `spawn`, so the
+///   spawn is the floor centre (3, 2, 0) and the bounds are (0,0,0)–(6,4,3);
+///   listener (0.5, −0.25, 1.2) atrium-local → (3.5, 1.75, 1.2) world;
+///   yaw 90° → π/2 rad; default FL (−3, 2, 0) → (0, 4, 0) world;
+///   walls default hard_wall, floor carpet, ceiling ceiling_tile;
+///   wall_reflectivity 0.9 reaches every pipeline; ground_factor 0 → G = 0;
+///   atmosphere 20 °C, 50 % RH, 101.325 kPa → c = 343.42 m/s.
+#[test]
+fn scene_config_units_reach_the_engine() {
+    let result = build_inline_scene(SMALL_ATRIUM_SCENE);
+    let scene = &result.scene;
+
+    let (environment_min, environment_max) = (scene.environment.min, scene.environment.max);
+    assert_eq!(environment_min, Vec3::ZERO);
+    assert_eq!(environment_max, Vec3::new(6.0, 4.0, 3.0));
+
+    assert_eq!(scene.listener.position, Vec3::new(3.5, 1.75, 1.2));
+    assert!((scene.listener.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(scene.initial_listener_yaw, scene.listener.yaw);
+    let forward = scene.listener.forward();
+    assert!(
+        forward.x.abs() < 1e-6 && (forward.y - 1.0).abs() < 1e-6,
+        "yaw 90° must face +y, faces {forward:?}"
+    );
+
+    let front_left = scene
+        .speaker_layout
+        .speaker_by_index(0)
+        .expect("5.1 has a front-left speaker");
+    assert_eq!(front_left.channel, 0);
+    assert_eq!(front_left.position, Vec3::new(0.0, 4.0, 0.0));
+    assert_eq!(scene.speaker_layout.total_channels(), 6);
+    assert_eq!(scene.speaker_layout.lfe_channel(), Some(3));
+
+    assert_eq!(scene.master_gain, 0.5);
+    assert_eq!(scene.active_pipeline, RenderMode::Dbap);
+    assert!(matches!(
+        scene.distance_model.model,
+        DistanceModelType::Exponential
+    ));
+    assert_eq!(scene.distance_model.ref_distance, 2.0);
+    assert_eq!(scene.distance_model.max_distance, 50.0);
+    assert_eq!(scene.distance_model.rolloff, 1.5);
+
+    let names: Vec<&str> = scene
+        .environment
+        .wall_materials
+        .iter()
+        .map(|wall| wall.name)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "hard_wall",
+            "hard_wall",
+            "hard_wall",
+            "hard_wall",
+            "carpet",
+            "ceiling_tile"
+        ]
+    );
+    for pipeline in &scene.pipelines {
+        assert_eq!(pipeline.wall_reflectivity, 0.9);
+    }
+    assert_eq!(scene.environment.ground.g_source, 0.0);
+    assert_eq!(scene.environment.ground.g_middle, 0.0);
+    assert_eq!(scene.environment.ground.g_receiver, 0.0);
+
+    assert_eq!(scene.environment.atmosphere.temperature_c, 20.0);
+    assert_eq!(scene.environment.atmosphere.humidity_pct, 50.0);
+    assert_eq!(scene.environment.atmosphere.pressure_kpa, 101.325);
+    assert!((scene.environment.atmosphere.speed_of_sound() - 343.42).abs() < 1e-3);
+
+    // The 16-slot pool is pre-warmed with silent placeholders.
+    assert_eq!(scene.sources.len(), atrium_core::telemetry::MAX_SOURCES);
+    assert!(scene.sources.iter().all(|source| !source.is_active()));
+}
+
+/// `output.rs` masks the layout channels the device cannot open (5.1
+/// scene on a 2-channel device → active [0, 1]). `Command::ResetScene`
+/// then re-enables the full 5.1 mask, so VBAP/DBAP route rear sources to
+/// channels 4/5 that the 2-channel callback never writes: they go silent.
+#[test]
+fn reset_scene_keeps_the_device_channel_mask() {
+    let mut result = build_inline_scene(SMALL_ATRIUM_SCENE);
+    let scene = &mut result.scene;
+    // What output.rs does when the device opened with 2 channels.
+    scene.speaker_layout.set_active_channels(&[0, 1]);
+
+    let (mut producer, mut consumer) = rtrb::RingBuffer::new(4);
+    producer
+        .push(atrium_core::commands::Command::ResetScene)
+        .unwrap();
+    scene.process_commands(&mut consumer);
+
+    for channel in 2..scene.speaker_layout.total_channels() {
+        assert!(
+            !scene.speaker_layout.is_channel_active(channel),
+            "ResetScene re-enabled channel {channel}, which the 2-channel device does not have"
+        );
+    }
+}
