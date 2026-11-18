@@ -13,8 +13,9 @@
 //!    whichever way that speaker faces); it becomes a full cardioid by twice
 //!    the ring radius. Without this a distant source arrives at near-equal
 //!    level in every speaker and carries almost no direction.
-//! 3. Air absorption, ground effect, first-order reflections, distance law and
-//!    source directivity, each for the source → speaker path.
+//! 3. Air absorption, first-order reflections, distance law and source
+//!    directivity, each for the source → speaker path. The ISO ground effect
+//!    applies only where the floor bounce has no reflection tap of its own.
 
 use atrium_core::directivity::directivity_gain;
 use atrium_core::panner::distance_gain_at_model;
@@ -24,9 +25,10 @@ use atrium_core::types::Vec3;
 use crate::audio::filters::AirAbsorptionFilter;
 use crate::audio::propagation::ground_effect_gain;
 use crate::pipeline::path::{PathEffectChain, PathSet};
+use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
+use crate::pipeline::room_acoustics;
 use crate::pipeline::stages::reflections::ReflectionCore;
-use crate::pipeline::SourceContext;
 
 /// Per source × speaker propagation state.
 struct SpeakerPropagation {
@@ -84,12 +86,16 @@ impl SourceDelayLine {
 
 /// Configuration for WorldLocked per-speaker propagation.
 pub struct WorldLockedParams {
-    pub wall_reflectivity: f32,
-    /// Delay buffer capacity for ReflectionCore, sized from room geometry.
-    pub reflection_capacity: usize,
-    /// Delay buffer capacity for the source → speaker arrival delay (samples).
-    pub propagation_capacity: usize,
+    /// Longest delay a reflection or a source → speaker arrival can have in
+    /// this room, in seconds. Delay lines are sized from it in samples once
+    /// the device sample rate is known (`ensure_topology`).
+    pub longest_delay_seconds: f32,
 }
+
+/// Smallest ring for the per-speaker reflection taps, in samples.
+const MIN_REFLECTION_CAPACITY: usize = 4096;
+/// Smallest ring for the source → speaker arrival delay, in samples.
+const MIN_PROPAGATION_CAPACITY: usize = 8192;
 
 /// Centre of the speaker array and the distance of its farthest speaker.
 ///
@@ -98,24 +104,7 @@ pub struct WorldLockedParams {
 /// sit forward of the room's middle.
 fn speaker_ring(layout: &SpeakerLayout) -> (Vec3, f32) {
     let speakers = layout.speakers();
-    let Some(first) = speakers.first() else {
-        return (Vec3::ZERO, 0.0);
-    };
-    let mut min = first.position;
-    let mut max = first.position;
-    for speaker in speakers {
-        min = Vec3::new(
-            min.x.min(speaker.position.x),
-            min.y.min(speaker.position.y),
-            min.z.min(speaker.position.z),
-        );
-        max = Vec3::new(
-            max.x.max(speaker.position.x),
-            max.y.max(speaker.position.y),
-            max.z.max(speaker.position.z),
-        );
-    }
-    let centre = (min + max) * 0.5;
+    let centre = layout.bounding_box_centre();
     let radius = speakers
         .iter()
         .map(|speaker| speaker.position.distance_to(centre))
@@ -172,19 +161,16 @@ impl WorldLockedRenderer {
             delay_lines: Vec::new(),
             prev_gains: Vec::new(),
             speaker_count: 0,
-            sample_rate: 48000.0,
+            // Unknown until the output device is opened; set by `ensure_topology`.
+            sample_rate: 0.0,
             params,
         }
     }
 
-    fn new_speaker_propagation(
-        sample_rate: f32,
-        wall_reflectivity: f32,
-        reflection_capacity: usize,
-    ) -> SpeakerPropagation {
+    fn new_speaker_propagation(sample_rate: f32, reflection_capacity: usize) -> SpeakerPropagation {
         SpeakerPropagation {
             air_absorption: AirAbsorptionFilter::new(sample_rate),
-            reflections: ReflectionCore::new(wall_reflectivity, reflection_capacity),
+            reflections: ReflectionCore::new(reflection_capacity),
             delay_samples: None,
         }
     }
@@ -203,7 +189,7 @@ impl Renderer for WorldLockedRenderer {
         let layout = ctx.layout;
         let speaker_count = layout.speaker_count().min(MAX_CHANNELS);
         let (ring_centre, ring_radius) = speaker_ring(layout);
-        let speed_of_sound = ctx.atmosphere.speed_of_sound();
+        let speed_of_sound = ctx.environment.atmosphere.speed_of_sound();
         let delay_line = &mut self.delay_lines[source_idx];
         let max_delay = delay_line.max_delay();
 
@@ -229,29 +215,39 @@ impl Renderer for WorldLockedRenderer {
                 prop.delay_samples = Some(target_delay);
 
                 // Air absorption filter update
-                prop.air_absorption.update(dist, ctx.atmosphere);
-
-                // Ground effect
-                let dx = ctx.source_pos.x - speaker.position.x;
-                let dy = ctx.source_pos.y - speaker.position.y;
-                let horizontal_dist = (dx * dx + dy * dy).sqrt();
-                let ground_gain = ground_effect_gain(
-                    horizontal_dist,
-                    ctx.source_pos.z.max(0.0),
-                    speaker.position.z.max(0.0),
-                    ctx.ground,
-                );
+                prop.air_absorption
+                    .update(dist, &ctx.environment.atmosphere);
 
                 // Reflections tap update
                 prop.reflections.update(
-                    ctx.environment_min,
-                    ctx.environment_max,
+                    ctx.environment,
                     ctx.source_pos,
                     speaker.position,
                     out.sample_rate,
                     speed_of_sound,
                     ctx.source_ref_distance,
                 );
+
+                // Ground effect. The ISO 9613-2 ground term is the direct ray
+                // plus the ray bounced off the ground. When that bounce is
+                // already rendered as the floor reflection tap, applying the
+                // ground term too counts the floor twice, so the tap wins.
+                // The term still acts where there is no floor tap: outdoors
+                // (nothing reflects) and for a speaker standing on the floor
+                // (the bounce arrives with the direct sound).
+                let ground_gain = if prop.reflections.has_floor_tap() {
+                    1.0
+                } else {
+                    let dx = ctx.source_pos.x - speaker.position.x;
+                    let dy = ctx.source_pos.y - speaker.position.y;
+                    let horizontal_dist = (dx * dx + dy * dy).sqrt();
+                    ground_effect_gain(
+                        horizontal_dist,
+                        ctx.source_pos.z.max(0.0),
+                        speaker.position.z.max(0.0),
+                        &ctx.environment.ground,
+                    )
+                };
 
                 // Distance + directivity (per-source distance model)
                 let dist_gain = distance_gain_at_model(
@@ -310,26 +306,35 @@ impl Renderer for WorldLockedRenderer {
     }
 
     fn ensure_topology(&mut self, source_count: usize, layout: &SpeakerLayout, sample_rate: f32) {
-        self.sample_rate = sample_rate;
+        if sample_rate != self.sample_rate {
+            // Delay lines and filters are sized and tuned for one sample rate.
+            // This happens when the device is opened, before any audio runs.
+            self.propagation.clear();
+            self.delay_lines.clear();
+            self.sample_rate = sample_rate;
+        }
         self.speaker_count = layout.speaker_count();
-        let refl = self.params.wall_reflectivity;
+        let reflection_capacity = room_acoustics::delay_capacity_for_seconds(
+            self.params.longest_delay_seconds,
+            sample_rate,
+            MIN_REFLECTION_CAPACITY,
+        );
+        let propagation_capacity = room_acoustics::delay_capacity_for_seconds(
+            self.params.longest_delay_seconds,
+            sample_rate,
+            MIN_PROPAGATION_CAPACITY,
+        );
 
         // Grow source dimension
         while self.propagation.len() < source_count {
             let speakers: Vec<SpeakerPropagation> = (0..self.speaker_count)
-                .map(|_| {
-                    Self::new_speaker_propagation(
-                        sample_rate,
-                        refl,
-                        self.params.reflection_capacity,
-                    )
-                })
+                .map(|_| Self::new_speaker_propagation(sample_rate, reflection_capacity))
                 .collect();
             self.propagation.push(speakers);
         }
         while self.delay_lines.len() < source_count {
             self.delay_lines
-                .push(SourceDelayLine::new(self.params.propagation_capacity));
+                .push(SourceDelayLine::new(propagation_capacity));
         }
 
         // Grow speaker dimension if layout changed
@@ -337,8 +342,7 @@ impl Renderer for WorldLockedRenderer {
             while source_props.len() < self.speaker_count {
                 source_props.push(Self::new_speaker_propagation(
                     sample_rate,
-                    refl,
-                    self.params.reflection_capacity,
+                    reflection_capacity,
                 ));
             }
         }
@@ -376,6 +380,8 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
+    use crate::pipeline::environment::Environment;
+    use crate::pipeline::wall_material::WallMaterial;
 
     const SAMPLE_RATE: f32 = 48000.0;
     const CHANNELS: usize = 6;
@@ -421,17 +427,43 @@ mod tests {
     /// (no walls, no ground effect at these heights is NOT assumed: ground is
     /// hard, which is a flat gain and so cancels out of every ratio below).
     fn render_free_field(source: &mut ScriptedSource, blocks: usize) -> Vec<f32> {
-        let layout = living_room_layout();
+        render_over_floor(
+            source,
+            blocks,
+            &living_room_layout(),
+            0.0,
+            &GroundProperties::hard(),
+        )
+    }
+
+    /// Render `blocks` 10 ms buffers of one source over a floor at z = 0.
+    /// The walls and ceiling are 500 m away, beyond the one-second delay
+    /// lines, so the floor is the only surface that can produce a tap.
+    fn render_over_floor(
+        source: &mut ScriptedSource,
+        blocks: usize,
+        layout: &SpeakerLayout,
+        wall_reflectivity: f32,
+        ground: &GroundProperties,
+    ) -> Vec<f32> {
         let mut renderer = WorldLockedRenderer::new(WorldLockedParams {
-            wall_reflectivity: 0.0,
-            reflection_capacity: 4096,
-            propagation_capacity: 65536,
+            longest_delay_seconds: 1.0,
         });
-        renderer.ensure_topology(1, &layout, SAMPLE_RATE);
+        renderer.ensure_topology(1, layout, SAMPLE_RATE);
 
         let listener = Listener::new(Vec3::ZERO, 0.0);
-        let atmosphere = AtmosphericParams::default();
-        let ground = GroundProperties::hard();
+        let environment_min = Vec3::new(-500.0, -500.0, 0.0);
+        let environment_max = Vec3::new(500.0, 500.0, 500.0);
+        let mut environment = if wall_reflectivity == 0.0 {
+            Environment::anechoic(environment_min, environment_max)
+        } else {
+            Environment::uniform(
+                environment_min,
+                environment_max,
+                WallMaterial::with_reflectivity(wall_reflectivity),
+            )
+        };
+        environment.ground = *ground;
         let distance_model = DistanceModel {
             model: DistanceModelType::Inverse,
             ref_distance: 1.0,
@@ -450,14 +482,11 @@ mod tests {
                 source_directivity: &directivity,
                 source_spread: 0.0,
                 source_ref_distance: 1.0,
-                dist_to_listener: position.distance_to(listener.position),
-                atmosphere: &atmosphere,
-                environment_min: Vec3::new(-500.0, -500.0, 0.0),
-                environment_max: Vec3::new(500.0, 500.0, 500.0),
-                ground: &ground,
+                path_target: listener.position,
+                environment: &environment,
                 sample_rate: SAMPLE_RATE,
                 distance_model: &distance_model,
-                layout: &layout,
+                layout,
                 reverb_send: 0.0,
             };
             let mut block = vec![0.0f32; frames * CHANNELS];
@@ -711,6 +740,194 @@ mod tests {
                 speaker.channel
             );
         }
+    }
+
+    /// The 6 × 4 m living room: the speakers' bounding box is centred on the
+    /// origin, so the ring centre is (0, 0, 0) and the radius is the corner
+    /// distance √(3² + 2²) = √13 = 3.6056 m. (The mean of the five speakers
+    /// would be (0, 0.4, 0): three in front, two behind.)
+    #[test]
+    fn speaker_ring_is_the_bounding_box_centre_and_farthest_speaker() {
+        let (centre, radius) = speaker_ring(&living_room_layout());
+        assert!(centre.distance_to(Vec3::ZERO) < 1e-6, "centre {centre:?}");
+        assert!((radius - 13f32.sqrt()).abs() < 1e-5, "radius {radius}");
+    }
+
+    /// Hand-derived points of the pickup blend. Ring radius R = 4, speaker on
+    /// the +X axis at (4, 0, 0).
+    #[test]
+    fn pickup_gain_at_hand_derived_points() {
+        let centre = Vec3::ZERO;
+        let radius = 4.0;
+        let speaker = Vec3::new(4.0, 0.0, 0.0);
+        // Source at 1.5 R = 6 m from the centre, 90° off the speaker's axis:
+        // (4, √20, 0) is √(16 + 20) = 6 m out. Blend x = (6 − 4)/4 = 0.5,
+        // smoothstep 0.5²·(3 − 1) = 0.5; cardioid at 90° = 0.5;
+        // gain = 1 + 0.5·(0.5 − 1) = 0.75.
+        let halfway =
+            outward_pickup_gain(centre, radius, speaker, Vec3::new(4.0, 20f32.sqrt(), 0.0));
+        assert!((halfway - 0.75).abs() < 1e-5, "halfway {halfway}");
+        // Blend x = 0.25 (5 m out), smoothstep 0.0625·2.5 = 0.15625. The
+        // source at (4, 3, 0) is 90° off axis: gain = 1 − 0.15625·0.5 = 0.921875.
+        let quarter = outward_pickup_gain(centre, radius, speaker, Vec3::new(4.0, 3.0, 0.0));
+        assert!((quarter - 0.921875).abs() < 1e-5, "quarter {quarter}");
+        // Full cardioid (≥ 2 R out), 60° off axis: 0.5·(1 + cos 60°) = 0.75.
+        let sixty = 60f32.to_radians();
+        let far = speaker + Vec3::new(sixty.cos(), sixty.sin(), 0.0) * 50.0;
+        let gain = outward_pickup_gain(centre, radius, speaker, far);
+        assert!((gain - 0.75).abs() < 1e-5, "60° cardioid {gain}");
+    }
+
+    /// The source delay line reads `delay` samples behind the newest sample
+    /// with linear interpolation. On a ramp signal x[n] = n interpolation is
+    /// exact, so after writing 0..=9 a delay of 2.25 reads 9 − 2.25 = 6.75.
+    #[test]
+    fn source_delay_line_reads_fractional_delays_exactly_on_a_ramp() {
+        let mut delay_line = SourceDelayLine::new(16);
+        for value in 0..10 {
+            delay_line.write(value as f32);
+        }
+        assert_eq!(delay_line.read(0.0), 9.0);
+        assert!((delay_line.read(2.25) - 6.75).abs() < 1e-6);
+        assert!((delay_line.read(7.5) - 1.5).abs() < 1e-6);
+        assert_eq!(delay_line.max_delay(), 14.0);
+    }
+
+    /// Speakers equidistant from the source, and mirror images about the
+    /// room's YZ plane, pick up identical signals: a source on the centre
+    /// line (x = 0) must give FL ≡ FR and RL ≡ RR sample for sample.
+    #[test]
+    fn source_on_the_centre_line_gives_mirror_speakers_identical_output() {
+        let mut source = ScriptedSource {
+            sample_index: 0,
+            position_at: |_| Vec3::new(0.0, 7.0, 1.5),
+            signal_at: noise,
+        };
+        let rendered = render_free_field(&mut source, 20);
+        let pairs = [(FRONT_LEFT, FRONT_RIGHT), (REAR_LEFT, REAR_RIGHT)];
+        for (left, right) in pairs {
+            let left_samples = channel(&rendered, left);
+            let right_samples = channel(&rendered, right);
+            assert!(left_samples.iter().any(|sample| sample.abs() > 1e-3));
+            for (index, (a, b)) in left_samples.iter().zip(&right_samples).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-7,
+                    "channels {left}/{right} differ at sample {index}: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    /// End-to-end level, per speaker, for a steady (DC) source at the room
+    /// centre: inside the ring the pickup is omni, so each speaker plays
+    /// ground gain × inverse-law gain. Corners are √13 = 3.606 m away →
+    /// 1/√13 = 0.27735; the centre speaker is 2 m away → 0.5. Air absorption
+    /// passes DC unchanged; the walls are 500 m away and reflect nothing.
+    /// Nothing normalises the sum across speakers: each one is a microphone.
+    #[test]
+    fn steady_source_at_the_centre_plays_the_distance_law_in_every_speaker() {
+        let mut source = ScriptedSource {
+            sample_index: 0,
+            position_at: |_| Vec3::ZERO,
+            signal_at: |_| 1.0,
+        };
+        let rendered = render_free_field(&mut source, 12);
+        let ground = GroundProperties::hard();
+        let settled = |ch: usize| *channel(&rendered, ch).last().unwrap();
+        let corner_distance = 13f32.sqrt();
+        let corner = ground_effect_gain(corner_distance, 0.0, 0.0, &ground) / corner_distance;
+        let centre = ground_effect_gain(2.0, 0.0, 0.0, &ground) * 0.5;
+        for ch in [FRONT_LEFT, FRONT_RIGHT, REAR_LEFT, REAR_RIGHT] {
+            assert!(
+                (settled(ch) - corner).abs() < 1e-4,
+                "channel {ch}: {} vs {corner}",
+                settled(ch)
+            );
+        }
+        assert!(
+            (settled(CENTRE) - centre).abs() < 1e-4,
+            "centre {}",
+            settled(CENTRE)
+        );
+        assert!(
+            channel(&rendered, 3).iter().all(|sample| *sample == 0.0),
+            "LFE stays silent"
+        );
+    }
+
+    /// The living-room rectangle with every speaker raised to `height` metres.
+    fn raised_layout(height: f32) -> SpeakerLayout {
+        SpeakerLayout::surround_5_1(
+            Vec3::new(-3.0, 2.0, height),
+            Vec3::new(3.0, 2.0, height),
+            Vec3::new(0.0, 2.0, height),
+            Vec3::new(-3.0, -2.0, height),
+            Vec3::new(3.0, -2.0, height),
+        )
+    }
+
+    fn steady_source_at_height_1_2() -> ScriptedSource {
+        ScriptedSource {
+            sample_index: 0,
+            position_at: |_| Vec3::new(0.0, 0.0, 1.2),
+            signal_at: |_| 1.0,
+        }
+    }
+
+    /// The floor is counted once. Source and speakers 1.2 m above a floor
+    /// reflecting 81 % of the energy (amplitude 0.9), hard ground:
+    ///   direct  √13 = 3.6056 m          → 1/√13       = 0.27735
+    ///   bounce  √(13 + 2.4²) = 4.3313 m → 0.9/4.3313  = 0.20779
+    /// A steady source settles at their sum, 0.48514. The ISO ground term
+    /// (×1.41 here) describes that same bounce and must not be applied on top.
+    #[test]
+    fn reflecting_floor_is_rendered_as_its_tap_without_the_ground_gain() {
+        let mut source = steady_source_at_height_1_2();
+        let rendered = render_over_floor(
+            &mut source,
+            12,
+            &raised_layout(1.2),
+            0.81,
+            &GroundProperties::hard(),
+        );
+        let settled = *channel(&rendered, FRONT_LEFT).last().unwrap();
+        let expected = 1.0 / 13f32.sqrt() + 0.9 / 18.76f32.sqrt();
+        assert!((expected - 0.48514).abs() < 1e-4, "hand value {expected}");
+        assert!((settled - expected).abs() < 1e-3, "{settled} vs {expected}");
+    }
+
+    /// A speaker standing on the floor is equally far from the source and from
+    /// its floor image, so there is no delayed tap and the bounce arrives with
+    /// the direct sound. The ground term is then the only floor model and
+    /// stays: hard ground at this range is +3 dB, a gain of 10^(3/20) = 1.4125.
+    #[test]
+    fn speaker_on_a_reflecting_floor_keeps_the_ground_gain() {
+        let mut source = steady_source_at_height_1_2();
+        let ground = GroundProperties::hard();
+        let rendered = render_over_floor(&mut source, 12, &living_room_layout(), 0.81, &ground);
+        let settled = *channel(&rendered, FRONT_LEFT).last().unwrap();
+        let ground_gain = ground_effect_gain(13f32.sqrt(), 1.2, 0.0, &ground);
+        assert!(
+            (ground_gain - 1.4125).abs() < 1e-3,
+            "ground gain {ground_gain}"
+        );
+        let expected = ground_gain / 14.44f32.sqrt();
+        assert!((settled - expected).abs() < 1e-3, "{settled} vs {expected}");
+    }
+
+    /// Outdoors nothing reflects, so there is no floor tap even for raised
+    /// speakers, and the ground term carries the ground: porous ground never
+    /// boosts, and the level is ground gain × 1/√13.
+    #[test]
+    fn open_field_keeps_the_ground_gain_for_raised_speakers() {
+        let mut source = steady_source_at_height_1_2();
+        let ground = GroundProperties::soft();
+        let rendered = render_over_floor(&mut source, 12, &raised_layout(1.2), 0.0, &ground);
+        let settled = *channel(&rendered, FRONT_LEFT).last().unwrap();
+        let ground_gain = ground_effect_gain(13f32.sqrt(), 1.2, 1.2, &ground);
+        assert!(ground_gain <= 1.0, "porous ground gain {ground_gain}");
+        let expected = ground_gain / 13f32.sqrt();
+        assert!((settled - expected).abs() < 1e-3, "{settled} vs {expected}");
     }
 
     /// Verify that WorldLocked distance attenuation uses per-source parameters.
