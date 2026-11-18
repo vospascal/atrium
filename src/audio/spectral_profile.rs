@@ -278,4 +278,186 @@ mod tests {
             peak_band + 1
         );
     }
+
+    // ── Frequency mapping, normalisation and dB conversion ──────────────────
+
+    fn band_center_hz(band_index: usize) -> f32 {
+        0.5 * (BARK_EDGES[band_index] + BARK_EDGES[band_index + 1])
+    }
+
+    fn peak_band_of(profile: &SpectralProfile) -> usize {
+        profile
+            .bands
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0
+    }
+
+    /// The edge table is the standard Zwicker Bark scale: 25 strictly increasing
+    /// edges from 0 Hz to 15.5 kHz, widths growing from 100 Hz to 3.5 kHz.
+    #[test]
+    fn bark_edges_are_the_standard_scale() {
+        assert_eq!(BARK_EDGES.len(), BARK_BANDS + 1);
+        assert_eq!(BARK_EDGES[0], 0.0);
+        assert_eq!(BARK_EDGES[BARK_BANDS], 15_500.0);
+        assert!(BARK_EDGES.windows(2).all(|pair| pair[1] > pair[0]));
+        // Spot-check against Zwicker's critical-band rate table.
+        assert_eq!(BARK_EDGES[5], 510.0);
+        assert_eq!(BARK_EDGES[9], 1080.0);
+        assert_eq!(BARK_EDGES[13], 2000.0);
+        assert_eq!(BARK_EDGES[17], 3700.0);
+        assert_eq!(BARK_EDGES[21], 7700.0);
+    }
+
+    /// Edges are half-open [lower, upper): the lower edge belongs to the band,
+    /// the upper edge to the next band, and anything at/above 15.5 kHz is out.
+    #[test]
+    fn frequency_to_bark_band_uses_half_open_intervals() {
+        assert_eq!(frequency_to_bark_band(0.0), Some(0));
+        assert_eq!(frequency_to_bark_band(99.99), Some(0));
+        assert_eq!(frequency_to_bark_band(100.0), Some(1));
+        assert_eq!(frequency_to_bark_band(509.9), Some(4));
+        assert_eq!(frequency_to_bark_band(510.0), Some(5));
+        assert_eq!(frequency_to_bark_band(15_499.0), Some(23));
+        assert_eq!(frequency_to_bark_band(15_500.0), None);
+        assert_eq!(frequency_to_bark_band(22_000.0), None);
+        assert_eq!(frequency_to_bark_band(-1.0), None);
+        assert_eq!(frequency_to_bark_band(f32::NAN), None);
+        // Every integer Hz below 15.5 kHz lands in exactly one band.
+        for hertz in 0..15_500 {
+            let band = frequency_to_bark_band(hertz as f32).unwrap();
+            assert!(BARK_EDGES[band] <= hertz as f32 && (hertz as f32) < BARK_EDGES[band + 1]);
+        }
+    }
+
+    /// Bin index → frequency is `k · sample_rate / FFT_SIZE`: a tone at the
+    /// centre of every Bark band peaks in that band, at all three sample rates.
+    #[test]
+    fn tone_at_each_band_centre_peaks_in_that_band_at_all_rates() {
+        for sample_rate in [44_100u32, 48_000, 96_000] {
+            for band_index in 0..BARK_BANDS {
+                let frequency = band_center_hz(band_index);
+                if frequency >= 0.45 * sample_rate as f32 {
+                    continue;
+                }
+                let profile = compute_profile(&sine_wave(frequency, sample_rate, 1.0), sample_rate);
+                assert_eq!(
+                    peak_band_of(&profile),
+                    band_index,
+                    "{frequency} Hz @ {sample_rate} should peak in band index {band_index}"
+                );
+            }
+        }
+    }
+
+    /// Bands are dB relative to the total in-band power, so the linear band
+    /// powers sum to exactly 1 (0 dB) for any signal with energy.
+    #[test]
+    fn linear_band_powers_sum_to_one() {
+        let mut state: u32 = 7;
+        let noise: Vec<f32> = (0..48_000)
+            .map(|_| {
+                state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                (state as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect();
+        for samples in [
+            sine_wave(440.0, 48_000, 1.0),
+            sine_wave(5000.0, 48_000, 0.5),
+            noise,
+        ] {
+            let profile = compute_profile(&samples, 48_000);
+            let total: f64 = profile
+                .bands
+                .iter()
+                .map(|&decibels| 10f64.powf(decibels as f64 / 10.0))
+                .sum();
+            assert!((total - 1.0).abs() < 1e-3, "sum of band powers = {total}");
+        }
+    }
+
+    /// A pure tone holds essentially all of the energy: its band is within
+    /// 0.1 dB of the 0 dB total.
+    #[test]
+    fn pure_tone_band_is_at_zero_db() {
+        let profile = compute_profile(&sine_wave(1000.0, 48_000, 1.0), 48_000);
+        assert!(
+            profile.bands[8] > -0.1 && profile.bands[8] <= 0.0,
+            "{}",
+            profile.bands[8]
+        );
+    }
+
+    /// The profile is level-invariant (relative dB): scaling the input by 10×
+    /// changes no band, so window/FFT gain constants cancel out.
+    #[test]
+    fn profile_is_invariant_to_input_level() {
+        let quiet = sine_wave(2500.0, 48_000, 1.0);
+        let loud: Vec<f32> = quiet.iter().map(|sample| sample * 10.0).collect();
+        let quiet_profile = compute_profile(&quiet, 48_000);
+        let loud_profile = compute_profile(&loud, 48_000);
+        for band in 0..BARK_BANDS {
+            // Compare only bands above the f32 leakage floor.
+            if quiet_profile.bands[band] > -60.0 {
+                assert!(
+                    (quiet_profile.bands[band] - loud_profile.bands[band]).abs() < 0.01,
+                    "band {band}"
+                );
+            }
+        }
+    }
+
+    /// dB conversion is 10·log10 of *power*: a tone with half the amplitude is
+    /// 4× lower in power = 6.02 dB (not 3.01 dB), independent of tone frequency
+    /// (the Hann window's energy gain is the same for every bin).
+    #[test]
+    fn half_amplitude_tone_is_six_db_lower() {
+        let loud = sine_wave(1000.0, 48_000, 1.0);
+        let quiet: Vec<f32> = sine_wave(4000.0, 48_000, 1.0)
+            .iter()
+            .map(|s| s * 0.5)
+            .collect();
+        let mixed: Vec<f32> = loud.iter().zip(&quiet).map(|(a, b)| a + b).collect();
+        let profile = compute_profile(&mixed, 48_000);
+        // 1 kHz → band 8 (920–1080), 4 kHz → band 17 (3700–4400).
+        let difference = profile.bands[8] - profile.bands[17];
+        assert!(
+            (difference - 6.0206).abs() < 0.05,
+            "difference {difference} dB"
+        );
+    }
+
+    /// Digital silence and an empty slice both give the flat (all-zero) default
+    /// instead of NaN from 0/0.
+    #[test]
+    fn silence_and_empty_input_give_flat_profile() {
+        let silence = compute_profile(&vec![0.0f32; 8192], 48_000);
+        assert!(silence.bands.iter().all(|&band| band == 0.0));
+        let empty = compute_profile(&[], 48_000);
+        assert!(empty.bands.iter().all(|&band| band == 0.0));
+    }
+
+    /// Bands above the Nyquist frequency have no bins at all and use the
+    /// documented −90 dB sentinel (22.05 kHz sampling: Nyquist 11.025 kHz).
+    #[test]
+    fn bands_above_nyquist_report_the_floor_sentinel() {
+        let profile = compute_profile(&sine_wave(1000.0, 22_050, 1.0), 22_050);
+        assert_eq!(profile.bands[23], -90.0, "12–15.5 kHz is above Nyquist");
+        assert!(
+            profile.bands[22] > -90.0,
+            "9.5–12 kHz still has bins below Nyquist"
+        );
+    }
+
+    /// Trailing samples that do not fill a whole hop are ignored; the profile of
+    /// a stationary tone must not depend on the clip length.
+    #[test]
+    fn stationary_profile_does_not_depend_on_clip_length() {
+        let long = compute_profile(&sine_wave(1000.0, 48_000, 2.0), 48_000);
+        let odd = compute_profile(&sine_wave(1000.0, 48_000, 1.37), 48_000);
+        assert_eq!(peak_band_of(&long), peak_band_of(&odd));
+        assert!((long.bands[8] - odd.bands[8]).abs() < 0.1);
+    }
 }

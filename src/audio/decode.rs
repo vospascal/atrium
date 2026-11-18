@@ -123,3 +123,112 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
         spectral_profile,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a minimal PCM16 WAV file and return its path.
+    fn write_pcm16_wav(
+        name: &str,
+        channels: u16,
+        sample_rate: u32,
+        interleaved: &[i16],
+    ) -> std::path::PathBuf {
+        let data_bytes = (interleaved.len() * 2) as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes());
+        bytes.extend_from_slice(&(channels * 2).to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in interleaved {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(format!(
+            "atrium_decode_test_{}_{name}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// Stereo is downmixed to mono by averaging channels (L+R)/2 — equal-weight,
+    /// i.e. −6 dB per channel, not −3 dB — and the file's sample rate is kept
+    /// (no resampling happens in the decoder).
+    #[test]
+    fn stereo_is_averaged_to_mono_and_sample_rate_is_preserved() {
+        let frames = 1000;
+        let mut interleaved = Vec::new();
+        for _ in 0..frames {
+            interleaved.push(16384i16); // L = +0.5
+            interleaved.push(-8192i16); // R = −0.25
+        }
+        let path = write_pcm16_wav("stereo", 2, 44_100, &interleaved);
+        let buffer = decode_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(buffer.sample_rate, 44_100);
+        assert_eq!(buffer.samples.len(), frames);
+        for &sample in &buffer.samples {
+            assert!((sample - 0.125).abs() < 1e-6, "mono sample {sample}");
+        }
+        assert!((buffer.rms - 0.125).abs() < 1e-6);
+    }
+
+    /// Mono files pass through untouched: PCM16 → f32 is x / 32768.
+    #[test]
+    fn mono_passes_through_with_pcm16_scaling() {
+        let interleaved: Vec<i16> = vec![0, 16384, -16384, 32767, -32768];
+        let path = write_pcm16_wav("mono", 1, 48_000, &interleaved);
+        let buffer = decode_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(buffer.sample_rate, 48_000);
+        let expected = [0.0f32, 0.5, -0.5, 32767.0 / 32768.0, -1.0];
+        assert_eq!(buffer.samples, expected);
+        // RMS = sqrt(mean(x²)).
+        let mean_square: f32 = expected.iter().map(|x| x * x).sum::<f32>() / 5.0;
+        assert!((buffer.rms - mean_square.sqrt()).abs() < 1e-6);
+    }
+
+    /// A full-scale ±0.5 square wave has RMS exactly 0.5 and the spectral profile
+    /// is attached (24 bands, not the flat default) after decoding.
+    #[test]
+    fn rms_and_spectral_profile_are_computed_from_decoded_samples() {
+        let interleaved: Vec<i16> = (0..8192)
+            .map(|index| if (index / 24) % 2 == 0 { 16384 } else { -16384 })
+            .collect();
+        let path = write_pcm16_wav("square", 1, 48_000, &interleaved);
+        let buffer = decode_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!((buffer.rms - 0.5).abs() < 1e-6);
+        assert!(buffer
+            .spectral_profile
+            .bands
+            .iter()
+            .any(|&band| band != 0.0));
+    }
+
+    /// Out-of-phase stereo cancels completely under averaging. Documented
+    /// consequence of a plain-average downmix: the RMS is 0, so the downstream
+    /// RMS normalisation falls back to gain 1.0.
+    #[test]
+    fn anti_phase_stereo_cancels_to_silence() {
+        let interleaved: Vec<i16> = (0..2000)
+            .map(|index| if index % 2 == 0 { 10000 } else { -10000 })
+            .collect();
+        let path = write_pcm16_wav("antiphase", 2, 48_000, &interleaved);
+        let buffer = decode_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buffer.samples.iter().all(|&sample| sample == 0.0));
+        assert_eq!(buffer.rms, 0.0);
+    }
+}

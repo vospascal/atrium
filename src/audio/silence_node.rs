@@ -6,8 +6,8 @@
 //! reports `is_active() == false` so `render_pipeline` skips it entirely and it
 //! contributes nothing to telemetry's active mask.
 
-use crate::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 
 /// A source that produces no audio and is never active. Occupies a free slot
 /// in the source pool until a real source replaces it.
@@ -28,4 +28,27 @@ impl SoundSource for SilenceNode {
     }
 
     fn tick(&mut self, _dt: f32) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A placeholder slot must contribute exactly nothing and be skipped.
+    #[test]
+    fn silence_node_is_inactive_and_outputs_exact_zero() {
+        let mut node = SilenceNode;
+        assert!(!node.is_active());
+        for sample_rate in [44_100.0, 48_000.0, 96_000.0] {
+            for _ in 0..64 {
+                assert_eq!(node.next_sample(sample_rate), 0.0);
+            }
+        }
+        node.tick(0.01);
+        assert_eq!(node.position(), Vec3::new(0.0, 0.0, 0.0));
+        // Defaults of the trait: unmuted, no spread, unit reference distance.
+        assert!(!node.is_muted());
+        assert_eq!(node.spread(), 0.0);
+        assert_eq!(node.ref_distance(), 1.0);
+    }
 }

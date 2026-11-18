@@ -236,4 +236,105 @@ mod tests {
             "purring should be ~{expected_purring}, got {gain_purring}"
         );
     }
+
+    // ── RMS normalisation and dB conversions ────────────────────────────────
+
+    /// RMS normalisation is a plain ratio target/buffer: a recording mastered
+    /// twice as hot (0.2 vs target 0.1) is halved, a quiet one is boosted.
+    #[test]
+    fn rms_normalization_is_target_over_buffer_rms() {
+        let at_reference = SoundProfile {
+            reference_spl: 94.0,
+        };
+        assert!((at_reference.amplitude(0.2, 0.1, SPL_REF) - 0.5).abs() < 1e-6);
+        assert!((at_reference.amplitude(0.05, 0.1, SPL_REF) - 2.0).abs() < 1e-6);
+        // Normalisation and SPL gain multiply: 74 dB (×0.1) on a 0.2-RMS buffer.
+        let quieter = SoundProfile {
+            reference_spl: 74.0,
+        };
+        assert!((quieter.amplitude(0.2, 0.1, SPL_REF) - 0.05).abs() < 1e-6);
+    }
+
+    /// Near-silent buffers (RMS ≤ 1e-6) skip normalisation (gain 1.0) instead of
+    /// dividing by ~0.
+    #[test]
+    fn silent_buffer_skips_rms_normalization() {
+        let profile = SoundProfile {
+            reference_spl: 94.0,
+        };
+        assert_eq!(profile.amplitude(0.0, 0.1, SPL_REF), 1.0);
+        assert_eq!(profile.amplitude(1e-7, 0.1, SPL_REF), 1.0);
+        assert!(profile.amplitude(1e-3, 0.1, SPL_REF).is_finite());
+    }
+
+    /// SPL → amplitude uses 20·log10 (pressure): +6.0206 dB doubles the
+    /// amplitude, +20 dB is ×10, −20 dB is ×0.1.
+    #[test]
+    fn spl_difference_uses_amplitude_decibels() {
+        let louder = SoundProfile {
+            reference_spl: 94.0 + 6.0206,
+        };
+        assert!((louder.amplitude(0.1, 0.1, SPL_REF) - 2.0).abs() < 1e-3);
+        let much_louder = SoundProfile {
+            reference_spl: 114.0,
+        };
+        assert!((much_louder.amplitude(0.1, 0.1, SPL_REF) - 10.0).abs() < 1e-4);
+        // Louder than the calibration level is *not* capped here.
+        let extreme = SoundProfile {
+            reference_spl: 134.0,
+        };
+        assert!((extreme.amplitude(0.1, 0.1, SPL_REF) - 100.0).abs() < 1e-2);
+    }
+
+    /// Audible radius inverts the 20·log10(d/d_ref) spreading law: at the
+    /// returned radius the SPL has fallen exactly to the threshold.
+    #[test]
+    fn audible_radius_is_where_spl_meets_threshold() {
+        for reference_spl in [25.0f32, 30.0, 45.0, 60.0] {
+            let profile = SoundProfile { reference_spl };
+            let radius = profile.audible_radius(20.0, 1.0e6);
+            let spl_at_radius = reference_spl - 20.0 * radius.log10();
+            assert!(
+                (spl_at_radius - 20.0).abs() < 1e-3,
+                "{reference_spl}: {spl_at_radius}"
+            );
+        }
+        // Each +6.0206 dB doubles the radius.
+        let near = SoundProfile {
+            reference_spl: 30.0,
+        }
+        .audible_radius(20.0, 1.0e6);
+        let far = SoundProfile {
+            reference_spl: 36.0206,
+        }
+        .audible_radius(20.0, 1.0e6);
+        assert!((far / near - 2.0).abs() < 1e-3);
+    }
+
+    /// Documented example values: djembe 75 dB → 562 m, campfire 55 dB → 56 m
+    /// (uncapped) and the max_distance cap and below-threshold cases.
+    #[test]
+    fn audible_radius_documented_values_cap_and_floor() {
+        let djembe = SoundProfile {
+            reference_spl: 75.0,
+        };
+        assert!((djembe.audible_radius(20.0, 1.0e6) - 562.3).abs() < 0.1);
+        assert_eq!(
+            djembe.audible_radius(20.0, 100.0),
+            100.0,
+            "capped to max_distance"
+        );
+        let campfire = SoundProfile {
+            reference_spl: 55.0,
+        };
+        assert!((campfire.audible_radius(20.0, 1.0e6) - 56.23).abs() < 0.01);
+        let at_threshold = SoundProfile {
+            reference_spl: 20.0,
+        };
+        assert_eq!(at_threshold.audible_radius(20.0, 100.0), 0.0);
+        let below = SoundProfile {
+            reference_spl: 10.0,
+        };
+        assert_eq!(below.audible_radius(20.0, 100.0), 0.0);
+    }
 }
