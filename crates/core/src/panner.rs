@@ -8,17 +8,7 @@
 //
 // See REFERENCES.md for full list.
 
-use std::f32::consts::PI;
-
-use crate::listener::Listener;
 use crate::types::Vec3;
-
-/// Stereo gain pair (left, right).
-#[derive(Clone, Copy, Debug)]
-pub struct StereoGains {
-    pub left: f32,
-    pub right: f32,
-}
 
 /// W3C Web Audio API distance models.
 /// See: https://www.w3.org/TR/webaudio/#distance-attenuation
@@ -76,6 +66,13 @@ const MAX_NEAR_FIELD_GAIN: f32 = 10.0;
 /// this allows near-field gain > 1.0 for sources closer than ref_distance.
 /// A source at 0.3m with ref_distance=1.0 gets +10.5 dB of near-field boost,
 /// matching real-world inverse square law behavior.
+///
+/// For every model and every `rolloff ≥ 0` the gain is monotonic
+/// non-increasing in distance and saturates at `MAX_NEAR_FIELD_GAIN` (+20 dB)
+/// where the law diverges. The inverse law with `rolloff > 1` diverges at
+/// d = ref·(1 − 1/rolloff), where its denominator reaches zero; everything
+/// closer than that radius is held at the cap rather than falling back to
+/// unity, so a source moving closer never gets quieter.
 pub fn distance_gain_at_model(
     from: Vec3,
     to: Vec3,
@@ -98,11 +95,19 @@ pub fn distance_gain_at_model(
             }
         }
         DistanceModelType::Inverse => {
-            let denom = ref_distance + rolloff * (effective - ref_distance);
-            if denom <= 0.0 {
+            if ref_distance <= 0.0 {
+                // Degenerate configuration: no reference distance, no attenuation
+                // (same convention as the exponential model).
                 1.0
             } else {
-                ref_distance / denom
+                let denominator = ref_distance + rolloff * (effective - ref_distance);
+                if denominator <= 0.0 {
+                    // Inside the divergence radius ref·(1 − 1/rolloff): the law
+                    // has gone through +∞, so hold the near-field ceiling.
+                    MAX_NEAR_FIELD_GAIN
+                } else {
+                    ref_distance / denominator
+                }
             }
         }
         DistanceModelType::Exponential => {
@@ -116,174 +121,155 @@ pub fn distance_gain_at_model(
     gain.clamp(0.0, MAX_NEAR_FIELD_GAIN)
 }
 
-/// Compute distance-based gain from listener to source.
-/// Convenience wrapper around [`distance_gain_at`].
-pub fn distance_gain(
-    listener: &Listener,
-    source_position: Vec3,
-    ref_distance: f32,
-    max_distance: f32,
-    rolloff: f32,
-) -> f32 {
-    distance_gain_at(
-        listener.position,
-        source_position,
-        ref_distance,
-        max_distance,
-        rolloff,
-    )
-}
-
-/// Compute equal-power stereo panning gains from a source position relative to a listener.
-///
-/// The panning law ensures constant perceived loudness as the source moves:
-/// left² + right² ≈ 1.0 at all positions.
-pub fn stereo_pan(listener: &Listener, source_position: Vec3) -> StereoGains {
-    let d = source_position - listener.position;
-
-    // Handle degenerate case: source exactly at listener
-    if d.x * d.x + d.y * d.y < 1e-10 {
-        return StereoGains {
-            left: std::f32::consts::FRAC_1_SQRT_2,
-            right: std::f32::consts::FRAC_1_SQRT_2,
-        };
-    }
-
-    // Rotate direction into listener's local frame (undo listener yaw)
-    let cos_y = listener.yaw.cos();
-    let sin_y = listener.yaw.sin();
-    let local_x = d.x * cos_y + d.y * sin_y; // forward
-    let local_y = -d.x * sin_y + d.y * cos_y; // left
-
-    // Azimuth: 0 = ahead, +π/2 = left, -π/2 = right
-    let azimuth = local_y.atan2(local_x);
-
-    // Map to pan: sin(azimuth) gives -1 (right) to +1 (left)
-    let pan = azimuth.sin();
-
-    // Equal-power gains
-    let theta = (1.0 - pan) * PI / 4.0;
-    StereoGains {
-        left: theta.cos(),
-        right: theta.sin(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn listener_at_origin() -> Listener {
-        Listener::new(Vec3::new(0.0, 0.0, 0.0), 0.0)
+    #[test]
+    fn inverse_model_partial_rolloff() {
+        // Inverse, ref 1, rolloff 0.5, d = 3: 1 / (1 + 0.5·(3 − 1)) = 0.5.
+        let gain = distance_gain_at_model(
+            Vec3::ZERO,
+            Vec3::new(0.0, 3.0, 0.0),
+            1.0,
+            20.0,
+            0.5,
+            DistanceModelType::Inverse,
+        );
+        assert!((gain - 0.5).abs() < 1e-6, "gain={gain}");
     }
 
     #[test]
-    fn source_ahead_is_center() {
-        let g = stereo_pan(&listener_at_origin(), Vec3::new(1.0, 0.0, 0.0));
-        assert!((g.left - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
-        assert!((g.right - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
+    fn linear_model_hand_values() {
+        // Linear, ref 1, max 11, rolloff 1: gain = 1 − (d − 1)/10.
+        let linear = |distance: f32| {
+            distance_gain_at_model(
+                Vec3::ZERO,
+                Vec3::new(distance, 0.0, 0.0),
+                1.0,
+                11.0,
+                1.0,
+                DistanceModelType::Linear,
+            )
+        };
+        assert!((linear(6.0) - 0.5).abs() < 1e-6); // halfway → 0.5
+        assert!(linear(11.0).abs() < 1e-6); // at max → silent
+        assert!(linear(30.0).abs() < 1e-6); // beyond max → clamped to max → silent
+                                            // Near field (no ref clamp, deliberate): d = 0.5 → 1 + 0.5/10 = 1.05.
+        assert!((linear(0.5) - 1.05).abs() < 1e-6);
     }
 
     #[test]
-    fn source_left() {
-        let g = stereo_pan(&listener_at_origin(), Vec3::new(0.0, 1.0, 0.0));
-        assert!(g.left > 0.95, "left={}", g.left);
-        assert!(g.right < 0.05, "right={}", g.right);
+    fn exponential_model_hand_values() {
+        // Exponential: (d/ref)^(−rolloff), ref 1.
+        let exponential = |distance: f32, rolloff: f32| {
+            distance_gain_at_model(
+                Vec3::ZERO,
+                Vec3::new(distance, 0.0, 0.0),
+                1.0,
+                20.0,
+                rolloff,
+                DistanceModelType::Exponential,
+            )
+        };
+        assert!((exponential(2.0, 1.0) - 0.5).abs() < 1e-6); // 2^−1
+        assert!((exponential(2.0, 2.0) - 0.25).abs() < 1e-6); // 2^−2
+        assert!((exponential(4.0, 0.5) - 0.5).abs() < 1e-6); // 4^−0.5
+                                                             // Near field: 0.5^−1 = 2 (+6 dB), same as the inverse model at rolloff 1.
+        assert!((exponential(0.5, 1.0) - 2.0).abs() < 1e-5);
     }
 
     #[test]
-    fn source_right() {
-        let g = stereo_pan(&listener_at_origin(), Vec3::new(0.0, -1.0, 0.0));
-        assert!(g.left < 0.05, "left={}", g.left);
-        assert!(g.right > 0.95, "right={}", g.right);
-    }
-
-    #[test]
-    fn source_behind_is_center() {
-        let g = stereo_pan(&listener_at_origin(), Vec3::new(-1.0, 0.0, 0.0));
-        assert!((g.left - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
-        assert!((g.right - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
-    }
-
-    #[test]
-    fn constant_power() {
-        // At any position, left² + right² should be ≈ 1.0
-        let listener = listener_at_origin();
-        for angle_deg in (0..360).step_by(15) {
-            let angle = (angle_deg as f32).to_radians();
-            let src = Vec3::new(angle.cos(), angle.sin(), 0.0);
-            let g = stereo_pan(&listener, src);
-            let power = g.left * g.left + g.right * g.right;
-            assert!(
-                (power - 1.0).abs() < 0.01,
-                "angle={}° power={} (left={}, right={})",
-                angle_deg,
-                power,
-                g.left,
-                g.right
-            );
+    fn zero_distance_is_finite_and_capped_for_every_model() {
+        // Source exactly on the listener: MIN_DISTANCE floor + 10× (+20 dB) cap,
+        // never inf/NaN.
+        for model in [
+            DistanceModelType::Inverse,
+            DistanceModelType::Exponential,
+            DistanceModelType::Linear,
+        ] {
+            let gain = distance_gain_at_model(Vec3::ZERO, Vec3::ZERO, 1.0, 20.0, 1.0, model);
+            assert!(gain.is_finite(), "{model:?} gain={gain}");
+            assert!(gain <= MAX_NEAR_FIELD_GAIN, "{model:?} gain={gain}");
         }
     }
 
+    /// With rolloff > 1 the inverse denominator `ref + rolloff·(d − ref)`
+    /// crosses zero at d = ref·(1 − 1/rolloff). ref 1, rolloff 2: d = 0.6 →
+    /// 1/0.2 = 5 (+14 dB); d = 0.4 → denominator −0.2, inside the divergence
+    /// radius 0.5 → held at the 10× cap. The old guard returned 1.0 there, so
+    /// a source moving closer got 14 dB quieter.
+    /// `rolloff` is user-configurable in the scene YAML and unvalidated.
     #[test]
-    fn distance_at_ref_is_unity() {
-        let l = listener_at_origin();
-        // Source at exactly ref_distance → gain = 1.0
-        let g = distance_gain(&l, Vec3::new(1.0, 0.0, 0.0), 1.0, 10.0, 1.0);
-        assert!((g - 1.0).abs() < 0.001, "gain={g}");
-    }
-
-    #[test]
-    fn near_field_gain_boost() {
-        let l = listener_at_origin();
-        // Source at 0.3m with ref_distance=1.0 → gain = 1.0/0.3 ≈ 3.33 (+10.5 dB)
-        let g = distance_gain(&l, Vec3::new(0.3, 0.0, 0.0), 1.0, 10.0, 1.0);
-        let expected = 1.0 / 0.3; // inverse: ref / (ref + rolloff*(d - ref)) = 1/(1+1*(0.3-1)) = 1/0.3
+    fn inverse_model_near_field_is_monotonic_for_rolloff_above_one() {
+        let inverse = |distance: f32| {
+            distance_gain_at_model(
+                Vec3::ZERO,
+                Vec3::new(distance, 0.0, 0.0),
+                1.0,
+                20.0,
+                2.0,
+                DistanceModelType::Inverse,
+            )
+        };
+        let gain_at_0_6 = inverse(0.6);
+        let gain_at_0_4 = inverse(0.4);
         assert!(
-            (g - expected).abs() < 0.01,
-            "near-field gain at 0.3m should be ~{expected:.2}, got {g:.4}"
+            (gain_at_0_6 - 5.0).abs() < 1e-4,
+            "gain at 0.6 m = {gain_at_0_6}"
         );
-        assert!(g > 1.0, "near-field gain should exceed 1.0");
-    }
-
-    #[test]
-    fn near_field_gain_capped() {
-        let l = listener_at_origin();
-        // Source extremely close (0.01m) → gain would be 100 but capped at 10.0
-        let g = distance_gain(&l, Vec3::new(0.01, 0.0, 0.0), 1.0, 10.0, 1.0);
         assert!(
-            (g - 10.0).abs() < 0.01,
-            "near-field gain should cap at 10.0, got {g}"
+            gain_at_0_4 >= gain_at_0_6,
+            "closer source must not be quieter: 0.4 m → {gain_at_0_4}, 0.6 m → {gain_at_0_6}"
         );
     }
 
+    /// Every model, every rolloff ≥ 0: sweeping the source from 0 to past
+    /// max_distance never makes the gain rise, the gain stays in
+    /// [0, MAX_NEAR_FIELD_GAIN], and a law that diverges (inverse rolloff > 1,
+    /// exponential near zero) ends at the cap, not below it.
     #[test]
-    fn distance_far_away_is_quiet() {
-        let l = listener_at_origin();
-        // Source at 10m with ref=1.0, rolloff=1.0 → gain = 1/(1+1*9) = 0.1
-        let g = distance_gain(&l, Vec3::new(10.0, 0.0, 0.0), 1.0, 10.0, 1.0);
-        assert!((g - 0.1).abs() < 0.001, "gain={g}");
-    }
-
-    #[test]
-    fn near_field_6db_per_halving() {
-        let l = listener_at_origin();
-        // Inverse square: halving distance → +6 dB (2x gain)
-        let g_1m = distance_gain(&l, Vec3::new(1.0, 0.0, 0.0), 1.0, 10.0, 1.0);
-        let g_half = distance_gain(&l, Vec3::new(0.5, 0.0, 0.0), 1.0, 10.0, 1.0);
-        let db_diff = 20.0 * (g_half / g_1m).log10();
-        assert!(
-            (db_diff - 6.0).abs() < 0.5,
-            "halving distance should add ~6 dB, got {db_diff:.1}"
+    fn every_model_is_monotonic_non_increasing_in_distance() {
+        for model in [
+            DistanceModelType::Inverse,
+            DistanceModelType::Exponential,
+            DistanceModelType::Linear,
+        ] {
+            for rolloff in [0.0_f32, 0.5, 1.0, 1.5, 2.0, 4.0, 10.0] {
+                let mut previous_gain = f32::INFINITY;
+                for step in 0..=3000 {
+                    let distance = step as f32 * 0.01;
+                    let gain = distance_gain_at_model(
+                        Vec3::ZERO,
+                        Vec3::new(distance, 0.0, 0.0),
+                        1.0,
+                        20.0,
+                        rolloff,
+                        model,
+                    );
+                    assert!(
+                        (0.0..=MAX_NEAR_FIELD_GAIN).contains(&gain),
+                        "{model:?} rolloff {rolloff} d {distance}: gain {gain}"
+                    );
+                    assert!(
+                        gain <= previous_gain,
+                        "{model:?} rolloff {rolloff}: gain rose to {gain} at {distance} m \
+                         from {previous_gain}"
+                    );
+                    previous_gain = gain;
+                }
+            }
+        }
+        // Inverse rolloff 4: divergence radius 1·(1 − 1/4) = 0.75 m, so 0.5 m
+        // is held at the cap.
+        let inside_divergence = distance_gain_at_model(
+            Vec3::ZERO,
+            Vec3::new(0.5, 0.0, 0.0),
+            1.0,
+            20.0,
+            4.0,
+            DistanceModelType::Inverse,
         );
-    }
-
-    #[test]
-    fn distance_beyond_max_clamps() {
-        let l = listener_at_origin();
-        // Source at 20m but max=10m → same gain as at 10m
-        let g_at_max = distance_gain(&l, Vec3::new(10.0, 0.0, 0.0), 1.0, 10.0, 1.0);
-        let g_beyond = distance_gain(&l, Vec3::new(20.0, 0.0, 0.0), 1.0, 10.0, 1.0);
-        assert!((g_at_max - g_beyond).abs() < 0.001);
+        assert_eq!(inside_divergence, MAX_NEAR_FIELD_GAIN);
     }
 }
