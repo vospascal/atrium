@@ -11,13 +11,12 @@ mod tests {
     use crate::audio::atmosphere::AtmosphericParams;
     use crate::audio::distance::DistanceModel;
     use crate::audio::propagation::GroundProperties;
+    use crate::pipeline::builders;
+    use crate::pipeline::environment::Environment;
     use crate::pipeline::mix_stage::{MixContext, MixStage};
-    use crate::pipeline::path::WallMaterial;
     use crate::pipeline::stages::fdn_reverb::FdnReverbStage;
-    use crate::pipeline::{
-        build_ambisonics, build_dbap, build_hrtf, build_vbap, render_pipeline, PipelineParams,
-        RenderParams, RenderPipeline,
-    };
+    use crate::pipeline::wall_material::WallMaterial;
+    use crate::pipeline::{render_pipeline, PipelineParams, RenderParams, RenderPipeline};
     use atrium_core::listener::Listener;
     use atrium_core::source::SoundSource;
     use atrium_core::speaker::SpeakerLayout;
@@ -284,6 +283,18 @@ mod tests {
         [WallMaterial::HARD_WALL; 6]
     }
 
+    /// The standard room with hard walls, default ground and 20 °C air.
+    fn standard_environment() -> Environment {
+        let (min, max) = standard_room();
+        Environment {
+            min,
+            max,
+            wall_materials: default_wall_materials(),
+            ground: default_ground(),
+            atmosphere: default_atmosphere(),
+        }
+    }
+
     fn layout_5_1() -> SpeakerLayout {
         SpeakerLayout::surround_5_1(
             Vec3::new(0.0, 4.0, 0.0),
@@ -362,14 +373,11 @@ mod tests {
             layout: render_params.layout,
             sample_rate,
             channels,
-            environment_min: render_params.environment_min,
-            environment_max: render_params.environment_max,
+            environment: render_params.environment,
             master_gain: render_params.master_gain,
             render_channels: effective_render_channels,
             reverb_input: Some(&reverb_send_snapshot),
             wall_reflectivity: init_ctx.wall_reflectivity,
-            wall_materials: init_ctx.wall_materials,
-            atmosphere: init_ctx.atmosphere,
             measurement_mode: render_params.measurement_mode,
         };
 
@@ -542,21 +550,17 @@ mod tests {
     #[test]
     fn analyze_vbap_pipeline() {
         let layout = layout_5_1();
-        let atm = default_atmosphere();
-        let ground = default_ground();
         let distance_model = default_distance_model();
-        let wall_materials = default_wall_materials();
-        let (environment_min, environment_max) = standard_room();
+        let environment = standard_environment();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
-            wall_materials: wall_materials.clone(),
-            environment_min,
-            environment_max,
+            environment_min: environment.min,
+            environment_max: environment.max,
             ..PipelineParams::default()
         };
-        let mut pipeline = build_vbap(&params);
+        let mut pipeline = builders::vbap::build(&params);
 
         let channels = layout.total_channels();
         let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
@@ -571,12 +575,7 @@ mod tests {
             master_gain: 1.0,
             distance_model: &distance_model,
             layout: &layout,
-            atmosphere: &atm,
-            ground: &ground,
-            environment_min,
-            environment_max,
-            barriers: &[],
-            wall_materials: &wall_materials,
+            environment: &environment,
             measurement_mode: true, // linear signal for accurate analysis
         };
 
@@ -585,14 +584,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            environment_min,
-            environment_max,
+            environment: &environment,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &wall_materials,
-            atmosphere: &atm,
             measurement_mode: true,
         };
 
@@ -627,21 +623,17 @@ mod tests {
     #[test]
     fn analyze_hrtf_pipeline() {
         let layout = layout_stereo();
-        let atm = default_atmosphere();
-        let ground = default_ground();
         let distance_model = default_distance_model();
-        let wall_materials = default_wall_materials();
-        let (environment_min, environment_max) = standard_room();
+        let environment = standard_environment();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
-            wall_materials: wall_materials.clone(),
-            environment_min,
-            environment_max,
+            environment_min: environment.min,
+            environment_max: environment.max,
             ..PipelineParams::default()
         };
-        let mut pipeline = build_hrtf(&params);
+        let mut pipeline = builders::hrtf::build(&params);
 
         let channels = layout.total_channels();
         let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
@@ -656,12 +648,7 @@ mod tests {
             master_gain: 1.0,
             distance_model: &distance_model,
             layout: &layout,
-            atmosphere: &atm,
-            ground: &ground,
-            environment_min,
-            environment_max,
-            barriers: &[],
-            wall_materials: &wall_materials,
+            environment: &environment,
             measurement_mode: true,
         };
 
@@ -670,14 +657,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            environment_min,
-            environment_max,
+            environment: &environment,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &wall_materials,
-            atmosphere: &atm,
             measurement_mode: true,
         };
 
@@ -693,21 +677,17 @@ mod tests {
     #[test]
     fn analyze_dbap_pipeline() {
         let layout = layout_5_1();
-        let atm = default_atmosphere();
-        let ground = default_ground();
         let distance_model = default_distance_model();
-        let wall_materials = default_wall_materials();
-        let (environment_min, environment_max) = standard_room();
+        let environment = standard_environment();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
-            wall_materials: wall_materials.clone(),
-            environment_min,
-            environment_max,
+            environment_min: environment.min,
+            environment_max: environment.max,
             ..PipelineParams::default()
         };
-        let mut pipeline = build_dbap(&params);
+        let mut pipeline = builders::dbap::build(&params);
 
         let channels = layout.total_channels();
         let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
@@ -722,12 +702,7 @@ mod tests {
             master_gain: 1.0,
             distance_model: &distance_model,
             layout: &layout,
-            atmosphere: &atm,
-            ground: &ground,
-            environment_min,
-            environment_max,
-            barriers: &[],
-            wall_materials: &wall_materials,
+            environment: &environment,
             measurement_mode: true,
         };
 
@@ -736,14 +711,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            environment_min,
-            environment_max,
+            environment: &environment,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &wall_materials,
-            atmosphere: &atm,
             measurement_mode: true,
         };
 
@@ -759,21 +731,17 @@ mod tests {
     #[test]
     fn analyze_ambisonics_pipeline() {
         let layout = layout_5_1();
-        let atm = default_atmosphere();
-        let ground = default_ground();
         let distance_model = default_distance_model();
-        let wall_materials = default_wall_materials();
-        let (environment_min, environment_max) = standard_room();
+        let environment = standard_environment();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
-            wall_materials: wall_materials.clone(),
-            environment_min,
-            environment_max,
+            environment_min: environment.min,
+            environment_max: environment.max,
             ..PipelineParams::default()
         };
-        let mut pipeline = build_ambisonics(&params);
+        let mut pipeline = builders::ambisonics::build(&params);
 
         let channels = layout.total_channels();
         let mut sources: Vec<Box<dyn SoundSource>> = vec![Box::new(ConstSource {
@@ -788,12 +756,7 @@ mod tests {
             master_gain: 1.0,
             distance_model: &distance_model,
             layout: &layout,
-            atmosphere: &atm,
-            ground: &ground,
-            environment_min,
-            environment_max,
-            barriers: &[],
-            wall_materials: &wall_materials,
+            environment: &environment,
             measurement_mode: true,
         };
 
@@ -802,14 +765,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            environment_min,
-            environment_max,
+            environment: &environment,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &wall_materials,
-            atmosphere: &atm,
             measurement_mode: true,
         };
 
@@ -830,21 +790,17 @@ mod tests {
     #[test]
     fn analyze_vbap_impulse_response() {
         let layout = layout_5_1();
-        let atm = default_atmosphere();
-        let ground = default_ground();
         let distance_model = default_distance_model();
-        let wall_materials = default_wall_materials();
-        let (environment_min, environment_max) = standard_room();
+        let environment = standard_environment();
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
             er_wall_reflectivity: 0.9,
-            wall_materials: wall_materials.clone(),
-            environment_min,
-            environment_max,
+            environment_min: environment.min,
+            environment_max: environment.max,
             ..PipelineParams::default()
         };
-        let mut pipeline = build_vbap(&params);
+        let mut pipeline = builders::vbap::build(&params);
 
         let channels = layout.total_channels();
 
@@ -853,14 +809,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            environment_min,
-            environment_max,
+            environment: &environment,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &wall_materials,
-            atmosphere: &atm,
             measurement_mode: true,
         };
         pipeline.init(&init_ctx);
@@ -873,12 +826,7 @@ mod tests {
             master_gain: 1.0,
             distance_model: &distance_model,
             layout: &layout,
-            atmosphere: &atm,
-            ground: &ground,
-            environment_min,
-            environment_max,
-            barriers: &[],
-            wall_materials: &wall_materials,
+            environment: &environment,
             measurement_mode: true,
         };
 
@@ -981,5 +929,127 @@ mod tests {
                 println!("  ⚠ WARNING: Reverb tail is decaying slowly — possible metallic ringing");
             }
         }
+    }
+
+    // ── Metric correctness ──────────────────────────────────────────────────
+
+    fn sine(frequency_hz: f32, sample_rate: f32, amplitude: f32, count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|index| {
+                amplitude
+                    * (2.0 * std::f32::consts::PI * frequency_hz * index as f32 / sample_rate).sin()
+            })
+            .collect()
+    }
+
+    /// For a bin-centred sine of amplitude A over N samples the Goertzel power
+    /// is (A·N/2)², so the reported value is A·√N/2. This pins the (N-dependent,
+    /// non-dBFS) scale: the "spectral_db" figures are only meaningful as
+    /// *relative* levels between buffers of the same length.
+    #[test]
+    fn goertzel_magnitude_scale_is_amplitude_times_sqrt_n_over_two() {
+        let sample_rate = 48_000.0;
+        let count = 4096;
+        // 1500 Hz → bin 128 exactly (1500 · 4096 / 48000 = 128).
+        let full = goertzel_magnitude(&sine(1500.0, sample_rate, 1.0, count), 1500.0, sample_rate);
+        let half = goertzel_magnitude(&sine(1500.0, sample_rate, 0.5, count), 1500.0, sample_rate);
+        let expected = (count as f32).sqrt() / 2.0;
+        assert!(
+            (full - expected).abs() < 0.01 * expected,
+            "{full} vs {expected}"
+        );
+        // Amplitude ratio 2 is +6.02 dB under 20·log10.
+        assert!((20.0 * (full / half).log10() - 6.0206).abs() < 0.01);
+    }
+
+    /// Goertzel rejects other frequencies and handles degenerate input.
+    #[test]
+    fn goertzel_rejects_off_frequency_and_empty_input() {
+        let sample_rate = 48_000.0;
+        let tone = sine(1500.0, sample_rate, 1.0, 4096);
+        let on_bin = goertzel_magnitude(&tone, 1500.0, sample_rate);
+        let off_bin = goertzel_magnitude(&tone, 6000.0, sample_rate);
+        assert!(
+            off_bin < on_bin * 1e-3,
+            "off-bin leakage {off_bin} vs {on_bin}"
+        );
+        assert_eq!(goertzel_magnitude(&[], 1000.0, sample_rate), 0.0);
+        assert_eq!(
+            goertzel_magnitude(&vec![0.0; 256], 1000.0, sample_rate),
+            0.0
+        );
+    }
+
+    /// RMS, peak and crest factor of a full-scale sine: 1/√2, 1.0, 3.0103 dB.
+    #[test]
+    fn metrics_of_sine_are_rms_peak_and_crest() {
+        let sample_rate = 48_000.0;
+        let tone = sine(1000.0, sample_rate, 1.0, 48_000); // 1000 whole cycles
+        let metrics = compute_metrics("sine", &tone, 1, sample_rate);
+        assert!((metrics.per_channel_rms[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4);
+        assert!((metrics.per_channel_peak[0] - 1.0).abs() < 1e-4);
+        assert!((metrics.per_channel_crest_factor[0] - 3.0103).abs() < 0.01);
+        // Interleaved multi-channel: channel 1 at half amplitude is 6.02 dB lower.
+        let mut interleaved = vec![0.0f32; 2 * 48_000];
+        for (frame, &sample) in tone.iter().enumerate() {
+            interleaved[frame * 2] = sample;
+            interleaved[frame * 2 + 1] = 0.5 * sample;
+        }
+        let metrics = compute_metrics("stereo", &interleaved, 2, sample_rate);
+        let difference_db =
+            20.0 * (metrics.per_channel_rms[0] / metrics.per_channel_rms[1]).log10();
+        assert!((difference_db - 6.0206).abs() < 0.01);
+        assert_eq!(metrics.total_samples, interleaved.len());
+    }
+
+    /// A constant signal has crest factor 0 dB, a silent channel reports 0 dB
+    /// crest (guarded divide) and every exact-zero sample is counted.
+    #[test]
+    fn metrics_handle_constant_and_silent_channels() {
+        let mut buffer = vec![0.0f32; 2 * 100];
+        for frame in 0..100 {
+            buffer[frame * 2] = 0.25;
+        }
+        let metrics = compute_metrics("dc", &buffer, 2, 48_000.0);
+        assert!((metrics.per_channel_rms[0] - 0.25).abs() < 1e-6);
+        assert!(metrics.per_channel_crest_factor[0].abs() < 1e-5);
+        assert_eq!(metrics.per_channel_rms[1], 0.0);
+        assert_eq!(metrics.per_channel_crest_factor[1], 0.0);
+        assert_eq!(metrics.zero_sample_count, 100);
+    }
+
+    /// The octave-band spectrum puts a 1 kHz tone's energy in the 1 kHz band and
+    /// not in the neighbouring octaves (band index 3 of OCTAVE_BANDS).
+    #[test]
+    fn metrics_spectrum_peaks_in_the_tone_octave() {
+        let sample_rate = 48_000.0;
+        let tone = sine(1000.0, sample_rate, 1.0, 4800);
+        let metrics = compute_metrics("tone", &tone, 1, sample_rate);
+        let peak = metrics
+            .spectral_db
+            .iter()
+            .cloned()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(OCTAVE_BANDS[peak], 1000.0);
+        for (index, &level) in metrics.spectral_db.iter().enumerate() {
+            if index != peak {
+                assert!(level < metrics.spectral_db[peak] - 20.0, "band {index}");
+            }
+        }
+    }
+
+    /// `compute_delta` reports 20·log10 of the RMS ratio (0.5× → −6.02 dB).
+    #[test]
+    fn delta_reports_rms_ratio_in_decibels() {
+        let sample_rate = 48_000.0;
+        let tone = sine(1000.0, sample_rate, 1.0, 4800);
+        let quieter: Vec<f32> = tone.iter().map(|sample| 0.5 * sample).collect();
+        let before = compute_metrics("before", &tone, 1, sample_rate);
+        let after = compute_metrics("after", &quieter, 1, sample_rate);
+        let delta = compute_delta(&before, &after);
+        assert!(delta.contains("ch0: Δ=-6.02dB"), "{delta}");
     }
 }

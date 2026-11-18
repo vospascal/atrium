@@ -11,11 +11,14 @@
 //!
 //! ```text
 //! 1. Read dry B-format from main buffer
-//! 2. Read 4 delayed taps from independent ring buffers
+//! 2. Read 4 delayed taps (one per line) from the shared B-format ring
 //! 3. Per-tap: lowpass → Z-rotation (72° × line index)
-//! 4. Write dry input to each ring buffer (no feedback)
+//! 4. Write dry input to the ring (no feedback)
 //! 5. Output: dry + depth/√N × Σ(rotated taps)
 //! ```
+//!
+//! Every line delays the same dry signal, so one ring serves all four taps.
+//! It is sized at init from the longest tap and the sample rate.
 //!
 //! ## Why short delays?
 //!
@@ -24,15 +27,22 @@
 //! long delays create audible discrete echoes. Delays of 7–23ms stay below
 //! the echo threshold (~50ms) while providing effective spatial decorrelation.
 //!
-//! No-ops for <4 channel output (stereo bilateral mode doesn't use this).
+//! No-ops unless `ambisonic_bus` says the bus carries B-format (the bilateral
+//! bus is already decoded to ear signals by the renderer).
 
 use atrium_core::ambisonics::{foa_rotate_z, BFormat};
 
 use crate::pipeline::mix_stage::{MixContext, MixStage};
+use crate::pipeline::renderers::ambisonics::{ambisonic_bus, AmbisonicBus};
 
-/// Ring buffer size: 2048 samples ≈ 42.7 ms at 48 kHz (fits all taps).
-const RING_SIZE: usize = 2048;
-const RING_MASK: usize = RING_SIZE - 1;
+/// A B-format frame of silence: the ring's initial content and the tap sum's
+/// starting value.
+const SILENT_FRAME: BFormat = BFormat {
+    w: 0.0,
+    y: 0.0,
+    z: 0.0,
+    x: 0.0,
+};
 
 /// Number of decorrelation delay lines.
 const NUM_LINES: usize = 4;
@@ -89,11 +99,14 @@ impl OnePole {
 /// B-format decorrelation stage (MixStage).
 ///
 /// 4 independent delay lines with Z-rotation, no feedback.
-/// Operates on channels 0–3 of the output buffer. No-op for <4 channels.
+/// Operates on channels 0–3 of the output buffer. No-op on a bilateral bus.
 pub struct AmbiMultiDelayStage {
-    /// Ring buffers: [line][foa_channel][sample].
-    rings: Box<[[[f32; RING_SIZE]; 4]; NUM_LINES]>,
-    /// Shared write position.
+    /// Ring of dry B-format frames shared by all lines, sized at init to the
+    /// next power of two above the longest tap (empty until then).
+    ring: Vec<BFormat>,
+    /// Bitmask for wrapping ring positions: `ring.len() - 1`.
+    ring_mask: usize,
+    /// Ring write position.
     write_pos: usize,
     /// Per-line delay lengths in samples.
     delay_samples: [usize; NUM_LINES],
@@ -108,7 +121,8 @@ pub struct AmbiMultiDelayStage {
 impl AmbiMultiDelayStage {
     pub fn new() -> Self {
         Self {
-            rings: Box::new([[[0.0; RING_SIZE]; 4]; NUM_LINES]),
+            ring: Vec::new(),
+            ring_mask: 0,
             write_pos: 0,
             delay_samples: [0; NUM_LINES],
             lp: [[OnePole::new(); 4]; NUM_LINES],
@@ -126,11 +140,18 @@ impl Default for AmbiMultiDelayStage {
 
 impl MixStage for AmbiMultiDelayStage {
     fn init(&mut self, ctx: &MixContext) {
-        for (i, &ms) in DELAY_MS.iter().enumerate() {
-            self.delay_samples[i] = ((ms / 1000.0) * ctx.sample_rate) as usize;
-            if self.delay_samples[i] >= RING_SIZE {
-                self.delay_samples[i] = RING_SIZE - 1;
-            }
+        for (delay_samples, &milliseconds) in self.delay_samples.iter_mut().zip(DELAY_MS.iter()) {
+            *delay_samples = ((milliseconds / 1000.0) * ctx.sample_rate) as usize;
+        }
+
+        // The ring holds the longest tap at this sample rate: a power of two
+        // above it, so the read never aliases the slot written this frame.
+        let longest_delay = self.delay_samples.iter().copied().max().unwrap_or(0);
+        let ring_size = (longest_delay + 1).next_power_of_two();
+        if ring_size != self.ring.len() {
+            self.ring = vec![SILENT_FRAME; ring_size];
+            self.ring_mask = ring_size - 1;
+            self.write_pos = 0;
         }
 
         for line in 0..NUM_LINES {
@@ -144,7 +165,11 @@ impl MixStage for AmbiMultiDelayStage {
 
     #[allow(clippy::needless_range_loop)]
     fn process(&mut self, buffer: &mut [f32], ctx: &MixContext) {
-        if ctx.render_channels < 4 || ctx.channels < 4 || !self.initialized {
+        let carries_bformat = matches!(
+            ambisonic_bus(ctx.layout, ctx.render_channels, ctx.channels),
+            AmbisonicBus::BFormat(_)
+        );
+        if !carries_bformat || !self.initialized {
             return;
         }
 
@@ -163,21 +188,12 @@ impl MixStage for AmbiMultiDelayStage {
             };
 
             // Sum delayed, filtered, rotated taps.
-            let mut wet = BFormat {
-                w: 0.0,
-                y: 0.0,
-                z: 0.0,
-                x: 0.0,
-            };
+            let mut wet = SILENT_FRAME;
 
             for line in 0..NUM_LINES {
-                let read_pos = (self.write_pos + RING_SIZE - self.delay_samples[line]) & RING_MASK;
-                let mut tap = BFormat {
-                    w: self.rings[line][0][read_pos],
-                    y: self.rings[line][1][read_pos],
-                    z: self.rings[line][2][read_pos],
-                    x: self.rings[line][3][read_pos],
-                };
+                let read_pos =
+                    (self.write_pos + self.ring.len() - self.delay_samples[line]) & self.ring_mask;
+                let mut tap = self.ring[read_pos];
 
                 // Lowpass for anti-aliasing.
                 tap.w = self.lp[line][0].process(tap.w);
@@ -194,15 +210,9 @@ impl MixStage for AmbiMultiDelayStage {
                 wet.x += rotated.x;
             }
 
-            // Write dry input to ring buffers (no feedback).
-            for line in 0..NUM_LINES {
-                self.rings[line][0][self.write_pos] = dry.w;
-                self.rings[line][1][self.write_pos] = dry.y;
-                self.rings[line][2][self.write_pos] = dry.z;
-                self.rings[line][3][self.write_pos] = dry.x;
-            }
-
-            self.write_pos = (self.write_pos + 1) & RING_MASK;
+            // Write dry input to the ring (no feedback).
+            self.ring[self.write_pos] = dry;
+            self.write_pos = (self.write_pos + 1) & self.ring_mask;
 
             // Output: dry + scaled wet.
             buffer[base] = dry.w + wet.w * gain;
@@ -213,11 +223,7 @@ impl MixStage for AmbiMultiDelayStage {
     }
 
     fn reset(&mut self) {
-        for line in self.rings.iter_mut() {
-            for channel in line.iter_mut() {
-                channel.fill(0.0);
-            }
-        }
+        self.ring.fill(SILENT_FRAME);
         self.write_pos = 0;
         for line in 0..NUM_LINES {
             for ch in 0..4 {
@@ -235,15 +241,29 @@ impl MixStage for AmbiMultiDelayStage {
 mod tests {
     use super::*;
     use crate::audio::atmosphere::AtmosphericParams;
-    use crate::pipeline::path::WallMaterial;
+    use crate::audio::propagation::GroundProperties;
+    use crate::pipeline::environment::Environment;
+    use crate::pipeline::wall_material::WallMaterial;
     use atrium_core::listener::Listener;
-    use atrium_core::speaker::SpeakerLayout;
+    use atrium_core::speaker::{Speaker, SpeakerLayout};
     use atrium_core::types::Vec3;
 
-    const TEST_MATERIALS: [WallMaterial; 6] = [WallMaterial::HARD_WALL; 6];
-
+    /// A square of speakers on channels 0–3 (a B-format bus) for 4 channels,
+    /// a stereo pair (a bilateral bus) for 2.
     fn make_ctx(channels: usize) -> (SpeakerLayout, Listener) {
-        let layout = SpeakerLayout::new(&[], None, channels);
+        let corners = [
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 0.0),
+            Vec3::new(-1.0, -1.0, 0.0),
+        ];
+        let speakers: Vec<Speaker> = corners
+            .iter()
+            .take(channels)
+            .enumerate()
+            .map(|(channel, &position)| Speaker { position, channel })
+            .collect();
+        let layout = SpeakerLayout::new(&speakers, None, channels);
         let listener = Listener::new(Vec3::ZERO, 0.0);
         (layout, listener)
     }
@@ -254,9 +274,20 @@ mod tests {
         pressure_kpa: 101.325,
     };
 
+    fn test_environment() -> Environment {
+        Environment {
+            min: Vec3::new(-5.0, -5.0, -5.0),
+            max: Vec3::new(5.0, 5.0, 5.0),
+            wall_materials: [WallMaterial::HARD_WALL; 6],
+            ground: GroundProperties::hard(),
+            atmosphere: TEST_ATMOSPHERE,
+        }
+    }
+
     fn test_mix_context<'a>(
         layout: &'a SpeakerLayout,
         listener: &'a Listener,
+        environment: &'a Environment,
         channels: usize,
     ) -> MixContext<'a> {
         MixContext {
@@ -264,14 +295,11 @@ mod tests {
             layout,
             sample_rate: 48000.0,
             channels,
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
+            environment,
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &TEST_MATERIALS,
-            atmosphere: &TEST_ATMOSPHERE,
             measurement_mode: false,
         }
     }
@@ -280,7 +308,8 @@ mod tests {
     fn silent_input_silent_output() {
         let (layout, listener) = make_ctx(4);
         let mut stage = AmbiMultiDelayStage::new();
-        let ctx = test_mix_context(&layout, &listener, 4);
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
         stage.init(&ctx);
 
         let mut buffer = vec![0.0f32; 4 * 512];
@@ -297,7 +326,8 @@ mod tests {
     fn impulse_produces_delayed_taps() {
         let (layout, listener) = make_ctx(4);
         let mut stage = AmbiMultiDelayStage::new();
-        let ctx = test_mix_context(&layout, &listener, 4);
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
         stage.init(&ctx);
 
         // Write an impulse in W channel at frame 0.
@@ -330,7 +360,8 @@ mod tests {
     fn rotation_redistributes_energy() {
         let (layout, listener) = make_ctx(4);
         let mut stage = AmbiMultiDelayStage::new();
-        let ctx = test_mix_context(&layout, &listener, 4);
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
         stage.init(&ctx);
 
         // Impulse in X channel only (front direction).
@@ -358,7 +389,8 @@ mod tests {
     fn noop_for_stereo() {
         let (layout, listener) = make_ctx(2);
         let mut stage = AmbiMultiDelayStage::new();
-        let ctx = test_mix_context(&layout, &listener, 2);
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 2);
         stage.init(&ctx);
 
         let mut buffer = vec![0.5f32; 2 * 256];
@@ -373,7 +405,8 @@ mod tests {
     fn no_feedback_tail() {
         let (layout, listener) = make_ctx(4);
         let mut stage = AmbiMultiDelayStage::new();
-        let ctx = test_mix_context(&layout, &listener, 4);
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
         stage.init(&ctx);
 
         // Impulse in first buffer.
@@ -401,7 +434,8 @@ mod tests {
     fn decorrelation_adds_bounded_energy() {
         let (layout, listener) = make_ctx(4);
         let mut stage = AmbiMultiDelayStage::new();
-        let ctx = test_mix_context(&layout, &listener, 4);
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
         stage.init(&ctx);
 
         // Constant signal in W channel for 2048 frames.
@@ -428,5 +462,166 @@ mod tests {
             wet_energy < dry_energy * 3.0,
             "decorrelation energy should be bounded: wet={wet_energy}, dry={dry_energy}"
         );
+    }
+
+    // ── Audit 2026-11: hand-derived values ────────────────────────────────
+
+    fn context_at_rate<'a>(
+        layout: &'a SpeakerLayout,
+        listener: &'a Listener,
+        environment: &'a Environment,
+        sample_rate: f32,
+    ) -> MixContext<'a> {
+        MixContext {
+            sample_rate,
+            ..test_mix_context(layout, listener, environment, 4)
+        }
+    }
+
+    #[test]
+    fn delay_lengths_tap_gain_and_lowpass_coefficient_at_48k() {
+        // 7, 11, 17, 23 ms × 48 kHz = 336, 528, 816, 1104 samples.
+        // Tap gain = DEPTH/√4 = 0.3/2 = 0.15.
+        // One-pole pole p = exp(−2π·6000/48000) = exp(−π/4) = 0.455938.
+        let (layout, listener) = make_ctx(4);
+        let mut stage = AmbiMultiDelayStage::new();
+        let environment = test_environment();
+        stage.init(&context_at_rate(&layout, &listener, &environment, 48000.0));
+        assert_eq!(stage.delay_samples, [336, 528, 816, 1104]);
+        assert!((stage.tap_gain - 0.15).abs() < 1e-7);
+        for line in &stage.lp {
+            for filter in line {
+                assert!(
+                    (filter.coeff - 0.455938).abs() < 1e-6,
+                    "pole {}",
+                    filter.coeff
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_tap_of_x_impulse_has_hand_derived_rotated_value() {
+        // X-impulse at frame 0. At frame 336 line 0 reads it back:
+        //   lowpass first sample: (1 − p)·1 = 0.544062
+        //   rotate by 72°: X' = X·cos72° = 0.168124, Y' = −X·sin72° = −0.517434
+        //   × tap gain 0.15: X = 0.025219, Y = −0.077615, W = Z = 0.
+        // Frame 0 itself is the untouched dry impulse.
+        let (layout, listener) = make_ctx(4);
+        let mut stage = AmbiMultiDelayStage::new();
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
+        stage.init(&ctx);
+        let mut buffer = vec![0.0f32; 4 * 400];
+        buffer[3] = 1.0;
+        stage.process(&mut buffer, &ctx);
+
+        assert_eq!(&buffer[0..4], &[0.0, 0.0, 0.0, 1.0]);
+        for frame in 1..336 {
+            for channel in 0..4 {
+                assert_eq!(
+                    buffer[frame * 4 + channel],
+                    0.0,
+                    "frame {frame} before first tap"
+                );
+            }
+        }
+        let tap = &buffer[336 * 4..336 * 4 + 4];
+        assert!(tap[0].abs() < 1e-7, "W stays zero: {}", tap[0]);
+        assert!((tap[1] + 0.077615).abs() < 1e-5, "Y: {}", tap[1]);
+        assert!(tap[2].abs() < 1e-7, "Z stays zero: {}", tap[2]);
+        assert!((tap[3] - 0.025219).abs() < 1e-5, "X: {}", tap[3]);
+    }
+
+    #[test]
+    fn omni_input_stays_omni_and_white_noise_wet_energy_matches_derivation() {
+        // Z-rotation leaves W untouched, so a W-only input never leaks into
+        // Y/Z/X. For white noise the four taps are mutually uncorrelated and
+        // uncorrelated with the dry signal, so
+        //   wet/dry = 4 · 0.15² · (1 − p)/(1 + p) = 0.09 · 0.373680 = 0.033631
+        // where (1 − p)/(1 + p) is the one-pole's white-noise power gain.
+        // (The DEPTH doc's "9 % of dry" omits the 6 kHz lowpass, which removes
+        // 63 % of white-noise power: −14.7 dB rather than −10.5 dB.)
+        let (layout, listener) = make_ctx(4);
+        let mut stage = AmbiMultiDelayStage::new();
+        let environment = test_environment();
+        let ctx = test_mix_context(&layout, &listener, &environment, 4);
+        stage.init(&ctx);
+
+        let frames = 1 << 18;
+        let mut state: u32 = 0x1234_5678;
+        let mut dry = vec![0.0f32; frames];
+        for sample in dry.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *sample = (state >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+        }
+        let mut buffer = vec![0.0f32; frames * 4];
+        for (frame, sample) in dry.iter().enumerate() {
+            buffer[frame * 4] = *sample;
+        }
+        stage.process(&mut buffer, &ctx);
+
+        let mut dry_energy = 0.0f64;
+        let mut wet_energy = 0.0f64;
+        for frame in 2048..frames {
+            let wet = (buffer[frame * 4] - dry[frame]) as f64;
+            dry_energy += (dry[frame] as f64).powi(2);
+            wet_energy += wet * wet;
+            for channel in 1..4 {
+                assert!(buffer[frame * 4 + channel].abs() < 1e-6);
+            }
+        }
+        let ratio = wet_energy / dry_energy;
+        assert!(
+            (ratio - 0.033631).abs() < 0.0015,
+            "wet/dry energy {ratio}, expected 0.033631"
+        );
+    }
+
+    #[test]
+    fn delay_lengths_hold_at_96k() {
+        // 23 ms × 96 kHz = 2208 samples. A fixed 2048-sample ring used to clamp
+        // the last line to 2047 samples (21.32 ms), and at 192 kHz the
+        // 11/17/23 ms lines all clamped to 2047 and became one coherent tap.
+        // The ring is now sized from the longest tap: 4096 at 96 kHz.
+        let (layout, listener) = make_ctx(4);
+        let mut stage = AmbiMultiDelayStage::new();
+        let environment = test_environment();
+        stage.init(&context_at_rate(&layout, &listener, &environment, 96000.0));
+        assert_eq!(stage.delay_samples, [672, 1056, 1632, 2208]);
+        assert_eq!(stage.ring.len(), 4096);
+    }
+
+    /// End to end at 192 kHz: an X impulse must come back once per line at
+    /// 7/11/17/23 ms = 1344/2112/3264/4416 frames — four distinct taps, not
+    /// clamped to the ring — and nowhere in between.
+    #[test]
+    fn impulse_taps_land_at_their_delays_at_192k() {
+        let (layout, listener) = make_ctx(4);
+        let mut stage = AmbiMultiDelayStage::new();
+        let environment = test_environment();
+        let ctx = context_at_rate(&layout, &listener, &environment, 192000.0);
+        stage.init(&ctx);
+        assert_eq!(stage.delay_samples, [1344, 2112, 3264, 4416]);
+
+        let frames = 5000;
+        let mut buffer = vec![0.0f32; frames * 4];
+        buffer[3] = 1.0;
+        stage.process(&mut buffer, &ctx);
+
+        let onsets: Vec<usize> = (1..frames)
+            .filter(|&frame| {
+                let current: f32 = buffer[frame * 4..frame * 4 + 4]
+                    .iter()
+                    .map(|s| s.abs())
+                    .sum();
+                let previous: f32 = buffer[(frame - 1) * 4..frame * 4]
+                    .iter()
+                    .map(|s| s.abs())
+                    .sum();
+                current > 1e-6 && previous < current * 0.5
+            })
+            .collect();
+        assert_eq!(onsets, vec![1344, 2112, 3264, 4416]);
     }
 }
