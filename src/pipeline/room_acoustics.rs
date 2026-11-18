@@ -30,7 +30,7 @@
 //!   where T = temperature in °C. At 20°C, c ≈ 343.4 m/s.
 
 use crate::audio::atmosphere::{iso9613_alpha, AtmosphericParams};
-use crate::pipeline::path::WallMaterial;
+use crate::pipeline::wall_material::WallMaterial;
 use atrium_core::types::Vec3;
 
 /// Compute the volume and total surface area of an axis-aligned room.
@@ -116,18 +116,19 @@ pub fn max_image_source_distance(room_min: Vec3, room_max: Vec3) -> f32 {
     dx.max(dy).max(dz)
 }
 
-/// Compute delay buffer capacity (in samples) from max image-source distance.
+/// Delay buffer capacity (in samples) that holds `longest_delay_seconds` at
+/// `sample_rate`.
 ///
-/// Returns a power-of-2 value clamped to `[min_capacity, 65536]`.
-/// The +2 margin accounts for fractional delay interpolation.
-pub fn delay_buffer_capacity(
-    max_distance: f32,
-    speed_of_sound: f32,
+/// Takes the delay in seconds so that a pipeline can be described before the
+/// output device is opened and sized once the device's sample rate is known.
+/// Returns a power-of-2 value clamped to `[min_capacity, 65536]`; the +2
+/// margin accounts for fractional delay interpolation.
+pub fn delay_capacity_for_seconds(
+    longest_delay_seconds: f32,
     sample_rate: f32,
     min_capacity: usize,
 ) -> usize {
-    let max_delay_seconds = max_distance / speed_of_sound;
-    let needed = (max_delay_seconds * sample_rate) as usize + 2;
+    let needed = (longest_delay_seconds * sample_rate) as usize + 2;
     let needed = needed.max(min_capacity);
     // Round up to next power of 2.
     needed.next_power_of_two().min(65536)
@@ -294,33 +295,6 @@ pub fn reverb_send(distance: f32, critical_distance: f32) -> f32 {
 /// reverb would double it and read as echo).
 pub fn diffuse_reverb_scale(spread: f32) -> f32 {
     (1.0 - spread / 0.75).clamp(0.0, 1.0)
-}
-
-/// Compute per-delay-line feedback gains for the Ambisonics FDN
-/// from room geometry and wall reflectivity.
-///
-/// Combines Sabine (RT60 from room) and Jot (per-line gain from RT60).
-/// Each independent delay line gets its own gain: shorter delays → higher gains,
-/// longer delays → lower gains. In the FDN topology (independent lines coupled
-/// through a unitary Hadamard matrix), Jot's formula gives exact RT60 control:
-/// each line decays by exactly 60 dB after RT60 seconds.
-///
-/// Reference: Jot & Chaigne (AES 1991), Gardner (Eq. 3.42–3.43).
-///
-/// Returns `(per_line_gains, rt60)` so both can be logged/inspected.
-pub fn compute_feedback_gains(
-    room_min: Vec3,
-    room_max: Vec3,
-    wall_reflectivity: f32,
-    delay_times_seconds: &[f32],
-) -> (Vec<f32>, f32) {
-    let (volume, surface_area) = room_geometry(room_min, room_max);
-    let rt60 = sabine_rt60(volume, surface_area, wall_reflectivity);
-    let gains: Vec<f32> = delay_times_seconds
-        .iter()
-        .map(|&delay| jot_feedback_gain(delay, rt60))
-        .collect();
-    (gains, rt60)
 }
 
 #[cfg(test)]
@@ -533,53 +507,6 @@ mod tests {
     }
 
     // ── Combined computation ─────────────────────────────────────────
-
-    #[test]
-    fn compute_feedback_gains_10m_cube() {
-        let room_min = Vec3::new(-5.0, -5.0, -5.0);
-        let room_max = Vec3::new(5.0, 5.0, 5.0);
-        let delay_times = [0.100, 0.167, 0.233, 0.300];
-
-        let (gains, rt60) = compute_feedback_gains(room_min, room_max, 0.9, &delay_times);
-
-        // RT60 ≈ 2.68s
-        assert!(
-            (rt60 - 2.68).abs() < 0.02,
-            "RT60 should be ~2.68s, got {rt60}"
-        );
-        // Per-tap gains: shorter delays → higher gains.
-        assert!(gains[0] > gains[1], "100ms gain should exceed 167ms gain");
-        assert!(gains[1] > gains[2], "167ms gain should exceed 233ms gain");
-        assert!(gains[2] > gains[3], "233ms gain should exceed 300ms gain");
-        // Longest delay gain ≈ 0.46
-        assert!(
-            (gains[3] - 0.46).abs() < 0.02,
-            "300ms gain should be ~0.46, got {}",
-            gains[3]
-        );
-    }
-
-    #[test]
-    fn compute_feedback_gains_small_damped_room() {
-        let room_min = Vec3::ZERO;
-        let room_max = Vec3::new(4.0, 3.0, 2.5);
-        let delay_times = [0.100, 0.167, 0.233, 0.300];
-
-        let (gains, rt60) = compute_feedback_gains(room_min, room_max, 0.7, &delay_times);
-
-        // V=30, S=59, α=0.3, A=17.7, RT60=0.273s
-        assert!(
-            rt60 < 0.4,
-            "small damped room RT60 should be short, got {rt60}"
-        );
-        // All gains should be very low for a short RT60.
-        for (i, &gain) in gains.iter().enumerate() {
-            assert!(
-                gain < 0.2,
-                "tap {i} should have low feedback in small damped room, got {gain}"
-            );
-        }
-    }
 
     /// Verify that Rudrich's original 0.759 constant corresponds to
     /// a specific room configuration (for documentation, not enforcement).
@@ -1045,29 +972,118 @@ mod tests {
         );
     }
 
+    // ── Per-band Sabine with materials and air (hand-computed) ──────────
+
+    /// Z is up: wall pairs are [−X, +X] = Ly·Lz, [−Y, +Y] = Lx·Lz and
+    /// [−Z floor, +Z ceiling] = Lx·Ly. For 6 × 4 × 3 m: [12, 12, 18, 18, 24, 24],
+    /// summing to the 108 m² total that `room_geometry` reports.
     #[test]
-    fn delay_buffer_capacity_large_room() {
-        // 50×50×10m room: max distance ≈ 112m → ~327ms at 343 m/s → ~15696 samples at 48kHz
-        // Next power of 2: 16384
+    fn wall_surface_areas_follow_wall_index_convention() {
         let room_min = Vec3::ZERO;
-        let room_max = Vec3::new(50.0, 50.0, 10.0);
-        let max_dist = max_image_source_distance(room_min, room_max);
-        let cap = delay_buffer_capacity(max_dist, 343.42, 48000.0, 8192);
-        assert!(
-            cap >= 16384,
-            "50×50×10m room should need ≥16384 samples, got {cap}"
-        );
-        // Should be power of 2
-        assert!(cap.is_power_of_two(), "capacity {cap} should be power of 2");
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let areas = wall_surface_areas(room_min, room_max);
+        assert_eq!(areas, [12.0, 12.0, 18.0, 18.0, 24.0, 24.0]);
+        let (_, surface_area) = room_geometry(room_min, room_max);
+        assert!((areas.iter().sum::<f32>() - surface_area).abs() < 1e-4);
     }
 
+    /// Air term of the absorption area, 4·m·V, with m the ENERGY attenuation
+    /// coefficient in 1/m: m = α_dB / (10·log10 e) = α_dB / 4.343.
+    fn air_absorption_area(frequency_hz: f32, volume: f32) -> f32 {
+        let atmosphere = AtmosphericParams::default();
+        4.0 * iso9613_alpha(frequency_hz, &atmosphere) / (10.0 * std::f32::consts::E.log10())
+            * volume
+    }
+
+    /// RT60(f) = 0.161·V / (Σ Sᵢ·αᵢ(f) + 4·m(f)·V) for a 6 × 4 × 3 m hard room
+    /// (V = 72 m³, S = 108 m²) at 20 °C / 50 % RH:
+    ///   500 Hz: surfaces 108 × 0.03 = 3.24 m², air ≈ 0.18 m² → RT60 ≈ 3.39 s
+    ///   4 kHz:  surfaces 108 × 0.05 = 5.40 m², air ≈ 1.97 m² → RT60 ≈ 1.57 s
+    /// Air absorption alone shortens the 4 kHz decay by 27 % (2.15 → 1.57 s).
     #[test]
-    fn delay_buffer_capacity_small_room_uses_minimum() {
-        // 3m cube: max distance ≈ 7.35m → ~21ms → ~1024 samples. Below 8192 minimum.
-        let room_min = Vec3::ZERO;
-        let room_max = Vec3::new(3.0, 3.0, 3.0);
-        let max_dist = max_image_source_distance(room_min, room_max);
-        let cap = delay_buffer_capacity(max_dist, 343.42, 48000.0, 8192);
-        assert_eq!(cap, 8192, "small room should use minimum capacity");
+    fn sabine_rt60_at_band_hand_computed_hard_room() {
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, _) = room_geometry(Vec3::ZERO, room_max);
+        let areas = wall_surface_areas(Vec3::ZERO, room_max);
+        let materials = [WallMaterial::HARD_WALL; 6];
+        let atmosphere = AtmosphericParams::default();
+
+        for (band, frequency_hz, surface_absorption, hand_rt60) in
+            [(2, 500.0, 3.24f32, 3.39f32), (5, 4000.0, 5.40, 1.57)]
+        {
+            let rt60 = sabine_rt60_at_band(volume, &areas, &materials, &atmosphere, band);
+            let composed =
+                0.161 * volume / (surface_absorption + air_absorption_area(frequency_hz, volume));
+            assert!(
+                (rt60 - composed).abs() < 1e-3,
+                "{frequency_hz} Hz: RT60 {rt60} should equal 0.161·V/(ΣSα + 4mV) = {composed}"
+            );
+            assert!(
+                (rt60 - hand_rt60).abs() < 0.05 * hand_rt60,
+                "{frequency_hz} Hz: hand-computed RT60 ≈ {hand_rt60} s, got {rt60} s"
+            );
+        }
+    }
+
+    /// Each wall's absorption is weighted by its own area. Swapping one
+    /// surface from hard (α500 = 0.03) to carpet (α500 = 0.08) must add exactly
+    /// S·Δα to the absorption area: the 24 m² floor adds 1.20 m², an 18 m²
+    /// −Y wall adds 0.90 m². The air term cancels in the difference.
+    #[test]
+    fn sabine_rt60_at_band_weights_each_wall_by_its_area() {
+        let room_max = Vec3::new(6.0, 4.0, 3.0);
+        let (volume, _) = room_geometry(Vec3::ZERO, room_max);
+        let areas = wall_surface_areas(Vec3::ZERO, room_max);
+        let atmosphere = AtmosphericParams::default();
+        let absorption_area = |materials: &[WallMaterial; 6]| {
+            0.161 * volume / sabine_rt60_at_band(volume, &areas, materials, &atmosphere, 2)
+        };
+        let hard = [WallMaterial::HARD_WALL; 6];
+        let baseline = absorption_area(&hard);
+
+        for (wall_index, expected_added_area) in [(4, 1.20f32), (2, 0.90)] {
+            let mut materials = hard.clone();
+            materials[wall_index] = WallMaterial::carpet();
+            let added = absorption_area(&materials) - baseline;
+            assert!(
+                (added - expected_added_area).abs() < 1e-3,
+                "carpet on wall {wall_index} should add {expected_added_area} m², added {added}"
+            );
+        }
+    }
+
+    /// Sabine's constant is 24·ln(10)/c = 55.26/c; at the engine's 20 °C speed
+    /// of sound (343.42 m/s) that is 0.16092 — the hard-coded 0.161 agrees to
+    /// 0.05 %. (It does not follow temperature: at 0 °C the true value is 0.1668.)
+    #[test]
+    fn sabine_constant_matches_speed_of_sound_at_20c() {
+        let speed_of_sound = crate::audio::atmosphere::speed_of_sound(20.0);
+        let sabine_constant = 24.0 * std::f32::consts::LN_10 / speed_of_sound;
+        assert!(
+            (sabine_constant - 0.161).abs() < 0.001 * 0.161,
+            "24·ln10/c = {sabine_constant}, expected 0.161"
+        );
+    }
+
+    /// Critical distance is where direct energy Q/(4πr²) equals the diffuse
+    /// field's 4/A: r_c = √(Q·A/(16π)), with A = 0.161·V/T giving
+    /// 0.0566·√(Q·V/T). The 0.057 shorthand is within 1 %. For the hard
+    /// 6 × 4 × 3 m room at 500 Hz (A = 3.42 m²): r_c = 0.261 m, shorthand 0.263 m.
+    #[test]
+    fn critical_distance_matches_diffuse_field_derivation() {
+        let exact_constant = (0.161f32 / (16.0 * std::f32::consts::PI)).sqrt();
+        assert!((exact_constant - 0.0566).abs() < 1e-4);
+        assert!((0.057 - exact_constant).abs() / exact_constant < 0.01);
+
+        let volume = 72.0;
+        let absorption_area = 3.4209f32;
+        let rt60 = 0.161 * volume / absorption_area;
+        let from_energy_balance = (absorption_area / (16.0 * std::f32::consts::PI)).sqrt();
+        let shorthand = critical_distance(volume, rt60, 1.0);
+        assert!((from_energy_balance - 0.261).abs() < 0.001);
+        assert!(
+            (shorthand - from_energy_balance).abs() / from_energy_balance < 0.01,
+            "shorthand d_c {shorthand} vs energy-balance {from_energy_balance}"
+        );
     }
 }

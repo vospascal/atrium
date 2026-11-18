@@ -7,15 +7,40 @@
 //! - **WorldLockedRenderer**: per-speaker propagation + gain ramp (WorldLocked)
 //! - **HrtfRenderer**: per-path HRTF convolution to stereo headphones (Hrtf)
 //! - **DbapRenderer**: per-path DBAP gain ramp × sample per channel (DBAP)
-//! - **AmbisonicsRenderer**: per-path FOA encode + decode gain ramp (Ambisonics)
+//! - **AmbisonicsRenderer**: per-path FOA encode to a B-format bus, or inline
+//!   bilateral decode (Ambisonics)
 //!
 //! The renderer manages per-source state (gain ramps, HRTF convolvers,
 //! per-speaker propagation, etc.).
 
+use atrium_core::directivity::DirectivityPattern;
+use atrium_core::listener::Listener;
 use atrium_core::speaker::SpeakerLayout;
+use atrium_core::types::Vec3;
 
+use super::environment::Environment;
 use super::path::{PathEffectChain, PathSet};
-use super::SourceContext;
+use super::renderers::field::FieldEncoding;
+use crate::audio::distance::DistanceModel;
+
+/// Per-source context for rendering. Borrowed from AudioScene per render call.
+pub struct SourceContext<'a> {
+    pub listener: &'a Listener,
+    pub source_pos: Vec3,
+    pub source_orientation: Vec3,
+    pub source_directivity: &'a DirectivityPattern,
+    pub source_spread: f32,
+    pub source_ref_distance: f32,
+    /// The point propagation paths were resolved towards: the listener for
+    /// listener-relative modes, a fixed point of the room for the others.
+    pub path_target: Vec3,
+    pub environment: &'a Environment,
+    pub sample_rate: f32,
+    pub distance_model: &'a DistanceModel,
+    pub layout: &'a SpeakerLayout,
+    /// Reverb send level (0.0–1.0), computed from critical distance.
+    pub reverb_send: f32,
+}
 
 /// Interleaved output buffer with format metadata.
 pub struct OutputBuffer<'a> {
@@ -55,6 +80,21 @@ pub trait Renderer: Send {
 
     /// Human-readable name for profiling/debugging.
     fn name(&self) -> &str;
+
+    /// How environmental fields must be written so the post-mix stages read
+    /// them as this renderer's bus does. Speaker channels unless the renderer
+    /// leaves an encoded bus for a later decode stage.
+    fn field_encoding(&self, _layout: &SpeakerLayout, _device_channels: usize) -> FieldEncoding {
+        FieldEncoding::Speaker
+    }
+
+    /// The receiver position this renderer's propagation paths are resolved
+    /// towards. Listener-relative renderers hear the room from the listener;
+    /// a renderer that feeds speakers from the scene alone overrides this with
+    /// a point that does not move with the listener.
+    fn path_target(&self, listener: &Listener, _layout: &SpeakerLayout) -> Vec3 {
+        listener.position
+    }
 
     /// Resize internal state when sources, layout, or sample rate change.
     ///

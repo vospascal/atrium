@@ -8,7 +8,7 @@
 //! attack/release dynamics (fast attack for newly-masked sources, slow release
 //! with hold for unmasking).
 
-use crate::audio::masking::{SpreadingFunction, MASKING_OFFSET};
+use crate::audio::masking::{masked_threshold, SpreadingFunction};
 use crate::audio::spectral_profile::BARK_BANDS;
 
 /// Smoothing time constants (at 48kHz, 256-sample blocks = 187.5 blocks/sec).
@@ -55,8 +55,6 @@ pub struct PerceptualLayer {
     scores: Vec<f32>,
     /// Hold counters for release smoothing.
     hold_counters: Vec<u32>,
-    /// Whether gain shaping is enabled (default: false).
-    pub gain_shaping_enabled: bool,
     /// Scratch buffer: per-source received level in dB.
     received_db: Vec<f32>,
     /// Scratch buffer: per-source per-band levels in dB.
@@ -71,7 +69,6 @@ impl PerceptualLayer {
             spreading: SpreadingFunction::new(),
             scores: vec![1.0; source_count],
             hold_counters: vec![0; source_count],
-            gain_shaping_enabled: false,
             received_db: vec![f32::NEG_INFINITY; source_count],
             band_db: vec![[f32::NEG_INFINITY; BARK_BANDS]; source_count],
             active_mask: vec![false; source_count],
@@ -91,16 +88,6 @@ impl PerceptualLayer {
     /// Get the current smoothed perceptual scores.
     pub fn scores(&self) -> &[f32] {
         &self.scores
-    }
-
-    /// Compute optional gain modifier from perceptual score.
-    /// Only meaningful when `gain_shaping_enabled` is true.
-    /// Maps score [0, 1] to gain [0.85, 1.15].
-    pub fn gain_modifier(&self, source_idx: usize) -> f32 {
-        if !self.gain_shaping_enabled || source_idx >= self.scores.len() {
-            return 1.0;
-        }
-        0.85 + 0.30 * self.scores[source_idx]
     }
 
     /// Update perceptual scores for all sources.
@@ -149,39 +136,30 @@ impl PerceptualLayer {
 
             #[allow(clippy::needless_range_loop)]
             for b in 0..BARK_BANDS {
-                // Compute masked threshold from all other sources.
-                let mut mask_linear = 0.0f32;
-                let mut max_other_level = f32::NEG_INFINITY;
-
-                for t in 0..source_count {
-                    if t == s || !self.active_mask[t] {
-                        continue;
-                    }
-                    // Spreading contribution from source t to band b.
-                    for (b2, &level) in self.band_db[t].iter().enumerate() {
-                        let dz = b as i32 - b2 as i32;
-                        let spread = self.spreading.spread_db(dz);
-                        let contribution_db = level + spread - MASKING_OFFSET;
-                        mask_linear += 10.0_f32.powf(contribution_db / 10.0);
-                    }
-                    // Track max other level in this band for uniqueness.
-                    if self.band_db[t][b] > max_other_level {
-                        max_other_level = self.band_db[t][b];
-                    }
-                }
-
-                let mask_db = if mask_linear > 0.0 {
-                    10.0 * mask_linear.log10()
-                } else {
-                    f32::NEG_INFINITY
-                };
-
                 let source_level = self.band_db[s][b];
 
                 // Skip bands where this source has no energy.
                 if source_level <= f32::NEG_INFINITY {
                     continue;
                 }
+
+                // Every other active source is a masker (inactive ones were
+                // cleared to −∞ above and would contribute nothing anyway).
+                let active_mask = &self.active_mask;
+                let other_band_levels = self
+                    .band_db
+                    .iter()
+                    .enumerate()
+                    .filter(|&(other, _)| other != s && active_mask[other])
+                    .map(|(_, bands)| bands);
+
+                // Masked threshold from all other active sources.
+                let mask_db = masked_threshold(b, other_band_levels.clone(), &self.spreading);
+
+                // Max other level in this band, for uniqueness.
+                let max_other_level = other_band_levels
+                    .map(|bands| bands[b])
+                    .fold(f32::NEG_INFINITY, f32::max);
 
                 // Audibility: sigmoid of excess above masking threshold.
                 let audibility = if mask_db <= f32::NEG_INFINITY {
@@ -466,28 +444,100 @@ mod tests {
         );
     }
 
+    // ── Hand-derived pins (audit 2026-11) ───────────────────────────────
+
+    /// One-pole block-rate smoothing: τ = −T_block / ln(1 − α), with
+    /// T_block = 256 / 48000 = 5.333 ms (the block size the constants assume).
+    /// Attack α 0.30 → τ = 14.95 ms ("~15 ms"); release α 0.035 → 149.7 ms
+    /// ("~150 ms"); hold 10 blocks = 53.3 ms ("~50 ms").
     #[test]
-    fn gain_modifier_default_is_unity() {
-        let layer = PerceptualLayer::new(1);
-        assert_eq!(layer.gain_modifier(0), 1.0, "gain shaping off = unity");
+    fn smoothing_constants_match_documented_time_constants() {
+        let block_seconds = 256.0_f32 / 48_000.0;
+        let attack_seconds = -block_seconds / (1.0 - DEFAULT_ATTACK_ALPHA).ln();
+        let release_seconds = -block_seconds / (1.0 - DEFAULT_RELEASE_ALPHA).ln();
+        let hold_seconds = DEFAULT_HOLD_BLOCKS as f32 * block_seconds;
+        assert!(
+            (attack_seconds * 1000.0 - 14.95).abs() < 0.05,
+            "{attack_seconds}"
+        );
+        assert!(
+            (release_seconds * 1000.0 - 149.7).abs() < 0.2,
+            "{release_seconds}"
+        );
+        assert!(
+            (hold_seconds * 1000.0 - 53.33).abs() < 0.05,
+            "{hold_seconds}"
+        );
     }
 
+    /// Attack is a plain one-pole: from 1.0 toward 0 the score is 0.7ⁿ after n
+    /// blocks (0.7, 0.49, 0.343). Release holds for exactly 10 blocks, then
+    /// moves 3.5 % of the gap on block 11. A lone source's target is
+    /// 1 · (0.7 + 0.3 · 1/(1 + e^(−20/6))) = 0.989666, so 0 → 0.0346383.
     #[test]
-    fn gain_modifier_bounded_when_enabled() {
-        let mut layer = PerceptualLayer::new(2);
-        layer.gain_shaping_enabled = true;
-        // Score 0 -> gain 0.85, score 1 -> gain 1.15.
+    fn attack_and_hold_release_follow_exact_block_recurrence() {
+        let mut layer = PerceptualLayer::new(1);
+        let inactive = [SourcePerceptualState {
+            received_amplitude: 1.0,
+            spectral_bands: flat_profile(),
+            active: false,
+        }];
+        for expected in [0.7_f32, 0.49, 0.343] {
+            layer.update(&inactive);
+            assert!((layer.scores()[0] - expected).abs() < 1e-6);
+        }
+
         layer.scores[0] = 0.0;
-        layer.scores[1] = 1.0;
-        let g0 = layer.gain_modifier(0);
-        let g1 = layer.gain_modifier(1);
+        layer.hold_counters[0] = 0;
+        let alone = [source(1.0, flat_profile())];
+        for _ in 0..10 {
+            layer.update(&alone);
+            assert_eq!(layer.scores()[0], 0.0, "hold must keep the score");
+        }
+        layer.update(&alone);
         assert!(
-            (g0 - 0.85).abs() < 0.01,
-            "min gain should be ~0.85, got {g0}"
+            (layer.scores()[0] - 0.034_638_3).abs() < 1e-6,
+            "{}",
+            layer.scores()[0]
         );
-        assert!(
-            (g1 - 1.15).abs() < 0.01,
-            "max gain should be ~1.15, got {g1}"
-        );
+    }
+
+    /// Two equal sources sharing only Bark band 10, both at 0 dB:
+    /// the threshold comes from `masking::masked_threshold`. Every other band
+    /// of both profiles is −∞, so the 27/24 dB-per-Bark slopes never enter and
+    /// only spread(0) = 0 dB contributes (the spreading fix left this pin as is):
+    /// threshold = 0 + spread(0) − 6 = −6 dB → excess 6 dB →
+    /// audibility = 1/(1 + e^(−0.6)) = 0.645656; uniqueness 0 dB → salience 0.5;
+    /// score = 0.645656 · (0.7 + 0.3·0.5) = 0.548808.
+    #[test]
+    fn equal_single_band_sources_settle_at_hand_derived_score() {
+        let mut layer = PerceptualLayer::new(2);
+        let mut profile = [f32::NEG_INFINITY; BARK_BANDS];
+        profile[10] = 0.0;
+        let sources = [source(1.0, profile), source(1.0, profile)];
+        for _ in 0..200 {
+            layer.update(&sources);
+        }
+        for score in layer.scores() {
+            assert!((score - 0.548_808).abs() < 1e-4, "score {score}");
+        }
+    }
+
+    /// Received level is 20·log10(amplitude): a source 20 dB below an
+    /// identical single-band masker (band 10 only, so again only spread(0)
+    /// enters the threshold: 0 − 6 = −6 dB) has excess = −20 + 6 = −14 dB →
+    /// audibility 1/(1 + e^1.4) = 0.197816; uniqueness −20 dB →
+    /// salience 1/(1 + e^(20/6)) = 0.034445; score = 0.197816 · 0.710334 = 0.140515.
+    #[test]
+    fn quieter_source_score_follows_level_difference() {
+        let mut layer = PerceptualLayer::new(2);
+        let mut profile = [f32::NEG_INFINITY; BARK_BANDS];
+        profile[10] = 0.0;
+        let sources = [source(0.1, profile), source(1.0, profile)];
+        for _ in 0..200 {
+            layer.update(&sources);
+        }
+        let score = layer.scores()[0];
+        assert!((score - 0.140_515).abs() < 1e-4, "score {score}");
     }
 }

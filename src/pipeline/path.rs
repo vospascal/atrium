@@ -1,7 +1,7 @@
 //! Path-based propagation types.
 //!
 //! A `PathResolver` computes how sound travels from source to target (direct,
-//! reflected, diffracted). Each propagation path is a `PathContribution` with
+//! reflected). Each propagation path is a `PathContribution` with
 //! its own direction, distance, delay, and gain. `PathEffect`s process audio
 //! per-path (air absorption, propagation delay, distance attenuation).
 //!
@@ -10,11 +10,10 @@
 
 use atrium_core::types::Vec3;
 
-use crate::audio::atmosphere::AtmosphericParams;
-use crate::audio::propagation::{Barrier, GroundProperties};
+use crate::pipeline::environment::Environment;
 
-/// Maximum paths per source (1 direct + 6 reflections + up to 5 diffraction).
-pub const MAX_PATHS: usize = 12;
+/// Maximum paths per source (1 direct + 6 first-order reflections).
+pub const MAX_PATHS: usize = 7;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Path data
@@ -27,8 +26,6 @@ pub enum PathKind {
     Direct,
     /// First-order wall reflection (image-source method).
     Reflection,
-    /// Edge diffraction (future: Biot-Tolstoy-Medwin).
-    Diffraction,
 }
 
 /// A single propagation path from source to target.
@@ -49,7 +46,7 @@ pub struct PathContribution {
     /// Geometric gain factor (e.g., wall reflectivity for reflections, 1.0 for direct).
     pub gain: f32,
     /// Which wall this reflection bounced off (0-5 for the 6 room faces).
-    /// `None` for direct paths and diffraction.
+    /// `None` for direct paths.
     pub wall_index: Option<u8>,
 }
 
@@ -113,10 +110,7 @@ impl PathSet {
 pub struct ResolveContext<'a> {
     pub source_pos: Vec3,
     pub target_pos: Vec3,
-    pub environment_min: Vec3,
-    pub environment_max: Vec3,
-    pub barriers: &'a [Barrier],
-    pub atmosphere: &'a AtmosphericParams,
+    pub environment: &'a Environment,
 }
 
 /// Resolves propagation paths from source to target.
@@ -124,123 +118,10 @@ pub struct ResolveContext<'a> {
 /// Implementations:
 /// - `DirectPathResolver`: 1 direct path (Phase 1.2)
 /// - `ImageSourceResolver`: 1 direct + up to 6 reflections (Phase 1.5)
-/// - Future: ray-traced resolver, diffraction resolver
+/// - Future: ray-traced resolver
 pub trait PathResolver: Send {
     /// Compute propagation paths and write them into `out`.
     fn resolve(&self, ctx: &ResolveContext<'_>, out: &mut PathSet);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Wall materials
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Surface absorption coefficients at 6 octave bands (125, 250, 500, 1k, 2k, 4k Hz).
-///
-/// Values from Yeoward 2021 / ISO 11654. α ranges from 0.0 (fully reflective)
-/// to 1.0 (fully absorptive).
-#[derive(Clone, Debug)]
-pub struct WallMaterial {
-    pub name: &'static str,
-    /// Absorption coefficients at [125, 250, 500, 1000, 2000, 4000] Hz.
-    pub alpha: [f32; 6],
-}
-
-impl WallMaterial {
-    /// Hard wall as a const for use in static arrays and test fixtures.
-    pub const HARD_WALL: WallMaterial = WallMaterial {
-        name: "hard_wall",
-        alpha: [0.02, 0.02, 0.03, 0.04, 0.05, 0.05],
-    };
-
-    /// Hard wall (concrete/plaster). Yeoward 2021 Table 1.
-    pub fn hard_wall() -> Self {
-        Self {
-            name: "hard_wall",
-            alpha: [0.02, 0.02, 0.03, 0.04, 0.05, 0.05],
-        }
-    }
-
-    /// Carpet on concrete. Yeoward 2021 Table 1.
-    pub fn carpet() -> Self {
-        Self {
-            name: "carpet",
-            alpha: [0.02, 0.04, 0.08, 0.20, 0.35, 0.40],
-        }
-    }
-
-    /// Acoustic ceiling tile. Yeoward 2021 Table 1.
-    pub fn ceiling_tile() -> Self {
-        Self {
-            name: "ceiling_tile",
-            alpha: [0.20, 0.40, 0.70, 0.80, 0.60, 0.40],
-        }
-    }
-
-    /// Stone surface (cathedral, castle). Very low absorption, high reflection.
-    pub fn stone() -> Self {
-        Self {
-            name: "stone",
-            alpha: [0.02, 0.02, 0.03, 0.03, 0.04, 0.05],
-        }
-    }
-
-    /// Wood paneling. Moderate absorption.
-    pub fn wood() -> Self {
-        Self {
-            name: "wood",
-            alpha: [0.15, 0.11, 0.10, 0.07, 0.06, 0.07],
-        }
-    }
-
-    /// Glass surface. Low mid-frequency absorption, moderate at high frequencies.
-    pub fn glass() -> Self {
-        Self {
-            name: "glass",
-            alpha: [0.35, 0.25, 0.18, 0.12, 0.07, 0.04],
-        }
-    }
-
-    /// Grass / soft outdoor ground. High absorption.
-    pub fn grass() -> Self {
-        Self {
-            name: "grass",
-            alpha: [0.10, 0.20, 0.40, 0.55, 0.60, 0.60],
-        }
-    }
-
-    /// Fully absorptive surface (outdoor / open air). No reflections.
-    pub fn open() -> Self {
-        Self {
-            name: "open",
-            alpha: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        }
-    }
-
-    /// Broadband reflectivity (energy domain, 0.0–1.0).
-    ///
-    /// Computed as `1.0 - α_broadband`, where α_broadband is the energy-weighted
-    /// average of the mid bands (250 Hz–4 kHz, indices 1–5). The 125 Hz band is
-    /// excluded because it contributes little to perceived broadband reflection level.
-    pub fn broadband_reflectivity(&self) -> f32 {
-        // Energy weights for bands 250, 500, 1k, 2k, 4k Hz.
-        // Flat weighting across these perceptually dominant bands.
-        let alpha_broadband =
-            (self.alpha[1] + self.alpha[2] + self.alpha[3] + self.alpha[4] + self.alpha[5]) / 5.0;
-        (1.0 - alpha_broadband).clamp(0.0, 1.0)
-    }
-
-    /// Broadband amplitude reflection gain: √(broadband_reflectivity).
-    ///
-    /// Used by `ImageSourceResolver` for per-wall reflection energy.
-    pub fn broadband_reflection_gain(&self) -> f32 {
-        self.broadband_reflectivity().sqrt()
-    }
-}
-
-impl Default for WallMaterial {
-    fn default() -> Self {
-        Self::hard_wall()
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,16 +131,14 @@ impl Default for WallMaterial {
 /// Context passed to a PathEffect for buffer-rate updates.
 pub struct PathEffectContext<'a> {
     pub path: &'a PathContribution,
-    pub atmosphere: &'a AtmosphericParams,
-    pub ground: &'a GroundProperties,
+    /// The room: its air, ground and the materials of its faces (indexed by
+    /// `path.wall_index`).
+    pub environment: &'a Environment,
     pub sample_rate: f32,
     /// Source position (for geometry-dependent effects like ground reflection).
     pub source_pos: atrium_core::types::Vec3,
     /// Target/listener position.
     pub target_pos: atrium_core::types::Vec3,
-    /// Wall materials for the 6 room faces (indexed by `path.wall_index`).
-    /// Order: -X, +X, -Y, +Y, -Z (floor), +Z (ceiling).
-    pub wall_materials: &'a [WallMaterial; 6],
 }
 
 /// Per-path audio effect (air absorption, propagation delay, etc.).

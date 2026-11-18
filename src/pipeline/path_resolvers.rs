@@ -2,14 +2,10 @@
 //!
 //! - `DirectPathResolver`: always returns 1 direct line-of-sight path.
 //! - `ImageSourceResolver`: 1 direct + up to 6 first-order wall reflections.
-//! - `BarrierDiffractionResolver`: decorator that adds diffraction paths over barriers.
 
 use atrium_core::types::Vec3;
 
-use crate::audio::propagation::{barrier_attenuation_gain, BarrierGeometry};
-use crate::pipeline::path::{
-    PathContribution, PathKind, PathResolver, PathSet, ResolveContext, WallMaterial,
-};
+use crate::pipeline::path::{PathContribution, PathKind, PathResolver, PathSet, ResolveContext};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DirectPathResolver
@@ -57,30 +53,7 @@ impl PathResolver for DirectPathResolver {
 ///
 /// Reflections are skipped when the image distance is shorter than the direct
 /// path (source between wall and target) or when the delay would be zero.
-pub struct ImageSourceResolver {
-    /// Per-wall broadband amplitude reflection gains [−X, +X, −Y, +Y, −Z, +Z].
-    wall_gains: [f32; 6],
-}
-
-impl ImageSourceResolver {
-    /// Create from per-wall materials. Each wall's broadband reflection gain is
-    /// derived from mid-band absorption coefficients (250 Hz–4 kHz).
-    pub fn from_materials(materials: &[WallMaterial; 6]) -> Self {
-        let mut wall_gains = [0.0f32; 6];
-        for (i, mat) in materials.iter().enumerate() {
-            wall_gains[i] = mat.broadband_reflection_gain();
-        }
-        Self { wall_gains }
-    }
-
-    /// Create with uniform reflectivity for all walls (legacy/test convenience).
-    pub fn new(wall_reflectivity: f32) -> Self {
-        let gain = wall_reflectivity.sqrt();
-        Self {
-            wall_gains: [gain; 6],
-        }
-    }
-}
+pub struct ImageSourceResolver;
 
 impl PathResolver for ImageSourceResolver {
     fn resolve(&self, ctx: &ResolveContext<'_>, out: &mut PathSet) {
@@ -102,16 +75,8 @@ impl PathResolver for ImageSourceResolver {
             wall_index: None,
         });
 
-        // 6 image sources: mirror source across each wall of the rectangular room
-        let src = ctx.source_pos;
-        let images = [
-            Vec3::new(2.0 * ctx.environment_min.x - src.x, src.y, src.z), // -X wall
-            Vec3::new(2.0 * ctx.environment_max.x - src.x, src.y, src.z), // +X wall
-            Vec3::new(src.x, 2.0 * ctx.environment_min.y - src.y, src.z), // -Y wall
-            Vec3::new(src.x, 2.0 * ctx.environment_max.y - src.y, src.z), // +Y wall
-            Vec3::new(src.x, src.y, 2.0 * ctx.environment_min.z - src.z), // -Z wall (floor)
-            Vec3::new(src.x, src.y, 2.0 * ctx.environment_max.z - src.z), // +Z wall (ceiling)
-        ];
+        // 6 image sources: the source mirrored across each face of the room.
+        let images = ctx.environment.image_sources(ctx.source_pos);
 
         for (wall_idx, image) in images.iter().enumerate() {
             let image_diff = *image - ctx.target_pos;
@@ -122,16 +87,17 @@ impl PathResolver for ImageSourceResolver {
                 continue;
             }
 
-            let delay_seconds = (image_dist - direct_dist) / ctx.atmosphere.speed_of_sound();
+            let delay_seconds =
+                (image_dist - direct_dist) / ctx.environment.atmosphere.speed_of_sound();
             if delay_seconds < 1e-6 {
                 continue;
             }
 
             let direction = image_diff * (1.0 / image_dist);
-            // Per-wall broadband amplitude reflection gain (pre-computed from materials).
+            // Per-wall broadband amplitude reflection gain, from the face's material.
             // Distance attenuation is applied by the renderer using the same
             // distance model as the direct path, keeping the gain staging consistent.
-            let gain = self.wall_gains[wall_idx];
+            let gain = ctx.environment.wall_reflection_gain(wall_idx);
 
             out.push(PathContribution {
                 kind: PathKind::Reflection,
@@ -145,86 +111,12 @@ impl PathResolver for ImageSourceResolver {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BarrierDiffractionResolver
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Decorator that adds diffraction paths over barriers (ISO 9613-2 §7.4).
-///
-/// Wraps an inner `PathResolver` (e.g. `ImageSourceResolver`) and appends one
-/// diffraction path per barrier that occludes the direct source-receiver path.
-/// Each diffraction path carries:
-/// - **direction**: unit vector from target toward barrier top (apparent source)
-/// - **distance**: total diffracted path length (source→barrier_top + barrier_top→receiver)
-/// - **delay**: extra propagation time relative to direct path
-/// - **gain**: broadband ISO 9613-2 Maekawa attenuation (averaged over 6 octave bands)
-///
-/// Barriers in the illuminated zone (δ < 1e-4 m) are skipped — they don't
-/// meaningfully occlude the direct path.
-pub struct BarrierDiffractionResolver {
-    inner: Box<dyn PathResolver>,
-}
-
-impl BarrierDiffractionResolver {
-    pub fn new(inner: Box<dyn PathResolver>) -> Self {
-        Self { inner }
-    }
-}
-
-impl PathResolver for BarrierDiffractionResolver {
-    fn resolve(&self, ctx: &ResolveContext<'_>, out: &mut PathSet) {
-        // Delegate to inner resolver for direct + reflection paths.
-        self.inner.resolve(ctx, out);
-
-        // Direct distance for delay computation.
-        let d_sr = ctx.source_pos.distance_to(ctx.target_pos);
-
-        for barrier in ctx.barriers {
-            let d_sb = ctx.source_pos.distance_to(barrier.top);
-            let d_br = barrier.top.distance_to(ctx.target_pos);
-            let delta = d_sb + d_br - d_sr;
-
-            // Skip if barrier doesn't meaningfully occlude (illuminated zone).
-            if delta < 1e-4 {
-                continue;
-            }
-
-            // Direction: sound appears to arrive from the barrier top.
-            let diff = barrier.top - ctx.target_pos;
-            let diff_len = diff.length();
-            let direction = if diff_len > 1e-10 {
-                diff * (1.0 / diff_len)
-            } else {
-                Vec3::new(0.0, 0.0, 1.0) // fallback: straight up
-            };
-
-            // ISO 9613-2 broadband attenuation gain.
-            let geom = BarrierGeometry {
-                source: ctx.source_pos,
-                receiver: ctx.target_pos,
-                barrier_top: barrier.top,
-            };
-            let gain = barrier_attenuation_gain(&geom, ctx.atmosphere.speed_of_sound());
-
-            let delay_seconds = delta / ctx.atmosphere.speed_of_sound();
-            let distance = d_sb + d_br;
-
-            out.push(PathContribution {
-                kind: PathKind::Diffraction,
-                direction,
-                distance,
-                delay_seconds,
-                gain,
-                wall_index: None,
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::atmosphere::AtmosphericParams;
+    use crate::pipeline::environment::Environment;
+    use crate::pipeline::wall_material::WallMaterial;
 
     /// Standard speed of sound at 20°C for test assertions.
     const TEST_SPEED: f32 = 343.42; // speed_of_sound(20.0) = 331.3 + 0.606*20
@@ -232,13 +124,12 @@ mod tests {
     #[test]
     fn direct_resolver_produces_one_path() {
         let resolver = DirectPathResolver;
+        let environment =
+            Environment::anechoic(Vec3::new(-10.0, -10.0, -10.0), Vec3::new(10.0, 10.0, 10.0));
         let ctx = ResolveContext {
             source_pos: Vec3::new(3.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -254,13 +145,11 @@ mod tests {
     #[test]
     fn direct_resolver_direction_points_from_target_to_source() {
         let resolver = DirectPathResolver;
+        let environment = Environment::anechoic(Vec3::ZERO, Vec3::ZERO);
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 5.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::ZERO,
-            environment_max: Vec3::ZERO,
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -275,13 +164,11 @@ mod tests {
     #[test]
     fn direct_resolver_coincident_positions() {
         let resolver = DirectPathResolver;
+        let environment = Environment::anechoic(Vec3::ZERO, Vec3::ZERO);
         let ctx = ResolveContext {
             source_pos: Vec3::new(1.0, 2.0, 3.0),
             target_pos: Vec3::new(1.0, 2.0, 3.0),
-            environment_min: Vec3::ZERO,
-            environment_max: Vec3::ZERO,
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -295,13 +182,11 @@ mod tests {
     #[test]
     fn direct_resolver_3d_distance() {
         let resolver = DirectPathResolver;
+        let environment = Environment::anechoic(Vec3::ZERO, Vec3::ZERO);
         let ctx = ResolveContext {
             source_pos: Vec3::new(3.0, 4.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::ZERO,
-            environment_max: Vec3::ZERO,
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -319,21 +204,35 @@ mod tests {
         pressure_kpa: 101.325,
     };
 
-    fn make_room_ctx(source: Vec3, target: Vec3) -> ResolveContext<'static> {
+    /// The [-5, 5]³ room used by most tests below: every face has the given
+    /// energy reflectivity, and the air is `TEST_ATMOSPHERE`.
+    fn make_room(reflectivity: f32) -> Environment {
+        let mut environment = Environment::uniform(
+            Vec3::new(-5.0, -5.0, -5.0),
+            Vec3::new(5.0, 5.0, 5.0),
+            WallMaterial::with_reflectivity(reflectivity),
+        );
+        environment.atmosphere = TEST_ATMOSPHERE;
+        environment
+    }
+
+    fn make_room_ctx(environment: &Environment, source: Vec3, target: Vec3) -> ResolveContext<'_> {
         ResolveContext {
             source_pos: source,
             target_pos: target,
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
-            barriers: &[],
-            atmosphere: &TEST_ATMOSPHERE,
+            environment,
         }
     }
 
     #[test]
     fn image_source_produces_direct_plus_reflections() {
-        let resolver = ImageSourceResolver::new(0.9);
-        let ctx = make_room_ctx(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -349,9 +248,14 @@ mod tests {
 
     #[test]
     fn image_source_direct_path_matches_direct_resolver() {
-        let image_resolver = ImageSourceResolver::new(0.9);
+        let image_resolver = ImageSourceResolver;
         let direct_resolver = DirectPathResolver;
-        let ctx = make_room_ctx(Vec3::new(3.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(3.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
 
         let mut image_paths = PathSet::new();
         image_resolver.resolve(&ctx, &mut image_paths);
@@ -372,8 +276,13 @@ mod tests {
 
     #[test]
     fn image_source_reflections_are_farther_than_direct() {
-        let resolver = ImageSourceResolver::new(0.9);
-        let ctx = make_room_ctx(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -390,8 +299,13 @@ mod tests {
 
     #[test]
     fn image_source_reflections_have_positive_delay() {
-        let resolver = ImageSourceResolver::new(0.9);
-        let ctx = make_room_ctx(Vec3::new(2.0, 1.0, 0.5), Vec3::new(0.0, 0.0, 0.0));
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(2.0, 1.0, 0.5),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -406,8 +320,13 @@ mod tests {
 
     #[test]
     fn image_source_delay_equals_distance_difference_over_speed() {
-        let resolver = ImageSourceResolver::new(0.9);
-        let ctx = make_room_ctx(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -426,10 +345,11 @@ mod tests {
     #[test]
     fn image_source_gain_uses_reflectivity_only() {
         let reflectivity = 0.8;
-        let resolver = ImageSourceResolver::new(reflectivity);
+        let resolver = ImageSourceResolver;
+        let environment = make_room(reflectivity);
         let source = Vec3::new(2.0, 0.0, 0.0);
         let target = Vec3::new(0.0, 0.0, 0.0);
-        let ctx = make_room_ctx(source, target);
+        let ctx = make_room_ctx(&environment, source, target);
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -449,15 +369,17 @@ mod tests {
     fn image_source_reflectivity_scales_gain() {
         let source = Vec3::new(2.0, 0.0, 0.0);
         let target = Vec3::new(0.0, 0.0, 0.0);
-        let ctx = make_room_ctx(source, target);
+        let environment_high = make_room(0.9);
+        let environment_low = make_room(0.4);
+        let ctx_high = make_room_ctx(&environment_high, source, target);
+        let ctx_low = make_room_ctx(&environment_low, source, target);
 
-        let resolver_high = ImageSourceResolver::new(0.9);
-        let resolver_low = ImageSourceResolver::new(0.4);
+        let resolver = ImageSourceResolver;
 
         let mut paths_high = PathSet::new();
         let mut paths_low = PathSet::new();
-        resolver_high.resolve(&ctx, &mut paths_high);
-        resolver_low.resolve(&ctx, &mut paths_low);
+        resolver.resolve(&ctx_high, &mut paths_high);
+        resolver.resolve(&ctx_low, &mut paths_low);
 
         assert_eq!(paths_high.len(), paths_low.len());
 
@@ -482,14 +404,16 @@ mod tests {
     #[test]
     fn image_source_symmetric_room_centered_source_produces_6_reflections() {
         // Source and target at center — all 6 walls equidistant, all reflections valid
-        let resolver = ImageSourceResolver::new(0.9);
+        let resolver = ImageSourceResolver;
+        let environment = Environment::uniform(
+            Vec3::new(-10.0, -10.0, -10.0),
+            Vec3::new(10.0, 10.0, 10.0),
+            WallMaterial::with_reflectivity(0.9),
+        );
         let ctx = ResolveContext {
             source_pos: Vec3::new(1.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -502,14 +426,16 @@ mod tests {
     fn image_source_skips_reflections_closer_than_direct() {
         // Source very close to +X wall — its -X image is farther than source,
         // but its +X image is very close to target
-        let resolver = ImageSourceResolver::new(0.9);
+        let resolver = ImageSourceResolver;
+        let environment = Environment::uniform(
+            Vec3::new(-5.0, -5.0, -5.0),
+            Vec3::new(5.0, 5.0, 5.0),
+            WallMaterial::with_reflectivity(0.9),
+        );
         let ctx = ResolveContext {
             source_pos: Vec3::new(4.9, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -525,11 +451,16 @@ mod tests {
 
     #[test]
     fn image_source_direction_points_toward_image() {
-        let resolver = ImageSourceResolver::new(0.9);
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
         // Source at (2,0,0), target at origin, room [-5,5]^3
         // -X wall image: (2*(-5) - 2, 0, 0) = (-12, 0, 0)
         // Direction from target toward image: (-1, 0, 0)
-        let ctx = make_room_ctx(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -545,14 +476,16 @@ mod tests {
 
     #[test]
     fn image_source_coincident_positions_still_works() {
-        let resolver = ImageSourceResolver::new(0.9);
+        let resolver = ImageSourceResolver;
+        let environment = Environment::uniform(
+            Vec3::new(-5.0, -5.0, -5.0),
+            Vec3::new(5.0, 5.0, 5.0),
+            WallMaterial::with_reflectivity(0.9),
+        );
         let ctx = ResolveContext {
             source_pos: Vec3::new(0.0, 0.0, 0.0),
             target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -571,172 +504,6 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // BarrierDiffractionResolver tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    use crate::audio::propagation::Barrier;
-
-    #[test]
-    fn barrier_no_barriers_same_as_inner() {
-        let inner = Box::new(DirectPathResolver);
-        let resolver = BarrierDiffractionResolver::new(inner);
-        let ctx = ResolveContext {
-            source_pos: Vec3::new(3.0, 0.0, 0.0),
-            target_pos: Vec3::new(0.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &[],
-            atmosphere: &AtmosphericParams::default(),
-        };
-        let mut paths = PathSet::new();
-        resolver.resolve(&ctx, &mut paths);
-
-        // Only the direct path from inner resolver.
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths.as_slice()[0].kind, PathKind::Direct);
-    }
-
-    #[test]
-    fn barrier_shadow_zone_adds_diffraction_path() {
-        let inner = Box::new(DirectPathResolver);
-        let resolver = BarrierDiffractionResolver::new(inner);
-
-        // Barrier top at (5, 0, 3) — well above the direct line from (0,0,0) to (10,0,0).
-        let barriers = [Barrier {
-            base: Vec3::new(5.0, 0.0, 0.0),
-            top: Vec3::new(5.0, 0.0, 3.0),
-        }];
-        let ctx = ResolveContext {
-            source_pos: Vec3::new(0.0, 0.0, 0.0),
-            target_pos: Vec3::new(10.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &barriers,
-            atmosphere: &AtmosphericParams::default(),
-        };
-        let mut paths = PathSet::new();
-        resolver.resolve(&ctx, &mut paths);
-
-        // 1 direct + 1 diffraction.
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths.as_slice()[0].kind, PathKind::Direct);
-        assert_eq!(paths.as_slice()[1].kind, PathKind::Diffraction);
-
-        let diff = &paths.as_slice()[1];
-        assert!(diff.gain > 0.0, "diffraction gain should be positive");
-        assert!(
-            diff.gain < 1.0,
-            "diffraction gain should be < 1.0 (attenuated)"
-        );
-        assert!(
-            diff.delay_seconds > 0.0,
-            "diffraction should have positive delay"
-        );
-    }
-
-    #[test]
-    fn barrier_illuminated_zone_skipped() {
-        let inner = Box::new(DirectPathResolver);
-        let resolver = BarrierDiffractionResolver::new(inner);
-
-        // Barrier top well below the direct line — doesn't occlude.
-        // Source at (0,0,5), receiver at (10,0,5), barrier top at (5,0,0).
-        // d_sr = 10, d_sb = sqrt(25+25) ≈ 7.07, d_br = sqrt(25+25) ≈ 7.07
-        // delta = 7.07 + 7.07 - 10 = 4.14 > 0... this still occludes.
-        // Instead: barrier top at (5,0,4.999) — nearly on the line.
-        // Actually, to get illuminated zone we need barrier top BELOW the line of sight.
-        // Source (0,0,0), receiver (10,0,0), barrier at (5,5,0) — off to the side.
-        // d_sr = 10, d_sb = sqrt(25+25) ≈ 7.07, d_br = sqrt(25+25) ≈ 7.07
-        // delta = 14.14 - 10 = 4.14... still positive because path goes through barrier.
-        //
-        // For illuminated zone, barrier must be collinear or behind the path.
-        // Barrier at (5,0,0) — exactly on the line: d_sb=5, d_br=5, delta=0. Skipped.
-        let barriers = [Barrier {
-            base: Vec3::new(5.0, 0.0, 0.0),
-            top: Vec3::new(5.0, 0.0, 0.0), // on the direct line
-        }];
-        let ctx = ResolveContext {
-            source_pos: Vec3::new(0.0, 0.0, 0.0),
-            target_pos: Vec3::new(10.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &barriers,
-            atmosphere: &AtmosphericParams::default(),
-        };
-        let mut paths = PathSet::new();
-        resolver.resolve(&ctx, &mut paths);
-
-        // Barrier on line of sight → delta ≈ 0 → skipped.
-        assert_eq!(paths.len(), 1, "barrier on direct line should be skipped");
-    }
-
-    #[test]
-    fn barrier_direction_points_toward_barrier_top() {
-        let inner = Box::new(DirectPathResolver);
-        let resolver = BarrierDiffractionResolver::new(inner);
-
-        let barriers = [Barrier {
-            base: Vec3::new(5.0, 0.0, 0.0),
-            top: Vec3::new(5.0, 0.0, 3.0),
-        }];
-        let ctx = ResolveContext {
-            source_pos: Vec3::new(0.0, 0.0, 0.0),
-            target_pos: Vec3::new(10.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &barriers,
-            atmosphere: &AtmosphericParams::default(),
-        };
-        let mut paths = PathSet::new();
-        resolver.resolve(&ctx, &mut paths);
-
-        let diff = &paths.as_slice()[1];
-        // Barrier top at (5,0,3), target at (10,0,0).
-        // Direction = normalize((5,0,3) - (10,0,0)) = normalize((-5,0,3))
-        let expected = Vec3::new(-5.0, 0.0, 3.0);
-        let expected_len = expected.length();
-        let expected_dir = expected * (1.0 / expected_len);
-
-        assert!((diff.direction.x - expected_dir.x).abs() < 1e-4);
-        assert!((diff.direction.y - expected_dir.y).abs() < 1e-4);
-        assert!((diff.direction.z - expected_dir.z).abs() < 1e-4);
-    }
-
-    #[test]
-    fn barrier_delay_equals_delta_over_speed_of_sound() {
-        let inner = Box::new(DirectPathResolver);
-        let resolver = BarrierDiffractionResolver::new(inner);
-
-        let barriers = [Barrier {
-            base: Vec3::new(5.0, 0.0, 0.0),
-            top: Vec3::new(5.0, 0.0, 3.0),
-        }];
-        let ctx = ResolveContext {
-            source_pos: Vec3::new(0.0, 0.0, 0.0),
-            target_pos: Vec3::new(10.0, 0.0, 0.0),
-            environment_min: Vec3::new(-10.0, -10.0, -10.0),
-            environment_max: Vec3::new(10.0, 10.0, 10.0),
-            barriers: &barriers,
-            atmosphere: &AtmosphericParams::default(),
-        };
-        let mut paths = PathSet::new();
-        resolver.resolve(&ctx, &mut paths);
-
-        let diff = &paths.as_slice()[1];
-        let d_sb = Vec3::new(0.0, 0.0, 0.0).distance_to(Vec3::new(5.0, 0.0, 3.0));
-        let d_br = Vec3::new(5.0, 0.0, 3.0).distance_to(Vec3::new(10.0, 0.0, 0.0));
-        let d_sr = 10.0_f32;
-        let expected_delay = (d_sb + d_br - d_sr) / TEST_SPEED;
-
-        assert!(
-            (diff.delay_seconds - expected_delay).abs() < 1e-6,
-            "delay {} should equal delta/c = {}",
-            diff.delay_seconds,
-            expected_delay
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // Per-wall material tests (Phase 3A)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -747,18 +514,13 @@ mod tests {
         let mut materials = std::array::from_fn(|_| WallMaterial::hard_wall());
         materials[4] = WallMaterial::carpet(); // floor = -Z wall
 
-        let resolver = ImageSourceResolver::from_materials(&materials);
+        let resolver = ImageSourceResolver;
+        let mut environment = make_room(0.0);
+        environment.wall_materials = materials;
 
         let source = Vec3::new(1.0, 1.0, 2.0);
         let target = Vec3::new(0.0, 0.0, 0.0);
-        let ctx = ResolveContext {
-            source_pos: source,
-            target_pos: target,
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
-            barriers: &[],
-            atmosphere: &TEST_ATMOSPHERE,
-        };
+        let ctx = make_room_ctx(&environment, source, target);
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -788,9 +550,9 @@ mod tests {
     }
 
     #[test]
-    fn from_materials_matches_manual_gain_computation() {
-        // Verify that from_materials produces gains consistent with
-        // the broadband_reflection_gain formula: √(1 - avg(α[1..5]))
+    fn wall_gains_come_from_each_faces_material() {
+        // Each reflection's gain is its own face's broadband_reflection_gain:
+        // √(1 - avg(α[1..5])).
         let materials = [
             WallMaterial::hard_wall(), // 0: -X
             WallMaterial::hard_wall(), // 1: +X
@@ -799,10 +561,16 @@ mod tests {
             WallMaterial::carpet(),    // 4: -Z (floor)
             WallMaterial::hard_wall(), // 5: +Z (ceiling)
         ];
-        let resolver = ImageSourceResolver::from_materials(&materials);
+        let resolver = ImageSourceResolver;
+        let mut environment = make_room(0.0);
+        environment.wall_materials = materials;
 
         // Resolve paths and check that wall 2 (-Y) and wall 4 (-Z) have carpet gain
-        let ctx = make_room_ctx(Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.0, 0.0, 0.0));
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
 
@@ -856,36 +624,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn uniform_materials_matches_legacy_constructor() {
-        // from_materials with all-same materials should produce identical results
-        // to the legacy new(reflectivity) constructor with the same reflectivity.
-        let materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::hard_wall());
-        let resolver_new = ImageSourceResolver::from_materials(&materials);
-
-        let hard_refl = WallMaterial::hard_wall().broadband_reflectivity();
-        let resolver_legacy = ImageSourceResolver::new(hard_refl);
-
-        let ctx = make_room_ctx(Vec3::new(2.0, 1.0, 0.5), Vec3::new(0.0, 0.0, 0.0));
-
-        let mut paths_new = PathSet::new();
-        let mut paths_legacy = PathSet::new();
-        resolver_new.resolve(&ctx, &mut paths_new);
-        resolver_legacy.resolve(&ctx, &mut paths_legacy);
-
-        assert_eq!(paths_new.len(), paths_legacy.len());
-        for (a, b) in paths_new.as_slice().iter().zip(paths_legacy.as_slice()) {
-            assert!(
-                (a.gain - b.gain).abs() < 1e-6,
-                "gain mismatch: from_materials={}, legacy={}",
-                a.gain,
-                b.gain
-            );
-            assert!((a.distance - b.distance).abs() < 1e-6);
-            assert!((a.delay_seconds - b.delay_seconds).abs() < 1e-6);
-        }
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
     // Cross-module consistency tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -908,14 +646,17 @@ mod tests {
         let sample_rate = 48000.0;
 
         // --- ImageSourceResolver delays ---
-        let resolver = ImageSourceResolver::new(0.9);
+        let resolver = ImageSourceResolver;
+        let mut environment = Environment::uniform(
+            environment_min,
+            environment_max,
+            WallMaterial::with_reflectivity(0.9),
+        );
+        environment.atmosphere = atmosphere;
         let ctx = ResolveContext {
             source_pos: source,
             target_pos: listener,
-            environment_min,
-            environment_max,
-            barriers: &[],
-            atmosphere: &atmosphere,
+            environment: &environment,
         };
         let mut paths = PathSet::new();
         resolver.resolve(&ctx, &mut paths);
@@ -929,16 +670,8 @@ mod tests {
         assert!(!resolver_delays.is_empty(), "should have reflections");
 
         // --- ReflectionCore delays (in samples) ---
-        let mut core = ReflectionCore::new(0.9, 4096);
-        core.update(
-            environment_min,
-            environment_max,
-            source,
-            listener,
-            sample_rate,
-            c,
-            1.0,
-        );
+        let mut core = ReflectionCore::new(4096);
+        core.update(&environment, source, listener, sample_rate, c, 1.0);
 
         // ReflectionCore and ImageSourceResolver both compute:
         //   delay = (image_dist - direct_dist) / speed_of_sound
@@ -965,5 +698,229 @@ mod tests {
             "10m at 20°C should be ~29.1ms, got {:.4}ms",
             direct_time * 1000.0
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Hand-derived image-source geometry (audit 2026-11)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn reflection_for_wall(paths: &PathSet, wall_index: u8) -> Option<PathContribution> {
+        paths
+            .as_slice()
+            .iter()
+            .find(|path| path.wall_index == Some(wall_index))
+            .copied()
+    }
+
+    /// Source (1,0,0), listener at the origin, room [-5,5]³. Mirroring the
+    /// source across each wall plane x = w gives x' = 2w − x:
+    ///   −X (x=−5): image (−11,0,0), path 11 m, arrives from (−1,0,0)
+    ///   +X (x=+5): image (  9,0,0), path  9 m, arrives from (+1,0,0)
+    ///   −Y (y=−5): image (1,−10,0), path √101 = 10.0499 m, from (0.0995,−0.9950,0)
+    ///   +Y, −Z, +Z: the same √101 m with the sign of the mirrored axis.
+    /// Delay is relative to the 1 m direct path: (L − 1) / 343.42 m/s.
+    #[test]
+    fn image_source_positions_lengths_and_directions_match_hand_derivation() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(1.0);
+        let ctx = make_room_ctx(&environment, Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO);
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+
+        assert_eq!(paths.len(), 7, "1 direct + 6 first-order reflections");
+
+        let side_length = 101.0_f32.sqrt(); // 10.0499 m
+        let side_axial = 10.0 / side_length; // 0.99504
+        let side_lateral = 1.0 / side_length; // 0.09950
+        let expected: [(u8, f32, Vec3); 6] = [
+            (0, 11.0, Vec3::new(-1.0, 0.0, 0.0)),
+            (1, 9.0, Vec3::new(1.0, 0.0, 0.0)),
+            (2, side_length, Vec3::new(side_lateral, -side_axial, 0.0)),
+            (3, side_length, Vec3::new(side_lateral, side_axial, 0.0)),
+            (4, side_length, Vec3::new(side_lateral, 0.0, -side_axial)),
+            (5, side_length, Vec3::new(side_lateral, 0.0, side_axial)),
+        ];
+        for (wall_index, length, direction) in expected {
+            let path = reflection_for_wall(&paths, wall_index)
+                .unwrap_or_else(|| panic!("missing reflection for wall {wall_index}"));
+            assert_eq!(path.kind, PathKind::Reflection);
+            assert!(
+                (path.distance - length).abs() < 1e-4,
+                "wall {wall_index}: path length {} != {length}",
+                path.distance
+            );
+            assert!(
+                (path.direction - direction).length() < 1e-4,
+                "wall {wall_index}: direction {:?} != {direction:?}",
+                path.direction
+            );
+            let expected_delay = (length - 1.0) / TEST_SPEED;
+            assert!(
+                (path.delay_seconds - expected_delay).abs() < 1e-6,
+                "wall {wall_index}: delay {} != {expected_delay}",
+                path.delay_seconds
+            );
+        }
+    }
+
+    /// +X reflection from the geometry above: 8 m extra path at 343.42 m/s
+    /// = 23.2951 ms → 1027.31 samples @ 44.1 kHz, 1118.16 @ 48 kHz,
+    /// 2236.33 @ 96 kHz.
+    #[test]
+    fn reflection_delay_in_samples_at_common_sample_rates() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(1.0);
+        let ctx = make_room_ctx(&environment, Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO);
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+        let positive_x = reflection_for_wall(&paths, 1).expect("+X reflection");
+
+        assert!((positive_x.delay_seconds * 1000.0 - 23.2951).abs() < 1e-3);
+        for (sample_rate, expected_samples) in [
+            (44_100.0_f32, 1027.313_f32),
+            (48_000.0, 1118.164),
+            (96_000.0, 2236.327),
+        ] {
+            let delay_samples = positive_x.delay_seconds * sample_rate;
+            assert!(
+                (delay_samples - expected_samples).abs() < 0.02,
+                "{sample_rate} Hz: {delay_samples} samples, expected {expected_samples}"
+            );
+        }
+    }
+
+    /// Mirroring is an isometric involution, so |M(S) − L| = |S − M(L)|:
+    /// swapping source and listener must leave every per-wall path length and
+    /// delay unchanged.
+    #[test]
+    fn image_source_paths_are_reciprocal() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let point_a = Vec3::new(1.7, -2.3, 0.4);
+        let point_b = Vec3::new(-3.1, 1.2, -1.9);
+
+        let mut forward = PathSet::new();
+        resolver.resolve(&make_room_ctx(&environment, point_a, point_b), &mut forward);
+        let mut reverse = PathSet::new();
+        resolver.resolve(&make_room_ctx(&environment, point_b, point_a), &mut reverse);
+
+        assert_eq!(forward.len(), reverse.len());
+        for wall_index in 0..6u8 {
+            let forward_path = reflection_for_wall(&forward, wall_index).expect("forward");
+            let reverse_path = reflection_for_wall(&reverse, wall_index).expect("reverse");
+            assert!(
+                (forward_path.distance - reverse_path.distance).abs() < 1e-4,
+                "wall {wall_index}: {} vs {}",
+                forward_path.distance,
+                reverse_path.distance
+            );
+            assert!((forward_path.delay_seconds - reverse_path.delay_seconds).abs() < 1e-7);
+        }
+    }
+
+    /// For any source and listener strictly inside the room, the wall plane is
+    /// the perpendicular bisector of source and image, with the listener on the
+    /// source's side — so every reflection is at least as long as the direct
+    /// path, all 6 survive, and every direction is a unit vector.
+    #[test]
+    fn interior_points_always_give_six_longer_reflections() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let coordinates = [-4.5_f32, -2.0, 0.3, 3.7];
+        for &source_x in &coordinates {
+            for &source_y in &coordinates {
+                for &listener_z in &coordinates {
+                    let source = Vec3::new(source_x, source_y, 1.1);
+                    let listener = Vec3::new(-source_y * 0.5, 2.2, listener_z);
+                    let mut paths = PathSet::new();
+                    resolver.resolve(&make_room_ctx(&environment, source, listener), &mut paths);
+                    assert_eq!(paths.len(), 7, "source {source:?} listener {listener:?}");
+                    let direct_length = paths.as_slice()[0].distance;
+                    for path in &paths.as_slice()[1..] {
+                        assert!(path.distance >= direct_length);
+                        assert!((path.direction.length() - 1.0).abs() < 1e-5);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Source exactly on the +X wall: its +X image coincides with the source,
+    /// so that reflection has zero extra delay and is folded into the direct
+    /// path (skipped). The other 5 remain.
+    #[test]
+    fn source_on_wall_skips_the_coincident_reflection() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.5, 0.0),
+        );
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+        assert_eq!(paths.len(), 6);
+        assert!(reflection_for_wall(&paths, 1).is_none());
+    }
+
+    /// Listener on the −X wall plane: |image − listener| equals the direct
+    /// distance, so the −X reflection carries no extra delay and is skipped.
+    #[test]
+    fn listener_on_wall_plane_skips_that_reflection() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(
+            &environment,
+            Vec3::new(2.0, 1.0, 0.0),
+            Vec3::new(-5.0, 0.0, 0.0),
+        );
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+        assert!(reflection_for_wall(&paths, 0).is_none());
+        assert_eq!(paths.len(), 6);
+    }
+
+    /// Source outside the room beyond +X (x = 7, wall at 5): the +X "image" is
+    /// at x = 3, closer to the listener than the source — rejected by the
+    /// closer-than-direct guard instead of producing a negative delay.
+    #[test]
+    fn source_outside_room_rejects_the_inside_image() {
+        let resolver = ImageSourceResolver;
+        let environment = make_room(0.9);
+        let ctx = make_room_ctx(&environment, Vec3::new(7.0, 0.0, 0.0), Vec3::ZERO);
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+        assert!(reflection_for_wall(&paths, 1).is_none());
+        for path in paths.as_slice() {
+            assert!(path.delay_seconds >= 0.0);
+        }
+    }
+
+    /// Wall index, image geometry and material must agree: with a distinct
+    /// material on the floor (−Z, index 4), the reflection arriving from below
+    /// carries the carpet gain √(1 − 0.214) = 0.88657 and every other wall the
+    /// hard-wall gain √(1 − 0.038) = 0.98082.
+    #[test]
+    fn floor_reflection_arrives_from_below_with_floor_material_gain() {
+        let mut materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::hard_wall());
+        materials[4] = WallMaterial::carpet();
+        let resolver = ImageSourceResolver;
+        let mut environment = make_room(0.0);
+        environment.wall_materials = materials;
+        let ctx = make_room_ctx(&environment, Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO);
+        let mut paths = PathSet::new();
+        resolver.resolve(&ctx, &mut paths);
+
+        for path in &paths.as_slice()[1..] {
+            let from_below = path.direction.z < -0.9;
+            assert_eq!(from_below, path.wall_index == Some(4));
+            let expected_gain = if from_below { 0.886_57 } else { 0.980_82 };
+            assert!(
+                (path.gain - expected_gain).abs() < 1e-4,
+                "wall {:?}: gain {} != {expected_gain}",
+                path.wall_index,
+                path.gain
+            );
+        }
     }
 }

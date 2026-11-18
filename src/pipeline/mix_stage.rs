@@ -7,10 +7,8 @@
 
 use atrium_core::listener::Listener;
 use atrium_core::speaker::SpeakerLayout;
-use atrium_core::types::Vec3;
 
-use crate::audio::atmosphere::AtmosphericParams;
-use crate::pipeline::path::WallMaterial;
+use crate::pipeline::environment::Environment;
 
 /// Context for post-mix stages.
 pub struct MixContext<'a> {
@@ -18,8 +16,8 @@ pub struct MixContext<'a> {
     pub layout: &'a SpeakerLayout,
     pub sample_rate: f32,
     pub channels: usize,
-    pub environment_min: Vec3,
-    pub environment_max: Vec3,
+    /// The room, its surfaces and its air.
+    pub environment: &'a Environment,
     /// Runtime master gain from AudioScene. Flows through each render call.
     pub master_gain: f32,
     /// Number of channels the renderer actually writes to.
@@ -32,9 +30,6 @@ pub struct MixContext<'a> {
     pub reverb_input: Option<&'a [f32]>,
     /// Wall reflectivity (0.0–1.0) for Sabine RT60 computation in FDN stages.
     pub wall_reflectivity: f32,
-    /// Per-wall surface materials for frequency-dependent RT60 computation.
-    pub wall_materials: &'a [WallMaterial; 6],
-    pub atmosphere: &'a AtmosphericParams,
     /// When true, bypasses soft clipping and gain clamping to preserve
     /// linear signal levels for acoustic measurement and calibration.
     /// NaN/Inf sanitization and a ±100.0 stability ceiling remain active.
