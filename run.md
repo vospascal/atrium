@@ -21,6 +21,22 @@ cargo run --release -- scenes/frog-headphones.yaml    # one frog, front-right
 cargo run --release -- scenes/wisp-headphones.yaml    # one wisp flying around your head
 ```
 
+## Control it from a browser or a phone
+
+The engine listens for control on port 3333 whenever it runs. The page in
+`web/` talks to it: switch render mode and speaker set, master gain, mute
+sounds, see levels and where everything is.
+
+```sh
+cargo run --release -- scenes/nature.yaml   # terminal 1: the engine
+npm --prefix web install                    # once
+npm --prefix web run dev                    # terminal 2: the page, http://localhost:6006
+```
+
+On a phone on the same Wi-Fi, open `http://<this-machine>:6006`; the dev
+server prints the address under "Network". The page finds the engine on the
+same host. To point it elsewhere: `http://localhost:6006/?engine=nuc.local:3333`.
+
 ## Head tracking
 
 Your head turn steers the listener, so the world stays put when you turn.
@@ -91,4 +107,5 @@ python3 scripts/dep-cycles.py             # module cycles in src/
 |---|---|
 | UDP 4242 (127.0.0.1) | head tracking in (OpenTrack) |
 | UDP 4243 (127.0.0.1) | Sony bridge JSON debug stream |
-| TCP 3333 | WebSocket telemetry + control (no client ships right now) |
+| TCP 3333 | WebSocket telemetry + control (the page in `web/` is its client) |
+| TCP 6006 | The control page's dev server (`npm --prefix web run dev`) |
