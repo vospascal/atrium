@@ -182,6 +182,35 @@ mod tests {
         );
     }
 
+    /// OpenTrack angles are degrees; the listener wants radians. One radian is
+    /// 57.29578°, so a reported −57.29578° (a left turn, under the −1 sign)
+    /// adds exactly +1 rad to the scene heading.
+    #[test]
+    fn tracker_degrees_become_listener_radians() {
+        let scene_yaw = 0.25;
+        let yaw = listener_yaw(scene_yaw, -57.295_78);
+        assert!((yaw - 1.25).abs() < 1e-5, "got {yaw} rad");
+    }
+
+    /// A full head turn (360°) lands on the same heading: the listener uses
+    /// yaw only through cos/sin, so no wrapping is needed.
+    #[test]
+    fn a_full_turn_returns_to_the_same_heading() {
+        let scene_yaw = 30f32.to_radians();
+        let turned = listener_yaw(scene_yaw, 360.0);
+        assert!((turned.cos() - scene_yaw.cos()).abs() < 1e-5);
+        assert!((turned.sin() - scene_yaw.sin()).abs() < 1e-5);
+    }
+
+    /// Only the angles are read: the position doubles (cm in OpenTrack) do
+    /// not affect the decoded head angles.
+    #[test]
+    fn position_doubles_do_not_affect_the_angles() {
+        let still = decode_opentrack_packet(&packet([0.0, 0.0, 0.0, 12.5, -3.0, 4.0])).unwrap();
+        let moved = decode_opentrack_packet(&packet([25.0, -10.0, 8.0, 12.5, -3.0, 4.0])).unwrap();
+        assert_eq!(still, moved);
+    }
+
     #[test]
     fn a_source_ahead_moves_to_the_right_ear_after_a_left_turn() {
         // The point of head tracking: the world stays put. A source due north

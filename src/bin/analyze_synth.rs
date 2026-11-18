@@ -16,8 +16,8 @@ use atrium::synth::river::RiverSource;
 use atrium::synth::soft_wind::SoftWindSource;
 use atrium::synth::storm_wind::StormWindSource;
 use atrium::synth::wave::WaveSource;
-use atrium::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 
 const BANDS: &[(f32, f32, &str)] = &[
     (20.0, 100.0, "sub-bass     "),

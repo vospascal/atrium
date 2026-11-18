@@ -11,8 +11,8 @@ use std::path::Path;
 use atrium::audio::decode::decode_file;
 use atrium::synth::field_wind::FieldWindSource;
 use atrium::synth::soft_wind::SoftWindSource;
-use atrium::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 use realfft::RealFftPlanner;
 
 const N_BANDS: usize = 8;

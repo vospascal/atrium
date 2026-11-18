@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::config::SceneConfig;
-use atrium::engine::telemetry::{telemetry_to_json, TelemetryFrame};
+use atrium::engine::telemetry::telemetry_to_json;
 use atrium::server::websocket::{run_server, TelemetryBroadcast};
 use atrium_core::commands::Command;
+use atrium_core::telemetry::TelemetryFrame;
 
 #[cfg(feature = "memprof")]
 #[global_allocator]

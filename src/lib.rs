@@ -5,4 +5,3 @@ pub mod head_tracking;
 pub mod pipeline;
 pub mod server;
 pub mod synth;
-pub mod world;

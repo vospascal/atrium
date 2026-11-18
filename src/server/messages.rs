@@ -1,8 +1,8 @@
 use serde::Deserialize;
 
-use crate::world::types::Vec3;
 use atrium_core::commands::Command;
 use atrium_core::speaker::{ChannelMode, RenderMode};
+use atrium_core::types::Vec3;
 
 /// JSON messages received from the browser via WebSocket.
 /// Tagged by the "type" field: {"type": "set_listener", "x": 3.0, ...}

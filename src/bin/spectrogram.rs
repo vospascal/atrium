@@ -15,8 +15,8 @@ use atrium::synth::rain_v2::RainSourceV2;
 use atrium::synth::river::RiverSource;
 use atrium::synth::soft_wind::SoftWindSource;
 use atrium::synth::storm_wind::StormWindSource;
-use atrium::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 use realfft::RealFftPlanner;
 
 const FFT_SIZE: usize = 8192;

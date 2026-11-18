@@ -1,23 +1,23 @@
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
-use crate::audio::propagation::GroundProperties;
 use crate::audio::spectral_profile::BARK_BANDS;
 use crate::engine::edit::{Retired, SceneEdit};
 #[cfg(feature = "memprof")]
 use crate::engine::memprof::{MemProfiler, MemStage};
-use crate::engine::telemetry::{compute_telemetry, TelemetryFrame};
+use crate::engine::telemetry::compute_telemetry;
+use crate::pipeline::environment::Environment;
 use crate::pipeline::mix_stage::MixContext;
 use crate::pipeline::perceptual::{PerceptualLayer, SourcePerceptualState};
 use crate::pipeline::{render_pipeline, RenderParams, RenderPipeline};
 use crate::profile_span;
-use crate::world::room::Room;
-use crate::world::types::Vec3;
 use atrium_core::commands::Command;
 use atrium_core::directivity::directivity_gain;
 use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
 use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
+use atrium_core::telemetry::TelemetryFrame;
+use atrium_core::types::Vec3;
 
 /// Snapshot of per-source initial state for scene reset.
 #[derive(Clone, Copy)]
@@ -33,12 +33,12 @@ pub struct InitialSourceState {
 pub struct AudioScene {
     pub listener: Listener,
     pub sources: Vec<Box<dyn SoundSource>>,
-    pub environment: Box<dyn Room>,
+    /// The virtual acoustic space: bounds, surfaces, ground and air.
+    pub environment: Environment,
     pub master_gain: f32,
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
     pub speaker_layout: SpeakerLayout,
-    pub atmosphere: AtmosphericParams,
     /// Ring buffer producer for sending telemetry to the main thread.
     pub telemetry_out: Option<rtrb::Producer<TelemetryFrame>>,
     /// Consumer for live source-pool edits (add/remove) from the control thread.
@@ -67,12 +67,9 @@ pub struct AudioScene {
     pub active_pipeline: RenderMode,
     /// Current speaker configuration (tracked for telemetry).
     pub active_channel_mode: ChannelMode,
-    /// Ground properties for pipeline propagation stages.
-    pub ground: GroundProperties,
-    /// Barriers for occlusion/transmission in propagation.
-    pub barriers: Vec<crate::audio::propagation::Barrier>,
-    /// Wall materials for the 6 environment faces (order: -X, +X, -Y, +Y, -Z, +Z).
-    pub wall_materials: [crate::pipeline::path::WallMaterial; 6],
+    /// Channel mode and channel mask from before the first `SetChannelMode`,
+    /// so `ResetScene` can restore them. `None` while they are unchanged.
+    pub startup_channels: Option<(ChannelMode, [bool; atrium_core::speaker::MAX_CHANNELS])>,
     /// Bypass soft clipping and gain clamping for acoustic measurement.
     pub measurement_mode: bool,
     // ── Perceptual masking layer ──
@@ -159,6 +156,10 @@ impl AudioScene {
                     }
                 }
                 Command::SetChannelMode { mode } => {
+                    // Remember what the scene started with, the first time it
+                    // changes: that mask includes the fit to the output device.
+                    self.startup_channels
+                        .get_or_insert((self.active_channel_mode, self.speaker_layout.active));
                     self.active_channel_mode = mode;
                     self.speaker_layout
                         .set_active_channels(mode.active_channels());
@@ -167,8 +168,8 @@ impl AudioScene {
                     temperature_c,
                     humidity_pct,
                 } => {
-                    self.atmosphere.temperature_c = temperature_c;
-                    self.atmosphere.humidity_pct = humidity_pct;
+                    self.environment.atmosphere.temperature_c = temperature_c;
+                    self.environment.atmosphere.humidity_pct = humidity_pct;
                 }
                 Command::SetSynthParam {
                     index,
@@ -183,17 +184,15 @@ impl AudioScene {
                     self.listener.position = self.initial_listener_pos;
                     self.listener.yaw = self.initial_listener_yaw;
                     self.master_gain = self.initial_master_gain;
-                    self.atmosphere = self.initial_atmosphere;
+                    self.environment.atmosphere = self.initial_atmosphere;
                     self.active_pipeline = self.initial_render_mode;
-                    // Reset speaker config to full layout
-                    let initial_channel_mode = match self.speaker_layout.total_channels() {
-                        2 => ChannelMode::Stereo,
-                        4 => ChannelMode::Quad,
-                        _ => ChannelMode::Surround51,
-                    };
-                    self.active_channel_mode = initial_channel_mode;
-                    self.speaker_layout
-                        .set_active_channels(initial_channel_mode.active_channels());
+                    // Undo channel-mode changes. The startup mask is restored
+                    // as it was, not rebuilt from the layout: rebuilding it
+                    // re-enabled channels a smaller output device does not have.
+                    if let Some((channel_mode, active_channels)) = self.startup_channels.take() {
+                        self.active_channel_mode = channel_mode;
+                        self.speaker_layout.active = active_channels;
+                    }
                     for p in self.pipelines.iter_mut() {
                         p.reset();
                     }
@@ -271,7 +270,9 @@ impl AudioScene {
     /// Initialize pipelines with environment geometry and sample rate.
     /// Must be called after sample_rate is set and before the audio callback starts.
     pub fn init_pipelines(&mut self) {
-        let (environment_min, environment_max) = self.environment.bounds();
+        // One perceptual state per source slot is pushed every callback; make
+        // room now so the audio thread never grows the list.
+        self.perceptual_states.reserve(self.sources.len());
         let total_channels = self.speaker_layout.total_channels();
         for pipeline in self.pipelines.iter_mut() {
             let render_channels = if pipeline.render_channels > 0 {
@@ -284,14 +285,11 @@ impl AudioScene {
                 layout: &self.speaker_layout,
                 sample_rate: self.sample_rate,
                 channels: total_channels,
-                environment_min,
-                environment_max,
+                environment: &self.environment,
                 master_gain: self.master_gain,
                 render_channels,
                 reverb_input: None,
                 wall_reflectivity: pipeline.wall_reflectivity,
-                wall_materials: &self.wall_materials,
-                atmosphere: &self.atmosphere,
                 measurement_mode: self.measurement_mode,
             };
             pipeline.init(&mix_ctx);
@@ -370,7 +368,6 @@ impl AudioScene {
 
         // Render through the composable pipeline
         {
-            let (environment_min, environment_max) = self.environment.bounds();
             let pipeline = &mut self.pipelines[self.active_pipeline.index()];
             let _s = profile_span!("pipeline", mode = ?self.active_pipeline).entered();
             let params = RenderParams {
@@ -380,12 +377,7 @@ impl AudioScene {
                 master_gain: self.master_gain,
                 distance_model: &self.distance_model,
                 layout: &self.speaker_layout,
-                atmosphere: &self.atmosphere,
-                ground: &self.ground,
-                environment_min,
-                environment_max,
-                barriers: &self.barriers,
-                wall_materials: &self.wall_materials,
+                environment: &self.environment,
                 measurement_mode: self.measurement_mode,
             };
             render_pipeline(pipeline, &mut self.sources, &params, output);
@@ -404,8 +396,8 @@ impl AudioScene {
                         compute_telemetry(&self.sources, &self.listener, &self.distance_model);
                     frame.render_mode = self.active_pipeline;
                     frame.channel_mode = self.active_channel_mode;
-                    frame.temperature_c = self.atmosphere.temperature_c;
-                    frame.humidity_pct = self.atmosphere.humidity_pct;
+                    frame.temperature_c = self.environment.atmosphere.temperature_c;
+                    frame.humidity_pct = self.environment.atmosphere.humidity_pct;
                     frame.channel_peaks =
                         crate::engine::telemetry::compute_channel_peaks(output, channels);
                     frame.channel_count = channels as u8;
@@ -425,14 +417,6 @@ impl AudioScene {
 
         #[cfg(feature = "memprof")]
         self.memprof.finish_callback();
-    }
-
-    /// Set the telemetry interval based on actual audio parameters.
-    /// Call after sample_rate is known (i.e. after CpalOutput resolves config).
-    pub fn calibrate_telemetry(&mut self, buffer_size: u32) {
-        // Target ~15 Hz. callbacks_per_sec = sample_rate / buffer_size
-        let callbacks_per_sec = self.sample_rate / buffer_size.max(1) as f32;
-        self.telemetry_interval = (callbacks_per_sec / 15.0).round().max(1.0) as u32;
     }
 
     /// Collect mix stage names from the active pipeline (for TUI display).

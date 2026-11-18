@@ -13,15 +13,12 @@ use atrium_core::listener::Listener;
 use atrium_core::panner::distance_gain_at_model;
 use atrium_core::source::{EmitterKind, SoundSource};
 
-// Re-export telemetry types from core so existing callers keep working.
-pub use atrium_core::telemetry::{
-    SourceTelemetry, TelemetryFrame, MAX_CHANNELS as MAX_TELEM_CHANNELS, MAX_SOURCES,
-};
+use atrium_core::telemetry::{SourceTelemetry, TelemetryFrame, MAX_CHANNELS, MAX_SOURCES};
 
 /// Compute per-channel peak amplitudes from an interleaved output buffer.
-pub fn compute_channel_peaks(output: &[f32], channels: usize) -> [f32; MAX_TELEM_CHANNELS] {
-    let mut peaks = [0.0f32; MAX_TELEM_CHANNELS];
-    let n = channels.min(MAX_TELEM_CHANNELS);
+pub fn compute_channel_peaks(output: &[f32], channels: usize) -> [f32; MAX_CHANNELS] {
+    let mut peaks = [0.0f32; MAX_CHANNELS];
+    let n = channels.min(MAX_CHANNELS);
     for frame in output.chunks_exact(channels) {
         for ch in 0..n {
             let abs = frame[ch].abs();
@@ -162,9 +159,9 @@ mod tests {
     use crate::audio::decode::AudioBuffer;
     use crate::audio::sound_profile::SoundProfile;
     use crate::audio::test_node::TestNode;
-    use crate::world::types::Vec3;
     use atrium_core::listener::Listener;
     use atrium_core::panner::DistanceModelType;
+    use atrium_core::types::Vec3;
     use std::sync::Arc;
 
     /// 1 kHz sine tone, 1 second.

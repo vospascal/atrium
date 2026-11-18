@@ -3,8 +3,8 @@
 use std::f32::consts::TAU;
 
 use atrium::synth::rain_v2::RainSourceV2;
-use atrium::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 
 const BANDS: &[(f32, f32, &str)] = &[
     (20.0, 100.0, "sub-bass     "),
