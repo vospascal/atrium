@@ -1,5 +1,5 @@
 # Scene: Default Atrium
-# Wires together environment, atrium, sound sources, processors, and atmosphere.
+# Wires together environment, atrium, sound sources and atmosphere.
 # Each section either defines inline config or references a separate file.
 #
 # Two-box architecture:
