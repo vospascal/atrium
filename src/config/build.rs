@@ -247,6 +247,7 @@ impl SceneConfig {
             active_pipeline,
             active_channel_mode,
             startup_channels: None,
+            output_channels: None,
             measurement_mode: false,
             perceptual_layer: crate::pipeline::perceptual::PerceptualLayer::new(source_count),
             spectral_profiles,

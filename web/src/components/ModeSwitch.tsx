@@ -21,35 +21,44 @@ const CHANNEL_MODE_LABELS: Record<ChannelModeName, string> = {
 
 interface ModeSwitchProps {
   scene: SceneState
+  /** Channels the output device opened with; fewer than the scene's speakers on a laptop. */
+  deviceChannels: number
   renderMode: RenderModeName
   channelMode: ChannelModeName
   onRenderMode: (mode: RenderModeName, channelMode: ChannelModeName | null) => void
   onChannelMode: (mode: ChannelModeName) => void
 }
 
-/** Channel modes this render mode supports that also fit the output device. */
-function usableChannelModes(scene: SceneState, mode: RenderModeName): ChannelModeName[] {
+/** Speaker sets this render mode supports that the scene and the output device both have. */
+function usableChannelModes(
+  scene: SceneState,
+  deviceChannels: number,
+  mode: RenderModeName,
+): ChannelModeName[] {
   const entry = scene.render_modes.find((candidate) => candidate.mode === mode)
+  const channelsAvailable = Math.min(scene.total_channels, deviceChannels)
   return (entry?.channel_modes ?? []).filter(
-    (channelMode) => CHANNELS_NEEDED[channelMode] <= scene.total_channels,
+    (channelMode) => CHANNELS_NEEDED[channelMode] <= channelsAvailable,
   )
 }
 
 export function ModeSwitch({
   scene,
+  deviceChannels,
   renderMode,
   channelMode,
   onRenderMode,
   onChannelMode,
 }: ModeSwitchProps) {
-  const channelModes = usableChannelModes(scene, renderMode)
+  const channelModes = usableChannelModes(scene, deviceChannels, renderMode)
+  const deviceIsSmaller = deviceChannels < scene.total_channels
 
   return (
     <section className="card">
       <h2>Render mode</h2>
       <div className="mode-grid" role="radiogroup" aria-label="Render mode">
         {scene.render_modes.map(({ mode }) => {
-          const usable = usableChannelModes(scene, mode)
+          const usable = usableChannelModes(scene, deviceChannels, mode)
           const active = mode === renderMode
           return (
             <button
@@ -58,14 +67,14 @@ export function ModeSwitch({
               role="radio"
               aria-checked={active}
               className={active ? 'mode active' : 'mode'}
-              disabled={usable.length === 0}
-              title={usable.length === 0 ? 'Needs more speakers than this scene has' : undefined}
               onClick={() => {
                 // Keep the speaker set when the new mode supports it; otherwise
-                // move to the largest one it does support.
-                const nextChannelMode = usable.includes(channelMode)
-                  ? null
-                  : usable[usable.length - 1]
+                // move to the largest one it does support on this device. If
+                // there is none, the engine plays the mode on what is there.
+                const nextChannelMode =
+                  usable.includes(channelMode) || usable.length === 0
+                    ? null
+                    : usable[usable.length - 1]
                 onRenderMode(mode, nextChannelMode)
               }}
             >
@@ -92,6 +101,13 @@ export function ModeSwitch({
           </button>
         ))}
       </div>
+      {deviceIsSmaller && (
+        <p className="footnote">
+          This output device has {deviceChannels} channels, so only the first {deviceChannels} of
+          the scene's {scene.total_channels} speaker channels can play here. The larger sets need
+          a device with more outputs.
+        </p>
+      )}
     </section>
   )
 }

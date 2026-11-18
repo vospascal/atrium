@@ -63,6 +63,8 @@ export default function App() {
           <div className="column">
             <ModeSwitch
               scene={scene}
+              // One peak per channel the device opened with.
+              deviceChannels={telemetry?.peaks_db.length ?? scene.total_channels}
               // The telemetry stream carries the mode the engine is really in.
               renderMode={telemetry?.render_mode ?? scene.render_mode}
               channelMode={telemetry?.channel_mode ?? scene.channel_mode}

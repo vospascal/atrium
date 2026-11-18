@@ -323,7 +323,7 @@ fn reset_scene_keeps_the_device_channel_mask() {
     let mut result = build_inline_scene(SMALL_ATRIUM_SCENE);
     let scene = &mut result.scene;
     // What output.rs does when the device opened with 2 channels.
-    scene.speaker_layout.set_active_channels(&[0, 1]);
+    scene.fit_to_output_device(2);
 
     let (mut producer, mut consumer) = rtrb::RingBuffer::new(4);
     producer
@@ -337,4 +337,34 @@ fn reset_scene_keeps_the_device_channel_mask() {
             "ResetScene re-enabled channel {channel}, which the 2-channel device does not have"
         );
     }
+}
+
+/// Asking for 5.1 on a 2-channel device must not switch on the centre, LFE
+/// and rear speakers: the callback never writes those channels, so whatever
+/// is panned to them is lost. The mode is recorded as asked; the speakers
+/// stay limited to what the device has. A 6-channel device gets all six.
+#[test]
+fn channel_mode_never_switches_on_channels_the_device_lacks() {
+    use atrium_core::commands::Command;
+    use atrium_core::speaker::ChannelMode;
+
+    let active_channels_on = |device_channels: usize| -> Vec<usize> {
+        let mut result = build_inline_scene(SMALL_ATRIUM_SCENE);
+        let scene = &mut result.scene;
+        scene.fit_to_output_device(device_channels);
+        let (mut producer, mut consumer) = rtrb::RingBuffer::new(4);
+        producer
+            .push(Command::SetChannelMode {
+                mode: ChannelMode::Surround51,
+            })
+            .unwrap();
+        scene.process_commands(&mut consumer);
+        assert_eq!(scene.active_channel_mode, ChannelMode::Surround51);
+        (0..scene.speaker_layout.total_channels())
+            .filter(|channel| scene.speaker_layout.is_channel_active(*channel))
+            .collect()
+    };
+
+    assert_eq!(active_channels_on(2), vec![0, 1]);
+    assert_eq!(active_channels_on(6), vec![0, 1, 2, 3, 4, 5]);
 }

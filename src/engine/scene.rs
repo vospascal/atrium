@@ -70,6 +70,10 @@ pub struct AudioScene {
     /// Channel mode and channel mask from before the first `SetChannelMode`,
     /// so `ResetScene` can restore them. `None` while they are unchanged.
     pub startup_channels: Option<(ChannelMode, [bool; atrium_core::speaker::MAX_CHANNELS])>,
+    /// How many channels the output device opened with. `None` until the
+    /// device is open. A speaker on a channel the device does not have can
+    /// never be heard, so no channel mode may switch it on.
+    pub output_channels: Option<usize>,
     /// Bypass soft clipping and gain clamping for acoustic measurement.
     pub measurement_mode: bool,
     // ── Perceptual masking layer ──
@@ -163,6 +167,7 @@ impl AudioScene {
                     self.active_channel_mode = mode;
                     self.speaker_layout
                         .set_active_channels(mode.active_channels());
+                    self.mask_channels_the_device_lacks();
                 }
                 Command::SetAtmosphere {
                     temperature_c,
@@ -264,6 +269,24 @@ impl AudioScene {
     fn retire(&mut self, source: Box<dyn SoundSource>) {
         if let Some(out) = self.retired_out.as_mut() {
             let _ = out.push(Retired(source));
+        }
+    }
+
+    /// Record how many channels the output device opened with and switch off
+    /// every speaker beyond them. The renderers still compute gains for all
+    /// speakers; a masked speaker's share goes to the ones that remain.
+    pub fn fit_to_output_device(&mut self, device_channels: usize) {
+        self.output_channels = Some(device_channels);
+        self.mask_channels_the_device_lacks();
+    }
+
+    /// Switch off active channels the output device does not have.
+    fn mask_channels_the_device_lacks(&mut self) {
+        let Some(device_channels) = self.output_channels else {
+            return;
+        };
+        for channel in device_channels..atrium_core::speaker::MAX_CHANNELS {
+            self.speaker_layout.active[channel] = false;
         }
     }
 
