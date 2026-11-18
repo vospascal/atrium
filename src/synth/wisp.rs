@@ -28,10 +28,13 @@
 
 use std::f32::consts::TAU;
 
-use crate::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 
-use super::noise::{OnePoleHP, OnePoleLP, Rng};
+use super::noise::{white_noise_density_scale, OnePoleHP, OnePoleLP, Rng};
+
+/// Low cut of the wing-noise band (Hz).
+const WING_HIGHPASS_HZ: f32 = 700.0;
 
 /// Wingbeat rate while hovering (Hz).
 const WING_RATE_HOVER_HZ: f32 = 48.0;
@@ -74,6 +77,9 @@ pub struct WispSource {
     /// Two one-pole stages in series (12 dB/octave). A single stage left the
     /// whirr almost white: 81 % of its energy above 3 kHz, a hiss, not wings.
     wing_lowpass: [OnePoleLP; 2],
+    /// Keeps the wing white noise at its 48 kHz density per Hz.
+    white_noise_scale: f32,
+    sample_rate_cached: f32,
 
     // ── Tuning knobs ────────────────────────────────────────────────────
     /// Horizontal radius of the territory around the anchor (m).
@@ -115,11 +121,13 @@ impl WispSource {
             flight_time: 0.0,
             speed_fraction: 0.0,
             wing_phase: 0.0,
-            wing_highpass: OnePoleHP::new(700.0, 48_000.0),
+            wing_highpass: OnePoleHP::new(WING_HIGHPASS_HZ, 48_000.0),
             wing_lowpass: [
                 OnePoleLP::new(1800.0, 48_000.0),
                 OnePoleLP::new(1800.0, 48_000.0),
             ],
+            white_noise_scale: 1.0,
+            sample_rate_cached: 0.0,
             range: 6.0,
             min_height,
             max_height: 3.0,
@@ -153,6 +161,13 @@ impl WispSource {
 
 impl SoundSource for WispSource {
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        if self.sample_rate_cached != sample_rate {
+            // The lowpasses follow the speed and are retuned every sample
+            // below; the fixed low cut and the noise density follow the rate.
+            self.sample_rate_cached = sample_rate;
+            self.wing_highpass.set_cutoff(WING_HIGHPASS_HZ, sample_rate);
+            self.white_noise_scale = white_noise_density_scale(sample_rate);
+        }
         let speed_fraction = self.speed_fraction;
 
         // ── Wings ───────────────────────────────────────────────────────
@@ -167,7 +182,9 @@ impl SoundSource for WispSource {
 
         // Noise band: opens up (brighter) with speed.
         let cutoff = 1800.0 + 2600.0 * speed_fraction;
-        let mut band = self.wing_highpass.process(self.rng.next_bipolar());
+        let mut band = self
+            .wing_highpass
+            .process(self.rng.next_bipolar() * self.white_noise_scale);
         for stage in &mut self.wing_lowpass {
             stage.set_cutoff(cutoff, sample_rate);
             band = stage.process(band);
@@ -476,5 +493,329 @@ mod tests {
             position_a.distance_to(position_c) > 1e-3,
             "seeds should differ"
         );
+    }
+
+    use crate::synth::test_support::{
+        averaged_power_spectrum, band_density_db, mean, render as render_at, root_mean_square,
+    };
+
+    /// Amplitude of the sinusoidal component at `frequency_hz`, by direct
+    /// Fourier projection over a whole number of its periods.
+    fn amplitude_at(samples: &[f32], sample_rate: f32, frequency_hz: f32) -> f32 {
+        let (mut real, mut imaginary) = (0.0_f64, 0.0_f64);
+        for (index, &value) in samples.iter().enumerate() {
+            let angle = (TAU * frequency_hz * index as f32 / sample_rate) as f64;
+            real += value as f64 * angle.cos();
+            imaginary += value as f64 * angle.sin();
+        }
+        (2.0 * (real * real + imaginary * imaginary).sqrt() / samples.len() as f64) as f32
+    }
+
+    /// Hum = sum over h = 2..5 of sin(h phase) / h, scaled by
+    /// hum_gain (0.4 + 0.6 speed): at rest each harmonic has amplitude
+    /// 0.18 * 0.4 / h and the fundamental is absent. Frequencies are exact
+    /// multiples of the 48 Hz wingbeat.
+    #[test]
+    fn hum_is_harmonics_two_to_five_of_the_wingbeat_with_one_over_h_amplitude() {
+        for sample_rate in [44_100.0_f32, 48_000.0, 96_000.0] {
+            let mut source = wisp();
+            source.wing_gain = 0.0;
+            let samples = render_at(2.0, sample_rate, |rate| source.next_sample(rate));
+            for harmonic in 2..=5 {
+                let expected = 0.18 * 0.4 / harmonic as f32;
+                let measured = amplitude_at(&samples, sample_rate, 48.0 * harmonic as f32);
+                assert!(
+                    (measured - expected).abs() < 0.0015,
+                    "{sample_rate} Hz, harmonic {harmonic}: {measured:.4}, expected {expected:.4}"
+                );
+            }
+            assert!(
+                amplitude_at(&samples, sample_rate, 48.0) < 0.001,
+                "fundamental present"
+            );
+            assert!(
+                amplitude_at(&samples, sample_rate, 72.0) < 0.001,
+                "inharmonic energy"
+            );
+        }
+    }
+
+    /// Phase advances 2 pi f / sample_rate per sample and wraps into
+    /// [0, 2 pi) without drifting: 4800 samples at 48 Hz / 48 kHz is exactly
+    /// 4.8 radians x ... = 48 full cycles ... check the residual phase.
+    #[test]
+    fn wing_phase_advances_by_two_pi_f_over_rate_and_wraps() {
+        for sample_rate in [44_100.0_f32, 48_000.0, 96_000.0] {
+            let mut source = wisp();
+            source.speed_fraction = 0.0;
+            let samples = 10_000usize;
+            for _ in 0..samples {
+                source.next_sample(sample_rate);
+                assert!((0.0..TAU).contains(&source.wing_phase));
+            }
+            let expected = (TAU as f64 * 48.0 * samples as f64 / sample_rate as f64) % TAU as f64;
+            let difference = (source.wing_phase as f64 - expected).abs();
+            let difference = difference.min(TAU as f64 - difference);
+            assert!(
+                difference < 0.02,
+                "{sample_rate} Hz: phase {} vs {expected}",
+                source.wing_phase
+            );
+        }
+    }
+
+    /// Power of the rectified envelope at `rate_hz` (Fourier projection).
+    fn envelope_power(samples: &[f32], sample_rate: f32, rate_hz: f32) -> f64 {
+        let envelope: Vec<f32> = samples.iter().map(|value| value.abs()).collect();
+        let level = envelope.iter().sum::<f32>() / envelope.len() as f32;
+        let centred: Vec<f32> = envelope.iter().map(|value| value - level).collect();
+        let amplitude = amplitude_at(&centred, sample_rate, rate_hz) as f64;
+        amplitude * amplitude
+    }
+
+    /// The wing pulse sits at the wingbeat rate at every host rate: 48 Hz
+    /// hovering, 82 Hz in a dart, and not at neighbouring frequencies.
+    #[test]
+    fn wing_pulse_rate_is_independent_of_sample_rate() {
+        for sample_rate in [44_100.0_f32, 96_000.0] {
+            for (speed_fraction, expected_hz) in [(0.0, 48.0), (1.0, 82.0)] {
+                let mut source = wisp();
+                source.hum_gain = 0.0;
+                source.speed_fraction = speed_fraction;
+                let samples = render_at(1.0, sample_rate, |rate| source.next_sample(rate));
+                let at_rate = envelope_power(&samples, sample_rate, expected_hz);
+                for neighbour in [expected_hz - 9.0, expected_hz + 9.0] {
+                    assert!(
+                        at_rate > 8.0 * envelope_power(&samples, sample_rate, neighbour),
+                        "{sample_rate} Hz, speed {speed_fraction}: pulse not at {expected_hz} Hz"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The whirr is a band-passed noise: highpass at 700 Hz, two lowpass
+    /// stages at 1.8 kHz (hover). Below 700 Hz it is a 6 dB/oct skirt. Were
+    /// the highpass left at its 48 kHz construction, at 96 kHz its corner
+    /// would silently become 1.4 kHz (measured before the fix: the 300-600 Hz
+    /// vs 2-3 kHz balance moved by 3.6 dB at a fixed wing speed).
+    #[test]
+    fn whirr_low_cut_is_sample_rate_independent() {
+        let low_to_mid_db = |sample_rate: f32| {
+            let mut source = wisp();
+            source.hum_gain = 0.0;
+            source.speed_fraction = 0.5;
+            // Hold the wings steady: no pulse, just the band-passed noise.
+            let mut samples = Vec::new();
+            for _ in 0..(6.0 * sample_rate) as usize {
+                source.wing_phase = std::f32::consts::PI; // cos = -1: pulse = 1
+                samples.push(source.next_sample(sample_rate));
+            }
+            let spectrum = averaged_power_spectrum(&samples);
+            band_density_db(&spectrum, sample_rate, 300.0, 600.0)
+                - band_density_db(&spectrum, sample_rate, 2_000.0, 3_000.0)
+        };
+        let difference = (low_to_mid_db(96_000.0) - low_to_mid_db(48_000.0)).abs();
+        assert!(
+            difference < 1.5,
+            "low-cut moved the 300-600 Hz balance by {difference:.1} dB"
+        );
+    }
+
+    /// Same measurement at 48 kHz: the one-pole 700 Hz highpass and the
+    /// two-pole 1.8 kHz lowpass shape a band: strongest around 1-2.5 kHz,
+    /// about 7 dB down at 100-200 Hz and 20+ dB down at 8-12 kHz.
+    #[test]
+    fn whirr_is_a_band_peaking_in_the_low_kilohertz() {
+        let mut source = wisp();
+        source.hum_gain = 0.0;
+        source.speed_fraction = 0.0;
+        let mut samples = Vec::new();
+        for _ in 0..(6.0 * SAMPLE_RATE) as usize {
+            source.wing_phase = std::f32::consts::PI;
+            samples.push(source.next_sample(SAMPLE_RATE));
+        }
+        let spectrum = averaged_power_spectrum(&samples);
+        let low = band_density_db(&spectrum, SAMPLE_RATE, 100.0, 200.0);
+        let peak_band = band_density_db(&spectrum, SAMPLE_RATE, 1_000.0, 2_500.0);
+        let high = band_density_db(&spectrum, SAMPLE_RATE, 8_000.0, 12_000.0);
+        assert!(peak_band > low + 5.0, "peak {peak_band:.1} vs low {low:.1}");
+        assert!(
+            peak_band > high + 15.0,
+            "peak {peak_band:.1} vs high {high:.1}"
+        );
+    }
+
+    /// Targets are uniform over the disc's area (radius = range sqrt(u)) and
+    /// uniform in height: E[r^2] = range^2 / 2, E[height] = mid height.
+    #[test]
+    fn new_targets_are_uniform_over_the_territory() {
+        let mut source = wisp();
+        let draws = 40_000;
+        let (mut radius_squared, mut height_sum, mut x_sum, mut y_sum) =
+            (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for _ in 0..draws {
+            source.choose_target();
+            let target = source.target;
+            let horizontal = (target.x * target.x + target.y * target.y) as f64;
+            assert!(horizontal.sqrt() <= source.range as f64 + 1e-4);
+            assert!(target.z >= source.min_height && target.z <= source.max_height);
+            radius_squared += horizontal;
+            height_sum += target.z as f64;
+            x_sum += target.x as f64;
+            y_sum += target.y as f64;
+        }
+        let draws = draws as f64;
+        let expected_radius_squared = (source.range as f64).powi(2) / 2.0;
+        assert!((radius_squared / draws / expected_radius_squared - 1.0).abs() < 0.03);
+        assert!(
+            (height_sum / draws - 1.8).abs() < 0.03,
+            "mean height {}",
+            height_sum / draws
+        );
+        assert!(
+            (x_sum / draws).abs() < 0.08 && (y_sum / draws).abs() < 0.08,
+            "targets lean to one side"
+        );
+    }
+
+    /// Semi-implicit Euler: velocity is updated first, then the offset moves
+    /// by the new velocity x dt, exactly.
+    #[test]
+    fn position_integrates_velocity_exactly_each_tick() {
+        let mut source = wisp();
+        for _ in 0..2_000 {
+            let before = source.offset;
+            source.tick(BUFFER_SECONDS);
+            let moved = source.offset - before;
+            let expected = source.velocity * BUFFER_SECONDS;
+            assert!(moved.distance_to(expected) < 1e-5);
+        }
+    }
+
+    /// From rest a far target pulls with k d = 14 x 6 = 84 m/s^2 against
+    /// damping 6.5 v: the uncapped terminal speed is 12.9 m/s, so the 7 m/s cap
+    /// is what limits a dart, and the dart saturates exactly at the cap.
+    #[test]
+    fn dart_speed_saturates_at_max_speed() {
+        let mut source = wisp();
+        source.offset = Vec3::new(0.0, 0.0, 1.2);
+        source.target = Vec3::new(6.0, 0.0, 1.2);
+        source.hover_remaining = 1.0e9;
+        let mut fastest = 0.0_f32;
+        for _ in 0..200 {
+            source.tick(BUFFER_SECONDS);
+            fastest = fastest.max(source.speed());
+        }
+        assert!(
+            (fastest - source.max_speed).abs() < 1e-3,
+            "top speed {fastest}"
+        );
+    }
+
+    /// Arrival: damping ratio zeta = 6.5 / (2 sqrt 14) = 0.87, so the spring
+    /// is slightly under-damped and overshoots by only exp(-pi zeta /
+    /// sqrt(1 - zeta^2)) = 0.4 % of the move (no visible bounce).
+    #[test]
+    fn spring_is_slightly_underdamped() {
+        let zeta = SPRING_DAMPING / (2.0 * SPRING_STIFFNESS.sqrt());
+        assert!((zeta - 0.868).abs() < 0.001);
+        assert!(zeta < 1.0 && zeta > 0.8);
+        let overshoot = (-std::f32::consts::PI * zeta / (1.0 - zeta * zeta).sqrt()).exp();
+        assert!((overshoot - 0.0041).abs() < 0.0005, "overshoot {overshoot}");
+    }
+
+    /// After a settling move the wisp ends up within the hover drift
+    /// (0.12 m x sqrt 3) of its target whatever the control rate.
+    #[test]
+    fn settled_position_does_not_depend_on_the_tick_rate() {
+        let settle = |dt: f32| {
+            let mut source = wisp();
+            source.offset = Vec3::new(0.0, 0.0, 1.2);
+            source.target = Vec3::new(3.0, -2.0, 2.0);
+            source.hover_remaining = 1.0e9;
+            for _ in 0..(4.0 / dt) as usize {
+                source.tick(dt);
+            }
+            source.offset
+        };
+        let reference = settle(0.005);
+        for dt in [0.01, 0.02, 0.05] {
+            let offset = settle(dt);
+            assert!(
+                offset.distance_to(reference) < 0.25,
+                "dt {dt}: {offset:?} vs {reference:?}"
+            );
+            assert!(offset.distance_to(Vec3::new(3.0, -2.0, 2.0)) < 0.4);
+        }
+    }
+
+    /// Every hover lasts hover_time_min..max seconds (the countdown only runs
+    /// while within the arrival distance), so the interval between new targets
+    /// is at least the shortest hover.
+    #[test]
+    fn hovers_last_at_least_the_minimum_hover_time() {
+        let mut source = wisp();
+        let mut last_target = source.target;
+        let mut last_change = 0.0_f32;
+        let mut clock = 0.0_f32;
+        let mut intervals = Vec::new();
+        for _ in 0..(300.0 / BUFFER_SECONDS) as usize {
+            source.tick(BUFFER_SECONDS);
+            clock += BUFFER_SECONDS;
+            if source.target.distance_to(last_target) > 1e-6 {
+                intervals.push(clock - last_change);
+                last_change = clock;
+                last_target = source.target;
+            }
+        }
+        assert!(
+            intervals.len() > 30,
+            "only {} darts in 300 s",
+            intervals.len()
+        );
+        let shortest = intervals.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(
+            shortest >= source.hover_time_min - 0.02,
+            "shortest {shortest}"
+        );
+        let mean_interval = intervals.iter().sum::<f32>() / intervals.len() as f32;
+        // 1.9 s mean hover plus travel.
+        assert!((2.0..6.0).contains(&mean_interval), "mean {mean_interval}");
+    }
+
+    #[test]
+    fn tick_ignores_non_positive_time_steps_and_survives_huge_ones() {
+        let mut source = wisp();
+        let before = (source.offset, source.velocity);
+        source.tick(0.0);
+        source.tick(-1.0);
+        assert_eq!((source.offset, source.velocity), before);
+        for _ in 0..400 {
+            source.tick(0.25);
+            assert!(source.offset.x.is_finite() && source.speed() <= source.max_speed + 1e-3);
+        }
+        let anchor = source.position;
+        assert!((source.position() - anchor - source.motion_offset()).length() < 1e-6);
+    }
+
+    #[test]
+    fn rms_is_roughly_stable_across_sample_rates() {
+        let rms = |sample_rate: f32| {
+            let mut source = wisp();
+            source.speed_fraction = 0.3;
+            let samples = render_at(4.0, sample_rate, |rate| source.next_sample(rate));
+            (root_mean_square(&samples), mean(&samples))
+        };
+        let (low, _) = rms(48_000.0);
+        let (high, dc) = rms(96_000.0);
+        // Measured 1.00 (it read 0.86 before the wing noise kept its density
+        // per Hz and the highpass was retuned).
+        assert!(
+            (0.7..1.3).contains(&(high / low)),
+            "RMS ratio {}",
+            high / low
+        );
+        assert!(dc.abs() < 0.01);
     }
 }

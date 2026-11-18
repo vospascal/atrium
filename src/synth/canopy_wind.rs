@@ -16,10 +16,10 @@ use std::f32::consts::TAU;
 use atrium_core::commands::SynthParam;
 use atrium_core::source::{EmitterKind, SoundSource};
 
-use crate::world::types::Vec3;
+use atrium_core::types::Vec3;
 
 use super::field_wind::WindDriver;
-use super::noise::{OnePoleHP, OnePoleLP, PinkNoiseFull, Rng};
+use super::noise::{white_noise_density_scale, OnePoleHP, OnePoleLP, PinkNoiseFull, Rng};
 
 const CONTACT_RING_SIZE: usize = 4096;
 const CONTACT_RING_MASK: usize = CONTACT_RING_SIZE - 1;
@@ -79,6 +79,8 @@ pub struct CanopyWindSource {
     pub contact_gain: f32,
     pub master_gain: f32,
 
+    /// Keeps the white dry-leaf and branch noise at their 48 kHz density per Hz.
+    white_noise_scale: f32,
     position: Vec3,
     sample_rate_cached: f32,
 }
@@ -125,6 +127,7 @@ impl CanopyWindSource {
             rustle_gain: 0.90,
             contact_gain: 0.75,
             master_gain: 1.0,
+            white_noise_scale: 1.0,
             position,
             sample_rate_cached: 0.0,
         }
@@ -176,6 +179,7 @@ impl CanopyWindSource {
         self.dry_lp
             .set_cutoff(11_000.0_f32.min(sample_rate * 0.45), sample_rate);
         self.branch_noise_lp.set_cutoff(350.0, sample_rate);
+        self.white_noise_scale = white_noise_density_scale(sample_rate);
     }
 
     /// Add one short, filtered leaf-on-leaf contact to a fixed ring buffer.
@@ -193,6 +197,7 @@ impl CanopyWindSource {
         let lp_mix = 1.0 - (-TAU * lowpass_hz / sample_rate).exp();
         let event_gain =
             0.055 * (0.75 + 0.50 * dryness) * (0.65 + 0.35 * self.contact_rng.next_f32());
+        let white_noise_scale = white_noise_density_scale(sample_rate);
 
         let mut lowpass = 0.0_f32;
         let mut hp_state = 0.0_f32;
@@ -200,7 +205,7 @@ impl CanopyWindSource {
         for i in 0..length {
             let attack = (i as f32 / attack_samples).min(1.0);
             let decay = (1.0 - i as f32 / length as f32).powi(2);
-            lowpass += lp_mix * (self.contact_rng.next_bipolar() - lowpass);
+            lowpass += lp_mix * (self.contact_rng.next_bipolar() * white_noise_scale - lowpass);
             hp_state = hp_a * (hp_state + lowpass - hp_previous);
             hp_previous = lowpass;
             let index = (self.contact_ring_index + 1 + i) & CONTACT_RING_MASK;
@@ -226,7 +231,9 @@ impl CanopyWindSource {
             return 0.0;
         }
 
-        let noise = self.branch_noise_lp.process(self.branch_rng.next_bipolar());
+        let noise = self
+            .branch_noise_lp
+            .process(self.branch_rng.next_bipolar() * self.white_noise_scale);
         let resonant = 0.72 * self.branch_phase.sin()
             + 0.20 * (2.0 * self.branch_phase + 0.6).sin()
             + 0.08 * noise;
@@ -287,8 +294,10 @@ impl SoundSource for CanopyWindSource {
                 .process(self.leaf_hp.process(self.leaf_noise.next_sample())),
         );
         let dry = self.dry_lp.process(
-            self.dry_hp2
-                .process(self.dry_hp.process(self.dry_rng.next_bipolar())),
+            self.dry_hp2.process(
+                self.dry_hp
+                    .process(self.dry_rng.next_bipolar() * self.white_noise_scale),
+            ),
         );
         let branch = self.next_branch(state.speed, sample_rate);
 
@@ -326,6 +335,11 @@ impl SoundSource for CanopyWindSource {
     fn tick(&mut self, _dt: f32) {}
 
     fn set_synth_param(&mut self, param: SynthParam, value: f32) {
+        // `f32::clamp` passes NaN through, and one NaN gain or speed would
+        // turn every later sample into NaN: keep the previous value instead.
+        if !value.is_finite() {
+            return;
+        }
         match param {
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => self.min_speed = value.clamp(0.0, self.max_speed),
@@ -455,5 +469,223 @@ mod tests {
             dry > green * 1.10,
             "dry foliage should add high-frequency energy: {dry} vs {green}"
         );
+    }
+
+    use crate::synth::test_support::{
+        averaged_power_spectrum, band_density_db, mean, peak, render, root_mean_square,
+    };
+
+    /// Leaf contacts started over `seconds` (a contact begins at
+    /// `contact_ring_index + 1`; slot `+ 2` changing during a call marks one).
+    fn count_contacts(wind: &mut CanopyWindSource, seconds: f32, sample_rate: f32) -> usize {
+        let mut count = 0;
+        for _ in 0..(seconds * sample_rate) as usize {
+            let watched = (wind.contact_ring_index + 2) & CONTACT_RING_MASK;
+            let before = wind.contact_ring[watched];
+            wind.next_sample(sample_rate);
+            if wind.contact_ring[watched] != before {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// contact rate = foliage x min(2 + 180 s^1.7, 900) per second with s =
+    /// speed / 8 clamped to 3.125: 14.3/s at 2 m/s, 136.5/s at 8 m/s, and the
+    /// 900/s ceiling (675/s at foliage 0.75) from about 17 m/s.
+    #[test]
+    fn leaf_contact_rate_follows_the_speed_law() {
+        for (speed, expected_rate) in [(2.0_f32, 14.3), (8.0, 136.5), (25.0, 675.0)] {
+            let mut wind = CanopyWindSource::new(Vec3::ZERO, speed, speed, 4);
+            wind.branch_level = 0.0;
+            let seconds = 20.0;
+            let expected = expected_rate * seconds;
+            let count = count_contacts(&mut wind, seconds, 16_000.0) as f32;
+            assert!(
+                (count - expected).abs() < 4.0 * expected.sqrt() + 5.0,
+                "{speed} m/s: {count} contacts in {seconds} s, expected {expected:.0}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaf_contact_rate_is_independent_of_sample_rate_and_scales_with_foliage() {
+        let expected = 136.5 * 4.0;
+        for sample_rate in [16_000.0_f32, 44_100.0, 96_000.0] {
+            let mut wind = CanopyWindSource::new(Vec3::ZERO, 8.0, 8.0, 5);
+            wind.branch_level = 0.0;
+            let count = count_contacts(&mut wind, 4.0, sample_rate) as f32;
+            assert!(
+                (count - expected).abs() < 4.0 * expected.sqrt() + 5.0,
+                "{sample_rate} Hz: {count} contacts, expected {expected}"
+            );
+        }
+        let mut bare = CanopyWindSource::new(Vec3::ZERO, 8.0, 8.0, 5);
+        bare.foliage_density = 0.0;
+        bare.branch_level = 0.0;
+        assert_eq!(count_contacts(&mut bare, 4.0, 16_000.0), 0);
+    }
+
+    /// Run `next_branch` alone at 1 kHz: count events and their lengths.
+    fn run_branch(
+        wind: &mut CanopyWindSource,
+        speed: f32,
+        seconds: f32,
+        sample_rate: f32,
+    ) -> (usize, Vec<usize>, Vec<f32>) {
+        let (mut events, mut lengths, mut decays) = (0, Vec::new(), Vec::new());
+        let mut running = 0usize;
+        for _ in 0..(seconds * sample_rate) as usize {
+            let was_active = wind.branch_envelope > 0.0;
+            wind.next_branch(speed, sample_rate);
+            let is_active = wind.branch_envelope > 0.0;
+            if !was_active && is_active {
+                events += 1;
+                running = 0;
+                decays.push(wind.branch_decay);
+                assert!((75.0..=230.0).contains(&wind.branch_frequency));
+            }
+            if is_active || was_active {
+                running += 1;
+            }
+            if was_active && !is_active {
+                lengths.push(running);
+            }
+        }
+        (events, lengths, decays)
+    }
+
+    /// Branch creaks fall 60 dB over their 0.25-1.15 s duration, like the
+    /// storm's strain events.
+    #[test]
+    fn branch_creaks_decay_by_60_db_over_their_duration() {
+        let sample_rate = 1_000.0;
+        let mut wind = CanopyWindSource::new(Vec3::ZERO, 12.0, 12.0, 9);
+        wind.branch_level = 1.0;
+        let (events, lengths, decays) = run_branch(&mut wind, 12.0, 400.0, sample_rate);
+        assert!(events > 100 && lengths.len() >= events - 1);
+        for (length, decay) in lengths.iter().zip(&decays) {
+            let duration = -6.9 / (decay.ln() * sample_rate);
+            assert!((0.25..=1.15).contains(&duration), "duration {duration}");
+            let expected = duration * sample_rate * (6.9078 / 6.9);
+            assert!(
+                (*length as f32 - expected).abs() <= 2.0,
+                "{length} vs {expected}"
+            );
+        }
+    }
+
+    /// Above 3 m/s only; rate = level (0.02 + 1.2 bend^2) with bend =
+    /// (speed - 3) / 9, then the renewal correction for the 0.7 s mean duration.
+    #[test]
+    fn branch_creak_rate_follows_the_renewal_law_and_speed_gate() {
+        let sample_rate = 1_000.0;
+        let seconds = 1_500.0;
+        let mut wind = CanopyWindSource::new(Vec3::ZERO, 12.0, 12.0, 10);
+        wind.branch_level = 1.0;
+        let (events, _, _) = run_branch(&mut wind, 12.0, seconds, sample_rate);
+        let expected = seconds / (1.0 / 1.22 + 0.70 * 1.0011);
+        assert!(
+            (events as f32 - expected).abs() < 5.0 * expected.sqrt(),
+            "{events} creaks in {seconds} s, expected {expected:.0}"
+        );
+        let mut calm = CanopyWindSource::new(Vec3::ZERO, 3.0, 3.0, 10);
+        calm.branch_level = 1.0;
+        assert_eq!(run_branch(&mut calm, 3.0, 500.0, sample_rate).0, 0);
+        let mut off = CanopyWindSource::new(Vec3::ZERO, 12.0, 12.0, 10);
+        off.branch_level = 0.0;
+        assert_eq!(run_branch(&mut off, 12.0, 500.0, sample_rate).0, 0);
+    }
+
+    /// Gain law (speed / 8)^1.25: 6 m/s against 3 m/s is a gain ratio of
+    /// 2^1.25 = 2.4, plus the speed-dependent contact density.
+    #[test]
+    fn level_follows_the_speed_law() {
+        let level = |speed: f32| {
+            let mut wind = CanopyWindSource::new(Vec3::ZERO, speed, speed, 71);
+            wind.branch_level = 0.0;
+            root_mean_square(&render(12.0, 16_000.0, |rate| wind.next_sample(rate)))
+        };
+        let ratio = level(6.0) / level(3.0);
+        assert!((2.3..9.0).contains(&ratio), "RMS ratio {ratio}");
+        assert!(level(1.0) < level(3.0) && level(3.0) < level(12.0));
+    }
+
+    /// Dry leaves: contact filters open up (HP 550 -> 1600 Hz, LP 2.8 -> 8.6
+    /// kHz) and the dry layer is added.
+    #[test]
+    fn leaf_dryness_brightens_the_contact_grains() {
+        let brightness = |dryness: f32| {
+            let mut wind = CanopyWindSource::new(Vec3::ZERO, 12.0, 12.0, 6);
+            wind.leaf_dryness = dryness;
+            wind.branch_level = 0.0;
+            let samples = render(10.0, 48_000.0, |rate| wind.next_sample(rate));
+            let spectrum = averaged_power_spectrum(&samples);
+            band_density_db(&spectrum, 48_000.0, 5_000.0, 9_000.0)
+                - band_density_db(&spectrum, 48_000.0, 300.0, 700.0)
+        };
+        assert!(brightness(1.0) > brightness(0.0) + 3.0);
+    }
+
+    #[test]
+    fn output_is_finite_zero_mean_and_inside_unity_at_default_speeds() {
+        let mut wind = CanopyWindSource::new(Vec3::ZERO, 2.0, 8.0, 7);
+        let samples = render(20.0, 48_000.0, |rate| wind.next_sample(rate));
+        assert!(samples.iter().all(|value| value.is_finite()));
+        assert!(peak(&samples) < 1.0, "peak {}", peak(&samples));
+        assert!(mean(&samples).abs() < 0.002, "DC {}", mean(&samples));
+    }
+
+    /// At the 25 m/s extreme the clamps (speed_at_canopy 3.125, gain cap 4.2)
+    /// keep the raw output finite and under 1.5.
+    #[test]
+    fn storm_speed_output_stays_bounded() {
+        let mut wind = CanopyWindSource::new(Vec3::ZERO, 25.0, 25.0, 7);
+        let samples = render(10.0, 48_000.0, |rate| wind.next_sample(rate));
+        assert!(samples.iter().all(|value| value.is_finite()));
+        assert!(peak(&samples) < 1.5, "peak {}", peak(&samples));
+        assert!(3.125_f32.powf(1.25) < 4.2);
+    }
+
+    #[test]
+    fn body_density_is_sample_rate_independent() {
+        let density = |sample_rate: f32| {
+            let mut wind = CanopyWindSource::new(Vec3::ZERO, 8.0, 8.0, 73);
+            wind.branch_level = 0.0;
+            let samples = render(10.0, sample_rate, |rate| wind.next_sample(rate));
+            band_density_db(
+                &averaged_power_spectrum(&samples),
+                sample_rate,
+                200.0,
+                300.0,
+            )
+        };
+        let reference = density(48_000.0);
+        for sample_rate in [44_100.0, 96_000.0] {
+            assert!(
+                (density(sample_rate) - reference).abs() < 1.0,
+                "{sample_rate} Hz"
+            );
+        }
+    }
+
+    #[test]
+    fn parameters_are_clamped_and_routed() {
+        let mut wind = CanopyWindSource::new(Vec3::ZERO, 30.0, 40.0, 1);
+        assert_eq!((wind.min_speed, wind.max_speed), (25.0, 25.0));
+        wind.set_speed_range(10.0, 2.0);
+        assert_eq!((wind.min_speed, wind.max_speed), (2.0, 10.0));
+        wind.set_synth_param(SynthParam::FoliageDensity, 3.0);
+        assert_eq!(wind.foliage_density, 1.0);
+        wind.set_synth_param(SynthParam::LeafDryness, -3.0);
+        assert_eq!(wind.leaf_dryness, 0.0);
+        wind.set_synth_param(SynthParam::BranchLevel, 0.5);
+        assert_eq!(wind.branch_level, 0.5);
+        wind.set_synth_param(SynthParam::LowGain, 0.1);
+        assert_eq!(wind.body_gain, 0.1);
+        wind.set_synth_param(SynthParam::MidGain, 0.2);
+        assert_eq!(wind.rustle_gain, 0.2);
+        wind.set_synth_param(SynthParam::AirGain, 0.3);
+        assert_eq!(wind.contact_gain, 0.3);
     }
 }

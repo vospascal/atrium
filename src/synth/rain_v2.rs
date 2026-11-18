@@ -7,12 +7,15 @@
 //   • Each drop has TWO components (SIGGRAPH 2019 / Liu, Cheng & Tong):
 //       1. Impact: short exponential-decay noise burst (1-4 ms)
 //       2. Bubble: damped sinusoid exp(-αt)·sin(2πft) at Minnaert frequency
-//   • Bubble frequency varies with drop size (research data, attenuated):
-//       - Small  (<1.2mm):  4-10 kHz (gentle sparkle, quiet — air absorbs HF)
-//       - Medium (1.2-2mm): usually NO bubble (no air trapping)
-//       - Large  (>2mm):    1-6 kHz  (the classic "plink")
-//   • Much higher drop rate (800/s base vs 150/s) — drops ARE the texture.
-//   • Only a subtle brown-noise bed for low-frequency body.
+//   • Bubble frequency falls with drop size (Minnaert direction, shifted well
+//     below the underwater values for warmth — air absorbs HF over distance):
+//       - Small  (<1.2mm):  500-2500 Hz, rarely (half the base probability)
+//       - Medium (1.2-2mm): 400-2000 Hz
+//       - Large  (>2mm):    250-1200 Hz (the deep "plink")
+//   • Drop rate follows a piecewise-linear intensity curve: 15/s at 0.2,
+//     50/s at 0.5, `drop_rate` (75/s by default) from 0.9 up.
+//   • Only a subtle brown-noise bed for low-frequency body, plus a faint
+//     pink-modulated white-noise texture that fills between drops.
 //   • No scratch buffer needed — impact+bubble written directly to ring.
 //
 // References:
@@ -24,13 +27,36 @@
 
 use std::f32::consts::TAU;
 
-use crate::world::types::Vec3;
 use atrium_core::source::SoundSource;
+use atrium_core::types::Vec3;
 
-use super::noise::{BrownNoise, PinkNoise, Rng};
+use super::noise::{white_noise_density_scale, BrownNoise, PinkNoise, Rng};
 
 const RING_SIZE: usize = 8192;
 const RING_MASK: usize = RING_SIZE - 1;
+
+/// Corner of the one-pole smoother on the ring readout: -ln(0.65) · 48 kHz / 2π,
+/// the 0.65-per-sample coefficient it was tuned with at 48 kHz.
+const RING_SMOOTHING_CORNER_HZ: f32 = 3_290.939;
+
+/// Drops per second at intensity 0.2 and 0.5 as fractions of the rate at full
+/// intensity (15/s and 50/s of the default 75/s).
+const LIGHT_DROP_RATE_FRACTION: f32 = 15.0 / 75.0;
+const MEDIUM_DROP_RATE_FRACTION: f32 = 50.0 / 75.0;
+
+/// Fraction of `drop_rate` that falls at `intensity`: piecewise linear from 0
+/// through 0.2 at intensity 0.2 and 2/3 at 0.5 to 1 at 0.9, flat above.
+fn drop_rate_fraction(intensity: f32) -> f32 {
+    if intensity <= 0.2 {
+        LIGHT_DROP_RATE_FRACTION * (intensity / 0.2)
+    } else if intensity <= 0.5 {
+        LIGHT_DROP_RATE_FRACTION
+            + (MEDIUM_DROP_RATE_FRACTION - LIGHT_DROP_RATE_FRACTION) * ((intensity - 0.2) / 0.3)
+    } else {
+        MEDIUM_DROP_RATE_FRACTION
+            + (1.0 - MEDIUM_DROP_RATE_FRACTION) * ((intensity - 0.5) / 0.4).min(1.0)
+    }
+}
 
 /// Physically-based rain source (v2).
 ///
@@ -53,9 +79,13 @@ pub struct RainSourceV2 {
     ring: Box<[f32; RING_SIZE]>,
     ring_idx: usize,
 
-    // Minimal smoothing on ring output
+    // Minimal smoothing on ring output. The per-sample coefficient is
+    // derived from RING_SMOOTHING_CORNER_HZ.
     env_state: f32,
     env_smooth: f32,
+    /// Keeps the texture white noise at its 48 kHz density per Hz.
+    white_noise_scale: f32,
+    sample_rate_cached: f32,
 
     // Output smoothing LP — softens transients at low intensity
     output_lp_state: f32,
@@ -63,8 +93,10 @@ pub struct RainSourceV2 {
     // -- Tuning knobs (all pub) --
     /// Rain intensity 0–1. Scales drop rate and overall level.
     pub intensity: f32,
-    /// Base drop impacts per second at intensity=1.
-    /// Default 800 — much higher than v1 because drops ARE the sound.
+    /// Drop impacts per second at full intensity (reached from intensity
+    /// 0.9). Lower intensities take a fixed fraction of it: 20 % at 0.2 and
+    /// two thirds at 0.5. Default 75. Drips and the texture layer follow the
+    /// intensity curve, not this knob.
     pub drop_rate: f32,
     /// Sporadic large drips per second at intensity=1 (gutter / puddle hits).
     pub drip_rate: f32,
@@ -101,10 +133,12 @@ impl RainSourceV2 {
             ring: Box::new([0.0; RING_SIZE]),
             ring_idx: 0,
             env_state: 0.0,
-            env_smooth: 0.65, // smooth ring readout — rounds off impact transients
+            env_smooth: 0.0, // set from RING_SMOOTHING_CORNER_HZ on the first sample
+            white_noise_scale: 1.0,
+            sample_rate_cached: 0.0,
             output_lp_state: 0.0,
             intensity: intensity.clamp(0.0, 1.0),
-            drop_rate: 600.0,
+            drop_rate: 75.0,
             drip_rate: 1.5,
             impact_gain: 0.6,   // compensate for 2-pole LP amplitude loss
             bubble_gain: 0.08,  // very subtle — pure tones are perceptually sharp
@@ -151,6 +185,7 @@ impl RainSourceV2 {
         let alpha_hp = rc_hp / (rc_hp + dt);
         let mut hp_prev_in = 0.0_f32;
         let mut hp_state = 0.0_f32;
+        let white_noise_scale = white_noise_density_scale(sample_rate);
 
         for i in 0..len {
             let t = i as f32 / sample_rate;
@@ -159,7 +194,7 @@ impl RainSourceV2 {
             if env < 0.001 && i > attack_samples as usize {
                 break;
             }
-            let noise = self.rng.next_bipolar();
+            let noise = self.rng.next_bipolar() * white_noise_scale;
             // Cascaded LP (2-pole) then HP: tight bandpass on low-mid
             lp1 += alpha_lp * (noise - lp1);
             lp2 += alpha_lp * (lp1 - lp2);
@@ -206,9 +241,9 @@ impl RainSourceV2 {
     ///
     /// Empirical Minnaert data shifted down for warmth (raw values are
     /// measured underwater — through air at distance, HF is heavily absorbed):
-    ///   - Small drops (<1.2mm):  4-10 kHz (gentle sparkle)
-    ///   - Medium drops (1.2-2mm): usually no bubble
-    ///   - Large drops (>2mm):    1-5 kHz  (warm "plink")
+    ///   - Small drops (<1.2mm):  500-2500 Hz, at half the base probability
+    ///   - Medium drops (1.2-2mm): 400-2000 Hz
+    ///   - Large drops (>2mm):    250-1200 Hz (warm "plink")
     ///
     /// Bubble probability and frequency scale with intensity.
     ///
@@ -285,29 +320,31 @@ impl RainSourceV2 {
 
 impl SoundSource for RainSourceV2 {
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        if self.sample_rate_cached != sample_rate {
+            self.sample_rate_cached = sample_rate;
+            self.env_smooth = (-TAU * RING_SMOOTHING_CORNER_HZ / sample_rate).exp();
+            self.white_noise_scale = white_noise_density_scale(sample_rate);
+        }
         let intensity = self.intensity;
         // Piecewise-linear drop rate: light=15/s, medium=50/s, heavy=75/s
-        let drop_rate = if intensity <= 0.2 {
-            15.0 * (intensity / 0.2)
-        } else if intensity <= 0.5 {
-            15.0 + 35.0 * ((intensity - 0.2) / 0.3)
-        } else {
-            50.0 + 25.0 * ((intensity - 0.5) / 0.4).min(1.0)
-        };
-        let drop_factor = drop_rate / 75.0; // normalized 0..1 for texture/drip scaling
+        // with the default drop_rate. The fraction alone (0..1) scales the
+        // texture and drips, so the drop_rate knob changes only the drops.
+        let drop_factor = drop_rate_fraction(intensity);
+        let drop_rate = self.drop_rate * drop_factor;
         let drip_rate = self.drip_rate * drop_factor;
 
         // 1. Subtle low-frequency bed (distant aggregate rain body)
-        let bed = self.bed_gain * intensity * self.brown.next_sample();
+        let bed = self.bed_gain * intensity * self.brown.next_sample(sample_rate);
 
         // 2. Csound-inspired texture: noise × pink × pink
         // White noise modulated by two pink noise sources creates organic
         // amplitude fluctuations matching natural rain statistics.
-        // Scaled by intensity² so light rain stays sparse/transparent
-        // while heavy rain gets the dense "wash" between drops.
-        let white = self.texture_rng.next_bipolar();
-        let mod1 = self.pink_mod1.next_sample().abs(); // rectify: 0..~0.8
-        let mod2 = self.pink_mod2.next_sample().abs();
+        // Scaled by the drop-rate fraction so light rain stays
+        // sparse/transparent while heavy rain gets the dense "wash" between
+        // drops.
+        let white = self.texture_rng.next_bipolar() * self.white_noise_scale;
+        let mod1 = self.pink_mod1.next_sample(sample_rate).abs(); // rectify: 0..~0.8
+        let mod2 = self.pink_mod2.next_sample(sample_rate).abs();
         let texture_raw = white * mod1 * mod2;
         // LP cutoff inverted like impacts: light = warm-bright (3.5kHz), heavy = warm (1.5kHz)
         let tex_cutoff = 3500.0 - 2000.0 * intensity;
@@ -316,7 +353,7 @@ impl SoundSource for RainSourceV2 {
         let tex_alpha = tex_dt / (tex_rc + tex_dt);
         self.texture_lp_state += tex_alpha * (texture_raw - self.texture_lp_state);
         let texture = self.texture_lp_state;
-        let texture_level = self.texture_gain * drop_factor; // intensity²
+        let texture_level = self.texture_gain * drop_factor;
 
         // 3. Read ring buffer (superposition of all active drops)
         let tail = self.ring[self.ring_idx];
@@ -410,9 +447,8 @@ mod tests {
     #[test]
     fn v2_bed_is_quieter_than_drops() {
         // Continuous layers alone should be significantly quieter than full mix.
-        // Note: drops are silenced via impact_gain/bubble_gain (real fields),
-        // NOT drop_rate — that field is currently dead code (the internal rate
-        // curve ignores it; see docs/rain-synthesis-audit.md).
+        // Drops are silenced via impact_gain/bubble_gain so the event stream
+        // (and with it every rng draw) is the same in both renders.
         let mut bed_only = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
         bed_only.impact_gain = 0.0;
         bed_only.bubble_gain = 0.0;
@@ -429,5 +465,333 @@ mod tests {
             energy_full > energy_bed * 1.2,
             "drops should add significant energy over bed alone (bed={energy_bed}, full={energy_full})"
         );
+    }
+
+    use crate::synth::test_support::{
+        averaged_power_spectrum, band_power, mean, peak, render, root_mean_square,
+    };
+
+    /// Sample indices at which a drop or drip started. Every event writes its
+    /// impact starting at `ring[ring_idx + 1]` with a 0.8 ms attack ramp, so
+    /// burst sample 1 (slot `ring_idx + 2`) is non-zero; that slot changing
+    /// during a call marks an event. It is first read two calls later.
+    fn event_count(source: &mut RainSourceV2, seconds: f32, sample_rate: f32) -> usize {
+        let mut count = 0;
+        for _ in 0..(seconds * sample_rate) as usize {
+            let watched = (source.ring_idx + 2) & RING_MASK;
+            let before = source.ring[watched];
+            source.next_sample(sample_rate);
+            if source.ring[watched] != before {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn drops_only(intensity: f32, seed: u64) -> RainSourceV2 {
+        let mut rain = RainSourceV2::new(Vec3::ZERO, intensity, seed);
+        rain.drip_rate = 0.0;
+        rain
+    }
+
+    /// Drop-rate curve: 15/s at intensity 0.2, 50/s at 0.5, 75/s at 0.9 and
+    /// above, linear in between and from zero. Counts are Poisson, so allow
+    /// four standard deviations.
+    #[test]
+    fn drop_rate_follows_the_piecewise_intensity_curve() {
+        for (intensity, expected_rate) in [
+            (0.1, 7.5),
+            (0.2, 15.0),
+            (0.35, 32.5),
+            (0.5, 50.0),
+            (0.7, 62.5),
+            (0.9, 75.0),
+            (1.0, 75.0),
+        ] {
+            let seconds = 40.0;
+            let expected = expected_rate * seconds;
+            let count = event_count(&mut drops_only(intensity, 31), seconds, 16_000.0) as f32;
+            assert!(
+                (count - expected).abs() < 4.0 * expected.sqrt(),
+                "intensity {intensity}: {count} drops in {seconds} s, expected {expected}"
+            );
+        }
+    }
+
+    /// The default `drop_rate` (75/s) times the intensity fraction is the
+    /// tuned curve exactly: 15/s at 0.2, 50/s at 0.5, 75/s from 0.9 up.
+    #[test]
+    fn default_drop_rate_reproduces_the_tuned_curve() {
+        let default_rate = RainSourceV2::new(Vec3::ZERO, 0.5, 1).drop_rate;
+        for (intensity, expected_rate) in [
+            (0.0, 0.0),
+            (0.1, 7.5),
+            (0.2, 15.0),
+            (0.35, 32.5),
+            (0.5, 50.0),
+            (0.7, 62.5),
+            (0.9, 75.0),
+            (1.0, 75.0),
+        ] {
+            let rate = default_rate * drop_rate_fraction(intensity);
+            assert!(
+                (rate - expected_rate).abs() < 1e-4,
+                "intensity {intensity}: {rate} drops/s, expected {expected_rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_rate_is_the_same_at_every_sample_rate() {
+        for sample_rate in [16_000.0_f32, 44_100.0, 96_000.0] {
+            let seconds = if sample_rate > 40_000.0 { 8.0 } else { 20.0 };
+            let expected = 50.0 * seconds;
+            let count = event_count(&mut drops_only(0.5, 32), seconds, sample_rate) as f32;
+            assert!(
+                (count - expected).abs() < 4.0 * expected.sqrt(),
+                "{sample_rate} Hz: {count} drops in {seconds} s, expected {expected}"
+            );
+        }
+    }
+
+    /// Drips are an independent Poisson stream at `drip_rate * drop_rate / 75`.
+    #[test]
+    fn drip_rate_adds_its_own_poisson_stream() {
+        let seconds = 30.0;
+        let mut dripping = RainSourceV2::new(Vec3::ZERO, 0.9, 33);
+        dripping.drip_rate = 40.0;
+        let total = event_count(&mut dripping, seconds, 16_000.0) as f32;
+        let expected = (75.0 + 40.0) * seconds;
+        assert!(
+            (total - expected).abs() < 4.0 * expected.sqrt(),
+            "{total} events in {seconds} s, expected {expected}"
+        );
+    }
+
+    /// `drop_rate` is the rate at full intensity and must reach the DSP: it
+    /// used to be ignored in favour of a fixed curve, so `drop_rate` = 10 and
+    /// 600 produced identical event streams (793 events in 10 s either way).
+    #[test]
+    fn drop_rate_knob_changes_the_event_rate() {
+        let mut sparse = drops_only(0.9, 34);
+        sparse.drop_rate = 10.0;
+        let mut dense = drops_only(0.9, 34);
+        dense.drop_rate = 600.0;
+        let sparse_count = event_count(&mut sparse, 10.0, 16_000.0);
+        let dense_count = event_count(&mut dense, 10.0, 16_000.0);
+        assert!(
+            dense_count > sparse_count * 5,
+            "{sparse_count} vs {dense_count}"
+        );
+    }
+
+    /// Per size class: bubble probability and frequency / decay ranges.
+    /// Small (<1.2 mm) 0.5 p, medium 1.0 p, large 1.2 p with p = 0.12 / 0.35 /
+    /// 0.20 for drizzle / moderate / heavy.
+    #[test]
+    fn bubble_parameters_follow_the_size_class_tables() {
+        let draws = 30_000;
+        for (intensity, probability) in [(0.2, 0.12), (0.5, 0.35), (0.9, 0.20)] {
+            for (radius, scale, freq_range, decay_range) in [
+                (1.0_f32, 0.5, (500.0, 2_500.0), (600.0, 1_000.0)),
+                (1.6, 1.0, (400.0, 2_000.0), (450.0, 750.0)),
+                (3.0, 1.2, (250.0, 1_200.0), (300.0, 500.0)),
+            ] {
+                let mut rain = RainSourceV2::new(Vec3::ZERO, intensity, 77);
+                let mut present = 0;
+                for _ in 0..draws {
+                    if let Some((frequency, decay)) = rain.bubble_params(radius) {
+                        present += 1;
+                        assert!(
+                            (freq_range.0..=freq_range.1).contains(&frequency),
+                            "radius {radius}: {frequency} Hz outside {freq_range:?}"
+                        );
+                        assert!(
+                            (decay_range.0..decay_range.1).contains(&decay),
+                            "radius {radius}: decay {decay} outside {decay_range:?}"
+                        );
+                    }
+                }
+                let measured = present as f32 / draws as f32;
+                let expected = probability * scale;
+                assert!(
+                    (measured - expected).abs() < 0.012,
+                    "intensity {intensity}, radius {radius}: bubble share {measured}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    /// Bigger drops ring lower: the mean bubble frequency falls with radius
+    /// (the physical Minnaert direction, f ~ 1/radius), though the values sit
+    /// well below Minnaert's 3.26/r kHz*mm (see module header: shifted down
+    /// for warmth).
+    #[test]
+    fn bubble_frequency_falls_as_drops_get_bigger() {
+        let mean_frequency = |radius: f32| {
+            let mut rain = RainSourceV2::new(Vec3::ZERO, 0.5, 5);
+            let (mut sum, mut count) = (0.0, 0);
+            for _ in 0..20_000 {
+                if let Some((frequency, _)) = rain.bubble_params(radius) {
+                    sum += frequency;
+                    count += 1;
+                }
+            }
+            sum / count as f32
+        };
+        let (small, medium, large) = (
+            mean_frequency(1.0),
+            mean_frequency(1.6),
+            mean_frequency(3.0),
+        );
+        assert!(small > medium && medium > large, "{small} {medium} {large}");
+    }
+
+    /// Reference: Minnaert resonance f = (1 / 2 pi r) sqrt(3 gamma P0 / rho)
+    /// = 3.26 kHz*mm / r for an air bubble in water. The river's comment that
+    /// 1.2-7 mm bubbles give 450-2700 Hz follows from it.
+    #[test]
+    fn minnaert_constant_is_3_26_hz_metres() {
+        let gamma = 1.4_f64;
+        let pressure = 101_325.0_f64;
+        let density = 998.0_f64;
+        let constant = (3.0 * gamma * pressure / density).sqrt() / std::f64::consts::TAU;
+        assert!((constant - 3.26).abs() < 0.03, "{constant}");
+        let frequency = |radius_mm: f64| constant / (radius_mm * 1e-3);
+        assert!((frequency(1.2) - 2_717.0).abs() < 30.0);
+        assert!((frequency(7.0) - 466.0).abs() < 6.0);
+    }
+
+    /// A written bubble is a decaying sine: its cycle count gives the
+    /// frequency, its envelope falls by 1/e per 1/decay seconds, it lasts
+    /// four time constants, and its gain is scaled by 1 - f / 20 kHz.
+    #[test]
+    fn written_bubble_has_the_requested_frequency_decay_and_duration() {
+        let sample_rate = 48_000.0;
+        let (frequency, decay) = (1_000.0_f32, 500.0_f32);
+        let mut rain = RainSourceV2::new(Vec3::ZERO, 0.5, 1);
+        rain.write_bubble(frequency, decay, 1.0, sample_rate);
+        let start = 1;
+        let length = (4.0 / decay * sample_rate) as usize; // 384 samples
+        let bubble: Vec<f32> = (0..length + 8)
+            .map(|offset| rain.ring[start + offset])
+            .collect();
+        assert!(
+            bubble[length..].iter().all(|&value| value == 0.0),
+            "bubble longer than 4/decay"
+        );
+        let cycles = bubble[..length]
+            .windows(2)
+            .filter(|pair| pair[0] <= 0.0 && pair[1] > 0.0)
+            .count();
+        let expected_cycles = frequency * 4.0 / decay; // 8
+        assert!(
+            (cycles as f32 - expected_cycles).abs() <= 1.0,
+            "{cycles} cycles"
+        );
+        // Envelope: peak within one cycle (48 samples) at t0 vs at t = 1/decay.
+        let window_peak = |from: usize| {
+            bubble[from..from + 48]
+                .iter()
+                .fold(0.0_f32, |a, v| a.max(v.abs()))
+        };
+        let time_constant = (sample_rate / decay) as usize; // 96 samples
+        let ratio = window_peak(time_constant) / window_peak(0);
+        assert!(
+            (ratio - (-1.0_f32).exp()).abs() < 0.12,
+            "envelope ratio {ratio}"
+        );
+        // Gain scaling: at most 1 - 1000/20000 = 0.95 of the unit gain; the
+        // random start phase and the 0.3 ms attack ramp take some of it off.
+        let largest = peak(&bubble);
+        assert!((0.5..=0.951).contains(&largest), "peak {largest}");
+    }
+
+    /// Impact bursts last 3 ms + 1.7 ms per mm of radius (radius capped at
+    /// 3 mm) and decay with tau = 0.4 of that duration.
+    #[test]
+    fn impact_duration_grows_with_drop_radius() {
+        let sample_rate = 48_000.0;
+        for (radius, expected_length) in [(1.0_f32, 225usize), (2.0, 306), (3.0, 388), (3.5, 388)] {
+            let mut rain = RainSourceV2::new(Vec3::ZERO, 0.5, 2);
+            rain.write_impact(radius, 1.0, sample_rate);
+            let last = (1..rain.ring.len() / 2)
+                .rev()
+                .find(|&index| rain.ring[index] != 0.0)
+                .unwrap();
+            assert!(
+                (last as i32 - expected_length as i32).abs() <= 4,
+                "radius {radius}: last non-zero slot {last}, expected {expected_length}"
+            );
+        }
+    }
+
+    /// "light rain is brighter, heavy rain darker": the impact lowpass moves
+    /// from ~4.7 kHz at intensity 0.2 to ~1.7 kHz at 0.9. The share of power
+    /// above 1.5 kHz must therefore fall as intensity rises.
+    #[test]
+    fn impact_spectrum_darkens_as_intensity_rises() {
+        let sample_rate = 48_000.0;
+        let bright_share = |intensity: f32| -> f64 {
+            let mut rain = RainSourceV2::new(Vec3::ZERO, intensity, 3);
+            let mut stream = Vec::new();
+            while stream.len() < 16_384 {
+                rain.ring.fill(0.0);
+                rain.write_impact(1.5, 1.0, sample_rate);
+                stream.extend((1..400).map(|index| rain.ring[index]));
+            }
+            let spectrum = averaged_power_spectrum(&stream);
+            band_power(&spectrum, sample_rate, 1_500.0, 12_000.0)
+                / band_power(&spectrum, sample_rate, 150.0, 12_000.0)
+        };
+        let light = bright_share(0.2);
+        let moderate = bright_share(0.5);
+        let heavy = bright_share(0.9);
+        assert!(
+            light > moderate && moderate > heavy,
+            "{light:.3} {moderate:.3} {heavy:.3}"
+        );
+    }
+
+    #[test]
+    fn output_is_finite_zero_mean_and_inside_unity() {
+        for intensity in [0.2, 0.5, 1.0] {
+            let mut rain = RainSourceV2::new(Vec3::ZERO, intensity, 5);
+            let samples = render(15.0, 48_000.0, |rate| rain.next_sample(rate));
+            assert!(samples.iter().all(|value| value.is_finite()));
+            assert!(
+                peak(&samples) < 1.0,
+                "intensity {intensity}: peak {}",
+                peak(&samples)
+            );
+            assert!(mean(&samples).abs() < 0.01, "DC {}", mean(&samples));
+        }
+    }
+
+    #[test]
+    fn rms_is_roughly_stable_across_sample_rates() {
+        let rms = |sample_rate: f32| {
+            let mut rain = RainSourceV2::new(Vec3::ZERO, 0.5, 42);
+            let samples = render(8.0, sample_rate, |rate| rain.next_sample(rate));
+            root_mean_square(&samples)
+        };
+        // Measured 1.07 (+0.6 dB, it read 0.84 before the white-noise bursts
+        // kept their density per Hz); the residual comes from the
+        // backward-Euler one-pole lowpasses, whose corner rises with the rate.
+        let ratio = rms(96_000.0) / rms(48_000.0);
+        assert!((0.70..1.30).contains(&ratio), "RMS ratio {ratio}");
+    }
+
+    /// With only the continuous layers left, a blank intensity still leaves
+    /// exact silence, and raising it raises RMS monotonically at 0.2/0.5/0.9.
+    #[test]
+    fn level_rises_with_intensity_up_to_the_rate_plateau() {
+        let level = |intensity: f32| {
+            let mut rain = RainSourceV2::new(Vec3::ZERO, intensity, 6);
+            let samples = render(6.0, 16_000.0, |rate| rain.next_sample(rate));
+            root_mean_square(&samples)
+        };
+        assert!(level(0.2) < level(0.5));
+        assert!(level(0.5) > 0.0 && level(0.0) == 0.0);
     }
 }
