@@ -99,13 +99,29 @@ pub fn iso9613_alpha(freq: f32, params: &AtmosphericParams) -> f32 {
     }
 }
 
-/// Compute shelving filter gains (in dB) for air absorption at a given distance.
+/// Gains (in dB) of the three-part air absorption fit at one distance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirAbsorptionGains {
+    /// Applied to every frequency: −α(500 Hz) × distance.
+    pub broadband_db: f32,
+    /// Low shelf that gives the bottom octaves back what the broadband gain
+    /// took and ISO does not: +(α(500 Hz) − α(63 Hz)) × distance.
+    pub low_shelf_db: f32,
+    /// High shelf for the steep rise above the mid band:
+    /// −(α(8 kHz) − α(500 Hz)) × distance.
+    pub high_shelf_db: f32,
+}
+
+/// Fit ISO 9613-1 air absorption at `distance` with a broadband gain and two
+/// shelves, exact at 63 Hz, 500 Hz and 8 kHz.
 ///
-/// Returns `(low_shelf_db, high_shelf_db)` for a 2-band shelving filter:
-/// - **Low shelf at 500 Hz**: captures O₂ relaxation absorption — the baseline
-///   attenuation that affects all frequencies. Gain = -α(500 Hz) × distance.
-/// - **High shelf at 4 kHz**: captures the HF rolloff from N₂ relaxation +
-///   classical absorption. Gain = -(α(8 kHz) - α(500 Hz)) × distance.
+/// - **Broadband gain**: the 500 Hz absorption, the level of the mid band.
+/// - **Low shelf (177 Hz)**: absorption falls roughly as f² toward low
+///   frequencies, so the bottom octaves lose almost nothing; this shelf
+///   restores them. Without it the lows would be cut as much as 500 Hz is
+///   (1.7 dB too much at 300 m in −20 °C air).
+/// - **High shelf (4 kHz)**: the additional loss from N₂ relaxation and
+///   classical absorption.
 ///
 /// The high shelf gain is derived from the 8 kHz absorption (not 4 kHz) because
 /// a 2nd-order shelf provides roughly half its gain at the center frequency and
@@ -113,20 +129,21 @@ pub fn iso9613_alpha(freq: f32, params: &AtmosphericParams) -> f32 {
 /// - ~half the gain at 4 kHz (close to the actual α(4 kHz) value)
 /// - full gain at 8 kHz (matching the steep HF rolloff)
 ///
-/// This is the best 2-filter fit for the ISO 9613 curve, which rises roughly
-/// as f² at high frequencies. Accuracy: within 1.5 dB at 4 kHz and within
-/// 0.5 dB at 8 kHz across typical indoor distances.
+/// Accuracy: within 1.5 dB at 4 kHz and within 0.5 dB at 8 kHz across typical
+/// indoor distances. Above 8 kHz the fit saturates while ISO keeps rising.
 ///
-/// Both gains are clamped to [-40, 0] dB to prevent extreme filter values at
-/// very large distances.
-pub fn air_absorption_shelf_gains(distance: f32, params: &AtmosphericParams) -> (f32, f32) {
-    let alpha_low = iso9613_alpha(500.0, params); // dB/m at 500 Hz
+/// Every gain is clamped to 40 dB to prevent extreme filter values at very
+/// large distances.
+pub fn air_absorption_gains(distance: f32, params: &AtmosphericParams) -> AirAbsorptionGains {
+    let alpha_bottom = iso9613_alpha(63.0, params); // dB/m at 63 Hz
+    let alpha_mid = iso9613_alpha(500.0, params); // dB/m at 500 Hz
     let alpha_high = iso9613_alpha(8000.0, params); // dB/m at 8 kHz
 
-    let low_shelf_db = (-alpha_low * distance).clamp(-40.0, 0.0);
-    let high_shelf_db = (-(alpha_high - alpha_low) * distance).clamp(-40.0, 0.0);
-
-    (low_shelf_db, high_shelf_db)
+    AirAbsorptionGains {
+        broadband_db: (-alpha_mid * distance).clamp(-40.0, 0.0),
+        low_shelf_db: ((alpha_mid - alpha_bottom) * distance).clamp(0.0, 40.0),
+        high_shelf_db: (-(alpha_high - alpha_mid) * distance).clamp(-40.0, 0.0),
+    }
 }
 
 #[cfg(test)]
@@ -175,8 +192,10 @@ mod tests {
     #[test]
     fn shelf_gains_increase_with_distance() {
         let p = standard_conditions();
-        let (low_1, high_1) = air_absorption_shelf_gains(1.0, &p);
-        let (low_50, high_50) = air_absorption_shelf_gains(50.0, &p);
+        let gains = air_absorption_gains(1.0, &p);
+        let (low_1, high_1) = (gains.broadband_db, gains.high_shelf_db);
+        let gains = air_absorption_gains(50.0, &p);
+        let (low_50, high_50) = (gains.broadband_db, gains.high_shelf_db);
 
         // More distance = more negative gain (more attenuation).
         assert!(
@@ -192,7 +211,9 @@ mod tests {
     #[test]
     fn shelf_gains_zero_at_zero_distance() {
         let p = standard_conditions();
-        let (low, high) = air_absorption_shelf_gains(0.0, &p);
+        let gains = air_absorption_gains(0.0, &p);
+        let (low, high) = (gains.broadband_db, gains.high_shelf_db);
+        assert_eq!(gains.low_shelf_db, 0.0);
         assert!(
             low.abs() < 1e-6 && high.abs() < 1e-6,
             "0m should give zero gain: low={low}, high={high}"
@@ -204,7 +225,8 @@ mod tests {
         // At 4 kHz, ISO 9613 absorption is much higher than at 500 Hz.
         // So the high shelf (additional HF loss) should be more negative than low shelf.
         let p = standard_conditions();
-        let (low, high) = air_absorption_shelf_gains(50.0, &p);
+        let gains = air_absorption_gains(50.0, &p);
+        let (low, high) = (gains.broadband_db, gains.high_shelf_db);
         assert!(
             high < low,
             "high shelf ({high} dB) should be more negative than low shelf ({low} dB)"
@@ -217,7 +239,8 @@ mod tests {
         // since the high shelf is derived from the 8 kHz absorption.
         let p = standard_conditions();
         let distance = 100.0;
-        let (low, high) = air_absorption_shelf_gains(distance, &p);
+        let gains = air_absorption_gains(distance, &p);
+        let (low, high) = (gains.broadband_db, gains.high_shelf_db);
         let total_db = low + high;
         let expected_db = -iso9613_alpha(8000.0, &p) * distance;
         assert!(
@@ -438,6 +461,224 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ── Speed of sound ───────────────────────────────────────────────────
+
+    /// c = 331.3 + 0.606·T: 331.30 m/s at 0 °C, 343.42 m/s at 20 °C.
+    /// A 10 m path at 20 °C therefore arrives after 10 / 343.42 = 29.12 ms.
+    #[test]
+    fn speed_of_sound_pins_standard_values() {
+        assert!((speed_of_sound(0.0) - 331.3).abs() < 1e-3);
+        assert!((speed_of_sound(20.0) - 343.42).abs() < 1e-3);
+        let delay_milliseconds = 10.0 / speed_of_sound(20.0) * 1000.0;
+        assert!(
+            (delay_milliseconds - 29.12).abs() < 0.01,
+            "10 m at 20 °C: {delay_milliseconds} ms"
+        );
+    }
+
+    /// The linear law is the first-order expansion of the ideal-gas law
+    /// c = 331.3·√(1 + T/273.15). Over the −20…40 °C range of an atrium the two
+    /// agree within 0.25 % (worst at 40 °C: 355.54 vs 354.73 m/s). Over a 20 m
+    /// path that is at most 0.13 ms of arrival time (6 samples at 48 kHz).
+    #[test]
+    fn linear_speed_of_sound_tracks_ideal_gas_law() {
+        for temperature_celsius in (-20..=40).map(|whole| whole as f32) {
+            let ideal_gas = 331.3 * (1.0 + temperature_celsius / 273.15).sqrt();
+            let linear = speed_of_sound(temperature_celsius);
+            let relative_error = (linear - ideal_gas).abs() / ideal_gas;
+            assert!(
+                relative_error < 0.0025,
+                "{temperature_celsius} °C: linear {linear}, ideal gas {ideal_gas}"
+            );
+            let path_length = 20.0;
+            let arrival_error_seconds = (path_length / linear - path_length / ideal_gas).abs();
+            assert!(arrival_error_seconds < 0.15e-3, "{arrival_error_seconds}");
+        }
+    }
+
+    // ── ISO 9613-1 absorption, pinned to the published tables ────────────
+
+    /// ISO 9613-2:1996 Table 2 lists α (dB/km) at the octave bands for six
+    /// atmospheres, computed from ISO 9613-1 at the exact mid-band frequencies
+    /// f = 1000·10^(k/10) (63.1, 125.9, …, 7943 Hz) and rounded to 0.1 dB/km
+    /// (three significant figures above 100). Our formula must reproduce every
+    /// entry to within that rounding.
+    #[test]
+    fn iso9613_matches_iso9613_2_table_two() {
+        let table: [(f32, f32, [f32; 8]); 6] = [
+            (10.0, 70.0, [0.1, 0.4, 1.0, 1.9, 3.7, 9.7, 32.8, 117.0]),
+            (20.0, 70.0, [0.1, 0.3, 1.1, 2.8, 5.0, 9.0, 22.9, 76.6]),
+            (30.0, 70.0, [0.1, 0.3, 1.0, 3.1, 7.4, 12.7, 23.1, 59.3]),
+            (15.0, 20.0, [0.3, 0.6, 1.2, 2.7, 8.2, 28.2, 88.8, 202.0]),
+            (15.0, 50.0, [0.1, 0.5, 1.2, 2.2, 4.2, 10.8, 36.2, 129.0]),
+            (15.0, 80.0, [0.1, 0.3, 1.1, 2.4, 4.1, 8.3, 23.7, 82.8]),
+        ];
+        for (temperature_c, humidity_pct, expected_db_per_km) in table {
+            let params = AtmosphericParams {
+                temperature_c,
+                humidity_pct,
+                pressure_kpa: 101.325,
+            };
+            for (band_index, expected) in expected_db_per_km.iter().enumerate() {
+                let exponent = 3.0 * band_index as f32 - 12.0;
+                let midband_frequency = 1000.0 * 10.0_f32.powf(exponent / 10.0);
+                let computed = iso9613_alpha(midband_frequency, &params) * 1000.0;
+                // Half a rounding step, or 0.6 % for the three-figure entries.
+                let tolerance = (0.06_f32).max(expected * 0.006);
+                assert!(
+                    (computed - expected).abs() <= tolerance,
+                    "{temperature_c} °C {humidity_pct} % @ {midband_frequency:.0} Hz: \
+                     computed {computed:.3} dB/km, table {expected} dB/km"
+                );
+            }
+        }
+    }
+
+    /// 20 °C, 50 % RH, 101.325 kPa at nominal frequencies, from an independent
+    /// f64 evaluation of ISO 9613-1: h = 1.153 %, f_rO = 35 414 Hz,
+    /// f_rN = 331.9 Hz, α = 4.665 / 29.67 / 105.3 dB/km at 1 / 4 / 8 kHz.
+    #[test]
+    fn iso9613_standard_atmosphere_pinned() {
+        let params = standard_conditions();
+        for (frequency, expected_db_per_metre) in
+            [(1000.0, 0.004_665), (4000.0, 0.029_67), (8000.0, 0.105_29)]
+        {
+            let computed = iso9613_alpha(frequency, &params);
+            assert!(
+                (computed - expected_db_per_metre).abs() / expected_db_per_metre < 0.002,
+                "{frequency} Hz: {computed} dB/m, expected {expected_db_per_metre}"
+            );
+        }
+    }
+
+    /// With no water vapour (h = 0) the relaxation frequencies collapse to
+    /// f_rO = 24 Hz and f_rN = 9 Hz. Pinned: 1.530 dB/km at 1 kHz,
+    /// 11.60 dB/km at 8 kHz (f64 evaluation). Must stay finite, not NaN.
+    #[test]
+    fn iso9613_dry_air_is_finite_and_pinned() {
+        let dry = AtmosphericParams {
+            humidity_pct: 0.0,
+            ..Default::default()
+        };
+        let at_one_kilohertz = iso9613_alpha(1000.0, &dry) * 1000.0;
+        let at_eight_kilohertz = iso9613_alpha(8000.0, &dry) * 1000.0;
+        assert!(
+            (at_one_kilohertz - 1.530).abs() < 0.01,
+            "{at_one_kilohertz}"
+        );
+        assert!(
+            (at_eight_kilohertz - 11.60).abs() < 0.05,
+            "{at_eight_kilohertz}"
+        );
+    }
+
+    /// α must be positive, finite and strictly increasing in frequency from
+    /// 20 Hz to 20 kHz across the atmospheres the engine can be configured
+    /// with (−20…40 °C, 0…100 % RH). Each relaxation term grows with f until
+    /// its relaxation frequency and then saturates; the classical f² term keeps
+    /// the total rising.
+    #[test]
+    fn iso9613_monotonic_in_frequency_over_extreme_atmospheres() {
+        for temperature_c in [-20.0f32, 0.0, 20.0, 40.0] {
+            for humidity_pct in [0.0f32, 10.0, 50.0, 100.0] {
+                let params = AtmosphericParams {
+                    temperature_c,
+                    humidity_pct,
+                    pressure_kpa: 101.325,
+                };
+                let mut previous = 0.0f32;
+                let mut frequency = 20.0f32;
+                while frequency <= 20_000.0 {
+                    let alpha = iso9613_alpha(frequency, &params);
+                    assert!(
+                        alpha.is_finite() && alpha > previous,
+                        "{temperature_c} °C {humidity_pct} % @ {frequency} Hz: \
+                         {alpha} after {previous}"
+                    );
+                    previous = alpha;
+                    frequency *= 1.25;
+                }
+            }
+        }
+    }
+
+    /// Classical absorption scales as 1/p and the relaxation frequencies as p.
+    /// At 1 kHz, 20 °C, 50 % RH, halving the pressure to 50 kPa gives 4.615 dB/km
+    /// (f64 evaluation) against 4.665 at sea level.
+    #[test]
+    fn iso9613_pressure_dependence_pinned() {
+        let half_atmosphere = AtmosphericParams {
+            pressure_kpa: 50.0,
+            ..Default::default()
+        };
+        let computed = iso9613_alpha(1000.0, &half_atmosphere) * 1000.0;
+        assert!((computed - 4.615).abs() < 0.01, "{computed}");
+    }
+
+    /// Every shelf gain is a pure product α·d: doubling the distance doubles
+    /// the dB value, until the −40 dB clamp.
+    #[test]
+    fn shelf_gains_linear_in_distance_and_clamped() {
+        let params = standard_conditions();
+        let gains = air_absorption_gains(10.0, &params);
+        let (low_ten, high_ten) = (gains.broadband_db, gains.high_shelf_db);
+        let gains = air_absorption_gains(20.0, &params);
+        let (low_twenty, high_twenty) = (gains.broadband_db, gains.high_shelf_db);
+        assert!((low_twenty - 2.0 * low_ten).abs() < 1e-5);
+        assert!((high_twenty - 2.0 * high_ten).abs() < 1e-5);
+        // 10 km: α(8 kHz)·d ≈ 1053 dB, far past the clamp.
+        let gains = air_absorption_gains(10_000.0, &params);
+        let (low_far, high_far) = (gains.broadband_db, gains.high_shelf_db);
+        assert_eq!(high_far, -40.0);
+        assert!((-40.0..=0.0).contains(&low_far));
+    }
+
+    /// Steady-state magnitude (dB) of the air absorption filter for a sine.
+    fn filter_response_db(
+        filter: &mut crate::audio::filters::AirAbsorptionFilter,
+        frequency: f32,
+        sample_rate: f32,
+    ) -> f32 {
+        let total_samples = (2.0 * sample_rate) as usize;
+        let settle_samples = total_samples / 2;
+        let mut peak = 0.0f32;
+        for index in 0..total_samples {
+            let phase = std::f32::consts::TAU * frequency * index as f32 / sample_rate;
+            let output = filter.process(phase.sin());
+            if index >= settle_samples {
+                peak = peak.max(output.abs());
+            }
+        }
+        20.0 * peak.log10()
+    }
+
+    /// The filter must follow ISO at both ends of the spectrum, not only in
+    /// the mid band. Cold air makes the ends matter: −20 °C, 50 % RH, 300 m.
+    /// ISO: 63 Hz loses 0.241 dB/km × 0.3 km = 0.07 dB, 8 kHz loses
+    /// 20.48 × 0.3 = 6.14 dB. An earlier version applied the 500 Hz loss
+    /// (1.75 dB) as a low shelf, which cut 63 Hz by 1.75 dB and left 8 kHz
+    /// 1.7 dB short.
+    #[test]
+    fn air_absorption_filter_matches_iso_at_band_edges() {
+        let sample_rate = 48_000.0;
+        let distance = 300.0;
+        let cold = AtmosphericParams {
+            temperature_c: -20.0,
+            humidity_pct: 50.0,
+            pressure_kpa: 101.325,
+        };
+        for frequency in [63.0f32, 8000.0] {
+            let mut filter = crate::audio::filters::AirAbsorptionFilter::new(sample_rate);
+            filter.update(distance, &cold);
+            let filter_db = filter_response_db(&mut filter, frequency, sample_rate);
+            let iso_db = -iso9613_alpha(frequency, &cold) * distance;
+            assert!(
+                (filter_db - iso_db).abs() < 0.5,
+                "{frequency} Hz: filter {filter_db:.2} dB, ISO 9613-1 {iso_db:.2} dB"
+            );
         }
     }
 }
