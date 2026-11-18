@@ -1,7 +1,7 @@
 //! FDN (Feedback Delay Network) late reverb.
 //!
-//! Based on Jot & Chaigne (1991). 8 parallel delay lines coupled through an
-//! 8×8 Hadamard mixing matrix, with one-pole lowpass damping per line for
+//! Based on Jot & Chaigne (1991). 16 parallel delay lines coupled through a
+//! 16×16 Hadamard mixing matrix, with one-pole lowpass damping per line for
 //! frequency-dependent decay (highs fade faster than lows).
 //!
 //! Chain order: Direct (0–3ms) → EarlyReflections (3–50ms) → FdnReverb (50ms+)
@@ -21,16 +21,22 @@ const MAX_OUT: usize = 8;
 /// Initial delay buffer size (floor). Grown at init to fit `BASE_DELAYS` for the
 /// actual sample rate (see `required_buffer_size` / `compute_delays`).
 const MIN_BUF_SIZE: usize = 512;
-const PRE_DELAY_BUF_SIZE: usize = 2048;
-const PRE_DELAY_BUF_MASK: usize = PRE_DELAY_BUF_SIZE - 1;
 /// Fallback pre-delay when room geometry is degenerate (volume ≈ 0 or surface area ≈ 0).
 const PRE_DELAY_FALLBACK_SECONDS: f32 = 0.020;
+/// Shortest pre-delay the mean-free-path value is given (tiny rooms).
+const PRE_DELAY_MINIMUM_SECONDS: f32 = 0.005;
+/// Longest pre-delay, geometry-derived or explicit. The pre-delay ring is sized
+/// at init to the pre-delay actually needed, so this only bounds the
+/// allocation: the mean-free-path time reaches it at a mean free path of
+/// ~86 m, far beyond any room (the 40×25×20 m cathedral is 50.6 ms).
+const PRE_DELAY_MAXIMUM_SECONDS: f32 = 0.250;
 /// Delay-line lengths (samples @ 48 kHz): 16 mutually-prime values spread over
 /// ~26–70 ms. HALL-scale, not box-scale: modal density is `fs / Σdelays`, so the
 /// ~36.8k-sample total gives ~1.3 Hz mode spacing (vs ~15.5 Hz for the old box
 /// delays, which rang metallically). Coprime lengths keep modes from coinciding;
 /// longer delays raise density without changing RT60 (the damping formula is
-/// per-sample normalized). Longest (3347) fits the 4096 buffer.
+/// per-sample normalized). Longest (3347, plus modulation depth and the
+/// interpolator's taps) fits the 4096 buffer.
 const BASE_DELAYS: [usize; NUM_LINES] = [
     1249, 1399, 1531, 1669, 1811, 1949, 2089, 2237, 2371, 2503, 2657, 2791, 2939, 3067, 3209, 3347,
 ];
@@ -44,7 +50,7 @@ const MOD_RATES_HZ: [f32; NUM_LINES] = [
     0.51, 0.73, 0.97, 1.13, 1.31, 1.53, 0.67, 1.07, 0.59, 0.83, 1.03, 1.21, 1.43, 1.61, 0.79, 1.19,
 ];
 /// Modulation depth in samples at 48 kHz. Scaled by sample_rate/48000 at init.
-/// ±10 samples ≈ ±208 µs smears residual modes across the ~2.8 Hz spacing so the
+/// ±10 samples ≈ ±208 µs smears residual modes across the ~1.3 Hz spacing so the
 /// tail stays smooth rather than metallic. On the hall-scale delay lines this is
 /// only ±0.3–0.8 %, and the slow rates keep pitch deviation at ~2 cents (inaudible).
 const MOD_DEPTH_SAMPLES_48K: f32 = 10.0;
@@ -85,6 +91,68 @@ impl DelayModulator {
     }
 }
 
+/// Cubic Hermite (Catmull-Rom) fractional-delay coefficients for the
+/// modulated delay-line read. A read at `integer + fraction` samples, with
+/// `fraction` in [0, 1), weights the samples at delays `integer − 1`,
+/// `integer`, `integer + 1` and `integer + 2` — the fraction always lies
+/// between the two middle taps. `fraction = 0` is exactly `[0, 1, 0, 0]`, so a
+/// frozen LFO reads an integer delay bit-exactly.
+///
+/// Why this interpolator. The LFO sweeps the fraction through [0, 1) every
+/// few tens of milliseconds, so what the loop sees per pass is |H|² averaged
+/// over the fraction (figures below are that average):
+/// - Linear (the previous read): 2/3 + cos(ω)/3, i.e. −0.79 dB at 8 kHz and
+///   −1.76 dB at 12 kHz on every ~48 ms trip round the loop. A flat 1.5 s
+///   tail measured 1.14 s at 8 kHz and 0.92 s at 12 kHz.
+/// - Catmull-Rom: −0.12 / −0.53 / −1.39 dB at 8 / 12 / 16 kHz; the flat
+///   1.5 s tail measures 1.41 s at 8 kHz, 1.25 s at 12 kHz. Its magnitude
+///   never exceeds 1 at any frequency/fraction pair: |H|² meets 1 at DC with
+///   zero slope, zero curvature and a negative fourth derivative, and falls
+///   from there (`hermite_interpolator_is_passive_at_every_fraction` measures
+///   the worst case on a dense grid). The loop gain is therefore at most the
+///   damping filter's, which `DampingFilter::design` keeps below 1.
+/// - 4-point Lagrange is equally passive and as cheap but loses more
+///   (−0.14 / −0.65 dB at 8 / 12 kHz; measured 1.39 s / 1.22 s).
+/// - A first-order allpass (Thiran) is exactly flat in magnitude, but it is
+///   recursive: its state carries the previous fraction, so a moving fraction
+///   leaves transients, and when the fraction wraps (the integer delay steps
+///   by one) its coefficient jumps across its whole range. Avoiding that
+///   needs crossfaded dual reads, which cost more than four taps.
+/// - 6-point Lagrange measures 1.47 s / 1.34 s for 50 % more taps. Even a
+///   12-point one leaves the tail at 1.51 s / 1.46 s against 1.55 s frozen and
+///   recovers only 0.6 dB of the ~2.7 dB by which the modulated network's
+///   white-noise wet level sits below the frozen-LFO network's (−15.4 vs
+///   −12.7 dB at 1.5 s); the other ~2.1 dB does not yield to interpolation.
+#[inline(always)]
+fn hermite_coefficients(fraction: f32) -> [f32; 4] {
+    let fraction_squared = fraction * fraction;
+    [
+        fraction * (-0.5 + fraction * (1.0 - 0.5 * fraction)),
+        1.0 + fraction_squared * (-2.5 + 1.5 * fraction),
+        fraction * (0.5 + fraction * (2.0 - 1.5 * fraction)),
+        fraction_squared * (-0.5 + 0.5 * fraction),
+    ]
+}
+
+/// Frequency (Hz) at which each line's damping filter meets the low-band RT60:
+/// Sabine band 2 (`RT60_LOW_BAND`), or the explicit RT60 override.
+const LOW_DECAY_FREQUENCY_HZ: f64 = 500.0;
+/// Frequency (Hz) at which each line's damping filter meets the high-band RT60:
+/// Sabine band 5 (`RT60_HIGH_BAND`), or the override × `HF_DECAY_RATIO`.
+const HIGH_DECAY_FREQUENCY_HZ: f64 = 4000.0;
+/// Passivity ceiling on any line's loop gain at any frequency. An infinite RT60
+/// would make the network lossless (gain exactly 1); 0.9999 per pass still
+/// decays over minutes (≥ 3 min on the shortest line) but can never build up.
+const MAXIMUM_LOOP_GAIN: f64 = 0.9999;
+/// Longest decay the damping filter may give DC, as a multiple of the 500 Hz
+/// RT60. A one-pole steep enough to reach a short 4 kHz decay lifts its DC gain
+/// above the 500 Hz gain; unchecked, a strongly HF-absorbing room would turn
+/// into a sub-bass drone. Typical rooms stay well inside it (carpeted
+/// 6×4×3 m: DC decays at 1.1–2.0× the 500 Hz RT60, only the longest line binds).
+const MAXIMUM_LOW_FREQUENCY_DECAY_RATIO: f64 = 2.0;
+
+/// Jot's one-pole absorptive filter, `y[n] = k·x[n] + p·y[n−1]`, with
+/// `|H(e^{jω})| = k / √(1 + p² − 2p·cos ω)`.
 #[derive(Clone, Copy)]
 struct DampingFilter {
     k: f32,
@@ -101,12 +169,109 @@ impl DampingFilter {
         }
     }
 
+    /// Damping filter for a line of `delay_samples`, solved in closed form so
+    /// its gain equals the Jot per-pass gain `10^(−3·delay / (RT60·fs))` of
+    /// `rt60_low` at 500 Hz and of `rt60_high` at 4 kHz — the frequencies the
+    /// two RT60s are defined at.
+    ///
+    /// Writing `1 + p² − 2p·cos ω = (1 − p)² + 2p·v(ω)` with the versine
+    /// `v(ω) = 1 − cos ω`, the ratio of the squared target gains
+    /// `r = (g_low / g_high)²` fixes the pole through
+    /// `(1 − p)² / (2p) = (v_high − r·v_low) / (r − 1)`; the stable root of that
+    /// quadratic is `p = 1 + s − √(s·(2 + s))` (see `pole_with_shape`), and then
+    /// `k = g_low · √((1 − p)² + 2p·v_low)`.
+    ///
+    /// Edge cases, all keeping the 500 Hz gain exact:
+    /// - `rt60_high ≥ rt60_low`: no damping, `p = 0`, `k = g_low`.
+    /// - A ratio no one-pole can reach (`v_high ≤ r·v_low`, ≈ 18 dB per pass
+    ///   between 500 Hz and 4 kHz): the pole goes as far as the DC cap allows.
+    /// - Passivity: the gain peaks at DC, `k / (1 − p)`, and is capped at
+    ///   `min(g_low^(1/MAXIMUM_LOW_FREQUENCY_DECAY_RATIO), MAXIMUM_LOOP_GAIN)`
+    ///   by lowering the pole, so every line's loop gain stays below 1.
+    ///
+    /// Solved in f64: at 96 kHz `v_low` is 5.4e-4, close to f32 rounding of
+    /// `cos ω`. Runs once per line at init.
+    fn design(delay_samples: usize, sample_rate: f32, rt60_low: f32, rt60_high: f32) -> Self {
+        let delay_seconds = delay_samples as f32 / sample_rate;
+        let low_gain = f64::from(room_acoustics::jot_feedback_gain(delay_seconds, rt60_low));
+        if low_gain.is_nan() || low_gain <= 0.0 {
+            return Self::new();
+        }
+        let low_gain = low_gain.min(MAXIMUM_LOOP_GAIN);
+        let high_gain =
+            f64::from(room_acoustics::jot_feedback_gain(delay_seconds, rt60_high)).min(low_gain);
+
+        let sample_rate = f64::from(sample_rate);
+        let high_angle = (std::f64::consts::TAU * HIGH_DECAY_FREQUENCY_HZ / sample_rate)
+            .min(std::f64::consts::PI);
+        let low_angle =
+            (std::f64::consts::TAU * LOW_DECAY_FREQUENCY_HZ / sample_rate).min(high_angle);
+        // 1 − cos ω = 2·sin²(ω/2), computed without the cancellation of 1 − cos ω.
+        let low_versine = 2.0 * (low_angle / 2.0).sin().powi(2);
+        let high_versine = 2.0 * (high_angle / 2.0).sin().powi(2);
+
+        let mut pole = if high_gain >= low_gain || high_versine <= low_versine {
+            0.0
+        } else {
+            let squared_gain_ratio = (low_gain / high_gain).powi(2);
+            let shape =
+                (high_versine - squared_gain_ratio * low_versine) / (squared_gain_ratio - 1.0);
+            // shape ≤ 0: unreachable ratio; pole 1 here, pulled back by the DC cap below.
+            pole_with_shape(shape.max(0.0))
+        };
+
+        let dc_ceiling = low_gain
+            .powf(1.0 / MAXIMUM_LOW_FREQUENCY_DECAY_RATIO)
+            .min(MAXIMUM_LOOP_GAIN);
+        if dc_ceiling > low_gain {
+            // Largest pole whose DC gain, with the 500 Hz gain held, is the ceiling:
+            // ceiling²·(1 − p)² = g_low²·((1 − p)² + 2p·v_low).
+            let low_gain_squared = low_gain * low_gain;
+            let dc_shape =
+                low_gain_squared * low_versine / (dc_ceiling * dc_ceiling - low_gain_squared);
+            pole = pole.min(pole_with_shape(dc_shape));
+        } else {
+            pole = 0.0;
+        }
+
+        let gain = low_gain * ((1.0 - pole).powi(2) + 2.0 * pole * low_versine).sqrt();
+        Self {
+            k: gain as f32,
+            p: pole as f32,
+            state: 0.0,
+        }
+    }
+
+    /// Steady-state energy build-up of a loop closed through this filter, for a
+    /// white input: the mean over frequency of `1 / (1 − |H(e^{jω})|²)`. With
+    /// `(1/π)∫₀^π dω / (a − b·cos ω) = 1/√(a² − b²)` this is exactly
+    /// `1 + k² / √(((1 − p)² − k²)·((1 + p)² − k²))`, finite because the DC
+    /// gain `k / (1 − p)` is below 1. Reduces to `1 / (1 − k²)` when `p = 0`.
+    fn white_noise_energy_buildup(&self) -> f32 {
+        let gain_squared = f64::from(self.k).powi(2);
+        let pole = f64::from(self.p);
+        let below_dc = (1.0 - pole).powi(2) - gain_squared;
+        let below_nyquist = (1.0 + pole).powi(2) - gain_squared;
+        if below_dc <= 0.0 {
+            return f32::INFINITY;
+        }
+        (1.0 + gain_squared / (below_dc * below_nyquist).sqrt()) as f32
+    }
+
     #[inline(always)]
     fn process(&mut self, input: f32) -> f32 {
         let output = self.k * input + self.p * self.state;
         self.state = output;
         output
     }
+}
+
+/// The pole `0 < p ≤ 1` with `(1 − p)² / (2p) = shape`: the root inside the
+/// unit circle of `p² − 2(1 + shape)·p + 1 = 0` (the roots multiply to 1).
+/// Written as `1 / (1 + shape + √(shape·(2 + shape)))` so a large shape (a
+/// pole near 0) does not cancel. `shape = 0` gives 1, `shape → ∞` gives 0.
+fn pole_with_shape(shape: f64) -> f64 {
+    1.0 / (1.0 + shape + (shape * (2.0 + shape)).sqrt())
 }
 
 /// Soft clamp for FDN feedback loop stability. Generous ±16.0 ceiling
@@ -149,7 +314,8 @@ pub struct FdnConfig {
     /// `HF_DECAY_RATIO`. `None` keeps the physically-derived decay.
     pub rt60_seconds: Option<f32>,
     /// Explicit pre-delay in milliseconds. `Some` bypasses the mean-free-path
-    /// pre-delay (clamped to the pre-delay buffer capacity). `None` keeps it.
+    /// pre-delay (bounded to `PRE_DELAY_MAXIMUM_SECONDS`, 250 ms; the
+    /// pre-delay ring is sized to it at init). `None` keeps it.
     pub pre_delay_ms: Option<f32>,
     /// Per-output-channel wet trim, indexed by the canonical 5.1 hardware layout
     /// (0=L, 1=R, 2=C, 3=LFE, 4=Ls, 5=Rs, 6/7=back surrounds). Lets surrounds run
@@ -214,19 +380,21 @@ impl FdnConfig {
 ///
 /// Fully physics-based gain staging:
 /// - **Send**: d²/(d²+d_c²) per source (bounded reverberant energy fraction)
-/// - **Decay**: Sabine RT60 → Jot per-line damping gains
+/// - **Decay**: Sabine RT60 → Jot per-line damping gains, met at 500 Hz and 4 kHz
 /// - **Output normalization**: derived from steady-state energy buildup of the
-///   8-line feedback network (1/RMS of per-line 1/√(1-g²)), so the d/d_c send
-///   law directly controls perceived wet level without an arbitrary wet knob.
+///   16-line feedback network (1/RMS over lines of the per-line white-noise
+///   build-up), so the d/d_c send law directly controls perceived wet level
+///   without an arbitrary wet knob.
 ///
 /// High-frequency decay is derived from per-wall material absorption
-/// coefficients via Sabine's equation at 500 Hz (low) and 4 kHz (high),
-/// so rooms with absorptive surfaces (carpet, acoustic tile) naturally
-/// produce faster HF decay than hard-walled rooms.
+/// coefficients via Sabine's equation at 500 Hz (low) and 4 kHz (high), and
+/// each line's damping filter is solved to hit both at those frequencies, so
+/// rooms with absorptive surfaces (carpet, acoustic tile) naturally produce
+/// faster HF decay than hard-walled rooms.
 pub struct FdnReverbStage {
     /// Delay line buffers — dynamically sized to accommodate delays at any
-    /// sample rate. At 48 kHz the buffer is 512 samples; at 96 kHz it grows
-    /// to 1024 to preserve the coprime delay ratios.
+    /// sample rate. At 48 kHz the buffer is 4096 samples; at 96 kHz it grows
+    /// to 8192 to preserve the coprime delay ratios.
     delay_buffers: Vec<Vec<f32>>,
     /// Current buffer size (always a power of 2).
     buffer_size: usize,
@@ -235,10 +403,15 @@ pub struct FdnReverbStage {
     write_pos: usize,
     delays: [usize; NUM_LINES],
     damping: [DampingFilter; NUM_LINES],
-    pre_delay_buf: Box<[f32; PRE_DELAY_BUF_SIZE]>,
+    /// Pre-delay ring, sized at init to the next power of two above
+    /// `pre_delay_samples` (see `set_pre_delay`).
+    pre_delay_buffer: Vec<f32>,
+    /// Bitmask for wrapping the pre-delay ring: `pre_delay_buffer.len() - 1`.
+    pre_delay_mask: usize,
     pre_delay_write_pos: usize,
     pre_delay_samples: usize,
-    /// Structural output normalization derived from Jot damping gains.
+    /// Structural output normalization derived from the damping filters'
+    /// steady-state energy build-up.
     /// Compensates for the FDN's steady-state energy accumulation so that
     /// the d/d_c send law directly controls the perceived wet level.
     output_normalization: f32,
@@ -294,7 +467,8 @@ impl FdnReverbStage {
             write_pos: 0,
             delays: [0; NUM_LINES],
             damping: [DampingFilter::new(); NUM_LINES],
-            pre_delay_buf: Box::new([0.0; PRE_DELAY_BUF_SIZE]),
+            pre_delay_buffer: vec![0.0; 1],
+            pre_delay_mask: 0,
             pre_delay_write_pos: 0,
             pre_delay_samples: 0,
             output_normalization: 1.0,
@@ -312,10 +486,17 @@ impl FdnReverbStage {
     }
 
     /// Compute the minimum power-of-2 buffer size needed for the given sample rate.
+    ///
+    /// The oldest sample the modulated read touches is the longest line plus
+    /// the full LFO depth plus the interpolator's two taps past the integer
+    /// delay (see `hermite_coefficients`); the slot being written this sample
+    /// must not alias it.
     fn required_buffer_size(sample_rate: f32) -> usize {
         let scale = sample_rate / BASE_SAMPLE_RATE;
-        let max_delay = (BASE_DELAYS[NUM_LINES - 1] as f32 * scale) as usize + 1;
-        max_delay.next_power_of_two().max(MIN_BUF_SIZE)
+        let longest_modulated_delay =
+            ((BASE_DELAYS[NUM_LINES - 1] as f32 + MOD_DEPTH_SAMPLES_48K) * scale).ceil() as usize;
+        let oldest_read = longest_modulated_delay + 2;
+        (oldest_read + 1).next_power_of_two().max(MIN_BUF_SIZE)
     }
 
     fn compute_delays(&mut self, sample_rate: f32) {
@@ -346,7 +527,8 @@ impl FdnReverbStage {
     }
 
     /// Compute pre-delay from mean free path time (average time between wall
-    /// bounces in a diffuse field). Falls back to 20ms for degenerate rooms.
+    /// bounces in a diffuse field). Falls back to 20ms for degenerate rooms,
+    /// and is held to at least `PRE_DELAY_MINIMUM_SECONDS`.
     ///
     /// Reference: Kuttruff, "Room Acoustics" (5th ed., 2009).
     fn compute_pre_delay(
@@ -361,61 +543,53 @@ impl FdnReverbStage {
         } else {
             room_acoustics::mean_free_path_time(volume, surface_area, speed_of_sound)
         };
+        self.set_pre_delay(
+            pre_delay_seconds.max(PRE_DELAY_MINIMUM_SECONDS),
+            sample_rate,
+        );
+    }
 
-        // Clamp to [5ms, buffer capacity] for safety.
-        let max_seconds = (PRE_DELAY_BUF_SIZE - 1) as f32 / sample_rate;
-        let clamped = pre_delay_seconds.clamp(0.005, max_seconds);
-        self.pre_delay_samples = (clamped * sample_rate) as usize;
+    /// Set the pre-delay, bounded to [0, `PRE_DELAY_MAXIMUM_SECONDS`], and size
+    /// the ring to hold it at this sample rate (a power of two above the delay,
+    /// so the read never aliases the write). Allocates when the size changes;
+    /// called from `init` only.
+    fn set_pre_delay(&mut self, seconds: f32, sample_rate: f32) {
+        let seconds = seconds.clamp(0.0, PRE_DELAY_MAXIMUM_SECONDS);
+        self.pre_delay_samples = (seconds * sample_rate) as usize;
+        let required_size = (self.pre_delay_samples + 1).next_power_of_two();
+        if required_size != self.pre_delay_buffer.len() {
+            self.pre_delay_buffer = vec![0.0; required_size];
+            self.pre_delay_mask = required_size - 1;
+            self.pre_delay_write_pos = 0;
+        }
     }
 
     /// Compute per-line one-pole damping filters for frequency-dependent decay,
     /// and derive structural output normalization from the loop gains.
     ///
-    /// Each filter has gain `k` and pole `p` derived from the RT60 at DC and Nyquist:
-    ///   g_dc  = 10^(-3m / (RT60_low  × fs))   — gain per sample at 0 Hz
-    ///   g_nyq = 10^(-3m / (RT60_high × fs))   — gain per sample at Nyquist
-    ///   k = 2·g_dc·g_nyq / (g_dc + g_nyq)     — filter gain (harmonic mean)
-    ///   p = (g_dc - g_nyq) / (g_dc + g_nyq)   — pole location
+    /// Each line's filter meets the Jot per-pass gain of `rt60_low` at 500 Hz
+    /// and of `rt60_high` at 4 kHz, the frequencies the two RT60s describe
+    /// (Sabine bands 2 and 5, or override and override × `HF_DECAY_RATIO`);
+    /// see `DampingFilter::design` for the closed form and its edge cases.
     ///
-    /// Output normalization uses g_eff = √((g_dc² + g_nyq²) / 2) per line —
-    /// the RMS of the actual endpoint loop gains, not the filter coefficient `k`.
-    /// Steady-state energy buildup per line is 1/(1 - g_eff²); RMS-averaged across
-    /// lines (Hadamard is orthonormal, so lines don't add coherently).
+    /// Output normalization divides out the network's steady-state energy
+    /// build-up: per line the white-noise mean of 1/(1 − |H(e^{jω})|²) over
+    /// frequency (`DampingFilter::white_noise_energy_buildup`, exact for the
+    /// one-pole), RMS-averaged across lines (Hadamard is orthonormal, so lines
+    /// don't add coherently).
     ///
     /// Reference: Jot, "Digital Delay Networks for Designing Artificial Reverberators",
     /// AES 90th Convention (1991), §3.2; extended in Jot's PhD thesis (1992), Ch. 4.
     fn compute_damping(&mut self, sample_rate: f32, rt60_low: f32, rt60_high: f32) {
-        let mut sum_norm_sq = 0.0f32;
+        let mut sum_energy_buildup = 0.0f32;
 
-        for i in 0..NUM_LINES {
-            let m = self.delays[i] as f32;
-            let g_dc = 10.0_f32.powf(-3.0 * m / (rt60_low * sample_rate));
-            let g_nyq = 10.0_f32.powf(-3.0 * m / (rt60_high * sample_rate));
-            let sum = g_dc + g_nyq;
-            if sum < f32::EPSILON {
-                self.damping[i].k = 0.0;
-                self.damping[i].p = 0.0;
-            } else {
-                self.damping[i].k = 2.0 * g_dc * g_nyq / sum;
-                self.damping[i].p = (g_dc - g_nyq) / sum;
-            }
-            self.damping[i].state = 0.0;
-
-            // Effective broadband loop gain: RMS of DC and Nyquist gains.
-            // This is the correct quantity for energy buildup estimation —
-            // unlike k (harmonic mean), g_eff represents the actual per-sample
-            // loop gain averaged across the spectrum.
-            let g_eff_sq = (g_dc * g_dc + g_nyq * g_nyq) * 0.5;
-            let norm_sq = if g_eff_sq < 0.9999 {
-                1.0 / (1.0 - g_eff_sq)
-            } else {
-                10000.0
-            };
-            sum_norm_sq += norm_sq;
+        for (filter, &delay_samples) in self.damping.iter_mut().zip(self.delays.iter()) {
+            *filter = DampingFilter::design(delay_samples, sample_rate, rt60_low, rt60_high);
+            sum_energy_buildup += filter.white_noise_energy_buildup();
         }
 
         // Network-level gain: RMS across lines (Hadamard is orthonormal).
-        let rms_gain = (sum_norm_sq / NUM_LINES as f32).sqrt();
+        let rms_gain = (sum_energy_buildup / NUM_LINES as f32).sqrt();
         let raw_norm = 1.0 / rms_gain;
         self.output_normalization = if self.measurement_mode {
             // Measurement mode: preserve linear gain, only prevent NaN/Inf.
@@ -459,30 +633,33 @@ impl FdnReverbStage {
     fn process_fdn_sample(&mut self, mono_in: f32, out_channels: usize) -> [f32; MAX_OUT] {
         let mut output = [0.0f32; MAX_OUT];
 
-        // Read from delay lines with modulated positions.
-        // Linear interpolation between adjacent integer samples gives
-        // smooth fractional delay, smearing resonant peaks.
+        // Read from delay lines with modulated positions, smearing resonant
+        // peaks. Cubic Hermite interpolation keeps the swept fractional read
+        // nearly flat and never above unity gain (see `hermite_coefficients`).
         let mut taps = [0.0_f32; NUM_LINES];
         for i in 0..NUM_LINES {
             let mod_offset = self.modulators[i].next();
-            let base_delay = self.delays[i] as f32 + mod_offset;
-            // Clamp to valid range: at least 1 sample, at most buffer_size - 2
-            // (need room for interpolation neighbor).
-            let clamped_delay = base_delay.clamp(1.0, (self.buffer_size - 2) as f32);
-            let delay_int = clamped_delay as usize;
-            let frac = clamped_delay - delay_int as f32;
+            let modulated_delay = self.delays[i] as f32 + mod_offset;
+            // Taps span delays integer − 1 … integer + 2: the newest must be at
+            // least 1 (the current slot is written below), the oldest at most
+            // buffer_size − 1. `required_buffer_size` makes this a no-op guard.
+            let clamped_delay = modulated_delay.clamp(2.0, (self.buffer_size - 3) as f32);
+            let delay_integer = clamped_delay as usize;
+            let coefficients = hermite_coefficients(clamped_delay - delay_integer as f32);
 
-            let pos_a = (self.write_pos + self.buffer_size - delay_int) & self.buffer_mask;
-            let pos_b = (self.write_pos + self.buffer_size - delay_int - 1) & self.buffer_mask;
-            taps[i] =
-                self.delay_buffers[i][pos_a] * (1.0 - frac) + self.delay_buffers[i][pos_b] * frac;
+            let line = &self.delay_buffers[i];
+            let newest = self.write_pos + self.buffer_size + 1 - delay_integer;
+            taps[i] = coefficients[0] * line[newest & self.buffer_mask]
+                + coefficients[1] * line[(newest - 1) & self.buffer_mask]
+                + coefficients[2] * line[(newest - 2) & self.buffer_mask]
+                + coefficients[3] * line[(newest - 3) & self.buffer_mask];
         }
 
         for i in 0..NUM_LINES {
             taps[i] = self.damping[i].process(taps[i]);
         }
 
-        // Distribute 8 delay line taps across output channels for a diffuse field.
+        // Distribute the 16 delay line taps across output channels for a diffuse field.
         // Each channel accumulates taps via modular assignment (line i → channel i%N).
         // Normalization: divide each channel by √(taps_in_ch × ch_count).
         // This simultaneously:
@@ -533,27 +710,27 @@ impl MixStage for FdnReverbStage {
         // the geometry decides: without facing reflective surfaces there is no
         // diffuse field for Sabine to describe.
         self.reverberant = self.rt60_override.is_some_and(|rt60| rt60 > 0.0)
-            || room_acoustics::has_facing_reflective_surfaces(ctx.wall_materials);
+            || room_acoustics::has_facing_reflective_surfaces(&ctx.environment.wall_materials);
 
         // Derive per-band RT60 from room geometry + wall materials via Sabine's equation.
         // RT60 at 500 Hz (band 2) sets the overall decay; RT60 at 4 kHz (band 5)
         // controls how much faster highs decay — driven by actual material absorption.
         let (volume, surface_area) =
-            room_acoustics::room_geometry(ctx.environment_min, ctx.environment_max);
+            room_acoustics::room_geometry(ctx.environment.min, ctx.environment.max);
         let wall_areas =
-            room_acoustics::wall_surface_areas(ctx.environment_min, ctx.environment_max);
+            room_acoustics::wall_surface_areas(ctx.environment.min, ctx.environment.max);
         let rt60_low = room_acoustics::sabine_rt60_at_band(
             volume,
             &wall_areas,
-            ctx.wall_materials,
-            ctx.atmosphere,
+            &ctx.environment.wall_materials,
+            &ctx.environment.atmosphere,
             RT60_LOW_BAND,
         );
         let rt60_high = room_acoustics::sabine_rt60_at_band(
             volume,
             &wall_areas,
-            ctx.wall_materials,
-            ctx.atmosphere,
+            &ctx.environment.wall_materials,
+            &ctx.environment.atmosphere,
             RT60_HIGH_BAND,
         );
 
@@ -565,16 +742,15 @@ impl MixStage for FdnReverbStage {
             _ => (rt60_low, rt60_high),
         };
 
-        // Pre-delay from mean free path: average time between wall bounces.
-        let speed_of_sound = ctx.atmosphere.speed_of_sound();
-        self.compute_pre_delay(ctx.sample_rate, volume, surface_area, speed_of_sound);
-
-        // Explicit pre-delay override (e.g. 20 ms) replaces the mean-free-path
-        // value, clamped to the pre-delay buffer capacity.
-        if let Some(ms) = self.pre_delay_override_ms {
-            let max_seconds = (PRE_DELAY_BUF_SIZE - 1) as f32 / ctx.sample_rate;
-            let seconds = (ms / 1000.0).clamp(0.0, max_seconds);
-            self.pre_delay_samples = (seconds * ctx.sample_rate) as usize;
+        // Pre-delay: an explicit override (e.g. 20 ms) wins; otherwise the mean
+        // free path, the average time between wall bounces. Either sizes the
+        // pre-delay ring for this sample rate.
+        match self.pre_delay_override_ms {
+            Some(milliseconds) => self.set_pre_delay(milliseconds / 1000.0, ctx.sample_rate),
+            None => {
+                let speed_of_sound = ctx.environment.atmosphere.speed_of_sound();
+                self.compute_pre_delay(ctx.sample_rate, volume, surface_area, speed_of_sound);
+            }
         }
 
         // Build the reverb-send high-pass now that the sample rate is known.
@@ -625,11 +801,12 @@ impl MixStage for FdnReverbStage {
             };
 
             // Pre-delay
-            self.pre_delay_buf[self.pre_delay_write_pos] = mono_in;
-            let read_pos = (self.pre_delay_write_pos + PRE_DELAY_BUF_SIZE - self.pre_delay_samples)
-                & PRE_DELAY_BUF_MASK;
-            let delayed_in = self.pre_delay_buf[read_pos];
-            self.pre_delay_write_pos = (self.pre_delay_write_pos + 1) & PRE_DELAY_BUF_MASK;
+            self.pre_delay_buffer[self.pre_delay_write_pos] = mono_in;
+            let read_pos = (self.pre_delay_write_pos + self.pre_delay_buffer.len()
+                - self.pre_delay_samples)
+                & self.pre_delay_mask;
+            let delayed_in = self.pre_delay_buffer[read_pos];
+            self.pre_delay_write_pos = (self.pre_delay_write_pos + 1) & self.pre_delay_mask;
 
             // FDN → only active channels within render range
             let wet = self.process_fdn_sample(delayed_in, render_channels);
@@ -655,7 +832,7 @@ impl MixStage for FdnReverbStage {
         for line in &mut self.delay_buffers {
             line.fill(0.0);
         }
-        self.pre_delay_buf.fill(0.0);
+        self.pre_delay_buffer.fill(0.0);
         self.write_pos = 0;
         self.pre_delay_write_pos = 0;
         for d in &mut self.damping {
@@ -733,15 +910,18 @@ mod tests {
         (layout, listener)
     }
 
-    use crate::pipeline::path::WallMaterial;
+    use crate::pipeline::environment::Environment;
+    use crate::pipeline::wall_material::WallMaterial;
+    use std::sync::LazyLock;
 
-    const TEST_MATERIALS: [WallMaterial; 6] = [WallMaterial::HARD_WALL; 6];
-
-    const TEST_ATMOSPHERE: AtmosphericParams = AtmosphericParams {
-        temperature_c: 20.0,
-        humidity_pct: 50.0,
-        pressure_kpa: 101.325,
-    };
+    /// A 10 m cube centred on the origin with hard walls and 20 °C air.
+    static TEST_ENVIRONMENT: LazyLock<Environment> = LazyLock::new(|| {
+        Environment::uniform(
+            Vec3::new(-5.0, -5.0, -5.0),
+            Vec3::new(5.0, 5.0, 5.0),
+            WallMaterial::HARD_WALL,
+        )
+    });
 
     fn mix_ctx<'a>(
         layout: &'a SpeakerLayout,
@@ -754,14 +934,11 @@ mod tests {
             layout,
             sample_rate: 48000.0,
             channels,
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
+            environment: &TEST_ENVIRONMENT,
             master_gain: 1.0,
             render_channels,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &TEST_MATERIALS,
-            atmosphere: &TEST_ATMOSPHERE,
             measurement_mode: false,
         }
     }
@@ -975,14 +1152,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels,
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
+            environment: &TEST_ENVIRONMENT,
             master_gain: 1.0,
             render_channels,
             reverb_input: Some(&reverb_input),
             wall_reflectivity: 0.9,
-            wall_materials: &TEST_MATERIALS,
-            atmosphere: &AtmosphericParams::default(),
             measurement_mode: false,
         };
 
@@ -1030,10 +1204,13 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
 
         // Dead room: acoustic tile on all walls → high absorption → short RT60
-        let tile_materials: [WallMaterial; 6] =
-            std::array::from_fn(|_| WallMaterial::ceiling_tile());
+        let dead_environment = Environment::uniform(
+            TEST_ENVIRONMENT.min,
+            TEST_ENVIRONMENT.max,
+            WallMaterial::ceiling_tile(),
+        );
         let ctx_dead = MixContext {
-            wall_materials: &tile_materials,
+            environment: &dead_environment,
             ..mix_ctx(&layout, &listener, channels, render_channels)
         };
         let mut fdn_dead = FdnReverbStage::new();
@@ -1061,9 +1238,13 @@ mod tests {
         let (layout, listener) = make_ctx(channels, render_channels);
 
         // Actual atrium: 6×4×3m room, hard walls
+        let atrium_environment = Environment::uniform(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(6.0, 4.0, 3.0),
+            WallMaterial::HARD_WALL,
+        );
         let ctx = MixContext {
-            environment_min: Vec3::new(0.0, 0.0, 0.0),
-            environment_max: Vec3::new(6.0, 4.0, 3.0),
+            environment: &atrium_environment,
             ..mix_ctx(&layout, &listener, channels, render_channels)
         };
 
@@ -1071,14 +1252,18 @@ mod tests {
         fdn.init(&ctx);
 
         // Hard walls produce long RT60 → high feedback gains → low output normalization.
-        // The exact value depends on material-derived RT60 at 500 Hz and 4 kHz bands.
+        // The exact value depends on material-derived RT60 at 500 Hz (3.39 s) and
+        // 4 kHz (1.57 s). Measured 0.691. It was 0.49 while the 1.57 s decay sat
+        // at Nyquist: the damping filters now reach it at 4 kHz and damp 4–24 kHz
+        // harder, so the network builds up less energy (its measured wet/send
+        // level moved only +0.5 dB, −15.5 → −15.0 dB, so the estimate tracks it).
         eprintln!(
             "Generic FDN output_normalization = {:.4} (atrium 6x4x3, hard walls)",
             fdn.output_normalization
         );
         assert!(
-            fdn.output_normalization > 0.05 && fdn.output_normalization < 0.5,
-            "atrium room norm should be between 0.05 and 0.5, got {}",
+            fdn.output_normalization > 0.05 && fdn.output_normalization < 0.8,
+            "atrium room norm should be between 0.05 and 0.8, got {}",
             fdn.output_normalization
         );
     }
@@ -1103,6 +1288,8 @@ mod tests {
         let environment_max = Vec3::new(6.0, 4.0, 3.0);
         let (volume, surface_area) =
             room_acoustics::room_geometry(environment_min, environment_max);
+        let environment =
+            Environment::uniform(environment_min, environment_max, WallMaterial::HARD_WALL);
 
         let reflectivities = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95];
         let hf_ratios = [0.3, 0.4, 0.5, 0.6];
@@ -1135,8 +1322,7 @@ mod tests {
                 reverb_input[0] = 1.0; // single impulse on ch0
 
                 let ctx = MixContext {
-                    environment_min,
-                    environment_max,
+                    environment: &environment,
                     wall_reflectivity: refl,
                     reverb_input: Some(&reverb_input),
                     ..mix_ctx(&layout, &listener, channels, render_channels)
@@ -1185,6 +1371,8 @@ mod tests {
         let environment_max = Vec3::new(6.0, 4.0, 3.0);
         let (volume, surface_area) =
             room_acoustics::room_geometry(environment_min, environment_max);
+        let hard_environment =
+            Environment::uniform(environment_min, environment_max, WallMaterial::HARD_WALL);
 
         let listener_pos = Vec3::new(3.0, 2.0, 0.0); // center of room
         let source_positions = [
@@ -1207,7 +1395,12 @@ mod tests {
             );
             eprintln!("{}", "─".repeat(85));
 
-            let resolver = ImageSourceResolver::new(refl);
+            let resolver = ImageSourceResolver;
+            let resolver_environment = Environment::uniform(
+                environment_min,
+                environment_max,
+                WallMaterial::with_reflectivity(refl),
+            );
 
             for (name, source_pos) in &source_positions {
                 let dist = source_pos.distance_to(listener_pos);
@@ -1218,10 +1411,7 @@ mod tests {
                 let resolve_ctx = ResolveContext {
                     source_pos: *source_pos,
                     target_pos: listener_pos,
-                    environment_min,
-                    environment_max,
-                    barriers: &[],
-                    atmosphere: &AtmosphericParams::default(),
+                    environment: &resolver_environment,
                 };
                 resolver.resolve(&resolve_ctx, &mut paths);
 
@@ -1241,7 +1431,7 @@ mod tests {
                 let rt60_high = room_acoustics::sabine_rt60_at_band(
                     volume,
                     &wall_areas,
-                    &TEST_MATERIALS,
+                    &TEST_ENVIRONMENT.wall_materials,
                     &atmosphere,
                     RT60_HIGH_BAND,
                 );
@@ -1257,8 +1447,7 @@ mod tests {
                 reverb_input[0] = send; // impulse scaled by d/d_c send law
 
                 let ctx = MixContext {
-                    environment_min,
-                    environment_max,
+                    environment: &hard_environment,
                     wall_reflectivity: refl,
                     reverb_input: Some(&reverb_input),
                     ..mix_ctx(&layout, &listener, channels, render_channels)
@@ -1377,14 +1566,14 @@ mod tests {
         let rt60_low = room_acoustics::sabine_rt60_at_band(
             volume,
             &wall_areas,
-            &TEST_MATERIALS,
+            &TEST_ENVIRONMENT.wall_materials,
             &atmosphere,
             RT60_LOW_BAND,
         );
         let rt60_high = room_acoustics::sabine_rt60_at_band(
             volume,
             &wall_areas,
-            &TEST_MATERIALS,
+            &TEST_ENVIRONMENT.wall_materials,
             &atmosphere,
             RT60_HIGH_BAND,
         );
@@ -1438,12 +1627,13 @@ mod tests {
         let environment_min = Vec3::ZERO;
         let environment_max = Vec3::new(6.0, 4.0, 3.0);
 
-        let hard_materials = [WallMaterial::HARD_WALL; 6];
-        let carpet_materials: [WallMaterial; 6] = std::array::from_fn(|_| WallMaterial::carpet());
+        let hard_environment =
+            Environment::uniform(environment_min, environment_max, WallMaterial::HARD_WALL);
+        let carpet_environment =
+            Environment::uniform(environment_min, environment_max, WallMaterial::carpet());
 
         let layout = SpeakerLayout::new(&[], None, 2);
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        let atmosphere = AtmosphericParams::default();
 
         let mut fdn_hard = FdnReverbStage::new();
         let ctx_hard = MixContext {
@@ -1451,14 +1641,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels: 2,
-            environment_min,
-            environment_max,
+            environment: &hard_environment,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &hard_materials,
-            atmosphere: &atmosphere,
             measurement_mode: false,
         };
         fdn_hard.init(&ctx_hard);
@@ -1469,14 +1656,11 @@ mod tests {
             layout: &layout,
             sample_rate: 48000.0,
             channels: 2,
-            environment_min,
-            environment_max,
+            environment: &carpet_environment,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &carpet_materials,
-            atmosphere: &atmosphere,
             measurement_mode: false,
         };
         fdn_carpet.init(&ctx_carpet);
@@ -1568,46 +1752,42 @@ mod tests {
         );
     }
 
-    /// At 96 kHz, all 8 delay lines must remain distinct (not clamped to the
+    /// At 96 kHz, all 16 delay lines must remain distinct (not clamped to the
     /// same value). The buffer should grow to accommodate scaled delays.
     #[test]
     fn delays_preserved_at_96khz() {
         let (layout, listener) = make_ctx(2, 2);
-        let atmosphere = TEST_ATMOSPHERE;
         let ctx = MixContext {
             listener: &listener,
             layout: &layout,
             sample_rate: 96000.0,
             channels: 2,
-            environment_min: Vec3::new(-5.0, -5.0, -5.0),
-            environment_max: Vec3::new(5.0, 5.0, 5.0),
+            environment: &TEST_ENVIRONMENT,
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
             wall_reflectivity: 0.9,
-            wall_materials: &TEST_MATERIALS,
-            atmosphere: &atmosphere,
             measurement_mode: false,
         };
         let mut fdn = FdnReverbStage::new();
         fdn.init(&ctx);
 
-        // All 8 delays should be distinct (coprime ratios preserved)
+        // All 16 delays should be distinct (coprime ratios preserved)
         let mut unique_delays: Vec<usize> = fdn.delays.to_vec();
         unique_delays.sort();
         unique_delays.dedup();
         assert_eq!(
             unique_delays.len(),
             NUM_LINES,
-            "all 8 delays should be distinct at 96 kHz, got {:?}",
+            "all 16 delays should be distinct at 96 kHz, got {:?}",
             fdn.delays
         );
 
-        // Longest delay should be approximately 3001 * 2 = 6002 at 96 kHz.
+        // Longest delay should be 3347 × 2 = 6694 at 96 kHz.
         let max_delay = *fdn.delays.iter().max().unwrap();
         assert!(
             max_delay > 5000,
-            "longest delay at 96 kHz should be ~6002, got {max_delay}"
+            "longest delay at 96 kHz should be ~6694, got {max_delay}"
         );
 
         // Buffer should have grown beyond the 48 kHz minimum of 512
@@ -1621,7 +1801,8 @@ mod tests {
     /// required_buffer_size scales correctly with sample rate.
     #[test]
     fn buffer_size_scales_with_sample_rate() {
-        // Longest delay 3001 @ 48 kHz → next_pow2(3002) = 4096.
+        // Longest delay 3347 + 10 modulation + 2 interpolation taps @ 48 kHz
+        // → next_pow2(3360) = 4096.
         assert_eq!(FdnReverbStage::required_buffer_size(48000.0), 4096);
         assert!(FdnReverbStage::required_buffer_size(96000.0) >= 8192);
         assert!(FdnReverbStage::required_buffer_size(44100.0) >= 4096);
@@ -1860,5 +2041,744 @@ mod tests {
             with_hpf < without_hpf * 0.3,
             "160 Hz send HPF should strongly attenuate a 40 Hz tail: with={with_hpf}, without={without_hpf}"
         );
+    }
+
+    // ── End-to-end physics: mixing matrix, damping, measured decay ──────────
+
+    const SAMPLE_RATE: f32 = 48_000.0;
+
+    /// Deterministic white noise in [-1, 1) (64-bit LCG, top 24 bits).
+    fn white_noise(length: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        (0..length)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// A stereo stage initialised in the 10 m hard-walled test cube, then
+    /// optionally given an explicit (low, high) RT60 pair directly.
+    fn stereo_stage(config: FdnConfig, rt60_low_high: Option<(f32, f32)>) -> FdnReverbStage {
+        let (layout, listener) = make_ctx(2, 2);
+        let ctx = mix_ctx(&layout, &listener, 2, 2);
+        let mut fdn = FdnReverbStage::with_config(config);
+        fdn.init(&ctx);
+        if let Some((rt60_low, rt60_high)) = rt60_low_high {
+            fdn.compute_damping(SAMPLE_RATE, rt60_low, rt60_high);
+        }
+        fdn
+    }
+
+    /// Run `send` through the stage as its mono reverb bus and return the
+    /// per-frame wet output of both stereo channels.
+    fn stereo_wet_output(fdn: &mut FdnReverbStage, send: &[f32]) -> Vec<[f32; 2]> {
+        let channels = 2;
+        let (layout, listener) = make_ctx(channels, channels);
+        let mut reverb_input = vec![0.0f32; send.len() * channels];
+        for (frame, &sample) in send.iter().enumerate() {
+            reverb_input[frame * channels] = sample;
+        }
+        let ctx = MixContext {
+            reverb_input: Some(&reverb_input),
+            ..mix_ctx(&layout, &listener, channels, channels)
+        };
+        let mut buffer = vec![0.0f32; send.len() * channels];
+        fdn.process(&mut buffer, &ctx);
+        buffer
+            .chunks_exact(channels)
+            .map(|frame| [frame[0], frame[1]])
+            .collect()
+    }
+
+    /// Mono (L+R) impulse response of the tail for a unit impulse on the send.
+    fn impulse_response(fdn: &mut FdnReverbStage, frames: usize) -> Vec<f32> {
+        let mut send = vec![0.0f32; frames];
+        send[0] = 1.0;
+        stereo_wet_output(fdn, &send)
+            .iter()
+            .map(|frame| frame[0] + frame[1])
+            .collect()
+    }
+
+    /// Octave band around `center_hz`: two cascaded Butterworth high-passes at
+    /// center/√2 and two low-passes at center·√2 (24 dB/oct skirts).
+    fn octave_band(signal: &[f32], center_hz: f32) -> Vec<f32> {
+        let lower_edge = center_hz / std::f32::consts::SQRT_2;
+        let upper_edge = center_hz * std::f32::consts::SQRT_2;
+        let mut filters = [
+            Biquad::highpass(lower_edge, SAMPLE_RATE),
+            Biquad::highpass(lower_edge, SAMPLE_RATE),
+            Biquad::lowpass(upper_edge, SAMPLE_RATE),
+            Biquad::lowpass(upper_edge, SAMPLE_RATE),
+        ];
+        signal
+            .iter()
+            .map(|&sample| {
+                filters
+                    .iter_mut()
+                    .fold(sample, |x, filter| filter.process(x))
+            })
+            .collect()
+    }
+
+    /// Schroeder backward integration: energy remaining after each sample, in
+    /// dB relative to the total energy (ISO 3382-1 energy decay curve).
+    fn schroeder_decay_db(impulse_response: &[f32]) -> Vec<f64> {
+        let mut remaining_energy = vec![0.0f64; impulse_response.len()];
+        let mut running_sum = 0.0f64;
+        for (index, &sample) in impulse_response.iter().enumerate().rev() {
+            running_sum += f64::from(sample) * f64::from(sample);
+            remaining_energy[index] = running_sum;
+        }
+        let total_energy = running_sum.max(f64::MIN_POSITIVE);
+        remaining_energy
+            .iter()
+            .map(|&energy| 10.0 * (energy / total_energy).max(1e-30).log10())
+            .collect()
+    }
+
+    /// RT60 extrapolated from a least-squares line through the decay curve
+    /// between -5 dB and -25 dB (the ISO 3382 T20 evaluation range).
+    fn rt60_from_decay(decay_db: &[f64]) -> f64 {
+        let points: Vec<(f64, f64)> = decay_db
+            .iter()
+            .enumerate()
+            .filter(|(_, &level)| (-25.0..=-5.0).contains(&level))
+            .map(|(index, &level)| (index as f64 / f64::from(SAMPLE_RATE), level))
+            .collect();
+        assert!(points.len() > 100, "decay curve never spans -5..-25 dB");
+        let count = points.len() as f64;
+        let mean_time = points.iter().map(|point| point.0).sum::<f64>() / count;
+        let mean_level = points.iter().map(|point| point.1).sum::<f64>() / count;
+        let covariance: f64 = points
+            .iter()
+            .map(|(time, level)| (time - mean_time) * (level - mean_level))
+            .sum();
+        let variance: f64 = points
+            .iter()
+            .map(|(time, _)| (time - mean_time).powi(2))
+            .sum();
+        let slope_db_per_second = covariance / variance;
+        -60.0 / slope_db_per_second
+    }
+
+    /// The Walsh–Hadamard mixing matrix must be orthonormal (lossless): every
+    /// entry ±1/√16 = ±0.25, H·Hᵀ = I, energy preserved for any input, and —
+    /// since the Sylvester Hadamard matrix is symmetric — its own inverse.
+    #[test]
+    fn hadamard_is_orthonormal_energy_preserving_and_self_inverse() {
+        let mut matrix = [[0.0f32; NUM_LINES]; NUM_LINES];
+        for (column, column_values) in matrix.iter_mut().enumerate() {
+            let mut basis = [0.0f32; NUM_LINES];
+            basis[column] = 1.0;
+            FdnReverbStage::hadamard(&mut basis);
+            *column_values = basis;
+        }
+        let entry_magnitude = 1.0 / (NUM_LINES as f32).sqrt();
+        for row in 0..NUM_LINES {
+            for column in 0..NUM_LINES {
+                assert!(
+                    (matrix[column][row].abs() - entry_magnitude).abs() < 1e-6,
+                    "entry ({row},{column}) = {} should be ±{entry_magnitude}",
+                    matrix[column][row]
+                );
+                let dot: f32 = (0..NUM_LINES)
+                    .map(|k| matrix[row][k] * matrix[column][k])
+                    .sum();
+                let identity = if row == column { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - identity).abs() < 1e-6,
+                    "H·Hᵀ[{row}][{column}] = {dot}, expected {identity}"
+                );
+            }
+        }
+
+        let noise = white_noise(NUM_LINES * 64, 7);
+        for chunk in noise.chunks_exact(NUM_LINES) {
+            let original: [f32; NUM_LINES] = chunk.try_into().unwrap();
+            let mut transformed = original;
+            FdnReverbStage::hadamard(&mut transformed);
+            let energy_in: f32 = original.iter().map(|x| x * x).sum();
+            let energy_out: f32 = transformed.iter().map(|x| x * x).sum();
+            assert!(
+                (energy_out / energy_in - 1.0).abs() < 1e-5,
+                "Hadamard must preserve energy: in={energy_in}, out={energy_out}"
+            );
+            FdnReverbStage::hadamard(&mut transformed);
+            for (back, forward) in transformed.iter().zip(&original) {
+                assert!(
+                    (back - forward).abs() < 1e-5,
+                    "H(H(v)) must equal v: {back} vs {forward}"
+                );
+            }
+        }
+    }
+
+    /// Analytic one-pole gain |H(e^{jω})| = k / √(1 + p² − 2p·cos ω).
+    fn damping_gain(filter: &DampingFilter, frequency_hz: f64, sample_rate: f32) -> f64 {
+        let angle = std::f64::consts::TAU * frequency_hz / f64::from(sample_rate);
+        let pole = f64::from(filter.p);
+        f64::from(filter.k) / (1.0 + pole * pole - 2.0 * pole * angle.cos()).sqrt()
+    }
+
+    /// Steady-state amplitude of the filter's response to a unit sine at
+    /// `frequency_hz` (48 kHz), measured by quadrature correlation over the
+    /// last 960 samples — a whole number of periods at both 500 Hz and 4 kHz.
+    fn measured_sine_gain(filter: DampingFilter, frequency_hz: f64) -> f64 {
+        let mut filter = filter;
+        let angle_per_sample = std::f64::consts::TAU * frequency_hz / f64::from(SAMPLE_RATE);
+        let (settle, window) = (4800, 960);
+        let (mut in_phase, mut quadrature) = (0.0f64, 0.0f64);
+        for sample in 0..settle + window {
+            let angle = angle_per_sample * sample as f64;
+            let output = f64::from(filter.process(angle.sin() as f32));
+            if sample >= settle {
+                in_phase += output * angle.sin();
+                quadrature += output * angle.cos();
+            }
+        }
+        2.0 * in_phase.hypot(quadrature) / window as f64
+    }
+
+    /// The damping filter must hit the Jot per-pass gain at the frequencies the
+    /// two RT60s are defined at: 10^(−3m/(RT60_low·fs)) at 500 Hz and
+    /// 10^(−3m/(RT60_high·fs)) at 4 kHz.
+    ///
+    /// Hand derivation, 2237-sample line at 48 kHz, RT60 2.0 s / 1.2 s:
+    ///   g_low  = 10^(−3·2237/96000) = 10^(−0.069906) = 0.85132
+    ///   g_high = 10^(−3·2237/57600) = 10^(−0.116510) = 0.76470
+    ///   v_low  = 1 − cos(2π·500/48000) = 0.0021411, v_high = 1 − cos(π/6) = 0.13397
+    ///   r = (g_low/g_high)² = 1.23939
+    ///   s = (v_high − r·v_low)/(r − 1) = (0.13397 − 0.00265)/0.23939 = 0.54856
+    ///   p = 1 + s − √(s·(2 + s)) = 1.54856 − 1.18240 = 0.36617
+    ///   k = g_low·√((1 − p)² + 2p·v_low) = 0.85132·√(0.40174 + 0.00157) = 0.54064
+    ///   DC gain k/(1 − p) = 0.85298 (the peak, < 1); Nyquist k/(1 + p) = 0.39574.
+    /// The gains are measured by driving the filter with 500 Hz and 4 kHz sines.
+    /// Every line at 44.1, 48 and 96 kHz must meet both targets analytically,
+    /// with its peak (DC) gain below 1.
+    #[test]
+    fn damping_filter_hits_jot_gain_at_500_hz_and_4_khz() {
+        let mut fdn = FdnReverbStage::new();
+        fdn.compute_delays(SAMPLE_RATE);
+        fdn.compute_damping(SAMPLE_RATE, 2.0, 1.2);
+
+        let line = BASE_DELAYS.iter().position(|&delay| delay == 2237).unwrap();
+        let filter = fdn.damping[line];
+        assert!((filter.p - 0.36617).abs() < 1e-4, "pole {}", filter.p);
+        assert!((filter.k - 0.54064).abs() < 1e-4, "gain {}", filter.k);
+        let dc_gain = filter.k / (1.0 - filter.p);
+        let nyquist_gain = filter.k / (1.0 + filter.p);
+        assert!((dc_gain - 0.85298).abs() < 1e-4, "DC gain {dc_gain}");
+        assert!(
+            (nyquist_gain - 0.39574).abs() < 1e-4,
+            "Nyquist gain {nyquist_gain}"
+        );
+        let low_output = measured_sine_gain(filter, 500.0);
+        let high_output = measured_sine_gain(filter, 4000.0);
+        assert!(
+            (low_output - 0.85132).abs() < 2e-4,
+            "500 Hz loop gain should be 0.85132, got {low_output}"
+        );
+        assert!(
+            (high_output - 0.76470).abs() < 2e-4,
+            "4 kHz loop gain should be 0.76470, got {high_output}"
+        );
+
+        // Every line and sample rate: the design points equal
+        // room_acoustics::jot_feedback_gain, the documented home of the formula.
+        for sample_rate in [44_100.0f32, 48_000.0, 96_000.0] {
+            let mut fdn = FdnReverbStage::new();
+            fdn.compute_delays(sample_rate);
+            fdn.compute_damping(sample_rate, 2.0, 1.2);
+            for (index, filter) in fdn.damping.iter().enumerate() {
+                let delay_seconds = fdn.delays[index] as f32 / sample_rate;
+                let low_gain = damping_gain(filter, 500.0, sample_rate);
+                let high_gain = damping_gain(filter, 4000.0, sample_rate);
+                let expected_low = f64::from(room_acoustics::jot_feedback_gain(delay_seconds, 2.0));
+                let expected_high =
+                    f64::from(room_acoustics::jot_feedback_gain(delay_seconds, 1.2));
+                assert!(
+                    (low_gain - expected_low).abs() < 1e-5,
+                    "{sample_rate} Hz line {index}: 500 Hz gain {low_gain} vs {expected_low}"
+                );
+                assert!(
+                    (high_gain - expected_high).abs() < 1e-5,
+                    "{sample_rate} Hz line {index}: 4 kHz gain {high_gain} vs {expected_high}"
+                );
+                let peak_gain = filter.k / (1.0 - filter.p);
+                assert!(
+                    (0.0..1.0).contains(&filter.p) && peak_gain < 1.0,
+                    "{sample_rate} Hz line {index}: pole {} peak gain {peak_gain}",
+                    filter.p
+                );
+            }
+        }
+    }
+
+    /// Targets a one-pole cannot meet, and the no-damping and lossless limits,
+    /// must still give a passive loop with the 500 Hz gain exact.
+    /// - 10 s / 0.1 s asks for up to 48 dB per pass between 500 Hz and 4 kHz;
+    ///   a one-pole spans at most ≈ 18 dB. The pole stops where DC decays at
+    ///   2 × the 500 Hz RT60 (g_dc = √g_low), so 4 kHz is under-damped, never over.
+    /// - RT60_high ≥ RT60_low: no damping, p = 0 and k = g_low (flat).
+    /// - Infinite or near-infinite RT60: loop gain capped at 0.9999, not 1.
+    #[test]
+    fn damping_filter_stays_passive_when_targets_are_unreachable() {
+        for sample_rate in [44_100.0f32, 48_000.0, 96_000.0] {
+            let mut fdn = FdnReverbStage::new();
+            fdn.compute_delays(sample_rate);
+
+            fdn.compute_damping(sample_rate, 10.0, 0.1);
+            for (index, filter) in fdn.damping.iter().enumerate() {
+                let delay_seconds = fdn.delays[index] as f32 / sample_rate;
+                let expected_low =
+                    f64::from(room_acoustics::jot_feedback_gain(delay_seconds, 10.0));
+                let target_high = f64::from(room_acoustics::jot_feedback_gain(delay_seconds, 0.1));
+                let low_gain = damping_gain(filter, 500.0, sample_rate);
+                let high_gain = damping_gain(filter, 4000.0, sample_rate);
+                let peak_gain = f64::from(filter.k) / (1.0 - f64::from(filter.p));
+                assert!(
+                    (low_gain - expected_low).abs() < 1e-5,
+                    "{sample_rate} Hz line {index}: 500 Hz gain {low_gain} vs {expected_low}"
+                );
+                assert!(
+                    (peak_gain - expected_low.sqrt()).abs() < 1e-4,
+                    "{sample_rate} Hz line {index}: DC gain {peak_gain} should sit at the cap {}",
+                    expected_low.sqrt()
+                );
+                assert!(
+                    high_gain >= target_high && high_gain < low_gain,
+                    "{sample_rate} Hz line {index}: 4 kHz gain {high_gain} (target {target_high})"
+                );
+                assert!(filter.p < 1.0 && peak_gain < 1.0);
+            }
+
+            fdn.compute_damping(sample_rate, 1.0, 2.0);
+            for (index, filter) in fdn.damping.iter().enumerate() {
+                let delay_seconds = fdn.delays[index] as f32 / sample_rate;
+                assert_eq!(filter.p, 0.0, "line {index}: no HF damping requested");
+                assert!(
+                    (filter.k - room_acoustics::jot_feedback_gain(delay_seconds, 1.0)).abs() < 1e-6
+                );
+            }
+
+            for (rt60_low, rt60_high) in [(f32::INFINITY, f32::INFINITY), (1.0e6, 0.6e6)] {
+                fdn.compute_damping(sample_rate, rt60_low, rt60_high);
+                for filter in &fdn.damping {
+                    let peak_gain = filter.k / (1.0 - filter.p);
+                    assert!(
+                        peak_gain < 1.0 && peak_gain > 0.9998,
+                        "RT60 {rt60_low}: peak gain {peak_gain}"
+                    );
+                }
+                assert!(fdn.output_normalization.is_finite() && fdn.output_normalization > 0.0);
+            }
+        }
+    }
+
+    /// Freeze the delay-modulation LFOs so every read is an integer delay.
+    fn without_modulation(mut fdn: FdnReverbStage) -> FdnReverbStage {
+        for modulator in &mut fdn.modulators {
+            modulator.depth = 0.0;
+        }
+        fdn
+    }
+
+    /// Measured RT60 of the octave band at `center_hz` (or broadband if `None`).
+    fn measured_rt60(response: &[f32], center_hz: Option<f32>) -> f64 {
+        match center_hz {
+            Some(center) => rt60_from_decay(&schroeder_decay_db(&octave_band(response, center))),
+            None => rt60_from_decay(&schroeder_decay_db(response)),
+        }
+    }
+
+    /// The Jot + Hadamard core is exact: with a frequency-independent RT60 of
+    /// 1.5 s and the LFOs frozen, the Schroeder decay of the real impulse
+    /// response (16 lines, Hadamard feedback, damping filters, output combiner)
+    /// extrapolates to 1.5 s ± 10 % broadband and in every octave 500 Hz–8 kHz.
+    /// (Measured: 1.54 broadband; 1.52 / 1.57 / 1.51 / 1.57 / 1.55 s per band.)
+    #[test]
+    fn measured_rt60_matches_configured_decay_in_every_band() {
+        let mut fdn = without_modulation(stereo_stage(FdnConfig::default(), Some((1.5, 1.5))));
+        let response = impulse_response(&mut fdn, (1.6 * SAMPLE_RATE) as usize);
+        for band in [
+            None,
+            Some(500.0),
+            Some(1000.0),
+            Some(2000.0),
+            Some(4000.0),
+            Some(8000.0),
+        ] {
+            let measured = measured_rt60(&response, band);
+            assert!(
+                (measured - 1.5).abs() < 0.15,
+                "flat 1.5 s FDN, band {band:?}: measured RT60 {measured:.3} s"
+            );
+        }
+    }
+
+    /// End-to-end through `init` with the production (modulated) network: an
+    /// RT60 override of 2.0 s sets the 500 Hz decay. The measured 500 Hz
+    /// octave-band RT60 must be 2.0 s ± 10 % (measured 1.97 s).
+    #[test]
+    fn measured_mid_band_rt60_matches_override() {
+        let mut fdn = stereo_stage(
+            FdnConfig {
+                rt60_seconds: Some(2.0),
+                ..FdnConfig::default()
+            },
+            None,
+        );
+        let response = impulse_response(&mut fdn, (1.8 * SAMPLE_RATE) as usize);
+        let measured = measured_rt60(&response, Some(500.0));
+        assert!(
+            (measured - 2.0).abs() < 0.2,
+            "500 Hz band should decay with the 2.0 s override, got {measured:.3} s"
+        );
+    }
+
+    /// `FdnConfig::rt60_seconds` documents that "the 4 kHz decay is derived via
+    /// HF_DECAY_RATIO" (0.6 → 1.2 s for a 2.0 s override). The damping filters
+    /// meet exactly that per-pass gain at 4 kHz, so the 4 kHz octave band must
+    /// measure 1.2 s ± 15 %. LFOs are frozen to isolate the filter mapping.
+    ///
+    /// Measured 1.37 s, close to the +15 % edge, and not a filter error (the
+    /// gain at 4 kHz is pinned by `damping_filter_hits_jot_gain_at_500_hz_and_4_khz`):
+    /// a one-pole's RT60 falls across the octave, 1.48 s at 2.83 kHz to 0.91 s
+    /// at 5.66 kHz, and a T20 fit follows the slow edge (1.25 s for an ideal
+    /// band); the 24 dB/oct band filter's skirts admit slower 2 kHz energy, and
+    /// the method itself reads a flat 1.5 s as 1.57 s here. Before the fix,
+    /// with the 1.2 s gain at Nyquist, this measured 1.97 s. The production
+    /// modulated network measures 1.31 s (1.25 s with the old linear
+    /// interpolation; see `modulated_interpolation_preserves_high_band_decay`).
+    #[test]
+    fn measured_high_band_rt60_matches_hf_decay_ratio() {
+        let mut fdn = without_modulation(stereo_stage(
+            FdnConfig {
+                rt60_seconds: Some(2.0),
+                ..FdnConfig::default()
+            },
+            None,
+        ));
+        let response = impulse_response(&mut fdn, (1.8 * SAMPLE_RATE) as usize);
+        let measured = measured_rt60(&response, Some(4000.0));
+        let expected = f64::from(2.0 * HF_DECAY_RATIO);
+        assert!(
+            (measured - expected).abs() < 0.15 * expected,
+            "4 kHz band should decay in {expected:.2} s (HF_DECAY_RATIO), got {measured:.3} s"
+        );
+    }
+
+    /// The modulated read's interpolation loss is not in the Jot gains, so it
+    /// shortens the decay wherever it bites. Linear interpolation averaged
+    /// (over the swept fraction f) |H|² = 2/3 + cos(ω)/3 per pass, −0.79 dB at
+    /// 8 kHz on every ~48 ms trip round the loop: a flat 1.5 s configuration
+    /// measured 1.14 s at 8 kHz and 0.92 s at 12 kHz (frozen LFOs: 1.55 s).
+    /// Catmull-Rom loses −0.12 dB at 8 kHz (see `hermite_coefficients`), and
+    /// the 8 kHz octave must decay in 1.5 s ± 10 %. Measured 1.41 s (12 kHz
+    /// 1.25 s, broadband 1.40 s; white-noise wet/send −15.4 dB, was −16.7 dB,
+    /// −12.7 dB frozen).
+    #[test]
+    fn modulated_interpolation_preserves_high_band_decay() {
+        let mut fdn = stereo_stage(FdnConfig::default(), Some((1.5, 1.5)));
+        let response = impulse_response(&mut fdn, (1.6 * SAMPLE_RATE) as usize);
+        let measured = measured_rt60(&response, Some(8000.0));
+        assert!(
+            (measured - 1.5).abs() < 0.15,
+            "flat 1.5 s FDN should decay in 1.5 s at 8 kHz, got {measured:.3} s"
+        );
+    }
+
+    /// The modulated read must never add gain, or a lossless-limit loop
+    /// (damping capped at `MAXIMUM_LOOP_GAIN` = 0.9999) could reach 1.
+    /// |H(e^{jω})| = |Σ c_k e^{−jωk}| over 1025 fractions × 4097 frequencies
+    /// in [0, π] must stay ≤ 1 up to f32 coefficient rounding (measured worst
+    /// case 1 + 6e-8, at DC, where the coefficients sum to 1), and its product
+    /// with the loop-gain cap must stay below 1. A frozen LFO (fraction 0) must
+    /// read the integer sample alone. The fraction-averaged power at 8 kHz and
+    /// 12 kHz pins the flatness: −0.118 dB and −0.527 dB per pass (hand-derived
+    /// by integrating |H|² over the fraction; linear interpolation gives −0.79
+    /// and −1.76 dB).
+    #[test]
+    fn hermite_interpolator_is_passive_at_every_fraction() {
+        assert_eq!(hermite_coefficients(0.0), [0.0, 1.0, 0.0, 0.0]);
+
+        let magnitude_squared = |coefficients: &[f32; 4], angle: f64| -> f64 {
+            let (real, imaginary) = coefficients.iter().enumerate().fold(
+                (0.0f64, 0.0f64),
+                |(real, imaginary), (tap, &coefficient)| {
+                    let phase = angle * tap as f64;
+                    (
+                        real + f64::from(coefficient) * phase.cos(),
+                        imaginary - f64::from(coefficient) * phase.sin(),
+                    )
+                },
+            );
+            real * real + imaginary * imaginary
+        };
+
+        let fraction_steps = 1024;
+        let frequency_steps = 4096;
+        let mut worst_magnitude = 0.0f64;
+        let mut worst_at = (0.0f32, 0.0f64);
+        for fraction_step in 0..=fraction_steps {
+            let fraction = fraction_step as f32 / fraction_steps as f32;
+            let coefficients = hermite_coefficients(fraction);
+            for frequency_step in 0..=frequency_steps {
+                let angle = std::f64::consts::PI * frequency_step as f64 / frequency_steps as f64;
+                let magnitude = magnitude_squared(&coefficients, angle).sqrt();
+                if magnitude > worst_magnitude {
+                    worst_magnitude = magnitude;
+                    worst_at = (
+                        fraction,
+                        angle * f64::from(SAMPLE_RATE) / std::f64::consts::TAU,
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "Hermite worst |H| = 1 + {:.2e} at fraction {}, {:.0} Hz",
+            worst_magnitude - 1.0,
+            worst_at.0,
+            worst_at.1
+        );
+        assert!(
+            worst_magnitude <= 1.0 + 1e-6,
+            "interpolator gain {worst_magnitude} at fraction {}, {:.0} Hz",
+            worst_at.0,
+            worst_at.1
+        );
+        assert!(worst_magnitude * MAXIMUM_LOOP_GAIN < 1.0);
+
+        for (frequency_hz, expected_db) in [(8000.0, -0.118), (12000.0, -0.527)] {
+            let angle = std::f64::consts::TAU * frequency_hz / f64::from(SAMPLE_RATE);
+            let mean_power = (0..fraction_steps)
+                .map(|fraction_step| {
+                    let fraction = (fraction_step as f32 + 0.5) / fraction_steps as f32;
+                    magnitude_squared(&hermite_coefficients(fraction), angle)
+                })
+                .sum::<f64>()
+                / fraction_steps as f64;
+            let mean_db = 10.0 * mean_power.log10();
+            assert!(
+                (mean_db - expected_db).abs() < 0.005,
+                "{frequency_hz} Hz: fraction-averaged loss {mean_db:.4} dB, expected {expected_db}"
+            );
+        }
+    }
+
+    /// Steady-state wet/send power ratio (total over both channels) for white
+    /// noise on the send, through the production (modulated) network.
+    fn steady_state_wet_to_send_db(rt60: f32) -> f64 {
+        let mut fdn = stereo_stage(FdnConfig::default(), Some((rt60, rt60)));
+        let frames = (2.5 * SAMPLE_RATE) as usize;
+        let send = white_noise(frames, 11);
+        let wet = stereo_wet_output(&mut fdn, &send);
+        // Skip 1.5 s: the stored energy is within 0.03 dB of steady state even
+        // for RT60 = 4 s (1 − 10^(−6·1.5/4) = 0.994).
+        let start = (1.5 * SAMPLE_RATE) as usize;
+        let send_power: f64 = send[start..]
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum();
+        let wet_power: f64 = wet[start..]
+            .iter()
+            .map(|frame| f64::from(frame[0]).powi(2) + f64::from(frame[1]).powi(2))
+            .sum();
+        10.0 * (wet_power / send_power).log10()
+    }
+
+    /// Gain staging of the send → wet path, pinned so it cannot drift silently.
+    /// `output_normalization` divides out the network's energy build-up
+    /// (1/(1−g²)) so the wet level should not depend on RT60. Measured
+    /// wet/send power: −18.5 / −16.1 / −15.2 / −15.1 dB at RT60 0.5 / 1 / 2 / 4 s
+    /// — held within 3.5 dB over an 8× RT60 range (−19.4 / −17.2 / −16.6 /
+    /// −16.8 dB with the old linear interpolation). The absolute level sits
+    /// ~16 dB below the send: −12 dB is the output combiner extracting the
+    /// per-line average (1/N, N = 16), the rest is loop loss g² and the
+    /// modulated read (interpolation loss above ~10 kHz plus a ~2 dB deficit
+    /// against frozen LFOs that better interpolation does not remove). Hence
+    /// at d = d_c (send 0.5, −6 dB) the tail is ~22 dB under the direct path
+    /// before `wet`, not the 0 dB D/R that the critical distance defines.
+    #[test]
+    fn steady_state_wet_level_is_nearly_independent_of_rt60() {
+        let rt60_values = [0.5f32, 1.0, 2.0, 4.0];
+        let levels: Vec<f64> = rt60_values
+            .iter()
+            .map(|&rt60| steady_state_wet_to_send_db(rt60))
+            .collect();
+        for (rt60, level) in rt60_values.iter().zip(&levels) {
+            assert!(
+                (level - -17.5).abs() < 2.5,
+                "RT60 {rt60} s: wet/send power should be ≈ −17.5 dB, got {level:.1} dB"
+            );
+        }
+        let loudest = levels.iter().copied().fold(f64::MIN, f64::max);
+        let quietest = levels.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            loudest - quietest < 4.0,
+            "normalisation should hold the wet level within 4 dB over RT60 0.5–4 s: {levels:?}"
+        );
+    }
+
+    /// Stability at the extremes. A near-infinite RT60 (loop gain → 1) driven by
+    /// full-scale noise must stay bounded by the ±16 soft clamp inside the loop
+    /// and the ±100 output ceiling, and remain finite; a near-zero RT60 must die
+    /// out immediately. Covers both the normal and measurement-mode clamps.
+    #[test]
+    fn impulse_response_bounded_for_extreme_rt60() {
+        for measurement_mode in [false, true] {
+            for rt60 in [1.0e6_f32, f32::INFINITY] {
+                let (layout, listener) = make_ctx(2, 2);
+                let ctx = MixContext {
+                    measurement_mode,
+                    ..mix_ctx(&layout, &listener, 2, 2)
+                };
+                let mut fdn = FdnReverbStage::with_config(FdnConfig {
+                    rt60_seconds: Some(rt60),
+                    ..FdnConfig::default()
+                });
+                fdn.init(&ctx);
+                let mut send = white_noise((0.5 * SAMPLE_RATE) as usize, 3);
+                send.extend(std::iter::repeat_n(0.0, (0.5 * SAMPLE_RATE) as usize));
+                let wet = stereo_wet_output(&mut fdn, &send);
+                let peak = wet
+                    .iter()
+                    .flat_map(|frame| frame.iter())
+                    .fold(0.0f32, |peak, &x| {
+                        assert!(x.is_finite(), "non-finite output at RT60={rt60}");
+                        peak.max(x.abs())
+                    });
+                assert!(peak <= 100.0, "output exceeded ±100 ceiling: {peak}");
+                let line_ceiling = if measurement_mode { 100.0 } else { 16.0 };
+                let stored_peak = fdn
+                    .delay_buffers
+                    .iter()
+                    .flat_map(|line| line.iter())
+                    .fold(0.0f32, |peak, &x| peak.max(x.abs()));
+                assert!(
+                    stored_peak <= line_ceiling,
+                    "delay-line content {stored_peak} exceeded ±{line_ceiling} \
+                     (RT60={rt60}, measurement_mode={measurement_mode})"
+                );
+            }
+        }
+
+        // Near-zero RT60: per-pass gain 10^(-3·1249/(1e-3·48000)) underflows to 0,
+        // so nothing survives the first pass through the loop.
+        let mut fdn = stereo_stage(FdnConfig::default(), Some((1.0e-3, 1.0e-3)));
+        let response = impulse_response(&mut fdn, (0.2 * SAMPLE_RATE) as usize);
+        let late_peak = response[(0.1 * SAMPLE_RATE) as usize..]
+            .iter()
+            .fold(0.0f32, |peak, &x| peak.max(x.abs()));
+        assert!(
+            late_peak < 1e-6,
+            "1 ms RT60 should leave no tail, got {late_peak}"
+        );
+    }
+
+    /// The in-loop soft clamp may only ever remove energy: identity below the
+    /// knee, odd-symmetric, monotonic, |f(x)| ≤ |x|, C¹ at the knee (slope 1),
+    /// and asymptotic to ±16. Together with |H_damping| < 1 this keeps the loop
+    /// gain below 1 at every frequency and amplitude.
+    #[test]
+    fn feedback_soft_clamp_is_passive_monotonic_and_smooth() {
+        let mut previous = feedback_soft_clamp(-1000.0);
+        let mut value = -1000.0f32;
+        while value <= 1000.0 {
+            let clamped = feedback_soft_clamp(value);
+            assert!(
+                clamped.abs() <= value.abs() + 1e-6,
+                "f({value}) gained energy"
+            );
+            assert!(
+                clamped.abs() < 16.0,
+                "f({value}) = {clamped} reached the ceiling"
+            );
+            assert!(clamped >= previous, "f not monotonic at {value}");
+            assert_eq!(
+                feedback_soft_clamp(-value),
+                -clamped,
+                "f not odd at {value}"
+            );
+            previous = clamped;
+            value += 0.25;
+        }
+        let step = 1e-3f32;
+        let slope_above_knee = (feedback_soft_clamp(14.0 + step) - 14.0) / step;
+        assert!(
+            (slope_above_knee - 1.0).abs() < 2e-3,
+            "slope just above the knee should be 1 (C¹), got {slope_above_knee}"
+        );
+    }
+
+    /// The default pre-delay is the mean-free-path time 4V/(S·c). For the
+    /// shipped cathedral (40×25×20 m, V = 20000 m³, S = 4600 m²) that is
+    /// 17.39 m / 343.42 m/s = 50.6 ms. A fixed 2048-sample pre-delay buffer
+    /// used to cap it at 2047/48000 = 42.6 ms (21.3 ms at 96 kHz); the ring is
+    /// now sized from the pre-delay and the sample rate.
+    #[test]
+    fn pre_delay_cathedral_not_truncated_by_buffer() {
+        let (volume, surface_area) =
+            room_acoustics::room_geometry(Vec3::ZERO, Vec3::new(40.0, 25.0, 20.0));
+        for sample_rate in [48_000.0f32, 96_000.0] {
+            let mut fdn = FdnReverbStage::new();
+            fdn.compute_pre_delay(sample_rate, volume, surface_area, 343.42);
+            let actual_ms = fdn.pre_delay_samples as f32 / sample_rate * 1000.0;
+            assert!(
+                (actual_ms - 50.6).abs() < 0.5,
+                "cathedral pre-delay at {sample_rate} Hz should be 50.6 ms, got {actual_ms:.1} ms"
+            );
+        }
+    }
+
+    /// An explicit pre-delay beyond the old 2048-sample cap is honoured end to
+    /// end: 100 ms at 96 kHz = 9600 samples, so a unit impulse on the send
+    /// cannot reach the output before frame 9600 + 2498 − 22 (the shortest
+    /// line, 1249 × 2, shortened by at most the LFO's 20-sample depth at
+    /// 96 kHz, the interpolator's newest tap and the integer rounding — any
+    /// earlier wet means the read wrapped round an undersized ring). Overrides
+    /// above 250 ms are bounded to 250 ms (24000 samples at 96 kHz).
+    #[test]
+    fn pre_delay_override_beyond_old_cap_reaches_the_output() {
+        let (layout, listener) = make_ctx(2, 2);
+        let sample_rate = 96_000.0;
+        let frames = 16_384;
+        let mut reverb_input = vec![0.0f32; frames * 2];
+        reverb_input[0] = 1.0;
+        let ctx = MixContext {
+            sample_rate,
+            reverb_input: Some(&reverb_input),
+            ..mix_ctx(&layout, &listener, 2, 2)
+        };
+        let mut fdn = FdnReverbStage::with_config(FdnConfig {
+            pre_delay_ms: Some(100.0),
+            ..FdnConfig::default()
+        });
+        fdn.init(&ctx);
+        assert_eq!(fdn.pre_delay_samples, 9600);
+        assert!(fdn.pre_delay_buffer.len() > 9600);
+
+        let mut buffer = vec![0.0f32; frames * 2];
+        fdn.process(&mut buffer, &ctx);
+        let first_wet_frame = buffer
+            .chunks_exact(2)
+            .position(|frame| frame[0] != 0.0 || frame[1] != 0.0)
+            .expect("the tail must reach the output within the window");
+        assert!(
+            first_wet_frame >= 9600 + 2498 - 22,
+            "wet arrived at frame {first_wet_frame}, before pre-delay + shortest line"
+        );
+
+        let mut fdn = FdnReverbStage::with_config(FdnConfig {
+            pre_delay_ms: Some(1000.0),
+            ..FdnConfig::default()
+        });
+        fdn.init(&ctx);
+        assert_eq!(fdn.pre_delay_samples, 24_000);
     }
 }
