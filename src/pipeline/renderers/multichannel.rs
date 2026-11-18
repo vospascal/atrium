@@ -16,8 +16,8 @@ use atrium_core::panner::distance_gain_at_model;
 use atrium_core::speaker::{SpeakerLayout, VbapLookup, MAX_CHANNELS};
 
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
+use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::SourceContext;
 
 /// Multichannel per-path gain-ramp renderer for VBAP mode.
 pub struct MultichannelRenderer {
@@ -107,7 +107,7 @@ impl Renderer for MultichannelRenderer {
                     g
                 }
                 _ => {
-                    // Reflection/diffraction: use LUT for fast angular panning
+                    // Reflection: use LUT for fast angular panning
                     let mut g = if let Some(ref lut) = self.vbap_lut {
                         lut.lookup(path.direction)
                     } else {
@@ -183,6 +183,206 @@ impl Renderer for MultichannelRenderer {
     fn reset(&mut self) {
         for gains in &mut self.prev_gains {
             *gains = [[0.0; MAX_CHANNELS]; MAX_PATHS];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atrium_core::directivity::DirectivityPattern;
+    use atrium_core::listener::Listener;
+    use atrium_core::panner::DistanceModelType;
+    use atrium_core::source::SoundSource;
+    use atrium_core::speaker::{DistanceParams, SourceSpatial};
+    use atrium_core::types::Vec3;
+
+    use crate::audio::distance::DistanceModel;
+    use crate::pipeline::environment::Environment;
+    use crate::pipeline::path::PathContribution;
+
+    const SAMPLE_RATE: f32 = 48000.0;
+    const CHANNELS: usize = 6;
+    const FRAMES: usize = 512;
+
+    /// A steady unit signal, so every output sample is its gain.
+    struct UnitSignal;
+
+    impl SoundSource for UnitSignal {
+        fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+            1.0
+        }
+        fn position(&self) -> Vec3 {
+            Vec3::ZERO
+        }
+        fn tick(&mut self, _dt: f32) {}
+    }
+
+    /// Quad on a 4 × 4 m square around a listener at the origin facing +X:
+    /// FL (−2, 2) is at azimuth 135°, FR (2, 2) at 45°, … (channels 0, 1, 4, 5).
+    fn quad_layout() -> SpeakerLayout {
+        SpeakerLayout::quad(
+            Vec3::new(-2.0, 2.0, 0.0),
+            Vec3::new(2.0, 2.0, 0.0),
+            Vec3::new(-2.0, -2.0, 0.0),
+            Vec3::new(2.0, -2.0, 0.0),
+        )
+    }
+
+    fn inverse_law() -> DistanceModel {
+        DistanceModel {
+            model: DistanceModelType::Inverse,
+            ref_distance: 1.0,
+            max_distance: 1000.0,
+            rolloff: 1.0,
+        }
+    }
+
+    /// Render `buffers` buffers of a unit signal; returns every buffer and
+    /// the reverb send of the last one.
+    fn render(
+        source_position: Vec3,
+        paths: &PathSet,
+        reverb_send_level: f32,
+        buffers: usize,
+    ) -> (Vec<Vec<f32>>, Vec<f32>) {
+        let layout = quad_layout();
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let environment = Environment::anechoic(
+            Vec3::new(-500.0, -500.0, 0.0),
+            Vec3::new(500.0, 500.0, 500.0),
+        );
+        let distance_model = inverse_law();
+        let directivity = DirectivityPattern::Omni;
+        let ctx = SourceContext {
+            listener: &listener,
+            source_pos: source_position,
+            source_orientation: Vec3::new(1.0, 0.0, 0.0),
+            source_directivity: &directivity,
+            source_spread: 0.0,
+            source_ref_distance: 1.0,
+            path_target: Vec3::ZERO,
+            environment: &environment,
+            sample_rate: SAMPLE_RATE,
+            distance_model: &distance_model,
+            layout: &layout,
+            reverb_send: reverb_send_level,
+        };
+        let mut renderer = MultichannelRenderer::new();
+        renderer.ensure_topology(1, &layout, SAMPLE_RATE);
+        let mut chains: Vec<PathEffectChain> = (0..MAX_PATHS)
+            .map(|_| PathEffectChain::new(Vec::new()))
+            .collect();
+        let mut blocks = Vec::new();
+        let mut reverb = Vec::new();
+        for _ in 0..buffers {
+            let mut block = vec![0.0f32; FRAMES * CHANNELS];
+            reverb = vec![0.0f32; FRAMES * CHANNELS];
+            let mut out = OutputBuffer {
+                buffer: &mut block,
+                reverb_send: Some(&mut reverb),
+                channels: CHANNELS,
+                num_frames: FRAMES,
+                sample_rate: SAMPLE_RATE,
+            };
+            renderer.render_source(0, &mut UnitSignal, &ctx, paths, &mut chains, &mut out);
+            blocks.push(block);
+        }
+        (blocks, reverb)
+    }
+
+    fn path(kind: PathKind, direction: Vec3, distance: f32, gain: f32) -> PathSet {
+        let mut paths = PathSet::new();
+        paths.push(PathContribution {
+            kind,
+            direction: direction.normalize(),
+            distance,
+            delay_seconds: 0.0,
+            gain,
+            wall_index: None,
+        });
+        paths
+    }
+
+    /// The direct path plays the layout's full VBAP gains (pan × distance ×
+    /// directivity), reached by a linear ramp from silence: frame n of the
+    /// first buffer is gain · n / 512, and the second buffer holds the gain.
+    #[test]
+    fn direct_path_ramps_linearly_to_the_layout_gains() {
+        let source_position = Vec3::new(3.0, 1.0, 0.0);
+        let paths = path(
+            PathKind::Direct,
+            source_position,
+            source_position.length(),
+            1.0,
+        );
+        let (blocks, _) = render(source_position, &paths, 0.0, 2);
+
+        let layout = quad_layout();
+        let directivity = DirectivityPattern::Omni;
+        let mut expected = layout.compute_gains_with_spread(
+            &Listener::new(Vec3::ZERO, 0.0),
+            &SourceSpatial {
+                position: source_position,
+                orientation: Vec3::new(1.0, 0.0, 0.0),
+                directivity: &directivity,
+            },
+            &DistanceParams {
+                ref_distance: 1.0,
+                max_distance: 1000.0,
+                rolloff: 1.0,
+                model: DistanceModelType::Inverse,
+            },
+            0.0,
+        );
+        layout.apply_mask(&mut expected);
+        assert!(expected.gains.iter().any(|gain| *gain > 0.1));
+
+        for ch in 0..CHANNELS {
+            for frame in [0usize, 128, 511] {
+                let actual = blocks[0][frame * CHANNELS + ch];
+                let wanted = expected.gains[ch] * frame as f32 / FRAMES as f32;
+                assert!(
+                    (actual - wanted).abs() < 1e-6,
+                    "ch {ch} frame {frame}: {actual} vs {wanted}"
+                );
+            }
+            for frame in 0..FRAMES {
+                assert!((blocks[1][frame * CHANNELS + ch] - expected.gains[ch]).abs() < 1e-6);
+            }
+        }
+    }
+
+    /// A reflection arriving from FL's exact direction (azimuth 135°, an
+    /// integer LUT entry) lands only in FL, at wall gain × inverse-law gain:
+    /// 0.6 × (1 m / 2 m) = 0.3.
+    #[test]
+    fn reflection_from_a_speaker_direction_plays_only_that_speaker() {
+        let paths = path(PathKind::Reflection, Vec3::new(-1.0, 1.0, 0.0), 2.0, 0.6);
+        let (blocks, _) = render(Vec3::new(3.0, 1.0, 0.0), &paths, 0.0, 2);
+        let settled = &blocks[1][100 * CHANNELS..101 * CHANNELS];
+        assert!((settled[0] - 0.3).abs() < 1e-4, "FL {}", settled[0]);
+        for (ch, gain) in settled.iter().enumerate().skip(1) {
+            assert!(
+                gain.abs() < 1e-4,
+                "channel {ch} should be silent, got {gain}"
+            );
+        }
+    }
+
+    /// Late-reverb send = source signal × ctx.reverb_send on the channel-0
+    /// mono bus, independent of distance and pan (the send level already
+    /// encodes d²/(d² + d_c²)).
+    #[test]
+    fn reverb_send_is_the_source_signal_times_the_send_level() {
+        let source_position = Vec3::new(10.0, 0.0, 0.0);
+        let paths = path(PathKind::Direct, source_position, 10.0, 1.0);
+        let (_, reverb) = render(source_position, &paths, 0.8, 1);
+        for frame in 0..FRAMES {
+            assert!((reverb[frame * CHANNELS] - 0.8).abs() < 1e-6);
+            assert!(reverb[frame * CHANNELS + 1..(frame + 1) * CHANNELS]
+                .iter()
+                .all(|sample| *sample == 0.0));
         }
     }
 }
