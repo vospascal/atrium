@@ -198,11 +198,8 @@ impl SceneConfig {
         let ground = GroundProperties::mixed(environment_cfg.ground_factor);
 
         let wall_materials = build_wall_materials(&environment_cfg);
-        // Environment's wall_reflectivity is authoritative
-        let effective_reflectivity = environment_cfg.wall_reflectivity;
         let pipeline_params = PipelineParams {
             hrtf_path: self.hrtf,
-            er_wall_reflectivity: effective_reflectivity,
             distance_model,
             dbap_rolloff_db: self.speakers.dbap_rolloff_db,
             environment_min,

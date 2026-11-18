@@ -73,7 +73,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         let mut buffer = vec![2.0f32; 4];
@@ -100,7 +99,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
         let mut buffer = vec![2.0f32, -3.0, 0.5, -0.1];
@@ -128,7 +126,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
         let mut buffer = vec![200.0, -500.0, f32::NAN, f32::INFINITY];
@@ -155,7 +152,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
         let input = 0.4f32;
@@ -195,7 +191,6 @@ mod tests {
             master_gain,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode,
         };
         let mut buffer = input.to_vec();

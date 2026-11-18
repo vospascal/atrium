@@ -239,7 +239,7 @@ sources: []
 ///   listener (0.5, −0.25, 1.2) atrium-local → (3.5, 1.75, 1.2) world;
 ///   yaw 90° → π/2 rad; default FL (−3, 2, 0) → (0, 4, 0) world;
 ///   walls default hard_wall, floor carpet, ceiling ceiling_tile;
-///   wall_reflectivity 0.9 reaches every pipeline; ground_factor 0 → G = 0;
+///   no rt60_seconds, so no pipeline overrides the decay; ground_factor 0 → G = 0;
 ///   atmosphere 20 °C, 50 % RH, 101.325 kPa → c = 343.42 m/s.
 #[test]
 fn scene_config_units_reach_the_engine() {
@@ -295,8 +295,10 @@ fn scene_config_units_reach_the_engine() {
             "ceiling_tile"
         ]
     );
+    // small_atrium.yaml sets no rt60_seconds: every pipeline derives the
+    // reverb's decay from the wall materials.
     for pipeline in &scene.pipelines {
-        assert_eq!(pipeline.wall_reflectivity, 0.9);
+        assert_eq!(pipeline.reverb_rt60_override, None);
     }
     assert_eq!(scene.environment.ground.g_source, 0.0);
     assert_eq!(scene.environment.ground.g_middle, 0.0);

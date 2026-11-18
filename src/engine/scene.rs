@@ -289,7 +289,6 @@ impl AudioScene {
                 master_gain: self.master_gain,
                 render_channels,
                 reverb_input: None,
-                wall_reflectivity: pipeline.wall_reflectivity,
                 measurement_mode: self.measurement_mode,
             };
             pipeline.init(&mix_ctx);

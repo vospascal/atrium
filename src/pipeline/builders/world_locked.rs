@@ -23,6 +23,7 @@ pub(in crate::pipeline) fn build(p: &PipelineParams) -> RenderPipeline {
             Box::new(MasterGainStage),
         ],
         0,
-        p.er_wall_reflectivity,
+        // No late reverb in this mode, so no decay time to override.
+        None,
     )
 }

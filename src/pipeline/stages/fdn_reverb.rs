@@ -135,7 +135,7 @@ fn hermite_coefficients(fraction: f32) -> [f32; 4] {
 }
 
 /// Frequency (Hz) at which each line's damping filter meets the low-band RT60:
-/// Sabine band 2 (`RT60_LOW_BAND`), or the explicit RT60 override.
+/// `room_acoustics::reverb_decay_seconds`: Sabine at 500 Hz, or the explicit RT60 override.
 const LOW_DECAY_FREQUENCY_HZ: f64 = 500.0;
 /// Frequency (Hz) at which each line's damping filter meets the high-band RT60:
 /// Sabine band 5 (`RT60_HIGH_BAND`), or the override × `HF_DECAY_RATIO`.
@@ -441,7 +441,6 @@ pub struct FdnReverbStage {
 
 /// Sabine RT60 band indices for FDN damping.
 /// Band 2 = 500 Hz (low-frequency reference), band 5 = 4 kHz (HF decay).
-const RT60_LOW_BAND: usize = 2;
 const RT60_HIGH_BAND: usize = 5;
 
 impl Default for FdnReverbStage {
@@ -719,13 +718,7 @@ impl MixStage for FdnReverbStage {
             room_acoustics::room_geometry(ctx.environment.min, ctx.environment.max);
         let wall_areas =
             room_acoustics::wall_surface_areas(ctx.environment.min, ctx.environment.max);
-        let rt60_low = room_acoustics::sabine_rt60_at_band(
-            volume,
-            &wall_areas,
-            &ctx.environment.wall_materials,
-            &ctx.environment.atmosphere,
-            RT60_LOW_BAND,
-        );
+        let rt60_low = room_acoustics::reverb_decay_seconds(ctx.environment, self.rt60_override);
         let rt60_high = room_acoustics::sabine_rt60_at_band(
             volume,
             &wall_areas,
@@ -737,9 +730,9 @@ impl MixStage for FdnReverbStage {
         // Explicit RT60 override (e.g. "atrium tuned to 3.5 s") bypasses the
         // geometry/material Sabine decay. HF decays a bit faster for a bright
         // but non-sizzly tail. Guard against non-positive values.
-        let (rt60_low, rt60_high) = match self.rt60_override {
-            Some(rt60) if rt60 > 0.0 => (rt60, rt60 * HF_DECAY_RATIO),
-            _ => (rt60_low, rt60_high),
+        let rt60_high = match self.rt60_override {
+            Some(rt60) if rt60 > 0.0 => rt60 * HF_DECAY_RATIO,
+            _ => rt60_high,
         };
 
         // Pre-delay: an explicit override (e.g. 20 ms) wins; otherwise the mean
@@ -938,7 +931,6 @@ mod tests {
             master_gain: 1.0,
             render_channels,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         }
     }
@@ -1156,7 +1148,6 @@ mod tests {
             master_gain: 1.0,
             render_channels,
             reverb_input: Some(&reverb_input),
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
 
@@ -1323,7 +1314,6 @@ mod tests {
 
                 let ctx = MixContext {
                     environment: &environment,
-                    wall_reflectivity: refl,
                     reverb_input: Some(&reverb_input),
                     ..mix_ctx(&layout, &listener, channels, render_channels)
                 };
@@ -1448,7 +1438,6 @@ mod tests {
 
                 let ctx = MixContext {
                     environment: &hard_environment,
-                    wall_reflectivity: refl,
                     reverb_input: Some(&reverb_input),
                     ..mix_ctx(&layout, &listener, channels, render_channels)
                 };
@@ -1568,7 +1557,7 @@ mod tests {
             &wall_areas,
             &TEST_ENVIRONMENT.wall_materials,
             &atmosphere,
-            RT60_LOW_BAND,
+            room_acoustics::MID_BAND_INDEX,
         );
         let rt60_high = room_acoustics::sabine_rt60_at_band(
             volume,
@@ -1604,7 +1593,7 @@ mod tests {
             &wall_areas,
             &carpet_materials,
             &atmosphere,
-            RT60_LOW_BAND,
+            room_acoustics::MID_BAND_INDEX,
         );
         let rt60_high = room_acoustics::sabine_rt60_at_band(
             volume,
@@ -1645,7 +1634,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         fdn_hard.init(&ctx_hard);
@@ -1660,7 +1648,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         fdn_carpet.init(&ctx_carpet);
@@ -1766,7 +1753,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         let mut fdn = FdnReverbStage::new();

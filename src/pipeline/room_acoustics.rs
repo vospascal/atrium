@@ -30,6 +30,7 @@
 //!   where T = temperature in °C. At 20°C, c ≈ 343.4 m/s.
 
 use crate::audio::atmosphere::{iso9613_alpha, AtmosphericParams};
+use crate::pipeline::environment::Environment;
 use crate::pipeline::wall_material::WallMaterial;
 use atrium_core::types::Vec3;
 
@@ -61,32 +62,6 @@ pub fn mean_free_path_time(volume: f32, surface_area: f32, speed_of_sound: f32) 
     }
     let mean_free_path_meters = 4.0 * volume / surface_area;
     mean_free_path_meters / speed_of_sound
-}
-
-/// Sabine's reverberation time (RT60) in seconds.
-///
-/// RT60 = 0.161 × V / A
-///
-/// Where:
-/// - `volume`: room volume in cubic meters
-/// - `surface_area`: total interior surface area in square meters
-/// - `wall_reflectivity`: fraction of energy reflected per bounce (0.0–1.0)
-///
-/// The absorption area A = surface_area × (1 - wall_reflectivity).
-///
-/// Reference: Sabine (1898), Wenmaekers (Metis217734, Eq. 1).
-///
-/// Returns RT60 in seconds, clamped to [0.1, 10.0] for safety.
-pub fn sabine_rt60(volume: f32, surface_area: f32, wall_reflectivity: f32) -> f32 {
-    let absorption_coefficient = 1.0 - wall_reflectivity.clamp(0.0, 0.99);
-    let total_absorption = surface_area * absorption_coefficient;
-
-    if total_absorption < 1e-6 {
-        return 10.0;
-    }
-
-    let rt60 = 0.161 * volume / total_absorption;
-    rt60.clamp(0.1, 10.0)
 }
 
 /// Octave-band center frequencies for the 6-band absorption model.
@@ -199,6 +174,31 @@ pub fn sabine_rt60_at_band(
     rt60.clamp(0.1, 10.0)
 }
 
+/// Octave band (500 Hz) whose decay time stands for "the" RT60 of a room.
+pub const MID_BAND_INDEX: usize = 2;
+
+/// Mid-band decay time of the late reverb in `environment`, in seconds.
+///
+/// An explicit `rt60_override` is a designer's decision and wins; otherwise
+/// it is Sabine's RT60 at 500 Hz from the room's size, the material of each
+/// face and the air. The reverb tail and the reverb send both use this one
+/// number, so how much a source feeds the reverb (critical distance) follows
+/// the decay the listener actually hears.
+pub fn reverb_decay_seconds(environment: &Environment, rt60_override: Option<f32>) -> f32 {
+    if let Some(rt60) = rt60_override.filter(|rt60| *rt60 > 0.0) {
+        return rt60;
+    }
+    let (volume, _surface_area) = room_geometry(environment.min, environment.max);
+    let wall_areas = wall_surface_areas(environment.min, environment.max);
+    sabine_rt60_at_band(
+        volume,
+        &wall_areas,
+        &environment.wall_materials,
+        &environment.atmosphere,
+        MID_BAND_INDEX,
+    )
+}
+
 /// Minimum broadband energy reflectivity for a surface to count as reflective
 /// when deciding whether a space can hold a reverberant field.
 const REFLECTIVE_SURFACE_THRESHOLD: f32 = 0.05;
@@ -295,6 +295,34 @@ pub fn reverb_send(distance: f32, critical_distance: f32) -> f32 {
 /// reverb would double it and read as echo).
 pub fn diffuse_reverb_scale(spread: f32) -> f32 {
     (1.0 - spread / 0.75).clamp(0.0, 1.0)
+}
+
+/// Sabine's RT60 for a room whose every face has the same reflectivity:
+/// the textbook single-number form, used here to derive expected values.
+///
+/// RT60 = 0.161 × V / A
+///
+/// Where:
+/// - `volume`: room volume in cubic meters
+/// - `surface_area`: total interior surface area in square meters
+/// - `wall_reflectivity`: fraction of energy reflected per bounce (0.0–1.0)
+///
+/// The absorption area A = surface_area × (1 - wall_reflectivity).
+///
+/// Reference: Sabine (1898), Wenmaekers (Metis217734, Eq. 1).
+///
+/// Returns RT60 in seconds, clamped to [0.1, 10.0] for safety.
+#[cfg(test)]
+pub(crate) fn sabine_rt60(volume: f32, surface_area: f32, wall_reflectivity: f32) -> f32 {
+    let absorption_coefficient = 1.0 - wall_reflectivity.clamp(0.0, 0.99);
+    let total_absorption = surface_area * absorption_coefficient;
+
+    if total_absorption < 1e-6 {
+        return 10.0;
+    }
+
+    let rt60 = 0.161 * volume / total_absorption;
+    rt60.clamp(0.1, 10.0)
 }
 
 #[cfg(test)]

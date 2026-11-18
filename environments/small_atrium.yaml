@@ -10,7 +10,6 @@ depth: 4.0    # meters (Y axis)
 height: 3.0   # meters (Z axis)
 
 ground_factor: 0.0         # hard floor (concrete/tile)
-wall_reflectivity: 0.9     # typical indoor room
 
 walls:
   default: hard_wall

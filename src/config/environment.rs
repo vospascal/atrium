@@ -20,12 +20,8 @@ pub(super) struct EnvironmentConfig {
     /// Default: 0.0 (hard reflective floor like concrete or tile).
     #[serde(default)]
     pub ground_factor: f32,
-    /// Broadband wall reflectivity (energy domain, 0.0–1.0).
-    /// Used for image source reflection gain and Sabine RT60.
-    /// Default: 0.9 (typical indoor room).
-    #[serde(default = "default_wall_reflectivity")]
-    pub wall_reflectivity: f32,
-    /// Per-wall material names for frequency-dependent absorption.
+    /// Material of each face. Reflections and the reverb's decay time both
+    /// come from these, so the two always describe the same room.
     #[serde(default)]
     pub walls: WallsConfig,
     /// Explicit late-reverb decay (mid-band RT60, seconds). When set, overrides
@@ -37,10 +33,6 @@ pub(super) struct EnvironmentConfig {
     /// mean-free-path pre-delay (e.g. 20 ms for clarity before the wash).
     #[serde(default)]
     pub pre_delay_ms: Option<f32>,
-}
-
-fn default_wall_reflectivity() -> f32 {
-    0.9
 }
 
 /// Per-wall material configuration. Each wall can specify a material name

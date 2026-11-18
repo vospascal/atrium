@@ -554,7 +554,6 @@ mod tests {
             ..Environment::anechoic(environment_min, environment_max)
         };
         let params = PipelineParams {
-            er_wall_reflectivity: 0.0,
             environment_min,
             environment_max,
             ..PipelineParams::default()

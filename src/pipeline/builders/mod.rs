@@ -20,15 +20,9 @@ use super::{path_effects, room_acoustics};
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;
 
-/// Default wall reflectivity: 0.0 — outdoor scene with no enclosing walls.
-/// Reflections and reverb only activate when a room config is loaded
-/// (e.g. `processors/small_room.yaml` sets wall_reflectivity: 0.9).
-const DEFAULT_WALL_REFLECTIVITY: f32 = 0.0;
-
 /// Parameters for building pipelines (extracted from scene config).
 pub struct PipelineParams {
     pub hrtf_path: String,
-    pub er_wall_reflectivity: f32,
     pub distance_model: DistanceModel,
     /// DBAP rolloff in dB per doubling of distance.
     /// 6.0 = free-field inverse distance law, 3–5 dB for reverberant spaces.
@@ -46,7 +40,6 @@ impl Default for PipelineParams {
     fn default() -> Self {
         Self {
             hrtf_path: "assets/hrtf/default.sofa".into(),
-            er_wall_reflectivity: DEFAULT_WALL_REFLECTIVITY,
             distance_model: DistanceModel::default(),
             dbap_rolloff_db: 6.0,
             environment_min: Vec3::new(-5.0, -5.0, -5.0),

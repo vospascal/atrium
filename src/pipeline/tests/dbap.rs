@@ -163,7 +163,6 @@ fn dbap_speaker_feed_does_not_depend_on_the_listener() {
         rig.environment.min = Vec3::new(-6.0, -5.0, -1.2);
         rig.environment.max = Vec3::new(6.0, 5.0, 4.0);
         rig.environment.wall_materials = uniform_walls(wall_material::WallMaterial::stone());
-        rig.wall_reflectivity = 0.9;
         rig.listener = Listener::new(listener_position, 0.3);
         let mut pipeline = rig.build(RenderMode::Dbap);
         let mut sources = vec![ImpulseSource::boxed(Vec3::new(3.0, 2.0, 0.5), BLOCK_FRAMES)];

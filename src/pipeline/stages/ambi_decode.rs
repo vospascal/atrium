@@ -145,7 +145,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 4,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         stage.init(&ctx);
@@ -193,7 +192,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 4,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         stage.init(&ctx);
@@ -231,7 +229,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         };
         stage.init(&ctx);
@@ -260,7 +257,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         }
     }

@@ -270,7 +270,6 @@ struct Rig {
     layout: SpeakerLayout,
     listener: Listener,
     environment: Environment,
-    wall_reflectivity: f32,
     reverb_rt60_seconds: Option<f32>,
     distance_model: DistanceModel,
     /// Device rate the stream runs at.
@@ -299,7 +298,6 @@ impl Rig {
                 ground: GroundProperties::hard(),
                 atmosphere: default_atmosphere(),
             },
-            wall_reflectivity: 0.0,
             reverb_rt60_seconds: None,
             distance_model: DistanceModel {
                 ref_distance: 1.0,
@@ -316,7 +314,6 @@ impl Rig {
 
     fn pipeline_params(&self) -> PipelineParams {
         PipelineParams {
-            er_wall_reflectivity: self.wall_reflectivity,
             distance_model: self.distance_model,
             environment_min: self.environment.min,
             environment_max: self.environment.max,
@@ -342,7 +339,6 @@ impl Rig {
             master_gain: self.master_gain,
             render_channels,
             reverb_input: None,
-            wall_reflectivity: pipeline.wall_reflectivity,
             environment: &self.environment,
             measurement_mode: self.measurement_mode,
         };

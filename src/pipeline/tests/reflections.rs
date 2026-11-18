@@ -1,9 +1,8 @@
 //! Image-source reflections: energy bounds, timing and the floor counted once.
 
 use super::{
-    default_atmosphere, default_distance_model, default_wall_materials, energy,
-    first_non_zero_frame, layout_5_1, quad_around, test_environment, ConstSource, ImpulseSource,
-    Rig, BLOCK_FRAMES, SAMPLE_RATES,
+    default_atmosphere, default_distance_model, energy, first_non_zero_frame, layout_5_1,
+    quad_around, test_environment, ConstSource, ImpulseSource, Rig, BLOCK_FRAMES, SAMPLE_RATES,
 };
 use crate::pipeline::builders;
 use crate::pipeline::wall_material;
@@ -23,7 +22,6 @@ use atrium_core::types::Vec3;
 fn reflection_energy_bounded_by_direct() {
     let layout = layout_5_1();
     let dm = default_distance_model();
-    let wall_materials = default_wall_materials();
 
     let source_pos = Vec3::new(4.5, 2.0, 0.0); // 1.5m from listener
     let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), std::f32::consts::FRAC_PI_2);
@@ -36,7 +34,6 @@ fn reflection_energy_bounded_by_direct() {
 
     let render_mode = |mode: RenderMode, reflectivity: f32| -> Vec<f32> {
         let params = PipelineParams {
-            er_wall_reflectivity: reflectivity,
             ..PipelineParams::default()
         };
         let mut pipeline = match mode {
@@ -52,8 +49,10 @@ fn reflection_energy_bounded_by_direct() {
             val: 1.0,
         })];
         let mut buffer = vec![0.0f32; frames * channels];
-        let environment =
-            test_environment(environment_min, environment_max, wall_materials.clone());
+        // Every face reflects the given fraction of the energy.
+        let wall_materials: [wall_material::WallMaterial; 6] =
+            std::array::from_fn(|_| wall_material::WallMaterial::with_reflectivity(reflectivity));
+        let environment = test_environment(environment_min, environment_max, wall_materials);
         let rp = RenderParams {
             listener: &listener,
             channels,

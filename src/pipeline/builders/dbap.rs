@@ -28,6 +28,6 @@ pub(in crate::pipeline) fn build(p: &PipelineParams) -> RenderPipeline {
             Box::new(MasterGainStage),
         ],
         0,
-        p.er_wall_reflectivity,
+        p.reverb_rt60_seconds,
     )
 }

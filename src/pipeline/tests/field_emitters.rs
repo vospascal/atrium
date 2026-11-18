@@ -23,10 +23,9 @@ fn field_emitter_bypasses_position_and_room_acoustics() {
     let channels = 6;
     let frames = 4096;
 
-    let render = |position: Vec3, reflectivity: f32, wall: wall_material::WallMaterial| {
+    let render = |position: Vec3, wall: wall_material::WallMaterial| {
         let walls: [wall_material::WallMaterial; 6] = std::array::from_fn(|_| wall.clone());
         let pipeline_params = PipelineParams {
-            er_wall_reflectivity: reflectivity,
             environment_min,
             environment_max,
             reverb_rt60_seconds: Some(3.0),
@@ -55,12 +54,10 @@ fn field_emitter_bypasses_position_and_room_acoustics() {
 
     let near_reflective = render(
         Vec3::new(3.1, 2.0, 1.2),
-        0.95,
         wall_material::WallMaterial::hard_wall(),
     );
     let far_open = render(
         Vec3::new(19.0, 14.0, 7.0),
-        0.0,
         wall_material::WallMaterial::open(),
     );
     assert_eq!(near_reflective, far_open);

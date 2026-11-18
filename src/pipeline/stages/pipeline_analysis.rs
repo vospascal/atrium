@@ -377,7 +377,6 @@ mod tests {
             master_gain: render_params.master_gain,
             render_channels: effective_render_channels,
             reverb_input: Some(&reverb_send_snapshot),
-            wall_reflectivity: init_ctx.wall_reflectivity,
             measurement_mode: render_params.measurement_mode,
         };
 
@@ -555,7 +554,6 @@ mod tests {
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
-            er_wall_reflectivity: 0.9,
             environment_min: environment.min,
             environment_max: environment.max,
             ..PipelineParams::default()
@@ -588,7 +586,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
 
@@ -628,7 +625,6 @@ mod tests {
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
-            er_wall_reflectivity: 0.9,
             environment_min: environment.min,
             environment_max: environment.max,
             ..PipelineParams::default()
@@ -661,7 +657,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: 2,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
 
@@ -682,7 +677,6 @@ mod tests {
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
-            er_wall_reflectivity: 0.9,
             environment_min: environment.min,
             environment_max: environment.max,
             ..PipelineParams::default()
@@ -715,7 +709,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
 
@@ -736,7 +729,6 @@ mod tests {
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
-            er_wall_reflectivity: 0.9,
             environment_min: environment.min,
             environment_max: environment.max,
             ..PipelineParams::default()
@@ -769,7 +761,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
 
@@ -795,7 +786,6 @@ mod tests {
         let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
 
         let params = PipelineParams {
-            er_wall_reflectivity: 0.9,
             environment_min: environment.min,
             environment_max: environment.max,
             ..PipelineParams::default()
@@ -813,7 +803,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: channels,
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: true,
         };
         pipeline.init(&init_ctx);
@@ -850,7 +839,7 @@ mod tests {
 
         println!("\n{}", "=".repeat(60));
         println!("Impulse Response Analysis: VBAP 5.1");
-        println!("  room: 6×4×3m, hard walls, wall_reflectivity=0.9");
+        println!("  room: 6×4×3m, hard walls");
         println!("{}", "=".repeat(60));
 
         // Measure RMS per time window

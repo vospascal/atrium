@@ -375,7 +375,6 @@ fn vbap_lfe_has_signal_in_5_1() {
         master_gain: 1.0,
         render_channels: channels,
         reverb_input: None,
-        wall_reflectivity: 0.9,
         environment: &environment,
         measurement_mode: false,
     };

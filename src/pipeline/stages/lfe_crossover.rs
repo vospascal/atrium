@@ -273,7 +273,6 @@ mod tests {
             master_gain: 1.0,
             render_channels: layout.total_channels(),
             reverb_input: None,
-            wall_reflectivity: 0.9,
             measurement_mode: false,
         }
     }

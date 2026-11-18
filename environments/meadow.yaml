@@ -10,7 +10,6 @@ height: 30.0  # meters (Z axis) — open sky
 spawn: [30.0, 30.0, 0.0]   # center of the clearing
 
 ground_factor: 1.0         # porous grass/earth
-wall_reflectivity: 0.0     # open air, no reflections
 
 walls:
   default: open

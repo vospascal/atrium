@@ -47,8 +47,9 @@ pub struct RenderPipeline {
     /// For Ambisonics, the renderer writes a full FOA B-format layout.
     /// Read by the FDN stage as its delay line injection input.
     pub reverb_send_buffer: Vec<f32>,
-    /// Wall reflectivity for critical distance computation.
-    pub wall_reflectivity: f32,
+    /// Explicit decay time of this pipeline's late reverb, if the environment
+    /// sets one. The reverb send uses the same decay as the reverb itself.
+    pub reverb_rt60_override: Option<f32>,
 }
 
 impl RenderPipeline {
@@ -60,7 +61,7 @@ impl RenderPipeline {
         path_effect_factories: Vec<PathEffectFactory>,
         mix_stages: Vec<Box<dyn MixStage>>,
         render_channels: usize,
-        wall_reflectivity: f32,
+        reverb_rt60_override: Option<f32>,
     ) -> Self {
         Self {
             renderer,
@@ -71,7 +72,7 @@ impl RenderPipeline {
             path_effects: Vec::new(),
             render_channels,
             reverb_send_buffer: Vec::new(),
-            wall_reflectivity,
+            reverb_rt60_override,
         }
     }
 
@@ -169,7 +170,7 @@ pub fn render_pipeline(
         path_effects,
         render_channels,
         reverb_send_buffer,
-        wall_reflectivity,
+        reverb_rt60_override,
     } = pipeline;
 
     // Ensure topology
@@ -192,9 +193,9 @@ pub fn render_pipeline(
     output.fill(0.0);
 
     // Room geometry + RT60 for per-source reverb send (critical distance).
-    let (volume, surface_area) =
+    let (volume, _surface_area) =
         room_acoustics::room_geometry(params.environment.min, params.environment.max);
-    let rt60 = room_acoustics::sabine_rt60(volume, surface_area, *wall_reflectivity);
+    let rt60 = room_acoustics::reverb_decay_seconds(params.environment, *reverb_rt60_override);
 
     // Prepare reverb send buffer (same size as output, zeroed).
     reverb_send_buffer.resize(output.len(), 0.0);
@@ -322,7 +323,6 @@ pub fn render_pipeline(
         master_gain: params.master_gain,
         render_channels: effective_render_channels,
         reverb_input: Some(reverb_send_buffer),
-        wall_reflectivity: *wall_reflectivity,
         measurement_mode: params.measurement_mode,
     };
     {

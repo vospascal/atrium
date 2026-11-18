@@ -28,8 +28,6 @@ pub struct MixContext<'a> {
     /// FDN reverb stages read from this instead of the main buffer for
     /// delay line injection, preserving per-source direct-to-reverberant balance.
     pub reverb_input: Option<&'a [f32]>,
-    /// Wall reflectivity (0.0–1.0) for Sabine RT60 computation in FDN stages.
-    pub wall_reflectivity: f32,
     /// When true, bypasses soft clipping and gain clamping to preserve
     /// linear signal levels for acoustic measurement and calibration.
     /// NaN/Inf sanitization and a ±100.0 stability ceiling remain active.

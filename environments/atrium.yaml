@@ -16,7 +16,6 @@ depth: 10.0   # meters (Y axis)
 height: 9.0   # meters (Z axis) — tall, airy
 
 ground_factor: 0.0         # hard stone floor
-wall_reflectivity: 0.75    # reflective but not a boomy echo chamber
 
 walls:
   default: glass            # glass curtain walls: bass-absorbing, bright

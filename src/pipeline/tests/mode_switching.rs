@@ -69,7 +69,6 @@ fn mode_switch_leaves_no_stale_state_and_stays_bounded() {
     rig.environment.min = Vec3::ZERO;
     rig.environment.max = Vec3::new(8.0, 6.0, 4.0);
     rig.environment.wall_materials = uniform_walls(wall_material::WallMaterial::hard_wall());
-    rig.wall_reflectivity = 0.9;
     rig.reverb_rt60_seconds = Some(1.0);
     rig.measurement_mode = false;
     for (index, mode) in RenderMode::ALL.into_iter().enumerate() {
@@ -127,7 +126,6 @@ fn silence_stays_exact_and_tails_decay_without_denormal_growth() {
     rig.environment.min = Vec3::ZERO;
     rig.environment.max = Vec3::new(8.0, 6.0, 4.0);
     rig.environment.wall_materials = uniform_walls(wall_material::WallMaterial::hard_wall());
-    rig.wall_reflectivity = 0.9;
     rig.reverb_rt60_seconds = Some(0.2);
     rig.measurement_mode = false;
     let source_position = Vec3::new(4.0, 4.5, 0.0);
