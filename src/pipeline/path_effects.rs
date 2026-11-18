@@ -108,12 +108,17 @@ impl PathEffect for GroundEffectFilter {
         self.sample_rate = ctx.sample_rate;
 
         // The ISO 9613-2 ground term is the direct ray plus the ray bounced
-        // off the ground, summed as energy (+3 dB over hard ground). A floor
-        // that reflects is already rendered as that bounce, as its own
-        // image-source path. Applying the ground term as well counted the
-        // floor twice, so the explicit reflection wins and this stage only
-        // acts where the floor has no image (an `open` floor, outdoors).
-        if ctx.environment.floor_reflects() {
+        // off the ground, summed as energy (+3 dB over hard ground). Where
+        // that bounce is rendered as an image-source path of its own,
+        // applying the ground term as well counts the floor twice, so the
+        // explicit reflection wins. Everywhere else this stage is the only
+        // floor there is: an `open` floor outdoors, and any source or
+        // receiver standing on the floor, whose bounce has no delay and so
+        // no path.
+        if ctx
+            .environment
+            .floor_bounce_is_rendered(ctx.source_pos, ctx.target_pos)
+        {
             self.set_unity();
             return;
         }

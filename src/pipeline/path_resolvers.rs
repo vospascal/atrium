@@ -3,6 +3,7 @@
 //! - `DirectPathResolver`: always returns 1 direct line-of-sight path.
 //! - `ImageSourceResolver`: 1 direct + up to 6 first-order wall reflections.
 
+use crate::pipeline::environment::WALL_COUNT;
 use atrium_core::types::Vec3;
 
 use crate::pipeline::path::{PathContribution, PathKind, PathResolver, PathSet, ResolveContext};
@@ -75,23 +76,17 @@ impl PathResolver for ImageSourceResolver {
             wall_index: None,
         });
 
-        // 6 image sources: the source mirrored across each face of the room.
-        let images = ctx.environment.image_sources(ctx.source_pos);
-
-        for (wall_idx, image) in images.iter().enumerate() {
-            let image_diff = *image - ctx.target_pos;
-            let image_dist = image_diff.length();
-
-            // Skip degenerate or closer-than-direct reflections
-            if image_dist < 0.1 || image_dist < direct_dist {
+        // One reflection per face, where that face has one to give.
+        for wall_idx in 0..WALL_COUNT {
+            let Some(reflection) =
+                ctx.environment
+                    .reflection_off(wall_idx, ctx.source_pos, ctx.target_pos)
+            else {
                 continue;
-            }
-
-            let delay_seconds =
-                (image_dist - direct_dist) / ctx.environment.atmosphere.speed_of_sound();
-            if delay_seconds < 1e-6 {
-                continue;
-            }
+            };
+            let image_dist = reflection.distance;
+            let delay_seconds = reflection.delay_seconds;
+            let image_diff = reflection.image - ctx.target_pos;
 
             let direction = image_diff * (1.0 / image_dist);
             // Per-wall broadband amplitude reflection gain, from the face's material.

@@ -21,6 +21,24 @@ pub const WALL_COUNT: usize = 6;
 /// `PathContribution::wall_index`.
 pub const FLOOR_WALL_INDEX: usize = 4;
 
+/// An image closer than this to the receiver is not a usable reflection.
+const NEAREST_IMAGE_METRES: f32 = 0.1;
+
+/// A reflection that arrives less than this after the direct sound is part of
+/// the direct sound.
+const SHORTEST_REFLECTION_DELAY_SECONDS: f32 = 1e-6;
+
+/// One first-order reflection, as the image source that produces it.
+#[derive(Clone, Copy, Debug)]
+pub struct WallReflection {
+    /// The source mirrored across the face.
+    pub image: Vec3,
+    /// Length of the reflected path: image to receiver, in metres.
+    pub distance: f32,
+    /// How much later than the direct sound it arrives.
+    pub delay_seconds: f32,
+}
+
 /// The virtual acoustic space.
 #[derive(Clone, Debug)]
 pub struct Environment {
@@ -61,11 +79,49 @@ impl Environment {
         self.wall_materials[wall_index].broadband_reflection_gain()
     }
 
-    /// Whether the floor sends anything back. A floor that does is rendered
-    /// as its own reflection; the ISO 9613-2 ground term describes that same
-    /// bounce and only applies where the floor has no image.
-    pub fn floor_reflects(&self) -> bool {
+    /// The first-order reflection off face `wall_index` on the way from
+    /// `source` to `target`, or `None` when there is no separate reflection
+    /// to render: the image is degenerate, or the bounce arrives together
+    /// with the direct sound (a source or a receiver on the face itself is
+    /// equally far from the other end directly and via its image).
+    pub fn reflection_off(
+        &self,
+        wall_index: usize,
+        source: Vec3,
+        target: Vec3,
+    ) -> Option<WallReflection> {
+        let image = self.image_sources(source)[wall_index];
+        let direct_distance = source.distance_to(target);
+        let distance = image.distance_to(target);
+        if distance < NEAREST_IMAGE_METRES || distance < direct_distance {
+            return None;
+        }
+        let delay_seconds = (distance - direct_distance) / self.atmosphere.speed_of_sound();
+        if delay_seconds < SHORTEST_REFLECTION_DELAY_SECONDS {
+            return None;
+        }
+        Some(WallReflection {
+            image,
+            distance,
+            delay_seconds,
+        })
+    }
+
+    /// Whether the floor sends anything back.
+    fn floor_reflects(&self) -> bool {
         self.wall_reflection_gain(FLOOR_WALL_INDEX) > 0.0
+    }
+
+    /// Whether the bounce off the floor between `source` and `target` is
+    /// rendered as a reflection of its own. Where it is, the ISO 9613-2
+    /// ground term, which describes that same bounce, must stay out of it.
+    /// Where it is not (the floor absorbs, or one end stands on the floor so
+    /// the bounce has no delay), the ground term is the only floor there is.
+    pub fn floor_bounce_is_rendered(&self, source: Vec3, target: Vec3) -> bool {
+        self.floor_reflects()
+            && self
+                .reflection_off(FLOOR_WALL_INDEX, source, target)
+                .is_some()
     }
 
     /// A box with no reflecting face, hard ground and default air.
@@ -143,5 +199,44 @@ mod tests {
         assert!((stone.wall_reflection_gain(FLOOR_WALL_INDEX) - 0.98285).abs() < 1e-4);
         assert!(stone.floor_reflects());
         assert!(!Environment::anechoic(bounds.0, bounds.1).floor_reflects());
+    }
+
+    /// Stone floor at z = 0, source and receiver 4 m apart.
+    /// Both 1.2 m up: the floor image is at z = −1.2, √(4² + 2.4²) = 4.6648 m
+    /// away, 0.6648 m longer than the direct 4 m → 0.6648 / 343.42 = 1.936 ms
+    /// late. That bounce is rendered as a reflection.
+    /// Receiver on the floor: image and source are equally far, no delay, no
+    /// separate reflection, so the ground term must carry the floor.
+    /// Same when the source is on the floor, and when the floor absorbs.
+    #[test]
+    fn floor_bounce_is_a_reflection_only_when_it_arrives_later() {
+        let (min, max) = (Vec3::new(-10.0, -10.0, 0.0), Vec3::new(10.0, 10.0, 8.0));
+        let stone = Environment::uniform(min, max, WallMaterial::stone());
+
+        let raised_source = Vec3::new(-2.0, 0.0, 1.2);
+        let raised_target = Vec3::new(2.0, 0.0, 1.2);
+        let reflection = stone
+            .reflection_off(FLOOR_WALL_INDEX, raised_source, raised_target)
+            .expect("a raised pair has a delayed floor bounce");
+        assert!(
+            (reflection.distance - 4.6648).abs() < 1e-3,
+            "{}",
+            reflection.distance
+        );
+        assert!(
+            (reflection.delay_seconds - 1.936e-3).abs() < 2e-6,
+            "{}",
+            reflection.delay_seconds
+        );
+        assert!(stone.floor_bounce_is_rendered(raised_source, raised_target));
+
+        let target_on_floor = Vec3::new(2.0, 0.0, 0.0);
+        let source_on_floor = Vec3::new(-2.0, 0.0, 0.0);
+        assert!(!stone.floor_bounce_is_rendered(raised_source, target_on_floor));
+        assert!(!stone.floor_bounce_is_rendered(source_on_floor, raised_target));
+        assert!(!stone.floor_bounce_is_rendered(source_on_floor, target_on_floor));
+
+        let open = Environment::anechoic(min, max);
+        assert!(!open.floor_bounce_is_rendered(raised_source, raised_target));
     }
 }
