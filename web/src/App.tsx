@@ -53,7 +53,11 @@ export default function App() {
       ) : (
         <main className="layout">
           <div className="column">
-            <SceneMap scene={scene} live={telemetry?.sources ?? []} />
+            <SceneMap
+              scene={scene}
+              live={telemetry?.sources ?? []}
+              onMove={(index, x, y, z) => send({ type: 'set_source_position', index, x, y, z })}
+            />
             <SourceList
               sources={scene.sources}
               live={telemetry?.sources ?? []}

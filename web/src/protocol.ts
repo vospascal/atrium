@@ -50,6 +50,11 @@ export interface SourceTelemetry {
   db: number
   muted: boolean
   perceptual: number
+  /** Centre of the source's orbit; its own position when it does not orbit. */
+  ocx: number
+  ocy: number
+  /** Orbit radius in metres; 0 when it stays put. */
+  or: number
 }
 
 /** Sent about 15 times a second. */
@@ -71,6 +76,8 @@ export type ClientMessage =
   | { type: 'set_channel_mode'; mode: ChannelModeName }
   | { type: 'set_gain'; gain: number }
   | { type: 'set_source_muted'; index: number; muted: boolean }
+  /** Moves a source; for an orbiting one this is the centre of its orbit. */
+  | { type: 'set_source_position'; index: number; x: number; y: number; z: number }
   | { type: 'reset_scene' }
 
 /** Output channels a channel mode needs on the device. Quad uses channels 0, 1, 4 and 5. */

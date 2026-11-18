@@ -1,8 +1,11 @@
-import type { SceneState, SourceTelemetry } from '../protocol'
+import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import type { SceneSource, SceneState, SourceTelemetry } from '../protocol'
 
 interface SceneMapProps {
   scene: SceneState
   live: SourceTelemetry[]
+  /** Called while a sound is dragged, with the new centre in world metres. */
+  onMove: (index: number, x: number, y: number, z: number) => void
 }
 
 interface Bounds {
@@ -10,6 +13,24 @@ interface Bounds {
   maxX: number
   minY: number
   maxY: number
+}
+
+/** A drag in progress: which sound, and where its centre is being put. */
+interface Drag {
+  index: number
+  /** Pointer position in world metres when the drag began. */
+  pointerStart: { x: number; y: number }
+  /** The sound's centre when the drag began. */
+  centreStart: { x: number; y: number; z: number }
+  /** The centre last sent to the engine. */
+  centre: { x: number; y: number }
+  /** The view as it was when the drag began, so the map does not zoom under the finger. */
+  bounds: Bounds
+}
+
+/** A wisp flies its own path; the engine ignores a position set from outside. */
+function canBeMoved(source: SceneSource): boolean {
+  return source.emitter_kind !== 'field' && source.synth_kind !== 'wisp'
 }
 
 /** Smallest square view that shows the room, every speaker and every sound. */
@@ -24,10 +45,12 @@ function viewBounds(scene: SceneState, live: SourceTelemetry[]): Bounds {
   }
   scene.sources.forEach((source, index) => {
     if (source.emitter_kind === 'field') return
-    const reach = Math.abs(source.orbit_radius)
-    xs.push(source.position[0] - reach, source.position[0] + reach)
-    ys.push(source.position[1] - reach, source.position[1] + reach)
     const state = live[index]
+    const centreX = state?.ocx ?? source.position[0]
+    const centreY = state?.ocy ?? source.position[1]
+    const reach = Math.abs(state?.or ?? source.orbit_radius)
+    xs.push(centreX - reach, centreX + reach)
+    ys.push(centreY - reach, centreY + reach)
     if (state) {
       xs.push(state.x)
       ys.push(state.y)
@@ -47,13 +70,52 @@ function viewBounds(scene: SceneState, live: SourceTelemetry[]): Bounds {
 
 /**
  * The scene from above. World +Y (the front of the room) points up, so every
- * y is negated on the way into SVG, whose y axis points down.
+ * y is negated on the way into SVG, whose y axis points down. Sounds can be
+ * dragged; an orbiting sound moves as a whole, orbit and all.
  */
-export function SceneMap({ scene, live }: SceneMapProps) {
-  const bounds = viewBounds(scene, live)
+export function SceneMap({ scene, live, onMove }: SceneMapProps) {
+  const svgRef = useRef<SVGSVGElement>(null)
+  const [drag, setDrag] = useState<Drag | null>(null)
+
+  const bounds = drag?.bounds ?? viewBounds(scene, live)
   const size = bounds.maxX - bounds.minX
   const unit = size / 100 // one hundredth of the view: keeps marks the same size at any zoom
   const forward = { x: Math.cos(scene.listener.yaw), y: Math.sin(scene.listener.yaw) }
+
+  /** Where the pointer is, in world metres. */
+  const pointerInWorld = (event: ReactPointerEvent): { x: number; y: number } | null => {
+    const svg = svgRef.current
+    const matrix = svg?.getScreenCTM()
+    if (!svg || !matrix) return null
+    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+    return { x: point.x, y: -point.y }
+  }
+
+  const beginDrag = (event: ReactPointerEvent<SVGCircleElement>, index: number) => {
+    const pointer = pointerInWorld(event)
+    if (!pointer) return
+    const source = scene.sources[index]
+    const state = live[index]
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const centreStart = {
+      x: state?.ocx ?? source.position[0],
+      y: state?.ocy ?? source.position[1],
+      z: state?.z ?? source.position[2],
+    }
+    setDrag({ index, pointerStart: pointer, centreStart, centre: centreStart, bounds })
+  }
+
+  const continueDrag = (event: ReactPointerEvent<SVGCircleElement>) => {
+    if (!drag) return
+    const pointer = pointerInWorld(event)
+    if (!pointer) return
+    const centre = {
+      x: drag.centreStart.x + (pointer.x - drag.pointerStart.x),
+      y: drag.centreStart.y + (pointer.y - drag.pointerStart.y),
+    }
+    setDrag({ ...drag, centre })
+    onMove(drag.index, centre.x, centre.y, drag.centreStart.z)
+  }
 
   return (
     <section className="card map-card">
@@ -62,6 +124,7 @@ export function SceneMap({ scene, live }: SceneMapProps) {
         <span className="value">{size.toFixed(0)} m across</span>
       </h2>
       <svg
+        ref={svgRef}
         className="map"
         viewBox={`${bounds.minX} ${-bounds.maxY} ${size} ${size}`}
         role="img"
@@ -113,20 +176,52 @@ export function SceneMap({ scene, live }: SceneMapProps) {
         {scene.sources.map((source, index) => {
           if (source.emitter_kind === 'field') return null
           const state = live[index]
-          const x = state?.x ?? source.position[0]
-          const y = state?.y ?? source.position[1]
+          const dragged = drag?.index === index ? drag : null
+          // The engine reports about 15 times a second. While dragging, show
+          // the sound where it is being put: its reported position shifted by
+          // however far the centre has moved since that report.
+          const reportedCentre = {
+            x: state?.ocx ?? source.position[0],
+            y: state?.ocy ?? source.position[1],
+          }
+          const centre = dragged?.centre ?? reportedCentre
+          const x = (state?.x ?? source.position[0]) + (centre.x - reportedCentre.x)
+          const y = (state?.y ?? source.position[1]) + (centre.y - reportedCentre.y)
+          const orbitRadius = Math.abs(state?.or ?? source.orbit_radius)
+          const movable = canBeMoved(source)
           return (
             <g key={`${source.name}-${index}`} opacity={state?.muted ? 0.3 : 1}>
-              <circle cx={x} cy={-y} r={unit * 1.8} fill={source.color} />
+              {orbitRadius > 0.01 && (
+                <circle
+                  className="map-orbit"
+                  cx={centre.x}
+                  cy={-centre.y}
+                  r={orbitRadius}
+                  stroke={source.color}
+                  strokeWidth={unit * 0.3}
+                />
+              )}
+              <circle cx={x} cy={-y} r={unit * (dragged ? 2.4 : 1.8)} fill={source.color} />
               <text className="map-label" x={x} y={-y + unit * 5} fontSize={unit * 3} textAnchor="middle">
                 {source.name}
               </text>
+              <circle
+                className={`map-handle${dragged ? ' dragging' : ''}${movable ? '' : ' fixed'}`}
+                cx={x}
+                cy={-y}
+                r={unit * 4.5}
+                onPointerDown={movable ? (event) => beginDrag(event, index) : undefined}
+                onPointerMove={movable ? continueDrag : undefined}
+                onPointerUp={() => setDrag(null)}
+                onPointerCancel={() => setDrag(null)}
+              />
             </g>
           )
         })}
       </svg>
       <p className="footnote">
-        From above, front of the room up. Squares are speakers, the ring is the listener.
+        From above, front of the room up. Squares are speakers, the ring is the listener. Drag a
+        sound to move it.
       </p>
     </section>
   )

@@ -438,4 +438,28 @@ input[type='range'] {
 .map-label {
   fill: var(--ink-soft);
   font-family: inherit;
+  pointer-events: none;
+  user-select: none;
+}
+
+.map-orbit {
+  fill: none;
+  stroke-dasharray: 1.2% 1.2%;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* A larger, invisible target around each sound, sized for a fingertip. */
+.map-handle {
+  fill: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+
+.map-handle.dragging {
+  cursor: grabbing;
+}
+
+.map-handle.fixed {
+  cursor: default;
 }
