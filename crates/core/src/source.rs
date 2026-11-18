@@ -132,3 +132,38 @@ pub trait SoundSource: Send {
         1.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StillSource;
+
+    impl SoundSource for StillSource {
+        fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+            0.0
+        }
+        fn position(&self) -> Vec3 {
+            Vec3::new(1.0, 2.0, 0.5)
+        }
+        fn tick(&mut self, _dt: f32) {}
+    }
+
+    /// The defaults every source inherits are physically neutral: a point
+    /// object with a unit-length facing, omni radiation (Q = 1), the 1 m
+    /// IEC 61672 reference distance, no spread, and no self-motion.
+    #[test]
+    fn default_source_is_neutral_point_object() {
+        let source = StillSource;
+        assert_eq!(source.emitter_kind(), EmitterKind::Object);
+        assert!((source.orientation().length() - 1.0).abs() < 1e-6);
+        assert_eq!(
+            crate::directivity::directivity_factor(&source.directivity()),
+            1.0
+        );
+        assert_eq!(source.ref_distance(), 1.0);
+        assert_eq!(source.spread(), 0.0);
+        assert_eq!(source.motion_offset().length(), 0.0);
+        assert_eq!(source.orbit_center().distance_to(source.position()), 0.0);
+    }
+}

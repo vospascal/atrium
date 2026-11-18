@@ -40,12 +40,6 @@ impl Vec3 {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
 
-    /// Reflect this vector about a surface normal (assumes `normal` is unit length).
-    /// Result: self - 2 * dot(self, normal) * normal
-    pub fn reflect(self, normal: Vec3) -> Vec3 {
-        self - normal * (2.0 * self.dot(normal))
-    }
-
     pub fn cross(self, other: Vec3) -> Vec3 {
         Vec3::new(
             self.y * other.z - self.z * other.y,
@@ -122,25 +116,6 @@ mod tests {
     }
 
     #[test]
-    fn reflect_45_degrees_off_wall() {
-        let incoming = Vec3::new(1.0, -1.0, 0.0).normalize();
-        let normal = Vec3::new(0.0, 1.0, 0.0);
-        let reflected = incoming.reflect(normal);
-        let expected = Vec3::new(1.0, 1.0, 0.0).normalize();
-        assert!((reflected.x - expected.x).abs() < 1e-5);
-        assert!((reflected.y - expected.y).abs() < 1e-5);
-    }
-
-    #[test]
-    fn reflect_head_on() {
-        let incoming = Vec3::new(-1.0, 0.0, 0.0);
-        let normal = Vec3::new(1.0, 0.0, 0.0);
-        let reflected = incoming.reflect(normal);
-        assert!((reflected.x - 1.0).abs() < 1e-5);
-        assert!(reflected.y.abs() < 1e-5);
-    }
-
-    #[test]
     fn cross_product_basis_vectors() {
         let x = Vec3::new(1.0, 0.0, 0.0);
         let y = Vec3::new(0.0, 1.0, 0.0);
@@ -148,6 +123,43 @@ mod tests {
         assert!((z.x).abs() < 1e-6);
         assert!((z.y).abs() < 1e-6);
         assert!((z.z - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn length_of_3_4_12_is_13() {
+        // Pythagorean quadruple: √(9 + 16 + 144) = √169 = 13.
+        let vector = Vec3::new(3.0, 4.0, 12.0);
+        assert!((vector.length() - 13.0).abs() < 1e-5);
+        // distance_to is the length of the difference, in either order.
+        let origin = Vec3::new(1.0, -1.0, 2.0);
+        let target = origin + vector;
+        assert!((origin.distance_to(target) - 13.0).abs() < 1e-5);
+        assert!((target.distance_to(origin) - 13.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn normalize_zero_vector_is_zero_not_nan() {
+        // Degenerate input must not produce NaN (0/0); the guard returns ZERO.
+        let normalized = Vec3::ZERO.normalize();
+        assert_eq!(normalized, Vec3::ZERO);
+        // Direction is kept: (0, 0, 5) → (0, 0, 1).
+        let up = Vec3::new(0.0, 0.0, 5.0).normalize();
+        assert!((up.z - 1.0).abs() < 1e-6 && up.x == 0.0 && up.y == 0.0);
+    }
+
+    #[test]
+    fn cross_is_right_handed_and_anticommutative() {
+        // Engine convention: X forward, Y left, Z up — a right-handed frame,
+        // so x × y = z, y × z = x, z × x = y, and a × b = −(b × a).
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let y = Vec3::new(0.0, 1.0, 0.0);
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        assert_eq!(y.cross(z), x);
+        assert_eq!(z.cross(x), y);
+        assert_eq!(y.cross(x), -z);
+        // |a × b| = |a||b| sin θ: (2,0,0) × (1,1,0) → (0,0,2), sin 45° · 2 · √2 = 2.
+        let product = Vec3::new(2.0, 0.0, 0.0).cross(Vec3::new(1.0, 1.0, 0.0));
+        assert!((product.z - 2.0).abs() < 1e-6);
     }
 
     #[test]

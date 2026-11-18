@@ -310,4 +310,159 @@ mod tests {
         );
         assert_eq!(g, 1.0);
     }
+
+    // ── Directivity factor against closed forms and the sphere ──────────
+
+    /// Closed form for g = α + (1 − α)·cos θ, with u = cos θ:
+    ///   Q = 2 / ∫₋₁¹ g² du.
+    /// For α ≥ 0.5 there is no rear lobe: ∫ = 2α² + 2(1 − α)²/3, so
+    ///   Q = 1 / (α² + (1 − α)²/3)   (omni 1, cardioid 3).
+    /// For α < 0.5 `gain_at_angle` clamps the negative rear lobe to 0, so the
+    /// integral only runs from u₀ = −α/(1 − α): ∫ = 1/(3(1 − α)), Q = 6(1 − α).
+    fn clamped_polar_directivity_factor(alpha: f32) -> f32 {
+        if alpha >= 0.5 {
+            1.0 / (alpha * alpha + (1.0 - alpha) * (1.0 - alpha) / 3.0)
+        } else {
+            6.0 * (1.0 - alpha)
+        }
+    }
+
+    /// Simpson's rule must reproduce the closed form across the polar family.
+    /// Pinned: omni 1, cardioid 3 (DI 4.77 dB), α = 0.7 → 1.923,
+    /// supercardioid (α = 0.37) → 3.78, α = 0.25 → 4.5, α = 0 → 6.
+    #[test]
+    fn directivity_factor_matches_closed_form() {
+        for (alpha, expected) in [
+            (1.0f32, 1.0f32),
+            (0.7, 1.923),
+            (0.5, 3.0),
+            (0.37, 3.78),
+            (0.25, 4.5),
+            (0.0, 6.0),
+        ] {
+            let closed_form = clamped_polar_directivity_factor(alpha);
+            assert!(
+                (closed_form - expected).abs() < 1e-3,
+                "{alpha}: {closed_form}"
+            );
+            let simpson = directivity_factor(&DirectivityPattern::Polar { alpha });
+            assert!(
+                (simpson - expected).abs() / expected < 2e-3,
+                "α = {alpha}: Simpson {simpson}, closed form {expected}"
+            );
+        }
+        let cardioid_index_db = 10.0 * directivity_factor(&DirectivityPattern::cardioid()).log10();
+        assert!(
+            (cardioid_index_db - 4.771).abs() < 0.01,
+            "{cardioid_index_db}"
+        );
+    }
+
+    /// Q = 4π / ∮ g² dΩ, integrated over the whole sphere with the 3-D
+    /// `directivity_gain` (midpoint rule, 360 × 720 cells) and an arbitrary
+    /// tilted facing. Agreeing with the 1-D `directivity_factor` checks both
+    /// the axisymmetric reduction and the angle convention of the 3-D path.
+    #[test]
+    fn directivity_factor_matches_sphere_integration() {
+        let facing = Vec3::new(1.0, 2.0, -0.5).normalize();
+        let patterns = [
+            DirectivityPattern::cardioid(),
+            DirectivityPattern::supercardioid(),
+            DirectivityPattern::Polar { alpha: 0.25 },
+            DirectivityPattern::Cone {
+                inner: FRAC_PI_4,
+                outer: FRAC_PI_2,
+                outer_gain: 0.2,
+            },
+        ];
+        const POLAR_STEPS: usize = 360;
+        const AZIMUTH_STEPS: usize = 720;
+        let polar_step = PI / POLAR_STEPS as f32;
+        let azimuth_step = 2.0 * PI / AZIMUTH_STEPS as f32;
+        for pattern in patterns {
+            let mut energy = 0.0f64;
+            for polar_index in 0..POLAR_STEPS {
+                let polar = (polar_index as f32 + 0.5) * polar_step;
+                for azimuth_index in 0..AZIMUTH_STEPS {
+                    let azimuth = (azimuth_index as f32 + 0.5) * azimuth_step;
+                    let direction = Vec3::new(
+                        polar.sin() * azimuth.cos(),
+                        polar.sin() * azimuth.sin(),
+                        polar.cos(),
+                    );
+                    let gain = directivity_gain(Vec3::ZERO, facing, direction, &pattern);
+                    energy += (gain * gain * polar.sin() * polar_step * azimuth_step) as f64;
+                }
+            }
+            let sphere_factor = (4.0 * std::f64::consts::PI / energy) as f32;
+            let simpson_factor = directivity_factor(&pattern);
+            assert!(
+                (sphere_factor - simpson_factor).abs() / simpson_factor < 5e-3,
+                "{pattern:?}: sphere {sphere_factor}, Simpson {simpson_factor}"
+            );
+        }
+    }
+
+    /// The clamp makes the engine's α < 0.5 patterns differ from the textbook
+    /// polar patterns, whose rear lobe radiates with inverted polarity:
+    /// textbook supercardioid (α = 0.37) Q = 1/(0.37² + 0.63²/3) = 3.715,
+    /// hypercardioid (α = 0.25) Q = 4.0, figure-8 (α = 0) Q = 3.0.
+    /// Pinned so a change to the clamp is a conscious decision.
+    #[test]
+    fn rear_lobe_clamp_departs_from_textbook_factor() {
+        let supercardioid = directivity_factor(&DirectivityPattern::supercardioid());
+        assert!(supercardioid > 3.715 && (supercardioid - 3.78).abs() < 0.01);
+        let hypercardioid = directivity_factor(&DirectivityPattern::Polar { alpha: 0.25 });
+        assert!((hypercardioid - 4.5).abs() < 0.01, "{hypercardioid}");
+        // Hypercardioid at θ = π: 0.25 − 0.75 = −0.5 before the clamp.
+        assert_eq!(
+            DirectivityPattern::Polar { alpha: 0.25 }.gain_at_angle(PI),
+            0.0
+        );
+    }
+
+    /// Cone with outer_gain 0 and inner = outer = π/2 is a hemisphere: Q = 2
+    /// (half the sphere at unit gain).
+    #[test]
+    fn hemisphere_cone_has_factor_two() {
+        let hemisphere = DirectivityPattern::Cone {
+            inner: FRAC_PI_2,
+            outer: FRAC_PI_2,
+            outer_gain: 0.0,
+        };
+        let factor = directivity_factor(&hemisphere);
+        assert!((factor - 2.0).abs() < 0.05, "{factor}");
+    }
+
+    /// Gain depends only on the angle to the facing axis: angles are symmetric
+    /// (±θ give the same gain) and rotating the target about the facing axis
+    /// changes nothing. Cardioid at 60° = 0.5 + 0.5·cos 60° = 0.75.
+    #[test]
+    fn directivity_gain_is_axisymmetric() {
+        let pattern = DirectivityPattern::cardioid();
+        assert_eq!(pattern.gain_at_angle(1.0), pattern.gain_at_angle(-1.0));
+        let facing = Vec3::new(1.0, 0.0, 0.0);
+        let sixty_degrees = std::f32::consts::FRAC_PI_3;
+        for roll in [0.0f32, 1.0, 2.5, 4.0] {
+            let target = Vec3::new(
+                sixty_degrees.cos(),
+                sixty_degrees.sin() * roll.cos(),
+                sixty_degrees.sin() * roll.sin(),
+            ) * 3.0;
+            let gain = directivity_gain(Vec3::ZERO, facing, target, &pattern);
+            assert!((gain - 0.75).abs() < 1e-5, "roll {roll}: {gain}");
+        }
+    }
+
+    /// Target coincident with the entity is degenerate: unity, never NaN.
+    #[test]
+    fn directivity_gain_at_zero_distance_is_unity() {
+        let gain = directivity_gain(
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            &DirectivityPattern::cardioid(),
+        );
+        assert_eq!(gain, 1.0);
+    }
 }
