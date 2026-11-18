@@ -79,25 +79,28 @@ pub struct SourceSpatial<'a> {
     pub directivity: &'a DirectivityPattern,
 }
 
-/// Output channel configuration. Determines which speaker channels are active.
-/// Works by masking channels on the underlying hardware layout (always 5.1).
+/// Output channel configuration. Determines which output channels exist on
+/// the rig: a masked channel has no speaker (or subwoofer) behind it, so
+/// nothing may be sent to it. Works by masking channels of the layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ChannelMode {
     /// Stereo: channels 0 (L), 1 (R) only.
     Stereo,
     /// Quad 4.0: channels 0 (FL), 1 (FR), 4 (RL), 5 (RR). Center + LFE masked.
     Quad,
-    /// Full 5.1 surround: channels 0 (L), 1 (R), 2 (C), 4 (Ls), 5 (Rs). LFE (3) unused.
+    /// Full 5.1 surround: channels 0 (L), 1 (R), 2 (C), 3 (LFE), 4 (Ls), 5 (Rs).
+    /// No renderer pans into the LFE; it carries the bass that bass management
+    /// redirects from the mains, which is why it must count as present here.
     Surround51,
 }
 
 impl ChannelMode {
-    /// Active spatial channel indices for this mode.
+    /// Output channel indices that exist in this mode, subwoofer included.
     pub fn active_channels(self) -> &'static [usize] {
         match self {
             ChannelMode::Stereo => &[0, 1],
             ChannelMode::Quad => &[0, 1, 4, 5],
-            ChannelMode::Surround51 => &[0, 1, 2, 4, 5],
+            ChannelMode::Surround51 => &[0, 1, 2, 3, 4, 5],
         }
     }
 
@@ -346,6 +349,34 @@ impl SpeakerLayout {
         &self.speakers[..self.count]
     }
 
+    /// Middle of the spatial speakers' bounding box; the origin for a layout
+    /// without speakers.
+    ///
+    /// This is the middle of the area the speakers enclose, not their mean: a
+    /// 5.1 layout has three speakers in front and two behind, and the mean
+    /// would sit forward of the room's middle.
+    pub fn bounding_box_centre(&self) -> Vec3 {
+        let speakers = self.speakers();
+        let Some(first) = speakers.first() else {
+            return Vec3::ZERO;
+        };
+        let mut min = first.position;
+        let mut max = first.position;
+        for speaker in speakers {
+            min = Vec3::new(
+                min.x.min(speaker.position.x),
+                min.y.min(speaker.position.y),
+                min.z.min(speaker.position.z),
+            );
+            max = Vec3::new(
+                max.x.max(speaker.position.x),
+                max.y.max(speaker.position.y),
+                max.z.max(speaker.position.z),
+            );
+        }
+        (min + max) * 0.5
+    }
+
     /// LFE channel index, if this layout has one.
     pub fn lfe_channel(&self) -> Option<usize> {
         self.lfe_channel
@@ -392,6 +423,41 @@ impl SpeakerLayout {
     }
 
     // ── VBAP mode ──────────────────────────────────────────────────────
+
+    /// Closest a speaker is ever treated as being to the listener, so that a
+    /// listener standing on a speaker does not silence it.
+    const MIN_SPEAKER_DISTANCE: f32 = 0.1;
+
+    /// Distance from the listener to the farthest speaker in the layout.
+    ///
+    /// This is the reference for distance compensation: the farthest speaker
+    /// plays at full gain and every closer one is turned down to match it.
+    fn farthest_speaker_distance(&self, listener: &Listener) -> f32 {
+        self.speakers()
+            .iter()
+            .map(|speaker| (speaker.position - listener.position).length())
+            .fold(Self::MIN_SPEAKER_DISTANCE, f32::max)
+    }
+
+    /// Gain that makes one speaker arrive at the listener as loud as the
+    /// farthest speaker would: `distance / farthest`.
+    ///
+    /// The reference is the farthest speaker of the whole layout, not of the
+    /// active pair, and the pair is deliberately not renormalised afterwards.
+    /// Renormalising per pair cancels the compensation between pairs: with
+    /// the centre speaker at 2 m and the others at 3.6 m, a source straight
+    /// ahead arrived 5.1 dB louder than the same source at the side.
+    fn arrival_compensation(
+        &self,
+        speaker_index: usize,
+        listener: &Listener,
+        farthest: f32,
+    ) -> f32 {
+        let distance = (self.speakers[speaker_index].position - listener.position)
+            .length()
+            .max(Self::MIN_SPEAKER_DISTANCE);
+        distance / farthest
+    }
 
     /// Compute per-channel gains using 2D VBAP.
     ///
@@ -509,29 +575,12 @@ impl SpeakerLayout {
             best_gb /= norm;
         }
 
-        // Per-speaker distance compensation: attenuate closer speakers so all
-        // deliver equal SPL at the listener. Uses farthest speaker as reference
-        // (closer speakers get scaled down since they naturally arrive louder).
-        let d_a = (self.speakers[best_a].position - listener.position)
-            .length()
-            .max(0.1);
-        let d_b = if best_b != best_a {
-            (self.speakers[best_b].position - listener.position)
-                .length()
-                .max(0.1)
-        } else {
-            d_a
-        };
-        let d_ref = d_a.max(d_b);
-        best_ga *= d_a / d_ref;
+        // Per-speaker distance compensation: attenuate closer speakers so
+        // every direction arrives at the listener at the same level.
+        let farthest = self.farthest_speaker_distance(listener);
+        best_ga *= self.arrival_compensation(best_a, listener, farthest);
         if best_b != best_a {
-            best_gb *= d_b / d_ref;
-        }
-        // Re-normalize to maintain constant power after compensation
-        let norm2 = (best_ga * best_ga + best_gb * best_gb).sqrt();
-        if norm2 > 1e-8 {
-            best_ga /= norm2;
-            best_gb /= norm2;
+            best_gb *= self.arrival_compensation(best_b, listener, farthest);
         }
 
         // Distance attenuation from listener to source
@@ -661,25 +710,10 @@ impl SpeakerLayout {
         }
 
         // Per-speaker distance compensation (same as compute_gains_vbap)
-        let d_a = (self.speakers[best_a].position - listener.position)
-            .length()
-            .max(0.1);
-        let d_b = if best_b != best_a {
-            (self.speakers[best_b].position - listener.position)
-                .length()
-                .max(0.1)
-        } else {
-            d_a
-        };
-        let d_ref = d_a.max(d_b);
-        best_ga *= d_a / d_ref;
+        let farthest = self.farthest_speaker_distance(listener);
+        best_ga *= self.arrival_compensation(best_a, listener, farthest);
         if best_b != best_a {
-            best_gb *= d_b / d_ref;
-        }
-        let norm2 = (best_ga * best_ga + best_gb * best_gb).sqrt();
-        if norm2 > 1e-8 {
-            best_ga /= norm2;
-            best_gb /= norm2;
+            best_gb *= self.arrival_compensation(best_b, listener, farthest);
         }
 
         gains.gains[self.speakers[best_a].channel] += best_ga;
@@ -767,22 +801,30 @@ impl SpeakerLayout {
             gains.gains[self.speakers[si_a].channel] = 1.0;
             return gains;
         }
+        // Limit the extension by angle, not by gain. The pair's arc is the
+        // shorter arc between the speakers (where both VBAP gains are ≥ 0); its
+        // centre bisects the two speaker vectors. The source may sit up to
+        // `max_ext` of the arc width beyond either speaker: inside that the
+        // exact (unclamped) Pulkki solution is used, and beyond it the panning
+        // direction is held at the limit so the gains stop changing there.
+        let arc_centre = (ay + by).atan2(ax + bx);
+        let arc_half_width = 0.5 * (ax * bx + ay * by).clamp(-1.0, 1.0).acos();
+        let offset_limit = arc_half_width * (1.0 + 2.0 * max_ext);
+        let offset = angle_diff(source_azimuth, arc_centre).clamp(-offset_limit, offset_limit);
+        let panned_azimuth = arc_centre + offset;
+
         let inv_det = 1.0 / det;
-        let (sx, sy) = (source_azimuth.cos(), source_azimuth.sin());
+        let (sx, sy) = (panned_azimuth.cos(), panned_azimuth.sin());
         let mut ga = (by * sx - bx * sy) * inv_det;
         let mut gb = (-ay * sx + ax * sy) * inv_det;
 
-        // Standard VBAP: both gains non-negative → source inside pair
+        // Inside the pair both gains are non-negative; remove rounding noise
+        // (this is also where a zero extension pins a source to the speaker).
+        // Outside it, one gain is negative (polarity inversion) and already
+        // bounded by the angular limit above.
         if ga >= -1e-6 && gb >= -1e-6 {
             ga = ga.max(0.0);
             gb = gb.max(0.0);
-        } else {
-            // Source outside pair → extended VBAP.
-            // Clamp the negative gain so extension doesn't exceed max_ext of span.
-            // When ga or gb = -max_ext/(1+max_ext), the source is at the extension limit.
-            let min_gain = -max_ext / (1.0 + max_ext);
-            ga = ga.max(min_gain);
-            gb = gb.max(min_gain);
         }
 
         // Energy normalization (Gjørup Eq. 3): g / sqrt(ga² + gb²)
@@ -800,140 +842,9 @@ impl SpeakerLayout {
 
     // ── Stereo mode ────────────────────────────────────────────────────
 
-    /// Compute per-channel gains for simple L/R stereo panning.
-    ///
-    /// Uses equal-power pan law based on source azimuth from the listener.
-    /// Only outputs to channels 0 (L) and 1 (R).
-    pub fn compute_gains_stereo(
-        &self,
-        listener: &Listener,
-        source: &SourceSpatial,
-        distance: &DistanceParams,
-    ) -> ChannelGains {
-        let source_pos = source.position;
-        let source_orientation = source.orientation;
-        let source_directivity = source.directivity;
-        let mut gains = ChannelGains::silent(self.total_channels);
-
-        // Source azimuth in listener's local frame
-        let d = source_pos - listener.position;
-        let source_azimuth = if d.x * d.x + d.y * d.y < 1e-10 {
-            0.0
-        } else {
-            let cos_y = listener.yaw.cos();
-            let sin_y = listener.yaw.sin();
-            let local_x = d.x * cos_y + d.y * sin_y; // forward
-            let local_y = -d.x * sin_y + d.y * cos_y; // left
-            local_y.atan2(local_x)
-        };
-
-        // Map azimuth to pan position [0, 1]:
-        //   left (+π/2) → 0, center (0) → 0.5, right (-π/2) → 1
-        let pan = (0.5 - source_azimuth / std::f32::consts::PI).clamp(0.0, 1.0);
-        let angle = pan * std::f32::consts::FRAC_PI_2;
-        let l_gain = angle.cos();
-        let r_gain = angle.sin();
-
-        // Distance and directivity attenuation
-        let dist = distance_gain_at_model(
-            listener.position,
-            source_pos,
-            distance.ref_distance,
-            distance.max_distance,
-            distance.rolloff,
-            distance.model,
-        );
-        let dir = directivity_gain(
-            source_pos,
-            source_orientation,
-            listener.position,
-            source_directivity,
-        );
-        let atten = dist * dir;
-
-        gains.gains[0] = l_gain * atten;
-        gains.gains[1] = r_gain * atten;
-        gains
-    }
-
     // ── Mono mode ─────────────────────────────────────────────────────
 
-    /// Compute per-channel gains for mono output.
-    ///
-    /// All spatial channels receive equal gain, normalized for constant power.
-    pub fn compute_gains_mono(
-        &self,
-        listener: &Listener,
-        source: &SourceSpatial,
-        distance: &DistanceParams,
-    ) -> ChannelGains {
-        let source_pos = source.position;
-        let source_orientation = source.orientation;
-        let source_directivity = source.directivity;
-        let mut gains = ChannelGains::silent(self.total_channels);
-
-        let dist = distance_gain_at_model(
-            listener.position,
-            source_pos,
-            distance.ref_distance,
-            distance.max_distance,
-            distance.rolloff,
-            distance.model,
-        );
-        let dir = directivity_gain(
-            source_pos,
-            source_orientation,
-            listener.position,
-            source_directivity,
-        );
-        let atten = dist * dir;
-
-        // Equal gain to all spatial channels, normalized so total power ≈ atten²
-        let per_channel = if self.count > 0 {
-            atten / (self.count as f32).sqrt()
-        } else {
-            0.0
-        };
-
-        for i in 0..self.count {
-            gains.gains[self.speakers[i].channel] = per_channel;
-        }
-        gains
-    }
-
     // ── Quad mode ─────────────────────────────────────────────────────
-
-    /// Compute per-channel gains for quad (4.0) output.
-    ///
-    /// Runs VBAP then zeros out the center channel, redistributing its
-    /// energy to the nearest L/R pair for constant power.
-    pub fn compute_gains_quad(
-        &self,
-        listener: &Listener,
-        source: &SourceSpatial,
-        distance: &DistanceParams,
-    ) -> ChannelGains {
-        let mut gains = self.compute_gains_vbap(listener, source, distance);
-
-        // Zero out center channel (ch 2 in ITU 5.1) and redistribute to L/R
-        if self.total_channels > 2 {
-            let center = gains.gains[2];
-            if center.abs() > 1e-8 {
-                // Distribute center to L and R preserving power
-                let half_power = center * std::f32::consts::FRAC_1_SQRT_2;
-                gains.gains[0] += half_power;
-                gains.gains[1] += half_power;
-                gains.gains[2] = 0.0;
-            }
-        }
-
-        // Also zero LFE if present
-        if let Some(lfe) = self.lfe_channel {
-            gains.gains[lfe] = 0.0;
-        }
-
-        gains
-    }
 
     // ── MDAP (Multiple Direction Amplitude Panning) ────────────────────
 
@@ -1130,6 +1041,7 @@ impl VbapLookup {
                 .length()
                 .max(0.1);
         }
+        let farthest = layout.farthest_speaker_distance(listener);
 
         // Build LUT: for each degree, find straddling pair and compute gains
         for deg in 0..LUT_SIZE {
@@ -1193,22 +1105,10 @@ impl VbapLookup {
                 best_gb /= norm;
             }
 
-            // Distance compensation
-            let d_a = speaker_dists[best_a];
-            let d_b = if best_b != best_a {
-                speaker_dists[best_b]
-            } else {
-                d_a
-            };
-            let d_ref = d_a.max(d_b);
-            best_ga *= d_a / d_ref;
+            // Distance compensation (same as compute_gains_vbap)
+            best_ga *= speaker_dists[best_a] / farthest;
             if best_b != best_a {
-                best_gb *= d_b / d_ref;
-            }
-            let norm2 = (best_ga * best_ga + best_gb * best_gb).sqrt();
-            if norm2 > 1e-8 {
-                best_ga /= norm2;
-                best_gb /= norm2;
+                best_gb *= speaker_dists[best_b] / farthest;
             }
 
             let mut entry = ChannelGains::silent(layout.total_channels());
@@ -1255,78 +1155,6 @@ mod tests {
     }
 
     // ── Stereo pan (equal-power L/R) tests ────────────────────────────────
-
-    #[test]
-    fn mic_source_to_listeners_left_is_louder_in_ch0() {
-        let layout = SpeakerLayout::stereo(Vec3::new(0.0, 2.0, 0.0), Vec3::new(6.0, 2.0, 0.0));
-        let dist = default_distance();
-        // Listener at (3, 2) facing +X (yaw=0). Left ear = +Y direction.
-        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-
-        // Source to the listener's left (+Y)
-        let gains = layout.compute_gains_stereo(
-            &listener,
-            &omni(Vec3::new(3.0, 4.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
-            &dist,
-        );
-
-        assert!(
-            gains.gains[0] > gains.gains[1],
-            "left ear={} should be louder than right ear={}",
-            gains.gains[0],
-            gains.gains[1]
-        );
-    }
-
-    #[test]
-    fn mic_source_ahead_is_centered() {
-        let layout = SpeakerLayout::stereo(Vec3::new(0.0, 2.0, 0.0), Vec3::new(6.0, 2.0, 0.0));
-        let dist = default_distance();
-        let listener = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-
-        // Source directly ahead of listener (+X)
-        let gains = layout.compute_gains_stereo(
-            &listener,
-            &omni(Vec3::new(5.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
-            &dist,
-        );
-
-        assert!(
-            (gains.gains[0] - gains.gains[1]).abs() < 0.01,
-            "left={} and right={} should be roughly equal for centered source",
-            gains.gains[0],
-            gains.gains[1]
-        );
-    }
-
-    #[test]
-    fn mic_panning_follows_listener_yaw() {
-        let layout = SpeakerLayout::stereo(Vec3::new(0.0, 2.0, 0.0), Vec3::new(6.0, 2.0, 0.0));
-        let dist = default_distance();
-        // Source at (5, 2). Listener facing +X → source is ahead (centered).
-        let listener_fwd = Listener::new(Vec3::new(3.0, 2.0, 0.0), 0.0);
-        let src = omni(Vec3::new(5.0, 2.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
-        let gains_fwd = layout.compute_gains_stereo(&listener_fwd, &src, &dist);
-
-        // Same source, but listener rotated to face +Y → source is now to the RIGHT
-        let listener_rotated = Listener::new(Vec3::new(3.0, 2.0, 0.0), PI / 2.0);
-        let gains_rot = layout.compute_gains_stereo(&listener_rotated, &src, &dist);
-
-        // When facing forward, should be centered
-        assert!(
-            (gains_fwd.gains[0] - gains_fwd.gains[1]).abs() < 0.01,
-            "facing source: left={} right={} should be equal",
-            gains_fwd.gains[0],
-            gains_fwd.gains[1]
-        );
-        // When rotated, source is to the right → ch1 louder
-        assert!(
-            gains_rot.gains[1] > gains_rot.gains[0],
-            "source to right: right={} should be louder than left={}",
-            gains_rot.gains[1],
-            gains_rot.gains[0]
-        );
-    }
 
     #[test]
     fn mic_5_1_has_six_channels() {
@@ -1447,11 +1275,13 @@ mod tests {
             &dist,
         );
 
-        let power_ahead: f32 = gains_ahead.gains[..6].iter().map(|g| g * g).sum();
-        let power_behind: f32 = gains_behind.gains[..6].iter().map(|g| g * g).sum();
+        // Compared where it is heard: speakers sit at different distances from
+        // this listener, so equal loudness means equal power on arrival.
+        let power_ahead = arrival_power(&layout, &listener, &gains_ahead);
+        let power_behind = arrival_power(&layout, &listener, &gains_behind);
         assert!(
             (power_ahead / power_behind - 1.0).abs() < 0.01,
-            "same distance ahead and behind must give equal power: ahead={power_ahead} behind={power_behind}"
+            "same distance ahead and behind must arrive equally loud: ahead={power_ahead} behind={power_behind}"
         );
     }
 
@@ -1548,48 +1378,6 @@ mod tests {
 
     // ── Stereo L/R ──
 
-    #[test]
-    fn stereo_source_left_has_more_ch0() {
-        let layout = room_layout();
-        let listener = room_listener();
-        let dist = default_distance();
-
-        // Source to listener's LEFT: facing +Y, left is -X → (1, 3, 0)
-        let gains = layout.compute_gains_stereo(
-            &listener,
-            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            &dist,
-        );
-
-        assert!(
-            gains.gains[0] > gains.gains[1],
-            "source LEFT of listener → ch0 (L) should be louder: ch0={}, ch1={}",
-            gains.gains[0],
-            gains.gains[1]
-        );
-    }
-
-    #[test]
-    fn stereo_source_right_has_more_ch1() {
-        let layout = room_layout();
-        let listener = room_listener();
-        let dist = default_distance();
-
-        // Source to listener's RIGHT: facing +Y, right is +X → (5, 3, 0)
-        let gains = layout.compute_gains_stereo(
-            &listener,
-            &omni(Vec3::new(5.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            &dist,
-        );
-
-        assert!(
-            gains.gains[1] > gains.gains[0],
-            "source RIGHT of listener → ch1 (R) should be louder: ch0={}, ch1={}",
-            gains.gains[0],
-            gains.gains[1]
-        );
-    }
-
     // ── VBAP L/R ──
 
     #[test]
@@ -1678,72 +1466,7 @@ mod tests {
 
     // ── Stereo pan L/R ──
 
-    #[test]
-    fn mic_source_left_of_listener_has_more_ch0() {
-        let layout = room_layout();
-        let listener = room_listener(); // at (3,2) facing +Y (yaw=π/2), left = -X
-        let dist = default_distance();
-
-        // Source to listener's LEFT (-X direction): (1, 3, 0)
-        let gains = layout.compute_gains_stereo(
-            &listener,
-            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            &dist,
-        );
-
-        assert!(
-            gains.gains[0] > gains.gains[1],
-            "source to listener's left → ch0 should be loudest: ch0={}, ch1={}",
-            gains.gains[0],
-            gains.gains[1]
-        );
-    }
-
-    #[test]
-    fn mic_source_right_of_listener_has_more_ch1() {
-        let layout = room_layout();
-        let listener = room_listener(); // at (3,2) facing +Y, right = +X
-        let dist = default_distance();
-
-        // Source to listener's RIGHT (+X direction): (5, 3, 0)
-        let gains = layout.compute_gains_stereo(
-            &listener,
-            &omni(Vec3::new(5.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            &dist,
-        );
-
-        assert!(
-            gains.gains[1] > gains.gains[0],
-            "source to listener's right → ch1 should be loudest: ch0={}, ch1={}",
-            gains.gains[0],
-            gains.gains[1]
-        );
-    }
-
     // ── Quad L/R ──
-
-    #[test]
-    fn quad_source_left_has_more_left_channels() {
-        let layout = room_layout();
-        let listener = room_listener();
-        let dist = default_distance();
-
-        // Source to listener's LEFT: (1, 3, 0)
-        let gains = layout.compute_gains_quad(
-            &listener,
-            &omni(Vec3::new(1.0, 3.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
-            &dist,
-        );
-
-        let left_sum = gains.gains[0] + gains.gains[4]; // FL + RL
-        let right_sum = gains.gains[1] + gains.gains[5]; // FR + RR
-        assert!(
-            left_sum > right_sum,
-            "source LEFT → left channels (FL+RL={}) should be louder than right (FR+RR={})",
-            left_sum,
-            right_sum
-        );
-    }
 
     // ── VbapLookup accuracy vs live ─────────────────────────────────────
 
@@ -1993,5 +1716,389 @@ mod tests {
             (energy - 1.0).abs() < 0.1,
             "midpoint energy {energy:.4} should be ~1.0 (energy preservation)"
         );
+    }
+
+    // ── Hand-derived VBAP / layout values ─────────────────────────────
+
+    /// Quad ring of radius 2 around the origin at ±45° / ±135°, listener at the
+    /// origin facing +X (yaw 0, left = +Y). Equidistant, so distance
+    /// compensation is a no-op and gains are pure Pulkki VBAP.
+    fn equidistant_quad() -> SpeakerLayout {
+        let offset = 2.0_f32.sqrt();
+        SpeakerLayout::quad(
+            Vec3::new(offset, offset, 0.0),   // FL ch0 at +45°
+            Vec3::new(offset, -offset, 0.0),  // FR ch1 at −45°
+            Vec3::new(-offset, offset, 0.0),  // RL ch4 at +135°
+            Vec3::new(-offset, -offset, 0.0), // RR ch5 at −135°
+        )
+    }
+
+    /// Power reaching the listener: each speaker's gain falls off as one over
+    /// its distance, so this is Σ(gain / distance)².
+    fn arrival_power(layout: &SpeakerLayout, listener: &Listener, gains: &ChannelGains) -> f32 {
+        layout
+            .speakers()
+            .iter()
+            .map(|speaker| {
+                let distance = (speaker.position - listener.position).length();
+                let arrival = gains.gains[speaker.channel] / distance;
+                arrival * arrival
+            })
+            .sum()
+    }
+
+    fn total_power(gains: &ChannelGains) -> f32 {
+        gains.gains.iter().map(|gain| gain * gain).sum()
+    }
+
+    /// World direction for a local azimuth (0 = ahead, + = left) of a listener.
+    fn world_direction(listener: &Listener, local_azimuth: f32) -> Vec3 {
+        let world_angle = listener.yaw + local_azimuth;
+        Vec3::new(world_angle.cos(), world_angle.sin(), 0.0)
+    }
+
+    #[test]
+    fn vbap_pair_gains_match_pulkki_closed_form() {
+        // For a 90° pair at ±45°, solving g = L⁻¹·s gives
+        //   g_left = sin(θ + 45°), g_right = cos(θ + 45°),
+        // already unit power. θ = 15° → FL = sin 60° = 0.866025, FR = 0.5.
+        let layout = equidistant_quad();
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let gains =
+            layout.compute_vbap_panning(&listener, world_direction(&listener, 15f32.to_radians()));
+        assert!(
+            (gains.gains[0] - 0.866_025).abs() < 1e-5,
+            "FL={}",
+            gains.gains[0]
+        );
+        assert!((gains.gains[1] - 0.5).abs() < 1e-5, "FR={}", gains.gains[1]);
+        assert_eq!(gains.gains[4], 0.0);
+        assert_eq!(gains.gains[5], 0.0);
+
+        // Sweep the front pair against the closed form.
+        for degrees in -45..=45 {
+            let theta = (degrees as f32).to_radians();
+            let gains = layout.compute_vbap_panning(&listener, world_direction(&listener, theta));
+            let quarter = std::f32::consts::FRAC_PI_4;
+            assert!((gains.gains[0] - (theta + quarter).sin()).abs() < 1e-4);
+            assert!((gains.gains[1] - (theta + quarter).cos()).abs() < 1e-4);
+        }
+
+        // Directly behind: midway between RL and RR → 1/√2 each.
+        let behind = layout.compute_vbap_panning(&listener, Vec3::new(-1.0, 0.0, 0.0));
+        assert!((behind.gains[4] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+        assert!((behind.gains[5] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn vbap_constant_arrival_power_and_continuity_over_full_sweep_in_room() {
+        // Room layout (non-equidistant: C 2.0 m, others √13 = 3.606 m). Each
+        // gain is scaled by its speaker's distance over the farthest (√13), so
+        // the power arriving at the listener is Σ(g/d)² = 1/13 at every
+        // azimuth, and adjacent 0.5° steps (including pair boundaries at the
+        // speaker azimuths 0°, ±56.31°, ±123.69°) change no gain by > 0.03.
+        let layout = room_layout();
+        let listener = room_listener();
+        let mut previous: Option<ChannelGains> = None;
+        for half_degree in 0..=720 {
+            let azimuth = (half_degree as f32 * 0.5 - 180.0).to_radians();
+            let gains = layout.compute_vbap_panning(&listener, world_direction(&listener, azimuth));
+            let power = arrival_power(&layout, &listener, &gains);
+            assert!(
+                (power - 1.0 / 13.0).abs() < 1e-5,
+                "azimuth {azimuth}: arrival power {power}"
+            );
+            assert_eq!(gains.gains[3], 0.0, "LFE must never receive VBAP gain");
+            if let Some(previous_gains) = previous {
+                for channel in 0..6 {
+                    let step = (gains.gains[channel] - previous_gains.gains[channel]).abs();
+                    assert!(
+                        step < 0.03,
+                        "azimuth {azimuth}, channel {channel}: step {step}"
+                    );
+                }
+            }
+            previous = Some(gains);
+        }
+    }
+
+    #[test]
+    fn vbap_source_on_each_speaker_drives_only_that_speaker() {
+        // Direction exactly toward a speaker: g = L⁻¹·s = (1, 0), then scaled by
+        // that speaker's distance over the farthest (√13 m): the centre at 2 m
+        // plays at 2/√13 = 0.554700, the other four at unity.
+        let layout = room_layout();
+        let listener = room_listener();
+        let farthest = 13.0_f32.sqrt();
+        for speaker in layout.speakers() {
+            let gains =
+                layout.compute_vbap_panning(&listener, speaker.position - listener.position);
+            let own_gain = (speaker.position - listener.position).length() / farthest;
+            for channel in 0..6 {
+                let expected = if channel == speaker.channel {
+                    own_gain
+                } else {
+                    0.0
+                };
+                assert!(
+                    (gains.gains[channel] - expected).abs() < 1e-4,
+                    "toward ch{}: ch{channel} = {}",
+                    speaker.channel,
+                    gains.gains[channel]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vbap_is_left_right_mirror_symmetric_in_room() {
+        // Room layout is symmetric about the listener's forward axis (+Y, x = 3):
+        // local azimuth +θ on (FL, RL) must equal −θ on (FR, RR); C equal.
+        let layout = room_layout();
+        let listener = room_listener();
+        for degrees in [5.0_f32, 30.0, 56.0, 90.0, 140.0, 175.0] {
+            let theta = degrees.to_radians();
+            let left = layout.compute_vbap_panning(&listener, world_direction(&listener, theta));
+            let right = layout.compute_vbap_panning(&listener, world_direction(&listener, -theta));
+            for (channel, mirror) in [(0, 1), (2, 2), (4, 5)] {
+                assert!(
+                    (left.gains[channel] - right.gains[mirror]).abs() < 1e-4,
+                    "{degrees}°: ch{channel}={} vs ch{mirror}={}",
+                    left.gains[channel],
+                    right.gains[mirror]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vbap_distance_compensation_equalises_arrival_within_pair() {
+        // Room listener: C at local 0° (2 m), FL at atan2(3, 2) = 56.31° (√13 m).
+        // On the bisector (28.155°) raw VBAP gains are equal (1/√2 each), and
+        // each is scaled by its distance over the farthest (√13 m):
+        //   g_C = (1/√2)·2/√13 = 0.392232, g_FL = 1/√2 = 0.707107,
+        // so the arrivals g/d are equal.
+        let layout = room_layout();
+        let listener = room_listener();
+        let bisector = (3.0_f32.atan2(2.0)) * 0.5;
+        let gains = layout.compute_vbap_panning(&listener, world_direction(&listener, bisector));
+        assert!(
+            (gains.gains[2] - 0.392_232).abs() < 1e-4,
+            "C={}",
+            gains.gains[2]
+        );
+        assert!(
+            (gains.gains[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4,
+            "FL={}",
+            gains.gains[0]
+        );
+        let arrival_center = gains.gains[2] / 2.0;
+        let arrival_front_left = gains.gains[0] / 13.0_f32.sqrt();
+        assert!((arrival_center - arrival_front_left).abs() < 1e-4);
+    }
+
+    /// A source at a fixed distance must arrive equally loud from every
+    /// direction. In the default 5.1 room (listener at centre, C at 2 m, the
+    /// other four at √13 m) renormalising each pair to Σg² = 1 used to cancel
+    /// the compensation between pairs: arrival power was 1/4 straight ahead
+    /// (C only) but 1/13 at 90° left (FL + RL), 10·log10(13/4) = 5.1 dB apart.
+    #[test]
+    fn vbap_arrival_level_is_independent_of_azimuth_in_room() {
+        let layout = room_layout();
+        let listener = room_listener();
+        let ahead = layout.compute_vbap_panning(&listener, world_direction(&listener, 0.0));
+        let left = layout.compute_vbap_panning(
+            &listener,
+            world_direction(&listener, std::f32::consts::FRAC_PI_2),
+        );
+        let level_difference_db = 10.0
+            * (arrival_power(&layout, &listener, &ahead)
+                / arrival_power(&layout, &listener, &left))
+            .log10();
+        assert!(
+            level_difference_db.abs() < 0.01,
+            "ahead vs left arrival level differs by {level_difference_db:.2} dB"
+        );
+    }
+
+    #[test]
+    fn vbap_lookup_matches_live_at_every_degree() {
+        // LUT entries are exact VBAP at integer local azimuths; the lookup must
+        // reproduce live panning there, and keep the arrival power at 1/13
+        // between entries (linear interpolation 1° apart dips < 0.1 %).
+        let layout = room_layout();
+        let listener = room_listener();
+        let mut lookup = VbapLookup::new(layout.total_channels());
+        assert!(lookup.update(&layout, &listener));
+        assert!(
+            !lookup.update(&layout, &listener),
+            "unchanged listener must not rebuild"
+        );
+        for degrees in 0..360 {
+            let azimuth = (degrees as f32).to_radians();
+            let direction = world_direction(&listener, azimuth);
+            let from_lookup = lookup.lookup(direction);
+            let live = layout.compute_vbap_panning(&listener, direction);
+            for channel in 0..6 {
+                assert!(
+                    (from_lookup.gains[channel] - live.gains[channel]).abs() < 1e-3,
+                    "{degrees}° ch{channel}: lookup {} live {}",
+                    from_lookup.gains[channel],
+                    live.gains[channel]
+                );
+            }
+            let between = lookup.lookup(world_direction(&listener, azimuth + 0.5_f32.to_radians()));
+            let between_power = arrival_power(&layout, &listener, &between);
+            assert!((between_power * 13.0 - 1.0).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn vbap_full_gains_apply_inverse_distance() {
+        // compute_gains_vbap = unit-power panning × distance gain × directivity.
+        // Omni source 4 m ahead, inverse model ref 1 rolloff 1 → amplitude 0.25,
+        // split between FL/FR at 1/√2 each: 0.176777, Σg² = 0.0625.
+        let layout = equidistant_quad();
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let source = omni(Vec3::new(4.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0));
+        let gains = layout.compute_gains_vbap(&listener, &source, &default_distance());
+        assert!((gains.gains[0] - 0.176_777).abs() < 1e-5);
+        assert!((gains.gains[1] - 0.176_777).abs() < 1e-5);
+        assert!((total_power(&gains) - 0.0625).abs() < 1e-6);
+        // Zero spread is exactly plain VBAP.
+        let spread_zero =
+            layout.compute_gains_with_spread(&listener, &source, &default_distance(), 0.0);
+        assert_eq!(spread_zero.gains, gains.gains);
+    }
+
+    #[test]
+    fn mdap_spread_is_mirror_symmetric_for_centred_source() {
+        // Phantoms at ±fan/2 are placed symmetrically, so a source dead ahead
+        // stays centred: FL = FR, RL = RR, and power equals the point source.
+        let layout = equidistant_quad();
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let source = omni(Vec3::new(2.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0));
+        let point = layout.compute_gains_mdap(&listener, &source, &default_distance(), 0.0);
+        let spread = layout.compute_gains_mdap(&listener, &source, &default_distance(), 0.8);
+        assert!((spread.gains[0] - spread.gains[1]).abs() < 1e-5);
+        assert!((spread.gains[4] - spread.gains[5]).abs() < 1e-5);
+        assert!(
+            spread.gains[4] > 0.0,
+            "spread 0.8 (±72°) must reach the rear pair"
+        );
+        assert!((total_power(&spread) - total_power(&point)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn angle_diff_wraps_to_shortest_signed_arc() {
+        // 170° − (−170°) = 340° ≡ −20°; −170° − 170° ≡ +20°; 30° − 10° = 20°.
+        let radians = |degrees: f32| degrees.to_radians();
+        assert!((angle_diff(radians(170.0), radians(-170.0)) - radians(-20.0)).abs() < 1e-5);
+        assert!((angle_diff(radians(-170.0), radians(170.0)) - radians(20.0)).abs() < 1e-5);
+        assert!((angle_diff(radians(30.0), radians(10.0)) - radians(20.0)).abs() < 1e-6);
+        assert!(angle_diff(PI, -PI).abs() < 1e-5);
+    }
+
+    #[test]
+    fn itu_5_1_and_quad_channel_conventions() {
+        // ITU/SMPTE 5.1 order: L 0, R 1, C 2, LFE 3, Ls 4, Rs 5.
+        let surround = room_layout();
+        let channels: Vec<usize> = surround.speakers().iter().map(|s| s.channel).collect();
+        assert_eq!(channels, vec![0, 1, 2, 4, 5]);
+        assert_eq!(surround.lfe_channel(), Some(3));
+        assert_eq!(surround.total_channels(), 6);
+        // Quad is masked 5.1: FL/FR/RL/RR on 0/1/4/5, C and LFE silent.
+        let quad = equidistant_quad();
+        let quad_channels: Vec<usize> = quad.speakers().iter().map(|s| s.channel).collect();
+        assert_eq!(quad_channels, vec![0, 1, 4, 5]);
+        let mut gains = ChannelGains::silent(6);
+        gains.gains[..6].copy_from_slice(&[1.0; 6]);
+        quad.apply_mask(&mut gains);
+        assert_eq!(&gains.gains[..6], &[1.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(ChannelMode::Quad.active_channels(), &[0, 1, 4, 5]);
+        for mode in [
+            ChannelMode::Stereo,
+            ChannelMode::Quad,
+            ChannelMode::Surround51,
+        ] {
+            assert_eq!(ChannelMode::parse(mode.as_str()), Some(mode));
+        }
+        for (index, mode) in RenderMode::ALL.iter().enumerate() {
+            assert_eq!(mode.index(), index);
+        }
+    }
+
+    /// The doc promises the extension is "clamped to `max_extension` of the
+    /// pair's angular span". The old code clamped the *unnormalised* gain at
+    /// −e/(1+e) — the tangent-law small-angle approximation of g_a/g_b, not a
+    /// bound on the gain — so the limit engaged at 23.9 % extension, not 40 %.
+    /// Stereo ±30° (span 60°), source at +48° (30 % beyond the left speaker,
+    /// inside max_extension 0.4): exact VBAP gives
+    /// g_right = −sin 18°/sin 60° = −0.356822, g_left = sin 78°/sin 60° = 1.129474,
+    /// normalised (−0.301245, 0.953547). The old clamp at −0.285714 yielded
+    /// (−0.245239, 0.969463).
+    /// Experimental path, off by default (`extended_vbap: false`, no setter).
+    #[test]
+    fn extended_vbap_unclamped_inside_max_extension() {
+        let half_span = 30.0_f32.to_radians();
+        let layout = SpeakerLayout::stereo(
+            Vec3::new(half_span.cos(), half_span.sin(), 0.0),
+            Vec3::new(half_span.cos(), -half_span.sin(), 0.0),
+        );
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        let gains = layout.compute_vbap_panning_extended(
+            &listener,
+            world_direction(&listener, 48.0_f32.to_radians()),
+            0.4,
+        );
+        assert!(
+            (gains.gains[0] - 0.953_547).abs() < 1e-3,
+            "L={}",
+            gains.gains[0]
+        );
+        assert!(
+            (gains.gains[1] + 0.301_245).abs() < 1e-3,
+            "R={}",
+            gains.gains[1]
+        );
+    }
+
+    /// Beyond the allowed extension the gains are held at the limit. Stereo
+    /// ±30°, max_extension 0.4 → limit 30° + 0.4·60° = 54°:
+    /// g_left = sin 84°/sin 60° = 1.148377, g_right = −sin 24°/sin 60° = −0.469655,
+    /// normalised (0.925584, −0.378543). Sources at 54°, 70° and 120° all give
+    /// these gains; the mirror side gives them swapped.
+    #[test]
+    fn extended_vbap_holds_gains_at_extension_limit() {
+        let half_span = 30.0_f32.to_radians();
+        let layout = SpeakerLayout::stereo(
+            Vec3::new(half_span.cos(), half_span.sin(), 0.0),
+            Vec3::new(half_span.cos(), -half_span.sin(), 0.0),
+        );
+        let listener = Listener::new(Vec3::ZERO, 0.0);
+        for degrees in [54.0_f32, 70.0, 120.0] {
+            let left_side = layout.compute_vbap_panning_extended(
+                &listener,
+                world_direction(&listener, degrees.to_radians()),
+                0.4,
+            );
+            assert!(
+                (left_side.gains[0] - 0.925_584).abs() < 1e-3,
+                "{degrees}°: L={}",
+                left_side.gains[0]
+            );
+            assert!(
+                (left_side.gains[1] + 0.378_543).abs() < 1e-3,
+                "{degrees}°: R={}",
+                left_side.gains[1]
+            );
+            let right_side = layout.compute_vbap_panning_extended(
+                &listener,
+                world_direction(&listener, (-degrees).to_radians()),
+                0.4,
+            );
+            assert!((right_side.gains[0] - left_side.gains[1]).abs() < 1e-5);
+            assert!((right_side.gains[1] - left_side.gains[0]).abs() < 1e-5);
+        }
     }
 }
