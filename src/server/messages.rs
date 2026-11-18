@@ -4,6 +4,10 @@ use atrium_core::commands::Command;
 use atrium_core::speaker::{ChannelMode, RenderMode};
 use atrium_core::types::Vec3;
 
+/// Highest master gain a client may set: ×8, about +18 dB. Scenes are
+/// calibrated quiet (scenes/wisp.yaml ships at 4.0), so unity is not the top.
+const MAX_MASTER_GAIN: f32 = 8.0;
+
 /// JSON messages received from the browser via WebSocket.
 /// Tagged by the "type" field: {"type": "set_listener", "x": 3.0, ...}
 #[derive(Deserialize, Debug)]
@@ -69,7 +73,7 @@ impl ClientMessage {
                 yaw,
             },
             ClientMessage::SetGain { gain } => Command::SetMasterGain {
-                gain: gain.clamp(0.0, 1.0),
+                gain: gain.clamp(0.0, MAX_MASTER_GAIN),
             },
             ClientMessage::SetSourceMuted { index, muted } => {
                 Command::SetSourceMuted { index, muted }
@@ -231,11 +235,11 @@ mod tests {
 
     #[test]
     fn into_command_clamps_gain() {
-        let msg = ClientMessage::SetGain { gain: 5.0 };
+        let msg = ClientMessage::SetGain { gain: 50.0 };
         let cmd = msg.into_command().unwrap();
         match cmd {
             Command::SetMasterGain { gain } => {
-                assert!((gain - 1.0).abs() < 1e-6, "gain should clamp to 1.0");
+                assert!((gain - 8.0).abs() < 1e-6, "gain should clamp to 8.0");
             }
             _ => panic!("wrong command variant"),
         }

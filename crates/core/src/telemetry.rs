@@ -76,6 +76,8 @@ pub struct TelemetryFrame {
     pub channel_peaks: [f32; MAX_CHANNELS],
     /// Number of output channels.
     pub channel_count: u8,
+    /// Master output gain in effect (linear).
+    pub master_gain: f32,
 }
 
 impl Default for TelemetryFrame {
@@ -90,6 +92,7 @@ impl Default for TelemetryFrame {
             humidity_pct: 50.0,
             channel_peaks: [0.0; MAX_CHANNELS],
             channel_count: 0,
+            master_gain: 1.0,
         }
     }
 }

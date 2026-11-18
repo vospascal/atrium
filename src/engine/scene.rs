@@ -400,6 +400,7 @@ impl AudioScene {
                     frame.channel_peaks =
                         crate::engine::telemetry::compute_channel_peaks(output, channels);
                     frame.channel_count = channels as u8;
+                    frame.master_gain = self.master_gain;
                     // Stamp perceptual scores from the latest analysis.
                     let scores = self.perceptual_layer.scores();
                     for i in 0..frame.source_count as usize {

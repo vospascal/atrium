@@ -108,6 +108,9 @@ pub fn compute_telemetry(
 
 /// Serialize a telemetry frame to JSON for WebSocket broadcast.
 /// Hand-rolled to avoid serde overhead in the broadcast path.
+/// Level reported for a silent channel, in dBFS.
+const SILENT_PEAK_DB: f32 = -120.0;
+
 pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
     use std::fmt::Write;
     let mut json = String::with_capacity(256);
@@ -149,6 +152,26 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
         );
     }
 
+    json.push(']');
+
+    // What the engine is doing right now, so a control surface shows the
+    // real state and not what it last asked for.
+    let _ = write!(
+        json,
+        r#","render_mode":"{}","channel_mode":"{}","master_gain":{:.4},"peaks_db":["#,
+        frame.render_mode.as_str(),
+        frame.channel_mode.as_str(),
+        frame.master_gain,
+    );
+    let channel_count = (frame.channel_count as usize).min(frame.channel_peaks.len());
+    for (channel, peak) in frame.channel_peaks[..channel_count].iter().enumerate() {
+        if channel > 0 {
+            json.push(',');
+        }
+        // Silence is reported as the meter floor; JSON has no −infinity.
+        let peak_db = (20.0 * peak.max(1e-6).log10()).max(SILENT_PEAK_DB);
+        let _ = write!(json, "{peak_db:.1}");
+    }
     json.push_str("]}");
     json
 }
@@ -487,5 +510,37 @@ mod tests {
         assert!((src["distance"].as_f64().unwrap() - 3.0).abs() < 0.1);
         assert!(src["dist"].as_f64().unwrap() > 0.0);
         assert!((src["emit"].as_f64().unwrap() - 1.0).abs() < 0.01); // omni
+    }
+
+    /// A control surface reads the engine's real state from the stream: the
+    /// active render mode and channel mode by their wire names, the master
+    /// gain, and one peak
+    /// per output channel in dBFS. Peak 0.5 → 20·log₁₀ 0.5 = −6.0 dB; a
+    /// silent channel reads the meter floor, −120 dB.
+    #[test]
+    fn telemetry_json_reports_modes_and_channel_peaks() {
+        use atrium_core::speaker::{ChannelMode, RenderMode};
+        let mut frame = TelemetryFrame {
+            render_mode: RenderMode::Dbap,
+            channel_mode: ChannelMode::Quad,
+            channel_count: 3,
+            master_gain: 0.25,
+            ..TelemetryFrame::default()
+        };
+        frame.channel_peaks[0] = 1.0;
+        frame.channel_peaks[1] = 0.5;
+        frame.channel_peaks[2] = 0.0;
+
+        let parsed: serde_json::Value = serde_json::from_str(&telemetry_to_json(&frame)).unwrap();
+        assert_eq!(parsed["render_mode"], "dbap");
+        assert_eq!(parsed["channel_mode"], "quad");
+        assert_eq!(parsed["master_gain"], 0.25);
+        let peaks: Vec<f64> = parsed["peaks_db"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|peak| peak.as_f64().unwrap())
+            .collect();
+        assert_eq!(peaks, vec![0.0, -6.0, -120.0]);
     }
 }
