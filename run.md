@@ -7,6 +7,7 @@ Everything runs from the repository root. Stop any running engine with **Ctrl+C*
 ```sh
 cargo run --release                                   # scenes/default.yaml
 cargo run --release -- scenes/nature.yaml             # any scene file
+cargo run --release -- scenes/wisp.yaml               # one wisp flying through the room
 cargo run --release -- --ui scenes/nature.yaml        # with the terminal dashboard
 ```
 
@@ -17,6 +18,7 @@ Headphone scenes use `layout: stereo` + `render_mode: hrtf`.
 ```sh
 cargo run --release -- scenes/nature-headphones.yaml  # the meadow, binaural
 cargo run --release -- scenes/frog-headphones.yaml    # one frog, front-right
+cargo run --release -- scenes/wisp-headphones.yaml    # one wisp flying around your head
 ```
 
 ## Head tracking
@@ -26,6 +28,7 @@ Your head turn steers the listener, so the world stays put when you turn.
 ```sh
 # Sony WH/WF-1000XM5/XM6 — one command, the engine starts the Sony bridge too
 cargo run --release -- --head-tracking=sony scenes/frog-headphones.yaml
+cargo run --release -- --head-tracking=sony scenes/wisp-headphones.yaml
 
 # Any other tracker that sends OpenTrack UDP to 127.0.0.1:4242 — start it yourself
 cargo run --release -- --head-tracking scenes/frog-headphones.yaml
@@ -33,6 +36,8 @@ cargo run --release -- --head-tracking scenes/frog-headphones.yaml
 
 Look straight ahead when it starts: that is "centre". Test: in the frog scene,
 turn your head right and the frog moves to straight ahead.
+The wisp scene is the harder test: it flies around and overhead, so turn your
+head to follow it and it should stay where it is in the world.
 
 ### Sony setup (once, and after firmware or setting changes)
 

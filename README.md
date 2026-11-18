@@ -1,206 +1,170 @@
 # Atrium
 
-Spatial audio engine in Rust — virtual acoustic environments with world-locked 3D sound.
+Atrium renders an environment. It is a spatial audio engine in Rust: a world of
+positioned sounds (birds, a river, wind, rain, an instrument), and a renderer
+that works out what arrives at each speaker or each ear.
 
-Built for a NUC driving 5.1 speakers + per-listener binaural headphones, but works on any system with stereo output.
+Built for a NUC driving 5.1 speakers plus binaural headphones, and it runs on
+any machine with a stereo output.
 
-## What it does
+To run it, see **[run.md](run.md)**: speakers, headphones, head tracking,
+analysis tools, profiling and ports.
 
-Two sound sources (djembe + campfire) orbit independently around a listener in a 6x4m virtual room. You hear them pan smoothly in stereo using equal-power panning with distance-based attenuation (inverse distance model). The architecture is designed from day one for:
-
-- Ray-traced reflections from room geometry
-- Acoustic zone transitions (atrium → rainy outdoors)
-- FDN reverb tied to room size/materials
-- HRTF binaural rendering for headphones
-- 5.1 surround speaker output
-- Multiple simultaneous listeners
-- WebSocket control for phone-based position tracking
-- Localized sound props (drips, leaves, puddles) with audible radius
-
-## Prerequisites
-
-- **Rust** 1.85+ (tested on 1.93.1)
-- Audio output device (headphones recommended for spatial effect)
-- macOS, Linux, or Windows
-
-## Build & Run
+## Quick start
 
 ```bash
-# Build
-cargo build
-
-# Run — you should hear djembe + campfire orbiting in stereo
-cargo run
-
-# Run optimized (lower CPU, tighter audio timing)
-cargo run --release
-
-# Run tests
-cargo test
+cargo run --release                                   # scenes/default.yaml on your speakers
 ```
 
-## Project Structure
-
+```bash
+cargo run --release -- scenes/nature-headphones.yaml  # a meadow, binaural
 ```
+
+```bash
+cargo test --workspace
+```
+
+Needs Rust 1.85 or newer (tested on 1.93.1) and an audio output device. macOS
+and Linux are the tested platforms.
+
+## What a scene is made of
+
+A scene file wires separate YAML files together, so each can be swapped alone:
+
+| Directory | Describes |
+|---|---|
+| `scenes/` | Which sounds are where, the speaker layout, the render mode |
+| `environments/` | The virtual acoustic space: size, wall materials, ground, reverb |
+| `rooms/` | The physical room the speakers stand in |
+| `sources/` | One sound: a recording or a synth, its level and directivity |
+| `atmospheres/` | Air temperature, humidity and pressure |
+
+Sounds are either decoded recordings (`assets/`) or procedural synths
+(`src/synth/`: four winds, two rains, river, waves, and a small flying creature).
+
+## How it renders
+
+Every source goes through the same three steps. Which implementation runs in
+each step depends on the render mode.
+
+1. **Resolve paths.** How does the sound reach the receiver: directly, and off
+   up to six faces of the environment (first-order image sources).
+2. **Per-path effects, then the renderer.** Each path gets its own delay, air
+   absorption (ISO 9613-1), ground effect (ISO 9613-2) and wall colouring; the
+   renderer then places it in the output.
+3. **Mix stages** on the whole buffer: late reverb (FDN), bass management,
+   speaker delay compensation, master gain.
+
+| Mode | For | Paths | Renderer | Mix stages |
+|---|---|---|---|---|
+| `world_locked` | speakers | direct only | each speaker is a microphone in the world: its own delay, air absorption, reflection taps | bass management, static delay compensation, master gain |
+| `vbap` | 3 or more speakers | direct + reflections | amplitude panning relative to the listener | reverb, bass management, listener-relative delay compensation, master gain |
+| `hrtf` | headphones | direct + reflections | HRTF convolution to two ears | reverb, master gain |
+| `dbap` | speakers | direct + reflections | distance-based panning from source to speaker positions | reverb, bass management, static delay compensation, master gain |
+| `ambisonics` | speakers or stereo | direct + reflections | first-order B-format encode | B-format delays, decode, reverb, bass management, listener-relative delay compensation, master gain |
+
+`world_locked` and `dbap` do not depend on where the listener stands: everyone
+in the room gets the same speaker feed. `vbap` and `ambisonics` are rendered for
+one listening position.
+
+## Project structure
+
+```text
 src/
-├── main.rs                  # Entry point: decode audio, setup cpal, run
-│
-├── audio/
-│   ├── decode.rs            # MP3/WAV/FLAC → mono f32 buffer (symphonia)
-│   ├── mixer.rs             # Mix N sources → stereo output with spatial panning + distance attenuation
-│   └── output.rs            # Audio backend trait + cpal implementation
-│
+├── main.rs                 # entry point: load a scene, open the device, run
+├── audio/                  # decoding, output device, filters, atmosphere,
+│                           #   ISO 9613-2 ground effect, HRTF convolver
+├── synth/                  # procedural sources, one file per generator
+├── config/                 # scene YAML → AudioScene
+│   ├── scene.rs            #   the scene file's own fields
+│   ├── environment.rs      #   environment file, wall material names
+│   ├── source.rs           #   source files (recording or synth)
+│   ├── synth/              #   one file per synth's parameters
+│   └── build.rs            #   builds the engine's AudioScene
 ├── engine/
-│   ├── commands.rs          # Lock-free command queue (rtrb ring buffer)
-│   └── scene.rs             # AudioScene: owns all state on the audio thread
-│
-├── spatial/
-│   ├── listener.rs          # Listener position + orientation
-│   ├── source.rs            # SoundSource trait + TestNode (orbiting buffer player)
-│   └── panner.rs            # Equal-power stereo panning + distance attenuation
-│
-├── world/
-│   ├── types.rs             # Vec3 math
-│   └── room.rs              # Room trait + BoxRoom (6x4m)
-│
-└── processors/
-    └── mod.rs               # AudioProcessor trait (extension point for reverb, reflections, etc.)
+│   ├── scene.rs            # AudioScene: all state owned by the audio thread
+│   ├── edit.rs             # live add/remove of sources
+│   ├── telemetry.rs        # levels and positions sent back to the control side
+│   ├── profiler.rs         # profile_span! (feature `profiler`)
+│   └── memprof.rs          # allocation tracking (feature `memprof`)
+├── pipeline/
+│   ├── environment.rs      # Environment: bounds, wall materials, ground, air
+│   ├── wall_material.rs    # absorption per octave band
+│   ├── path.rs             # PathResolver and PathEffect contracts
+│   ├── path_resolvers.rs   # direct path, image sources
+│   ├── path_effects.rs     # delay, air absorption, ground effect, wall absorption
+│   ├── renderer.rs         # Renderer contract, SourceContext
+│   ├── renderers/          # one file per renderer, plus diffuse field emitters
+│   ├── mix_stage.rs        # MixStage contract
+│   ├── stages/             # reverb, bass management, delay compensation, …
+│   ├── room_acoustics.rs   # Sabine RT60, critical distance, delay sizing
+│   ├── builders/           # which pieces each render mode is made of
+│   ├── render.rs           # RenderPipeline and the per-buffer render loop
+│   └── tests/              # end-to-end pipeline tests, grouped by subject
+├── head_tracking/          # OpenTrack UDP, Sony headphone bridge
+├── server/                 # WebSocket telemetry and control (port 3333)
+└── bin/                    # analysis tools for recordings and synths
 
-assets/
-├── djembe.mp3               # Percussive test source (close orbit)
-└── campfire.mp3             # Ambient test source (wide orbit)
+crates/
+├── core/                   # atrium-core: math and panning with no I/O
+│                           #   (Vec3, listener, speakers, VBAP, DBAP, ambisonics,
+│                           #    directivity, commands, telemetry types)
+└── tui/                    # terminal dashboard (`--ui`)
+
+tests/
+└── audio_thread_allocations.rs   # the audio callback never touches the heap
 ```
 
-## Architecture
+Crate conventions (private modules behind a small facade, one implementation
+per file) are in [AGENTS.md](AGENTS.md).
 
-```
-Control Thread                    Audio Thread (cpal callback)
-     │                                  │
-     │── Command (rtrb) ──────────────>│  SetListenerPose, SetMasterGain, ...
-     │                                  │
-     │                            AudioScene
-     │                           ┌──────┴──────┐
-     │                      Listener      Sources[]
-     │                           │              │
-     │                           └──── Mixer ───┘
-     │                                  │
-     │                           [Processors]  ← future: reverb, reflections
-     │                                  │
-     │                            Stereo Output
-     │                                  │
-     │                              cpal → OS
+## Threads
+
+```text
+Control thread                          Audio thread (cpal callback)
+     │                                        │
+     │── Command (rtrb ring buffer) ────────▶ │  process_commands
+     │   SetListenerPose, SetRenderMode, …    │
+     │                                        │  AudioScene::render
+     │                                        │    tick sources
+     │                                        │    render_pipeline (active mode)
+     │ ◀──────── TelemetryFrame (rtrb) ───────│    push telemetry
+     │                                        │
+     │                                   cpal → device
 ```
 
-**Key design constraint:** The audio callback runs on a real-time OS thread. No allocations, no locks, no I/O. Commands arrive via a wait-free ring buffer (`rtrb`). All state is owned by `AudioScene` on the audio thread.
+All five pipelines are built at startup, so switching mode allocates nothing.
+
+**The audio callback must not allocate, lock or do I/O.** Commands arrive over
+a wait-free ring buffer and all state is owned by `AudioScene` on the audio
+thread. `tests/audio_thread_allocations.rs` enforces the allocation part: it
+counts every heap operation inside the callback, in every render mode, across
+the shipped scenes, with live commands arriving.
 
 ## Profiling
 
-Two optional features for measuring pipeline performance — both compile to nothing when disabled.
+Two optional features, both compiled out when disabled. Commands are in
+[run.md](run.md#profiling).
 
-### Time profiling (`profiler`)
+- **`profiler`** instruments the render path with `tracing` spans and can write
+  terminal timings, a Perfetto trace or a flame graph.
+- **`memprof`** counts allocations on the audio thread per stage while the
+  engine runs.
 
-Instruments the render pipeline with `tracing` spans. Choose an output backend at runtime:
+| Span | Location | What it measures |
+|---|---|---|
+| `callback` | `audio/output.rs` | The whole cpal callback |
+| `process_commands` | `engine/scene.rs` | Draining the command queue |
+| `render` | `engine/scene.rs` | One buffer: tick, analysis, pipeline, telemetry |
+| `source_tick` | `engine/scene.rs` | Advancing every source |
+| `perceptual` | `engine/scene.rs` | Masking analysis (telemetry only) |
+| `pipeline` | `engine/scene.rs` | The active render pipeline |
+| `renderer` | `pipeline/render.rs` | One source through its renderer |
+| `mix_stages` | `pipeline/render.rs` | The post-mix chain |
+| `telemetry` | `engine/scene.rs` | Building and pushing a telemetry frame |
 
-```bash
-# Terminal span timing
-cargo run --features profiler -- scenes/default.yaml --profile fmt
-
-# Perfetto trace (drag trace.pftrace into https://ui.perfetto.dev)
-cargo run --features profiler -- scenes/default.yaml --profile perfetto
-
-# Flame graph (then: inferno-flamegraph < tracing.folded > flamegraph.svg)
-cargo run --features profiler -- scenes/default.yaml --profile flame
-```
-
-Without `--profile`, no subscriber is installed and spans are ~1ns no-ops.
-
-### Allocation tracking (`memprof`)
-
-Detects heap allocations on the audio thread — any allocation in the callback is a real-time safety violation.
-
-```bash
-cargo run --features memprof -- scenes/default.yaml
-```
-
-### Both together
-
-```bash
-cargo run --features profiler,memprof -- scenes/default.yaml --profile perfetto
-```
-
-### Pipeline benchmark
-
-Built-in wall-clock measurement of every pipeline stage (mixer, processors, full chain) across all render modes. Reports min/avg/max and percentage of the audio callback deadline.
-
-```bash
-# Debug mode (catches regressions, ~10× slower than real-time)
-cargo test -p atrium pipeline_benchmark -- --ignored --nocapture
-
-# Release mode (production-representative numbers)
-cargo test -p atrium --release pipeline_benchmark -- --ignored --nocapture
-```
-
-Example output (release, M-series Mac, 2 sources, 512 frames @ 48kHz):
-
-```
-Pipeline Benchmark (512 frames @ 48000Hz, deadline = 10.67ms)
-  20 warmup + 200 measured iterations
-──────────────────────────────────────────────────────────────────────────
-  Stage                              Min        Avg        Max   % Dead
-──────────────────────────────────────────────────────────────────────────
-  mix_sources (stereo)             15.1us      15.5us      19.0us     0.1%
-  mix_sources (mono)               14.8us      15.2us      18.5us     0.1%
-  mix_sources (quad)               20.3us      21.6us      28.1us     0.2%
-  mix_sources (5.1 VBAP)           25.4us      28.1us      57.7us     0.3%
-  binaural_mix (HRTF)              18.2us      19.7us      23.8us     0.2%
-──────────────────────────────────────────────────────────────────────────
-  EarlyReflections                  2.7us       2.7us       2.9us     0.0%
-  FdnReverb                         5.2us       5.5us       9.2us     0.1%
-  FdnReverb (6ch)                   6.5us       6.6us      12.0us     0.1%
-──────────────────────────────────────────────────────────────────────────
-  full_pipeline (stereo)           16.5us      16.6us      23.7us     0.2%
-  full_pipeline (mono)             16.2us      16.4us      22.1us     0.2%
-  full_pipeline (quad)             22.1us      22.8us      30.5us     0.2%
-  full_pipeline (5.1 VBAP)         27.2us      27.7us      33.7us     0.3%
-  full_pipeline (binaural)         26.5us      28.2us      34.5us     0.3%
-──────────────────────────────────────────────────────────────────────────
-  deadline = 10.67ms (512 frames / 48000Hz)
-```
-
-The test is `#[ignore]` so it never runs during normal `cargo test`.
-
-### Instrumented spans
-
-The `profiler` feature instruments the following spans (visible in Perfetto/flame graphs):
-
-| Level | Span | Location | What it measures |
-|-------|------|----------|-----------------|
-| Callback | `callback` | `audio/output.rs` | Full cpal callback |
-| Scene | `render` | `engine/scene.rs` | Source tick + mix + processors + telemetry |
-| Scene | `process_commands` | `engine/scene.rs` | Command queue drain |
-| Scene | `source_tick` | `engine/scene.rs` | All sources `.tick(dt)` |
-| Mix | `mix` | `engine/scene.rs` | Mixer dispatch (multichannel or binaural) |
-| Mix | `mix_source` | `audio/mixer.rs` | Per-source multichannel processing |
-| Mix | `air_absorption` | `audio/mixer.rs` | ISO 9613-1 filter update |
-| Mix | `ground_effect` | `audio/mixer.rs` | ISO 9613-2 ground gain |
-| Mix | `reflection_update` | `audio/mixer.rs` | Image-source tap recomputation |
-| Mix | `speaker_gains` | `audio/mixer.rs` | VBAP/MDAP gain computation |
-| Mix | `source_render` | `audio/mixer.rs` | Per-frame gain ramp + sample generation |
-| Mix | `lfe_crossover` | `audio/mixer.rs` | 120Hz Butterworth low-pass |
-| Mix | `delay_compensation` | `audio/mixer.rs` | Speaker time-of-arrival alignment |
-| Mix | `master_gain` | `audio/mixer.rs` | Final gain + clamp |
-| Binaural | `binaural_source` | `audio/binaural.rs` | Per-source HRTF processing |
-| Binaural | `distance_gain` | `audio/binaural.rs` | Inverse distance model |
-| Binaural | `hrtf_update` | `audio/binaural.rs` | SOFA filter lookup + convolver set |
-| Binaural | `hrtf_convolution` | `audio/binaural.rs` | Block FFT convolution (mono→L/R) |
-| Processor | `processor` | `engine/scene.rs` | Per-processor (name + index) |
-| Processor | `fdn_frames` | `processors/fdn_reverb.rs` | FDN frame loop (frames + lines) |
-| Processor | `er_frames` | `processors/early_reflections.rs` | Early reflections frame loop (frames + taps) |
-| Telemetry | `telemetry` | `engine/scene.rs` | Telemetry push (~15 Hz) |
-
-### External profilers (Instruments, perf, etc.)
-
-Use the `profiling` Cargo profile for release builds with debug symbols:
+For external profilers (Instruments, perf) there is a `profiling` Cargo profile:
+a release build with debug symbols.
 
 ```bash
 cargo run --profile profiling -- scenes/default.yaml
@@ -209,20 +173,32 @@ cargo run --profile profiling -- scenes/default.yaml
 ## Dependencies
 
 | Crate | Purpose |
-|-------|---------|
-| [cpal](https://github.com/RustAudio/cpal) | Cross-platform audio device I/O |
-| [symphonia](https://github.com/pdeljanov/Symphonia) | MP3/WAV/FLAC decoding |
-| [rtrb](https://github.com/mgeier/rtrb) | Lock-free SPSC ring buffer |
+|---|---|
+| [cpal](https://github.com/RustAudio/cpal) | Audio device I/O |
+| [symphonia](https://github.com/pdeljanov/Symphonia) | Decoding MP3, WAV, AAC, Ogg Vorbis |
+| [rtrb](https://github.com/mgeier/rtrb) | Wait-free single-producer ring buffer |
+| [realfft](https://github.com/HEnquist/realfft) | FFT for the HRTF convolver |
+| [sofar](https://crates.io/crates/sofar) | Reading SOFA HRTF files |
+| [tungstenite](https://github.com/snapview/tungstenite-rs) | WebSocket server |
+| serde, serde_yaml, serde_json | Scene files and telemetry |
 
-The audio backend is abstracted behind the `AudioOutput` trait — swappable for [cubeb-rs](https://github.com/mozilla/cubeb-rs) or others without changing the engine.
+## Extension points
 
-## Extension Points
+| Trait | File | Implement it to add |
+|---|---|---|
+| `SoundSource` | `crates/core/src/source.rs` | A new kind of sound (a synth, a player) |
+| `PathResolver` | `src/pipeline/path.rs` | Another way sound reaches the receiver (for example ray tracing) |
+| `PathEffect` | `src/pipeline/path.rs` | Per-path processing |
+| `Renderer` | `src/pipeline/renderer.rs` | A spatialisation method |
+| `MixStage` | `src/pipeline/mix_stage.rs` | Whole-buffer processing after the mix |
+| `AudioOutput` | `src/audio/output.rs` | Another audio backend |
 
-| Trait | File | What to implement |
-|-------|------|-------------------|
-| `SoundSource` | `spatial/source.rs` | New sound types (WAV loops, granular, procedural noise) |
-| `AudioProcessor` | `processors/mod.rs` | Effects chain (reverb, reflections, zone blending, occlusion) |
-| `Room` | `world/room.rs` | Geometry (add `cast_ray()` for ray-traced audio) |
-| `AudioOutput` | `audio/output.rs` | Alternative backends (cubeb-rs, custom HDMI routing) |
+A new render mode is a new file in `src/pipeline/builders/` that picks one of
+each.
 
-See [REFERENCES.md](REFERENCES.md) for a curated list of libraries and architecture patterns to draw from.
+## Further reading
+
+- [docs/physics-audit-decisions.md](docs/physics-audit-decisions.md): why the models are the way they are
+- [docs/living-atrium-roadmap.md](docs/living-atrium-roadmap.md): the synthesis roadmap
+- [docs/listener-tracking.md](docs/listener-tracking.md): head and position tracking
+- [REFERENCES.md](REFERENCES.md): libraries and papers the engine draws on
