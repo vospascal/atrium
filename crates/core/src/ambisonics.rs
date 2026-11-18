@@ -67,6 +67,16 @@ pub fn foa_encode(azimuth: f32, elevation: f32, gain: f32) -> BFormat {
     }
 }
 
+/// Largest speaker ring an [`FoaDecoder`] can hold, and the largest virtual
+/// ring [`AllRadDecoder::from_listener_with_count`] accepts.
+///
+/// Decoders keep their matrices in fixed-size stack arrays so that building and
+/// using one never touches the heap — the decoder is rebuilt from the listener
+/// pose on the audio thread. 32 virtual speakers is a 11.25° spacing, far past
+/// the point where first-order material gains anything (FOA carries four
+/// channels of spatial information). Speakers beyond this bound are ignored.
+const MAX_VIRTUAL_SPEAKERS: usize = 32;
+
 /// Precomputed FOA decoder for a specific speaker layout.
 ///
 /// The decode matrix maps 4 B-format channels (W, Y, Z, X) to N speaker gains.
@@ -74,11 +84,20 @@ pub fn foa_encode(azimuth: f32, elevation: f32, gain: f32) -> BFormat {
 ///
 /// Adapts to 3-channel (horizontal-only) decoding when all speakers have zero
 /// elevation, storing zeros in the Z column to avoid a singular 4×4 matrix.
+///
+/// Holds at most [`MAX_VIRTUAL_SPEAKERS`] speakers; construction and decoding
+/// perform no heap allocation.
 pub struct FoaDecoder {
-    /// Nx4 decode matrix. Row i = [d_w, d_y, d_z, d_x] for speaker i.
-    decode_matrix: Vec<[f32; 4]>,
-    /// Output channel index for each speaker.
-    channels: Vec<usize>,
+    /// Nx4 decode matrix. Row i = [d_w, d_y, d_z, d_x] for speaker i; only the
+    /// first `speaker_count` rows are meaningful.
+    decode_matrix: [[f32; 4]; MAX_VIRTUAL_SPEAKERS],
+    /// Number of valid rows in `decode_matrix`.
+    speaker_count: usize,
+    /// Output channel index for each speaker; only the first `channel_count`
+    /// entries are meaningful.
+    channels: [usize; MAX_VIRTUAL_SPEAKERS],
+    /// Number of valid entries in `channels`.
+    channel_count: usize,
 }
 
 impl FoaDecoder {
@@ -87,35 +106,60 @@ impl FoaDecoder {
     /// Speaker azimuths and elevations are computed in the listener's local
     /// frame (same as the encoder), so both sides of the B-format chain use
     /// the same reference.
+    ///
+    /// At most [`MAX_VIRTUAL_SPEAKERS`] speakers are used.
     pub fn from_listener(speakers: &[Speaker], speaker_count: usize, listener: &Listener) -> Self {
-        let n = speaker_count;
+        let n = speaker_count.min(MAX_VIRTUAL_SPEAKERS);
         if n == 0 {
-            return Self {
-                decode_matrix: Vec::new(),
-                channels: Vec::new(),
-            };
+            return Self::without_speakers(&[]);
         }
 
         let cos_y = listener.yaw.cos();
         let sin_y = listener.yaw.sin();
 
-        let mut azimuths = Vec::with_capacity(n);
-        let mut elevations = Vec::with_capacity(n);
+        let mut azimuths = [0.0_f32; MAX_VIRTUAL_SPEAKERS];
+        let mut elevations = [0.0_f32; MAX_VIRTUAL_SPEAKERS];
+        let mut channels = [0_usize; MAX_VIRTUAL_SPEAKERS];
 
-        for s in &speakers[..n] {
+        for (i, s) in speakers[..n].iter().enumerate() {
             let dx = s.position.x - listener.position.x;
             let dy = s.position.y - listener.position.y;
             let dz = s.position.z - listener.position.z;
             let local_x = dx * cos_y + dy * sin_y; // forward
             let local_y = -dx * sin_y + dy * cos_y; // left
-            azimuths.push(local_y.atan2(local_x));
+            azimuths[i] = local_y.atan2(local_x);
             let horiz = (local_x * local_x + local_y * local_y).sqrt();
-            elevations.push(dz.atan2(horiz));
+            elevations[i] = dz.atan2(horiz);
+            channels[i] = s.channel;
         }
 
-        let channels: Vec<usize> = speakers[..n].iter().map(|s| s.channel).collect();
+        Self::new(&azimuths[..n], &elevations[..n], &channels[..n])
+    }
 
-        Self::new(&azimuths, &elevations, &channels)
+    /// A decoder with no speakers whose channel table is `channels` (truncated
+    /// to [`MAX_VIRTUAL_SPEAKERS`]).
+    fn without_speakers(channels: &[usize]) -> Self {
+        let channel_count = channels.len().min(MAX_VIRTUAL_SPEAKERS);
+        let mut channel_table = [0_usize; MAX_VIRTUAL_SPEAKERS];
+        channel_table[..channel_count].copy_from_slice(&channels[..channel_count]);
+        Self {
+            decode_matrix: [[0.0; 4]; MAX_VIRTUAL_SPEAKERS],
+            speaker_count: 0,
+            channels: channel_table,
+            channel_count,
+        }
+    }
+
+    /// A decoder whose first `n` rows all carry `[equal, 0, 0, 0]` (omni fallback
+    /// for a singular encoding matrix).
+    fn omni_fallback(n: usize, channels: &[usize]) -> Self {
+        let equal = 1.0 / (n as f32).sqrt();
+        let mut decoder = Self::without_speakers(channels);
+        decoder.speaker_count = n;
+        for row in &mut decoder.decode_matrix[..n] {
+            *row = [equal, 0.0, 0.0, 0.0];
+        }
+        decoder
     }
 
     /// Build a decoder from speaker azimuths, elevations (radians), and channel indices.
@@ -125,14 +169,14 @@ impl FoaDecoder {
     ///
     /// When all speakers have zero elevation, builds a 3-channel (W, Y, X)
     /// decoder to avoid the singular 4×4 matrix that arises from a flat array.
+    ///
+    /// At most [`MAX_VIRTUAL_SPEAKERS`] speakers are used; any beyond that are ignored.
     pub fn new(azimuths: &[f32], elevations: &[f32], channels: &[usize]) -> Self {
-        let n = azimuths.len();
+        let n = azimuths.len().min(MAX_VIRTUAL_SPEAKERS);
         if n == 0 {
-            return Self {
-                decode_matrix: Vec::new(),
-                channels: channels.to_vec(),
-            };
+            return Self::without_speakers(channels);
         }
+        let azimuths = &azimuths[..n];
 
         let has_elevation = elevations.iter().any(|e| e.abs() > 1e-6);
 
@@ -150,7 +194,7 @@ impl FoaDecoder {
         let n = azimuths.len();
 
         // Build encoding matrix C (3×N): W_NORM, sin(φ), cos(φ)
-        let mut c = vec![[0.0_f32; 3]; n];
+        let mut c = [[0.0_f32; 3]; MAX_VIRTUAL_SPEAKERS];
         for (i, &az) in azimuths.iter().enumerate() {
             c[i][0] = W_NORM;
             c[i][1] = az.sin();
@@ -162,7 +206,7 @@ impl FoaDecoder {
         for i in 0..3 {
             for j in 0..3 {
                 let mut sum = 0.0_f32;
-                for ck in &c {
+                for ck in &c[..n] {
                     sum += ck[i] * ck[j];
                 }
                 cct[i][j] = sum;
@@ -171,17 +215,13 @@ impl FoaDecoder {
 
         let inv = match invert_3x3(&cct) {
             Some(m) => m,
-            None => {
-                let equal = 1.0 / (n as f32).sqrt();
-                return Self {
-                    decode_matrix: vec![[equal, 0.0, 0.0, 0.0]; n],
-                    channels: channels.to_vec(),
-                };
-            }
+            None => return Self::omni_fallback(n, channels),
         };
 
         // D = Cᵀ · (CCᵀ)⁻¹ — store in [d_w, d_y, 0, d_x] layout
-        let mut decode_matrix = vec![[0.0_f32; 4]; n];
+        let mut decoder = Self::without_speakers(channels);
+        decoder.speaker_count = n;
+        let decode_matrix = &mut decoder.decode_matrix;
         for i in 0..n {
             for j in 0..3 {
                 let mut sum = 0.0_f32;
@@ -194,10 +234,7 @@ impl FoaDecoder {
             }
         }
 
-        Self {
-            decode_matrix,
-            channels: channels.to_vec(),
-        }
+        decoder
     }
 
     /// 4-channel decoder (full 3D): W, Y, Z, X.
@@ -205,7 +242,7 @@ impl FoaDecoder {
         let n = azimuths.len();
 
         // Build encoding matrix C (4×N): W_NORM, cos(θ)·sin(φ), sin(θ), cos(θ)·cos(φ)
-        let mut c = vec![[0.0_f32; 4]; n];
+        let mut c = [[0.0_f32; 4]; MAX_VIRTUAL_SPEAKERS];
         for i in 0..n {
             let cos_el = elevations[i].cos();
             c[i][0] = W_NORM;
@@ -219,7 +256,7 @@ impl FoaDecoder {
         for i in 0..4 {
             for j in 0..4 {
                 let mut sum = 0.0_f32;
-                for ck in &c {
+                for ck in &c[..n] {
                     sum += ck[i] * ck[j];
                 }
                 cct[i][j] = sum;
@@ -228,17 +265,13 @@ impl FoaDecoder {
 
         let inv = match invert_4x4(&cct) {
             Some(m) => m,
-            None => {
-                let equal = 1.0 / (n as f32).sqrt();
-                return Self {
-                    decode_matrix: vec![[equal, 0.0, 0.0, 0.0]; n],
-                    channels: channels.to_vec(),
-                };
-            }
+            None => return Self::omni_fallback(n, channels),
         };
 
         // D = Cᵀ · (CCᵀ)⁻¹
-        let mut decode_matrix = vec![[0.0_f32; 4]; n];
+        let mut decoder = Self::without_speakers(channels);
+        decoder.speaker_count = n;
+        let decode_matrix = &mut decoder.decode_matrix;
         for i in 0..n {
             for j in 0..4 {
                 let mut sum = 0.0_f32;
@@ -249,29 +282,36 @@ impl FoaDecoder {
             }
         }
 
-        Self {
-            decode_matrix,
-            channels: channels.to_vec(),
-        }
+        decoder
     }
 
     /// Decode B-format coefficients to per-channel speaker gains.
     pub fn decode(&self, bformat: &BFormat) -> ChannelGains {
-        let mut gains = ChannelGains::silent(MAX_CHANNELS);
-        for (i, row) in self.decode_matrix.iter().enumerate() {
-            let g =
-                row[0] * bformat.w + row[1] * bformat.y + row[2] * bformat.z + row[3] * bformat.x;
-            if i < self.channels.len() {
-                gains.gains[self.channels[i]] = g;
-            }
-        }
-        gains
+        decode_rows(
+            &self.decode_matrix[..self.speaker_count],
+            &self.channels[..self.channel_count],
+            bformat,
+        )
     }
 
     /// Number of speakers in this decoder.
     pub fn speaker_count(&self) -> usize {
-        self.decode_matrix.len()
+        self.speaker_count
     }
+}
+
+/// Apply a decode matrix (one `[w, y, z, x]` row per speaker) to a B-format
+/// signal, writing each speaker's gain to its output channel. Rows without a
+/// channel entry are skipped.
+fn decode_rows(rows: &[[f32; 4]], channels: &[usize], bformat: &BFormat) -> ChannelGains {
+    let mut gains = ChannelGains::silent(MAX_CHANNELS);
+    for (i, row) in rows.iter().enumerate() {
+        let g = row[0] * bformat.w + row[1] * bformat.y + row[2] * bformat.z + row[3] * bformat.x;
+        if i < channels.len() {
+            gains.gains[channels[i]] = g;
+        }
+    }
+    gains
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -284,7 +324,8 @@ impl FoaDecoder {
 /// Going higher (24, 50) has diminishing returns since FOA only carries 4 channels
 /// of spatial information. 12 is the standard choice in literature (Zotter & Frank).
 ///
-/// This is just the default — `from_listener_with_count()` accepts any value ≥4.
+/// This is just the default — `from_listener_with_count()` accepts any value in
+/// `4..=MAX_VIRTUAL_SPEAKERS`.
 pub const DEFAULT_ALLRAD_VIRTUAL_COUNT: usize = 12;
 
 /// AllRAD decoder: decode FOA to virtual speakers, VBAP re-pan to real speakers.
@@ -303,11 +344,17 @@ pub const DEFAULT_ALLRAD_VIRTUAL_COUNT: usize = 12;
 /// The virtual speaker count is configurable via `from_listener_with_count()`.
 /// Any value ≥4 works; 12 is the default. Higher values give marginally smoother
 /// re-panning at no runtime cost (only build time).
+///
+/// Holds at most `MAX_CHANNELS` real speakers; construction and decoding perform
+/// no heap allocation.
 pub struct AllRadDecoder {
-    /// N_real × 4 combined decode matrix.
-    decode_matrix: Vec<[f32; 4]>,
-    /// Output channel index for each real speaker.
-    channels: Vec<usize>,
+    /// N_real × 4 combined decode matrix; only the first `speaker_count` rows
+    /// are meaningful.
+    decode_matrix: [[f32; 4]; MAX_CHANNELS],
+    /// Output channel index for each real speaker (first `speaker_count` entries).
+    channels: [usize; MAX_CHANNELS],
+    /// Number of real speakers.
+    speaker_count: usize,
 }
 
 impl AllRadDecoder {
@@ -323,9 +370,14 @@ impl AllRadDecoder {
 
     /// Build an AllRAD decoder with a specific number of virtual speakers.
     ///
-    /// `virtual_count` must be ≥4 (minimum for FOA t-design). Typical values:
-    /// 12 (default, 30° spacing), 16 (22.5°), 24 (15°). Higher values give
-    /// marginally smoother re-panning but only affect build time, not runtime.
+    /// `virtual_count` must be ≥4 (minimum for FOA t-design) and is clamped to
+    /// `4..=`[`MAX_VIRTUAL_SPEAKERS`] — the virtual ring lives in stack storage so
+    /// building never allocates. Typical values: 12 (default, 30° spacing),
+    /// 16 (22.5°), 24 (15°). Higher values give marginally smoother re-panning
+    /// but only affect build time, not runtime.
+    ///
+    /// At most `MAX_CHANNELS` real speakers are used (the VBAP matrix is indexed
+    /// by output channel).
     ///
     /// Steps:
     /// 1. Places `virtual_count` virtual speakers at equal intervals in listener-local frame.
@@ -338,27 +390,38 @@ impl AllRadDecoder {
         listener: &Listener,
         virtual_count: usize,
     ) -> Self {
-        let virtual_count = virtual_count.max(4);
-        let n_real = speaker_count;
+        let virtual_count = virtual_count.clamp(4, MAX_VIRTUAL_SPEAKERS);
+        let n_real = speaker_count.min(MAX_CHANNELS);
         if n_real == 0 {
             return Self {
-                decode_matrix: Vec::new(),
-                channels: Vec::new(),
+                decode_matrix: [[0.0; 4]; MAX_CHANNELS],
+                channels: [0; MAX_CHANNELS],
+                speaker_count: 0,
             };
         }
 
-        let channels: Vec<usize> = speakers[..n_real].iter().map(|s| s.channel).collect();
+        let mut channels = [0_usize; MAX_CHANNELS];
+        for (channel, speaker) in channels.iter_mut().zip(&speakers[..n_real]) {
+            *channel = speaker.channel;
+        }
 
         // Step 1: Virtual speakers at equal angular intervals (listener-local frame)
-        let mut virt_azimuths = vec![0.0f32; virtual_count];
-        for (i, az) in virt_azimuths.iter_mut().enumerate() {
+        let mut virt_azimuths = [0.0f32; MAX_VIRTUAL_SPEAKERS];
+        for (i, az) in virt_azimuths[..virtual_count].iter_mut().enumerate() {
             *az = (i as f32) * std::f32::consts::TAU / virtual_count as f32;
         }
-        let virt_elevations = vec![0.0f32; virtual_count];
-        let virt_channels: Vec<usize> = (0..virtual_count).collect();
+        let virt_elevations = [0.0f32; MAX_VIRTUAL_SPEAKERS];
+        let mut virt_channels = [0_usize; MAX_VIRTUAL_SPEAKERS];
+        for (i, channel) in virt_channels[..virtual_count].iter_mut().enumerate() {
+            *channel = i;
+        }
 
         // Step 2: FOA mode-matching decoder for the virtual ring
-        let virt_decoder = FoaDecoder::new(&virt_azimuths, &virt_elevations, &virt_channels);
+        let virt_decoder = FoaDecoder::new(
+            &virt_azimuths[..virtual_count],
+            &virt_elevations[..virtual_count],
+            &virt_channels[..virtual_count],
+        );
 
         // Step 3: VBAP re-panning matrix — for each virtual speaker, compute
         // gains to real speakers. Virtual speakers are in local frame, so we
@@ -367,20 +430,34 @@ impl AllRadDecoder {
         let sin_y = listener.yaw.sin();
 
         // Compute real speaker angles in listener-local frame + sort by angle
-        let mut real_angles: Vec<(f32, usize)> = Vec::with_capacity(n_real);
-        let mut real_dists: Vec<f32> = Vec::with_capacity(n_real);
+        let mut real_angles = [(0.0_f32, 0_usize); MAX_CHANNELS];
         for (i, s) in speakers[..n_real].iter().enumerate() {
             let dx = s.position.x - listener.position.x;
             let dy = s.position.y - listener.position.y;
             let local_x = dx * cos_y + dy * sin_y;
             let local_y = -dx * sin_y + dy * cos_y;
-            real_angles.push((local_y.atan2(local_x), i));
-            real_dists.push((dx * dx + dy * dy).sqrt().max(0.1));
+            real_angles[i] = (local_y.atan2(local_x), i);
         }
-        real_angles.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let real_angles = &mut real_angles[..n_real];
+        // Stable insertion sort by angle: `slice::sort_by` may allocate a merge
+        // buffer, and n_real ≤ MAX_CHANNELS makes insertion sort the right size.
+        for unsorted in 1..real_angles.len() {
+            let mut position = unsorted;
+            while position > 0
+                && real_angles[position - 1]
+                    .0
+                    .partial_cmp(&real_angles[position].0)
+                    .unwrap()
+                    == std::cmp::Ordering::Greater
+            {
+                real_angles.swap(position - 1, position);
+                position -= 1;
+            }
+        }
 
         // For each virtual speaker, find its VBAP gains to real speakers
-        let mut vbap_matrix = vec![[0.0f32; MAX_CHANNELS]; virtual_count];
+        let mut vbap_matrix = [[0.0f32; MAX_CHANNELS]; MAX_VIRTUAL_SPEAKERS];
+        let vbap_matrix = &mut vbap_matrix[..virtual_count];
         for (v, vbap_row) in vbap_matrix.iter_mut().enumerate() {
             let vaz = virt_azimuths[v];
             let vx = vaz.cos();
@@ -421,7 +498,7 @@ impl AllRadDecoder {
             if !found {
                 // Fallback: nearest real speaker
                 let mut min_diff = f32::MAX;
-                for &(angle, idx) in &real_angles {
+                for &(angle, idx) in real_angles.iter() {
                     let diff = angle_diff(vaz, angle).abs();
                     if diff < min_diff {
                         min_diff = diff;
@@ -452,7 +529,7 @@ impl AllRadDecoder {
         // Step 4: Combine into a single N_real × 4 matrix.
         // combined[real_i][k] = Σⱼ vbap[j→real_i] × virt_decode[j][k]
         // This folds the two-stage decode into one matrix multiply at runtime.
-        let mut decode_matrix = vec![[0.0f32; 4]; n_real];
+        let mut decode_matrix = [[0.0f32; 4]; MAX_CHANNELS];
         for (i, speaker) in speakers[..n_real].iter().enumerate() {
             let ch = speaker.channel;
             for (k, dm) in decode_matrix[i].iter_mut().enumerate() {
@@ -467,20 +544,17 @@ impl AllRadDecoder {
         Self {
             decode_matrix,
             channels,
+            speaker_count: n_real,
         }
     }
 
     /// Decode B-format to per-channel speaker gains (same interface as FoaDecoder).
     pub fn decode(&self, bformat: &BFormat) -> ChannelGains {
-        let mut gains = ChannelGains::silent(MAX_CHANNELS);
-        for (i, row) in self.decode_matrix.iter().enumerate() {
-            let g =
-                row[0] * bformat.w + row[1] * bformat.y + row[2] * bformat.z + row[3] * bformat.x;
-            if i < self.channels.len() {
-                gains.gains[self.channels[i]] = g;
-            }
-        }
-        gains
+        decode_rows(
+            &self.decode_matrix[..self.speaker_count],
+            &self.channels[..self.speaker_count],
+            bformat,
+        )
     }
 
     /// Build an AllRAD decoder with EPAD (Energy-Preserving AllRAD) correction.
@@ -497,13 +571,13 @@ impl AllRadDecoder {
         listener: &Listener,
     ) -> Self {
         let mut decoder = Self::from_listener(speakers, speaker_count, listener);
-        apply_epad(&mut decoder.decode_matrix);
+        apply_epad(&mut decoder.decode_matrix[..decoder.speaker_count]);
         decoder
     }
 
     /// Number of real speakers in this decoder.
     pub fn speaker_count(&self) -> usize {
-        self.decode_matrix.len()
+        self.speaker_count
     }
 }
 
@@ -517,7 +591,7 @@ impl AllRadDecoder {
 ///   2. Eigendecompose via Jacobi rotations → V, λ
 ///   3. σᵢ = √λᵢ, σ_mean = mean of non-zero σ
 ///   4. D_EPAD = D × V × diag(σ_mean/σᵢ) × Vᵀ
-fn apply_epad(decode_matrix: &mut Vec<[f32; 4]>) {
+fn apply_epad(decode_matrix: &mut [[f32; 4]]) {
     let n = decode_matrix.len();
     if n == 0 {
         return;
@@ -565,22 +639,22 @@ fn apply_epad(decode_matrix: &mut Vec<[f32; 4]>) {
     }
 
     // Apply: D_EPAD = D × V × diag(scales) × Vᵀ
-    let mut new_matrix = vec![[0.0f32; 4]; n];
-    for (i, new_row) in new_matrix.iter_mut().enumerate() {
+    // Row i of the result depends only on row i of the input, so rows are
+    // rewritten in place.
+    for row in decode_matrix.iter_mut() {
+        let mut new_row = [0.0f32; 4];
         for k in 0..4 {
             let mut sum = 0.0f32;
             for j in 0..4 {
                 // (D × V)[i][j] = Σ_l D[i][l] × V[l][j]
-                let dv: f32 = (0..4)
-                    .map(|l| decode_matrix[i][l] * eigenvectors[l][j])
-                    .sum();
+                let dv: f32 = (0..4).map(|l| row[l] * eigenvectors[l][j]).sum();
                 // × scales[j] × Vᵀ[j][k] = V[k][j]
                 sum += dv * scales[j] * eigenvectors[k][j];
             }
             new_row[k] = sum;
         }
+        *row = new_row;
     }
-    *decode_matrix = new_matrix;
 }
 
 /// Jacobi eigendecomposition of a 4×4 symmetric matrix.
@@ -1256,9 +1330,11 @@ mod tests {
     }
 
     #[test]
-    fn foa_rotate_z_90_front_becomes_left() {
+    fn foa_rotate_z_90_front_becomes_right() {
         // Front source (azimuth=0): X positive, Y zero.
-        // Rotating +90° should move energy from X into Y (front → left).
+        // foa_rotate_z turns the *head* by +angle (the field by −angle), so a
+        // +90° turn puts a front source on the listener's right:
+        //   Y' = Y·cos α − X·sin α = 0 − a·1 = −a  (negative Y = right).
         let b = foa_encode(0.0, 0.0, 1.0);
         let rotated = foa_rotate_z(&b, FRAC_PI_2);
         assert!((rotated.w - b.w).abs() < 1e-6, "W unchanged by rotation");
@@ -1267,8 +1343,8 @@ mod tests {
             "Z unchanged by yaw rotation"
         );
         assert!(
-            rotated.y.abs() > 0.3,
-            "Y should be significant after 90° rotation: Y={}",
+            (rotated.y + MAX_RE_WEIGHT).abs() < 1e-6,
+            "front source after +90° head turn should sit at the right (Y = −a): Y={}",
             rotated.y
         );
         assert!(
@@ -1630,6 +1706,546 @@ mod tests {
                 "ch{ch}: uniform compression should preserve gain ratios: \
                  orig={ratio_orig:.4}, comp={ratio_comp:.4}"
             );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Audit 2026-11: hand-derived values and invariants
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn assert_close(actual: f32, expected: f32, tolerance: f32, label: &str) {
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "{label}: got {actual}, expected {expected} (±{tolerance})"
+        );
+    }
+
+    /// Unweighted first-order basis (max-rE removed) in ACN order W, Y, Z, X.
+    fn unweighted_basis(azimuth: f32, elevation: f32) -> [f64; 4] {
+        let bformat = foa_encode(azimuth, elevation, 1.0);
+        [
+            bformat.w as f64,
+            (bformat.y / MAX_RE_WEIGHT) as f64,
+            (bformat.z / MAX_RE_WEIGHT) as f64,
+            (bformat.x / MAX_RE_WEIGHT) as f64,
+        ]
+    }
+
+    /// Energy vector rE = Σ gᵢ² uᵢ / Σ gᵢ² for a horizontal ring.
+    /// Returns (magnitude, direction in radians).
+    fn energy_vector(gains: &[f32], azimuths: &[f32]) -> (f32, f32) {
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_energy = 0.0;
+        for (gain, azimuth) in gains.iter().zip(azimuths) {
+            let energy = gain * gain;
+            sum_x += energy * azimuth.cos();
+            sum_y += energy * azimuth.sin();
+            sum_energy += energy;
+        }
+        let (x, y) = (sum_x / sum_energy, sum_y / sum_energy);
+        ((x * x + y * y).sqrt(), y.atan2(x))
+    }
+
+    /// Velocity vector rV = Σ gᵢ uᵢ / Σ gᵢ for a horizontal ring.
+    fn velocity_vector_magnitude(gains: &[f32], azimuths: &[f32]) -> f32 {
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_gain = 0.0;
+        for (gain, azimuth) in gains.iter().zip(azimuths) {
+            sum_x += gain * azimuth.cos();
+            sum_y += gain * azimuth.sin();
+            sum_gain += gain;
+        }
+        ((sum_x * sum_x + sum_y * sum_y).sqrt()) / sum_gain
+    }
+
+    fn gains_for(decoded: &ChannelGains, channels: &[usize]) -> Vec<f32> {
+        channels
+            .iter()
+            .map(|&channel| decoded.gains[channel])
+            .collect()
+    }
+
+    fn speaker_at(x: f32, y: f32, z: f32, channel: usize) -> Speaker {
+        use crate::types::Vec3;
+        Speaker {
+            position: Vec3::new(x, y, z),
+            channel,
+        }
+    }
+
+    /// ITU-R BS.775 5.0 ring (radius 2 m) around a listener at the origin
+    /// facing +X: L 30°, R −30°, C 0°, Ls 110°, Rs −110°. Channels 0,1,2,4,5.
+    fn itu_5_0_speakers() -> Vec<Speaker> {
+        let place = |degrees: f32, channel: usize| {
+            let azimuth = degrees.to_radians();
+            speaker_at(2.0 * azimuth.cos(), 2.0 * azimuth.sin(), 0.0, channel)
+        };
+        vec![
+            place(30.0, 0),
+            place(-30.0, 1),
+            place(0.0, 2),
+            place(110.0, 4),
+            place(-110.0, 5),
+        ]
+    }
+
+    fn origin_listener() -> Listener {
+        Listener::new(crate::types::Vec3::ZERO, 0.0)
+    }
+
+    #[test]
+    fn spherical_harmonic_gram_matrix_is_fuma_w_with_sn3d_first_order() {
+        // ∫ Yₙ Yₘ dΩ / 4π over the sphere (midpoint quadrature, cos-weighted).
+        // SN3D first order: ‖Y‖² = ‖Z‖² = ‖X‖² = 1/3 (e.g. ∫cos²θ sin²φ dΩ/4π = 1/3).
+        // W here is 1/√2 (FuMa scaling), so ‖W‖² = 1/2 — not SN3D/AmbiX's 1.
+        // Off-diagonal terms vanish (orthogonality). Encoder and decoders share
+        // W_NORM, so the convention is self-consistent inside the engine.
+        let elevation_steps = 180;
+        let azimuth_steps = 360;
+        let mut gram = [[0.0f64; 4]; 4];
+        let mut total_weight = 0.0f64;
+        for elevation_index in 0..elevation_steps {
+            let elevation = -std::f64::consts::FRAC_PI_2
+                + (elevation_index as f64 + 0.5) * std::f64::consts::PI / elevation_steps as f64;
+            let weight = elevation.cos();
+            for azimuth_index in 0..azimuth_steps {
+                let azimuth =
+                    (azimuth_index as f64 + 0.5) * std::f64::consts::TAU / azimuth_steps as f64;
+                let basis = unweighted_basis(azimuth as f32, elevation as f32);
+                for row in 0..4 {
+                    for column in 0..4 {
+                        gram[row][column] += weight * basis[row] * basis[column];
+                    }
+                }
+                total_weight += weight;
+            }
+        }
+        let expected_diagonal = [0.5, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+        for (row, gram_row) in gram.iter().enumerate() {
+            for (column, sum) in gram_row.iter().enumerate() {
+                let value = sum / total_weight;
+                let expected = if row == column {
+                    expected_diagonal[row]
+                } else {
+                    0.0
+                };
+                assert!(
+                    (value - expected).abs() < 1e-4,
+                    "Gram[{row}][{column}] = {value}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn circular_harmonic_gram_matrix_on_horizon_is_uniform_one_half() {
+        // On the horizontal circle the (W, Y, X) basis with W = 1/√2 is
+        // orthogonal with equal norms: mean(W²) = 1/2, mean(sin²φ) = mean(cos²φ)
+        // = 1/2. Equal norms are why EPAD energy is exactly azimuth-independent.
+        let point_count = 36;
+        let mut gram = [[0.0f64; 3]; 3];
+        for index in 0..point_count {
+            let azimuth = index as f32 * std::f32::consts::TAU / point_count as f32;
+            let basis = unweighted_basis(azimuth, 0.0);
+            let horizontal = [basis[0], basis[1], basis[3]];
+            for row in 0..3 {
+                for column in 0..3 {
+                    gram[row][column] += horizontal[row] * horizontal[column];
+                }
+            }
+        }
+        for (row, gram_row) in gram.iter().enumerate() {
+            for (column, value) in gram_row.iter().enumerate() {
+                let mean = value / point_count as f64;
+                let expected = if row == column { 0.5 } else { 0.0 };
+                assert!(
+                    (mean - expected).abs() < 1e-6,
+                    "circular Gram[{row}][{column}] = {mean}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn max_re_weight_is_the_2d_first_order_optimum() {
+        // 2D max-rE: a₁ = cos(π/(2N+2)) = cos(π/4) = 1/√2 for N = 1.
+        // For a 2D panning function g(γ) = 1 + 2a·cos γ, |rE| = 2a/(1+2a²),
+        // maximised at a = 1/√2 where |rE| = 1/√2.
+        assert_close(
+            MAX_RE_WEIGHT,
+            (std::f32::consts::PI / 4.0).cos(),
+            1e-7,
+            "max-rE weight",
+        );
+        let energy_vector_magnitude = |weight: f32| 2.0 * weight / (1.0 + 2.0 * weight * weight);
+        let at_optimum = energy_vector_magnitude(MAX_RE_WEIGHT);
+        assert_close(at_optimum, std::f32::consts::FRAC_1_SQRT_2, 1e-6, "|rE|");
+        assert!(energy_vector_magnitude(MAX_RE_WEIGHT - 0.02) < at_optimum);
+        assert!(energy_vector_magnitude(MAX_RE_WEIGHT + 0.02) < at_optimum);
+    }
+
+    #[test]
+    fn mode_matching_regular_quad_hand_derived_gains() {
+        // Regular L-speaker ring: CCᵀ = (L/2)·I, so D = (2/L)·[1/√2, sin φᵢ, cos φᵢ]
+        // and gᵢ = (1/L)·(1 + 2a·cos(φ − φᵢ)) with a = 1/√2, L = 4.
+        //   front source:  FL = FR = ¼(1 + √2·cos45°) = ½,  RL = RR = ¼(1 − 1) = 0
+        //   source at 45°: FL = ¼(1+√2) = 0.603553, FR = RL = ¼ = 0.25,
+        //                  RR = ¼(1−√2) = −0.103553
+        let azimuths = [
+            45.0_f32.to_radians(),
+            -45.0_f32.to_radians(),
+            135.0_f32.to_radians(),
+            -135.0_f32.to_radians(),
+        ];
+        let decoder = FoaDecoder::new(&azimuths, &[0.0; 4], &[0, 1, 2, 3]);
+
+        let front = decoder.decode(&foa_encode(0.0, 0.0, 1.0));
+        for (channel, expected) in [0.5, 0.5, 0.0, 0.0].iter().enumerate() {
+            assert_close(front.gains[channel], *expected, 1e-5, "front source");
+        }
+        let at_speaker = decoder.decode(&foa_encode(FRAC_PI_4, 0.0, 1.0));
+        for (channel, expected) in [0.603553, 0.25, 0.25, -0.103553].iter().enumerate() {
+            assert_close(at_speaker.gains[channel], *expected, 1e-5, "45° source");
+        }
+    }
+
+    #[test]
+    fn mode_matching_regular_quad_energy_and_vectors_are_azimuth_independent() {
+        // Energy: Σgᵢ² = (1/L²)·(L + 4a²·L/2) = (1 + 2a²)/L = 2/4 = 0.5 for every φ.
+        // Velocity: |rV| = a = 1/√2. Energy: |rE| = 2a/(1+2a²) = 1/√2, pointing
+        // at the source (the discrete sums are exact for L ≥ 4 up to order 3).
+        let azimuths = [
+            45.0_f32.to_radians(),
+            -45.0_f32.to_radians(),
+            135.0_f32.to_radians(),
+            -135.0_f32.to_radians(),
+        ];
+        let decoder = FoaDecoder::new(&azimuths, &[0.0; 4], &[0, 1, 2, 3]);
+        for degrees in (0..360).step_by(7) {
+            let source_azimuth = (degrees as f32).to_radians();
+            let gains = gains_for(
+                &decoder.decode(&foa_encode(source_azimuth, 0.0, 1.0)),
+                &[0, 1, 2, 3],
+            );
+            let energy: f32 = gains.iter().map(|gain| gain * gain).sum();
+            assert_close(energy, 0.5, 1e-5, "quad energy");
+            let (magnitude, direction) = energy_vector(&gains, &azimuths);
+            assert_close(magnitude, std::f32::consts::FRAC_1_SQRT_2, 1e-5, "|rE|");
+            assert!(
+                angle_diff(direction, source_azimuth).abs() < 1e-3,
+                "rE direction {direction} should equal source azimuth {source_azimuth}"
+            );
+            assert_close(
+                velocity_vector_magnitude(&gains, &azimuths),
+                std::f32::consts::FRAC_1_SQRT_2,
+                1e-5,
+                "|rV|",
+            );
+        }
+    }
+
+    #[test]
+    fn mode_matching_octahedron_shows_2d_max_re_weight_in_3d() {
+        // Octahedron (±X, ±Y, ±Z) is a spherical 3-design: CCᵀ = diag(3, 2, 2, 2),
+        // so gᵢ = (1/6)·(1 + 3a·cos γᵢ). Source at +X with a = 1/√2:
+        //   +X: (1 + 3a)/6 = 0.520220,  −X: (1 − 3a)/6 = −0.186887,  others 1/6.
+        // |rE| = 2a/(1 + 3a²) = 0.565685. The 3D max-rE weight would be
+        // a = 1/√3 (largest root of P₂), giving |rE| = 0.577350. The encoder's
+        // 2D weight therefore costs 0.012 of |rE| on genuinely 3D layouts; the
+        // production decoders are horizontal (AllRAD ring), where 1/√2 is optimal.
+        let azimuths = [0.0, FRAC_PI_2, PI, -FRAC_PI_2, 0.0, 0.0];
+        let elevations = [0.0, 0.0, 0.0, 0.0, FRAC_PI_2, -FRAC_PI_2];
+        let decoder = FoaDecoder::new(&azimuths, &elevations, &[0, 1, 2, 3, 4, 5]);
+        let gains = gains_for(
+            &decoder.decode(&foa_encode(0.0, 0.0, 1.0)),
+            &[0, 1, 2, 3, 4, 5],
+        );
+        assert_close(gains[0], 0.520220, 1e-4, "+X speaker");
+        assert_close(gains[2], -0.186887, 1e-4, "−X speaker");
+        for &index in &[1, 3, 4, 5] {
+            assert_close(gains[index], 1.0 / 6.0, 1e-4, "orthogonal speaker");
+        }
+        let energy: f32 = gains.iter().map(|gain| gain * gain).sum();
+        let energy_vector_x = (gains[0] * gains[0] - gains[2] * gains[2]) / energy;
+        assert_close(energy_vector_x, 0.565685, 1e-4, "3D |rE| with 2D weight");
+        let third = 1.0 / 3.0_f32.sqrt();
+        let optimum = 2.0 * third / (1.0 + 3.0 * third * third);
+        assert_close(optimum, 0.577350, 1e-5, "3D max-rE optimum");
+    }
+
+    #[test]
+    fn foa_rotate_z_maps_source_azimuth_phi_to_phi_minus_angle() {
+        // Y' = Y cos α − X sin α = a·sin(φ − α), X' = Y sin α + X cos α = a·cos(φ − α):
+        // a head turn by +α. W and Z are invariant.
+        for &source_degrees in &[0.0_f32, 30.0, 90.0, 170.0, -120.0] {
+            for &angle_degrees in &[0.0_f32, 45.0, 90.0, -72.0, 200.0] {
+                let source = source_degrees.to_radians();
+                let angle = angle_degrees.to_radians();
+                let rotated = foa_rotate_z(&foa_encode(source, 0.4, 0.8), angle);
+                let expected = foa_encode(source - angle, 0.4, 0.8);
+                for (actual, wanted) in [
+                    (rotated.w, expected.w),
+                    (rotated.y, expected.y),
+                    (rotated.z, expected.z),
+                    (rotated.x, expected.x),
+                ] {
+                    assert_close(actual, wanted, 1e-5, "rotated component");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bilateral_hand_derived_ear_gains() {
+        // Left ear  = ½(√2·W + X'_left)  with X'_left  = a·cos(φ − π/2) = a·sin φ·cos θ
+        // Right ear = ½(√2·W + X'_right) with X'_right = −a·sin φ·cos θ
+        // so L = ½(1 + a·sin φ·cos θ), R = ½(1 − a·sin φ·cos θ), L + R = 1.
+        //   90° left: L = ½(1 + 0.707107) = 0.853553, R = 0.146447 → ILD 15.31 dB
+        //   30° left: L = ½(1 + 0.353553) = 0.676777, R = 0.323223
+        //   front / overhead: L = R = ½
+        let bilateral = BilateralDecoder::new();
+        let cases = [
+            (FRAC_PI_2, 0.0, 0.853553, 0.146447),
+            (30.0_f32.to_radians(), 0.0, 0.676777, 0.323223),
+            (0.0, 0.0, 0.5, 0.5),
+            (1.0, FRAC_PI_2, 0.5, 0.5),
+        ];
+        for (azimuth, elevation, expected_left, expected_right) in cases {
+            let (left, right) = bilateral.decode_stereo(&foa_encode(azimuth, elevation, 1.0));
+            assert_close(left, expected_left, 1e-5, "left ear");
+            assert_close(right, expected_right, 1e-5, "right ear");
+        }
+        let (left, right) = bilateral.decode_stereo(&foa_encode(FRAC_PI_2, 0.0, 1.0));
+        assert_close(20.0 * (left / right).log10(), 15.31, 0.01, "ILD at 90°");
+    }
+
+    #[test]
+    fn bilateral_is_left_right_mirror_symmetric_with_constant_amplitude_sum() {
+        let bilateral = BilateralDecoder::new();
+        for degrees in (-180..=180).step_by(10) {
+            let azimuth = (degrees as f32).to_radians();
+            let (left, right) = bilateral.decode_stereo(&foa_encode(azimuth, 0.0, 1.0));
+            let (mirror_left, mirror_right) =
+                bilateral.decode_stereo(&foa_encode(-azimuth, 0.0, 1.0));
+            assert_close(left, mirror_right, 1e-5, "mirror L↔R");
+            assert_close(right, mirror_left, 1e-5, "mirror R↔L");
+            assert_close(left + right, 1.0, 1e-5, "amplitude sum");
+        }
+    }
+
+    #[test]
+    fn bilateral_power_rises_1_76_db_from_front_to_side() {
+        // L² + R² = ½(1 + a²·sin²φ) = ½ at the front and ¾ at ±90° (a² = ½):
+        // 10·log10(1.5) = 1.761 dB louder at the sides. The decode is
+        // amplitude-sum-preserving, not power-preserving; pinned so a change to
+        // either is deliberate.
+        let bilateral = BilateralDecoder::new();
+        let power = |azimuth: f32| {
+            let (left, right) = bilateral.decode_stereo(&foa_encode(azimuth, 0.0, 1.0));
+            left * left + right * right
+        };
+        assert_close(power(0.0), 0.5, 1e-6, "front power");
+        assert_close(power(FRAC_PI_2), 0.75, 1e-6, "side power");
+        assert_close(
+            10.0 * (power(FRAC_PI_2) / power(0.0)).log10(),
+            1.761,
+            1e-3,
+            "front→side power rise",
+        );
+    }
+
+    #[test]
+    fn decoder_from_listener_uses_listener_local_azimuth() {
+        // Listener facing +Y (yaw π/2): world +Y is local front, world −X is
+        // local left (azimuth +π/2, counter-clockwise, right-handed Z-up).
+        let listener = Listener::new(crate::types::Vec3::ZERO, FRAC_PI_2);
+        let speakers = vec![
+            speaker_at(0.0, 2.0, 0.0, 0),  // local front
+            speaker_at(-2.0, 0.0, 0.0, 1), // local left
+            speaker_at(0.0, -2.0, 0.0, 2), // local rear
+            speaker_at(2.0, 0.0, 0.0, 3),  // local right
+        ];
+        let decoder = FoaDecoder::from_listener(&speakers, 4, &listener);
+        let loudest = |azimuth: f32| {
+            let gains = gains_for(
+                &decoder.decode(&foa_encode(azimuth, 0.0, 1.0)),
+                &[0, 1, 2, 3],
+            );
+            (0..4)
+                .max_by(|&a, &b| gains[a].partial_cmp(&gains[b]).unwrap())
+                .unwrap()
+        };
+        assert_eq!(loudest(0.0), 0, "front source → world +Y speaker");
+        assert_eq!(loudest(FRAC_PI_2), 1, "left source → world −X speaker");
+        assert_eq!(loudest(PI), 2, "rear source → world −Y speaker");
+        assert_eq!(loudest(-FRAC_PI_2), 3, "right source → world +X speaker");
+    }
+
+    #[test]
+    fn allrad_with_aligned_virtual_ring_equals_mode_matching() {
+        // Real speakers at 0°, 90°, 180°, 270° and 4 virtual speakers at the same
+        // angles: VBAP re-panning is the identity, so AllRAD = mode-matching:
+        //   front source: 0° → ¼(1+√2) = 0.603553, ±90° → ¼, 180° → ¼(1−√2) = −0.103553
+        let speakers = vec![
+            speaker_at(1.0, 0.0, 0.0, 0),
+            speaker_at(0.0, 1.0, 0.0, 1),
+            speaker_at(-1.0, 0.0, 0.0, 2),
+            speaker_at(0.0, -1.0, 0.0, 3),
+        ];
+        let decoder = AllRadDecoder::from_listener_with_count(&speakers, 4, &origin_listener(), 4);
+        let gains = decoder.decode(&foa_encode(0.0, 0.0, 1.0));
+        for (channel, expected) in [0.603553, 0.25, -0.103553, 0.25].iter().enumerate() {
+            assert_close(gains.gains[channel], *expected, 1e-5, "aligned AllRAD");
+        }
+    }
+
+    #[test]
+    fn allrad_eight_virtual_on_aligned_quad_hand_derived() {
+        // 8 virtual speakers (45° spacing) on real speakers at 0/90/180/270°.
+        // Virtual decoder rows: dᵥ = (2/8)·[1/√2, sin φᵥ, cos φᵥ].
+        // On-speaker virtuals map with weight 1; the 45° virtuals split
+        // 1/√2 : 1/√2 (power-normalised 2D VBAP). Row for the 0° speaker:
+        //   W = ¼·(1/√2)·(1 + 2/√2) = 0.426777,  Y = 0,  X = ¼·(1 + 2·½) = 0.5
+        // Front source (W = X = 1/√2):
+        //   0°: 0.426777/√2 + 0.5/√2 = 0.655330
+        //   ±90°: 0.301777,   180°: 0.301777 − 0.353553 = −0.051777
+        // The W row is (1+√2)/2 = 1.207× the mode-matching value 0.353553:
+        // coherent summation in power-normalised VBAP lifts the omni part 1.64 dB.
+        let speakers = vec![
+            speaker_at(1.0, 0.0, 0.0, 0),
+            speaker_at(0.0, 1.0, 0.0, 1),
+            speaker_at(-1.0, 0.0, 0.0, 2),
+            speaker_at(0.0, -1.0, 0.0, 3),
+        ];
+        let decoder = AllRadDecoder::from_listener_with_count(&speakers, 4, &origin_listener(), 8);
+        assert_close(decoder.decode_matrix[0][0], 0.426777, 1e-5, "W row");
+        assert_close(decoder.decode_matrix[0][1], 0.0, 1e-5, "Y row");
+        assert_close(decoder.decode_matrix[0][2], 0.0, 1e-7, "Z row");
+        assert_close(decoder.decode_matrix[0][3], 0.5, 1e-5, "X row");
+        let gains = decoder.decode(&foa_encode(0.0, 0.0, 1.0));
+        for (channel, expected) in [0.655330, 0.301777, -0.051777, 0.301777].iter().enumerate() {
+            assert_close(gains.gains[channel], *expected, 1e-5, "8-virtual AllRAD");
+        }
+    }
+
+    #[test]
+    fn epad_on_itu_5_0_gives_exactly_flat_energy_and_mirror_symmetry() {
+        // After EPAD, DᵀD = σ̄²·P(W,Y,X), so Σgᵢ² = σ̄²·(W² + Y² + X²)
+        // = σ̄²·g²·(½ + a²) = σ̄²·g² — independent of azimuth.
+        // An independent numpy re-implementation of AllRAD(12)+EPAD on this
+        // layout gives σ̄² = 0.48951 and plain-AllRAD variation 4.63 dB.
+        let speakers = itu_5_0_speakers();
+        let listener = origin_listener();
+        let channels = [0, 1, 2, 4, 5];
+        let epad = AllRadDecoder::from_listener_epad(&speakers, 5, &listener);
+        let allrad = AllRadDecoder::from_listener(&speakers, 5, &listener);
+
+        let mut allrad_min = f32::MAX;
+        let mut allrad_max = f32::MIN;
+        for degrees in 0..360 {
+            let azimuth = (degrees as f32).to_radians();
+            let bformat = foa_encode(azimuth, 0.0, 1.0);
+            let gains = gains_for(&epad.decode(&bformat), &channels);
+            let energy: f32 = gains.iter().map(|gain| gain * gain).sum();
+            assert_close(energy, 0.48951, 2e-4, "EPAD energy");
+
+            let allrad_energy: f32 = gains_for(&allrad.decode(&bformat), &channels)
+                .iter()
+                .map(|gain| gain * gain)
+                .sum();
+            allrad_min = allrad_min.min(allrad_energy);
+            allrad_max = allrad_max.max(allrad_energy);
+
+            // L/R mirror: L(φ) = R(−φ), Ls(φ) = Rs(−φ), C(φ) = C(−φ).
+            let mirror = gains_for(&epad.decode(&foa_encode(-azimuth, 0.0, 1.0)), &channels);
+            assert_close(gains[0], mirror[1], 1e-4, "L↔R mirror");
+            assert_close(gains[2], mirror[2], 1e-4, "C mirror");
+            assert_close(gains[3], mirror[4], 1e-4, "Ls↔Rs mirror");
+        }
+        let allrad_variation_db = 10.0 * (allrad_max / allrad_min).log10();
+        assert_close(
+            allrad_variation_db,
+            4.63,
+            0.05,
+            "AllRAD 5.0 energy variation",
+        );
+    }
+
+    #[test]
+    fn epad_on_itu_5_0_peaks_at_each_side_speaker_but_not_centre() {
+        // Encode→decode at a speaker's own direction should make that speaker
+        // the loudest. FOA cannot resolve C (0°) against L/R (±30°): a front
+        // source decodes to L = R = 0.4499 > C = 0.2805 (numpy reference). This
+        // is a first-order resolution limit, not a decoder defect.
+        let speakers = itu_5_0_speakers();
+        let decoder = AllRadDecoder::from_listener_epad(&speakers, 5, &origin_listener());
+        let channels = [0, 1, 2, 4, 5];
+        for (degrees, expected_channel) in [(30.0_f32, 0), (-30.0, 1), (110.0, 4), (-110.0, 5)] {
+            let gains = decoder.decode(&foa_encode(degrees.to_radians(), 0.0, 1.0));
+            let loudest = *channels
+                .iter()
+                .max_by(|&&a, &&b| gains.gains[a].partial_cmp(&gains.gains[b]).unwrap())
+                .unwrap();
+            assert_eq!(
+                loudest, expected_channel,
+                "source at {degrees}° should peak at channel {expected_channel}"
+            );
+        }
+        let front = decoder.decode(&foa_encode(0.0, 0.0, 1.0));
+        assert_close(front.gains[0], 0.4499, 2e-3, "front → L");
+        assert_close(front.gains[2], 0.2805, 2e-3, "front → C");
+    }
+
+    #[test]
+    fn epad_leaves_an_already_balanced_decoder_unchanged() {
+        // Regular-quad mode-matching: DᵀD = ¼·Σ[½, s², 0, c²] = diag(½, ½, 0, ½),
+        // so every non-zero singular value is already 1/√2 and EPAD is identity.
+        let azimuths = [
+            45.0_f32.to_radians(),
+            -45.0_f32.to_radians(),
+            135.0_f32.to_radians(),
+            -135.0_f32.to_radians(),
+        ];
+        let decoder = FoaDecoder::new(&azimuths, &[0.0; 4], &[0, 1, 2, 3]);
+        let mut equalised = decoder.decode_matrix.clone();
+        apply_epad(&mut equalised);
+        for (row, original) in equalised.iter().zip(&decoder.decode_matrix) {
+            for column in 0..4 {
+                assert_close(row[column], original[column], 1e-5, "EPAD identity");
+            }
+        }
+    }
+
+    #[test]
+    fn jacobi_eigen_reconstructs_symmetric_matrix() {
+        // [[2,1],[1,2]] ⊕ [3] ⊕ [0] has eigenvalues {1, 3, 3, 0}.
+        let matrix = [
+            [2.0, 1.0, 0.0, 0.0],
+            [1.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 3.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
+        let (eigenvectors, eigenvalues) = jacobi_eigen_4x4(&matrix);
+        let mut sorted = eigenvalues;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (actual, expected) in sorted.iter().zip([0.0, 1.0, 3.0, 3.0]) {
+            assert_close(*actual, expected, 1e-5, "eigenvalue");
+        }
+        for row in 0..4 {
+            for column in 0..4 {
+                // V·Λ·Vᵀ = A and Vᵀ·V = I
+                let reconstructed: f32 = (0..4)
+                    .map(|k| eigenvectors[row][k] * eigenvalues[k] * eigenvectors[column][k])
+                    .sum();
+                assert_close(reconstructed, matrix[row][column], 1e-5, "V·Λ·Vᵀ");
+                let orthogonality: f32 = (0..4)
+                    .map(|k| eigenvectors[k][row] * eigenvectors[k][column])
+                    .sum();
+                let identity = if row == column { 1.0 } else { 0.0 };
+                assert_close(orthogonality, identity, 1e-5, "Vᵀ·V");
+            }
         }
     }
 }
