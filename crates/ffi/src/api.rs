@@ -43,8 +43,9 @@ pub struct SceneDescription {
     pub depth: f32,
     /// Listener position at load time.
     pub listener: Position,
-    /// Sources in slot order: entry `i` is slot `i`. `Engine::add_sound`
-    /// appends to it.
+    /// The scene's sounds, each with the slot it plays from. Their order is
+    /// the scene file's, with sounds added since at the end; it is not slot
+    /// order once a sound has been removed and another added.
     pub sources: Vec<SourceDescription>,
 }
 
@@ -54,6 +55,11 @@ pub struct SourceDescription {
     /// What the sound is known by in the scene file. Unlike its slot, it
     /// stays the same when sounds around it are added or removed.
     pub id: String,
+    /// The engine voice it plays from: what every call that takes a `slot`
+    /// means, and what telemetry reports it under.
+    pub slot: u16,
+    /// How it radiates. A field ignores it.
+    pub pattern: Pattern,
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,
@@ -71,6 +77,37 @@ pub struct SourceDescription {
     pub beam_half_angle: Option<f32>,
     /// Initial forward vector in world coordinates.
     pub facing: Position,
+}
+
+/// How a localized sound radiates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum Pattern {
+    /// Equally in every direction.
+    Omni,
+    /// Mostly the way it faces, nothing straight behind.
+    Cardioid,
+    /// A narrower beam the way it faces, with a small lobe behind.
+    Supercardioid,
+}
+
+impl From<atrium_world::Pattern> for Pattern {
+    fn from(pattern: atrium_world::Pattern) -> Self {
+        match pattern {
+            atrium_world::Pattern::Omni => Self::Omni,
+            atrium_world::Pattern::Cardioid => Self::Cardioid,
+            atrium_world::Pattern::Supercardioid => Self::Supercardioid,
+        }
+    }
+}
+
+impl From<Pattern> for atrium_world::Pattern {
+    fn from(pattern: Pattern) -> Self {
+        match pattern {
+            Pattern::Omni => Self::Omni,
+            Pattern::Cardioid => Self::Cardioid,
+            Pattern::Supercardioid => Self::Supercardioid,
+        }
+    }
 }
 
 /// Whether the engine renders a source as a localized object or a diffuse field.
@@ -106,6 +143,8 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
     fn from(source: atrium::config::SourceDescription) -> Self {
         Self {
             id: source.id,
+            slot: source.slot,
+            pattern: source.pattern.into(),
             name: source.name,
             group: source.group,
             color: source.color,

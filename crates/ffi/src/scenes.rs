@@ -79,7 +79,7 @@ mod tests {
         let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenes");
         let scenes = list_scenes(directory.into()).expect("scenes directory should list");
         let names: Vec<&str> = scenes.iter().map(|scene| scene.name.as_str()).collect();
-        assert!(names.contains(&"frog-headphones"), "got {names:?}");
+        assert!(names.contains(&"frog"), "got {names:?}");
         assert!(
             names.windows(2).all(|pair| pair[0] <= pair[1]),
             "unsorted: {names:?}"
@@ -89,9 +89,9 @@ mod tests {
             .all(|scene| std::path::Path::new(&scene.path).is_file()));
         let frogs = scenes
             .iter()
-            .find(|scene| scene.name == "frog-headphones")
+            .find(|scene| scene.name == "frog")
             .expect("frog scene listed");
-        assert_eq!(frogs.title, "Frog Headphones");
+        assert_eq!(frogs.title, "Frog");
         assert!(!frogs.sounds.is_empty());
     }
 

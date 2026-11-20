@@ -10,8 +10,9 @@ Kotlin can reach is declared here:
   whether each is a recording or a generator.
 - `head_trackers()`: the head trackers that can work on this platform.
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
-  `set_volume`, `set_source_position`, `set_source_muted`, `set_source_level`, `audition`,
-  `add_sound`, `set_head_tracker` and `latest_telemetry()`.
+  `set_volume`, `set_source_position`, `set_source_facing`, `set_source_pattern`,
+  `set_source_muted`, `set_source_level`, `audition`, `add_sound`, `remove_sound`,
+  `set_head_tracker` and `latest_telemetry()`.
 - The records it returns: `Position`, `SceneDescription`, `Output`, `Telemetry`. Telemetry
   includes where the listener faces and whether a head tracker is sending.
 - `EngineError`.
@@ -24,19 +25,30 @@ runs Cargo itself. There is nothing to build here by hand.
 ## Decisions that look wrong and are right
 
 - **Only the commands a screen uses are exported:** moving a source (the editor's map), the output,
-  volume and head tracker (the player's Settings), and mute, level, audition and add (the
-  editor's layers and library). Every other `Command` gets a method when a
+  volume and head tracker (the player's Settings), and mute, level, pattern, facing, audition,
+  add and remove (the editor). Every other `Command` gets a method when a
   Kotlin screen calls it. An exported method with no caller is surface the generated Kotlin
   carries for nothing.
 - **`scene()` is the scene as it is now, kept by this object.** The audio thread reports where a
   sound is and whether it is muted, but not its level, and it knows nothing of names, ids or
-  groups. So `set_source_level`, `set_source_position` and `add_sound` record their change in
+  groups. So every call that changes a sound (level, position, facing, pattern, add, remove)
+  records it in
   the description this object holds, and the app reads `scene()` again after each. The position
   kept there is where a sound was placed; telemetry has where it is, which differs for one
   that moves by itself.
-- **Solo is not exported.** The engine only knows muted or not. The app keeps what was muted
-  by hand and what was asked to be heard alone, and sends the mutes that follow. A solo in the
-  engine would have to remember the same two sets to undo itself.
+- **Each sound in `scene()` carries the voice it plays from.** The list is the scene's sounds,
+  not the engine's 16 voices. Once a sound is removed and another added, the third entry is no
+  longer in the third voice, so the app matches telemetry by `slot` and never by place in the
+  list. `add_sound` takes the lowest free voice, which is why a removed sound's voice and id
+  are reused.
+- **A sound keeps the facing it was turned to.** Before 2026-11-20 a still sound always faced
+  east and an orbiting one faced its centre; nothing could turn either. `SetSourceFacing` sets
+  a heading that then wins over both. A sound that was never turned behaves as before.
+- **`set_source_facing` takes a direction, not an angle.** The app has the vector from the sound
+  to the pointer and should not need to know which way the engine counts angles.
+- **There is no solo.** The engine only knows muted or not, and the app's first layer list had
+  an `S` that muted every other layer. Tried on 2026-11-20, that read as the opposite of what
+  it did, so each layer now has one ear that silences that layer and nothing else.
 - **A sound added while playing goes through the same builder as the scene's own.**
   `SoundBuilder` is kept from the scene build with its loudness calibration and distance model,
   so an added frog is exactly the frog a reloaded scene would have.
@@ -44,8 +56,11 @@ runs Cargo itself. There is nothing to build here by hand.
   voices from the first, so the last is the one they reach last. A scene that uses all 16 cannot
   audition, and both calls say so with `NoFreeVoice`.
 - **`audition` and `add_sound` block while the sound is built.** A recording is decoded and a
-  generator is measured for a few seconds of output. The app calls them one at a time from a
-  background thread, which also keeps a release from overtaking its press.
+  generator is measured for a few seconds of output: 0.3 to 0.6 s per sound, measured
+  2026-11-20 in the unoptimised build the app runs. The app calls them one at a time from a
+  background thread, so a stop never overtakes its start. For the same reason the library has
+  a play/stop button and not press-and-hold: with a hold, an ordinary short press started the
+  sound and stopped it in the same instant, and nothing was ever heard.
 - **A sound the audio thread takes out is dropped on the calling thread.** Freeing memory is
   not safe on the audio thread, so it sends the box back, and the next edit collects it.
 - **Head tracking belongs to the engine object, so it stops and starts with every scene.** The
@@ -155,12 +170,11 @@ runs Cargo itself. There is nothing to build here by hand.
 - **The first Sony start on a machine builds the bridge.** The script clones a pinned commit from
   GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
   engine is compiled, so a build moved away from this repository cannot find it.
-- **A sound cannot be removed, and an added one is not saved.** Playing the scene again brings
-  back the file's own sounds. Remove and Save come with scenes as documents.
+- **Nothing is saved.** A sound that was added, removed, moved, turned or reshaped is as the
+  scene file has it once the scene is played again. Save comes with scenes as documents.
+- **A sound's size cannot be set.** `SetSourceSpread` exists in the engine; no screen uses it.
 - **A new sound always lands 2 m ahead of where the scene puts the listener.** Dropping it at a
   chosen spot needs the map of all sounds.
-- **The scene description is indexed by voice.** Entry `i` is voice `i`, which holds only while
-  nothing is removed. Remove will need each entry to carry its voice.
 - **A killed app leaves its Sony bridge running.** The bridge is stopped when the engine is
   closed. A process that is killed outright never closes it, and whether closing the app's
   window always does has not been checked. A bridge left behind keeps sending to a port nobody

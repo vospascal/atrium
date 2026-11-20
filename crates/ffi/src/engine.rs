@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use atrium::audio::output::{AudioOutput, CpalOutput};
-use atrium::config::{read_preset, SceneConfig, SoundBuilder};
+use atrium::config::{radiation_of, read_preset, SceneConfig, SoundBuilder};
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
@@ -14,7 +14,9 @@ use atrium_core::telemetry::{TelemetryFrame, MAX_SOURCES};
 use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Shape, Sound};
 
-use crate::api::{EngineError, Position, SceneDescription, SourceDescription, Telemetry};
+use crate::api::{
+    EmitterKind, EngineError, Pattern, Position, SceneDescription, SourceDescription, Telemetry,
+};
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::output::{playable_outputs, Output};
 
@@ -118,7 +120,7 @@ impl Engine {
     /// holds no source, or a level that is not a number, changes nothing.
     pub fn set_source_level(&self, slot: u16, level: f32) -> Result<(), EngineError> {
         let mut description = lock(&self.description);
-        let Some(source) = description.sources.get_mut(slot as usize) else {
+        let Some(source) = sound_in(&mut description, slot) else {
             return Ok(());
         };
         if !level.is_finite() {
@@ -145,9 +147,58 @@ impl Engine {
                 position: position.into(),
             })
             .map_err(|_| EngineError::CommandQueueFull)?;
-        if let Some(source) = description.sources.get_mut(slot as usize) {
+        if let Some(source) = sound_in(&mut description, slot) {
             source.position = position;
         }
+        Ok(())
+    }
+
+    /// Change how the source in `slot` radiates. `scene()` reports the
+    /// pattern and the beam it gives from then on. A field has no beam,
+    /// whatever its pattern.
+    pub fn set_source_pattern(&self, slot: u16, pattern: Pattern) -> Result<(), EngineError> {
+        let mut description = lock(&self.description);
+        let Some(source) = sound_in(&mut description, slot) else {
+            return Ok(());
+        };
+        let (radiation, beam_half_angle) = radiation_of(pattern.into());
+        lock(&self.commands)
+            .push(Command::SetSourceDirectivity {
+                index: slot,
+                pattern: radiation,
+            })
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        source.pattern = pattern;
+        source.beam_half_angle = match source.emitter_kind {
+            EmitterKind::Object => beam_half_angle,
+            EmitterKind::Field => None,
+        };
+        Ok(())
+    }
+
+    /// Turn the source in `slot` to face along `facing`, a direction over
+    /// the ground; its length and height are ignored. A direction with no
+    /// length changes nothing.
+    pub fn set_source_facing(&self, slot: u16, facing: Position) -> Result<(), EngineError> {
+        let length = facing.x.hypot(facing.y);
+        if !length.is_finite() || length < 1e-6 {
+            return Ok(());
+        }
+        let mut description = lock(&self.description);
+        let Some(source) = sound_in(&mut description, slot) else {
+            return Ok(());
+        };
+        lock(&self.commands)
+            .push(Command::SetSourceFacing {
+                index: slot,
+                yaw: facing.y.atan2(facing.x),
+            })
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        source.facing = Position {
+            x: facing.x / length,
+            y: facing.y / length,
+            z: 0.0,
+        };
         Ok(())
     }
 
@@ -199,7 +250,11 @@ impl Engine {
         let Some(preset) = preset else {
             return Ok(());
         };
-        if lock(&self.description).sources.len() > AUDITION_SLOT {
+        let taken = lock(&self.description)
+            .sources
+            .iter()
+            .any(|source| source.slot as usize == AUDITION_SLOT);
+        if taken {
             return Err(EngineError::NoFreeVoice);
         }
         let id = EntityId::unused("audition", []);
@@ -218,17 +273,21 @@ impl Engine {
     }
 
     /// Add a sound made from `preset` to the scene, just ahead of the
-    /// listener, and report it. It takes the next free voice and an id made
+    /// listener, and report it. It takes the lowest free voice and an id made
     /// from the preset's name. An audition in progress is stopped. Like
     /// `audition`, this takes a moment.
     pub fn add_sound(&self, preset: String) -> Result<SourceDescription, EngineError> {
         let mut edits = lock(&self.edits);
         edits.stop_audition()?;
         let mut description = lock(&self.description);
-        let slot = description.sources.len();
-        if slot >= MAX_SOURCES {
-            return Err(EngineError::NoFreeVoice);
-        }
+        let slot = (0..MAX_SOURCES)
+            .find(|slot| {
+                description
+                    .sources
+                    .iter()
+                    .all(|source| source.slot as usize != *slot)
+            })
+            .ok_or(EngineError::NoFreeVoice)?;
         let summary =
             read_preset(&preset).map_err(|error| EngineError::Scene(error.to_string()))?;
         let id = EntityId::unused(
@@ -249,6 +308,23 @@ impl Engine {
         let added: SourceDescription = built.description.into();
         description.sources.push(added.clone());
         Ok(added)
+    }
+
+    /// Take the sound in `slot` out of the scene. Its voice falls silent and
+    /// is free for the next sound added; `scene()` no longer lists it. A slot
+    /// that holds no sound changes nothing.
+    pub fn remove_sound(&self, slot: u16) -> Result<(), EngineError> {
+        let mut edits = lock(&self.edits);
+        let mut description = lock(&self.description);
+        if sound_in(&mut description, slot).is_none() {
+            return Ok(());
+        }
+        edits.send(SceneEdit::RemoveSource {
+            slot,
+            filler: SoundBuilder::silence(),
+        })?;
+        description.sources.retain(|source| source.slot != slot);
+        Ok(())
     }
 
     /// Let `tracker` steer the listener, or stop with `None`. Stopping turns
@@ -316,6 +392,14 @@ impl Engine {
             moves: Moves::Still,
         }
     }
+}
+
+/// The sound playing from `slot`, if the scene has one there.
+fn sound_in(description: &mut SceneDescription, slot: u16) -> Option<&mut SourceDescription> {
+    description
+        .sources
+        .iter_mut()
+        .find(|source| source.slot == slot)
 }
 
 /// The way sounds reach the audio thread while it runs, and come back.
@@ -430,7 +514,7 @@ mod tests {
     fn output_and_volume_change_while_playing() {
         std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .expect("repository root");
-        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        let engine = Engine::new("scenes/frog.yaml".into()).expect("scene should play");
         let outputs = engine.outputs();
         let target = *outputs
             .last()
@@ -476,7 +560,7 @@ mod tests {
         let port_is_free = || std::net::UdpSocket::bind(("127.0.0.1", 4242)).is_ok();
         assert!(port_is_free(), "stop the running head tracker first");
 
-        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        let engine = Engine::new("scenes/frog.yaml".into()).expect("scene should play");
         engine.set_volume(0.0).expect("volume");
 
         engine
@@ -525,7 +609,7 @@ mod tests {
         std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .expect("repository root");
         // The frog scene faces the listener north: +Y.
-        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        let engine = Engine::new("scenes/frog.yaml".into()).expect("scene should play");
         engine.set_volume(0.0).expect("volume");
 
         let at_rest = telemetry_when(&engine, |_| true);
@@ -571,7 +655,7 @@ mod tests {
     fn layers_and_library_change_the_playing_scene() {
         std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .expect("repository root");
-        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        let engine = Engine::new("scenes/frog.yaml".into()).expect("scene should play");
         engine.set_volume(0.0).expect("volume");
         let playing = |telemetry: &Telemetry, slot: usize| {
             telemetry
@@ -623,8 +707,63 @@ mod tests {
                 .iter()
                 .any(|source| source.slot == 1 && source.muted)
         });
+        let level_of = |slot: u16| {
+            engine
+                .scene()
+                .sources
+                .iter()
+                .find(|source| source.slot == slot)
+                .map(|source| source.spl)
+        };
         engine.set_source_level(1, 50.0).expect("level");
-        assert_eq!(engine.scene().sources[1].spl, 50.0);
+        assert_eq!(level_of(1), Some(50.0));
+
+        // Removing a layer: its voice falls silent, the scene forgets it, and
+        // the next sound added takes the freed voice and the freed id.
+        engine.remove_sound(1).expect("remove");
+        telemetry_when(&engine, |telemetry| !playing(telemetry, 1));
+        let left: Vec<(String, u16)> = engine
+            .scene()
+            .sources
+            .iter()
+            .map(|source| (source.id.clone(), source.slot))
+            .collect();
+        assert_eq!(left, [("frogs".to_string(), 0), ("frog-2".to_string(), 2)]);
+        engine
+            .remove_sound(1)
+            .expect("an empty voice is left alone");
+        let again = engine
+            .add_sound("sources/frog.yaml".into())
+            .expect("a frog builds again");
+        assert_eq!((again.id.as_str(), again.slot), ("frog", 1));
+        telemetry_when(&engine, |telemetry| playing(telemetry, 1));
+        assert_eq!(engine.scene().sources.len(), 3);
+        assert_eq!(engine.scene().sources[2].id, "frog", "added ones go last");
+
+        // A shape and a direction: a cardioid's beam is 90° to each side, and
+        // a sound turned north faces +Y on the audio thread too.
+        assert_eq!(engine.scene().sources[0].pattern, Pattern::Omni);
+        assert_eq!(engine.scene().sources[0].beam_half_angle, None);
+        engine
+            .set_source_pattern(0, Pattern::Cardioid)
+            .expect("pattern");
+        let shaped = engine.scene().sources[0].clone();
+        assert_eq!(shaped.pattern, Pattern::Cardioid);
+        let beam = shaped.beam_half_angle.expect("a cardioid has a beam");
+        assert!((beam - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let north = Position {
+            x: 0.0,
+            y: 3.0,
+            z: 9.0,
+        };
+        engine.set_source_facing(0, north).expect("facing");
+        let turned = engine.scene().sources[0].facing;
+        assert!(turned.x.abs() < 1e-6 && (turned.y - 1.0).abs() < 1e-6 && turned.z == 0.0);
+        telemetry_when(&engine, |telemetry| {
+            telemetry.sources.iter().any(|source| {
+                source.slot == 0 && source.facing.x.abs() < 1e-3 && source.facing.y > 0.999
+            })
+        });
 
         // A sound dragged on the map: the scene remembers where it was put.
         let moved = Position {
@@ -633,14 +772,20 @@ mod tests {
             z: added.position.z,
         };
         engine.set_source_position(1, moved).expect("move");
-        assert_eq!(engine.scene().sources[1].position, moved);
+        let placed = engine
+            .scene()
+            .sources
+            .iter()
+            .find(|source| source.slot == 1)
+            .map(|source| source.position);
+        assert_eq!(placed, Some(moved));
         telemetry_when(&engine, |telemetry| {
             telemetry
                 .sources
                 .iter()
                 .any(|source| source.slot == 1 && source.position == moved)
         });
-        assert_eq!(engine.scene().sources[2].spl, 65.0, "only that layer");
+        assert_eq!(level_of(2), Some(65.0), "only that layer");
     }
 
     #[test]

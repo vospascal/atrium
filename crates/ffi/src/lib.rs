@@ -13,7 +13,7 @@ mod output;
 mod scenes;
 
 pub use api::{
-    EmitterKind, EngineError, Position, SceneDescription, SourceDescription, SourceSignal,
+    EmitterKind, EngineError, Pattern, Position, SceneDescription, SourceDescription, SourceSignal,
     SourceTelemetry, Telemetry,
 };
 pub use engine::Engine;
