@@ -39,11 +39,11 @@ class InkTest {
         width = 60f,
         depth = 60f,
         listener = listener,
-        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), Pattern.OMNI, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f)) },
+        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), Pattern.OMNI, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f), listOf("Take")) },
     )
 
     private fun heard(at: Position, gainDb: Float, muted: Boolean = false, signal: SourceSignal? = null) = Telemetry(
-        sources = listOf(SourceTelemetry(0u, at, gainDb, muted, Position(1f, 0f, 0f), signal)),
+        sources = listOf(SourceTelemetry(0u, at, gainDb, muted, Position(1f, 0f, 0f), signal, 0u)),
         peaksDb = listOf(-20f, -20f),
         output = Output(RenderMode.HRTF, ChannelMode.STEREO),
         volume = 1f,

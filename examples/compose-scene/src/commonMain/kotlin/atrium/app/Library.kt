@@ -85,7 +85,15 @@ private fun PresetRow(preset: Preset, heard: Boolean, onHear: () -> Unit, onAdd:
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
             PaperText(preset.name, 18)
-            PaperText(if (preset.generated) "Generator" else "Recording", 13, Muted)
+            PaperText(
+                when {
+                    preset.generated -> "Generator"
+                    preset.takes > 1u -> "Sings · ${preset.takes} phrases"
+                    else -> "Recording"
+                },
+                13,
+                Muted,
+            )
         }
         Chip("Add", selected = false, onClick = onAdd)
     }

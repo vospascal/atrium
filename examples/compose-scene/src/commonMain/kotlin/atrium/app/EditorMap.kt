@@ -51,6 +51,8 @@ private data class Marker(
     val facing: Float,
     val strength: Float,
     val silent: Boolean,
+    /** Whether it is uttering something now; a voice that sings rests between its takes. */
+    val sounding: Boolean,
 ) {
     /** A sound with a beam can be turned; an ambient or omni one sounds the same whichever way it faces. */
     val turnable: Boolean get() = !ambient && beamHalfAngle != null
@@ -116,6 +118,7 @@ internal fun EditorMap(
             facing = turned?.takeIf { it.slot == sound.slot }?.heading ?: atan2(facing.y, facing.x),
             strength = strengths.getOrElse(index) { 0f },
             silent = session.mix.silences(sound.id),
+            sounding = live == null || live.take != null,
         )
     }
     // Sized by where sounds were placed, so the view holds still while one is dragged or moves by itself.
@@ -308,7 +311,7 @@ private fun DrawScope.drawFacingHandle(at: Offset, marker: Marker, colors: Playe
  */
 private fun DrawScope.drawReach(at: Offset, marker: Marker, view: TopDown, beat: Float, selected: Boolean) {
     val radius = marker.reach * view.pixelsPerMetre
-    val heard = !marker.silent && marker.strength > 0f
+    val heard = !marker.silent && marker.sounding && marker.strength > 0f
     // Only the selected sound is filled, so overlapping reaches stay readable as outlines.
     val fill = marker.color.copy(alpha = if (selected) .12f else 0f)
     val edge = marker.color.copy(alpha = if (selected) .9f else if (marker.silent) .18f else .38f)
@@ -344,6 +347,10 @@ private fun DrawScope.drawPoint(at: Offset, marker: Marker, colors: PlayerColors
     if (marker.silent) {
         drawCircle(colors.backdrop, density * 6f, at)
         drawCircle(marker.color, density * 6f, at, style = Stroke(width = density * 1.5f))
+    } else if (!marker.sounding) {
+        // Resting between two takes: the dot dims until it sounds again.
+        drawCircle(colors.backdrop, density * 6f, at)
+        drawCircle(marker.color.copy(alpha = .35f), density * 6f, at)
     } else {
         drawCircle(marker.color, density * 6f, at)
     }

@@ -42,7 +42,11 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
     PlayerTheme(look.appearance) {
         val tint = if (look.monochrome) LocalPlayerColors.current.monochromeInk else null
         CompositionLocalProvider(LocalInkTint provides tint) {
-            val strengths = plumesFor(scene, session.description, session.telemetry).map { it.strength }
+            // How strongly each sound reaches the listener, and nothing while a voice rests between takes.
+            val resting = session.telemetry?.sources.orEmpty().filter { it.take == null }.map { it.slot }.toSet()
+            val strengths = plumesFor(scene, session.description, session.telemetry).mapIndexed { index, plume ->
+                if (session.description?.sources?.getOrNull(index)?.slot in resting) 0f else plume.strength
+            }
             val chosen = session.description?.sources?.firstOrNull { it.id == selected }
             val deleteChosen = {
                 chosen?.let(session::remove)

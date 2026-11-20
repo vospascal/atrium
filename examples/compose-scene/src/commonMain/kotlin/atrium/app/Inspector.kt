@@ -1,5 +1,6 @@
 package atrium.app
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -49,6 +50,22 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
         onChange = { session.level(sound.slot, QuietestLayerLevel + it * (LoudestLayerLevel - QuietestLayerLevel)) },
         Modifier.fillMaxWidth(),
     )
+
+    if (sound.takes.size > 1) {
+        // What it can say, with the one it is saying now lit. Between two it rests.
+        Spacer(Modifier.height(10.dp))
+        PaperText(if (live != null && live.take == null) "Resting" else "Singing", 14, Muted)
+        sound.takes.forEachIndexed { index, take ->
+            val now = live?.take?.toInt() == index
+            PaperText(
+                take,
+                15,
+                if (now) Foreground else Muted,
+                if (now) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.fillMaxWidth().background(if (now) Highlight else Backdrop).padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+        }
+    }
 
     Part("Shape")
     if (sound.emitterKind != EmitterKind.FIELD) {
