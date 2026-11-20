@@ -34,7 +34,7 @@ impl From<Position> for Vec3 {
     }
 }
 
-/// The scene the engine was built with.
+/// The scene the engine is playing.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SceneDescription {
     /// Environment floor size along x (m).
@@ -43,18 +43,25 @@ pub struct SceneDescription {
     pub depth: f32,
     /// Listener position at load time.
     pub listener: Position,
-    /// Sources in slot order: entry `i` is slot `i`.
+    /// Sources in slot order: entry `i` is slot `i`. `Engine::add_sound`
+    /// appends to it.
     pub sources: Vec<SourceDescription>,
 }
 
-/// One source as built.
+/// One source as it is now.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SourceDescription {
+    /// What the sound is known by in the scene file. Unlike its slot, it
+    /// stays the same when sounds around it are added or removed.
+    pub id: String,
     pub name: String,
+    /// The family it belongs to in a list, when the scene gives it one.
+    pub group: Option<String>,
     /// UI color as `#rrggbb`.
     pub color: String,
     pub position: Position,
-    /// Calibrated level at `reference_distance` (dB SPL).
+    /// Level at `reference_distance` (dB SPL): the scene's, until
+    /// `Engine::set_source_level` changes it.
     pub spl: f32,
     /// Distance at which `spl` applies (m).
     pub reference_distance: f32,
@@ -90,20 +97,24 @@ impl From<atrium::config::SceneDescription> for SceneDescription {
             width: scene.width,
             depth: scene.depth,
             listener: scene.listener.into(),
-            sources: scene
-                .sources
-                .into_iter()
-                .map(|source| SourceDescription {
-                    name: source.name,
-                    color: source.color,
-                    position: source.position.into(),
-                    spl: source.spl,
-                    reference_distance: source.reference_distance,
-                    emitter_kind: source.emitter_kind.into(),
-                    beam_half_angle: source.beam_half_angle,
-                    facing: source.facing.into(),
-                })
-                .collect(),
+            sources: scene.sources.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<atrium::config::SourceDescription> for SourceDescription {
+    fn from(source: atrium::config::SourceDescription) -> Self {
+        Self {
+            id: source.id,
+            name: source.name,
+            group: source.group,
+            color: source.color,
+            position: source.position.into(),
+            spl: source.spl,
+            reference_distance: source.reference_distance,
+            emitter_kind: source.emitter_kind.into(),
+            beam_half_angle: source.beam_half_angle,
+            facing: source.facing.into(),
         }
     }
 }
@@ -221,6 +232,8 @@ pub enum EngineError {
     UnplayableOutput,
     /// The head tracker could not start, or is not one of `head_trackers()`.
     HeadTracking(String),
+    /// Every voice of the engine is taken, so no further sound can play.
+    NoFreeVoice,
 }
 
 impl std::fmt::Display for EngineError {
@@ -235,6 +248,7 @@ impl std::fmt::Display for EngineError {
             Self::HeadTracking(reason) => {
                 write!(formatter, "head tracking could not start: {reason}")
             }
+            Self::NoFreeVoice => write!(formatter, "every voice is taken"),
         }
     }
 }

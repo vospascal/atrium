@@ -5,14 +5,16 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use atrium::audio::output::{AudioOutput, CpalOutput};
-use atrium::config::SceneConfig;
+use atrium::config::{read_preset, SceneConfig, SoundBuilder};
+use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
 use atrium_core::commands::Command;
-use atrium_core::telemetry::TelemetryFrame;
+use atrium_core::telemetry::{TelemetryFrame, MAX_SOURCES};
 use atrium_core::types::Vec3;
+use atrium_world::{Entity, EntityId, Moves, Shape, Sound};
 
-use crate::api::{EngineError, Position, SceneDescription, Telemetry};
+use crate::api::{EngineError, Position, SceneDescription, SourceDescription, Telemetry};
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::output::{playable_outputs, Output};
 
@@ -20,6 +22,14 @@ use crate::output::{playable_outputs, Output};
 const COMMAND_CAPACITY: usize = 256;
 /// Telemetry frames held for the UI; it only ever reads the newest.
 const TELEMETRY_CAPACITY: usize = 4;
+/// Sound changes the audio thread can fall behind by. Each is one press in a
+/// UI, so a handful is plenty.
+const EDIT_CAPACITY: usize = 8;
+/// How far ahead of the listener an auditioned or newly added sound stands (m).
+const AHEAD_OF_LISTENER: f32 = 2.0;
+/// The voice an auditioned preset plays from: the last one, so a scene's own
+/// sounds, which fill voices from the first, reach it last.
+const AUDITION_SLOT: usize = MAX_SOURCES - 1;
 
 /// A loaded scene playing on the default output device.
 ///
@@ -28,7 +38,9 @@ const TELEMETRY_CAPACITY: usize = 4;
 /// frame when it draws, so nothing calls into Kotlin from an engine thread.
 #[derive(uniffi::Object)]
 pub struct Engine {
-    description: SceneDescription,
+    /// The scene as it is now. The audio thread does not report a sound's
+    /// level back, so a change made through this object is recorded here.
+    description: Mutex<SceneDescription>,
     /// What this scene can play on the opened device; fixed for its lifetime.
     outputs: Vec<Output>,
     /// Shared with head tracking, which steers the listener from its own
@@ -41,6 +53,9 @@ pub struct Engine {
     listener_yaw: f32,
     /// The running tracker, if any.
     head_tracking: Mutex<Option<HeadTracking>>,
+    /// Builds one more sound for this scene, as its own sounds were built.
+    sounds: SoundBuilder,
+    edits: Mutex<Edits>,
     /// Dropped last; dropping it stops the audio.
     _output: OutputThread,
 }
@@ -58,26 +73,65 @@ impl Engine {
         let (telemetry_producer, telemetry) = rtrb::RingBuffer::new(TELEMETRY_CAPACITY);
         built.scene.telemetry_out = Some(telemetry_producer);
         let (commands, command_consumer) = rtrb::RingBuffer::new(COMMAND_CAPACITY);
+        let (to_audio, edit_consumer) = rtrb::RingBuffer::new(EDIT_CAPACITY);
+        let (retired_producer, retired) = rtrb::RingBuffer::new(EDIT_CAPACITY);
+        built.scene.scene_edits = Some(edit_consumer);
+        built.scene.retired_out = Some(retired_producer);
         let layout_channels = built.scene.speaker_layout.total_channels();
         let listener_position = built.scene.listener.position;
         let listener_yaw = built.scene.listener.yaw;
         let output = OutputThread::start(built.scene, command_consumer)?;
 
         Ok(Arc::new(Self {
-            description: built.description.into(),
+            description: Mutex::new(built.description.into()),
             outputs: playable_outputs(layout_channels, output.device_channels),
             commands: Arc::new(Mutex::new(commands)),
             telemetry: Mutex::new(telemetry),
             listener_position,
             listener_yaw,
             head_tracking: Mutex::new(None),
+            sounds: built.sounds,
+            edits: Mutex::new(Edits {
+                to_audio,
+                retired,
+                auditioned: false,
+            }),
             _output: output,
         }))
     }
 
-    /// The scene as built.
+    /// The scene as it is now: as built, with every level set since.
     pub fn scene(&self) -> SceneDescription {
-        self.description.clone()
+        lock(&self.description).clone()
+    }
+
+    /// Silence the source in `slot`, or let it sound again. It keeps running
+    /// while muted, so it comes back where it would have been.
+    pub fn set_source_muted(&self, slot: u16, muted: bool) -> Result<(), EngineError> {
+        lock(&self.commands)
+            .push(Command::SetSourceMuted { index: slot, muted })
+            .map_err(|_| EngineError::CommandQueueFull)
+    }
+
+    /// Set the level of the source in `slot`, in dB SPL at its reference
+    /// distance. `scene()` reports the new level from then on. A slot that
+    /// holds no source, or a level that is not a number, changes nothing.
+    pub fn set_source_level(&self, slot: u16, level: f32) -> Result<(), EngineError> {
+        let mut description = lock(&self.description);
+        let Some(source) = description.sources.get_mut(slot as usize) else {
+            return Ok(());
+        };
+        if !level.is_finite() {
+            return Ok(());
+        }
+        lock(&self.commands)
+            .push(Command::SetSourceSpl {
+                index: slot,
+                spl: level,
+            })
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        source.spl = level;
+        Ok(())
     }
 
     /// Move the source in `slot` to `position`.
@@ -126,6 +180,70 @@ impl Engine {
             .map_err(|_| EngineError::CommandQueueFull)
     }
 
+    /// Play `preset` just ahead of the listener, to hear it before placing
+    /// it, or stop with `None`. One preset is auditioned at a time, and it is
+    /// not part of the scene: `scene()` does not list it.
+    ///
+    /// Building the sound decodes its recording or measures its generator, so
+    /// this call takes a moment. Keep it off a UI thread.
+    pub fn audition(&self, preset: Option<String>) -> Result<(), EngineError> {
+        let mut edits = lock(&self.edits);
+        edits.stop_audition()?;
+        let Some(preset) = preset else {
+            return Ok(());
+        };
+        if lock(&self.description).sources.len() > AUDITION_SLOT {
+            return Err(EngineError::NoFreeVoice);
+        }
+        let id = EntityId::unused("audition", []);
+        let built = self
+            .sounds
+            .build(&id, &self.sound_ahead(preset, None, None), AUDITION_SLOT)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        edits.send(SceneEdit::AddSource {
+            slot: AUDITION_SLOT as u16,
+            source: built.source,
+            bands: built.bands,
+            amplitude: built.amplitude,
+        })?;
+        edits.auditioned = true;
+        Ok(())
+    }
+
+    /// Add a sound made from `preset` to the scene, just ahead of the
+    /// listener, and report it. It takes the next free voice and an id made
+    /// from the preset's name. An audition in progress is stopped. Like
+    /// `audition`, this takes a moment.
+    pub fn add_sound(&self, preset: String) -> Result<SourceDescription, EngineError> {
+        let mut edits = lock(&self.edits);
+        edits.stop_audition()?;
+        let mut description = lock(&self.description);
+        let slot = description.sources.len();
+        if slot >= MAX_SOURCES {
+            return Err(EngineError::NoFreeVoice);
+        }
+        let summary =
+            read_preset(&preset).map_err(|error| EngineError::Scene(error.to_string()))?;
+        let id = EntityId::unused(
+            &summary.name,
+            description.sources.iter().map(|source| source.id.as_str()),
+        );
+        let entity = self.sound_ahead(preset, Some(summary.name), summary.group);
+        let built = self
+            .sounds
+            .build(&id, &entity, slot)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        edits.send(SceneEdit::AddSource {
+            slot: slot as u16,
+            source: built.source,
+            bands: built.bands,
+            amplitude: built.amplitude,
+        })?;
+        let added: SourceDescription = built.description.into();
+        description.sources.push(added.clone());
+        Ok(added)
+    }
+
     /// Let `tracker` steer the listener, or stop with `None`. Stopping turns
     /// the listener back to the way the scene faces it. Any tracker already
     /// running is stopped first, and has let go of its port when this returns.
@@ -167,6 +285,59 @@ impl Engine {
             Some(_) => HeadTrackingStatus::Waiting,
         };
         Some(report)
+    }
+}
+
+impl Engine {
+    /// A sound made from `preset`, standing a short way ahead of where the
+    /// scene puts the listener, at ear height.
+    fn sound_ahead(&self, preset: String, name: Option<String>, group: Option<String>) -> Entity {
+        let ahead = Vec3::new(self.listener_yaw.cos(), self.listener_yaw.sin(), 0.0);
+        Entity {
+            name,
+            color: None,
+            group,
+            sound: Sound {
+                preset: Some(preset),
+                audio: None,
+                level: None,
+            },
+            shape: Shape::default(),
+            place: self
+                .sounds
+                .place_at(self.listener_position + ahead * AHEAD_OF_LISTENER),
+            moves: Moves::Still,
+        }
+    }
+}
+
+/// The way sounds reach the audio thread while it runs, and come back.
+struct Edits {
+    to_audio: rtrb::Producer<SceneEdit>,
+    /// Sounds the audio thread took out. Freeing memory is not safe there,
+    /// so it sends them back to be dropped on the calling thread.
+    retired: rtrb::Consumer<Retired>,
+    /// Whether a preset is playing from the audition voice.
+    auditioned: bool,
+}
+
+impl Edits {
+    fn send(&mut self, edit: SceneEdit) -> Result<(), EngineError> {
+        while self.retired.pop().is_ok() {}
+        self.to_audio
+            .push(edit)
+            .map_err(|_| EngineError::CommandQueueFull)
+    }
+
+    fn stop_audition(&mut self) -> Result<(), EngineError> {
+        if self.auditioned {
+            self.send(SceneEdit::RemoveSource {
+                slot: AUDITION_SLOT as u16,
+                filler: SoundBuilder::silence(),
+            })?;
+            self.auditioned = false;
+        }
+        Ok(())
     }
 }
 
@@ -384,6 +555,70 @@ mod tests {
         telemetry_when(&engine, |telemetry| {
             telemetry.head_tracking == HeadTrackingStatus::Off && telemetry.listener_facing.y > 0.99
         });
+    }
+
+    /// What the editor's layers and library do to a playing scene, at zero
+    /// volume: `cargo test -p atrium-ffi -- --ignored --test-threads=1`.
+    #[test]
+    #[ignore = "opens the default output device"]
+    fn layers_and_library_change_the_playing_scene() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        engine.set_volume(0.0).expect("volume");
+        let playing = |telemetry: &Telemetry, slot: usize| {
+            telemetry
+                .sources
+                .iter()
+                .any(|source| source.slot as usize == slot)
+        };
+        let scene = engine.scene();
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].id, "frogs");
+        assert_eq!(scene.sources[0].group.as_deref(), Some("Creatures"));
+
+        // Hearing a preset before placing it: it plays, and is not in the scene.
+        engine
+            .audition(Some("sources/cricket.yaml".into()))
+            .expect("the cricket builds");
+        telemetry_when(&engine, |telemetry| playing(telemetry, AUDITION_SLOT));
+        assert_eq!(
+            engine.scene().sources.len(),
+            1,
+            "an audition is not a layer"
+        );
+        engine.audition(None).expect("the audition stops");
+        telemetry_when(&engine, |telemetry| !playing(telemetry, AUDITION_SLOT));
+
+        // Adding one: the next voice, an id from the preset's name, its group,
+        // and a place 2 m ahead of a listener who faces north.
+        let added = engine
+            .add_sound("sources/frog.yaml".into())
+            .expect("the frog builds");
+        assert_eq!((added.id.as_str(), added.name.as_str()), ("frog", "Frog"));
+        assert_eq!(added.group.as_deref(), Some("Creatures"));
+        assert!((added.position.y - scene.listener.y - 2.0).abs() < 1e-3);
+        assert!((added.position.x - scene.listener.x).abs() < 1e-3);
+        let second = engine
+            .add_sound("sources/frog.yaml".into())
+            .expect("a second frog builds");
+        assert_eq!(second.id, "frog-2", "ids stay unique");
+        assert_eq!(engine.scene().sources.len(), 3);
+        telemetry_when(&engine, |telemetry| {
+            playing(telemetry, 1) && playing(telemetry, 2)
+        });
+
+        // A layer's mute and level.
+        engine.set_source_muted(1, true).expect("mute");
+        telemetry_when(&engine, |telemetry| {
+            telemetry
+                .sources
+                .iter()
+                .any(|source| source.slot == 1 && source.muted)
+        });
+        engine.set_source_level(1, 50.0).expect("level");
+        assert_eq!(engine.scene().sources[1].spl, 50.0);
+        assert_eq!(engine.scene().sources[2].spl, 65.0, "only that layer");
     }
 
     #[test]

@@ -6,9 +6,12 @@ Kotlin can reach is declared here:
 - `list_scenes(directory)`: the scene files a player can pick from. Each comes with its title and,
   for each sound, its name, color and direction from the listener. They are read from the YAML
   alone, with no audio decoded.
+- `list_presets(directory)`: the presets a sound can be made from, with a name, a group and
+  whether each is a recording or a generator.
 - `head_trackers()`: the head trackers that can work on this platform.
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
-  `set_volume`, `set_source_position`, `set_head_tracker` and `latest_telemetry()`.
+  `set_volume`, `set_source_position`, `set_source_muted`, `set_source_level`, `audition`,
+  `add_sound`, `set_head_tracker` and `latest_telemetry()`.
 - The records it returns: `Position`, `SceneDescription`, `Output`, `Telemetry`. Telemetry
   includes where the listener faces and whether a head tracker is sending.
 - `EngineError`.
@@ -20,10 +23,29 @@ runs Cargo itself. There is nothing to build here by hand.
 
 ## Decisions that look wrong and are right
 
-- **Only the commands a screen uses are exported:** moving a source (the composer), and the output,
-  volume and head tracker (the player's Settings). Every other `Command` gets a method when a
+- **Only the commands a screen uses are exported:** moving a source (the composer), the output,
+  volume and head tracker (the player's Settings), and mute, level, audition and add (the
+  editor's layers and library). Every other `Command` gets a method when a
   Kotlin screen calls it. An exported method with no caller is surface the generated Kotlin
   carries for nothing.
+- **`scene()` is the scene as it is now, kept by this object.** The audio thread reports where a
+  sound is and whether it is muted, but not its level, and it knows nothing of names, ids or
+  groups. So `set_source_level` and `add_sound` record their change in the description this
+  object holds, and the app reads `scene()` again after either.
+- **Solo is not exported.** The engine only knows muted or not. The app keeps what was muted
+  by hand and what was asked to be heard alone, and sends the mutes that follow. A solo in the
+  engine would have to remember the same two sets to undo itself.
+- **A sound added while playing goes through the same builder as the scene's own.**
+  `SoundBuilder` is kept from the scene build with its loudness calibration and distance model,
+  so an added frog is exactly the frog a reloaded scene would have.
+- **An audition plays from the last voice and is not in `scene()`.** A scene's sounds fill the
+  voices from the first, so the last is the one they reach last. A scene that uses all 16 cannot
+  audition, and both calls say so with `NoFreeVoice`.
+- **`audition` and `add_sound` block while the sound is built.** A recording is decoded and a
+  generator is measured for a few seconds of output. The app calls them one at a time from a
+  background thread, which also keeps a release from overtaking its press.
+- **A sound the audio thread takes out is dropped on the calling thread.** Freeing memory is
+  not safe on the audio thread, so it sends the box back, and the next edit collects it.
 - **Head tracking belongs to the engine object, so it stops and starts with every scene.** The
   tracker steers one engine's listener through that engine's command ring. The app keeps the
   choice and gives it to each engine as it starts. The cost is that the Sony bridge restarts on a
@@ -105,11 +127,13 @@ runs Cargo itself. There is nothing to build here by hand.
   plays without stream errors. Heavier scenes have not been tried in a debug build. Run Gradle with
   `-PreleaseBuild=true` for an optimised build. That flag also builds the other desktop
   platforms, which needs their cross toolchains.
-- **Three tests are ignored by default.** Run them with
+- **Four tests are ignored by default.** Run them with
   `cargo test -p atrium-ffi -- --ignored --test-threads=1`. One at a time, because two of them
   bind the tracker's port.
   `output_and_volume_change_while_playing` needs an output device and plays under a second of
   sound. On 2026-11-19 it passed on a 2-channel headphone device.
+  `layers_and_library_change_the_playing_scene` auditions, adds, mutes and sets a level at zero
+  volume. It passed on 2026-11-20.
   `head_tracking_holds_its_port_only_while_it_is_on` and
   `telemetry_shows_whether_a_tracker_is_sending_and_where_the_head_points` open the device at
   zero volume and bind port 4242, so no other tracker may be running. Both passed on 2026-11-20.
@@ -129,6 +153,12 @@ runs Cargo itself. There is nothing to build here by hand.
 - **The first Sony start on a machine builds the bridge.** The script clones a pinned commit from
   GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
   engine is compiled, so a build moved away from this repository cannot find it.
+- **A sound cannot be removed, and an added one is not saved.** Playing the scene again brings
+  back the file's own sounds. Remove and Save come with scenes as documents.
+- **A new sound always lands 2 m ahead of where the scene puts the listener.** Dropping it at a
+  chosen spot needs the map of all sounds.
+- **The scene description is indexed by voice.** Entry `i` is voice `i`, which holds only while
+  nothing is removed. Remove will need each entry to carry its voice.
 - **A killed app leaves its Sony bridge running.** The bridge is stopped when the engine is
   closed. A process that is killed outright never closes it, and whether closing the app's
   window always does has not been checked. A bridge left behind keeps sending to a port nobody

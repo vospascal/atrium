@@ -13,6 +13,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [dependencies]
 atrium = { path = "../..", default-features = false }
 atrium-core = { path = "../core" }
+atrium-world = { path = "../world" }
 rtrb = "0.3"
 # Exact: the generated Kotlin depends on this release's FFI layout, and OxiKT
 # 1.4 generates for 0.32.0 only.
