@@ -38,7 +38,7 @@ class InkTest {
         width = 60f,
         depth = 60f,
         listener = listener,
-        sources = List(count) { SourceDescription("Sound $it", "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f)) },
+        sources = List(count) { SourceDescription("sound-$it", "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f)) },
     )
 
     private fun heard(at: Position, gainDb: Float, muted: Boolean = false, signal: SourceSignal? = null) = Telemetry(
@@ -52,6 +52,19 @@ class InkTest {
 
     private fun close(expected: Float, actual: Float) =
         assertTrue(kotlin.math.abs(expected - actual) < 1e-4f, "expected $expected, got $actual")
+
+    /**
+     * A sound added from the library is in the engine's description and not in
+     * the scene file. It gets a plume like the others, in its own color.
+     */
+    @Test
+    fun aSoundAddedWhilePlayingGetsAPlume() {
+        val file = scene(Position(10f, 0f, 0f))
+        assertEquals(1, plumesFor(file, null, null).size)
+        val plumes = plumesFor(file, description(2), null)
+        assertEquals(2, plumes.size)
+        assertEquals(parseColor("#26c6da"), plumes[1].color)
+    }
 
     @Test
     fun inkFlowsTowardTheSoundBeforeItPlays() {

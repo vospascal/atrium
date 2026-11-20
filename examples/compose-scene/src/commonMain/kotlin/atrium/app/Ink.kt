@@ -86,6 +86,9 @@ internal data class Plume(
  */
 internal val LocalInkTint = staticCompositionLocalOf<Color?> { null }
 
+/** The ink of a sound that neither the scene file nor the engine has a color for. */
+private const val UnknownSoundColor = "#888888"
+
 /** How dense a plume is before its sound reports a level. */
 internal const val RestingStrength = .7f
 
@@ -101,14 +104,17 @@ private const val FaintestInk = .06f
  * rests at its starting direction.
  */
 internal fun plumesFor(scene: SceneFile, description: SceneDescription?, telemetry: Telemetry?): List<Plume> =
-    scene.sounds.mapIndexed { slot, sound ->
+    // A sound added while the scene plays is in the description and not in the file.
+    List(maxOf(scene.sounds.size, description?.sources?.size ?: 0)) { slot ->
+        val sound = scene.sounds.getOrNull(slot)
         val live = telemetry?.sources?.firstOrNull { it.slot.toInt() == slot }
         val built = description?.sources?.getOrNull(slot)
         val listener = description?.listener
-        val offset = if (live != null && listener != null) {
-            Point(live.position.x - listener.x, live.position.y - listener.y)
-        } else {
-            sound.offsetFromListener.toPoint()
+        val offset = when {
+            live != null && listener != null -> Point(live.position.x - listener.x, live.position.y - listener.y)
+            sound != null -> sound.offsetFromListener.toPoint()
+            built != null && listener != null -> Point(built.position.x - listener.x, built.position.y - listener.y)
+            else -> Point(0f, 0f)
         }
         val strength = when {
             telemetry != null && live == null -> 0f
@@ -133,7 +139,8 @@ internal fun plumesFor(scene: SceneFile, description: SceneDescription?, telemet
                 it.highShare,
             )
         }
-        Plume(screenDirection(offset), strength, parseColor(sound.color), extent, built?.beamHalfAngle, signal)
+        val color = parseColor(sound?.color ?: built?.color ?: UnknownSoundColor)
+        Plume(screenDirection(offset), strength, color, extent, built?.beamHalfAngle, signal)
     }
 
 /** World +x is right and +y is north, which is up on screen. */

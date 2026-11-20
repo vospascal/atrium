@@ -33,7 +33,7 @@ private enum class Tab { Home, Scenes, Settings }
 
 /** Choose a scene and listen: Home (now playing), Scenes and Settings over one engine session. */
 @Composable
-internal fun Player(scenes: Result<List<SceneFile>>, session: Session, look: Look, onCompose: () -> Unit) {
+internal fun Player(scenes: Result<List<SceneFile>>, session: Session, look: Look, onEdit: () -> Unit) {
     val list = scenes.getOrNull().orEmpty()
     var tab by remember { mutableStateOf(Tab.Home) }
     var view by remember { mutableStateOf(PlayerView.Zen) }
@@ -76,7 +76,7 @@ internal fun Player(scenes: Result<List<SceneFile>>, session: Session, look: Loo
                             when (tab) {
                                 Tab.Home -> Box(Modifier.fillMaxSize().padding(24.dp)) { Wordmark() }
                                 Tab.Scenes -> Scenes(scenes, session, onToggle = ::toggle)
-                                Tab.Settings -> Settings(session, look, onCompose = onCompose)
+                                Tab.Settings -> Settings(session, look, onEdit = onEdit)
                             }
                         }
                         if (current != null) {

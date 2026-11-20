@@ -8,12 +8,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 
-/** Inspect a sound in the playing scene and drag it if it is localized. */
+/** Inspect a sound in the playing scene, starting with the one in [initialSlot], and drag it if it is localized. */
 @Composable
-internal fun Composer(session: Session, onBack: () -> Unit) {
+internal fun Composer(session: Session, initialSlot: Int, onBack: () -> Unit) {
     val description = session.description
     val sourceCount = description?.sources?.size ?: 0
-    var selected by remember(description) { mutableStateOf(0) }
+    var selected by remember(description?.sources?.size) { mutableStateOf(initialSlot.coerceIn(0, maxOf(sourceCount - 1, 0))) }
     val slot = selected.toUShort()
     var scene by remember(description, selected) { mutableStateOf(description?.toScene(selected) ?: Scene.Preview) }
     val drag = remember(description, selected) { DragEcho() }

@@ -29,7 +29,7 @@ It has two faces that share one running engine.
 - **Scenes** lists every scene in `scenes/`. Each cover is a still of that scene's own ink, drawn
   from its file, so nothing has to be painted by hand. A mini player sits above the tabs.
 - **Settings** has the appearance (Auto, Light or Dark), the ink (Color or Monochrome), the
-  output, head tracking, the volume, and the way into the composer. Head tracking is for
+  output, head tracking, the volume, and the way into the editor. Head tracking is for
   headphones: the listener turns with your head, so the place stays where it is. On macOS it
   offers Sony headphones (WH/WF-1000XM5 or XM6, started by the app) and any tracker that sends
   OpenTrack UDP to port 4242. The choice holds across scenes until the app closes. Settings says
@@ -44,8 +44,18 @@ the same paint in both. Only the backdrop, text, controls and listener rings cha
 draws every plume in the opposite of the backdrop, black on white or white on black. It gets its
 depth from tone instead of hue.
 
-**The composer** is opened from Settings while a scene plays. Browse its sounds on the tilted
-  grid and drag a localized sound to move it. Environmental fields such as wind show broad
+**The editor** is opened from Settings while a scene plays. It is in the player's paper style
+and has two lists.
+
+- **Layers** are the sounds of the scene in their groups. The dot silences a layer or a whole
+  group, `S` lets one or more be heard alone, and the line shows how strongly each reaches you.
+  Selecting a layer shows its level and the way to its place on the map.
+- **Library** lists the presets in `sources/`. Hold one to hear it just ahead of you, and Add
+  puts it in the scene there, as a new layer. An added sound lasts until the scene is played
+  again: scenes cannot be saved yet, and a layer cannot be removed.
+
+**The composer's map** is reached from a layer. It shows that sound on the tilted grid, and a
+  localized sound can be dragged. Environmental fields such as wind show broad
   bands. A field's scene anchor can give the bands a bearing, while an anchor at the listener
   shows an all-direction field. The bearing guides the visualization. Directional objects show
   their facing and beam width. Omnidirectional objects show the direct-level estimate.

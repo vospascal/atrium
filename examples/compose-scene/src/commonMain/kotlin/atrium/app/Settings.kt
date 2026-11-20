@@ -26,9 +26,9 @@ import atrium.engine.RenderMode
 import atrium.engine.headTrackers
 import kotlin.math.roundToInt
 
-/** How the player looks and how the scene reaches you: appearance, ink, output, head tracking, volume, composer. */
+/** How the player looks and how the scene reaches you: appearance, ink, output, head tracking, volume, editor. */
 @Composable
-internal fun Settings(session: Session, look: Look, onCompose: () -> Unit) {
+internal fun Settings(session: Session, look: Look, onEdit: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
         Box(Modifier.padding(top = 22.dp)) { Wordmark() }
         PaperText("Settings", 52, weight = FontWeight.Bold, modifier = Modifier.padding(top = 24.dp, bottom = 8.dp))
@@ -105,8 +105,8 @@ internal fun Settings(session: Session, look: Look, onCompose: () -> Unit) {
             session.command { setVolume(level) }
         }, Modifier.fillMaxWidth())
 
-        Section("Compose")
-        Chip("Open the composer", selected = false, onClick = onCompose)
+        Section("Edit")
+        Chip("Open the editor", selected = false, onClick = onEdit)
 
         Spacer(Modifier.height(24.dp))
         val peak = session.telemetry?.peaksDb?.maxOrNull()

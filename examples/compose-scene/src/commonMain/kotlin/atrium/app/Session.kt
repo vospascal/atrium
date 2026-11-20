@@ -11,11 +11,16 @@ import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
 import atrium.engine.Output
+import atrium.engine.Preset
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
 import atrium.engine.Telemetry
+import atrium.engine.listPresets
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -50,6 +55,19 @@ internal class Session {
     var headTrackingFailure by mutableStateOf<String?>(null)
         private set
 
+    /** What the listener silenced or asked to hear alone; forgotten when the scene changes. */
+    var mix by mutableStateOf(LayerMix())
+        private set
+
+    /** The presets a sound can be made from, read when the library is first opened. */
+    val presets: Result<List<Preset>> by lazy { runCatching { listPresets(PresetDirectory) } }
+    /** Why the last audition or add did not work; null once one does. */
+    var libraryFailure by mutableStateOf<String?>(null)
+        private set
+
+    /** Building a sound decodes or measures it, which takes a moment: one at a time, off the UI thread. */
+    private val building = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
+
     private var requests = 0
 
     fun play(scene: SceneFile) {
@@ -62,6 +80,52 @@ internal class Session {
 
     /** Whether [scene] is the one asked for: starting, playing, or failed to start. */
     fun isActive(scene: SceneFile) = request?.scene?.path == scene.path
+
+    /** Make [next] the layer mix, telling the engine about every sound that falls silent or returns. */
+    fun mix(next: LayerMix) {
+        val before = mix
+        mix = next
+        description?.sources?.forEachIndexed { slot, sound ->
+            val silent = next.silences(sound.id)
+            if (silent != before.silences(sound.id)) command { setSourceMuted(slot.toUShort(), silent) }
+        }
+    }
+
+    /** Set the level of the sound in [slot], in dB SPL at 1 m. */
+    fun level(slot: Int, level: Float) {
+        val running = engine ?: return
+        command { setSourceLevel(slot.toUShort(), level) }
+        description = running.scene()
+    }
+
+    /** Play [preset] just ahead of the listener to hear it before placing it, or stop with null. */
+    fun audition(preset: String?) {
+        val running = engine ?: return
+        building.launch {
+            libraryFailure = runCatching { running.audition(preset) }.exceptionOrNull()?.message
+        }
+    }
+
+    /** Add a sound made from [preset] to the playing scene; [onAdded] gets its id once it sounds. */
+    fun add(preset: String, onAdded: (id: String) -> Unit) {
+        val running = engine ?: return
+        building.launch {
+            runCatching { running.addSound(preset) }
+                .onSuccess { added ->
+                    libraryFailure = null
+                    if (engine === running) {
+                        description = running.scene()
+                        onAdded(added.id)
+                    }
+                }
+                .onFailure { libraryFailure = it.message }
+        }
+    }
+
+    /** A new scene starts with every layer sounding. */
+    internal fun forgetMix() {
+        mix = LayerMix()
+    }
 
     /** Let [tracker] turn the listener with the head, or switch it off with null. */
     fun chooseHeadTracker(tracker: HeadTracker?) {
@@ -115,6 +179,7 @@ internal fun RunSession(session: Session) {
             return@LaunchedEffect
         }
         try {
+            session.forgetMix()
             session.description = running.scene()
             session.outputs = running.outputs()
             session.engine = running
@@ -135,3 +200,6 @@ internal fun RunSession(session: Session) {
         }
     }
 }
+
+/** Where the presets are, relative to the working directory, like the scenes. */
+private const val PresetDirectory = "sources"
