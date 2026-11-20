@@ -44,21 +44,21 @@ the same paint in both. Only the backdrop, text, controls and listener rings cha
 draws every plume in the opposite of the backdrop, black on white or white on black. It gets its
 depth from tone instead of hue.
 
-**The editor** is opened from Settings while a scene plays. It is in the player's paper style
-and has two lists.
+**The editor** is opened from Settings while a scene plays. It is in the player's paper style,
+and on desktop the window widens for it. It has three panels; in a narrow window they are tabs.
 
 - **Layers** are the sounds of the scene in their groups. The dot silences a layer or a whole
   group, `S` lets one or more be heard alone, and the line shows how strongly each reaches you.
-  Selecting a layer shows its level and the way to its place on the map.
 - **Library** lists the presets in `sources/`. Hold one to hear it just ahead of you, and Add
   puts it in the scene there, as a new layer. An added sound lasts until the scene is played
   again: scenes cannot be saved yet, and a layer cannot be removed.
-
-**The composer's map** is reached from a layer. It shows that sound on the tilted grid, and a
-  localized sound can be dragged. Environmental fields such as wind show broad
-  bands. A field's scene anchor can give the bands a bearing, while an anchor at the listener
-  shows an all-direction field. The bearing guides the visualization. Directional objects show
-  their facing and beam width. Omnidirectional objects show the direct-level estimate.
+- **The map** shows every sound from above, north up, with you in the middle and rings at 5, 10
+  and 20 m. A sound is a dot with a halo as strong as it is heard, a focused one has a wedge as
+  wide as its beam, and an ambient one is a wash with a dashed edge. Click a sound to select it,
+  drag it to move it, click the ground to select nothing. The selected sound shows its distance
+  and bearing on a dashed line.
+- **The inspector** shows the selected sound in a fixed order: its level, which can be set, then
+  its shape, place, when it plays and whether it moves. With nothing selected it shows the scene.
 
 A scene can set `title:`. Without it, the player makes one from the file name.
 
@@ -66,7 +66,7 @@ A scene can set `title:`. Without it, the player makes one from the file name.
 
 | Source set   | Holds                                                                           |
 | ------------ | ------------------------------------------------------------------------------- |
-| `commonMain` | Everything: player tabs, ink, map, composer, engine session, telemetry          |
+| `commonMain` | Everything: player tabs, ink, map, editor, engine session, telemetry            |
 | `jvmMain`    | `main()`: a desktop window                                                      |
 | `iosMain`    | `MainViewController(sceneDirectory)` for an iOS host app                        |
 | `commonTest` | Runs on JVM and the iOS simulator, including one real call into the Rust engine |
@@ -111,6 +111,10 @@ program argument.
   written from the published methods.
 - **Ink strength maps 20–65 dB SPL at the listener to faint–dense.** The numbers were chosen by
   eye, not from a perceptual model.
-- **The composer's heatmap is drawn in Kotlin.** It is plain inverse-distance falloff from the source's
-  reference level. It leaves out air absorption, rolloff, directivity and ground effect, so it can
-  disagree with what you hear. It should come from the engine.
+- **The editor's map has no loudness picture.** It shows how strongly each sound reaches you,
+  from the engine, and draws no falloff of its own. A loudness layer has to be computed by the
+  engine first.
+- **The editor's map cannot be zoomed or panned.** It fits the scene: the farthest placed sound
+  decides how much ground it shows.
+- **The speakers are not on the editor's map.** The engine's scene description does not report
+  them yet.

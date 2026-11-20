@@ -11,6 +11,7 @@ import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
 import atrium.engine.Output
+import atrium.engine.Position
 import atrium.engine.Preset
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
@@ -24,7 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The one engine the app runs, shared by the player and the composer.
+ * The one engine the app runs, shared by the player and the editor.
  *
  * Screens read its state and call [play], [stop] or the running [engine];
  * [RunSession] starts and closes engines to match.
@@ -120,6 +121,14 @@ internal class Session {
                 }
                 .onFailure { libraryFailure = it.message }
         }
+    }
+
+    /** Move the sound in [slot] to [position] while it is dragged. */
+    fun move(slot: Int, position: Position) = command { setSourcePosition(slot.toUShort(), position) }
+
+    /** A drag has ended: take over where the engine now says the scene's sounds were placed. */
+    fun placed() {
+        description = engine?.scene() ?: return
     }
 
     /** A new scene starts with every layer sounding. */

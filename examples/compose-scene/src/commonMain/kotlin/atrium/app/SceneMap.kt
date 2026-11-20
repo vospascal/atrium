@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -168,4 +169,26 @@ private fun gridStep(half: Float) = when {
     half <= 25f -> 5f
     half <= 50f -> 10f
     else -> 20f
+}
+
+/** An isometric-style view of a width × depth ground area, fitted to [size]. */
+internal class Projection(size: Size, width: Float, depth: Float) {
+    private val diagonals = (width + depth) * Diagonal
+    val pixelsPerMetre = (minOf(size.width * .84f, size.height * 1.36f) / diagonals).coerceAtLeast(.01f)
+    private val unit = pixelsPerMetre * Diagonal
+    private val origin = Offset(
+        size.width / 2 - (width - depth) / 2 * unit,
+        size.height * .48f - (width + depth) / 2 * unit * Tilt,
+    )
+
+    fun project(point: Point) = origin + Offset(
+        (point.x - point.y) * unit,
+        (point.x + point.y) * unit * Tilt - point.z * pixelsPerMetre,
+    )
+
+
+    companion object {
+        private const val Diagonal = .70710677f
+        const val Tilt = .52f
+    }
 }

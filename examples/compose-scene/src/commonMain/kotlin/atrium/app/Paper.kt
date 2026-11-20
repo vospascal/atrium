@@ -104,7 +104,7 @@ internal enum class Appearance { Auto, Light, Dark }
 
 /**
  * How the player looks. Restored from [store] when created and written back
- * on every change, so it outlives both a visit to the composer and a restart.
+ * on every change, so it outlives both a visit to the editor and a restart.
  */
 @Stable
 internal class Look(private val store: SettingsStore) {

@@ -121,7 +121,7 @@ private fun Section(title: String) {
     Spacer(Modifier.height(10.dp))
 }
 
-private val RenderMode.label
+internal val RenderMode.label
     get() = when (this) {
         RenderMode.WORLD_LOCKED -> "World-locked"
         RenderMode.VBAP -> "VBAP"
@@ -136,7 +136,7 @@ private val HeadTracker.label
         HeadTracker.EXTERNAL -> "OpenTrack"
     }
 
-private val ChannelMode.label
+internal val ChannelMode.label
     get() = when (this) {
         ChannelMode.STEREO -> "stereo"
         ChannelMode.QUAD -> "quad"

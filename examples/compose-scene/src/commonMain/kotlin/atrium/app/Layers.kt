@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,11 +23,10 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import atrium.engine.SourceDescription
-import kotlin.math.roundToInt
 
 /**
  * The sounds of the playing scene as layers, in their groups. Each layer can
- * be silenced, heard alone and selected; the selected one shows its level.
+ * be silenced, heard alone and selected.
  *
  * [strengths] is how strongly each sound reaches the listener right now, from
  * 0 to 1 in slot order.
@@ -39,7 +37,6 @@ internal fun Layers(
     strengths: List<Float>,
     selected: String?,
     onSelect: (String?) -> Unit,
-    onShowOnMap: (slot: Int) -> Unit,
 ) {
     val sounds = session.description?.sources.orEmpty()
     val mix = session.mix
@@ -64,7 +61,6 @@ internal fun Layers(
                 onSolo = { session.mix(mix.toggleSolo(sound.id)) },
                 onSelect = { onSelect(if (sound.id == selected) null else sound.id) },
             )
-            if (sound.id == selected) LayerLevel(session, slot, sound, onShowOnMap = { onShowOnMap(slot) })
         }
     }
 }
@@ -94,21 +90,6 @@ private fun LayerRow(
         Meter(strength, Modifier.width(72.dp).height(14.dp))
         Spacer(Modifier.width(14.dp))
         SoloMark(alone, onSolo)
-    }
-}
-
-/** The selected layer's level, and the way to its place on the map. */
-@Composable
-private fun LayerLevel(session: Session, slot: Int, sound: SourceDescription, onShowOnMap: () -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Highlight).padding(start = 58.dp, end = 22.dp, bottom = 14.dp)) {
-        PaperText("Level ${sound.spl.roundToInt()} dB at 1 m", 13, Muted)
-        PaperLevel(
-            ((sound.spl - QuietestLayerLevel) / (LoudestLayerLevel - QuietestLayerLevel)).coerceIn(0f, 1f),
-            onChange = { session.level(slot, QuietestLayerLevel + it * (LoudestLayerLevel - QuietestLayerLevel)) },
-            Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(6.dp))
-        Chip("Show on map", selected = false, onClick = onShowOnMap)
     }
 }
 
