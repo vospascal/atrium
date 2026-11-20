@@ -4,6 +4,7 @@ import atrium.engine.ChannelMode
 import atrium.engine.EmitterKind
 import atrium.engine.HeadTrackingStatus
 import atrium.engine.Output
+import atrium.engine.Pattern
 import atrium.engine.Position
 import atrium.engine.RenderMode
 import atrium.engine.SceneDescription
@@ -38,7 +39,7 @@ class InkTest {
         width = 60f,
         depth = 60f,
         listener = listener,
-        sources = List(count) { SourceDescription("sound-$it", "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f)) },
+        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), Pattern.OMNI, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f)) },
     )
 
     private fun heard(at: Position, gainDb: Float, muted: Boolean = false, signal: SourceSignal? = null) = Telemetry(
@@ -64,6 +65,23 @@ class InkTest {
         val plumes = plumesFor(file, description(2), null)
         assertEquals(2, plumes.size)
         assertEquals(parseColor("#26c6da"), plumes[1].color)
+    }
+
+    /**
+     * After a sound is removed the scene's list has a gap in its voices. Each plume
+     * still follows the sound with its own voice, not the one at the same place in the list.
+     */
+    @Test
+    fun aPlumeFollowsItsOwnVoiceAfterAnotherWasRemoved() {
+        val three = description(3)
+        val left = three.copy(sources = three.sources.filter { it.slot != 1.toUShort() })
+        val west = Position(listener.x - 8f, listener.y, 0f)
+        val live = heard(west, gainDb = 0f).let { it.copy(sources = it.sources.map { source -> source.copy(slot = 2u) }) }
+        val plumes = plumesFor(scene(Position(10f, 0f, 0f)), left, live)
+        assertEquals(2, plumes.size)
+        assertEquals(0f, plumes[0].strength, "voice 0 is not in the telemetry")
+        assertTrue(plumes[1].strength > 0f, "the second sound left is the one in voice 2")
+        close(PI.toFloat(), kotlin.math.abs(plumes[1].direction))
     }
 
     @Test

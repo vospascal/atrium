@@ -47,18 +47,27 @@ depth from tone instead of hue.
 **The editor** is opened from Settings while a scene plays. It is in the player's paper style,
 and on desktop the window widens for it. It has three panels; in a narrow window they are tabs.
 
-- **Layers** are the sounds of the scene in their groups. The dot silences a layer or a whole
-  group, `S` lets one or more be heard alone, and the line shows how strongly each reaches you.
-- **Library** lists the presets in `sources/`. Hold one to hear it just ahead of you, and Add
-  puts it in the scene there, as a new layer. An added sound lasts until the scene is played
-  again: scenes cannot be saved yet, and a layer cannot be removed.
+- **Layers** are the sounds of the scene in their groups. The ear in front of a layer silences
+  it and brings it back, like the eye in a picture editor's layer list; a group's ear does it
+  for the whole group. The line shows how strongly each layer reaches you. The bar underneath
+  has the actions: plus opens the library, and the bin deletes the selected layer.
+- **Library** lists the presets in `sources/`. The play button in front of one plays it just
+  ahead of you until you press it again; the sound starts about half a second after the press.
+  Add puts it in the scene there, as a new layer. An added sound lasts until the scene is played
+  again, because scenes cannot be saved yet.
 - **The map** shows every sound from above, north up, with you in the middle and rings at 5, 10
-  and 20 m. A sound is a dot with a halo as strong as it is heard, a focused one has a wedge as
-  wide as its beam, and an ambient one is a wash with a dashed edge. Click a sound to select it,
-  drag it to move it, click the ground to select nothing. The selected sound shows its distance
-  and bearing on a dashed line.
-- **The inspector** shows the selected sound in a fixed order: its level, which can be set, then
-  its shape, place, when it plays and whether it moves. With nothing selected it shows the scene.
+  and 20 m. Sounds are black and white, and the selected one is in its own colour. A sound's
+  circle is how far its level carries, so a louder sound is larger; a focused sound has a wedge
+  as wide as its beam instead. A ring travels outward from every sound that is heard. A wind is
+  drawn as bands arriving from the side its anchor lies on, and as rings all round when the
+  anchor is at you. Click a sound to select it, drag it to move it, click the ground to select
+  nothing. A wind is grabbed near its anchor; moving it changes where it is drawn to come from,
+  not how it sounds, since an ambient sound is heard everywhere. The selected sound shows its
+  distance and bearing on a dashed line, and a focused one has a handle at the end of its facing
+  line: drag it to turn the sound.
+- **The inspector** shows the selected sound in a fixed order: its level, which can be set; its
+  shape, which can be Omni, Focused or Narrow; then its place, when it plays and whether it
+  moves. With nothing selected it shows the scene.
 
 A scene can set `title:`. Without it, the player makes one from the file name.
 
@@ -111,9 +120,10 @@ program argument.
   written from the published methods.
 - **Ink strength maps 20–65 dB SPL at the listener to faint–dense.** The numbers were chosen by
   eye, not from a perceptual model.
-- **The editor's map has no loudness picture.** It shows how strongly each sound reaches you,
-  from the engine, and draws no falloff of its own. A loudness layer has to be computed by the
-  engine first.
+- **A sound's circle on the map is distance alone.** It is where the sound's level has fallen
+  to 60 dB, losing 6 dB for every doubling of distance. Air, ground and direction are left
+  out, so it compares sounds and does not say what you hear. That is computed in Kotlin, not
+  by the engine.
 - **The editor's map cannot be zoomed or panned.** It fits the scene: the farthest placed sound
   decides how much ground it shows.
 - **The speakers are not on the editor's map.** The engine's scene description does not report

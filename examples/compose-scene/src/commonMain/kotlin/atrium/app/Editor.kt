@@ -43,6 +43,11 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
         val tint = if (look.monochrome) LocalPlayerColors.current.monochromeInk else null
         CompositionLocalProvider(LocalInkTint provides tint) {
             val strengths = plumesFor(scene, session.description, session.telemetry).map { it.strength }
+            val chosen = session.description?.sources?.firstOrNull { it.id == selected }
+            val deleteChosen = {
+                chosen?.let(session::remove)
+                selected = null
+            }
             BoxWithConstraints(Modifier.fillMaxSize().background(Backdrop)) {
                 val wide = maxWidth >= WideFrom
                 Column(Modifier.fillMaxSize()) {
@@ -52,17 +57,23 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
                         // The map is always there, so the left panel only switches between its two lists.
                         val list = if (panel == Panel.Map) Panel.Layers else panel
                         Row(Modifier.weight(1f)) {
-                            Column(Modifier.width(SidePanel).fillMaxHeight().verticalScroll(rememberScrollState())) {
+                            Column(Modifier.width(SidePanel).fillMaxHeight()) {
                                 PanelTabs(listOf(Panel.Layers, Panel.Library), list) { panel = it }
                                 Rule()
-                                when (list) {
-                                    Panel.Library -> Library(session, onAdded = { id ->
-                                        selected = id
-                                        panel = Panel.Layers
-                                    })
-                                    else -> Layers(session, strengths, selected, onSelect = { selected = it })
+                                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                                    when (list) {
+                                        Panel.Library -> Library(session, onAdded = { id ->
+                                            selected = id
+                                            panel = Panel.Layers
+                                        })
+                                        else -> Layers(session, strengths, selected, onSelect = { selected = it })
+                                    }
+                                    Spacer(Modifier.height(24.dp))
                                 }
-                                Spacer(Modifier.height(24.dp))
+                                if (list == Panel.Layers) {
+                                    Rule()
+                                    LayerActions(canDelete = chosen != null, onAdd = { panel = Panel.Library }, onDelete = deleteChosen)
+                                }
                             }
                             Upright()
                             EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxHeight())
@@ -76,13 +87,13 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
                         PanelTabs(Panel.entries, panel) { panel = it }
                         Rule()
                         when (panel) {
-                            Panel.Layers -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                // A layer chosen here is shown where it can be seen and changed.
-                                Layers(session, strengths, selected, onSelect = {
-                                    selected = it
-                                    if (it != null) panel = Panel.Map
-                                })
-                                Spacer(Modifier.height(24.dp))
+                            Panel.Layers -> {
+                                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                                    Layers(session, strengths, selected, onSelect = { selected = it })
+                                    Spacer(Modifier.height(24.dp))
+                                }
+                                Rule()
+                                LayerActions(canDelete = chosen != null, onAdd = { panel = Panel.Library }, onDelete = deleteChosen)
                             }
                             Panel.Library -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                                 Library(session, onAdded = { id ->

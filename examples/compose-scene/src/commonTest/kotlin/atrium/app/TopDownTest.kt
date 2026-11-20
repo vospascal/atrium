@@ -3,6 +3,7 @@ package atrium.app
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import atrium.engine.EmitterKind
+import atrium.engine.Pattern
 import atrium.engine.Position
 import atrium.engine.SourceDescription
 import kotlin.math.abs
@@ -46,6 +47,31 @@ class TopDownTest {
         assertNull(nearestWithin(emptyList(), Offset(0f, 0f), radius = 20f))
     }
 
+    /** A wind's wash can be grabbed anywhere inside it, but a sound standing on it is picked first. */
+    @Test
+    fun aWashIsPickedAnywhereInsideItUnlessAPointIsUnderThePointer() {
+        val frog = listOf(0 to Offset(300f, 300f))
+        val wind = listOf(1 to Offset(250f, 300f))
+        assertEquals(1, pickAt(frog, wind, washRadius = 80f, at = Offset(200f, 320f), radius = 20f), "inside the wash")
+        assertEquals(0, pickAt(frog, wind, washRadius = 80f, at = Offset(305f, 300f), radius = 20f), "the frog on top wins")
+        assertNull(pickAt(frog, wind, washRadius = 80f, at = Offset(600f, 300f), radius = 20f))
+    }
+
+    /** North is up: a sound facing north has its handle above it, one facing east to its right. */
+    @Test
+    fun theFacingHandleSitsTheWayTheSoundFaces() {
+        val at = Offset(100f, 100f)
+        val north = facingHandle(at, (kotlin.math.PI / 2).toFloat(), 40f)
+        close(100f, north.x)
+        close(60f, north.y)
+        val east = facingHandle(at, 0f, 40f)
+        close(140f, east.x)
+        close(100f, east.y)
+        // Dragging the handle to a point up and to the right turns the sound north-east.
+        val toward = groundDirection(at, Offset(130f, 70f))
+        assertEquals("45° NE", bearingLabel(Position(toward.x, toward.y, 0f)))
+    }
+
     /** The farthest sound decides the view, with a fifth to spare; a lone nearby sound does not fill it. */
     @Test
     fun theViewReachesPastTheFarthestSound() {
@@ -61,6 +87,19 @@ class TopDownTest {
         assertEquals(listOf(5f, 10f, 20f, 40f), ringsWithin(40f))
     }
 
+    /**
+     * 20 dB more is ten times as far, 6 dB more about twice: an 80 dB sound has
+     * fallen to the faint level of 60 dB at 10 m, a 100 dB one at 100 m.
+     */
+    @Test
+    fun aLouderSoundReachesFurther() {
+        close(10f, reachOf(80f, 1f))
+        close(100f, reachOf(100f, 1f))
+        assertTrue(kotlin.math.abs(reachOf(76f, 1f) / reachOf(70f, 1f) - 2f) < .01f, "6 dB is about twice as far")
+        close(1f, reachOf(40f, 1f))
+        assertTrue(reachOf(76f, 1f) > reachOf(55f, 1f))
+    }
+
     /** The frog scene's own comment: 10.1 east and 10.1 north is 14.3 m at 45°. */
     @Test
     fun aSoundIsDescribedByDistanceAndBearing() {
@@ -73,7 +112,7 @@ class TopDownTest {
     @Test
     fun theShapeIsSaidInALine() {
         fun sound(kind: EmitterKind, beam: Float?) = SourceDescription(
-            "s", "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, beam, Position(1f, 0f, 0f),
+            "s", 0u, Pattern.OMNI, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, beam, Position(1f, 0f, 0f),
         )
         assertEquals("Ambient: heard everywhere", shapeLine(sound(EmitterKind.FIELD, null)))
         assertEquals("Omni: equal all round", shapeLine(sound(EmitterKind.OBJECT, null)))

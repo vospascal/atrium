@@ -11,10 +11,12 @@ import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
 import atrium.engine.Output
+import atrium.engine.Pattern
 import atrium.engine.Position
 import atrium.engine.Preset
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
+import atrium.engine.SourceDescription
 import atrium.engine.Telemetry
 import atrium.engine.listPresets
 import kotlinx.coroutines.CoroutineScope
@@ -86,16 +88,16 @@ internal class Session {
     fun mix(next: LayerMix) {
         val before = mix
         mix = next
-        description?.sources?.forEachIndexed { slot, sound ->
+        description?.sources?.forEach { sound ->
             val silent = next.silences(sound.id)
-            if (silent != before.silences(sound.id)) command { setSourceMuted(slot.toUShort(), silent) }
+            if (silent != before.silences(sound.id)) command { setSourceMuted(sound.slot, silent) }
         }
     }
 
     /** Set the level of the sound in [slot], in dB SPL at 1 m. */
-    fun level(slot: Int, level: Float) {
+    fun level(slot: UShort, level: Float) {
         val running = engine ?: return
-        command { setSourceLevel(slot.toUShort(), level) }
+        command { setSourceLevel(slot, level) }
         description = running.scene()
     }
 
@@ -124,7 +126,28 @@ internal class Session {
     }
 
     /** Move the sound in [slot] to [position] while it is dragged. */
-    fun move(slot: Int, position: Position) = command { setSourcePosition(slot.toUShort(), position) }
+    fun move(slot: UShort, position: Position) = command { setSourcePosition(slot, position) }
+
+    /** Turn the sound in [slot] to face along [facing] while its handle is dragged. */
+    fun face(slot: UShort, facing: Position) = command { setSourceFacing(slot, facing) }
+
+    /** Change how the sound in [slot] radiates. */
+    fun shape(slot: UShort, pattern: Pattern) {
+        val running = engine ?: return
+        command { setSourcePattern(slot, pattern) }
+        description = running.scene()
+    }
+
+    /**
+     * Take [sound] out of the playing scene. It is also dropped from the layer mix first, so
+     * that removing a layer that was heard alone lets the others sound again.
+     */
+    fun remove(sound: SourceDescription) {
+        val running = engine ?: return
+        mix(mix.without(sound.id))
+        command { removeSound(sound.slot) }
+        description = running.scene()
+    }
 
     /** A drag has ended: take over where the engine now says the scene's sounds were placed. */
     fun placed() {

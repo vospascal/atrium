@@ -86,9 +86,6 @@ internal data class Plume(
  */
 internal val LocalInkTint = staticCompositionLocalOf<Color?> { null }
 
-/** The ink of a sound that neither the scene file nor the engine has a color for. */
-private const val UnknownSoundColor = "#888888"
-
 /** How dense a plume is before its sound reports a level. */
 internal const val RestingStrength = .7f
 
@@ -99,36 +96,35 @@ private const val FaintestInk = .06f
 
 /**
  * The plumes for [scene]. Pass [description] and [telemetry] only while that
- * scene plays: they move each plume to where its sound is now and set its
- * density from the level heard at the listener. Without them each sound
- * rests at its starting direction.
+ * scene plays. Then there is one plume per sound the scene has now, in the
+ * order of the description, which differs from the file once a sound has been
+ * added or removed; each is where its sound is and as dense as it is heard.
+ * Without them each sound of the file rests at its starting direction.
  */
-internal fun plumesFor(scene: SceneFile, description: SceneDescription?, telemetry: Telemetry?): List<Plume> =
-    // A sound added while the scene plays is in the description and not in the file.
-    List(maxOf(scene.sounds.size, description?.sources?.size ?: 0)) { slot ->
-        val sound = scene.sounds.getOrNull(slot)
-        val live = telemetry?.sources?.firstOrNull { it.slot.toInt() == slot }
-        val built = description?.sources?.getOrNull(slot)
-        val listener = description?.listener
-        val offset = when {
-            live != null && listener != null -> Point(live.position.x - listener.x, live.position.y - listener.y)
-            sound != null -> sound.offsetFromListener.toPoint()
-            built != null && listener != null -> Point(built.position.x - listener.x, built.position.y - listener.y)
-            else -> Point(0f, 0f)
+internal fun plumesFor(scene: SceneFile, description: SceneDescription?, telemetry: Telemetry?): List<Plume> {
+    if (description == null) {
+        return scene.sounds.map { sound ->
+            Plume(screenDirection(sound.offsetFromListener.toPoint()), RestingStrength, parseColor(sound.color), PlumeExtent.Point, null, null)
         }
+    }
+    val listener = description.listener
+    return description.sources.map { built ->
+        val live = telemetry?.sources?.firstOrNull { it.slot == built.slot }
+        val at = live?.position ?: built.position
+        val offset = Point(at.x - listener.x, at.y - listener.y)
         val strength = when {
             telemetry != null && live == null -> 0f
-            live == null || built == null -> RestingStrength
+            live == null -> RestingStrength
             live.muted -> 0f
             else -> ((built.spl + live.gainDb - QuietLevel) / (LoudLevel - QuietLevel)).coerceIn(FaintestInk, 1f)
         }
         val extent = when {
-            built?.emitterKind != EmitterKind.FIELD -> PlumeExtent.Point
+            built.emitterKind != EmitterKind.FIELD -> PlumeExtent.Point
             offset.hasGroundBearing() -> PlumeExtent.Fan
             else -> PlumeExtent.Surround
         }
         val signal = live?.signal?.let {
-            val level = if (built != null && it.relativeRms > 0f) {
+            val level = if (it.relativeRms > 0f) {
                 built.spl + live.gainDb + 20f * log10(it.relativeRms)
             } else {
                 Float.NEGATIVE_INFINITY
@@ -139,9 +135,9 @@ internal fun plumesFor(scene: SceneFile, description: SceneDescription?, telemet
                 it.highShare,
             )
         }
-        val color = parseColor(sound?.color ?: built?.color ?: UnknownSoundColor)
-        Plume(screenDirection(offset), strength, color, extent, built?.beamHalfAngle, signal)
+        Plume(screenDirection(offset), strength, parseColor(built.color), extent, built.beamHalfAngle, signal)
     }
+}
 
 /** World +x is right and +y is north, which is up on screen. */
 internal fun screenDirection(offset: Point): Float =

@@ -7,12 +7,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -35,28 +37,40 @@ import kotlin.math.sin
 
 /** A sound as the map draws it: where it is now, relative to the listener. */
 private data class Marker(
-    val slot: Int,
+    val slot: UShort,
     val id: String,
     val name: String,
     val offset: Point,
     /** Metres above the ground. */
     val height: Float,
     val color: Color,
+    /** How far it reaches before it has faded to a whisper (m). */
+    val reach: Float,
     val ambient: Boolean,
     val beamHalfAngle: Float?,
     val facing: Float,
     val strength: Float,
     val silent: Boolean,
-)
+) {
+    /** A sound with a beam can be turned; an ambient or omni one sounds the same whichever way it faces. */
+    val turnable: Boolean get() = !ambient && beamHalfAngle != null
+}
+
+/** A sound whose facing handle is being dragged: the map owns its heading until the drag ends. */
+private data class Turned(val slot: UShort, val heading: Float)
 
 /** A sound being dragged: the map owns its place until the engine reports it there. */
-private data class Dragged(val slot: Int, val offset: Point)
+private data class Dragged(val slot: UShort, val offset: Point)
 
 /**
  * Every sound of the playing scene from above, in the player's paper style.
  * Click a sound to select it, drag it to move it, click the ground to select
- * nothing. An ambient sound is a wash, a focused one a wedge, the rest a dot
- * with a halo as strong as it is heard.
+ * nothing. A sound is black and white until it is selected. Its circle, or
+ * its wedge when it is focused, is how far its level carries, and a ring
+ * travels outward while it is heard. An ambient sound is bands arriving from
+ * the side its anchor lies on, and can be grabbed near that anchor. The
+ * selected focused sound has a handle at the end of its facing line: drag it
+ * to turn the sound.
  */
 @Composable
 internal fun EditorMap(
@@ -73,31 +87,34 @@ internal fun EditorMap(
     val telemetry = session.telemetry
     val listener = description?.listener ?: Position(0f, 0f, 0f)
     var dragged by remember(session.engine) { mutableStateOf<Dragged?>(null) }
+    var turned by remember(session.engine) { mutableStateOf<Turned?>(null) }
     val echo = remember(session.engine) { DragEcho() }
 
     // Hand a dragged sound back to telemetry once the engine reports it where it was dropped.
     LaunchedEffect(telemetry) {
         val held = dragged ?: return@LaunchedEffect
-        val reported = telemetry?.sources?.firstOrNull { it.slot.toInt() == held.slot }?.position ?: return@LaunchedEffect
+        val reported = telemetry?.sources?.firstOrNull { it.slot == held.slot }?.position ?: return@LaunchedEffect
         if (echo.accepts(Point(reported.x - listener.x, reported.y - listener.y))) dragged = null
     }
 
-    val markers = description?.sources.orEmpty().mapIndexed { slot, sound ->
-        val live = telemetry?.sources?.firstOrNull { it.slot.toInt() == slot }
+    val markers = description?.sources.orEmpty().mapIndexed { index, sound ->
+        val live = telemetry?.sources?.firstOrNull { it.slot == sound.slot }
         val at = live?.position ?: sound.position
-        val held = dragged?.takeIf { it.slot == slot }
+        val held = dragged?.takeIf { it.slot == sound.slot }
         val facing = live?.facing ?: sound.facing
         Marker(
-            slot,
+            sound.slot,
             sound.id,
             sound.name,
             held?.offset ?: Point(at.x - listener.x, at.y - listener.y),
             height = at.z,
-            tint ?: parseColor(sound.color),
+            // Black and white until it is selected; then its own ink.
+            if (sound.id == selected) tint ?: parseColor(sound.color) else colors.foreground,
+            reach = reachOf(sound.spl, sound.referenceDistance),
             ambient = sound.emitterKind == EmitterKind.FIELD,
             beamHalfAngle = sound.beamHalfAngle,
-            facing = atan2(facing.y, facing.x),
-            strength = strengths.getOrElse(slot) { 0f },
+            facing = turned?.takeIf { it.slot == sound.slot }?.heading ?: atan2(facing.y, facing.x),
+            strength = strengths.getOrElse(index) { 0f },
             silent = session.mix.silences(sound.id),
         )
     }
@@ -105,14 +122,34 @@ internal fun EditorMap(
     val reach = reachFor(description?.sources.orEmpty().map { Point(it.position.x - listener.x, it.position.y - listener.y) })
     val current = rememberUpdatedState(markers)
     val select = rememberUpdatedState(onSelect)
+    val chosen = rememberUpdatedState(selected)
+
+    /** The sound a pointer at [at] picks in [view], if any. */
+    fun pick(view: TopDown, at: Offset, density: Float): Marker? {
+        val (washes, points) = current.value.withIndex().partition { it.value.ambient }
+        val index = pickAt(
+            points.map { it.index to view.toScreen(it.value.offset) },
+            washes.map { it.index to view.toScreen(it.value.offset) },
+            AmbientRadius * view.pixelsPerMetre,
+            at,
+            PickRadius * density,
+        )
+        return index?.let { current.value[it] }
+    }
+
+    // Seconds since the map appeared: what the travelling rings and drifting bands move by.
+    val beat by produceState(0f) {
+        val start = withFrameMillis { it }
+        while (true) withFrameMillis { value = (it - start) / 1000f }
+    }
 
     Canvas(
         modifier
+            .clipToBounds()
             .pointerInput(session.engine, reach) {
                 detectTapGestures { at ->
                     val view = TopDown(androidx.compose.ui.geometry.Size(size.width.toFloat(), size.height.toFloat()), reach)
-                    val hit = nearestWithin(current.value.map { view.toScreen(it.offset) }, at, PickRadius * density)
-                    select.value(hit?.let { current.value[it].id })
+                    select.value(pick(view, at, density)?.id)
                 }
             }
             .pointerInput(session.engine, reach) {
@@ -121,8 +158,14 @@ internal fun EditorMap(
                     onDragStart = { at ->
                         val top = TopDown(androidx.compose.ui.geometry.Size(size.width.toFloat(), size.height.toFloat()), reach)
                         view = top
-                        val hit = nearestWithin(current.value.map { top.toScreen(it.offset) }, at, PickRadius * density)
-                        val marker = hit?.let { current.value[it] }
+                        // The facing handle of the selected sound is tried first: it sits away from its dot.
+                        val focused = current.value.firstOrNull { it.id == chosen.value && it.turnable }
+                        val handle = focused?.let { facingHandle(top.toScreen(it.offset), it.facing, FacingReach * density) }
+                        if (focused != null && handle != null && (handle - at).getDistance() <= HandleRadius * density) {
+                            turned = Turned(focused.slot, focused.facing)
+                            return@detectDragGestures
+                        }
+                        val marker = pick(top, at, density)
                         if (marker != null) {
                             select.value(marker.id)
                             echo.move()
@@ -130,8 +173,18 @@ internal fun EditorMap(
                         }
                     },
                     onDrag = { change, _ ->
-                        val held = dragged
+                        val turning = turned
                         val top = view
+                        if (turning != null && top != null) {
+                            val sound = current.value.firstOrNull { it.slot == turning.slot }
+                            val toward = sound?.let { groundDirection(top.toScreen(it.offset), change.position) }
+                            if (toward != null && toward.hasGroundBearing()) {
+                                turned = turning.copy(heading = atan2(toward.y, toward.x))
+                                session.face(turning.slot, Position(toward.x, toward.y, 0f))
+                            }
+                            return@detectDragGestures
+                        }
+                        val held = dragged
                         if (held != null && top != null) {
                             val at = top.toWorld(change.position)
                             val height = current.value.firstOrNull { it.slot == held.slot }?.height ?: 0f
@@ -141,10 +194,12 @@ internal fun EditorMap(
                     },
                     onDragEnd = {
                         dragged?.let { echo.release(it.offset) }
+                        turned = null
                         session.placed()
                     },
                     onDragCancel = {
                         dragged?.let { echo.release(it.offset) }
+                        turned = null
                         session.placed()
                     },
                 )
@@ -162,14 +217,16 @@ internal fun EditorMap(
         drawText(north, topLeft = Offset(centre.x - north.size.width / 2f, density * 6f))
 
         // Ambient washes first, so points and wedges stay readable on top of them.
-        markers.filter { it.ambient }.forEach { drawAmbient(it, view, colors, text, it.id == selected) }
+        markers.filter { it.ambient }.forEach { drawAmbient(it, centre, view, colors, text, it.id == selected, beat) }
+        // Reaches under every point, so a small sound inside a large one can still be seen and picked.
+        markers.filterNot { it.ambient }.sortedByDescending { it.reach }.forEach { drawReach(view.toScreen(it.offset), it, view, beat, it.id == selected) }
 
         drawListener(centre, telemetry?.listenerFacing, colors)
 
         markers.filterNot { it.ambient }.forEach { marker ->
             val at = view.toScreen(marker.offset)
             if (marker.id == selected) drawBearingLine(centre, at, marker.offset, colors, text)
-            marker.beamHalfAngle?.let { drawBeam(at, marker, it, view) }
+            if (marker.id == selected && marker.turnable) drawFacingHandle(at, marker, colors)
             drawPoint(at, marker, colors, text, marker.id == selected)
         }
     }
@@ -200,49 +257,89 @@ private fun DrawScope.drawListener(centre: Offset, facing: Position?, colors: Pl
     drawCircle(colors.foreground, density * 2f, centre)
 }
 
-/** An ambient sound has no place it comes from: a soft wash around its anchor, with a dashed edge. */
-private fun DrawScope.drawAmbient(marker: Marker, view: TopDown, colors: PlayerColors, text: TextMeasurer, selected: Boolean) {
+/**
+ * An ambient sound is heard everywhere, so it has no circle of its own: broad
+ * bands arriving from the side its anchor lies on, or rings all round when
+ * the anchor is at the listener. The small mark is the anchor a drag moves.
+ */
+private fun DrawScope.drawAmbient(marker: Marker, centre: Offset, view: TopDown, colors: PlayerColors, text: TextMeasurer, selected: Boolean, beat: Float) {
     val at = view.toScreen(marker.offset)
-    val radius = AmbientRadius * view.pixelsPerMetre
-    val alpha = if (marker.silent) .03f else .05f + .10f * marker.strength
-    drawCircle(marker.color.copy(alpha = alpha), radius, at)
-    drawCircle(
-        marker.color.copy(alpha = if (selected) .9f else .45f),
-        radius,
-        at,
-        style = Stroke(width = density * if (selected) 1.8f else 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(density * 6f, density * 5f))),
-    )
+    val alpha = if (marker.silent) .10f else .22f + .30f * marker.strength
+    val stroke = Stroke(width = density * 7f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+    val from = atan2(marker.offset.y, marker.offset.x)
+    val surround = !marker.offset.copy(z = 0f).hasGroundBearing() || hypot(marker.offset.x, marker.offset.y) < SurroundWithin
+    repeat(AmbientBands) { band ->
+        // The bands drift toward the listener while the wind is heard.
+        val drift = if (marker.silent) 0f else (beat * BandDrift) % 1f
+        val radius = (AmbientNearest + (band + 1f - drift) * AmbientBandGap) * view.pixelsPerMetre
+        val fade = alpha * (1f - (band + 1f - drift) / (AmbientBands + 1f))
+        if (surround) {
+            drawCircle(marker.color.copy(alpha = fade), radius, centre, style = stroke)
+        } else {
+            // Compose measures angles clockwise from east; the map's north is up.
+            drawArc(
+                marker.color.copy(alpha = fade),
+                startAngle = -(from + AmbientSpread) * 180f / PI.toFloat(),
+                sweepAngle = 2 * AmbientSpread * 180f / PI.toFloat(),
+                useCenter = false,
+                topLeft = Offset(centre.x - radius, centre.y - radius),
+                size = androidx.compose.ui.geometry.Size(radius * 2, radius * 2),
+                style = stroke,
+            )
+        }
+    }
+    drawCircle(marker.color.copy(alpha = if (marker.silent) .4f else .9f), density * 3f, at)
+    if (selected) drawCircle(colors.foreground, density * 8f, at, style = Stroke(width = density * 1.6f))
     drawName(marker, at, colors, text, selected)
 }
 
-/** A focused sound: a wedge as wide as its beam, pointing where it faces. */
-private fun DrawScope.drawBeam(at: Offset, marker: Marker, halfAngle: Float, view: TopDown) {
-    val length = BeamLength * view.pixelsPerMetre
-    val wedge = Path().apply {
+/** The handle that turns the selected sound: a line the way it faces, with a ring to grab at its end. */
+private fun DrawScope.drawFacingHandle(at: Offset, marker: Marker, colors: PlayerColors) {
+    val handle = facingHandle(at, marker.facing, FacingReach * density)
+    drawLine(colors.foreground, at, handle, strokeWidth = density * 1.4f)
+    drawCircle(colors.backdrop, density * 6f, handle)
+    drawCircle(colors.foreground, density * 6f, handle, style = Stroke(width = density * 1.6f))
+}
+
+/**
+ * How far a sound reaches, drawn as its shape: a full circle for one that is
+ * equal all round, a wedge as wide as its beam for a focused one. Both have a
+ * border, and a ring travels outward from the sound while it is heard.
+ */
+private fun DrawScope.drawReach(at: Offset, marker: Marker, view: TopDown, beat: Float, selected: Boolean) {
+    val radius = marker.reach * view.pixelsPerMetre
+    val heard = !marker.silent && marker.strength > 0f
+    // Only the selected sound is filled, so overlapping reaches stay readable as outlines.
+    val fill = marker.color.copy(alpha = if (selected) .12f else 0f)
+    val edge = marker.color.copy(alpha = if (selected) .9f else if (marker.silent) .18f else .38f)
+    val border = Stroke(width = density * 1.2f)
+    val half = marker.beamHalfAngle
+    if (half == null) {
+        drawCircle(fill, radius, at)
+        drawCircle(edge, radius, at, style = border)
+        if (heard) {
+            val travelled = (beat * PulseRate + marker.slot.toInt() * .37f) % 1f
+            drawCircle(marker.color.copy(alpha = (1f - travelled) * .5f * marker.strength), radius * travelled, at, style = border)
+        }
+        return
+    }
+    fun wedge(length: Float) = Path().apply {
         moveTo(at.x, at.y)
         for (step in 0..WedgeSteps) {
-            val angle = marker.facing - halfAngle + 2 * halfAngle * step / WedgeSteps
+            val angle = marker.facing - half + 2 * half * step / WedgeSteps
             lineTo(at.x + cos(angle) * length, at.y - sin(angle) * length)
         }
         close()
     }
-    drawPath(wedge, marker.color.copy(alpha = if (marker.silent) .06f else .2f))
+    drawPath(wedge(radius), fill)
+    drawPath(wedge(radius), edge, style = border)
+    if (heard) {
+        val travelled = (beat * PulseRate + marker.slot.toInt() * .37f) % 1f
+        drawPath(wedge(radius * travelled), marker.color.copy(alpha = (1f - travelled) * .5f * marker.strength), style = border)
+    }
 }
 
 private fun DrawScope.drawPoint(at: Offset, marker: Marker, colors: PlayerColors, text: TextMeasurer, selected: Boolean) {
-    if (!marker.silent && marker.strength > 0f) {
-        val halo = density * (14f + 26f * marker.strength)
-        drawCircle(
-            Brush.radialGradient(
-                0f to marker.color.copy(alpha = .40f * marker.strength + .08f),
-                1f to marker.color.copy(alpha = 0f),
-                center = at,
-                radius = halo,
-            ),
-            halo,
-            at,
-        )
-    }
     if (selected) drawCircle(colors.foreground, density * 11f, at, style = Stroke(width = density * 1.6f))
     if (marker.silent) {
         drawCircle(colors.backdrop, density * 6f, at)
@@ -293,13 +390,29 @@ internal fun oneDecimal(value: Float): String {
 
 /** How close to a sound a click or the start of a drag has to be (dp). */
 private const val PickRadius = 20f
+
+/** How far from its sound the facing handle sits, and how close a drag has to start to grab it (dp). */
+private const val FacingReach = 46f
+private const val HandleRadius = 16f
 private const val ListenerWedge = 40f
 private const val ListenerSpread = (35.0 * PI / 180.0).toFloat()
 private const val WedgeSteps = 12
 
-/** How large an ambient sound's wash is drawn, and how long a beam (m). */
+/** How near its anchor an ambient sound can be grabbed (m). */
 private const val AmbientRadius = 6f
-private const val BeamLength = 6f
+
+/** An ambient sound's bands: how many, how far from the listener the nearest is and how far apart (m), and how wide (rad). */
+private const val AmbientBands = 4
+private const val AmbientNearest = 3f
+private const val AmbientBandGap = 3f
+private const val AmbientSpread = (50.0 * PI / 180.0).toFloat()
+
+/** An anchor this close to the listener means the sound comes from all round (m). */
+private const val SurroundWithin = 1f
+
+/** How fast a band drifts inward and a ring travels outward (per second). */
+private const val BandDrift = .12f
+private const val PulseRate = .35f
 
 /** A sound this far above the ground gets its height written under its name (m). */
 private const val HeightWorthSaying = .3f

@@ -2,9 +2,7 @@ package atrium.app
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,24 +10,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import atrium.engine.SourceDescription
 
 /**
- * The sounds of the playing scene as layers, in their groups. Each layer can
- * be silenced, heard alone and selected.
+ * The sounds of the playing scene as layers, in their groups. The ear in
+ * front of a layer silences it and brings it back, the way the eye in a layer
+ * list hides a layer; a group's ear does it for the whole group.
  *
  * [strengths] is how strongly each sound reaches the listener right now, from
- * 0 to 1 in slot order.
+ * 0 to 1, in the order the scene lists its sounds.
  */
 @Composable
 internal fun Layers(
@@ -43,22 +44,20 @@ internal fun Layers(
     groupedInSceneOrder(sounds.withIndex().toList()) { it.value.group }.forEach { (group, members) ->
         val ids = members.map { it.value.id }
         Row(
-            Modifier.fillMaxWidth().padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 6.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 22.dp, top = 18.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            AudibleMark(audible = !mix.muted.containsAll(ids), Foreground) { session.mix(mix.toggleMuteAll(ids)) }
-            Spacer(Modifier.width(12.dp))
+            Ear(hearing = !mix.muted.containsAll(ids), Muted) { session.mix(mix.toggleMuteAll(ids)) }
+            Spacer(Modifier.width(10.dp))
             PaperText(group.uppercase(), 13, Muted, FontWeight.SemiBold, spacing = 2f)
         }
-        members.forEach { (slot, sound) ->
+        members.forEach { (index, sound) ->
             LayerRow(
                 sound,
-                strength = if (mix.silences(sound.id)) 0f else strengths.getOrElse(slot) { 0f },
-                audible = sound.id !in mix.muted,
-                alone = sound.id in mix.solo,
+                strength = if (mix.silences(sound.id)) 0f else strengths.getOrElse(index) { 0f },
+                hearing = !mix.silences(sound.id),
                 selected = sound.id == selected,
-                onMute = { session.mix(mix.toggleMute(sound.id)) },
-                onSolo = { session.mix(mix.toggleSolo(sound.id)) },
+                onEar = { session.mix(mix.toggleMute(sound.id)) },
                 onSelect = { onSelect(if (sound.id == selected) null else sound.id) },
             )
         }
@@ -69,11 +68,9 @@ internal fun Layers(
 private fun LayerRow(
     sound: SourceDescription,
     strength: Float,
-    audible: Boolean,
-    alone: Boolean,
+    hearing: Boolean,
     selected: Boolean,
-    onMute: () -> Unit,
-    onSolo: () -> Unit,
+    onEar: () -> Unit,
     onSelect: () -> Unit,
 ) {
     val ink = LocalInkTint.current ?: parseColor(sound.color)
@@ -81,39 +78,93 @@ private fun LayerRow(
         Modifier.fillMaxWidth()
             .background(if (selected) Highlight else Backdrop)
             .clickable(role = Role.Button, onClick = onSelect)
-            .padding(horizontal = 22.dp, vertical = 10.dp),
+            .padding(start = 16.dp, end = 22.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AudibleMark(audible, ink, onMute)
-        Spacer(Modifier.width(12.dp))
-        PaperText(sound.name, 18, if (audible) Foreground else Muted, modifier = Modifier.weight(1f))
+        Ear(hearing, Foreground, onClick = onEar)
+        Spacer(Modifier.width(10.dp))
+        Canvas(Modifier.size(10.dp)) { drawCircle(ink.copy(alpha = if (hearing) 1f else .35f)) }
+        Spacer(Modifier.width(10.dp))
+        PaperText(sound.name, 18, if (hearing) Foreground else Muted, modifier = Modifier.weight(1f))
         Meter(strength, Modifier.width(72.dp).height(14.dp))
-        Spacer(Modifier.width(14.dp))
-        SoloMark(alone, onSolo)
     }
 }
 
-/** A filled dot for a layer that sounds, a ring for one that is muted. Press to change it. */
+/**
+ * The bar under the layers, where a layer list keeps its actions: add a sound
+ * from the library, and delete the selected layer.
+ */
 @Composable
-private fun AudibleMark(audible: Boolean, color: Color, onClick: () -> Unit) {
-    Canvas(Modifier.size(24.dp).clickable(role = Role.Switch, onClick = onClick)) {
-        val radius = 6.dp.toPx()
-        if (audible) drawCircle(color, radius) else drawCircle(color, radius, style = Stroke(1.5.dp.toPx()))
-    }
-}
-
-/** "S": filled while this layer is heard alone. */
-@Composable
-private fun SoloMark(alone: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(4.dp)
-    Box(
-        Modifier.size(26.dp)
-            .border(1.dp, if (alone) Foreground else Hairline, shape)
-            .background(if (alone) Foreground else Backdrop, shape)
-            .clickable(role = Role.Switch, onClick = onClick),
-        contentAlignment = Alignment.Center,
+internal fun LayerActions(canDelete: Boolean, onAdd: () -> Unit, onDelete: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        PaperText("S", 13, if (alone) Backdrop else Muted, FontWeight.SemiBold)
+        Spacer(Modifier.weight(1f))
+        ActionIcon(Foreground, onAdd) { color -> plus(color) }
+        Spacer(Modifier.width(6.dp))
+        ActionIcon(if (canDelete) Foreground else Hairline, onClick = { if (canDelete) onDelete() }) { color -> bin(color) }
+    }
+}
+
+@Composable
+private fun ActionIcon(color: Color, onClick: () -> Unit, draw: androidx.compose.ui.graphics.drawscope.DrawScope.(Color) -> Unit) {
+    Canvas(Modifier.size(34.dp).clickable(role = Role.Button, onClick = onClick).padding(8.dp)) { draw(color) }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.plus(color: Color) {
+    val stroke = 1.8.dp.toPx()
+    drawLine(color, Offset(size.width / 2, size.height * .12f), Offset(size.width / 2, size.height * .88f), stroke, StrokeCap.Round)
+    drawLine(color, Offset(size.width * .12f, size.height / 2), Offset(size.width * .88f, size.height / 2), stroke, StrokeCap.Round)
+}
+
+/** A waste bin: a lid with a handle, and a tapering body with two ribs. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.bin(color: Color) {
+    val stroke = 1.6.dp.toPx()
+    val w = size.width
+    val h = size.height
+    drawLine(color, Offset(w * .08f, h * .24f), Offset(w * .92f, h * .24f), stroke, StrokeCap.Round)
+    drawLine(color, Offset(w * .38f, h * .08f), Offset(w * .62f, h * .08f), stroke, StrokeCap.Round)
+    val body = Path().apply {
+        moveTo(w * .2f, h * .24f)
+        lineTo(w * .27f, h * .95f)
+        lineTo(w * .73f, h * .95f)
+        lineTo(w * .8f, h * .24f)
+    }
+    drawPath(body, color, style = Stroke(stroke))
+    drawLine(color, Offset(w * .42f, h * .42f), Offset(w * .43f, h * .78f), stroke, StrokeCap.Round)
+    drawLine(color, Offset(w * .58f, h * .42f), Offset(w * .57f, h * .78f), stroke, StrokeCap.Round)
+}
+
+/**
+ * An ear: drawn whole for a layer that is heard, faint and struck through for
+ * one that is silenced. Press it to change that.
+ */
+@Composable
+internal fun Ear(hearing: Boolean, color: Color, size: Dp = 26.dp, onClick: () -> Unit) {
+    Canvas(Modifier.size(size).clickable(role = Role.Switch, onClick = onClick).padding(4.dp)) {
+        val w = this.size.width
+        val h = this.size.height
+        val ink = color.copy(alpha = if (hearing) 1f else .35f)
+        val stroke = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round)
+        // The rim: up the back, over the top, down the front into the lobe.
+        val rim = Path().apply {
+            moveTo(w * .40f, h * .96f)
+            cubicTo(w * .14f, h * .86f, w * .30f, h * .64f, w * .24f, h * .44f)
+            cubicTo(w * .16f, h * .14f, w * .50f, h * .00f, w * .72f, h * .12f)
+            cubicTo(w * .96f, h * .26f, w * .90f, h * .54f, w * .72f, h * .64f)
+            cubicTo(w * .58f, h * .72f, w * .68f, h * .90f, w * .40f, h * .96f)
+        }
+        drawPath(rim, ink, style = stroke)
+        // The fold inside it.
+        val fold = Path().apply {
+            moveTo(w * .42f, h * .46f)
+            cubicTo(w * .38f, h * .26f, w * .66f, h * .22f, w * .68f, h * .40f)
+        }
+        drawPath(fold, ink, style = stroke)
+        if (!hearing) {
+            drawLine(color.copy(alpha = .7f), Offset(w * .08f, h * .92f), Offset(w * .92f, h * .08f), 1.6.dp.toPx(), StrokeCap.Round)
+        }
     }
 }
 

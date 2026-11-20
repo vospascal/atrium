@@ -9,36 +9,23 @@ class LayerMixTest {
     private val meadow = listOf("wind", "frogs", "birds")
 
     @Test
-    fun everyLayerSoundsUntilSomethingIsAsked() {
+    fun everyLayerSoundsUntilItsEarIsPressed() {
         val mix = LayerMix()
         meadow.forEach { assertFalse(mix.silences(it), "$it should sound") }
     }
 
+    /** An ear silences its own layer and nothing else, and pressing it again brings the layer back. */
     @Test
-    fun aMutedLayerIsSilentAndTheRestSound() {
+    fun anEarSilencesItsOwnLayerOnly() {
         val mix = LayerMix().toggleMute("frogs")
-        assertTrue(mix.silences("frogs"))
-        assertFalse(mix.silences("wind"))
-        assertFalse(mix.toggleMute("frogs").silences("frogs"), "muting again brings it back")
+        assertEquals(listOf("frogs"), meadow.filter(mix::silences))
+        assertEquals(emptyList(), meadow.filter(mix.toggleMute("frogs")::silences))
     }
 
-    /** Solo is what the engine has no word for: it becomes a mute of everything else. */
     @Test
-    fun aLayerHeardAloneSilencesEveryOther() {
-        val mix = LayerMix().toggleSolo("birds")
-        assertEquals(listOf("wind", "frogs"), meadow.filter(mix::silences))
-        val two = mix.toggleSolo("frogs")
-        assertEquals(listOf("wind"), meadow.filter(two::silences), "two can be heard alone together")
-        assertEquals(emptyList(), meadow.filter(two.toggleSolo("birds").toggleSolo("frogs")::silences))
-    }
-
-    /** A mute is not forgotten while another layer is heard alone, and it wins over its own solo. */
-    @Test
-    fun aMuteOutlastsASolo() {
-        val mix = LayerMix().toggleMute("wind").toggleSolo("birds")
-        assertTrue(mix.silences("wind"))
-        assertTrue(mix.toggleSolo("birds").silences("wind"), "still muted after the solo ends")
-        assertTrue(LayerMix().toggleMute("birds").toggleSolo("birds").silences("birds"))
+    fun aRemovedLayerIsForgotten() {
+        assertEquals(LayerMix(), LayerMix().toggleMute("wind").without("wind"))
+        assertTrue(LayerMix().toggleMute("wind").without("birds").silences("wind"), "a mute on another layer stays")
     }
 
     @Test

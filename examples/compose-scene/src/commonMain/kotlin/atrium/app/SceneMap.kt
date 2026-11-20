@@ -53,20 +53,17 @@ internal fun SceneMap(
     val colors = LocalPlayerColors.current
     val tint = LocalInkTint.current
     val text = rememberTextMeasurer()
-    // One pin per plume, so a sound added while the scene plays is on the map too.
-    val pins = plumes.mapIndexedNotNull { slot, plume ->
-        val sound = scene.sounds.getOrNull(slot)
-        val built = description?.sources?.getOrNull(slot)
-        val live = telemetry?.sources?.firstOrNull { it.slot.toInt() == slot }
-        val listener = description?.listener
-        val at = live?.position ?: built?.position
-        val offset = when {
-            at != null && listener != null -> Point(at.x - listener.x, at.y - listener.y, at.z - listener.z)
-            sound != null -> sound.offsetFromListener.toPoint()
-            else -> return@mapIndexedNotNull null
+    // One pin per plume: the sounds the scene has now while it plays, the file's own before.
+    val pins = plumes.mapIndexedNotNull { index, plume ->
+        val ink = if (tint == null) plume else plume.copy(color = tint)
+        if (description == null) {
+            val sound = scene.sounds.getOrNull(index) ?: return@mapIndexedNotNull null
+            return@mapIndexedNotNull Pin(sound.name, sound.offsetFromListener.toPoint(), ink)
         }
-        val name = built?.name ?: sound?.name ?: return@mapIndexedNotNull null
-        Pin(name, offset, if (tint == null) plume else plume.copy(color = tint))
+        val built = description.sources.getOrNull(index) ?: return@mapIndexedNotNull null
+        val at = telemetry?.sources?.firstOrNull { it.slot == built.slot }?.position ?: built.position
+        val listener = description.listener
+        Pin(built.name, Point(at.x - listener.x, at.y - listener.y, at.z - listener.z), ink)
     }
     // Half the side of the square shown, with room around the farthest sound.
     val half = (pins.maxOfOrNull { max(abs(it.offset.x), abs(it.offset.y)) } ?: 10f) * 1.2f + 4f
