@@ -90,13 +90,6 @@ internal val DarkPlayer = PlayerColors(
     onOther = Color(0xFFEDEBE7),
 )
 
-private val NightCanvas = DarkPlayer.copy(
-    backdrop = Color(0xFF050607),
-    hairline = Color(0xFF202123),
-    ring = Color(0xFFDAE3E8).copy(alpha = .29f),
-    other = Color(0xFF171819),
-)
-
 internal val LocalPlayerColors = staticCompositionLocalOf { LightPlayer }
 
 /** Light, dark, or whichever the system uses. */
@@ -133,19 +126,15 @@ internal class Look(private val store: SettingsStore) {
     }
 }
 
-/** The player's colors for [appearance]. Auto follows the system. Some views use a dark canvas. */
+/** The player's colors for [appearance]. Auto follows the system. */
 @Composable
-internal fun PlayerTheme(appearance: Appearance, darkCanvas: Boolean = false, content: @Composable () -> Unit) {
+internal fun PlayerTheme(appearance: Appearance, content: @Composable () -> Unit) {
     val dark = when (appearance) {
         Appearance.Auto -> isSystemInDarkTheme()
         Appearance.Light -> false
         Appearance.Dark -> true
     }
-    val colors = when {
-        darkCanvas -> NightCanvas
-        dark -> DarkPlayer
-        else -> LightPlayer
-    }
+    val colors = if (dark) DarkPlayer else LightPlayer
     CompositionLocalProvider(LocalPlayerColors provides colors, content = content)
 }
 
