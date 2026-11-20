@@ -34,8 +34,9 @@ hall environment exists.
    settings: their names, ranges and defaults come from the engine, not from Kotlin.
 3. **No second physics model in the app.** Anything that needs the distance model or air
    absorption (the loudness layer) is computed by the engine and handed over, so the
-   picture can never disagree with the sound. The editor's map draws only what the engine
-   reports: where a sound is, how strongly it reaches the listener, and its shape.
+   picture can never disagree with the sound. One exception exists: the circle around a
+   sound on the editor's map is where its level has fallen to 60 dB by distance alone. It
+   was asked for so that level can be seen (2026-11-20), and it leaves out air and ground.
 4. **Listening first.** Changes are heard immediately. Saving is a separate, deliberate act.
 5. **Two faces, one engine.** The player is for living with a place, the editor for
    building one. Both are in the same app and share one running engine.
@@ -265,7 +266,9 @@ Decided on 2026-11-20:
 - **It looks like the player.** Black and white in the paper style, following the Auto,
   Light and Dark setting. The only colour is each sound's own ink colour, and Monochrome
   turns that off too. The dark palette of the mockup is not used.
-- **The layer list stays** as sketched: groups, mute, solo, a live level.
+- **The layer list works like a picture editor's**, with an ear where that has an eye: it
+  silences its own layer. There is no solo; an `S` that muted the others was tried and read
+  as the opposite of what it did. The actions sit in a bar under the list: add, delete.
 - **On the Mac, Save writes the scene back into the project's `scenes/` folder.** A saved
   file is rewritten from the engine's values and loses its comments. So the first save of
   a hand-written scene asks for a new name and leaves the original alone. After that, Save
@@ -397,8 +400,8 @@ Click empty ground and the inspector shows the place itself.
 ### Layers and Library
 
 - **Layers** lists every sound in the scene in groups (Weather, Water, Creatures, Music).
-  Each row has mute, solo and a small live level. A group can be muted, soloed and turned
-  down as one.
+  Each row has an ear that silences it and a small live level. A group has an ear of its
+  own. Turning a whole group down is not built.
 - **Library** lists the presets in `sources/`. Drag one onto the map and it lands with the
   level, shape and size from its preset.
 
@@ -534,9 +537,10 @@ one binding method away. Bold marks what is missing.
 | Every sound on one map | scene description | `scene()` reports each sound's position, level, ambient or not, beam width and facing | exists: the editor's map |
 | Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | each layer and each sound on the map shows how strongly it reaches the listener. Channel peaks are not drawn |
 | Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (E2) |
-| Mute and solo | `SetSourceMuted`. No solo command; the app mutes the rest | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
+| Mute | `SetSourceMuted` | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
 | Level | `SetSourceSpl` | `set_source_level` | exists: the selected layer |
-| Size, omni or focused | `SetSourceSpread`, `SetSourceDirectivity` | **no call.** Size is not in the description | new (E2) |
+| Omni or focused | `SetSourceDirectivity` | `set_source_pattern` | exists: the inspector |
+| Size | `SetSourceSpread` | **no call.** Size is not in the description | new (E2) |
 | Orbit | `SetSourceOrbitSpeed`, `SetSourceOrbitRadius`, `SetSourceOrbitAngle` | **no call.** Orbit is not in the description | new (E2) |
 | Temperature and humidity | `SetAtmosphere` | **no call** | new (E2) |
 | Listener position and facing | `SetListenerPose` | **no call** | new (E2) |
@@ -545,7 +549,8 @@ one binding method away. Bold marks what is missing.
 | Generator settings while playing | `SetSynthParam` reaches the four winds and the river. **Rain, waves and the wisp ignore it** | **no call, and no list of a generator's settings** | new (E3) |
 | Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn |
 | Add a sound, hear a preset first | `SceneEdit` add, and a builder kept from the scene build | `list_presets`, `audition`, `add_sound` | exists: the editor's library |
-| Remove a sound | `SceneEdit` remove exists | **no call.** The description is indexed by voice | new (E4) |
+| Remove a sound | `SceneEdit` remove | `remove_sound`; each sound in `scene()` carries its voice | exists: the inspector |
+| Turn a sound | `SetSourceFacing`; a scene file's `shape.facing` | `set_source_facing` | exists: a handle on the map for a focused sound |
 | Save a scene | the scene types can already be written out (`scenes/saved.yaml` is an old result). **No function writes them** | **nothing** | new (E4) |
 | Several takes per sound | **nothing.** A source file names one recording. `assets/birds/` holds 20 takes of five species that no source uses | | new (A1) |
 | When: gaps and bouts | **nothing.** Recordings loop without a pause | | new (A1) |
@@ -589,16 +594,18 @@ listening.
 ### Editor (app and binding)
 
 - **E0. The sound model, layers, audio, library.** *Engine, binding and app.* Built
-  2026-11-20. Sounds have an id and a group. The layer list shows them with mute, solo,
-  level and a live meter. The library lists the presets, plays one while it is held, and
-  adds one to the scene just ahead of the listener. Not yet: removing a layer, saving, and
-  dropping a sound at a chosen spot.
+  2026-11-20. Sounds have an id and a group. The layer list shows them with an ear to
+  silence each, a live meter, and a bar with add and delete. The library lists the
+  presets, plays one with a play/stop button, and adds one to the scene just ahead of the
+  listener. A sound can be removed, switched
+  between omni and focused, and turned. Not yet: saving, and dropping a sound at a chosen
+  spot.
 - **E1. One map, all sounds.** *App only.* Built 2026-11-20. Every sound on one top-down
   map beside the layer list, selection shared between the two, an inspector with the five
   parts, drag any sound, and the scene's own details when nothing is selected. A narrow
   window shows the same three panels as tabs. The block's speakers are not drawn yet,
   because the scene description does not report them.
-- **E2. Reach what the engine already does.** *Binding.* Mute and solo, level, size, omni
+- **E2. Reach what the engine already does.** *Binding.* Mute, level, size, omni
   and focused with facing and width, orbit, temperature and humidity, the listener. The
   scene description grows to report speakers, size, orbit and generator. The inspector
   becomes editable and the map gets its handles. Head tracking on desktop was the first
