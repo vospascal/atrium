@@ -34,9 +34,8 @@ hall environment exists.
    settings: their names, ranges and defaults come from the engine, not from Kotlin.
 3. **No second physics model in the app.** Anything that needs the distance model or air
    absorption (the loudness layer) is computed by the engine and handed over, so the
-   picture can never disagree with the sound. One exception exists today: the composer
-   draws level rings for a single omni sound from its reported level and reference
-   distance. The loudness layer replaces them.
+   picture can never disagree with the sound. The editor's map draws only what the engine
+   reports: where a sound is, how strongly it reaches the listener, and its shape.
 4. **Listening first.** Changes are heard immediately. Saving is a separate, deliberate act.
 5. **Two faces, one engine.** The player is for living with a place, the editor for
    building one. Both are in the same app and share one running engine.
@@ -257,8 +256,9 @@ Endel and brain.fm. None of this is first.
 ## The scene editor
 
 A scene is a document. The map is the canvas, sounds are layers, and the inspector shows
-whatever is selected. The editor grows out of the app's composer, which today shows one
-sound at a time on a tilted grid and lets you drag it.
+whatever is selected. The three-panel layout is built (2026-11-20): layers and library on
+the left, a top-down map of every sound in the middle, the inspector on the right. It
+replaced the composer, which showed one sound at a time on a tilted grid.
 
 Decided on 2026-11-20:
 
@@ -348,7 +348,7 @@ controls and keeps the rest folded behind it.
 |---|---|---|---|
 | **Sound**: what is it? | A recording with one or more takes, or one of nine generators: four winds, two rains, river, waves, wisp. Its level in dB at 1 m. | Colour and name | Level can change while playing. The binding has no call for it. **A recording is one file.** |
 | **Shape**: how does it fill the air? | **Ambient**: everywhere, optionally from one side. **Omni**: a point, equal all round. **Focused**: a beam with a facing and a width. Plus a size, from a point to wide. | A wash, rings, or a cone you turn and widen by hand | Omni, focused and size can change while playing; the binding has no call. **Ambient is fixed per generator, and only the four winds are.** |
-| **Place**: where? | Position and height | Drag it. A dashed line gives distance and bearing to the listener. | Works. It is the one thing the composer already does. |
+| **Place**: where? | Position and height | Drag it. A dashed line gives distance and bearing to the listener. | Works: drag a sound on the editor's map. |
 | **When**: how often? | Always. Now and then, with a gap range. In bouts. And when it is active: at dawn, in dry weather. | The activity strip | **Missing.** Every recording loops without a pause. |
 | **Moves**: does it travel? | Still. Orbit. Along a drawn path. Wanders in a territory. Hops between perches. | A circle, a line, a territory | Orbit can change while playing; the binding has no call. The wisp wanders by itself. **Paths and perches are missing.** |
 
@@ -530,9 +530,9 @@ one binding method away. Bold marks what is missing.
 |---|---|---|---|
 | Pick a scene and play it | builds any file in `scenes/` | `Engine::new` | exists: the player's Scenes tab |
 | Output and volume | `SetRenderMode`, `SetChannelMode`, `SetMasterGain` | `set_output`, `set_volume` | exists: Settings |
-| Move a sound | `SetSourcePosition` | `set_source_position` | exists: the composer, one sound at a time |
-| Every sound on one map | scene description | `scene()` reports each sound's position, level, ambient or not, beam width and facing | new (E1) |
-| Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | the composer shows the highest channel peak only |
+| Move a sound | `SetSourcePosition` | `set_source_position` | exists: drag any sound on the editor's map. `scene()` remembers where it was put |
+| Every sound on one map | scene description | `scene()` reports each sound's position, level, ambient or not, beam width and facing | exists: the editor's map |
+| Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | each layer and each sound on the map shows how strongly it reaches the listener. Channel peaks are not drawn |
 | Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (E2) |
 | Mute and solo | `SetSourceMuted`. No solo command; the app mutes the rest | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
 | Level | `SetSourceSpl` | `set_source_level` | exists: the selected layer |
@@ -593,10 +593,11 @@ listening.
   level and a live meter. The library lists the presets, plays one while it is held, and
   adds one to the scene just ahead of the listener. Not yet: removing a layer, saving, and
   dropping a sound at a chosen spot.
-- **E1. One map, all sounds.** *App only.* Every sound on one map, the layer list,
-  selection, the inspector as a read-out, drag any sound, scene settings when nothing is
-  selected. Replaces stepping through the sounds one at a time. Uses the binding as it is,
-  so the block's speakers are not drawn yet.
+- **E1. One map, all sounds.** *App only.* Built 2026-11-20. Every sound on one top-down
+  map beside the layer list, selection shared between the two, an inspector with the five
+  parts, drag any sound, and the scene's own details when nothing is selected. A narrow
+  window shows the same three panels as tabs. The block's speakers are not drawn yet,
+  because the scene description does not report them.
 - **E2. Reach what the engine already does.** *Binding.* Mute and solo, level, size, omni
   and focused with facing and width, orbit, temperature and humidity, the listener. The
   scene description grows to report speakers, size, orbit and generator. The inspector
@@ -621,9 +622,8 @@ tracking on iPhone, and the link that shares a session between devices.
 
 From the editor concept, each with a suggestion:
 
-- **Top-down or tilted for editing?** The composer is tilted today. Suggested: top-down for
-  editing, because distances and angles read true. Tilted stays as a view switch for when
-  height matters.
+- **Top-down or tilted for editing?** Built top-down, because distances and angles read
+  true; height is written under a sound's name. A tilted view as a switch is still open.
 - **Where does aliveness run?** Takes, gaps, wandering, conditions and weather stories.
   Suggested: all of it in the engine, planned ahead into a session.
 - **How far ahead is the plan?** Far enough to share and to draw, short enough that a
