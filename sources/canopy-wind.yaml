@@ -3,6 +3,8 @@
 # A diffuse Field emitter: placement is an editor anchor, not a point source.
 # The synth models the vegetation itself as the radiator—broad foliage body,
 # continuous leaf wash, statistical leaf contacts, and sparse branch motion.
+name: Canopy wind
+group: Weather
 synth: canopy_wind
 
 # Bounded weather driver. This preset spans light air through moderate breeze.

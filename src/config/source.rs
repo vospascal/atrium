@@ -95,6 +95,12 @@ pub(super) enum SourceDef {
 /// Sample-file source definition.
 #[derive(Deserialize)]
 pub(super) struct SampleSourceDef {
+    /// The name a library shows; without one, it comes from the file name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The family a sound made from this preset joins in a list.
+    #[serde(default)]
+    pub group: Option<String>,
     pub path: String,
     pub reference_spl: SplValue,
     #[serde(default = "default_directivity")]
@@ -108,6 +114,12 @@ pub(super) struct SampleSourceDef {
 /// `min_speed: 1.0` + …).
 #[derive(Deserialize)]
 pub(super) struct SynthSourceDef {
+    /// The name a library shows; without one, it comes from the file name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The family a sound made from this preset joins in a list.
+    #[serde(default)]
+    pub group: Option<String>,
     #[serde(flatten)]
     pub spec: SynthSpec,
     pub reference_spl: SplValue,

@@ -1,4 +1,6 @@
 # Synth source: procedural ocean waves (swell LFO + stochastic breakers).
+name: Waves
+group: Water
 synth: waves
 period: 6.0         # seconds between swell peaks (3-10 typical)
 crash_prob: 0.25    # breaker events per second

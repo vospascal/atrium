@@ -2,6 +2,8 @@
 #
 # A diffuse Field emitter. Its high, persistent 2-16 kHz bed and fast spectral
 # ruffles make it a different acoustic response from the darker field_wind.
+name: Soft wind
+group: Weather
 synth: soft_wind
 
 # Shared three-scale wind-state model. The recording's level motion is divided

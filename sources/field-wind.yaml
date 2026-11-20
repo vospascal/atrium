@@ -3,6 +3,8 @@
 # This is an environmental Field emitter by construction: its placement is an
 # authoring/UI anchor only. Playback bypasses point distance, directional
 # panning, propagation paths, early reflections, and late-reverb send.
+name: Field wind
+group: Weather
 synth: field_wind
 
 # Bounded wind-speed driver. Approximate Beaufort bands: light air 1-2 m/s,

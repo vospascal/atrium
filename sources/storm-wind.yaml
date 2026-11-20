@@ -2,6 +2,8 @@
 #
 # A diffuse Field emitter: it bypasses point distance, direction, reflections,
 # and room reverb. Compose rain, thunder, waves, or canopy wind separately.
+name: Storm wind
+group: Weather
 synth: storm_wind
 
 # Bounded storm-front driver. This tuned default spans moderate breeze through

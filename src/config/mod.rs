@@ -12,8 +12,10 @@
 mod build;
 mod description;
 mod environment;
+mod presets;
 mod scene;
 mod scene_json;
+mod sound_builder;
 mod source;
 mod synth;
 
@@ -22,4 +24,6 @@ mod build_tests;
 
 pub use build::BuildResult;
 pub use description::{SceneDescription, SceneSummary, SoundSummary, SourceDescription};
+pub use presets::{list_presets, read_preset, PresetSummary};
 pub use scene::SceneConfig;
+pub use sound_builder::{BuiltSound, SoundBuilder};

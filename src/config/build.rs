@@ -10,12 +10,13 @@ use atrium_core::panner::DistanceModelType;
 use atrium_core::source::EmitterKind;
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
-use atrium_world::{Entity, Moves};
+use atrium_world::Entity;
 
 use super::description::{beam_half_angle, SceneDescription, SourceDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
-use super::source::{display_name, resolve, resolve_spl, ResolvedSound};
+use super::sound_builder::SoundBuilder;
+use super::source::resolve_spl;
 use super::synth::SynthSpec;
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
@@ -29,6 +30,9 @@ use crate::pipeline::{build_all_pipelines, PipelineParams};
 
 pub struct BuildResult {
     pub scene: AudioScene,
+    /// Builds one more sound for this scene while it plays, the same way
+    /// the scene's own sounds were built.
+    pub sounds: SoundBuilder,
     /// The built scene for an in-process UI (the Kotlin app via `atrium-ffi`).
     pub description: SceneDescription,
     /// The built scene for a WebSocket client.
@@ -66,6 +70,8 @@ pub(super) fn source_color(entity: &Entity, slot: usize) -> String {
 
 /// Metadata collected during source building, serialized to JSON for the browser.
 pub(super) struct SourceMeta {
+    pub(super) id: String,
+    pub(super) group: Option<String>,
     pub(super) name: String,
     pub(super) color: String,
     pub(super) spl: f32,
@@ -143,6 +149,7 @@ impl SceneConfig {
 
         // Decode audio and build sources (also collects metadata for the browser)
         let build = self.build_sources(spawn)?;
+        let sound_builder = self.sound_builder(spawn);
         let mut sources = build.sources;
         let source_metas = build.metas;
         let mut spectral_profiles = build.spectral_profiles;
@@ -207,7 +214,9 @@ impl SceneConfig {
                 .zip(&sources)
                 .take(MAX_SOURCES)
                 .map(|(meta, node)| SourceDescription {
+                    id: meta.id.clone(),
                     name: meta.name.clone(),
+                    group: meta.group.clone(),
                     color: meta.color.clone(),
                     position: arr_to_vec3(meta.position) + spawn,
                     spl: meta.spl,
@@ -304,6 +313,7 @@ impl SceneConfig {
 
         Ok(BuildResult {
             scene,
+            sounds: sound_builder,
             description,
             scene_json,
             source_names,
@@ -337,87 +347,19 @@ impl SceneConfig {
     }
 
     fn build_sources(&self, spawn: Vec3) -> Result<BuildSourcesResult, Box<dyn std::error::Error>> {
-        let norm = &self.normalization;
+        let builder = self.sound_builder(spawn);
         let mut nodes: Vec<Box<dyn atrium_core::source::SoundSource>> = Vec::new();
         let mut metas: Vec<SourceMeta> = Vec::new();
         let mut spectral_profiles = Vec::<[f32; crate::audio::spectral_profile::BARK_BANDS]>::new();
         let mut source_amplitudes = Vec::<f32>::new();
 
-        let global_ref_dist = self.distance_model.ref_distance;
-        let max_dist = self.distance_model.max_distance;
-
-        for (i, (id, entity)) in self.sounds.iter().enumerate() {
-            // Merge the preset (if any) with what the entity changes.
-            let resolved = resolve(entity)?;
-            let place: [f32; 3] = entity.place.into();
-            let position = arr_to_vec3(place) + spawn;
-            let (orbit_radius, orbit_speed) = match entity.moves {
-                Moves::Still => (0.0, 0.0),
-                Moves::Orbit { radius, speed } => (radius, speed),
-            };
-            let built = match &resolved.sound {
-                ResolvedSound::Sample { audio_path } => build_one_source(
-                    audio_path,
-                    resolved.reference_spl,
-                    &resolved.directivity,
-                    resolved.spread,
-                    position,
-                    orbit_radius,
-                    orbit_speed,
-                    norm,
-                    global_ref_dist,
-                    max_dist,
-                )?,
-                ResolvedSound::Synth { spec } => {
-                    if entity.moves != Moves::Still {
-                        return Err(format!("sound `{id}`: a generator cannot orbit yet").into());
-                    }
-                    build_one_synth_source(
-                        spec,
-                        resolved.reference_spl,
-                        &resolved.directivity,
-                        resolved.spread,
-                        position,
-                        // Slot-stable default seed: reloading the scene sounds
-                        // statistically identical, multiple synths decorrelate.
-                        1000 + i as u64,
-                        norm,
-                        global_ref_dist,
-                        max_dist,
-                    )?
-                }
-            };
-
-            let name = display_name(id, entity);
-            let color = source_color(entity, i);
-
+        for (slot, (id, entity)) in self.sounds.iter().enumerate() {
+            let (built, meta) = builder.build_parts(id, entity, slot)?;
             println!(
                 "  {} → SPL={:.0} dB, amplitude={:.4}, ref_dist={:.2}m, audible={:.2}m",
-                name, resolved.reference_spl, built.amplitude, built.ref_dist, built.audible_radius,
+                meta.name, meta.spl, built.amplitude, built.ref_dist, built.audible_radius,
             );
-
-            let synth_kind = match &resolved.sound {
-                ResolvedSound::Synth { spec } => Some(spec.kind_name().to_string()),
-                ResolvedSound::Sample { .. } => None,
-            };
-            let emitter_kind = built.source.emitter_kind();
-            metas.push(SourceMeta {
-                name,
-                color,
-                spl: resolved.reference_spl,
-                ref_dist: built.ref_dist,
-                amplitude: built.amplitude,
-                audible_radius: built.audible_radius,
-                directivity: resolved.directivity.clone(),
-                directivity_alpha: built.directivity_alpha,
-                spread: resolved.spread,
-                position: place,
-                orbit_radius,
-                orbit_speed,
-                synth_kind,
-                emitter_kind,
-            });
-
+            metas.push(meta);
             spectral_profiles.push(built.bands);
             source_amplitudes.push(built.amplitude);
             nodes.push(built.source);
@@ -429,6 +371,16 @@ impl SceneConfig {
             spectral_profiles,
             source_amplitudes,
         })
+    }
+
+    /// The builder for this scene's sounds, with the scene placed at `spawn`.
+    fn sound_builder(&self, spawn: Vec3) -> SoundBuilder {
+        SoundBuilder::new(
+            self.normalization.clone(),
+            self.distance_model.ref_distance,
+            self.distance_model.max_distance,
+            spawn,
+        )
     }
 }
 
@@ -457,7 +409,7 @@ pub(super) struct BuiltSource {
 /// source matches a reloaded one exactly). `position` is world coordinates
 /// (already offset by the environment spawn point).
 #[allow(clippy::too_many_arguments)]
-fn build_one_source(
+pub(super) fn build_one_source(
     audio_path: &str,
     reference_spl: f32,
     directivity: &str,

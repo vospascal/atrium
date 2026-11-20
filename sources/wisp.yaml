@@ -3,6 +3,8 @@
 # territory. The scene's `position` is the centre of that territory at ground
 # level. See src/synth/wisp.rs.
 
+name: Wisp
+group: Creatures
 synth: wisp
 
 # ── Flight ──────────────────────────────────────────────────────────────────

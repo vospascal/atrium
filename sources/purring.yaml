@@ -5,6 +5,8 @@
 # 55 dB plays as: clearly present when you approach the cat, faint warmth at
 # the listener center, gone across the room.
 
+name: Purring cat
+group: Creatures
 path: assets/purring.mp3
 reference_spl: 55.0        # stylized; matches campfire at 1m, +20 dB near-field when close
 directivity: omni           # radiates equally in all directions

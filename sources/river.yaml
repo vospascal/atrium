@@ -1,6 +1,8 @@
 # A located segment of flowing water. Unlike wind and ambient rain, this is a
 # Object emitter: normal distance falloff, direction, reflections, and room
 # reverb all apply.
+name: River
+group: Water
 synth: river
 
 # Plausible calm-to-brisk stream velocity. This preserves the useful dynamic

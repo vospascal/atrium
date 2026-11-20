@@ -4,6 +4,8 @@
 #
 # Available directivity patterns: omni, cardioid, supercardioid
 
+name: Djembe
+group: Music
 path: assets/djembe.mp3
 reference_spl: 75.0        # ~75 dB SPL at 1m (moderate playing)
 directivity: cardioid       # forward-projecting polar pattern (alpha=0.5)

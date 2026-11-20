@@ -32,7 +32,12 @@ pub struct SceneDescription {
 /// One source as built.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceDescription {
+    /// What the sound is known by in the scene file. It stays the same when
+    /// sounds around it are added or removed; its slot does not.
+    pub id: String,
     pub name: String,
+    /// The family it belongs to in a list, when the scene gives it one.
+    pub group: Option<String>,
     /// UI color as `#rrggbb`.
     pub color: String,
     /// Position at load time.
@@ -107,7 +112,7 @@ impl SceneConfig {
 }
 
 /// `scenes/river-bend.yaml` → "River Bend".
-fn title_from_path(path: &str) -> String {
+pub(super) fn title_from_path(path: &str) -> String {
     let stem = Path::new(path)
         .file_stem()
         .and_then(|stem| stem.to_str())

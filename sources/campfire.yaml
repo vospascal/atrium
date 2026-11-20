@@ -2,6 +2,8 @@
 # Wood fire crackling — moderate ambient sound, radiates in all directions.
 # Uses spread to simulate a spatially wide source (not a point).
 
+name: Campfire
+group: Fire
 path: assets/campfire.mp3
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (close crackling/popping fire)
 directivity: omni           # radiates equally in all directions
