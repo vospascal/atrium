@@ -534,8 +534,9 @@ one binding method away. Bold marks what is missing.
 | Every sound on one map | scene description | `scene()` reports each sound's position, level, ambient or not, beam width and facing | new (E1) |
 | Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | the composer shows the highest channel peak only |
 | Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (E2) |
-| Mute and solo | `SetSourceMuted`. No solo command; the app mutes the rest | **no call.** Telemetry reports `muted` | new (E2) |
-| Level, size, omni or focused | `SetSourceSpl`, `SetSourceSpread`, `SetSourceDirectivity` | **no call.** Size is not in the description | new (E2) |
+| Mute and solo | `SetSourceMuted`. No solo command; the app mutes the rest | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
+| Level | `SetSourceSpl` | `set_source_level` | exists: the selected layer |
+| Size, omni or focused | `SetSourceSpread`, `SetSourceDirectivity` | **no call.** Size is not in the description | new (E2) |
 | Orbit | `SetSourceOrbitSpeed`, `SetSourceOrbitRadius`, `SetSourceOrbitAngle` | **no call.** Orbit is not in the description | new (E2) |
 | Temperature and humidity | `SetAtmosphere` | **no call** | new (E2) |
 | Listener position and facing | `SetListenerPose` | **no call** | new (E2) |
@@ -543,7 +544,8 @@ one binding method away. Bold marks what is missing.
 | Move a speaker | `SetSpeakerPosition` | **no call** | new |
 | Generator settings while playing | `SetSynthParam` reaches the four winds and the river. **Rain, waves and the wisp ignore it** | **no call, and no list of a generator's settings** | new (E3) |
 | Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn |
-| Add and remove sounds | `SceneEdit` add and remove exist with no producer | **nothing** | new (E4) |
+| Add a sound, hear a preset first | `SceneEdit` add, and a builder kept from the scene build | `list_presets`, `audition`, `add_sound` | exists: the editor's library |
+| Remove a sound | `SceneEdit` remove exists | **no call.** The description is indexed by voice | new (E4) |
 | Save a scene | the scene types can already be written out (`scenes/saved.yaml` is an old result). **No function writes them** | **nothing** | new (E4) |
 | Several takes per sound | **nothing.** A source file names one recording. `assets/birds/` holds 20 takes of five species that no source uses | | new (A1) |
 | When: gaps and bouts | **nothing.** Recordings loop without a pause | | new (A1) |
@@ -586,10 +588,11 @@ listening.
 
 ### Editor (app and binding)
 
-- **E0. The sound model, layers, audio, library.** *Engine, binding and app.* Sounds get
-  an id and a group; this part is done. The layer list shows them with mute, solo, level
-  and a live meter.
-  The library lists the presets, plays one on a press, and adds one to the scene.
+- **E0. The sound model, layers, audio, library.** *Engine, binding and app.* Built
+  2026-11-20. Sounds have an id and a group. The layer list shows them with mute, solo,
+  level and a live meter. The library lists the presets, plays one while it is held, and
+  adds one to the scene just ahead of the listener. Not yet: removing a layer, saving, and
+  dropping a sound at a chosen spot.
 - **E1. One map, all sounds.** *App only.* Every sound on one map, the layer list,
   selection, the inspector as a read-out, drag any sound, scene settings when nothing is
   selected. Replaces stepping through the sounds one at a time. Uses the binding as it is,
