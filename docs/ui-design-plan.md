@@ -552,8 +552,8 @@ one binding method away. Bold marks what is missing.
 | Remove a sound | `SceneEdit` remove | `remove_sound`; each sound in `scene()` carries its voice | exists: the inspector |
 | Turn a sound | `SetSourceFacing`; a scene file's `shape.facing` | `set_source_facing` | exists: a handle on the map for a focused sound |
 | Save a scene | the scene types can already be written out (`scenes/saved.yaml` is an old result). **No function writes them** | **nothing** | new (E4) |
-| Several takes per sound | **nothing.** A source file names one recording. `assets/birds/` holds 20 takes of five species that no source uses | | new (A1) |
-| When: gaps and bouts | **nothing.** Recordings loop without a pause | | new (A1) |
+| Several takes per sound | a preset lists `takes`; four bird kinds use 19 of the 20 on disk | `scene()` names them, telemetry says which is sung | exists: the inspector lists them, the map dims a resting bird |
+| When: gaps | a `sings` rule with a gap range and level and pitch variation, decided on the audio thread from a seed | | built 2026-11-21. Bouts, chance in the editor and planning ahead are not |
 | The session: a plan made ahead, kept and shared | **nothing.** A command takes effect when the audio thread next reads it and carries no time. No link between devices | | new (A1 onwards) |
 | A piece: a composed scene of set length | **nothing** | | new (E6) |
 | A setting that wanders | **nothing** at the scene level. The winds and the river vary inside themselves | | new (A2) |
