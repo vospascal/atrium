@@ -1,9 +1,10 @@
 //! Building one sound of a scene: the single path a scene's own sounds and a
 //! sound added while it plays both go through, so the two cannot differ.
 
-use atrium_core::source::SoundSource;
+use atrium_core::directivity::DirectivityPattern;
+use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::types::Vec3;
-use atrium_world::{Entity, EntityId, Moves, Place};
+use atrium_world::{Entity, EntityId, Moves, Pattern, Place};
 
 use super::build::{
     arr_to_vec3, build_one_source, build_one_synth_source, source_color, BuiltSource, SourceMeta,
@@ -60,6 +61,8 @@ impl SoundBuilder {
         let (built, meta) = self.build_parts(id, entity, slot)?;
         let description = SourceDescription {
             id: meta.id,
+            slot: slot as u16,
+            pattern: pattern_named(&meta.directivity),
             name: meta.name,
             group: meta.group,
             color: meta.color,
@@ -141,6 +144,11 @@ impl SoundBuilder {
             }
         };
 
+        let mut built = built;
+        if let Some(bearing) = entity.shape.facing {
+            built.source.set_facing(yaw_for_bearing(bearing));
+        }
+
         let synth_kind = match &resolved.sound {
             ResolvedSound::Synth { spec } => Some(spec.kind_name().to_string()),
             ResolvedSound::Sample { .. } => None,
@@ -164,5 +172,67 @@ impl SoundBuilder {
             emitter_kind: built.source.emitter_kind(),
         };
         Ok((built, meta))
+    }
+}
+
+/// The engine's heading for a compass bearing: a bearing is degrees clockwise
+/// from north (+Y), a heading is radians counter-clockwise from +X.
+fn yaw_for_bearing(bearing_degrees: f32) -> f32 {
+    (90.0 - bearing_degrees).to_radians()
+}
+
+/// The pattern a preset or a scene names. A name the engine does not know
+/// plays as omni, and is reported as that.
+pub(super) fn pattern_named(name: &str) -> Pattern {
+    match name {
+        "cardioid" => Pattern::Cardioid,
+        "supercardioid" => Pattern::Supercardioid,
+        _ => Pattern::Omni,
+    }
+}
+
+/// How the engine radiates a pattern, and how wide its beam is drawn: `None`
+/// for a pattern that is equal all round.
+pub fn radiation_of(pattern: Pattern) -> (DirectivityPattern, Option<f32>) {
+    let radiation = match pattern {
+        Pattern::Omni => DirectivityPattern::Omni,
+        Pattern::Cardioid => DirectivityPattern::cardioid(),
+        Pattern::Supercardioid => DirectivityPattern::supercardioid(),
+    };
+    (radiation, beam_half_angle(EmitterKind::Object, radiation))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// North is +Y, which is a heading of π/2; east is +X, heading 0; and a
+    /// bearing turns clockwise while a heading turns the other way.
+    #[test]
+    fn a_compass_bearing_becomes_the_engines_heading() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        assert!((yaw_for_bearing(0.0) - FRAC_PI_2).abs() < 1e-6);
+        assert!(yaw_for_bearing(90.0).abs() < 1e-6);
+        assert!(
+            (yaw_for_bearing(270.0).cos() - PI.cos()).abs() < 1e-6,
+            "west"
+        );
+        assert!(
+            (yaw_for_bearing(180.0).sin() + 1.0).abs() < 1e-6,
+            "south is −Y"
+        );
+    }
+
+    /// A cardioid is half as loud at 90° off its axis, so its beam is drawn
+    /// 90° to each side. Omni has no beam to draw.
+    #[test]
+    fn a_pattern_gives_the_beam_a_map_draws() {
+        assert_eq!(radiation_of(Pattern::Omni).1, None);
+        let (_, cardioid) = radiation_of(Pattern::Cardioid);
+        assert!((cardioid.expect("a beam") - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let (_, narrow) = radiation_of(Pattern::Supercardioid);
+        assert!(narrow.expect("a beam") < std::f32::consts::FRAC_PI_2);
+        assert_eq!(pattern_named("cardioid"), Pattern::Cardioid);
+        assert_eq!(pattern_named("no such pattern"), Pattern::Omni);
     }
 }

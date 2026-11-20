@@ -15,7 +15,7 @@ use atrium_world::Entity;
 use super::description::{beam_half_angle, SceneDescription, SourceDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
-use super::sound_builder::SoundBuilder;
+use super::sound_builder::{pattern_named, SoundBuilder};
 use super::source::resolve_spl;
 use super::synth::SynthSpec;
 use crate::audio::atmosphere::AtmosphericParams;
@@ -213,8 +213,11 @@ impl SceneConfig {
                 .iter()
                 .zip(&sources)
                 .take(MAX_SOURCES)
-                .map(|(meta, node)| SourceDescription {
+                .enumerate()
+                .map(|(slot, (meta, node))| SourceDescription {
                     id: meta.id.clone(),
+                    slot: slot as u16,
+                    pattern: pattern_named(&meta.directivity),
                     name: meta.name.clone(),
                     group: meta.group.clone(),
                     color: meta.color.clone(),

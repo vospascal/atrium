@@ -24,7 +24,7 @@ fn synth_test_scene_builds_with_calibrated_sources() {
 /// engine renders it, and match the calibration the engine was built with.
 #[test]
 fn description_matches_the_built_scene() {
-    let result = SceneConfig::load("scenes/frog-headphones.yaml")
+    let result = SceneConfig::load("scenes/frog.yaml")
         .expect("scene should load")
         .build()
         .expect("scene should build");

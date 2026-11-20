@@ -11,6 +11,7 @@ use atrium_core::directivity::DirectivityPattern;
 use atrium_core::source::EmitterKind;
 use atrium_core::telemetry::MAX_SOURCES;
 use atrium_core::types::Vec3;
+use atrium_world::Pattern;
 
 use super::build::{arr_to_vec3, source_color};
 use super::scene::SceneConfig;
@@ -25,7 +26,7 @@ pub struct SceneDescription {
     pub depth: f32,
     /// Listener position at load time.
     pub listener: Vec3,
-    /// Sources in pool-slot order: entry `i` is slot `i`.
+    /// The scene's sources, each with the slot it plays from.
     pub sources: Vec<SourceDescription>,
 }
 
@@ -35,6 +36,10 @@ pub struct SourceDescription {
     /// What the sound is known by in the scene file. It stays the same when
     /// sounds around it are added or removed; its slot does not.
     pub id: String,
+    /// The engine voice it plays from: the index commands and telemetry use.
+    pub slot: u16,
+    /// How it radiates.
+    pub pattern: Pattern,
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,
