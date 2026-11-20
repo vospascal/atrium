@@ -536,94 +536,148 @@ one binding method away. Bold marks what is missing.
 | Move a sound | `SetSourcePosition` | `set_source_position` | exists: drag any sound on the editor's map. `scene()` remembers where it was put |
 | Every sound on one map | scene description | `scene()` reports each sound's position, level, ambient or not, beam width and facing | exists: the editor's map |
 | Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | each layer and each sound on the map shows how strongly it reaches the listener. Channel peaks are not drawn |
-| Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (E2) |
+| Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (6) |
 | Mute | `SetSourceMuted` | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
 | Level | `SetSourceSpl` | `set_source_level` | exists: the selected layer |
 | Omni or focused | `SetSourceDirectivity` | `set_source_pattern` | exists: the inspector |
-| Size | `SetSourceSpread` | **no call.** Size is not in the description | new (E2) |
-| Orbit | `SetSourceOrbitSpeed`, `SetSourceOrbitRadius`, `SetSourceOrbitAngle` | **no call.** Orbit is not in the description | new (E2) |
-| Temperature and humidity | `SetAtmosphere` | **no call** | new (E2) |
-| Listener position and facing | `SetListenerPose` | **no call** | new (E2) |
+| Size | `SetSourceSpread` | **no call.** Size is not in the description | new (10) |
+| Orbit | `SetSourceOrbitSpeed`, `SetSourceOrbitRadius`, `SetSourceOrbitAngle` | **no call.** Orbit is not in the description | new (33) |
+| Temperature and humidity | `SetAtmosphere` | **no call** | new (39) |
+| Listener position and facing | `SetListenerPose` | **no call** | new (39) |
 | Head tracking | listens for OpenTrack packets and can start the Sony bridge. Telemetry carries the listener's heading | `head_trackers`, `set_head_tracker`; telemetry reports the facing and whether a tracker is sending | exists on desktop: Settings switches it and says whether head movement arrives; the 3D map draws where the listener faces. Seen working with the Sony headphones on 2026-11-20. The Sony bridge is a Mac script, so iPhone needs its own source of head motion |
 | Move a speaker | `SetSpeakerPosition` | **no call** | new |
-| Generator settings while playing | `SetSynthParam` reaches the four winds and the river. **Rain, waves and the wisp ignore it** | **no call, and no list of a generator's settings** | new (E3) |
-| Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn |
+| Generator settings while playing | `SetSynthParam` reaches the four winds and the river. **Rain, waves and the wisp ignore it** | **no call, and no list of a generator's settings** | new (26, 27) |
+| Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn. Any sound ambient is 11 |
 | Add a sound, hear a preset first | `SceneEdit` add, and a builder kept from the scene build | `list_presets`, `audition`, `add_sound` | exists: the editor's library |
 | Remove a sound | `SceneEdit` remove | `remove_sound`; each sound in `scene()` carries its voice | exists: the inspector |
 | Turn a sound | `SetSourceFacing`; a scene file's `shape.facing` | `set_source_facing` | exists: a handle on the map for a focused sound |
-| Save a scene | the scene types can already be written out (`scenes/saved.yaml` is an old result). **No function writes them** | **nothing** | new (E4) |
+| Save a scene | the scene types can already be written out (`scenes/saved.yaml` is an old result). **No function writes them** | **nothing** | new (1) |
 | Several takes per sound | a preset lists `takes`; four bird kinds use 19 of the 20 on disk | `scene()` names them, telemetry says which is sung | exists: the inspector lists them, the map dims a resting bird |
-| When: gaps | a `sings` rule with a gap range and level and pitch variation, decided on the audio thread from a seed | | built 2026-11-21. Bouts, chance in the editor and planning ahead are not |
-| The session: a plan made ahead, kept and shared | **nothing.** A command takes effect when the audio thread next reads it and carries no time. No link between devices | | new (A1 onwards) |
-| A piece: a composed scene of set length | **nothing** | | new (E6) |
-| A setting that wanders | **nothing** at the scene level. The winds and the river vary inside themselves | | new (A2) |
-| Conditions, and settings that follow them | **nothing.** No scene seed or clock; each generator has its own seed | | new (A3) |
-| Weather stories | **nothing** | | new (A4) |
-| Thunder | **nothing.** It was never ported from the earlier project | | new (A4) |
-| Paths, wandering, perches | **nothing** beyond orbit and the wisp's own flight | | new (A5) |
-| Tone generator | **nothing** | | new (A6) |
-| Group level | **nothing** | | new (E5) |
-| Drag the block | **no command.** Speakers, listener and block rectangle must move together in one step | | new (E5) |
-| Loudness layer | **nothing yet.** Needs a pure function over the scene and a coarse grid | | new (E5) |
+| When: gaps | a `sings` rule with a gap range and level and pitch variation, decided on the audio thread from a seed | | built 2026-11-21. Bouts (16), chance in the editor (14) and planning ahead (22) are not |
+| The session: a plan made ahead, kept and shared | **nothing.** A command takes effect when the audio thread next reads it and carries no time. No link between devices | | new (21–25) |
+| A piece: a composed scene of set length | **nothing** | | new (41) |
+| A setting that wanders | **nothing** at the scene level. The winds and the river vary inside themselves | | new (28) |
+| Conditions, and settings that follow them | **nothing.** No scene seed or clock; each generator has its own seed | | new (29) |
+| Weather stories | **nothing** | | new (30) |
+| Thunder | **nothing.** It was never ported from the earlier project | | new (31) |
+| Paths, wandering, perches | **nothing** beyond orbit and the wisp's own flight | | new (33) |
+| Tone generator | **nothing** | | new (43) |
+| Group level | **nothing** | | new (36) |
+| Drag the block | **no command.** Speakers, listener and block rectangle must move together in one step | | new (37) |
+| Loudness layer | **nothing yet.** Needs a pure function over the scene and a coarse grid | | new (38) |
 | What arrives at a speaker | **nothing yet.** Telemetry has per-sound level at the listener and per-channel peaks, not per-sound-per-speaker | | new |
 | Spectrum per output channel | **nothing yet** | | new |
 
 ## Order of work
 
-Two tracks. Aliveness matters most in what you hear, but the editor is built first (decided
-2026-11-20): E0, E1, then E4, then A1. Each step ends with something you can use while
-listening.
+Rewritten 2026-11-21 as one numbered list, replacing the two tracks (A1–A6, E0–E6). The
+features keep their numbers when the order changes, so they can be named in conversation.
+Size: **S** is a day or less, **M** a few days, **L** a week or more. "Needs" names what has
+to exist first.
 
-### Aliveness (engine and scene files)
+**Built so far.** The sound model and its crate, the three-panel editor (layers with an ear
+and a live meter, library with play and add, one top-down map, the inspector), remove, move,
+turn, mute, level, omni or focused, head tracking on desktop, and kinds with takes that sing
+with gaps from a range and a small level and pitch offset. Nothing is saved yet, and the
+singing is decided on the audio thread, not planned ahead.
 
-- **A1. Repertoire and gaps.** A sound holds several takes and plays them with gaps from a
-  range, varied or in bouts, each with a small level and pitch offset. First test: the
-  five garden birds already on disk, in the meadow. The decisions go into a session from
-  the start, and each event carries its start time. The editor gains the takes under
-  Sound, the When section and the activity strip.
-- **A2. Wander.** A level or a generator setting drifts inside a range. Rain, waves and the
-  wisp have to accept changes while playing first. The editor gains the second handle.
-- **A3. Conditions.** Wind, rain, storm and daylight as curves in the session, and the
-  "follows" link. Presets get their links. The editor gains the
-  conditions in the scene inspector and the follow chip.
-- **A4. Weather stories.** Held, drifting, a passing storm. Thunder. The editor gains the
-  story picker, time-lapse and the zoomed-out strip.
-- **A5. Moves.** Perches, wandering for any sound, paths, and the Path tool.
-- **A6. Beyond nature.** A tone generator, the real clock as a condition, energy.
+### Suggested order
 
-### Editor (app and binding)
+1. **1, then 14, then 9.** Save first, so tuning chance, gaps and width is not lost.
+2. **15, 16, 17.** Small, and they make the birds visibly and audibly alive.
+3. **21, then 22.** The session. Most of groups 4, 5 and 7 build on it.
+4. **26, then 29, then 30 and 31.** Weather that has a cause, with thunder.
+5. Then pieces, the storybook and the tone generator, in whichever order matters most.
 
-- **E0. The sound model, layers, audio, library.** *Engine, binding and app.* Built
-  2026-11-20. Sounds have an id and a group. The layer list shows them with an ear to
-  silence each, a live meter, and a bar with add and delete. The library lists the
-  presets, plays one with a play/stop button, and adds one to the scene just ahead of the
-  listener. A sound can be removed, switched
-  between omni and focused, and turned. Not yet: saving, and dropping a sound at a chosen
-  spot.
-- **E1. One map, all sounds.** *App only.* Built 2026-11-20. Every sound on one top-down
-  map beside the layer list, selection shared between the two, an inspector with the five
-  parts, drag any sound, and the scene's own details when nothing is selected. A narrow
-  window shows the same three panels as tabs. The block's speakers are not drawn yet,
-  because the scene description does not report them.
-- **E2. Reach what the engine already does.** *Binding.* Mute, level, size, omni
-  and focused with facing and width, orbit, temperature and humidity, the listener. The
-  scene description grows to report speakers, size, orbit and generator. The inspector
-  becomes editable and the map gets its handles. Head tracking on desktop was the first
-  part of this step to be built (2026-11-20): Settings switches it while a scene plays.
-- **E3. Generator panels.** *Binding and engine.* The engine publishes each generator's
-  settings and the three-depth panel is drawn from them. The four winds and the river
-  already change while playing.
-- **E4. The scene as a document.** *Engine.* Save as a new scene, undo, add, remove and
-  duplicate from the Library, presets with overrides, the voice counter. Keep a session.
-- **E5. Whole-place controls.** *Engine.* Group level, ambient for any sound, one command
-  that moves block, speakers and listener together, and the loudness layer: a pure
-  function in the engine, unit-tested against the distance model, handed over as a coarse
-  grid when the scene changes.
-- **E6. Pieces.** *App and engine.* The strip as a timeline for a scene of set length:
-  drawn condition curves, blocks, single events. Needs A1, A3 and E4.
+The small ones (3–8, 10–13, 36, 39) fill the gaps between the big steps.
 
-Not placed yet: what arrives at a speaker, the diagnostics drawer, an iOS host app, head
-tracking on iPhone, and the link that shares a session between devices.
+### 1. Make editing stick
+
+Without these, nothing done in the editor survives a restart.
+
+1. **Save a scene** (Mac). The first save of a hand-written scene asks for a new name; added
+   and removed sounds are kept in the scene's entities. **M**
+2. **Undo and redo.** **M**, needs 1
+3. **Drop a sound where it is let go** when dragged from the library, instead of just ahead
+   of the listener. **S**
+4. **Duplicate a sound.** **S**
+5. **Rename, recolour and regroup** a sound in the inspector. **S**, needs 1
+6. **Speakers and the block on the map.** The scene description has to report them. **S–M**
+7. **Zoom and pan the map.** **S**
+8. **Arrow keys nudge** the selected sound. **S**
+
+### 2. Shape and reach of an entity
+
+9. **Width in degrees plus how much is heard behind**, replacing Omni, Focused and Narrow
+   (see `entity-idea.md`, "Shape and reach"). **M**, engine, binding and app
+10. **Size settable.** The engine has `SetSourceSpread`. **S**
+11. **Any sound can be ambient**: rain, a recorded forest bed. **M**
+12. **Each kind comes with its own shape and reach.** **S**, needs 9
+13. **Show what an individual changed**, with a way back to the kind's value. **S**, needs 1
+
+### 3. When an entity sounds
+
+14. **Chance and gaps editable** in the inspector. **S**, needs 1 for the values to be kept
+15. **A button per take** to hear that take on its own. **S**
+16. **Bouts**: the same take a few times, then a switch. **S–M**
+17. **The activity strip**, first as the last two minutes, each phrase a mark. **M**
+18. **Cut a long recording into takes** at its silences. **M**
+19. **More bird takes.** The great tit has one, and `bird_1` and `bird_2` are unnamed.
+    Recordings, not code.
+20. **Registers**: song, call and alarm as separate sets of takes. **M**, later
+
+### 4. Planning ahead: the session
+
+The base for pause, sharing between devices, pieces and the storybook.
+
+21. **A scene seed and a clock** in the engine. **M**
+22. **Phrases and rests decided ahead of time**, outside the audio thread, as a pure
+    function of scene, seed, state and time window. **L**, needs 21
+23. **The strip shows the next 45 seconds as planned.** **S**, needs 17 and 22
+24. **Pause stops the session's clock**, and a long sound can start partway through. **M**,
+    needs 22
+25. **Keep a session** and play the same half hour again. **S**, needs 22
+
+### 5. A living place
+
+26. **Rain, waves and the wisp accept changes while playing.** Today only the four winds and
+    the river do. **M**
+27. **Generator panels** at three depths. **M**, needs 26
+28. **Wander**: a setting drifts inside a range. **M**, needs 26
+29. **Conditions**: wind, rain, storm and daylight, and sounds that follow them. **L**,
+    needs 22
+30. **Weather stories**: held, drifting, a passing storm. **M**, needs 29
+31. **Thunder**, ported from the spatial project. **M**
+32. **Time-lapse, and dragging the conditions by hand.** **M**, needs 30
+33. **Moves**: perches, wandering, paths, and orbit editable in the inspector. **L**
+34. **Entities answer each other**: the robin answers the blackbird. **M**, needs 22
+35. **More creatures than voices**: a resting entity gives its voice back. **L**
+
+### 6. The whole place
+
+36. **Group level**: all the birds louder or softer together. **S**
+37. **Move the block, speakers and listener together**, in one command. **M**
+38. **The loudness layer** on the map. **M**
+39. **Listener position, temperature and humidity** in the scene inspector. **S**
+40. **"Why can't I hear it?"**: too far, muted, or drowned out. The engine has a perceptual
+    score the binding does not report. **S–M**
+
+### 7. Beyond nature, and the player
+
+41. **Pieces**: a set length with drawn conditions, blocks and single events. **L**, needs 1,
+    22 and 29
+42. **The storybook**: a narrator, events tied to markers in the narration, pages. **L**,
+    needs 41
+43. **A tone generator** for focus tones, named by pitch. **M**
+44. **Patterns** in the way of TidalCycles, and **music in space** with stereo width and
+    stems. **L** each
+45. **An iOS host app**, **head tracking on iPhone**, and **the link between devices** that
+    shares a session and a clock. **M**, **M**, **L**
+46. **Player extras**: crossfade between places, sleep timer, quiet hours, schedule,
+    wall-tablet view, speaker check. **S** each
+
+Not numbered yet: what arrives at a speaker, the diagnostics drawer, and the rest of the
+idea pool.
 
 ## Open decisions
 
@@ -654,7 +708,7 @@ From the editor concept, each with a suggestion:
   voices. Suggested: start with copies. Add a count with scatter later if voices run short.
 - **The roadmap's home for scheduling, motion and weather is gone.**
   `living-atrium-roadmap.md` plans thunder, triggering with a repertoire, a call scheduler
-  and a weather state, which is the aliveness track above. But it puts the scheduler,
+  and a weather state, which is groups 3 to 5 of the order of work. But it puts the scheduler,
   motion and weather in the behaviour crate and the Bevy editor, both removed on
   2026-11-17, and it would delete the engine's orbit in their favour. Suggested: the
   engine takes all three, as this plan assumes, and the roadmap is rewritten to match.
