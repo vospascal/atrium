@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use crate::audio::decode::AudioBuffer;
+use crate::audio::signal_meter::SignalMeter;
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::source::SoundSource;
+use atrium_core::telemetry::SourceSignal;
 use atrium_core::types::Vec3;
 
 /// A looping buffer player that orbits a center point.
@@ -22,6 +24,7 @@ pub struct TestNode {
     pub spread: f32,
     pub ref_dist: f32,
     muted: bool,
+    signal_meter: Option<SignalMeter>,
 }
 
 impl TestNode {
@@ -44,7 +47,12 @@ impl TestNode {
             spread: 0.0,
             ref_dist: 1.0,
             muted: false,
+            signal_meter: None,
         }
+    }
+
+    pub(crate) fn meter_signal(&mut self) {
+        self.signal_meter = Some(SignalMeter::new(self.buffer.rms * self.amplitude));
     }
 }
 
@@ -74,7 +82,15 @@ impl SoundSource for TestNode {
             // Still advance playback so it stays in sync when unmuted
             return 0.0;
         }
-        sample * self.amplitude
+        let output = sample * self.amplitude;
+        if let Some(meter) = &mut self.signal_meter {
+            meter.push(output, sample_rate);
+        }
+        output
+    }
+
+    fn signal(&self) -> Option<SourceSignal> {
+        self.signal_meter.as_ref().map(SignalMeter::signal)
     }
 
     fn position(&self) -> Vec3 {
@@ -113,6 +129,11 @@ impl SoundSource for TestNode {
     }
 
     fn set_muted(&mut self, muted: bool) {
+        if muted && !self.muted {
+            if let Some(meter) = &mut self.signal_meter {
+                meter.reset();
+            }
+        }
         self.muted = muted;
     }
 

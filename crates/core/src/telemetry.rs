@@ -9,6 +9,17 @@ use crate::speaker::{ChannelMode, RenderMode};
 pub const MAX_SOURCES: usize = 16;
 pub const MAX_CHANNELS: usize = 8;
 
+/// Short-time measurement of a source's rendered mono signal, before spatial effects.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SourceSignal {
+    /// RMS relative to the source's calibrated RMS when the scene was built.
+    pub relative_rms: f32,
+    /// Share of measured energy below roughly 350 Hz.
+    pub low_share: f32,
+    /// Share of measured energy above roughly 2.4 kHz. The remainder is midrange.
+    pub high_share: f32,
+}
+
 /// Per-source telemetry snapshot.
 #[derive(Clone, Copy, Debug)]
 pub struct SourceTelemetry {
@@ -21,6 +32,8 @@ pub struct SourceTelemetry {
     pub gain_total: f32,
     pub gain_db: f32,
     pub is_muted: bool,
+    /// The signal meter, where the scene source provides one.
+    pub signal: Option<SourceSignal>,
     /// Perceptual score [0, 1] from masking/salience analysis.
     pub perceptual_score: f32,
     /// Source facing direction (unit vector).
@@ -45,6 +58,7 @@ impl Default for SourceTelemetry {
             gain_total: 0.0,
             gain_db: f32::NEG_INFINITY,
             is_muted: false,
+            signal: None,
             perceptual_score: 1.0,
             orientation_x: 1.0,
             orientation_y: 0.0,

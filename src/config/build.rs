@@ -495,6 +495,7 @@ fn build_one_source(
     node.ref_dist = ref_dist;
     node.pattern = pattern;
     node.spread = spread;
+    node.meter_signal();
 
     Ok(BuiltSource {
         source: Box::new(node),
@@ -568,6 +569,7 @@ pub(super) fn build_one_synth_source(
     node.ref_dist = ref_dist;
     node.pattern = pattern;
     node.spread = spread;
+    node.meter_signal(rms);
 
     Ok(BuiltSource {
         source: Box::new(node),

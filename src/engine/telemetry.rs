@@ -94,6 +94,7 @@ pub fn compute_telemetry(
             gain_total,
             gain_db,
             is_muted: source.is_muted(),
+            signal: source.signal(),
             perceptual_score: 1.0, // overwritten by AudioScene with actual scores
             orientation_x: orientation.x,
             orientation_y: orientation.y,
@@ -106,11 +107,17 @@ pub fn compute_telemetry(
     frame
 }
 
-/// Serialize a telemetry frame to JSON for WebSocket broadcast.
-/// Hand-rolled to avoid serde overhead in the broadcast path.
 /// Level reported for a silent channel, in dBFS.
 const SILENT_PEAK_DB: f32 = -120.0;
 
+/// A channel's linear peak in dBFS. Silence is reported as the meter floor
+/// rather than −∞, so every consumer sees the same finite number.
+pub fn peak_db(peak: f32) -> f32 {
+    (20.0 * peak.max(1e-6).log10()).max(SILENT_PEAK_DB)
+}
+
+/// Serialize a telemetry frame to JSON for WebSocket broadcast.
+/// Hand-rolled to avoid serde overhead in the broadcast path.
 pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
     use std::fmt::Write;
     let mut json = String::with_capacity(256);
@@ -168,9 +175,7 @@ pub fn telemetry_to_json(frame: &TelemetryFrame) -> String {
         if channel > 0 {
             json.push(',');
         }
-        // Silence is reported as the meter floor; JSON has no −infinity.
-        let peak_db = (20.0 * peak.max(1e-6).log10()).max(SILENT_PEAK_DB);
-        let _ = write!(json, "{peak_db:.1}");
+        let _ = write!(json, "{:.1}", peak_db(*peak));
     }
     json.push_str("]}");
     json

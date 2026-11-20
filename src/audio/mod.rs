@@ -6,6 +6,7 @@ pub mod filters;
 pub mod masking;
 pub mod output;
 pub mod propagation;
+mod signal_meter;
 pub mod silence_node;
 pub mod sound_profile;
 pub mod spectral_profile;

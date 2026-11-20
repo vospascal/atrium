@@ -1,4 +1,5 @@
 use crate::directivity::DirectivityPattern;
+use crate::telemetry::SourceSignal;
 use crate::types::Vec3;
 
 /// How a source occupies acoustic space.
@@ -32,6 +33,11 @@ impl EmitterKind {
 pub trait SoundSource: Send {
     /// Generate the next mono sample.
     fn next_sample(&mut self, sample_rate: f32) -> f32;
+
+    /// Latest short-time levels, if this source meters its rendered signal.
+    fn signal(&self) -> Option<SourceSignal> {
+        None
+    }
 
     /// Current world-space position.
     fn position(&self) -> Vec3;
