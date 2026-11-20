@@ -77,6 +77,9 @@ pub struct SourceDescription {
     pub beam_half_angle: Option<f32>,
     /// Initial forward vector in world coordinates.
     pub facing: Position,
+    /// The names of what it can utter, in the order `SourceTelemetry::take`
+    /// counts them. One name for a recording that loops, none for a generator.
+    pub takes: Vec<String>,
 }
 
 /// How a localized sound radiates.
@@ -154,6 +157,7 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
             emitter_kind: source.emitter_kind.into(),
             beam_half_angle: source.beam_half_angle,
             facing: source.facing.into(),
+            takes: source.takes,
         }
     }
 }
@@ -190,6 +194,9 @@ pub struct SourceTelemetry {
     pub facing: Position,
     /// Short-time measurements of the mono source before spatial effects.
     pub signal: Option<SourceSignal>,
+    /// Which of its takes it is uttering, counted from 0, or nothing while
+    /// it rests between two. A source that never rests is always on take 0.
+    pub take: Option<u8>,
 }
 
 /// Frequency balance and strength measured from the source audio.
@@ -235,6 +242,7 @@ impl From<&TelemetryFrame> for Telemetry {
                             low_share: signal.low_share,
                             high_share: signal.high_share,
                         }),
+                        take: source.sounding_take,
                     }
                 })
                 .collect(),

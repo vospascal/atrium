@@ -46,6 +46,11 @@ runs Cargo itself. There is nothing to build here by hand.
   a heading that then wins over both. A sound that was never turned behaves as before.
 - **`set_source_facing` takes a direction, not an angle.** The app has the vector from the sound
   to the pointer and should not need to know which way the engine counts angles.
+- **A kind can sing.** A preset with `takes` and a `sings` rule utters one take, rests for a gap
+  from a range, and utters another, never the same twice running. `scene()` gives each sound's
+  take names and telemetry says which one it is uttering, or nothing while it rests. The choice
+  is made on the audio thread from a seed per voice, not planned ahead: that was chosen on
+  2026-11-21 to hear birds sooner, and it means nothing knows the next phrase in advance.
 - **There is no solo.** The engine only knows muted or not, and the app's first layer list had
   an `S` that muted every other layer. Tried on 2026-11-20, that read as the opposite of what
   it did, so each layer now has one ear that silences that layer and nothing else.

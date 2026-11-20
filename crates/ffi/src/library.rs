@@ -12,6 +12,9 @@ pub struct Preset {
     pub group: Option<String>,
     /// Whether it is a generator; otherwise it plays a recording.
     pub generated: bool,
+    /// How many takes it can utter: 1 for a recording that loops, 0 for a
+    /// generator.
+    pub takes: u32,
 }
 
 /// Every preset in `directory`, by file name. Read from the files alone: no
@@ -27,6 +30,7 @@ pub fn list_presets(directory: String) -> Result<Vec<Preset>, EngineError> {
             name: preset.name,
             group: preset.group,
             generated: preset.generated,
+            takes: preset.takes as u32,
         })
         .collect())
 }
@@ -46,7 +50,15 @@ mod tests {
         assert!(frog.path.ends_with("sources/frog.yaml"));
         assert_eq!(frog.group.as_deref(), Some("Creatures"));
         assert!(!frog.generated);
-        assert!(presets.iter().any(|preset| preset.generated));
+        assert_eq!(frog.takes, 1);
+        assert!(presets
+            .iter()
+            .any(|preset| preset.generated && preset.takes == 0));
+        let robin = presets
+            .iter()
+            .find(|preset| preset.name == "Robin")
+            .expect("the robin is listed");
+        assert_eq!(robin.takes, 5);
     }
 
     #[test]
