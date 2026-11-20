@@ -1,0 +1,12 @@
+[package]
+name = "atrium-world"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The sounds of a scene as entities: what each one is, how it radiates, where it is and how it moves"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_yaml = "0.9"

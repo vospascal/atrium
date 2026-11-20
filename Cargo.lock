@@ -113,6 +113,7 @@ version = "0.1.0"
 dependencies = [
  "atrium-core",
  "atrium-tui",
+ "atrium-world",
  "cpal",
  "realfft",
  "rtrb",
@@ -147,6 +148,14 @@ name = "atrium-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+]
+
+[[package]]
+name = "atrium-world"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
