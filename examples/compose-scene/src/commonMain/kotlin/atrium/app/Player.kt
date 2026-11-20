@@ -36,7 +36,7 @@ private enum class Tab { Home, Scenes, Settings }
 internal fun Player(scenes: Result<List<SceneFile>>, session: Session, look: Look, onEdit: () -> Unit) {
     val list = scenes.getOrNull().orEmpty()
     var tab by remember { mutableStateOf(Tab.Home) }
-    var view by remember { mutableStateOf(PlayerView.Zen) }
+    var view by remember { mutableStateOf(PlayerView.Zen2) }
     var chosen by remember { mutableStateOf<SceneFile?>(null) }
     val current = session.request?.scene ?: chosen ?: list.firstOrNull()
 
@@ -58,8 +58,7 @@ internal fun Player(scenes: Result<List<SceneFile>>, session: Session, look: Loo
         if (session.request != null) session.play(next)
     }
 
-    val darkCanvas = tab == Tab.Home && current != null && view.inkStyle?.darkBackdrop == true
-    PlayerTheme(look.appearance, darkCanvas) {
+    PlayerTheme(look.appearance) {
         val tint = if (look.monochrome) LocalPlayerColors.current.monochromeInk else null
         CompositionLocalProvider(LocalInkTint provides tint) {
             Box(Modifier.fillMaxSize().background(Backdrop)) {

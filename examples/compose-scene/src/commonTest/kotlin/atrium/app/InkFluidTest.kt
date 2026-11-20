@@ -49,9 +49,9 @@ class InkFluidTest {
     }
 
     @Test
-    fun lowerFrequenciesWidenTheOriginalPlumeAtTheSameLevel() {
-        val bass = east.copy(signal = PlumeSignal(1f, .94f, .01f)).forBand(InkLayer.Original.band)
-        val treble = east.copy(signal = PlumeSignal(1f, .01f, .94f)).forBand(InkLayer.Original.band)
+    fun lowerFrequenciesWidenTheCoverPlumeAtTheSameLevel() {
+        val bass = east.copy(signal = PlumeSignal(1f, .94f, .01f)).forBand(InkLayer.Cover.band)
+        val treble = east.copy(signal = PlumeSignal(1f, .01f, .94f)).forBand(InkLayer.Cover.band)
         val broad = water().apply { step(listOf(bass), 1f / 30f) }
         val narrow = water().apply { step(listOf(treble), 1f / 30f) }
         assertTrue(narrow.inkNear(60f, 32f, 1f) > 0f)
@@ -101,6 +101,6 @@ class InkFluidTest {
         assertEquals(2, InkLayer.Ribbon.dyeDetail(860f, 104))
         assertEquals(6, InkLayer.Ribbon.dyeDetail(1727f, 104))
         assertEquals(3, InkLayer.Veil.dyeDetail(1727f, 68))
-        assertEquals(2, InkLayer.Original.dyeDetail(1727f, 112))
+        assertEquals(2, InkLayer.Cover.dyeDetail(1727f, 112))
     }
 }

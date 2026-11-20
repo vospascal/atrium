@@ -29,13 +29,12 @@ internal enum class InkLayer(
     val core: Float = 1f,
     val band: InkBand = InkBand.Full,
 ) {
-    Original(112, 1f, 1f, 1f, 0f, 2, 7f),
+    /** One still layer for scene covers: ink that stays where it was released. */
+    Cover(112, 1f, 1f, 1f, 0f, 2, 7f),
     Veil(68, 1.55f, .80f, .42f, -.22f, 3, 7f, band = InkBand.Low),
     Ribbon(104, 1.08f, 1f, .82f, .15f, 6, 3f, band = InkBand.High),
     SmokeVeil(68, 1.52f, .78f, .56f, -.24f, 3, 7f, sway = .26f, confinement = 1.35f, band = InkBand.Low),
-    SmokeFold(104, 1.32f, 1.06f, .96f, .20f, 6, 3f, sway = .48f, confinement = 1.85f, band = InkBand.High),
-    BloomWash(68, 2.08f, .73f, .87f, -.28f, 3, 7f, sway = .37f, confinement = 1.45f, core = 1.63f, band = InkBand.Low),
-    BloomGrain(104, 1.60f, 1.13f, .88f, .14f, 6, 3f, sway = .58f, confinement = 1.76f, core = 1.38f, band = InkBand.High);
+    SmokeFold(104, 1.32f, 1.06f, .96f, .20f, 6, 3f, sway = .48f, confinement = 1.85f, band = InkBand.High);
 
     fun dyeDetail(longSideDp: Float, waterCells: Int): Int =
         if (longSideDp <= 900f) 2 else {
@@ -77,10 +76,10 @@ internal class InkFluid(
     val listenerY: Float = rows / 2f,
     val reach: Float = max(columns, rows) * .72f,
     val detail: Int = 2,
-    private val layer: InkLayer = InkLayer.Original,
+    private val layer: InkLayer = InkLayer.Cover,
 ) {
     private val cells = columns * rows
-    private val throughFlow = layer != InkLayer.Original
+    private val throughFlow = layer != InkLayer.Cover
     private val outletRadius = max(DrainRadius, min(columns, rows) * .18f)
 
     private var velocityX = FloatArray(cells)

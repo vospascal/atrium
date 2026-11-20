@@ -124,7 +124,7 @@ class InkTest {
         val mids = plume(1f, 0f, 0f)
         val quiet = plume(.2f, .95f, .02f)
         val distant = plume(1f, .95f, .02f, gainDb = -15f)
-        val zen = InkStyle.Original.layers.single().band
+        val zen = InkLayer.Cover.band
         close(2f / 3f, low.forBand(zen).strength)
         close(low.forBand(zen).strength, high.forBand(zen).strength)
 

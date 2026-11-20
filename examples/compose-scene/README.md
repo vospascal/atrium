@@ -10,20 +10,17 @@ It has two faces that share one running engine.
 **The player** has three tabs:
 
 - **Home** is the scene now playing. The ink shows it as ink in water: each sound is a spring at
-  the edge where it lies, releasing ink in its scene color, and you are a drain at the centre
-  rings. The ink flows from every sound in to you. Louder sounds release more ink and push
-  harder. A moving sound drags the water and stirs eddies; a still one flows laminar. When a
-  sound stops, its last ink drains into the centre and fades. **Zen 2** pairs a slower veil
+  the edge where it lies, releasing ink in its scene color, and you are the rings at the centre.
+  Louder sounds release more ink and push harder. A moving sound drags the water and stirs
+  eddies; a still one flows laminar. **Zen 2** pairs a slower veil
   with a sharper layer. Ink drifts around and past the listener and fades throughout the canvas.
   Moving sources carry their momentum between telemetry updates. Fields with a bearing flow
   in from that side, and all-direction winds drift in broad currents from the edges.
   A directional object uses a narrower plume according to its built directivity.
-  **Zen 3** turns the flow into side-lit smoke. **Zen 4** gives it broader ink blooms,
-  feathered edges and a grainy texture. Both use a near-black backdrop in their player view.
-  The source's short-time level controls density in all four modes. In **Zen**, lower
-  frequencies broaden the single plume and higher frequencies tighten and quicken it.
-  In **Zen 2**, **Zen 3**, and **Zen 4**, low frequencies drive the slow, broad layer and
-  high frequencies bring out finer detail. The layers share the midrange.
+  **Zen 3** turns the same flow into side-lit smoke. It follows the appearance and the ink
+  setting exactly as Zen 2 does: each sound's color on paper or on near-black, or one tone.
+  The source's short-time level controls density in both. Low frequencies drive the slow,
+  broad layer and high frequencies bring out finer detail. The layers share the midrange.
   When a source falls silent or is muted, it stops releasing ink and the remaining ink fades.
   **3D Map** shows the sounds around the listener. Prev, Play and Next move through the scenes.
 - **Scenes** lists every scene in `scenes/`. Each cover is a still of that scene's own ink, drawn
@@ -106,12 +103,12 @@ program argument.
   simulator. An Xcode app still has to bundle the scene files and start in their directory.
   See `crates/ffi/README.md`.
 - **The ink is a Navier–Stokes simulation (`InkFluid.kt`).** It is Stam's "Stable Fluids" with
-  vorticity confinement. Zen's water grid is 112 cells across. Zen 2 uses separate 68- and
+  vorticity confinement. The scene covers use one 112-cell water grid whose ink drains into the centre. Zen 2 and Zen 3 use separate 68- and
   104-cell grids so the slower wash and nearer ribbons can drift at different speeds. The dye
-  grids start at twice the water resolution. On larger canvases Zen 2, Zen 3 and Zen 4 increase that to
+  grids start at twice the water resolution. On larger canvases Zen 2 and Zen 3 increase that to
   at most three times for the veil and six times for the sharper layer. The dye
   moves by MacCormack advection, so its edges stay sharp like ink instead of blurring like smoke.
-  The original Zen costs about 1.1 ms a step on desktop. Zen 2 has not been profiled on a device. A Skia shader
+  The cover grid costs about 1.1 ms a step on desktop. Zen 2 and Zen 3 have not been profiled on a device. A Skia shader
   (`InkShader.kt`) upscales the dye, keeps thin veils clear, deepens dense ink and draws dark
   lines where sheets fold. The fluid parameters were tuned by eye from rendered stills, not
   watched live. A slight stair-step can still show along folds that cross the water grid. The

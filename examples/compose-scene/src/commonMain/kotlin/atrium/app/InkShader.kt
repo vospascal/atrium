@@ -107,7 +107,7 @@ private val InkEffect: RuntimeEffect by lazy { RuntimeEffect.makeForShader(InkSk
 
 private val Smooth = FilterMipmap(FilterMode.LINEAR, MipmapMode.NONE)
 
-internal enum class InkFinish { Dye, Smoke, Bloom }
+internal enum class InkFinish { Dye, Smoke }
 
 internal fun makeInkShader(
     image: Image,
@@ -115,13 +115,10 @@ internal fun makeInkShader(
     detailScale: Float,
     seconds: Float,
     finish: InkFinish = InkFinish.Dye,
-    monochrome: Boolean = false,
-    fine: Boolean = true,
 ): Shader {
     val effect = when (finish) {
         InkFinish.Dye -> InkEffect
         InkFinish.Smoke -> SmokeEffect
-        InkFinish.Bloom -> BloomEffect
     }
     return RuntimeShaderBuilder(effect).useSkia { builder ->
         image.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, Smooth, null).useSkia { dye ->
@@ -129,8 +126,6 @@ internal fun makeInkShader(
             builder.uniform("cell", dyeCellPixels)
             builder.uniform("scale", detailScale)
             builder.uniform("time", seconds % ClockWrap)
-            if (finish == InkFinish.Smoke) builder.uniform("monochrome", if (monochrome) 1f else 0f)
-            if (finish == InkFinish.Bloom) builder.uniform("grain", if (fine) .86f else .42f)
             builder.makeShader()
         }
     }
@@ -148,14 +143,13 @@ internal fun DrawScope.drawInk(
     tint: Color? = null,
     opacity: Float = 1f,
     finish: InkFinish = InkFinish.Dye,
-    fine: Boolean = true,
 ) {
     fluid.writePixels(pixels, tint)
     val info = ImageInfo(fluid.dyeColumns, fluid.dyeRows, ColorType.RGBA_8888, ColorAlphaType.PREMUL)
     Image.makeRaster(info, pixels, fluid.dyeColumns * 4).useSkia { image ->
         makeInkShader(
             image, cell / fluid.detail, maxOf(size.width, size.height) / 2.5f, seconds,
-            finish = finish, monochrome = tint != null, fine = fine,
+            finish = finish,
         ).useSkia { shader ->
             drawRect(brushOf(shader), alpha = opacity)
         }

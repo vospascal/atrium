@@ -27,10 +27,8 @@ import androidx.compose.ui.unit.dp
 import atrium.engine.SceneFile
 
 internal enum class PlayerView(val label: String, val inkStyle: InkStyle? = null) {
-    Zen("Zen", InkStyle.Original),
     Zen2("Zen 2", InkStyle.Layered),
     Zen3("Zen 3", InkStyle.Smoke),
-    Zen4("Zen 4", InkStyle.Bloom),
     Map("3D Map"),
 }
 
@@ -111,10 +109,9 @@ internal fun NowPlaying(
 private fun ViewToggle(view: PlayerView, onChange: (PlayerView) -> Unit, modifier: Modifier) {
     val colors = LocalPlayerColors.current
     val shape = RoundedCornerShape(50)
-    val border = if (view.inkStyle?.darkBackdrop == true) colors.hairline else colors.foreground
     BoxWithConstraints(modifier.width(480.dp)) {
         val labelSize = if (maxWidth < 350.dp) 13 else 17
-        Row(Modifier.fillMaxWidth().clip(shape).background(colors.other).border(1.5.dp, border, shape)) {
+        Row(Modifier.fillMaxWidth().clip(shape).background(colors.other).border(1.5.dp, colors.foreground, shape)) {
             PlayerView.entries.forEach { entry ->
                 val chosen = entry == view
                 Box(

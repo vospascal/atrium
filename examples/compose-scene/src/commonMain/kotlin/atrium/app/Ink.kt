@@ -35,12 +35,8 @@ internal enum class PlumeExtent { Point, Fan, Surround }
 internal enum class InkBand { Full, Low, High }
 
 internal enum class InkStyle(val layers: List<InkLayer>, val finish: InkFinish = InkFinish.Dye) {
-    Original(listOf(InkLayer.Original)),
     Layered(listOf(InkLayer.Veil, InkLayer.Ribbon)),
     Smoke(listOf(InkLayer.SmokeVeil, InkLayer.SmokeFold), InkFinish.Smoke),
-    Bloom(listOf(InkLayer.BloomWash, InkLayer.BloomGrain), InkFinish.Bloom);
-
-    val darkBackdrop: Boolean get() = finish != InkFinish.Dye
 }
 
 /** The level and frequency balance of a plume from the current audio window. */
@@ -163,7 +159,7 @@ private class Water(
     listener: Offset,
     reach: Float,
     cellsAcross: Int,
-    val layer: InkLayer = InkLayer.Original,
+    val layer: InkLayer = InkLayer.Cover,
     detail: Int = 2,
 ) {
     val cell = InkFluid.cellSize(size.width.toFloat(), size.height.toFloat(), cellsAcross)
@@ -233,7 +229,6 @@ internal fun InkField(
             drawInk(
                 water.fluid, water.pixels, water.cell, seconds * water.layer.speed, tint, water.layer.opacity,
                 finish = style.finish,
-                fine = water.layer.band == InkBand.High,
             )
         }
         drawListener(Offset(size.width / 2, size.height * ListenerHeight), seconds, ring)

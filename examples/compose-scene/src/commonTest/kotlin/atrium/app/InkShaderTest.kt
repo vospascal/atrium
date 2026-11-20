@@ -53,15 +53,6 @@ class InkShaderTest {
         assertEquals(0, pixelAt(pixels, 32, 128, InkFinish.Smoke))
     }
 
-    @Test
-    fun aDenseBloomIsBrightAndGrainy() {
-        val pixels = ByteArray(16 * 16 * 4) { 120.toByte() }
-        val grains = (128..136).map { x -> pixelAt(pixels, x, 128, InkFinish.Bloom) }
-        assertTrue(grains.all { it ushr 24 > 40 })
-        assertTrue(grains.toSet().size > 3)
-        assertTrue(grains.all { (it shr 16 and 255) == (it and 255) }, "Bloom stays monochrome")
-    }
-
     private fun pixelAt(pixels: ByteArray, x: Int, y: Int, finish: InkFinish = InkFinish.Dye): Int {
         val info = ImageInfo(16, 16, ColorType.RGBA_8888, ColorAlphaType.PREMUL)
         val shader = Image.makeRaster(info, pixels, 16 * 4).useSkia { image ->
