@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/core",
+    "crates/ffi",
     "crates/tui",
 ]
 

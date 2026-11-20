@@ -1,0 +1,19 @@
+[package]
+name = "atrium-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The Atrium engine as one object for the Kotlin Multiplatform app (UniFFI, bound by OxiKT)"
+
+[lib]
+name = "atrium_ffi"
+# cdylib: loaded by JNA on desktop JVM. staticlib: linked by Kotlin/Native on iOS.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+atrium = { path = "../..", default-features = false }
+atrium-core = { path = "../core" }
+rtrb = "0.3"
+# Exact: the generated Kotlin depends on this release's FFI layout, and OxiKT
+# 1.4 generates for 0.32.0 only.
+uniffi = "=0.32.0"
