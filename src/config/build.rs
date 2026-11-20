@@ -7,12 +7,14 @@ use std::sync::Arc;
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::listener::Listener;
 use atrium_core::panner::DistanceModelType;
+use atrium_core::source::EmitterKind;
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
 
+use super::description::{beam_half_angle, SceneDescription, SourceDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
-use super::source::{resolve_spl, ResolvedSound};
+use super::source::{resolve_spl, ResolvedSound, SourceEntry};
 use super::synth::SynthSpec;
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
@@ -26,6 +28,9 @@ use crate::pipeline::{build_all_pipelines, PipelineParams};
 
 pub struct BuildResult {
     pub scene: AudioScene,
+    /// The built scene for an in-process UI (the Kotlin app via `atrium-ffi`).
+    pub description: SceneDescription,
+    /// The built scene for a WebSocket client.
     pub scene_json: String,
     pub source_names: Vec<String>,
     /// Pipeline mix stage names (for TUI display).
@@ -50,6 +55,14 @@ const SOURCE_COLORS: &[&str] = &[
     "#26c6da", "#9ccc65",
 ];
 
+/// A source's UI color: its own `color`, else the palette entry for its slot.
+pub(super) fn source_color(entry: &SourceEntry, slot: usize) -> String {
+    entry
+        .color
+        .clone()
+        .unwrap_or_else(|| SOURCE_COLORS[slot % SOURCE_COLORS.len()].to_string())
+}
+
 /// Metadata collected during source building, serialized to JSON for the browser.
 pub(super) struct SourceMeta {
     pub(super) name: String,
@@ -65,7 +78,7 @@ pub(super) struct SourceMeta {
     pub(super) orbit_radius: f32,
     pub(super) orbit_speed: f32,
     pub(super) synth_kind: Option<String>,
-    pub(super) emitter_kind: String,
+    pub(super) emitter_kind: EmitterKind,
 }
 
 // ── Loading & building ──────────────────────────────────────────────────────
@@ -184,6 +197,27 @@ impl SceneConfig {
             &atmosphere,
         );
 
+        let description = SceneDescription {
+            width: environment_cfg.width,
+            depth: environment_cfg.depth,
+            listener: listener_pos,
+            sources: source_metas
+                .iter()
+                .zip(&sources)
+                .take(MAX_SOURCES)
+                .map(|(meta, node)| SourceDescription {
+                    name: meta.name.clone(),
+                    color: meta.color.clone(),
+                    position: arr_to_vec3(meta.position) + spawn,
+                    spl: meta.spl,
+                    reference_distance: meta.ref_dist,
+                    emitter_kind: meta.emitter_kind,
+                    beam_half_angle: beam_half_angle(meta.emitter_kind, node.directivity()),
+                    facing: node.orientation(),
+                })
+                .collect(),
+        };
+
         let initial_source_states: Vec<InitialSourceState> = self
             .sources
             .iter()
@@ -270,6 +304,7 @@ impl SceneConfig {
 
         Ok(BuildResult {
             scene,
+            description,
             scene_json,
             source_names,
             pipeline_post,
@@ -353,10 +388,7 @@ impl SceneConfig {
             };
 
             let name = entry.display_name();
-            let color = entry
-                .color
-                .clone()
-                .unwrap_or_else(|| SOURCE_COLORS[i % SOURCE_COLORS.len()].to_string());
+            let color = source_color(entry, i);
 
             println!(
                 "  {} → SPL={:.0} dB, amplitude={:.4}, ref_dist={:.2}m, audible={:.2}m",
@@ -367,7 +399,7 @@ impl SceneConfig {
                 ResolvedSound::Synth { spec } => Some(spec.kind_name().to_string()),
                 ResolvedSound::Sample { .. } => None,
             };
-            let emitter_kind = built.source.emitter_kind().as_str().to_string();
+            let emitter_kind = built.source.emitter_kind();
             metas.push(SourceMeta {
                 name,
                 color,

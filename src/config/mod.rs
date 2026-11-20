@@ -10,6 +10,7 @@
 //! parameters (speakers, normalization, distance model).
 
 mod build;
+mod description;
 mod environment;
 mod scene;
 mod scene_json;
@@ -20,4 +21,5 @@ mod synth;
 mod build_tests;
 
 pub use build::BuildResult;
+pub use description::{SceneDescription, SceneSummary, SoundSummary, SourceDescription};
 pub use scene::SceneConfig;

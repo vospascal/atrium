@@ -1,0 +1,182 @@
+//! What a control surface needs to show a scene.
+//!
+//! Every value is the one the engine builds from, so a UI never re-derives
+//! positions or colors from the YAML (and never disagrees with what is
+//! heard). It holds only what a consumer reads today; grow it when a consumer
+//! needs more, not before.
+
+use std::path::Path;
+
+use atrium_core::directivity::DirectivityPattern;
+use atrium_core::source::EmitterKind;
+use atrium_core::telemetry::MAX_SOURCES;
+use atrium_core::types::Vec3;
+
+use super::build::{arr_to_vec3, source_color};
+use super::scene::SceneConfig;
+
+/// The built scene as a UI sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneDescription {
+    /// Environment floor size along x (m).
+    pub width: f32,
+    /// Environment floor size along y (m).
+    pub depth: f32,
+    /// Listener position at load time.
+    pub listener: Vec3,
+    /// Sources in pool-slot order: entry `i` is slot `i`.
+    pub sources: Vec<SourceDescription>,
+}
+
+/// One source as built.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceDescription {
+    pub name: String,
+    /// UI color as `#rrggbb`.
+    pub color: String,
+    /// Position at load time.
+    pub position: Vec3,
+    /// Calibrated level at `reference_distance` (dB SPL).
+    pub spl: f32,
+    /// Distance at which `spl` applies (m).
+    pub reference_distance: f32,
+    /// Whether this is a localized sound or an environmental field.
+    pub emitter_kind: EmitterKind,
+    /// Outer half-angle in radians for a cone, or the half-gain angle for a polar pattern.
+    /// Absent for sources that render without a directional beam.
+    pub beam_half_angle: Option<f32>,
+    /// The node's initial forward vector in world coordinates.
+    pub facing: Vec3,
+}
+
+pub(super) fn beam_half_angle(kind: EmitterKind, pattern: DirectivityPattern) -> Option<f32> {
+    if kind == EmitterKind::Field {
+        return None;
+    }
+    match pattern {
+        DirectivityPattern::Cone {
+            outer, outer_gain, ..
+        } if outer_gain < 1.0 => Some(outer),
+        DirectivityPattern::Polar { alpha } if alpha < 1.0 => {
+            Some(((0.5 - alpha) / (1.0 - alpha)).clamp(-1.0, 1.0).acos())
+        }
+        _ => None,
+    }
+}
+
+/// A scene as a chooser shows it, read from the scene file alone: no audio
+/// is decoded and no referenced file is opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneSummary {
+    pub title: String,
+    /// In slot order, as they will play.
+    pub sounds: Vec<SoundSummary>,
+}
+
+/// One sound in a scene summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundSummary {
+    pub name: String,
+    /// UI color as `#rrggbb`, the same one the built scene reports.
+    pub color: String,
+    /// Where the sound starts, relative to the listener (m). Scene positions
+    /// are all offset by the same spawn point, so this holds in the world too.
+    pub offset_from_listener: Vec3,
+}
+
+impl SceneConfig {
+    /// The summary of this scene, loaded from `path`.
+    pub fn summary(&self, path: &str) -> SceneSummary {
+        let listener = arr_to_vec3(self.listener.position);
+        SceneSummary {
+            title: self.title.clone().unwrap_or_else(|| title_from_path(path)),
+            sounds: self
+                .sources
+                .iter()
+                .take(MAX_SOURCES)
+                .enumerate()
+                .map(|(slot, entry)| SoundSummary {
+                    name: entry.display_name(),
+                    color: source_color(entry, slot),
+                    offset_from_listener: arr_to_vec3(entry.position) - listener,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `scenes/river-bend.yaml` → "River Bend".
+fn title_from_path(path: &str) -> String {
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path);
+    stem.split(['-', '_'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut letters = word.chars();
+            letters
+                .next()
+                .map(|first| first.to_uppercase().chain(letters).collect())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beam_shape_comes_from_the_rendered_pattern() {
+        use std::f32::consts::FRAC_PI_2;
+        let cone = DirectivityPattern::Cone {
+            inner: 0.3,
+            outer: 0.7,
+            outer_gain: 0.15,
+        };
+        assert_eq!(beam_half_angle(EmitterKind::Object, cone), Some(0.7));
+        assert_eq!(
+            beam_half_angle(EmitterKind::Object, DirectivityPattern::OMNI),
+            None
+        );
+        assert_eq!(beam_half_angle(EmitterKind::Field, cone), None);
+        assert_eq!(
+            beam_half_angle(EmitterKind::Object, DirectivityPattern::cardioid()),
+            Some(FRAC_PI_2)
+        );
+    }
+
+    #[test]
+    fn titles_come_from_the_file_name_when_the_scene_has_none() {
+        assert_eq!(title_from_path("scenes/river-bend.yaml"), "River Bend");
+        assert_eq!(
+            title_from_path("nature_headphones.yaml"),
+            "Nature Headphones"
+        );
+    }
+
+    /// The summary is read without building, so it must still point each
+    /// sound the way the built scene places it, and color it the same.
+    #[test]
+    fn summary_agrees_with_the_built_scene() {
+        let path = "scenes/nature-headphones.yaml";
+        let config = SceneConfig::load(path).expect("scene should load");
+        let summary = config.summary(path);
+        let built = config.build().expect("scene should build").description;
+
+        assert_eq!(summary.title, "Nature Headphones");
+        assert_eq!(summary.sounds.len(), built.sources.len());
+        for (sound, source) in summary.sounds.iter().zip(&built.sources) {
+            assert_eq!(sound.name, source.name);
+            assert_eq!(sound.color, source.color);
+            let built_offset = source.position - built.listener;
+            assert!(
+                (sound.offset_from_listener - built_offset).length() < 1e-4,
+                "{} points elsewhere than it plays",
+                sound.name
+            );
+        }
+    }
+}

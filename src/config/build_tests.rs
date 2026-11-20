@@ -20,6 +20,35 @@ fn synth_test_scene_builds_with_calibrated_sources() {
     }
 }
 
+/// The description a UI draws must place every source exactly where the
+/// engine renders it, and match the calibration the engine was built with.
+#[test]
+fn description_matches_the_built_scene() {
+    let result = SceneConfig::load("scenes/frog-headphones.yaml")
+        .expect("scene should load")
+        .build()
+        .expect("scene should build");
+    let description = &result.description;
+
+    assert_eq!(description.listener, result.scene.listener.position);
+    assert_eq!(description.sources.len(), result.source_names.len());
+    for (slot, source) in description.sources.iter().enumerate() {
+        assert_eq!(source.name, result.source_names[slot]);
+        assert_eq!(
+            source.emitter_kind,
+            result.scene.sources[slot].emitter_kind()
+        );
+        assert_eq!(
+            source.position,
+            result.scene.sources[slot].position(),
+            "slot {slot} ({}) drawn away from where it is rendered",
+            source.name
+        );
+        assert!(source.spl.is_finite() && source.reference_distance > 0.0);
+    }
+    assert!(description.width > 0.0 && description.depth > 0.0);
+}
+
 #[test]
 fn canopy_wind_scene_builds_end_to_end() {
     let scene = SceneConfig::load("scenes/canopy-wind-only.yaml").expect("scene should load");
@@ -61,6 +90,10 @@ fn soft_wind_scene_builds_end_to_end() {
     assert!(result.scene.source_amplitudes[0] > 0.0);
     assert_eq!(
         result.scene.sources[0].emitter_kind(),
+        atrium_core::source::EmitterKind::Field
+    );
+    assert_eq!(
+        result.description.sources[0].emitter_kind,
         atrium_core::source::EmitterKind::Field
     );
 }

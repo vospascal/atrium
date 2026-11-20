@@ -10,6 +10,10 @@ use super::source::SourceEntry;
 /// files, adds listener placement, speaker layout, and mixing parameters.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct SceneConfig {
+    /// The name a player shows (e.g. "River Bend"). Omit to derive one from
+    /// the file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Path to environment definition file (e.g. "environments/riverside.yaml").
     /// The virtual acoustic space where sources live.
     #[serde(alias = "room")]

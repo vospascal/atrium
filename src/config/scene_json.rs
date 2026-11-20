@@ -58,7 +58,7 @@ impl SceneConfig {
                     "orbit_radius": s.orbit_radius,
                     "orbit_speed": s.orbit_speed,
                     "synth_kind": s.synth_kind,
-                    "emitter_kind": s.emitter_kind,
+                    "emitter_kind": s.emitter_kind.as_str(),
                 })
             })
             .collect();
