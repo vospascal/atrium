@@ -3,6 +3,11 @@
 
 name: Frog
 group: Creatures
-path: assets/frog.mp3
+takes:
+  - { file: assets/frog.mp3, name: Chorus }
+rule:
+  sings:
+    gap: [5, 20]             # seconds of rest before it starts again
+    vary: { level: 2, pitch: 10 }
 reference_spl: 65.0        # ~60-70 dB SPL at 1m (chorus of croaks)
 directivity: omni           # croaks radiate in all directions

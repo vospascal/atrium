@@ -7,6 +7,8 @@
 
 name: Purring cat
 group: Creatures
-path: assets/purring.mp3
+takes:
+  - { file: assets/purring.mp3, name: Purring cat }
+rule: loops
 reference_spl: 55.0        # stylized; matches campfire at 1m, +20 dB near-field when close
 directivity: omni           # radiates equally in all directions

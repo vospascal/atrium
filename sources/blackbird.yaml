@@ -1,0 +1,22 @@
+# Kind: Blackbird
+# Loud, fluting phrases from a high perch.
+#
+# A kind that sings: it utters one of its takes, rests, and utters another,
+# never the same one twice running. The level and the gaps are a first guess
+# by ear, not measured.
+
+name: Blackbird
+group: Creatures
+reference_spl: 62.0        # dB SPL at 1 m
+directivity: omni
+spread: 0.0                 # a point
+
+takes:
+  - { file: assets/birds/merel/merel-zang_1.mp3, name: Phrase 1 }
+  - { file: assets/birds/merel/merel-zang_2.mp3, name: Phrase 2 }
+  - { file: assets/birds/merel/merel-zang_3.mp3, name: Phrase 3 }
+
+rule:
+  sings:
+    gap: [3, 8]             # seconds of rest between two phrases
+    vary: { level: 2, pitch: 15 }   # each phrase up to 2 dB and 15 cents different

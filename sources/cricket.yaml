@@ -4,7 +4,14 @@
 
 name: Cricket
 group: Creatures
-path: assets/cricket.ogg
+takes:
+  - { file: assets/cricket.ogg, name: Long chirping }
+  - { file: assets/crickets2.mp3, name: Chirping }
+  - { file: assets/field_of_cricket.mp3, name: Field }
+rule:
+  sings:
+    gap: [2, 10]             # seconds of rest before it starts again
+    vary: { level: 2, pitch: 10 }
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective chorus, like cicadas)
 directivity: omni           # stridulation scatters in all directions
 spread: 0.6                 # broad MDAP spread — a chorus, not a point

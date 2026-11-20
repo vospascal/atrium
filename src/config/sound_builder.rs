@@ -63,6 +63,7 @@ impl SoundBuilder {
             id: meta.id,
             slot: slot as u16,
             pattern: pattern_named(&meta.directivity),
+            takes: meta.takes,
             name: meta.name,
             group: meta.group,
             color: meta.color,
@@ -112,18 +113,27 @@ impl SoundBuilder {
             Moves::Orbit { radius, speed } => (radius, speed),
         };
         let built = match &resolved.sound {
-            ResolvedSound::Sample { audio_path } => build_one_source(
-                audio_path,
-                resolved.reference_spl,
-                &resolved.directivity,
-                resolved.spread,
-                position,
-                orbit_radius,
-                orbit_speed,
-                &self.normalization,
-                self.reference_distance,
-                self.max_distance,
-            )?,
+            ResolvedSound::Sample { takes, singing } => {
+                if singing.is_some() && entity.moves != Moves::Still {
+                    return Err(format!("sound `{id}`: a voice that sings cannot orbit yet").into());
+                }
+                build_one_source(
+                    takes,
+                    *singing,
+                    // Slot-stable, like a generator's: each voice sings its own way,
+                    // and the same way when the scene is loaded again.
+                    1000 + slot as u64,
+                    resolved.reference_spl,
+                    &resolved.directivity,
+                    resolved.spread,
+                    position,
+                    orbit_radius,
+                    orbit_speed,
+                    &self.normalization,
+                    self.reference_distance,
+                    self.max_distance,
+                )?
+            }
             ResolvedSound::Synth { spec } => {
                 if entity.moves != Moves::Still {
                     return Err(format!("sound `{id}`: a generator cannot orbit yet").into());
@@ -155,6 +165,12 @@ impl SoundBuilder {
         };
         let meta = SourceMeta {
             id: id.to_string(),
+            takes: match &resolved.sound {
+                ResolvedSound::Sample { takes, .. } => {
+                    takes.iter().map(|take| take.name.clone()).collect()
+                }
+                ResolvedSound::Synth { .. } => Vec::new(),
+            },
             group: entity.group.clone(),
             name: display_name(id, entity),
             color: source_color(entity, slot),

@@ -17,6 +17,8 @@ pub struct PresetSummary {
     pub generated: bool,
     /// Its level in dB SPL at 1 m.
     pub level: f32,
+    /// How many takes it can utter; 0 for a generator.
+    pub takes: usize,
 }
 
 /// Every preset in `directory`, by file name. A file that is not a preset is
@@ -42,9 +44,15 @@ pub fn read_preset(path: &str) -> Result<PresetSummary, Box<dyn std::error::Erro
     let contents = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
     let preset: SourceDef =
         serde_yaml::from_str(&contents).map_err(|error| format!("{path}: {error}"))?;
-    let (name, group, generated, level) = match preset {
-        SourceDef::Sample(sample) => (sample.name, sample.group, false, sample.reference_spl),
-        SourceDef::Synth(synth) => (synth.name, synth.group, true, synth.reference_spl),
+    let (name, group, generated, level, takes) = match preset {
+        SourceDef::Sample(sample) => (
+            sample.name,
+            sample.group,
+            false,
+            sample.reference_spl,
+            sample.takes.len(),
+        ),
+        SourceDef::Synth(synth) => (synth.name, synth.group, true, synth.reference_spl, 0),
     };
     Ok(PresetSummary {
         name: name.unwrap_or_else(|| title_from_path(path)),
@@ -52,6 +60,7 @@ pub fn read_preset(path: &str) -> Result<PresetSummary, Box<dyn std::error::Erro
         group,
         generated,
         level,
+        takes,
     })
 }
 

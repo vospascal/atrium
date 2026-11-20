@@ -113,10 +113,18 @@ fn river_scene_builds_end_to_end() {
     );
 }
 
+/// The meadow names 5.1 speakers. Asked for headphones it is the same six
+/// sounds on two channels, rendered binaurally.
 #[test]
-fn nature_headphones_scene_builds_binaural_stereo() {
-    let scene = SceneConfig::load("scenes/nature-headphones.yaml").expect("scene should load");
-    let result = scene.build().expect("nature headphones scene should build");
+fn a_speaker_scene_builds_binaural_stereo_for_headphones() {
+    let scene = SceneConfig::load("scenes/nature.yaml").expect("scene should load");
+    let on_speakers = scene.clone().build().expect("nature scene should build");
+    assert_eq!(on_speakers.scene.speaker_layout.total_channels(), 6);
+
+    let result = scene
+        .for_headphones()
+        .build()
+        .expect("nature scene should build for headphones");
     assert_eq!(result.scene.active_pipeline, RenderMode::Hrtf);
     assert_eq!(result.scene.speaker_layout.total_channels(), 2);
     assert_eq!(result.source_names.len(), 6);
@@ -191,12 +199,22 @@ fn glass_atrium_still_rings_after_sources_stop() {
 }
 
 /// The wisp flies by itself: rendered through a real scene, its reported
-/// position moves, stays near its territory, and it makes sound in both
-/// the speaker scene and the headphone scene.
+/// position moves, stays near its territory, and it makes sound both on
+/// its speakers and on headphones.
 #[test]
-fn wisp_scenes_build_fly_and_sound() {
-    for path in ["scenes/wisp.yaml", "scenes/wisp-headphones.yaml"] {
-        let scene = SceneConfig::load(path).expect("scene should load");
+fn the_wisp_scene_builds_flies_and_sounds() {
+    for headphones in [false, true] {
+        let path = if headphones {
+            "wisp on headphones"
+        } else {
+            "wisp on speakers"
+        };
+        let scene = SceneConfig::load("scenes/wisp.yaml").expect("scene should load");
+        let scene = if headphones {
+            scene.for_headphones()
+        } else {
+            scene
+        };
         let mut result = scene.build().expect("wisp scene should build");
         assert_eq!(
             result.source_names.first().map(String::as_str),
@@ -416,7 +434,7 @@ fn every_repository_scene_reads_and_names_its_sounds() {
         })
         .collect();
     scenes.sort();
-    assert!(scenes.len() >= 13, "found only {} scenes", scenes.len());
+    assert!(scenes.len() >= 11, "found only {} scenes", scenes.len());
     for path in scenes {
         let path = path.to_str().expect("a UTF-8 path");
         let config = SceneConfig::load(path).unwrap_or_else(|error| panic!("{path}: {error}"));
@@ -428,4 +446,86 @@ fn every_repository_scene_reads_and_names_its_sounds() {
             );
         }
     }
+}
+
+/// The meadow of singing birds builds: each bird kind reports its takes by
+/// name, rests and sings by itself, and no two birds utter the same sequence.
+/// Rendered without an audio device, at 48 kHz for two minutes.
+#[test]
+fn the_meadow_birds_sing_their_own_takes_with_rests() {
+    let scene = SceneConfig::load("scenes/meadow-birds.yaml").expect("scene should load");
+    let mut result = scene.build().expect("scene should build");
+    let birds: Vec<_> = result
+        .description
+        .sources
+        .iter()
+        .filter(|source| source.takes.len() > 1)
+        .map(|source| {
+            (
+                source.name.clone(),
+                source.slot as usize,
+                source.takes.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        birds
+            .iter()
+            .map(|bird| (bird.0.as_str(), bird.2))
+            .collect::<Vec<_>>(),
+        [
+            ("Blackbird", 3),
+            ("Robin", 5),
+            ("Dunnock", 5),
+            ("Blue tit", 6)
+        ]
+    );
+    assert_eq!(result.description.sources[1].takes[0], "Phrase 1");
+    assert!(
+        result.description.sources[0].takes.is_empty(),
+        "the wind has no takes"
+    );
+
+    let mut uttered: Vec<Vec<u8>> = vec![Vec::new(); birds.len()];
+    let mut before: Vec<Option<u8>> = vec![None; birds.len()];
+    let mut resting = vec![0usize; birds.len()];
+    for _ in 0..120 * 48_000 {
+        for (index, (_, slot, _)) in birds.iter().enumerate() {
+            let source = &mut result.scene.sources[*slot];
+            source.next_sample(48_000.0);
+            let now = source.sounding_take();
+            if now.is_none() {
+                resting[index] += 1;
+            }
+            if now != before[index] {
+                if let Some(take) = now {
+                    uttered[index].push(take);
+                }
+                before[index] = now;
+            }
+        }
+    }
+    for (index, (name, _, takes)) in birds.iter().enumerate() {
+        let sung = &uttered[index];
+        assert!(
+            sung.len() >= 8,
+            "{name} sang only {} phrases in two minutes",
+            sung.len()
+        );
+        assert!(
+            sung.windows(2).all(|pair| pair[0] != pair[1]),
+            "{name} repeated a phrase"
+        );
+        assert!(sung.iter().all(|take| (*take as usize) < *takes));
+        let share = resting[index] as f32 / (120.0 * 48_000.0);
+        assert!(
+            share > 0.4,
+            "{name} rested only {:.0} % of the time",
+            share * 100.0
+        );
+    }
+    assert_ne!(
+        uttered[1], uttered[2],
+        "two birds with five takes must not sing in step"
+    );
 }

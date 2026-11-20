@@ -1,0 +1,75 @@
+# Scene: Meadow birds — four garden birds that sing over a soft wind.
+# Each bird is a kind with a repertoire: it sings a phrase, rests, and sings
+# another, so no two minutes are the same. The wind is the bed their rests
+# fall back into.
+#   cargo run --release -- scenes/meadow-birds.yaml
+#
+# Positions are [x, y, z] in metres, relative to the listener's spot.
+
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]   # centre of the clearing, ears at 1.2 m
+  yaw_degrees: 90.0           # facing +Y (north / up on the map)
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0          # keep sources audible out to ~40 m
+  rolloff: 1.0
+
+speakers:
+  layout: "5.1"
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c:  [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0
+
+sounds:
+  wind:
+    name: Soft wind
+    color: "#a8c4c8"
+    group: Weather
+    sound: { preset: sources/soft-wind.yaml }
+    place: [0.0, 0.0, 1.2]
+
+  blackbird:  # high in a tree, north-east
+    name: Blackbird
+    color: "#3d3d3d"
+    group: Creatures
+    sound: { preset: sources/blackbird.yaml }
+    place: [9.0, 11.0, 7.0]
+
+  robin:  # in the hedge, west
+    name: Robin
+    color: "#e0703a"
+    group: Creatures
+    sound: { preset: sources/robin.yaml }
+    place: [-10.0, 3.0, 2.5]
+
+  dunnock:  # low, south-east
+    name: Dunnock
+    color: "#9a7b5a"
+    group: Creatures
+    sound: { preset: sources/dunnock.yaml }
+    place: [7.0, -8.0, 1.0]
+
+  blue-tit:  # near, north-west, mid height
+    name: Blue tit
+    color: "#4a90d9"
+    group: Creatures
+    sound: { preset: sources/blue-tit.yaml }
+    place: [-5.0, 8.0, 4.0]
+
+atmosphere: atmospheres/default.yaml

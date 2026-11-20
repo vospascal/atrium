@@ -1,0 +1,24 @@
+# Kind: Dunnock
+# A quick, even warble from low in a hedge.
+#
+# A kind that sings: it utters one of its takes, rests, and utters another,
+# never the same one twice running. The level and the gaps are a first guess
+# by ear, not measured.
+
+name: Dunnock
+group: Creatures
+reference_spl: 55.0        # dB SPL at 1 m
+directivity: omni
+spread: 0.0                 # a point
+
+takes:
+  - { file: assets/birds/heggenmus/heggenmus-zang_1.mp3, name: Phrase 1 }
+  - { file: assets/birds/heggenmus/heggenmus-zang_2.mp3, name: Phrase 2 }
+  - { file: assets/birds/heggenmus/heggenmus-zang_3.mp3, name: Phrase 3 }
+  - { file: assets/birds/heggenmus/heggenmus-zang_4.mp3, name: Phrase 4 }
+  - { file: assets/birds/heggenmus/heggenmus-zang_5.mp3, name: Phrase 5 }
+
+rule:
+  sings:
+    gap: [5, 12]             # seconds of rest between two phrases
+    vary: { level: 2, pitch: 15 }   # each phrase up to 2 dB and 15 cents different

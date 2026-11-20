@@ -40,6 +40,9 @@ pub struct SourceDescription {
     pub slot: u16,
     /// How it radiates.
     pub pattern: Pattern,
+    /// The names of what it can utter, in the order telemetry counts its
+    /// takes. Empty for a generator, which has no recordings.
+    pub takes: Vec<String>,
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,
@@ -172,12 +175,12 @@ mod tests {
     /// sound the way the built scene places it, and color it the same.
     #[test]
     fn summary_agrees_with_the_built_scene() {
-        let path = "scenes/nature-headphones.yaml";
+        let path = "scenes/nature.yaml";
         let config = SceneConfig::load(path).expect("scene should load");
         let summary = config.summary(path);
         let built = config.build().expect("scene should build").description;
 
-        assert_eq!(summary.title, "Nature Headphones");
+        assert_eq!(summary.title, "Nature");
         assert_eq!(summary.sounds.len(), built.sources.len());
         for (sound, source) in summary.sounds.iter().zip(&built.sources) {
             assert_eq!(sound.name, source.name);

@@ -16,7 +16,7 @@ use super::description::{beam_half_angle, SceneDescription, SourceDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
 use super::sound_builder::{pattern_named, SoundBuilder};
-use super::source::resolve_spl;
+use super::source::{resolve_spl, ResolvedTake};
 use super::synth::SynthSpec;
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
@@ -24,6 +24,7 @@ use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 use crate::audio::synth_node::SynthNode;
 use crate::audio::test_node::TestNode;
+use crate::audio::voice_node::{Singing, Take, VoiceNode};
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::environment::Environment;
 use crate::pipeline::{build_all_pipelines, PipelineParams};
@@ -71,6 +72,8 @@ pub(super) fn source_color(entity: &Entity, slot: usize) -> String {
 /// Metadata collected during source building, serialized to JSON for the browser.
 pub(super) struct SourceMeta {
     pub(super) id: String,
+    /// The names of its takes, in the order telemetry counts them.
+    pub(super) takes: Vec<String>,
     pub(super) group: Option<String>,
     pub(super) name: String,
     pub(super) color: String,
@@ -218,6 +221,7 @@ impl SceneConfig {
                     id: meta.id.clone(),
                     slot: slot as u16,
                     pattern: pattern_named(&meta.directivity),
+                    takes: meta.takes.clone(),
                     name: meta.name.clone(),
                     group: meta.group.clone(),
                     color: meta.color.clone(),
@@ -406,14 +410,19 @@ pub(super) struct BuiltSource {
     pub directivity_alpha: f32,
 }
 
-/// Decode a source audio file and build one `SoundSource` with its amplitude,
+/// Decode a kind's recordings and build one `SoundSource` with its amplitude,
 /// spectral profile, and reference distance. Used both when building a scene
 /// and when adding a source live (the same lossless path, so a live-added
 /// source matches a reloaded one exactly). `position` is world coordinates
 /// (already offset by the environment spawn point).
+///
+/// Without `singing` the one take loops. With it, the takes are sung with
+/// rests between them, and `seed` decides the choices.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_one_source(
-    audio_path: &str,
+    takes: &[ResolvedTake],
+    singing: Option<Singing>,
+    seed: u64,
     reference_spl: f32,
     directivity: &str,
     spread: f32,
@@ -424,37 +433,84 @@ pub(super) fn build_one_source(
     global_ref_dist: f32,
     max_distance: f32,
 ) -> Result<BuiltSource, Box<dyn std::error::Error>> {
-    let buffer = Arc::new(decode_file(Path::new(audio_path))?);
+    let buffers = takes
+        .iter()
+        .map(|take| {
+            decode_file(Path::new(&take.file))
+                .map(Arc::new)
+                .map_err(|error| format!("{}: {}", take.file, error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // One level for the whole voice: the RMS over all its takes end to end,
+    // so a quiet phrase stays quieter than a loud one.
+    let (energy, length) = buffers
+        .iter()
+        .fold((0.0f64, 0usize), |(energy, length), take| {
+            let samples = take.samples.len();
+            (
+                energy + (take.rms as f64).powi(2) * samples as f64,
+                length + samples,
+            )
+        });
+    let rms = if length > 0 {
+        (energy / length as f64).sqrt() as f32
+    } else {
+        0.0
+    };
+    let longest = buffers
+        .iter()
+        .max_by_key(|take| take.samples.len())
+        .ok_or("a sound needs at least one recording")?;
+
     let profile = resolve_spl(reference_spl);
-    let amplitude = profile.amplitude(
-        buffer.rms,
-        normalization.target_rms,
-        normalization.spl_reference,
-    );
+    let amplitude = profile.amplitude(rms, normalization.target_rms, normalization.spl_reference);
     let ref_dist = profile.ref_distance(global_ref_dist);
     let pattern = parse_directivity(directivity);
-    let bands = buffer.spectral_profile.bands;
+    let bands = longest.spectral_profile.bands;
     let audible_radius = profile.audible_radius(normalization.spl_threshold, max_distance);
 
     // Base amplitude at 0 dB SPL, so a live SPL edit can rescale without
     // re-decoding: amplitude = unit_amplitude · 10^(spl/20).
-    let rms_correction = if buffer.rms > 1e-6 {
-        normalization.target_rms / buffer.rms
+    let rms_correction = if rms > 1e-6 {
+        normalization.target_rms / rms
     } else {
         1.0
     };
     let unit_amplitude = rms_correction * 10.0_f32.powf(-normalization.spl_reference / 20.0);
 
-    let mut node = TestNode::new(buffer, position, orbit_radius, orbit_speed);
-    node.amplitude = amplitude;
-    node.unit_amplitude = unit_amplitude;
-    node.ref_dist = ref_dist;
-    node.pattern = pattern;
-    node.spread = spread;
-    node.meter_signal();
+    let source: Box<dyn atrium_core::source::SoundSource> = match singing {
+        None => {
+            let mut node = TestNode::new(buffers[0].clone(), position, orbit_radius, orbit_speed);
+            node.amplitude = amplitude;
+            node.unit_amplitude = unit_amplitude;
+            node.ref_dist = ref_dist;
+            node.pattern = pattern;
+            node.spread = spread;
+            node.meter_signal();
+            Box::new(node)
+        }
+        Some(singing) => {
+            let voice = buffers
+                .iter()
+                .zip(takes)
+                .map(|(audio, take)| Take {
+                    audio: audio.clone(),
+                    chance: take.chance,
+                })
+                .collect();
+            let mut node = VoiceNode::new(voice, singing, position, seed);
+            node.amplitude = amplitude;
+            node.unit_amplitude = unit_amplitude;
+            node.ref_dist = ref_dist;
+            node.pattern = pattern;
+            node.spread = spread;
+            node.meter_signal(rms);
+            Box::new(node)
+        }
+    };
 
     Ok(BuiltSource {
-        source: Box::new(node),
+        source,
         bands,
         amplitude,
         ref_dist,

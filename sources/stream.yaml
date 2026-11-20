@@ -4,7 +4,9 @@
 
 name: Stream
 group: Water
-path: assets/running_water.ogg
+takes:
+  - { file: assets/running_water.ogg, name: Stream }
+rule: loops
 reference_spl: 62.0        # ~60-65 dB SPL at 1m (babbling brook, close)
 directivity: omni           # water noise scatters in all directions
 spread: 0.3                 # a little width — a stretch of stream, not a point
