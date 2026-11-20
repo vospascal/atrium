@@ -219,7 +219,13 @@ Endel and brain.fm. None of this is first.
   five-second tail. Chant is a repertoire sung in bouts. The bell follows the real clock.
   Footsteps are a path. It needs recordings, not a new model.
 - **Focus tones.** A tone generator with a pitch (333 Hz, say), overtones, and a slow
-  shimmer that wanders. The engine has no tone generator.
+  shimmer that wanders. The engine has no tone generator. A pattern can choose the pitch
+  from a set, such as the nine "solfeggio" values (174 to 963 Hz), and give each tone its
+  own place around the listener. Only two pairs in that set form a clean interval (396 with
+  528, and 639 with 852, both a fourth), so a pattern should play one tone at a time or
+  those pairs. 432 Hz is a tuning, not a tone: the same music played a third of a semitone
+  lower. The health claims made for these numbers are not established, so the app names
+  them by pitch and makes no claim.
 - **A purpose** such as focus, relax or sleep is one more condition, say *energy*, that
   layers follow the way they follow wind. Sleep is a slow story that takes it down over an
   hour.
