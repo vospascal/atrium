@@ -134,14 +134,21 @@ impl Engine {
         Ok(())
     }
 
-    /// Move the source in `slot` to `position`.
+    /// Move the source in `slot` to `position`. `scene()` reports it there
+    /// from then on, as where the source was placed; telemetry has where it
+    /// is, which differs for a source that moves by itself.
     pub fn set_source_position(&self, slot: u16, position: Position) -> Result<(), EngineError> {
+        let mut description = lock(&self.description);
         lock(&self.commands)
             .push(Command::SetSourcePosition {
                 index: slot,
                 position: position.into(),
             })
-            .map_err(|_| EngineError::CommandQueueFull)
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        if let Some(source) = description.sources.get_mut(slot as usize) {
+            source.position = position;
+        }
+        Ok(())
     }
 
     /// The outputs this scene can play on the opened device.
@@ -618,6 +625,21 @@ mod tests {
         });
         engine.set_source_level(1, 50.0).expect("level");
         assert_eq!(engine.scene().sources[1].spl, 50.0);
+
+        // A sound dragged on the map: the scene remembers where it was put.
+        let moved = Position {
+            x: added.position.x + 4.0,
+            y: added.position.y - 1.0,
+            z: added.position.z,
+        };
+        engine.set_source_position(1, moved).expect("move");
+        assert_eq!(engine.scene().sources[1].position, moved);
+        telemetry_when(&engine, |telemetry| {
+            telemetry
+                .sources
+                .iter()
+                .any(|source| source.slot == 1 && source.position == moved)
+        });
         assert_eq!(engine.scene().sources[2].spl, 65.0, "only that layer");
     }
 

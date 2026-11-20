@@ -23,15 +23,17 @@ runs Cargo itself. There is nothing to build here by hand.
 
 ## Decisions that look wrong and are right
 
-- **Only the commands a screen uses are exported:** moving a source (the composer), the output,
+- **Only the commands a screen uses are exported:** moving a source (the editor's map), the output,
   volume and head tracker (the player's Settings), and mute, level, audition and add (the
   editor's layers and library). Every other `Command` gets a method when a
   Kotlin screen calls it. An exported method with no caller is surface the generated Kotlin
   carries for nothing.
 - **`scene()` is the scene as it is now, kept by this object.** The audio thread reports where a
   sound is and whether it is muted, but not its level, and it knows nothing of names, ids or
-  groups. So `set_source_level` and `add_sound` record their change in the description this
-  object holds, and the app reads `scene()` again after either.
+  groups. So `set_source_level`, `set_source_position` and `add_sound` record their change in
+  the description this object holds, and the app reads `scene()` again after each. The position
+  kept there is where a sound was placed; telemetry has where it is, which differs for one
+  that moves by itself.
 - **Solo is not exported.** The engine only knows muted or not. The app keeps what was muted
   by hand and what was asked to be heard alone, and sends the mutes that follow. A solo in the
   engine would have to remember the same two sets to undo itself.
