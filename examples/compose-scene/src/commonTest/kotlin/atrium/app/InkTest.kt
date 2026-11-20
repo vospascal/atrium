@@ -2,6 +2,7 @@ package atrium.app
 
 import atrium.engine.ChannelMode
 import atrium.engine.EmitterKind
+import atrium.engine.HeadTrackingStatus
 import atrium.engine.Output
 import atrium.engine.Position
 import atrium.engine.RenderMode
@@ -45,6 +46,8 @@ class InkTest {
         peaksDb = listOf(-20f, -20f),
         output = Output(RenderMode.HRTF, ChannelMode.STEREO),
         volume = 1f,
+        listenerFacing = Position(1f, 0f, 0f),
+        headTracking = HeadTrackingStatus.OFF,
     )
 
     private fun close(expected: Float, actual: Float) =

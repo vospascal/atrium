@@ -55,6 +55,9 @@ turn your head right and the frog moves to straight ahead.
 The wisp scene is the harder test: it flies around and overhead, so turn your
 head to follow it and it should stay where it is in the world.
 
+The app in `examples/compose-scene` has the same two choices under
+Settings → Head tracking, and switches them while a scene plays.
+
 ### Sony setup (once, and after firmware or setting changes)
 
 1. Sony Sound Connect app: **Bluetooth Connection Quality → Prioritize Stable

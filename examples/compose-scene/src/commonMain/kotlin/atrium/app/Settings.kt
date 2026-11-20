@@ -20,10 +20,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import atrium.engine.ChannelMode
+import atrium.engine.HeadTracker
+import atrium.engine.HeadTrackingStatus
 import atrium.engine.RenderMode
+import atrium.engine.headTrackers
 import kotlin.math.roundToInt
 
-/** How the player looks and how the scene reaches you: appearance, ink, output, volume, composer. */
+/** How the player looks and how the scene reaches you: appearance, ink, output, head tracking, volume, composer. */
 @Composable
 internal fun Settings(session: Session, look: Look, onCompose: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
@@ -57,6 +60,37 @@ internal fun Settings(session: Session, look: Look, onCompose: () -> Unit) {
                     session.command { setOutput(output) }
                 }
             }
+        }
+
+        val trackers = remember { headTrackers() }
+        if (trackers.isNotEmpty()) {
+            Section("Head tracking")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("Off", selected = session.headTracker == null) { session.chooseHeadTracker(null) }
+                trackers.forEach { tracker ->
+                    Chip(tracker.label, selected = tracker == session.headTracker) {
+                        session.chooseHeadTracker(tracker)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            PaperText(
+                session.headTrackingFailure ?: when (session.telemetry?.headTracking) {
+                    HeadTrackingStatus.RECEIVING ->
+                        "Receiving head movement · facing " +
+                            "${session.telemetry?.listenerFacing?.let(::bearingLabel)}. The 3D map shows it."
+                    HeadTrackingStatus.WAITING ->
+                        "Switched on, but no head movement is arriving. " + when (session.headTracker) {
+                            HeadTracker.SONY ->
+                                "In the Sony app, set Bluetooth Connection Quality to Prioritize Stable " +
+                                    "Connection. Then forget the headphones on this Mac and pair them again."
+                            else -> "Start your tracker and point it at port 4242 on this machine."
+                        }
+                    else -> "For headphones. Turn your head and the place stays where it is."
+                },
+                13,
+                Muted,
+            )
         }
 
         Section("Volume")
@@ -94,6 +128,12 @@ private val RenderMode.label
         RenderMode.HRTF -> "Binaural"
         RenderMode.DBAP -> "DBAP"
         RenderMode.AMBISONICS -> "Ambisonics"
+    }
+
+private val HeadTracker.label
+    get() = when (this) {
+        HeadTracker.SONY -> "Sony headphones"
+        HeadTracker.EXTERNAL -> "OpenTrack"
     }
 
 private val ChannelMode.label

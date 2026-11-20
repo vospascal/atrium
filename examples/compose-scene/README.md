@@ -29,7 +29,14 @@ It has two faces that share one running engine.
 - **Scenes** lists every scene in `scenes/`. Each cover is a still of that scene's own ink, drawn
   from its file, so nothing has to be painted by hand. A mini player sits above the tabs.
 - **Settings** has the appearance (Auto, Light or Dark), the ink (Color or Monochrome), the
-  output, the volume, and the way into the composer.
+  output, head tracking, the volume, and the way into the composer. Head tracking is for
+  headphones: the listener turns with your head, so the place stays where it is. On macOS it
+  offers Sony headphones (WH/WF-1000XM5 or XM6, started by the app) and any tracker that sends
+  OpenTrack UDP to port 4242. The choice holds across scenes until the app closes. Settings says
+  whether head movement is arriving, and the 3D map draws where you face as a wedge at the
+  centre that turns with your head, with a line along its bottom edge giving the status and
+  the compass bearing you face. On a headphone output that line also says when head tracking
+  is off. `run.md` has the headphone setup the Sony bridge needs.
 
 The player is light or dark as chosen; Auto follows the system. Appearance and ink are remembered
 between launches: in Java preferences (`atrium/app`) on desktop, in `NSUserDefaults` on iOS. The ink is one transparent layer with

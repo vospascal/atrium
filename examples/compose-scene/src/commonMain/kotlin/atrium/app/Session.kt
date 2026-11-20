@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import atrium.engine.Engine
 import atrium.engine.EngineException
+import atrium.engine.HeadTracker
 import atrium.engine.Output
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
@@ -42,6 +43,12 @@ internal class Session {
     /** Why the requested scene did not start; null while starting or playing. */
     var failure by mutableStateOf<String?>(null)
         internal set
+    /** The head tracker asked for. It outlives a scene: each engine gets it as it starts. */
+    var headTracker by mutableStateOf<HeadTracker?>(null)
+        private set
+    /** Why the chosen tracker did not start; null while it runs or is off. */
+    var headTrackingFailure by mutableStateOf<String?>(null)
+        private set
 
     private var requests = 0
 
@@ -55,6 +62,22 @@ internal class Session {
 
     /** Whether [scene] is the one asked for: starting, playing, or failed to start. */
     fun isActive(scene: SceneFile) = request?.scene?.path == scene.path
+
+    /** Let [tracker] turn the listener with the head, or switch it off with null. */
+    fun chooseHeadTracker(tracker: HeadTracker?) {
+        headTracker = tracker
+        engine?.let(::followHeadTracker)
+    }
+
+    /** Give [running] the chosen tracker. A failure is kept for Settings to show. */
+    internal fun followHeadTracker(running: Engine) {
+        headTrackingFailure = try {
+            running.setHeadTracker(headTracker)
+            null
+        } catch (refused: EngineException.HeadTracking) {
+            refused.message
+        }
+    }
 
     /** Commands are dropped only when the audio thread is behind; the next one catches up. */
     fun command(action: Engine.() -> Unit) {
@@ -96,6 +119,9 @@ internal fun RunSession(session: Session) {
             session.outputs = running.outputs()
             session.engine = running
             session.status = "Playing ${request.scene.title}"
+            // The engine that played before has closed by now and let go of the
+            // tracker's port, so this one can take it.
+            if (session.headTracker != null) session.followHeadTracker(running)
             while (true) {
                 withFrameMillis { }
                 running.latestTelemetry()?.let { session.telemetry = it }
