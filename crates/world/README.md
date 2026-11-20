@@ -74,7 +74,7 @@ one domain, so there is no `state.rs`, `gpu.rs` or domain directory yet.
 |---|---|
 | `lib.rs` | The public names and `WorldError` |
 | `api.rs` | `Entity` and its parts, as plain data |
-| `id.rs` | `EntityId` and what makes an id usable |
+| `id.rs` | `EntityId`, what makes an id usable, and a free id for a new sound |
 | `entities.rs` | `Entities`: unique ids in file order, and the mapping it reads and writes |
 
 When the behaviours arrive (when a sound plays, how it wanders), each gets its own file in
@@ -82,13 +82,11 @@ a private directory and the planning gets a `state.rs`.
 
 ## Known gaps
 
-- **`group` has no reader yet.** It is read, kept and written, and every repository scene
-  has one, but nothing draws a layer list from it. That is the next step.
 - **Nothing adds, removes or changes an entity in memory.** `Entities` can be built whole
-  and walked. Insert and remove come with the library and with saving, when something calls
-  them.
-- **The engine does not hand the id on.** Its scene description and telemetry still speak
-  in voice numbers. The Kotlin app gets ids when the layer list needs them.
+  and walked. A sound added from the app's library is built from an `Entity` and plays, but
+  it is not put into a scene's `Entities`; that comes with saving.
+- **Telemetry still speaks in voice numbers.** The scene description carries each sound's id
+  and group, and the app's layer list is drawn from them.
 - **When, wander, follow, vary-per-play and conditions are not here.** They are the
   components this version makes room for.
 - **A generator cannot orbit.** The engine refuses `moves: orbit` on a generator preset, as

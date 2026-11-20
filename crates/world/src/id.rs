@@ -35,6 +35,33 @@ impl EntityId {
         }
     }
 
+    /// An id for a new entity that reads like `wanted` and is not among
+    /// `taken`: `wanted` itself, cut down to what an id may hold, with `-2`,
+    /// `-3`, … added while it is in use.
+    pub fn unused<'taken>(wanted: &str, taken: impl IntoIterator<Item = &'taken str>) -> Self {
+        let taken: Vec<&str> = taken.into_iter().collect();
+        let mut base = String::new();
+        for character in wanted.to_lowercase().chars() {
+            let kept = matches!(character, 'a'..='z' | '0'..='9');
+            if kept {
+                base.push(character);
+            } else if !base.is_empty() && !base.ends_with('-') {
+                base.push('-');
+            }
+        }
+        // Room for a numbering suffix.
+        base.truncate(Self::MAX_LENGTH - 4);
+        let base = base.trim_end_matches('-');
+        let base = if base.is_empty() { "sound" } else { base };
+        let mut candidate = base.to_string();
+        let mut number = 2;
+        while taken.contains(&candidate.as_str()) {
+            candidate = format!("{base}-{number}");
+            number += 1;
+        }
+        Self(candidate)
+    }
+
     /// The id as written in a scene file.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -102,5 +129,26 @@ mod tests {
             );
         }
         assert!(EntityId::new("a".repeat(EntityId::MAX_LENGTH)).is_ok());
+    }
+
+    /// A sound added from a library gets its id from the preset's name. A
+    /// second frog must not take the first frog's id, and whatever the name
+    /// holds, the result is an id `new` would accept.
+    #[test]
+    fn a_new_sound_gets_a_free_id_that_reads_like_its_name() {
+        assert_eq!(EntityId::unused("Frog", []).as_str(), "frog");
+        assert_eq!(EntityId::unused("Frog", ["frog"]).as_str(), "frog-2");
+        assert_eq!(
+            EntityId::unused("Frog", ["frog", "frog-2", "birds"]).as_str(),
+            "frog-3"
+        );
+        assert_eq!(EntityId::unused("Rain v2!", []).as_str(), "rain-v2");
+        assert_eq!(
+            EntityId::unused("  Étang  du  Nord ", []).as_str(),
+            "tang-du-nord"
+        );
+        assert_eq!(EntityId::unused("???", ["sound"]).as_str(), "sound-2");
+        let long = EntityId::unused(&"wind ".repeat(30), []);
+        assert_eq!(EntityId::new(long.as_str()), Ok(long));
     }
 }
