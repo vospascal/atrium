@@ -6,14 +6,23 @@
 //! gains pitch and roll.
 
 use std::net::UdpSocket;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use atrium_core::commands::Command;
 use atrium_core::types::Vec3;
 
 /// OpenTrack's own default input port; every tracker bridge defaults to it.
 pub(super) const DEFAULT_PORT: u16 = 4242;
+
+/// How long one read waits before the thread checks whether it should stop.
+/// It is also the longest that dropping an [`OpenTrackListener`] blocks.
+const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Silence after which the tracker is reported as gone.
+const SILENCE_BEFORE_HOLDING: Duration = Duration::from_secs(2);
 
 /// Size of one OpenTrack UDP packet: six `f64`.
 const PACKET_BYTES: usize = 6 * std::mem::size_of::<f64>();
@@ -66,6 +75,32 @@ fn listener_yaw(scene_yaw_radians: f32, tracker_yaw_degrees: f64) -> f32 {
     scene_yaw_radians + TRACKER_YAW_SIGN * (tracker_yaw_degrees as f32).to_radians()
 }
 
+/// The running listener thread. Dropping it stops the thread and frees the
+/// port before the drop returns, so a new listener can bind it right away.
+pub(super) struct OpenTrackListener {
+    stop: Arc<AtomicBool>,
+    receiving: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl OpenTrackListener {
+    /// Whether a tracker is sending: a valid packet arrived within the last
+    /// two seconds.
+    pub(super) fn is_receiving(&self) -> bool {
+        self.receiving.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for OpenTrackListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            // The thread owns the socket; joining is what frees the port.
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Start the head tracking listener on its own thread.
 ///
 /// Binds `127.0.0.1:port` (loopback only — a tracker on the network is not
@@ -77,26 +112,33 @@ pub(super) fn spawn(
     producer: Arc<Mutex<rtrb::Producer<Command>>>,
     scene_position: Vec3,
     scene_yaw_radians: f32,
-) -> std::io::Result<()> {
+) -> std::io::Result<OpenTrackListener> {
     let socket = UdpSocket::bind(("127.0.0.1", port))?;
-    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    socket.set_read_timeout(Some(STOP_CHECK_INTERVAL))?;
     println!("Head tracking: listening for OpenTrack UDP on 127.0.0.1:{port}");
 
-    std::thread::Builder::new()
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_requested = stop.clone();
+    let receiving = Arc::new(AtomicBool::new(false));
+    let receiving_now = receiving.clone();
+    let thread = std::thread::Builder::new()
         .name("head-tracking".into())
         .spawn(move || {
             let mut buffer = [0u8; 64];
-            let mut receiving = false;
-            loop {
+            // When the newest valid packet arrived; `None` while no tracker
+            // is sending.
+            let mut last_packet: Option<Instant> = None;
+            while !stop_requested.load(Ordering::Relaxed) {
                 match socket.recv(&mut buffer) {
                     Ok(length) => {
                         let Some(angles) = decode_opentrack_packet(&buffer[..length]) else {
                             continue;
                         };
-                        if !receiving {
-                            receiving = true;
+                        if last_packet.is_none() {
                             println!("Head tracking: receiving");
                         }
+                        last_packet = Some(Instant::now());
+                        receiving_now.store(true, Ordering::Relaxed);
                         let command = Command::SetListenerPose {
                             position: scene_position,
                             yaw: listener_yaw(scene_yaw_radians, angles.yaw_degrees),
@@ -113,8 +155,11 @@ pub(super) fn spawn(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) =>
                     {
-                        if receiving {
-                            receiving = false;
+                        let silent = last_packet
+                            .is_some_and(|arrived| arrived.elapsed() >= SILENCE_BEFORE_HOLDING);
+                        if silent {
+                            last_packet = None;
+                            receiving_now.store(false, Ordering::Relaxed);
                             println!("Head tracking: no packets for 2 s, holding last pose");
                         }
                     }
@@ -125,19 +170,17 @@ pub(super) fn spawn(
                 }
             }
         })?;
-    Ok(())
+    Ok(OpenTrackListener {
+        stop,
+        receiving,
+        thread: Some(thread),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn packet(values: [f64; 6]) -> Vec<u8> {
-        values
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect()
-    }
+    use crate::head_tracking::test_support::{free_port, next_command, packet, send_yaw};
 
     #[test]
     fn decodes_yaw_pitch_roll_from_the_last_three_doubles() {
@@ -209,6 +252,76 @@ mod tests {
         let still = decode_opentrack_packet(&packet([0.0, 0.0, 0.0, 12.5, -3.0, 4.0])).unwrap();
         let moved = decode_opentrack_packet(&packet([25.0, -10.0, 8.0, 12.5, -3.0, 4.0])).unwrap();
         assert_eq!(still, moved);
+    }
+
+    /// The whole path on a real socket: a packet becomes one listener pose at
+    /// the scene's position, and dropping the listener gives the port back
+    /// before the drop returns. An app that changes scene binds it again at
+    /// once, so a port still held would refuse the next scene's tracker.
+    #[test]
+    fn a_packet_steers_the_listener_and_dropping_frees_the_port() {
+        let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let port = free_port();
+        let scene_position = Vec3::new(30.0, 30.0, 1.2);
+        let scene_yaw = 90f32.to_radians();
+        let listener = spawn(
+            port,
+            Arc::new(Mutex::new(producer)),
+            scene_position,
+            scene_yaw,
+        )
+        .expect("a free port can be bound");
+
+        assert!(
+            !listener.is_receiving(),
+            "nothing has been sent, so no tracker is reported"
+        );
+        send_yaw(port, 90.0 * TRACKER_YAW_SIGN as f64);
+        match next_command(&mut consumer) {
+            Command::SetListenerPose { position, yaw } => {
+                assert_eq!(position, scene_position);
+                assert!(
+                    (yaw.to_degrees() - 180.0).abs() < 1e-3,
+                    "a 90° left turn from north faces west, got {}°",
+                    yaw.to_degrees()
+                );
+            }
+            other => panic!("expected a listener pose, got {other:?}"),
+        }
+
+        assert!(
+            listener.is_receiving(),
+            "a tracker that has just sent is reported"
+        );
+        assert!(
+            UdpSocket::bind(("127.0.0.1", port)).is_err(),
+            "the listener holds its port while it runs"
+        );
+        drop(listener);
+        UdpSocket::bind(("127.0.0.1", port)).expect("dropping the listener frees its port");
+    }
+
+    /// Headphones that are switched off stop sending. After two seconds of
+    /// silence the tracker is no longer reported, so a UI can say it is
+    /// waiting instead of showing a frozen head.
+    #[test]
+    fn a_tracker_that_falls_silent_is_no_longer_reported() {
+        let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let port = free_port();
+        let listener = spawn(port, Arc::new(Mutex::new(producer)), Vec3::ZERO, 0.0)
+            .expect("a free port can be bound");
+        send_yaw(port, 10.0);
+        next_command(&mut consumer);
+        assert!(listener.is_receiving());
+
+        let deadline = Instant::now() + SILENCE_BEFORE_HOLDING + Duration::from_secs(1);
+        while listener.is_receiving() {
+            assert!(
+                Instant::now() < deadline,
+                "still reported a second after the silence limit"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
