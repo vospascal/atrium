@@ -104,7 +104,7 @@ frogs:
   color: \"#6db33f\"
   group: Creatures
   sound: { preset: sources/frog.yaml, level: 68 }
-  shape: { pattern: cardioid, size: 0.2 }
+  shape: { pattern: cardioid, size: 0.2, facing: 225 }
   place: [10.1, 10.1, 0.0]
 drum:
   sound: { audio: assets/djembe.mp3 }
@@ -138,6 +138,7 @@ drum:
                 shape: Shape {
                     pattern: Some(Pattern::Cardioid),
                     size: Some(0.2),
+                    facing: Some(225.0),
                 },
                 place: Place {
                     x: 10.1,

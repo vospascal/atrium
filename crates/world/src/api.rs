@@ -58,6 +58,12 @@ pub struct Shape {
     /// the preset's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
+    /// Which way it faces, as a compass bearing in degrees: 0 is north (+y),
+    /// 90 is east (+x), the way scene files give directions. It matters for
+    /// a pattern that radiates more one way than another. Left out, the
+    /// sound faces the way the engine would turn it by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facing: Option<f32>,
 }
 
 impl Shape {

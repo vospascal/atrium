@@ -12,7 +12,7 @@ sounds:
     color: "#6db33f"
     group: Creatures
     sound: { preset: sources/frog.yaml, level: 68 }
-    shape: { pattern: cardioid, size: 0.2 }
+    shape: { pattern: cardioid, size: 0.2, facing: 225 }
     place: [10.1, 10.1, 0.0]
     moves:
       orbit: { radius: 1.5, speed: 1.0 }
@@ -91,4 +91,7 @@ a private directory and the planning gets a `state.rs`.
   components this version makes room for.
 - **A generator cannot orbit.** The engine refuses `moves: orbit` on a generator preset, as
   it did before entities.
-- **`size` and `level` are not range-checked.** The engine uses them as given.
+- **`size`, `level` and `facing` are not range-checked.** The engine uses them as given.
+- **`facing` is a compass bearing, the engine's heading is not.** A scene file says 0 for north
+  and 90 for east, as its comments always have. The engine counts radians the other way round
+  from east, and converts when it builds the sound.
