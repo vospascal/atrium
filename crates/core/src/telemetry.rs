@@ -92,6 +92,9 @@ pub struct TelemetryFrame {
     pub channel_count: u8,
     /// Master output gain in effect (linear).
     pub master_gain: f32,
+    /// Listener heading in radians: 0 = facing +X, π/2 = facing +Y. It moves
+    /// with the head while a head tracker steers the listener.
+    pub listener_yaw: f32,
 }
 
 impl Default for TelemetryFrame {
@@ -107,6 +110,7 @@ impl Default for TelemetryFrame {
             channel_peaks: [0.0; MAX_CHANNELS],
             channel_count: 0,
             master_gain: 1.0,
+            listener_yaw: 0.0,
         }
     }
 }

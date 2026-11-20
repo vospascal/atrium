@@ -41,6 +41,7 @@ pub fn compute_telemetry(
     let mut frame = TelemetryFrame::default();
     let count = sources.len().min(MAX_SOURCES);
     frame.source_count = count as u8;
+    frame.listener_yaw = listener.yaw;
 
     for (i, source) in sources.iter().enumerate().take(count) {
         // Mark this slot present in the active mask. Empty pool slots hold a
@@ -266,6 +267,16 @@ mod tests {
             vec![make_source(&buf, 80.0, Vec3::new(5.0, 0.0, 0.0), 100.0)];
         let frame = compute_telemetry(&sources, &listener, &dist);
         assert!((frame.sources[0].distance - 5.0).abs() < 0.01);
+    }
+
+    /// A map that draws which way the listener faces reads it from here, so
+    /// it shows the heading the audio thread renders with.
+    #[test]
+    fn frame_reports_the_listener_heading() {
+        let heading = 2.5;
+        let listener = Listener::new(Vec3::new(3.0, 4.0, 1.2), heading);
+        let frame = compute_telemetry(&[], &listener, &default_distance());
+        assert_eq!(frame.listener_yaw, heading);
     }
 
     #[test]
