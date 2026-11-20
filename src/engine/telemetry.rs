@@ -96,6 +96,7 @@ pub fn compute_telemetry(
             gain_db,
             is_muted: source.is_muted(),
             signal: source.signal(),
+            sounding_take: source.sounding_take(),
             perceptual_score: 1.0, // overwritten by AudioScene with actual scores
             orientation_x: orientation.x,
             orientation_y: orientation.y,

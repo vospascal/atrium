@@ -12,3 +12,4 @@ pub mod sound_profile;
 pub mod spectral_profile;
 pub mod synth_node;
 pub mod test_node;
+pub mod voice_node;

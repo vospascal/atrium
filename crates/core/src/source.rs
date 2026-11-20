@@ -39,6 +39,13 @@ pub trait SoundSource: Send {
         None
     }
 
+    /// Which of its takes the source is uttering, counted from 0, or `None`
+    /// while it rests between two. A source that never rests, such as a
+    /// loop or a generator, is always on take 0.
+    fn sounding_take(&self) -> Option<u8> {
+        Some(0)
+    }
+
     /// Current world-space position.
     fn position(&self) -> Vec3;
 

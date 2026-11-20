@@ -34,6 +34,9 @@ pub struct SourceTelemetry {
     pub is_muted: bool,
     /// The signal meter, where the scene source provides one.
     pub signal: Option<SourceSignal>,
+    /// Which of its takes the source is uttering, or `None` while it rests
+    /// between two. A source that never rests is always on take 0.
+    pub sounding_take: Option<u8>,
     /// Perceptual score [0, 1] from masking/salience analysis.
     pub perceptual_score: f32,
     /// Source facing direction (unit vector).
@@ -59,6 +62,7 @@ impl Default for SourceTelemetry {
             gain_db: f32::NEG_INFINITY,
             is_muted: false,
             signal: None,
+            sounding_take: Some(0),
             perceptual_score: 1.0,
             orientation_x: 1.0,
             orientation_y: 0.0,
