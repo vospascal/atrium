@@ -87,13 +87,19 @@ is the generator form of a repertoire, with every strike made new.
 
 ### Still, wander, follow
 
-Every setting of a sound is in one of three states.
+Every setting of a sound has a base value, and any of these can be added on top. They
+stack; they are not alternatives (decided 2026-11-20). Each one is a component on the
+entity, which is what the entity-component idea is for.
 
-- **Still**: one value.
+- **Still**: the base value alone.
 - **Wanders**: a range and a pace. The value drifts inside the range and never settles into
   a regular swing.
 - **Follows**: tied to a condition, with an amount. Wind strength follows *wind*. Bird
   activity follows *daylight* and falls with *rain*.
+- **Varies per play**: a small random offset each time the sound starts.
+
+A blackbird's level can be 62 dB, fall as the rain picks up, drift a little over minutes,
+and still differ slightly on every phrase.
 
 This is one idea instead of a patch panel. Presets ship with their links, so a blackbird
 from the Library already sings more at dawn and stops in the rain without anyone wiring
@@ -253,6 +259,58 @@ Endel and brain.fm. None of this is first.
 A scene is a document. The map is the canvas, sounds are layers, and the inspector shows
 whatever is selected. The editor grows out of the app's composer, which today shows one
 sound at a time on a tilted grid and lets you drag it.
+
+Decided on 2026-11-20:
+
+- **It looks like the player.** Black and white in the paper style, following the Auto,
+  Light and Dark setting. The only colour is each sound's own ink colour, and Monochrome
+  turns that off too. The dark palette of the mockup is not used.
+- **The layer list stays** as sketched: groups, mute, solo, a live level.
+- **On the Mac, Save writes the scene back into the project's `scenes/` folder.** A saved
+  file is rewritten from the engine's values and loses its comments. So the first save of
+  a hand-written scene asks for a new name and leaves the original alone. After that, Save
+  overwrites the app's own copy. A phone has no project folder and offers no Save.
+- **A sound is added from the Library tab** next to Layers: the presets in `sources/`,
+  dragged onto the map. Pressing a preset plays it at the listener, so it can be heard
+  before it is placed.
+- **The model comes first.** A sound is an entity with behaviour. The basics are modelled
+  and built before anything else: the sound model below, then layers, audio and library.
+- **The editor comes before the birds.** The shell first, then scenes as documents, so
+  every later feature has a place to land.
+
+### The sound model
+
+A sound in a scene is an entity: one thing with a name that keeps its identity while
+everything about it changes. It has five parts, the same five the inspector shows.
+Version 1 is built (2026-11-20) as the crate `atrium-world`, and every scene file is
+written in its layout. Its design record is `crates/world/README.md`.
+
+| Part | Holds | In a scene file |
+|---|---|---|
+| Identity | A stable id, a name, a colour, a group | the key of the entry, `name`, `color`, `group` |
+| Sound | The preset it starts from, what it overrides, its level | `sound: { preset, audio, level }` |
+| Shape | Ambient, omni or focused, and a size | `shape: { pattern, size }`. Ambient is fixed per generator |
+| Place | Position and height | `place: [x, y, z]` |
+| When | A behaviour: always, now and then, in bouts | **nothing** |
+| Moves | A behaviour: still, orbit, path, wanders, perches | `moves: { orbit: { radius, speed } }` |
+
+This is the entity-component-system idea: the entity is the id, the parts are its
+components, and the systems are the engine code that carries each behaviour out, one
+system per behaviour. A part can be absent: no When means always, no Moves means still.
+It is the shape that is taken, not a library. A scene has at most 16 voices and a fixed
+set of parts, so plain structs and one small function per behaviour do the job.
+
+Three rules keep it small:
+
+- **A behaviour is data, not code.** When and Moves are each one choice from a short list,
+  with a few numbers. The engine carries them out. A new behaviour is a new entry in the
+  list, and the shape of the model does not change.
+- **The basics are the entries that exist.** When starts with "always" only, and Moves
+  with "still" and "orbit". The model already has the two slots, so repertoire, perches
+  and the rest arrive later without touching the layers, the library or the saved files.
+- **An entity is not a voice.** The scene describes the sound; the engine gives it one of
+  its 16 voices while it plays. The id is what the editor, undo, the saved file and later
+  the session's events all point at, so it must not change when a slot does.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────┐
@@ -486,7 +544,7 @@ one binding method away. Bold marks what is missing.
 | Generator settings while playing | `SetSynthParam` reaches the four winds and the river. **Rain, waves and the wisp ignore it** | **no call, and no list of a generator's settings** | new (E3) |
 | Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn |
 | Add and remove sounds | `SceneEdit` add and remove exist with no producer | **nothing** | new (E4) |
-| Save a scene | **nothing** | **nothing** | new (E4) |
+| Save a scene | the scene types can already be written out (`scenes/saved.yaml` is an old result). **No function writes them** | **nothing** | new (E4) |
 | Several takes per sound | **nothing.** A source file names one recording. `assets/birds/` holds 20 takes of five species that no source uses | | new (A1) |
 | When: gaps and bouts | **nothing.** Recordings loop without a pause | | new (A1) |
 | The session: a plan made ahead, kept and shared | **nothing.** A command takes effect when the audio thread next reads it and carries no time. No link between devices | | new (A1 onwards) |
@@ -505,10 +563,9 @@ one binding method away. Bold marks what is missing.
 
 ## Order of work
 
-Two tracks. Aliveness matters most and does not wait for the editor: a scene is a file, so
-each aliveness step can be heard from a hand-written scene before any panel exists. Each
-step ends with something you can use while listening. A1 and E1 can both start now and do
-not depend on each other.
+Two tracks. Aliveness matters most in what you hear, but the editor is built first (decided
+2026-11-20): E0, E1, then E4, then A1. Each step ends with something you can use while
+listening.
 
 ### Aliveness (engine and scene files)
 
@@ -529,6 +586,10 @@ not depend on each other.
 
 ### Editor (app and binding)
 
+- **E0. The sound model, layers, audio, library.** *Engine, binding and app.* Sounds get
+  an id and a group; this part is done. The layer list shows them with mute, solo, level
+  and a live meter.
+  The library lists the presets, plays one on a press, and adds one to the scene.
 - **E1. One map, all sounds.** *App only.* Every sound on one map, the layer list,
   selection, the inspector as a read-out, drag any sound, scene settings when nothing is
   selected. Replaces stepping through the sounds one at a time. Uses the binding as it is,
@@ -598,8 +659,6 @@ Carried over:
 - **How coarse is the layer?** A 1 m grid over a 60 × 60 m meadow is 3600 values; cheap to
   hand over on change, too much 15 times a second. Proposed: recompute only when a sound
   or the weather changes, and not while a drag is in progress.
-- **Does saving overwrite the scene file or write a new one?** Proposed: always a new
-  named file, never overwrite a hand-written scene. The top bar's "Save as" assumes this.
 
 ## Not planned
 
