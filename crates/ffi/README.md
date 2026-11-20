@@ -6,9 +6,11 @@ Kotlin can reach is declared here:
 - `list_scenes(directory)`: the scene files a player can pick from. Each comes with its title and,
   for each sound, its name, color and direction from the listener. They are read from the YAML
   alone, with no audio decoded.
+- `head_trackers()`: the head trackers that can work on this platform.
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
-  `set_volume`, `set_source_position` and `latest_telemetry()`.
-- The records it returns: `Position`, `SceneDescription`, `Output`, `Telemetry`.
+  `set_volume`, `set_source_position`, `set_head_tracker` and `latest_telemetry()`.
+- The records it returns: `Position`, `SceneDescription`, `Output`, `Telemetry`. Telemetry
+  includes where the listener faces and whether a head tracker is sending.
 - `EngineError`.
 
 [UniFFI](https://github.com/mozilla/uniffi-rs) proc-macros describe the surface.
@@ -18,9 +20,40 @@ runs Cargo itself. There is nothing to build here by hand.
 
 ## Decisions that look wrong and are right
 
-- **Only the commands a screen uses are exported:** moving a source (the composer), and the output
-  and volume (the player). Every other `Command` gets a method when a Kotlin screen calls it. An
-  exported method with no caller is surface the generated Kotlin carries for nothing.
+- **Only the commands a screen uses are exported:** moving a source (the composer), and the output,
+  volume and head tracker (the player's Settings). Every other `Command` gets a method when a
+  Kotlin screen calls it. An exported method with no caller is surface the generated Kotlin
+  carries for nothing.
+- **Head tracking belongs to the engine object, so it stops and starts with every scene.** The
+  tracker steers one engine's listener through that engine's command ring. The app keeps the
+  choice and gives it to each engine as it starts. The cost is that the Sony bridge restarts on a
+  scene change. Keeping one tracker alive across engines would need a listener that can be pointed
+  at a new ring, which `atrium::head_tracking` does not have.
+- **`set_head_tracker(None)` has let go of the port when it returns, and so has a dropped
+  engine.** Every tracker listens on OpenTrack's port 4242, and the next scene binds it at once. A
+  listener left running would refuse it. The engine's listener thread polls a stop flag every
+  100 ms, so a stop blocks for at most that long.
+- **Stopping the Sony bridge also terminates the script's children.** The bridge script ends in
+  `tail -f … | grep …`, and a shell runs a TERM trap only after its foreground command ends.
+  `tail -f` never does. Before 2026-11-20 the engine sent TERM to the script alone. That was
+  never noticed because the engine binary only stops at exit, usually by Ctrl+C, which signals
+  the whole group. From an app that keeps running, the stop hung forever and left the bridge app
+  running. `sony.rs` records the measurement and a test with a script of the same shape guards it.
+- **Switching head tracking off turns the listener back to the scene's heading.** Otherwise the
+  place would stay turned the way the head last pointed until the scene was restarted. The engine
+  does this when its tracker is dropped, so the binding has nothing to remember.
+- **Telemetry says whether a tracker is sending, and where the listener faces.** "Switched on"
+  and "working" are different things: the port binds and the bridge starts whether or not the
+  headphones offer their sensor. On 2026-11-20 the first try in the app did nothing, with no
+  hint why. macOS listed the headphones with audio services only, so no head turn could arrive.
+  `Telemetry.head_tracking` is now `Off`, `Waiting` or `Receiving`, and `listener_facing` is the
+  heading the audio thread renders with. The app draws both on its 3D map.
+- **`head_tracking` is filled in by `latest_telemetry()`, not by the frame conversion.** A frame
+  comes from the audio thread, which knows the listener's heading but not whether a tracker
+  exists. The engine object knows that. `Telemetry::from(&frame)` therefore always says `Off`.
+- **`head_trackers()` is decided in Rust, like `outputs()`.** The Sony bridge is a macOS program.
+  On iOS nothing is offered, because the listener accepts packets from the same device only and no
+  tracker on an iPhone sends them. `set_head_tracker` refuses a tracker that is not in the list.
 - **`outputs()` is decided in Rust and fixed when the engine starts.** A channel mode is offered
   only when every channel it uses exists in the scene's layout and on the opened device. Quad uses
   channels 0, 1, 4 and 5, so a 4-channel device cannot play it. Without this rule the UI would offer
@@ -34,6 +67,10 @@ runs Cargo itself. There is nothing to build here by hand.
   an engine thread. On Kotlin/Native that thread would have to attach, and UI state would be
   written off the main thread. Pulling avoids both, and the frame rate already bounds how often
   the UI can use a frame.
+- **Frequency balance travels with each source.** Fixed-size meters read the emitted mono audio
+  before spatialization so each source can drive its own ink. Two broad crossovers and smoothed
+  RMS windows keep the audio callback allocation-free and let the Kotlin player weight a broad
+  and a fine layer independently. The level is relative to the source's build-time calibration.
 - **A thread exists only to hold the audio stream.** `cpal::Stream` is not `Send` on Apple
   platforms. A UniFFI object must be `Send + Sync`, so the engine cannot hold the stream. The
   stream is created, kept and dropped on `atrium-output`, which waits until the engine is
@@ -68,7 +105,34 @@ runs Cargo itself. There is nothing to build here by hand.
   plays without stream errors. Heavier scenes have not been tried in a debug build. Run Gradle with
   `-PreleaseBuild=true` for an optimised build. That flag also builds the other desktop
   platforms, which needs their cross toolchains.
-- **One test is ignored by default:** `output_and_volume_change_while_playing` needs an output
-  device and plays under a second of sound. Run it with `cargo test -p atrium-ffi -- --ignored`.
-  On 2026-11-19 it passed on a 2-channel headphone device.
+- **Three tests are ignored by default.** Run them with
+  `cargo test -p atrium-ffi -- --ignored --test-threads=1`. One at a time, because two of them
+  bind the tracker's port.
+  `output_and_volume_change_while_playing` needs an output device and plays under a second of
+  sound. On 2026-11-19 it passed on a 2-channel headphone device.
+  `head_tracking_holds_its_port_only_while_it_is_on` and
+  `telemetry_shows_whether_a_tracker_is_sending_and_where_the_head_points` open the device at
+  zero volume and bind port 4242, so no other tracker may be running. Both passed on 2026-11-20.
+- **The Sony path works in the app, checked by hand only.** On 2026-11-20, after the headphones
+  were paired again and listed their sensor service, the wedge on the 3D map turned with the
+  head in the running app. Before that, a one-off test drove the Settings screen with a running
+  engine and a simulated click on the Sony chip: the status went from waiting to receiving and
+  closing the engine stopped the bridge after 298 samples. Whether the sound itself stays put
+  has not been reported. The automated tests use a stand-in tracker over loopback.
+- **The headphones' sensor service comes and goes.** It was there on 2026-11-19, gone the next
+  evening, and back after forgetting and pairing the headphones again. The cause is not known.
+  `system_profiler SPBluetoothDataType` must list `HID` among the headphones' services.
+- **`Waiting` does not say why.** Headphones that are off, a missing Input Monitoring grant and a
+  sensor the headphones do not offer all look the same: nothing arrives. The app shows the Sony
+  setup step that has been the cause so far. The bridge's own log is in
+  `$TMPDIR/atrium-sony-bridge.log`.
+- **The first Sony start on a machine builds the bridge.** The script clones a pinned commit from
+  GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
+  engine is compiled, so a build moved away from this repository cannot find it.
+- **A killed app leaves its Sony bridge running.** The bridge is stopped when the engine is
+  closed. A process that is killed outright never closes it, and whether closing the app's
+  window always does has not been checked. A bridge left behind keeps sending to a port nobody
+  listens on, and the next start adds a second one. `pkill -f SonyBridge` stops them.
+- **The head turns, the listener's position does not.** A tracker sends the scene's own listener
+  position with every heading. Once the app can move the listener, the two have to be combined.
 - **The WebSocket server is still in the engine binary** for `web/`. This crate does not use it.

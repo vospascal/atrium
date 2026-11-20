@@ -7,10 +7,13 @@ use std::thread::JoinHandle;
 use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::config::SceneConfig;
 use atrium::engine::scene::AudioScene;
+use atrium::head_tracking::HeadTracking;
 use atrium_core::commands::Command;
 use atrium_core::telemetry::TelemetryFrame;
+use atrium_core::types::Vec3;
 
 use crate::api::{EngineError, Position, SceneDescription, Telemetry};
+use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::output::{playable_outputs, Output};
 
 /// Commands the audio thread can fall behind by before new ones are refused.
@@ -28,8 +31,16 @@ pub struct Engine {
     description: SceneDescription,
     /// What this scene can play on the opened device; fixed for its lifetime.
     outputs: Vec<Output>,
-    commands: Mutex<rtrb::Producer<Command>>,
+    /// Shared with head tracking, which steers the listener from its own
+    /// thread.
+    commands: Arc<Mutex<rtrb::Producer<Command>>>,
     telemetry: Mutex<rtrb::Consumer<TelemetryFrame>>,
+    /// Where the scene puts the listener and which way it faces (radians).
+    /// Head turns are added to this heading.
+    listener_position: Vec3,
+    listener_yaw: f32,
+    /// The running tracker, if any.
+    head_tracking: Mutex<Option<HeadTracking>>,
     /// Dropped last; dropping it stops the audio.
     _output: OutputThread,
 }
@@ -48,13 +59,18 @@ impl Engine {
         built.scene.telemetry_out = Some(telemetry_producer);
         let (commands, command_consumer) = rtrb::RingBuffer::new(COMMAND_CAPACITY);
         let layout_channels = built.scene.speaker_layout.total_channels();
+        let listener_position = built.scene.listener.position;
+        let listener_yaw = built.scene.listener.yaw;
         let output = OutputThread::start(built.scene, command_consumer)?;
 
         Ok(Arc::new(Self {
             description: built.description.into(),
             outputs: playable_outputs(layout_channels, output.device_channels),
-            commands: Mutex::new(commands),
+            commands: Arc::new(Mutex::new(commands)),
             telemetry: Mutex::new(telemetry),
+            listener_position,
+            listener_yaw,
+            head_tracking: Mutex::new(None),
             _output: output,
         }))
     }
@@ -110,6 +126,32 @@ impl Engine {
             .map_err(|_| EngineError::CommandQueueFull)
     }
 
+    /// Let `tracker` steer the listener, or stop with `None`. Stopping turns
+    /// the listener back to the way the scene faces it. Any tracker already
+    /// running is stopped first, and has let go of its port when this returns.
+    pub fn set_head_tracker(&self, tracker: Option<HeadTracker>) -> Result<(), EngineError> {
+        let mut head_tracking = lock(&self.head_tracking);
+        // Stop before starting: both listen on the same port.
+        *head_tracking = None;
+        let Some(tracker) = tracker else {
+            return Ok(());
+        };
+        if !head_trackers().contains(&tracker) {
+            return Err(EngineError::HeadTracking(
+                "that tracker does not run on this platform".into(),
+            ));
+        }
+        let started = atrium::head_tracking::start(
+            tracker.into(),
+            self.commands.clone(),
+            self.listener_position,
+            self.listener_yaw,
+        )
+        .map_err(|error| EngineError::HeadTracking(error.to_string()))?;
+        *head_tracking = Some(started);
+        Ok(())
+    }
+
     /// The newest telemetry since the last call, or nothing if no frame has
     /// arrived since.
     pub fn latest_telemetry(&self) -> Option<Telemetry> {
@@ -118,7 +160,13 @@ impl Engine {
         while let Ok(frame) = telemetry.pop() {
             latest = Some(frame);
         }
-        latest.as_ref().map(Telemetry::from)
+        let mut report = Telemetry::from(latest.as_ref()?);
+        report.head_tracking = match lock(&self.head_tracking).as_ref() {
+            None => HeadTrackingStatus::Off,
+            Some(tracking) if tracking.is_receiving() => HeadTrackingStatus::Receiving,
+            Some(_) => HeadTrackingStatus::Waiting,
+        };
+        Some(report)
     }
 }
 
@@ -236,6 +284,106 @@ mod tests {
                 Err(EngineError::UnplayableOutput)
             ));
         }
+    }
+
+    /// Opens the default output device at zero volume and binds the tracker
+    /// port, so nothing else may be listening on it:
+    /// `cargo test -p atrium-ffi -- --ignored`.
+    #[test]
+    #[ignore = "opens the default output device and the head tracking port"]
+    fn head_tracking_holds_its_port_only_while_it_is_on() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        // OpenTrack's default port, which the engine listens on.
+        let port_is_free = || std::net::UdpSocket::bind(("127.0.0.1", 4242)).is_ok();
+        assert!(port_is_free(), "stop the running head tracker first");
+
+        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        engine.set_volume(0.0).expect("volume");
+
+        engine
+            .set_head_tracker(Some(HeadTracker::External))
+            .expect("the listener starts");
+        assert!(!port_is_free(), "the tracker listens while it is on");
+
+        // Asking again restarts it on the same port instead of failing.
+        engine
+            .set_head_tracker(Some(HeadTracker::External))
+            .expect("a running tracker can be chosen again");
+
+        engine.set_head_tracker(None).expect("the listener stops");
+        assert!(port_is_free(), "switching off frees the port at once");
+
+        // A scene change closes the engine with tracking still on. The next
+        // scene's engine binds the same port straight away.
+        engine
+            .set_head_tracker(Some(HeadTracker::External))
+            .expect("the listener starts again");
+        drop(engine);
+        assert!(port_is_free(), "closing the engine stops head tracking");
+    }
+
+    /// The newest telemetry for which `ready` holds, waiting up to two seconds.
+    fn telemetry_when(engine: &Engine, ready: impl Fn(&Telemetry) -> bool) -> Telemetry {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(telemetry) = engine.latest_telemetry() {
+                if ready(&telemetry) {
+                    return telemetry;
+                }
+            }
+            assert!(Instant::now() < deadline, "the engine never reported it");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// What the app's map and Settings read: whether a tracker is chosen,
+    /// whether it is sending, and where the head points. A stand-in tracker
+    /// sends one OpenTrack packet over loopback. Opens the default output
+    /// device at zero volume: `cargo test -p atrium-ffi -- --ignored`.
+    #[test]
+    #[ignore = "opens the default output device and the head tracking port"]
+    fn telemetry_shows_whether_a_tracker_is_sending_and_where_the_head_points() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        // The frog scene faces the listener north: +Y.
+        let engine = Engine::new("scenes/frog-headphones.yaml".into()).expect("scene should play");
+        engine.set_volume(0.0).expect("volume");
+
+        let at_rest = telemetry_when(&engine, |_| true);
+        assert_eq!(at_rest.head_tracking, HeadTrackingStatus::Off);
+        assert!(at_rest.listener_facing.y > 0.99, "the scene faces north");
+
+        engine
+            .set_head_tracker(Some(HeadTracker::External))
+            .expect("the listener starts");
+        let listening = telemetry_when(&engine, |telemetry| {
+            telemetry.head_tracking != HeadTrackingStatus::Off
+        });
+        assert_eq!(
+            listening.head_tracking,
+            HeadTrackingStatus::Waiting,
+            "chosen, but nothing has been sent"
+        );
+
+        // A 90° left turn, which a tracker reports as −90°. North turns west.
+        let left_turn: Vec<u8> = [0.0f64, 0.0, 0.0, -90.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        std::net::UdpSocket::bind(("127.0.0.1", 0))
+            .and_then(|tracker| tracker.send_to(&left_turn, ("127.0.0.1", 4242)))
+            .expect("the stand-in tracker sends");
+        let turned = telemetry_when(&engine, |telemetry| {
+            telemetry.head_tracking == HeadTrackingStatus::Receiving
+                && telemetry.listener_facing.x < -0.99
+        });
+        assert!(turned.listener_facing.y.abs() < 0.1, "the head points west");
+
+        engine.set_head_tracker(None).expect("the listener stops");
+        telemetry_when(&engine, |telemetry| {
+            telemetry.head_tracking == HeadTrackingStatus::Off && telemetry.listener_facing.y > 0.99
+        });
     }
 
     #[test]

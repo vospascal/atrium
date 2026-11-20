@@ -4,6 +4,7 @@
 use atrium_core::telemetry::TelemetryFrame;
 use atrium_core::types::Vec3;
 
+use crate::head_tracking::HeadTrackingStatus;
 use crate::output::Output;
 
 /// Gain reported for a source that cannot be heard at all.
@@ -118,6 +119,12 @@ pub struct Telemetry {
     pub output: Output,
     /// Master gain in effect (linear, 0–1).
     pub volume: f32,
+    /// The listener's current horizontal forward vector. It turns with the
+    /// head while a tracker is sending.
+    pub listener_facing: Position,
+    /// Whether a head tracker is chosen and whether it is sending. A frame
+    /// alone cannot know this; `Engine::latest_telemetry` fills it in.
+    pub head_tracking: HeadTrackingStatus,
 }
 
 /// One live source's state.
@@ -190,6 +197,12 @@ impl From<&TelemetryFrame> for Telemetry {
                 channel_mode: frame.channel_mode.into(),
             },
             volume: frame.master_gain,
+            listener_facing: Position {
+                x: frame.listener_yaw.cos(),
+                y: frame.listener_yaw.sin(),
+                z: 0.0,
+            },
+            head_tracking: HeadTrackingStatus::Off,
         }
     }
 }
@@ -206,6 +219,8 @@ pub enum EngineError {
     CommandQueueFull,
     /// The output is not one of `Engine::outputs()` for this scene and device.
     UnplayableOutput,
+    /// The head tracker could not start, or is not one of `head_trackers()`.
+    HeadTracking(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -216,6 +231,9 @@ impl std::fmt::Display for EngineError {
             Self::CommandQueueFull => write!(formatter, "engine command queue is full"),
             Self::UnplayableOutput => {
                 write!(formatter, "this scene cannot play on that output here")
+            }
+            Self::HeadTracking(reason) => {
+                write!(formatter, "head tracking could not start: {reason}")
             }
         }
     }
@@ -284,6 +302,24 @@ mod tests {
             telemetry.peaks_db[1],
             atrium::engine::telemetry::peak_db(0.0),
             "silence is the same finite floor the WebSocket reports"
+        );
+    }
+
+    /// The engine's heading is an angle (0 = +X, counter-clockwise). The map
+    /// gets a vector in the same axes as the sound positions, so it needs no
+    /// angle convention: a listener facing north (π/2) faces +Y.
+    #[test]
+    fn the_listener_heading_becomes_a_forward_vector() {
+        let mut frame = frame_with_slots(0, 0);
+        frame.listener_yaw = std::f32::consts::FRAC_PI_2;
+        let telemetry = Telemetry::from(&frame);
+        assert!(telemetry.listener_facing.x.abs() < 1e-6);
+        assert!((telemetry.listener_facing.y - 1.0).abs() < 1e-6);
+        assert_eq!(telemetry.listener_facing.z, 0.0);
+        assert_eq!(
+            telemetry.head_tracking,
+            HeadTrackingStatus::Off,
+            "a frame alone never claims a tracker"
         );
     }
 
