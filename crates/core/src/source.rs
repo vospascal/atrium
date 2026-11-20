@@ -108,6 +108,10 @@ pub trait SoundSource: Send {
     /// Set the source's directivity emission pattern.
     fn set_directivity(&mut self, _pattern: DirectivityPattern) {}
 
+    /// Turn the source to face `yaw` (radians, 0 = +X, π/2 = +Y). Default:
+    /// no-op, for sources that have no facing to turn.
+    fn set_facing(&mut self, _yaw: f32) {}
+
     /// Set a procedural-synth parameter live. Sources that don't model the
     /// given parameter ignore it. Default: no-op (sample players etc.).
     fn set_synth_param(&mut self, _param: crate::commands::SynthParam, _value: f32) {}

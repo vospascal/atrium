@@ -144,6 +144,11 @@ impl AudioScene {
                         source.set_directivity(pattern);
                     }
                 }
+                Command::SetSourceFacing { index, yaw } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_facing(yaw);
+                    }
+                }
                 Command::SetSourceOrbitSpeed { index, speed } => {
                     if let Some(source) = self.sources.get_mut(index as usize) {
                         source.set_orbit_speed(speed);

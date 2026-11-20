@@ -23,6 +23,9 @@ pub struct TestNode {
     pub pattern: DirectivityPattern,
     pub spread: f32,
     pub ref_dist: f32,
+    /// The heading it was turned to (radians). Until it is turned, it faces
+    /// its orbit centre.
+    facing: Option<f32>,
     muted: bool,
     signal_meter: Option<SignalMeter>,
 }
@@ -46,6 +49,7 @@ impl TestNode {
             pattern: DirectivityPattern::OMNI,
             spread: 0.0,
             ref_dist: 1.0,
+            facing: None,
             muted: false,
             signal_meter: None,
         }
@@ -108,8 +112,12 @@ impl SoundSource for TestNode {
         }
     }
 
-    /// Faces toward the orbit center (i.e. toward the listener).
+    /// The heading it was turned to. A source that was never turned faces
+    /// its orbit centre, so one that circles the listener points at them.
     fn orientation(&self) -> Vec3 {
+        if let Some(yaw) = self.facing {
+            return Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+        }
         let pos = self.position();
         let d = self.orbit_center - pos;
         let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
@@ -158,6 +166,10 @@ impl SoundSource for TestNode {
 
     fn set_directivity(&mut self, pattern: DirectivityPattern) {
         self.pattern = pattern;
+    }
+
+    fn set_facing(&mut self, yaw: f32) {
+        self.facing = Some(yaw);
     }
 
     fn set_orbit_speed(&mut self, speed: f32) {
@@ -362,6 +374,25 @@ mod tests {
         }
         node.set_orbit_radius(0.0);
         assert_eq!(node.orientation(), Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    /// A sound that was turned keeps that heading wherever it is: north is
+    /// +Y (yaw π/2), west is −X (yaw π), and the vector stays flat and unit
+    /// length. Being turned wins over facing the orbit centre.
+    #[test]
+    fn a_turned_source_faces_where_it_was_turned() {
+        let mut node = TestNode::new(
+            buffer(vec![0.0], 48_000),
+            Vec3::new(1.0, 1.0, 0.0),
+            3.0,
+            0.0,
+        );
+        node.set_facing(std::f32::consts::FRAC_PI_2);
+        assert!(node.orientation().distance_to(Vec3::new(0.0, 1.0, 0.0)) < 1e-6);
+        node.set_orbit_angle(2.0);
+        assert!(node.orientation().distance_to(Vec3::new(0.0, 1.0, 0.0)) < 1e-6);
+        node.set_facing(std::f32::consts::PI);
+        assert!(node.orientation().distance_to(Vec3::new(-1.0, 0.0, 0.0)) < 1e-6);
     }
 
     #[test]

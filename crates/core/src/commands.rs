@@ -41,6 +41,11 @@ pub enum Command {
         pattern: DirectivityPattern,
     },
 
+    /// Turn a source to face `yaw`: radians, 0 = facing +X, π/2 = facing +Y,
+    /// like the listener's heading. It matters for a source that radiates
+    /// more one way than another.
+    SetSourceFacing { index: u16, yaw: f32 },
+
     /// Set orbit speed for a source (0 = paused).
     SetSourceOrbitSpeed { index: u16, speed: f32 },
 

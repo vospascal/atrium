@@ -25,6 +25,8 @@ pub struct SynthNode {
     pub spread: f32,
     pub ref_dist: f32,
     position: Vec3,
+    /// The heading it was turned to (radians); +X until it is turned.
+    facing: Option<f32>,
     muted: bool,
     signal_meter: Option<SignalMeter>,
 }
@@ -39,6 +41,7 @@ impl SynthNode {
             spread: 0.0,
             ref_dist: 1.0,
             position,
+            facing: None,
             muted: false,
             signal_meter: None,
         }
@@ -86,6 +89,13 @@ impl SoundSource for SynthNode {
         self.pattern
     }
 
+    fn orientation(&self) -> Vec3 {
+        match self.facing {
+            Some(yaw) => Vec3::new(yaw.cos(), yaw.sin(), 0.0),
+            None => Vec3::new(1.0, 0.0, 0.0),
+        }
+    }
+
     fn is_muted(&self) -> bool {
         self.muted
     }
@@ -120,6 +130,10 @@ impl SoundSource for SynthNode {
 
     fn set_directivity(&mut self, pattern: DirectivityPattern) {
         self.pattern = pattern;
+    }
+
+    fn set_facing(&mut self, yaw: f32) {
+        self.facing = Some(yaw);
     }
 
     fn set_synth_param(&mut self, param: atrium_core::commands::SynthParam, value: f32) {
