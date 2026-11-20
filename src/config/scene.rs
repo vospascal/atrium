@@ -40,6 +40,18 @@ pub struct SceneConfig {
     pub hrtf: String,
 }
 
+impl SceneConfig {
+    /// The same scene for headphones: two channels, rendered binaurally.
+    ///
+    /// What a scene is heard on is the listener's choice, made when the scene
+    /// starts. It is not a second scene file that differs in two lines.
+    pub fn for_headphones(mut self) -> Self {
+        self.speakers.layout = "stereo".into();
+        self.speakers.render_mode = "hrtf".into();
+        self
+    }
+}
+
 fn default_master_gain() -> f32 {
     1.0
 }

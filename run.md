@@ -13,12 +13,14 @@ cargo run --release -- --ui scenes/nature.yaml        # with the terminal dashbo
 
 ## Listen on headphones
 
-Headphone scenes use `layout: stereo` + `render_mode: hrtf`.
+`--headphones` plays any scene binaurally on two channels, whatever speakers the scene
+names. There is one file per scene, not a second one for headphones. In the app the same
+choice is Settings → Output, and it is remembered.
 
 ```sh
-cargo run --release -- scenes/nature-headphones.yaml  # the meadow, binaural
-cargo run --release -- scenes/frog-headphones.yaml    # one frog, front-right
-cargo run --release -- scenes/wisp-headphones.yaml    # one wisp flying around your head
+cargo run --release -- --headphones scenes/nature.yaml  # the meadow, binaural
+cargo run --release -- --headphones scenes/wisp.yaml    # one wisp flying around your head
+cargo run --release -- scenes/frog.yaml                 # one frog, front-right; binaural by itself
 ```
 
 ## Control it from a browser or a phone
@@ -43,11 +45,11 @@ Your head turn steers the listener, so the world stays put when you turn.
 
 ```sh
 # Sony WH/WF-1000XM5/XM6 — one command, the engine starts the Sony bridge too
-cargo run --release -- --head-tracking=sony scenes/frog-headphones.yaml
-cargo run --release -- --head-tracking=sony scenes/wisp-headphones.yaml
+cargo run --release -- --head-tracking=sony scenes/frog.yaml
+cargo run --release -- --head-tracking=sony --headphones scenes/wisp.yaml
 
 # Any other tracker that sends OpenTrack UDP to 127.0.0.1:4242 — start it yourself
-cargo run --release -- --head-tracking scenes/frog-headphones.yaml
+cargo run --release -- --head-tracking scenes/frog.yaml
 ```
 
 Look straight ahead when it starts: that is "centre". Test: in the frog scene,

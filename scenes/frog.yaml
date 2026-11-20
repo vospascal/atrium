@@ -1,7 +1,7 @@
-# Scene: Frog only (headphones) — one source for head-tracking tests.
+# Scene: Frog — one source for head-tracking tests. Starts binaural, for headphones.
 # The frog sits front-right (45°). Turn your head right and it should move to
 # straight ahead; turn left and it should swing round to your right ear.
-#   cargo run --release -- --head-tracking=sony scenes/frog-headphones.yaml
+#   cargo run --release -- --head-tracking=sony scenes/frog.yaml
 #
 # Positions are [x, y, z] in metres, listener-relative (offset by the meadow
 # spawn). Bearings are measured from +Y (north / "up" on the map), clockwise —

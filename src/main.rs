@@ -38,7 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Loading scene: {}", scene_path);
 
+    // --headphones: hear any scene binaurally, whatever speakers it names.
     let config = SceneConfig::load(&scene_path)?;
+    let config = if args.iter().any(|a| a == "--headphones") {
+        config.for_headphones()
+    } else {
+        config
+    };
     let mut result = config.build()?;
 
     // Telemetry channel: audio thread → broadcaster (small ring, latest-wins)

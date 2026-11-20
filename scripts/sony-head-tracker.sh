@@ -1,7 +1,7 @@
 #!/bin/sh
 # Sony headphone head tracker → OpenTrack UDP on 127.0.0.1:4242.
 # Normally started for you by the engine:
-#   cargo run --release -- --head-tracking=sony scenes/frog-headphones.yaml
+#   cargo run --release -- --head-tracking=sony scenes/frog.yaml
 # Run it by hand only to build it or check the sensor (probe / rebuild below).
 #
 # Uses NicholasSlattery/sony-head-tracker (MIT), pinned below, built once into

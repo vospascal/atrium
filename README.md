@@ -17,7 +17,7 @@ cargo run --release                                   # scenes/default.yaml on y
 ```
 
 ```bash
-cargo run --release -- scenes/nature-headphones.yaml  # a meadow, binaural
+cargo run --release -- --headphones scenes/nature.yaml  # a meadow, binaural
 ```
 
 ```bash

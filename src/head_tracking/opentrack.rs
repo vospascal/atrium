@@ -33,7 +33,7 @@ const PACKET_BYTES: usize = 6 * std::mem::size_of::<f64>();
 /// π/2 = facing +Y), so turning the head LEFT must increase it. This constant
 /// maps the tracker's yaw onto that: −1.0 means the tracker reports a left turn
 /// as negative degrees. Verified by ear 2026-11-17 with a Sony WH-1000XM6 via
-/// `sony-head-tracker` (default axis map): in `scenes/frog-headphones.yaml` the
+/// `sony-head-tracker` (default axis map): in `scenes/frog.yaml` the
 /// front-right frog moves to straight ahead on a right turn. A tracker that
 /// turns the world the wrong way has the opposite convention — re-run that test.
 const TRACKER_YAW_SIGN: f32 = -1.0;
