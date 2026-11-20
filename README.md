@@ -109,7 +109,10 @@ crates/
 ├── core/                   # atrium-core: math and panning with no I/O
 │                           #   (Vec3, listener, speakers, VBAP, DBAP, ambisonics,
 │                           #    directivity, commands, telemetry types)
-└── tui/                    # terminal dashboard (`--ui`)
+├── ffi/                    # the engine as one object for the Kotlin app
+├── tui/                    # terminal dashboard (`--ui`)
+└── world/                  # atrium-world: a scene's sounds as entities
+                            #   (id, sound, shape, place, moves)
 
 tests/
 └── audio_thread_allocations.rs   # the audio callback never touches the heap

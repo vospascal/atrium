@@ -31,9 +31,11 @@ normalization:
   spl_reference: 94.0
   spl_threshold: 0
 
-sources:
-  - source: sources/canopy-wind.yaml
+sounds:
+  canopy-wind:
     name: Canopy Wind
     color: "#6f8f68"
+    group: Weather
+    sound: { preset: sources/canopy-wind.yaml }
     # Field emitters are volume-like; this position is only the editor anchor.
-    position: [0.0, 0.0, 1.2]
+    place: [0.0, 0.0, 1.2]

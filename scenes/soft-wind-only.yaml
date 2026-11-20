@@ -31,8 +31,10 @@ normalization:
   spl_reference: 94.0
   spl_threshold: 0
 
-sources:
-  - source: sources/soft-wind.yaml
+sounds:
+  soft-wind:
     name: Soft Wind
     color: "#a8c4c8"
-    position: [0.0, 0.0, 1.2]
+    group: Weather
+    sound: { preset: sources/soft-wind.yaml }
+    place: [0.0, 0.0, 1.2]

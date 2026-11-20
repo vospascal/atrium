@@ -10,11 +10,12 @@ use atrium_core::panner::DistanceModelType;
 use atrium_core::source::EmitterKind;
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
+use atrium_world::{Entity, Moves};
 
 use super::description::{beam_half_angle, SceneDescription, SourceDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
-use super::source::{resolve_spl, ResolvedSound, SourceEntry};
+use super::source::{display_name, resolve, resolve_spl, ResolvedSound};
 use super::synth::SynthSpec;
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::decode::decode_file;
@@ -55,9 +56,9 @@ const SOURCE_COLORS: &[&str] = &[
     "#26c6da", "#9ccc65",
 ];
 
-/// A source's UI color: its own `color`, else the palette entry for its slot.
-pub(super) fn source_color(entry: &SourceEntry, slot: usize) -> String {
-    entry
+/// A sound's UI color: its own `color`, else the palette entry for its slot.
+pub(super) fn source_color(entity: &Entity, slot: usize) -> String {
+    entity
         .color
         .clone()
         .unwrap_or_else(|| SOURCE_COLORS[slot % SOURCE_COLORS.len()].to_string())
@@ -218,13 +219,12 @@ impl SceneConfig {
                 .collect(),
         };
 
-        let initial_source_states: Vec<InitialSourceState> = self
-            .sources
+        let initial_source_states: Vec<InitialSourceState> = source_metas
             .iter()
-            .map(|entry| InitialSourceState {
-                position: arr_to_vec3(entry.position) + spawn,
-                orbit_radius: entry.orbit_radius,
-                orbit_speed: entry.orbit_speed,
+            .map(|meta| InitialSourceState {
+                position: arr_to_vec3(meta.position) + spawn,
+                orbit_radius: meta.orbit_radius,
+                orbit_speed: meta.orbit_speed,
             })
             .collect();
 
@@ -346,10 +346,15 @@ impl SceneConfig {
         let global_ref_dist = self.distance_model.ref_distance;
         let max_dist = self.distance_model.max_distance;
 
-        for (i, entry) in self.sources.iter().enumerate() {
-            // Merge referenced def (if any) with inline overrides.
-            let resolved = entry.resolve()?;
-            let position = arr_to_vec3(entry.position) + spawn;
+        for (i, (id, entity)) in self.sounds.iter().enumerate() {
+            // Merge the preset (if any) with what the entity changes.
+            let resolved = resolve(entity)?;
+            let place: [f32; 3] = entity.place.into();
+            let position = arr_to_vec3(place) + spawn;
+            let (orbit_radius, orbit_speed) = match entity.moves {
+                Moves::Still => (0.0, 0.0),
+                Moves::Orbit { radius, speed } => (radius, speed),
+            };
             let built = match &resolved.sound {
                 ResolvedSound::Sample { audio_path } => build_one_source(
                     audio_path,
@@ -357,19 +362,15 @@ impl SceneConfig {
                     &resolved.directivity,
                     resolved.spread,
                     position,
-                    entry.orbit_radius,
-                    entry.orbit_speed,
+                    orbit_radius,
+                    orbit_speed,
                     norm,
                     global_ref_dist,
                     max_dist,
                 )?,
                 ResolvedSound::Synth { spec } => {
-                    if entry.orbit_radius != 0.0 || entry.orbit_speed != 0.0 {
-                        return Err(format!(
-                            "source `{}`: synth sources don't support orbit (motion belongs to the behavior layer)",
-                            entry.display_name()
-                        )
-                        .into());
+                    if entity.moves != Moves::Still {
+                        return Err(format!("sound `{id}`: a generator cannot orbit yet").into());
                     }
                     build_one_synth_source(
                         spec,
@@ -387,8 +388,8 @@ impl SceneConfig {
                 }
             };
 
-            let name = entry.display_name();
-            let color = source_color(entry, i);
+            let name = display_name(id, entity);
+            let color = source_color(entity, i);
 
             println!(
                 "  {} → SPL={:.0} dB, amplitude={:.4}, ref_dist={:.2}m, audible={:.2}m",
@@ -410,9 +411,9 @@ impl SceneConfig {
                 directivity: resolved.directivity.clone(),
                 directivity_alpha: built.directivity_alpha,
                 spread: resolved.spread,
-                position: entry.position,
-                orbit_radius: entry.orbit_radius,
-                orbit_speed: entry.orbit_speed,
+                position: place,
+                orbit_radius,
+                orbit_speed,
                 synth_kind,
                 emitter_kind,
             });

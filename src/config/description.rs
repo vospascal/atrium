@@ -14,6 +14,7 @@ use atrium_core::types::Vec3;
 
 use super::build::{arr_to_vec3, source_color};
 use super::scene::SceneConfig;
+use super::source::display_name;
 
 /// The built scene as a UI sees it.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,14 +92,14 @@ impl SceneConfig {
         SceneSummary {
             title: self.title.clone().unwrap_or_else(|| title_from_path(path)),
             sounds: self
-                .sources
+                .sounds
                 .iter()
                 .take(MAX_SOURCES)
                 .enumerate()
-                .map(|(slot, entry)| SoundSummary {
-                    name: entry.display_name(),
-                    color: source_color(entry, slot),
-                    offset_from_listener: arr_to_vec3(entry.position) - listener,
+                .map(|(slot, (id, entity))| SoundSummary {
+                    name: display_name(id, entity),
+                    color: source_color(entity, slot),
+                    offset_from_listener: arr_to_vec3(entity.place.into()) - listener,
                 })
                 .collect(),
         }

@@ -263,7 +263,7 @@ speakers:
   layout: \"5.1\"
   render_mode: dbap
   dbap_rolloff_db: 4.5
-sources: []
+sounds: {}
 ";
 
 /// Every unit conversion between the YAML and the engine, by hand:
@@ -400,4 +400,32 @@ fn channel_mode_never_switches_on_channels_the_device_lacks() {
 
     assert_eq!(active_channels_on(2), vec![0, 1]);
     assert_eq!(active_channels_on(6), vec![0, 1, 2, 3, 4, 5]);
+}
+
+/// Every scene in the repository reads in the current layout. The engine has
+/// no reader for an older one, so a scene left behind would fail here by name
+/// instead of at the moment someone tries to play it.
+#[test]
+fn every_repository_scene_reads_and_names_its_sounds() {
+    let mut scenes: Vec<_> = std::fs::read_dir("scenes")
+        .expect("the scenes directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "yaml")
+        })
+        .collect();
+    scenes.sort();
+    assert!(scenes.len() >= 13, "found only {} scenes", scenes.len());
+    for path in scenes {
+        let path = path.to_str().expect("a UTF-8 path");
+        let config = SceneConfig::load(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        assert!(!config.sounds.is_empty(), "{path} has no sounds");
+        for (id, entity) in config.sounds.iter() {
+            assert!(
+                entity.group.is_some(),
+                "{path}: sound `{id}` has no group for the layer list"
+            );
+        }
+    }
 }

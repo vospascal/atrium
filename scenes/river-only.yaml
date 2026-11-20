@@ -31,8 +31,10 @@ normalization:
   spl_reference: 94.0
   spl_threshold: 0
 
-sources:
-  - source: sources/river.yaml
+sounds:
+  river:
     name: River
     color: "#4b9ab8"
-    position: [4.0, 1.0, 0.2]
+    group: Water
+    sound: { preset: sources/river.yaml }
+    place: [4.0, 1.0, 0.2]

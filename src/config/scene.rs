@@ -2,9 +2,8 @@
 //! sub-configs it embeds (listener, speakers, distance model, normalization),
 //! plus the atrium and atmosphere files a scene references.
 
+use atrium_world::Entities;
 use serde::{Deserialize, Serialize};
-
-use super::source::SourceEntry;
 
 /// A scene: references environment, atrium, source, processor, and atmosphere
 /// files, adds listener placement, speaker layout, and mixing parameters.
@@ -29,7 +28,9 @@ pub struct SceneConfig {
     pub speakers: SpeakerConfig,
     #[serde(default)]
     pub normalization: NormalizationConfig,
-    pub sources: Vec<SourceEntry>,
+    /// The sounds of the scene, each under its id, in the order they take
+    /// the engine's voices.
+    pub sounds: Entities,
     /// Path to atmosphere definition file (e.g. "atmospheres/default.yaml").
     /// Omit for standard conditions.
     pub atmosphere: Option<String>,

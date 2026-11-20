@@ -73,19 +73,25 @@ normalization:
   # 20 dB ≈ quiet room / rustling leaves.
   spl_threshold: 0
 
-sources:
-  - source: sources/djembe.yaml
+sounds:
+  djembe:
     color: "#ff6b35"
-    position: [0.0, 0.0, 0.0]    # orbits around listener at center
-    orbit_radius: 1.5
-    orbit_speed: 1.0              # rad/s (~6.3s per orbit)
+    group: Music
+    sound: { preset: sources/djembe.yaml }
+    place: [0.0, 0.0, 0.0]    # orbits around listener at center
+    moves:
+      orbit: { radius: 1.5, speed: 1.0 }  # rad/s (~6.3s per orbit)
 
-  - source: sources/campfire.yaml
+  campfire:
     color: "#ffc107"
-    position: [-1.5, 0.0, 0.0]   # 1.5m left of center
+    group: Fire
+    sound: { preset: sources/campfire.yaml }
+    place: [-1.5, 0.0, 0.0]   # 1.5m left of center
 
-  - source: sources/purring.yaml
+  purring:
     color: "#ce93d8"
-    position: [1.5, 0.0, 0.0]    # 1.5m right of center
+    group: Creatures
+    sound: { preset: sources/purring.yaml }
+    place: [1.5, 0.0, 0.0]    # 1.5m right of center
 
 atmosphere: atmospheres/default.yaml

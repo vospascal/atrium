@@ -43,82 +43,54 @@ normalization:
   target_rms: 0.1
   spl_reference: 94.0
   spl_threshold: 0.0
-sources:
-- source: sources/field-wind.yaml
-  reference_spl: 48.0
-  directivity: omni
-  spread: 1.0
-  name: Field Wind
-  color: '#8ca9ad'
-  position:
-  - 2.6762886
-  - 8.472488
-  - 3.0
-  orbit_radius: 0.0
-  orbit_speed: 0.0
-- source: sources/cicadas.yaml
-  audio: assets/cicadas.ogg
-  reference_spl: 76.0
-  directivity: omni
-  spread: 0.6
-  name: cicadas
-  color: '#ffc107'
-  position:
-  - -3.8176575
-  - 5.9326553
-  - 0.0
-  orbit_radius: 0.0
-  orbit_speed: 0.0
-- source: sources/cricket.yaml
-  audio: assets/cricket.ogg
-  reference_spl: 76.0
-  directivity: omni
-  spread: 0.6
-  name: cricket
-  color: '#ce93d8'
-  position:
-  - 5.9651566
-  - 2.7677307
-  - 0.0
-  orbit_radius: 0.0
-  orbit_speed: 0.0
-- source: sources/canopy-wind.yaml
-  reference_spl: 48.0
-  directivity: omni
-  spread: 1.0
-  name: Canopy Wind
-  color: '#4fc3f7'
-  position:
-  - 2.1637459
-  - 3.571041
-  - 0.0
-  orbit_radius: 0.0
-  orbit_speed: 0.0
-- source: sources/frog.yaml
-  audio: assets/frog.mp3
-  reference_spl: 65.0
-  directivity: omni
-  spread: 0.0
-  name: frog
-  color: '#66bb6a'
-  position:
-  - 5.7695007
-  - -2.2810574
-  - 0.0
-  orbit_radius: 0.0
-  orbit_speed: 0.0
-- source: sources/seagull.yaml
-  audio: assets/seagull.ogg
-  reference_spl: 70.0
-  directivity: omni
-  spread: 0.0
-  name: seagull
-  color: '#ef5350'
-  position:
-  - -2.4887085
-  - 9.602268
-  - 0.0
-  orbit_radius: 0.0
-  orbit_speed: 0.0
+sounds:
+  field-wind:
+    name: Field Wind
+    color: '#8ca9ad'
+    group: Weather
+    sound: { preset: sources/field-wind.yaml, level: 48.0 }
+    shape: { pattern: omni, size: 1.0 }
+    place: [2.6762886, 8.472488, 3.0]
+
+  cicadas:
+    name: cicadas
+    color: '#ffc107'
+    group: Creatures
+    sound: { preset: sources/cicadas.yaml, audio: assets/cicadas.ogg, level: 76.0 }
+    shape: { pattern: omni, size: 0.6 }
+    place: [-3.8176575, 5.9326553, 0.0]
+
+  cricket:
+    name: cricket
+    color: '#ce93d8'
+    group: Creatures
+    sound: { preset: sources/cricket.yaml, audio: assets/cricket.ogg, level: 76.0 }
+    shape: { pattern: omni, size: 0.6 }
+    place: [5.9651566, 2.7677307, 0.0]
+
+  canopy-wind:
+    name: Canopy Wind
+    color: '#4fc3f7'
+    group: Weather
+    sound: { preset: sources/canopy-wind.yaml, level: 48.0 }
+    shape: { pattern: omni, size: 1.0 }
+    place: [2.1637459, 3.571041, 0.0]
+
+  frog:
+    name: frog
+    color: '#66bb6a'
+    group: Creatures
+    sound: { preset: sources/frog.yaml, audio: assets/frog.mp3, level: 65.0 }
+    shape: { pattern: omni, size: 0.0 }
+    place: [5.7695007, -2.2810574, 0.0]
+
+  seagull:
+    name: seagull
+    color: '#ef5350'
+    group: Creatures
+    sound: { preset: sources/seagull.yaml, audio: assets/seagull.ogg, level: 70.0 }
+    shape: { pattern: omni, size: 0.0 }
+    place: [-2.4887085, 9.602268, 0.0]
+
 atmosphere: null
 hrtf: assets/hrtf/default.sofa

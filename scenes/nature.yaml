@@ -38,35 +38,47 @@ normalization:
   spl_reference: 94.0
   spl_threshold: 0
 
-sources:
-  - source: sources/seagull.yaml    # Birds — NW, high overhead
+sounds:
+  birds:  # Birds — NW, high overhead
     name: Birds
     color: "#e0544a"
-    position: [-13.2, 13.2, 6.0]    # 18.6 m @ 315 deg
+    group: Creatures
+    sound: { preset: sources/seagull.yaml }
+    place: [-13.2, 13.2, 6.0]    # 18.6 m @ 315 deg
 
-  - source: sources/frog.yaml       # Frogs — NE, near the water
+  frogs:  # Frogs — NE, near the water
     name: Frogs
     color: "#6db33f"
-    position: [10.1, 10.1, 0.0]     # 14.3 m @ 45 deg
+    group: Creatures
+    sound: { preset: sources/frog.yaml }
+    place: [10.1, 10.1, 0.0]     # 14.3 m @ 45 deg
 
-  - source: sources/stream.yaml     # Stream — due east
+  stream:  # Stream — due east
     name: Stream
     color: "#26c6da"
-    position: [10.7, 0.0, 0.0]      # 10.7 m @ 90 deg
+    group: Water
+    sound: { preset: sources/stream.yaml }
+    place: [10.7, 0.0, 0.0]      # 10.7 m @ 90 deg
 
-  - source: sources/cicadas.yaml    # Cicadas in the trees — SE, up in the canopy
+  cicadas:  # Cicadas in the trees — SE, up in the canopy
     name: Cicadas
     color: "#e0a020"
-    position: [11.5, -11.5, 4.0]    # 16.2 m @ 135 deg
+    group: Creatures
+    sound: { preset: sources/cicadas.yaml }
+    place: [11.5, -11.5, 4.0]    # 16.2 m @ 135 deg
 
-  - source: sources/campfire.yaml   # Campfire — due south
+  campfire:  # Campfire — due south
     name: Campfire
     color: "#ff7a2e"
-    position: [0.0, -9.8, 0.0]      # 9.8 m @ 180 deg
+    group: Fire
+    sound: { preset: sources/campfire.yaml }
+    place: [0.0, -9.8, 0.0]      # 9.8 m @ 180 deg
 
-  - source: sources/cricket.yaml    # Insects — SW, in the grass
+  insects:  # Insects — SW, in the grass
     name: Insects
     color: "#9b6dc8"
-    position: [-9.1, -9.1, 0.0]     # 12.9 m @ 225 deg
+    group: Creatures
+    sound: { preset: sources/cricket.yaml }
+    place: [-9.1, -9.1, 0.0]     # 12.9 m @ 225 deg
 
 atmosphere: atmospheres/default.yaml

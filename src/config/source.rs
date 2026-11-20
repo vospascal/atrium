@@ -1,58 +1,20 @@
-//! Source entries: how a scene places a sound, how an entry resolves against
-//! a referenced `sources/*.yaml` definition, and the definition formats
-//! (sample file or procedural synth).
+//! How a scene's sound resolves against the preset it names, and the preset
+//! formats in `sources/*.yaml` (sample file or procedural synth).
 
-use std::path::Path;
-
-use serde::{Deserialize, Serialize};
+use atrium_world::{Entity, EntityId};
+use serde::Deserialize;
 
 use super::synth::SynthSpec;
 use crate::audio::sound_profile::SoundProfile;
 
-/// Scene entry: places a source in the scene. The sound definition comes either
-/// from a referenced `sources/*.yaml` file (`source`) or from inline fields
-/// (`audio` + `reference_spl` + …). Inline fields also act as overrides on top
-/// of a referenced file — so a live SPL/spread/directivity edit is captured on
-/// Save without needing to rewrite the source yaml, and a browsed audio file
-/// with no preset yaml round-trips as a fully self-contained entry.
-#[derive(Deserialize, Serialize, Clone)]
-pub struct SourceEntry {
-    /// Path to a source definition YAML file (e.g. "sources/djembe.yaml").
-    /// Optional when the entry is defined inline via `audio`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// Path to the audio file (e.g. "assets/frog.mp3"). Overrides the referenced
-    /// def's path; required when `source` is absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio: Option<String>,
-    /// Reference SPL in dB at 1 m. Overrides the referenced def.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reference_spl: Option<f32>,
-    /// Directivity pattern ("omni", "cardioid", …). Overrides the referenced def.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub directivity: Option<String>,
-    /// MDAP spread (0.0 = point, 1.0 = full surround). Overrides the referenced def.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spread: Option<f32>,
-    /// Display name (defaults to filename stem if omitted).
-    pub name: Option<String>,
-    /// UI color as hex string (e.g. "#ff6b35"). Defaults to palette by index.
-    pub color: Option<String>,
-    pub position: [f32; 3],
-    #[serde(default)]
-    pub orbit_radius: f32,
-    #[serde(default)]
-    pub orbit_speed: f32,
-}
-
-/// The sound identity an entry resolved to: a sample file or a synth spec.
+/// The sound identity an entity resolved to: a sample file or a synth spec.
 pub(super) enum ResolvedSound {
     Sample { audio_path: String },
     Synth { spec: SynthSpec },
 }
 
-/// Resolved intrinsic sound properties for one entry, merging a referenced
-/// `SourceDef` (if any) with the entry's inline overrides.
+/// Resolved intrinsic sound properties for one entity: its preset (if any)
+/// with the entity's own changes on top.
 pub(super) struct ResolvedSource {
     pub(super) sound: ResolvedSound,
     pub(super) reference_spl: f32,
@@ -60,79 +22,64 @@ pub(super) struct ResolvedSource {
     pub(super) spread: f32,
 }
 
-impl SourceEntry {
-    /// Resolve this entry's sound definition: load the referenced yaml (if any)
-    /// and apply inline overrides on top.
-    pub(super) fn resolve(&self) -> Result<ResolvedSource, Box<dyn std::error::Error>> {
-        let def: Option<SourceDef> = match &self.source {
-            Some(path) => {
-                let contents =
-                    std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
-                Some(serde_yaml::from_str(&contents).map_err(|e| format!("{}: {}", path, e))?)
-            }
-            None => None,
-        };
-
-        // Split the def into its sound identity + intrinsic defaults.
-        let (def_sound, def_spl, def_directivity, def_spread) = match def {
-            Some(SourceDef::Sample(sample)) => (
-                Some(ResolvedSound::Sample {
-                    audio_path: sample.path,
-                }),
-                Some(sample.reference_spl),
-                Some(sample.directivity),
-                Some(sample.spread),
-            ),
-            Some(SourceDef::Synth(synth)) => (
-                Some(ResolvedSound::Synth { spec: synth.spec }),
-                Some(synth.reference_spl),
-                Some(synth.directivity),
-                Some(synth.spread),
-            ),
-            None => (None, None, None, None),
-        };
-
-        // The entry-level `audio:` override replaces a sample def's file.
-        // Combining it with a synth def is contradictory — reject it.
-        let sound = match (self.audio.clone(), def_sound) {
-            (Some(_), Some(ResolvedSound::Synth { .. })) => {
-                return Err("`audio:` override cannot apply to a synth source definition".into())
-            }
-            (Some(audio_path), _) => ResolvedSound::Sample { audio_path },
-            (None, Some(sound)) => sound,
-            (None, None) => return Err("source entry needs either `source` or `audio`".into()),
-        };
-
-        Ok(ResolvedSource {
-            sound,
-            reference_spl: self.reference_spl.or(def_spl).unwrap_or(70.0),
-            directivity: self
-                .directivity
-                .clone()
-                .or(def_directivity)
-                .unwrap_or_else(|| "omni".into()),
-            spread: self.spread.or(def_spread).unwrap_or(0.0),
-        })
-    }
-
-    /// A display name: explicit `name`, else the stem of the referenced yaml or
-    /// the audio file.
-    pub(super) fn display_name(&self) -> String {
-        if let Some(name) = &self.name {
-            return name.clone();
+/// Resolve an entity's sound: load the preset it names (if any) and apply
+/// what the entity changes on top.
+pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::error::Error>> {
+    let def: Option<SourceDef> = match &entity.sound.preset {
+        Some(path) => {
+            let contents = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+            Some(serde_yaml::from_str(&contents).map_err(|e| format!("{}: {}", path, e))?)
         }
-        let stem_of = |p: &str| {
-            Path::new(p)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-        };
-        self.source
-            .as_deref()
-            .and_then(stem_of)
-            .or_else(|| self.audio.as_deref().and_then(stem_of))
-            .unwrap_or_else(|| "?".to_string())
-    }
+        None => None,
+    };
+
+    // Split the def into its sound identity + intrinsic defaults.
+    let (def_sound, def_spl, def_directivity, def_spread) = match def {
+        Some(SourceDef::Sample(sample)) => (
+            Some(ResolvedSound::Sample {
+                audio_path: sample.path,
+            }),
+            Some(sample.reference_spl),
+            Some(sample.directivity),
+            Some(sample.spread),
+        ),
+        Some(SourceDef::Synth(synth)) => (
+            Some(ResolvedSound::Synth { spec: synth.spec }),
+            Some(synth.reference_spl),
+            Some(synth.directivity),
+            Some(synth.spread),
+        ),
+        None => (None, None, None, None),
+    };
+
+    // The entity's own `audio:` replaces a sample preset's file.
+    // Combining it with a generator preset is contradictory — reject it.
+    let sound = match (entity.sound.audio.clone(), def_sound) {
+        (Some(_), Some(ResolvedSound::Synth { .. })) => {
+            return Err("`audio:` cannot replace the sound of a generator preset".into())
+        }
+        (Some(audio_path), _) => ResolvedSound::Sample { audio_path },
+        (None, Some(sound)) => sound,
+        // `Entities` refuses a sound with neither, so a scene never gets here.
+        (None, None) => return Err("a sound needs either `preset` or `audio`".into()),
+    };
+
+    Ok(ResolvedSource {
+        sound,
+        reference_spl: entity.sound.level.or(def_spl).unwrap_or(70.0),
+        directivity: entity
+            .shape
+            .pattern
+            .map(|pattern| pattern.name().to_string())
+            .or(def_directivity)
+            .unwrap_or_else(|| "omni".into()),
+        spread: entity.shape.size.or(def_spread).unwrap_or(0.0),
+    })
+}
+
+/// The name a list shows: the entity's own `name`, else its id.
+pub(super) fn display_name(id: &EntityId, entity: &Entity) -> String {
+    entity.name.clone().unwrap_or_else(|| id.to_string())
 }
 
 /// Source definition (loaded from `sources/*.yaml`): intrinsic sound identity.

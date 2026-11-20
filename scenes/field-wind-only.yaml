@@ -31,9 +31,11 @@ normalization:
   spl_reference: 94.0
   spl_threshold: 0
 
-sources:
-  - source: sources/field-wind.yaml
+sounds:
+  field-wind:
     name: Field Wind
     color: "#8ca9ad"
+    group: Weather
+    sound: { preset: sources/field-wind.yaml }
     # Field emitters are volume-like; this is only their editor anchor.
-    position: [0.0, 0.0, 1.2]
+    place: [0.0, 0.0, 1.2]

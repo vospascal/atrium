@@ -44,23 +44,31 @@ normalization:
   spl_reference: 94.0
   spl_threshold: 0
 
-sources:
-  - source: sources/field-wind.yaml       # Field wind — ambient field emitter
+sounds:
+  field-wind:  # Field wind — ambient field emitter
     name: Field Wind
     color: "#8ca9ad"
-    position: [-8.0, 0.0, 3.0]
+    group: Weather
+    sound: { preset: sources/field-wind.yaml }
+    place: [-8.0, 0.0, 3.0]
 
-  - source: sources/synth-waves.yaml    # Waves — due south, at ground level
+  waves:  # Waves — due south, at ground level
     name: Waves
     color: "#26c6da"
-    position: [0.0, -10.0, 0.5]
+    group: Water
+    sound: { preset: sources/synth-waves.yaml }
+    place: [0.0, -10.0, 0.5]
 
-  - source: sources/synth-rain-v2.yaml  # Rain v2 — due north, overhead
+  rain-v2:  # Rain v2 — due north, overhead
     name: Rain v2
     color: "#6aa49e"
-    position: [0.0, 8.0, 5.0]
+    group: Weather
+    sound: { preset: sources/synth-rain-v2.yaml }
+    place: [0.0, 8.0, 5.0]
 
-  - source: sources/synth-rain-v1.yaml  # Rain v1 — due east, overhead
+  rain-v1:  # Rain v1 — due east, overhead
     name: Rain v1
     color: "#cfcb7f"
-    position: [8.0, 0.0, 5.0]
+    group: Weather
+    sound: { preset: sources/synth-rain-v1.yaml }
+    place: [8.0, 0.0, 5.0]
