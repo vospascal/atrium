@@ -16,9 +16,10 @@ import atrium.engine.listScenes
  */
 @Composable
 internal fun AtriumApp(sceneDirectory: String, onEditing: (Boolean) -> Unit = {}) {
-    val session = remember { Session() }
+    val settings = remember { platformSettings() }
+    val session = remember { Session(settings) }
     val scenes = remember(sceneDirectory) { runCatching { listScenes(sceneDirectory) } }
-    val look = remember { Look(platformSettings()) }
+    val look = remember { Look(settings) }
     var editing by remember { mutableStateOf(false) }
 
     RunSession(session)

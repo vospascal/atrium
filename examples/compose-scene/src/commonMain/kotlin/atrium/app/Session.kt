@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
+import atrium.engine.ChannelMode
 import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
@@ -14,6 +15,7 @@ import atrium.engine.Output
 import atrium.engine.Pattern
 import atrium.engine.Position
 import atrium.engine.Preset
+import atrium.engine.RenderMode
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
 import atrium.engine.SourceDescription
@@ -33,7 +35,7 @@ import kotlinx.coroutines.withContext
  * [RunSession] starts and closes engines to match.
  */
 @Stable
-internal class Session {
+internal class Session(private val store: SettingsStore) {
     /** The scene asked for; a new request restarts even the same scene. */
     var request by mutableStateOf<PlayRequest?>(null)
         private set
@@ -56,6 +58,12 @@ internal class Session {
         private set
     /** Why the chosen tracker did not start; null while it runs or is off. */
     var headTrackingFailure by mutableStateOf<String?>(null)
+        private set
+    /**
+     * The output last chosen in Settings. It belongs to this device and not to a scene, so it
+     * outlives a scene and a restart: every scene starts on it when it can be played here.
+     */
+    var chosenOutput by mutableStateOf(outputSaved(store.read(OutputKey)))
         private set
 
     /** What the listener silenced or asked to hear alone; forgotten when the scene changes. */
@@ -159,6 +167,19 @@ internal class Session {
         mix = LayerMix()
     }
 
+    /** Play on [output] from now on: the scene that plays, and every scene started after it. */
+    fun chooseOutput(output: Output) {
+        chosenOutput = output
+        store.write(OutputKey, output.saved())
+        command { setOutput(output) }
+    }
+
+    /** Switch a scene that just started to the chosen output, when it can be played here. */
+    internal fun followChosenOutput() {
+        val chosen = chosenOutput?.takeIf { it in outputs } ?: return
+        command { setOutput(chosen) }
+    }
+
     /** Let [tracker] turn the listener with the head, or switch it off with null. */
     fun chooseHeadTracker(tracker: HeadTracker?) {
         headTracker = tracker
@@ -216,6 +237,7 @@ internal fun RunSession(session: Session) {
             session.outputs = running.outputs()
             session.engine = running
             session.status = "Playing ${request.scene.title}"
+            session.followChosenOutput()
             // The engine that played before has closed by now and let go of the
             // tracker's port, so this one can take it.
             if (session.headTracker != null) session.followHeadTracker(running)
@@ -235,3 +257,16 @@ internal fun RunSession(session: Session) {
 
 /** Where the presets are, relative to the working directory, like the scenes. */
 private const val PresetDirectory = "sources"
+
+private const val OutputKey = "output"
+
+/** An output as the settings store keeps it, such as `HRTF/STEREO`. */
+internal fun Output.saved(): String = "${renderMode.name}/${channelMode.name}"
+
+/** The output [saved] names, or null when nothing was saved or it names an output this version does not have. */
+internal fun outputSaved(saved: String?): Output? {
+    val names = saved?.split('/')?.takeIf { it.size == 2 } ?: return null
+    val renderMode = RenderMode.entries.firstOrNull { it.name == names[0] } ?: return null
+    val channelMode = ChannelMode.entries.firstOrNull { it.name == names[1] } ?: return null
+    return Output(renderMode, channelMode)
+}

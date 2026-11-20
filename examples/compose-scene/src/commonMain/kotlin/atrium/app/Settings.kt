@@ -57,7 +57,7 @@ internal fun Settings(session: Session, look: Look, onEdit: () -> Unit) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             session.outputs.forEach { output ->
                 Chip("${output.renderMode.label} · ${output.channelMode.label}", selected = output == current) {
-                    session.command { setOutput(output) }
+                    session.chooseOutput(output)
                 }
             }
         }
