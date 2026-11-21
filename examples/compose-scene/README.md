@@ -77,6 +77,11 @@ panel or list gets them by using it.
   Dragging the ruler above the tracks scrubs more finely. 1×, 10× and 60× run the weather faster
   while the sounds keep their own pace. **Pause** in the top bar, or the space bar, stops the
   scene's clock: sounds, plan and weather hold where they are.
+- **Air** is under Weather: the temperature and humidity, which decide how fast sound travels
+  and how much treble the air takes from a distant sound. A point also has a **Size**, from a
+  point to all around, drawn as a soft disc on the map.
+- **Channel meters** sit in the header of the tracks: one per output channel, named as the room
+  names its loudspeakers, bold when a channel clips.
 - **Weather** is in the inspector when nothing is selected: the story (Held, Drifting or Passing
   storm) and the band each condition keeps to, with where it is now. A selected sound's
   **Follows** says how it answers them, such as "Activity 100 % → 0 % as rain rises".
@@ -86,12 +91,19 @@ panel or list gets them by using it.
   as wide as its beam instead. A ring travels outward from every sound that is heard. A wind is
   drawn as bands arriving from the side its anchor lies on, and as rings all round when the
   anchor is at you. Click a sound to select it, drag it to move it, click the ground to select
-  nothing. A wind is grabbed near its anchor; moving it changes where it is drawn to come from,
+  nothing. Shift or ⌘ with a click adds a sound to the selection or takes it out; dragging one
+  of several moves them all as one step, and the arrow keys nudge them. Hold Alt while dragging
+  and the sounds stay put while copies land where you let go. Hold **S** to hear only what is
+  selected, for as long as the key is down. **Loudness**, bottom left, colours the ground by how
+  loud the place is there: everything that is heard, or the one selected sound alone. Each band
+  is 6 dB, a doubling of distance, and it shows direct sound only. A wind is grabbed near its anchor; moving it changes where it is drawn to come from,
   not how it sounds, since an ambient sound is heard everywhere. The selected sound shows its
   distance and bearing on a dashed line, and a focused one has a handle at the end of its facing
   line: drag it to turn the sound.
 - **The inspector** shows the selected sound in a fixed order: its level, which can be set; its
-  shape, a width from a narrow beam to all round and how much is heard behind it, with Omni,
+  shape, first whether it is a **Point** or **Ambient** (heard everywhere at its level, with no
+  distance, direction or echo; any sound can be either, and switching starts it over), then for
+  a point a width from a narrow beam to all round and how much is heard behind it, with Omni,
   Focused and Narrow as starting points and a drawing of the beam turned the way it faces; then its place, when it plays and whether it
   moves. **When** is All the time or Now and then; Now and then has a range with two handles for
   the shortest and longest rest. Anything with takes lists them, with the one sounding now lit

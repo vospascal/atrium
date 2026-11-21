@@ -22,6 +22,16 @@ class LayerMixTest {
         assertEquals(emptyList(), meadow.filter(mix.toggleMute("frogs")::silences))
     }
 
+    /** Hearing some alone silences the rest and lets even a muted one of them sound; after, the ears count again. */
+    @Test
+    fun hearingAloneSilencesTheRestUntilItEnds() {
+        val muted = LayerMix().toggleMute("frogs")
+        val alone = muted.hearingAlone(setOf("frogs", "birds"))
+        assertEquals(listOf("wind"), meadow.filter(alone::silences))
+        assertEquals(listOf("frogs"), meadow.filter(alone.hearingAlone(emptySet())::silences))
+        assertEquals(emptySet(), alone.without("frogs").without("birds").alone, "a removed layer is not waited for")
+    }
+
     @Test
     fun aRemovedLayerIsForgotten() {
         assertEquals(LayerMix(), LayerMix().toggleMute("wind").without("wind"))

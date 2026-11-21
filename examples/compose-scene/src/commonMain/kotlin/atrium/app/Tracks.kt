@@ -142,11 +142,12 @@ private const val LaneSteps = 160
 @Composable
 internal fun TracksPanel(
     session: Session,
-    selected: String?,
-    onSelect: (String?) -> Unit,
+    selection: Selection,
+    onSelection: (Selection) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val sounds = session.description?.sources.orEmpty()
+    val keys = remember { HeldKeys() }
     val history = session.tracks
     val now by produceState(session.sceneTime()) {
         while (true) withFrameMillis { value = session.sceneTime() }
@@ -170,7 +171,10 @@ internal fun TracksPanel(
     val nowAt = (shown / span).toFloat()
     Column(modifier) {
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            PaperText("TRACKS", 12, Muted, FontWeight.SemiBold, spacing = 2f, modifier = Modifier.weight(1f))
+            PaperText("TRACKS", 12, Muted, FontWeight.SemiBold, spacing = 2f)
+            Spacer(Modifier.weight(1f))
+            ChannelMeters(session)
+            Spacer(Modifier.width(14.dp))
             TrackZooms.forEach { (seconds, label) ->
                 PaperText(
                     label,
@@ -224,11 +228,11 @@ internal fun TracksPanel(
         for (slot in 0 until VoiceCount) {
             val sound = sounds.firstOrNull { it.slot.toInt() == slot }
             val audition = slot == AuditionTrack && sound == null
-            val chosen = sound != null && sound.id == selected
+            val chosen = sound != null && sound.id in selection
             Row(
-                Modifier.fillMaxWidth().height(TrackHeight)
+                keys.watch.fillMaxWidth().height(TrackHeight)
                     .listRow(slot, chosen)
-                    .clickable(enabled = sound != null, role = Role.Button) { onSelect(sound?.id?.takeIf { it != selected }) },
+                    .clickable(enabled = sound != null, role = Role.Button) { sound?.let { onSelection(selection.clickedInList(it.id, keys.adding)) } },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Row(Modifier.width(HeaderWidth).padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -357,3 +361,45 @@ private val HeaderWidth = 150.dp
 
 /** The voice a preset or a take is heard from on its own; shown as Preview when no sound holds it. */
 private const val AuditionTrack = VoiceCount - 1
+
+/**
+ * A small meter for each output channel: its peak in the last buffer, from −60 dBFS to full
+ * scale, named as the room names its loudspeaker or L and R on headphones. A channel at full
+ * scale is clipping, and its name turns bold.
+ */
+@Composable
+private fun ChannelMeters(session: Session) {
+    val telemetry = session.telemetry ?: return
+    val names = channelNames(telemetry.peaksDb.size, telemetry.channelsInUse.isEmpty(), session.description?.speakers.orEmpty().associate { it.channel.toInt() to it.name })
+    val track = Hairline
+    val fill = Foreground
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        telemetry.peaksDb.forEachIndexed { channel, peak ->
+            val clipping = peak >= ClippingFrom
+            PaperText(names[channel], 11, if (clipping) Foreground else Muted, if (clipping) FontWeight.Bold else FontWeight.Normal, singleLine = true)
+            Canvas(Modifier.padding(start = 4.dp, end = 10.dp).width(30.dp).height(8.dp)) {
+                val middle = size.height / 2
+                drawLine(track, Offset(0f, middle), Offset(size.width, middle), strokeWidth = 3.dp.toPx())
+                val level = meterOf(peak)
+                if (level > 0f) drawLine(fill, Offset(0f, middle), Offset(size.width * level, middle), strokeWidth = (if (clipping) 5.dp else 3.dp).toPx())
+            }
+        }
+    }
+}
+
+/**
+ * What each of [count] output channels is called: L and R on [headphones], else the room's own
+ * name for the loudspeaker on that channel from [speakers], and LFE or the channel's number for
+ * one no loudspeaker stands on.
+ */
+internal fun channelNames(count: Int, headphones: Boolean, speakers: Map<Int, String>): List<String> = List(count) { channel ->
+    when {
+        headphones && count == 2 -> if (channel == 0) "L" else "R"
+        channel in speakers -> speakers.getValue(channel)
+        count == 6 && channel == 3 -> "LFE"
+        else -> "${channel + 1}"
+    }
+}
+
+/** A peak this close to full scale is clipping (dBFS). */
+private const val ClippingFrom = -.1f

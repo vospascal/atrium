@@ -21,6 +21,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +35,7 @@ import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.Role
@@ -82,7 +84,7 @@ internal fun Editor(open: SceneFile?, scenes: List<SceneFile>, session: Session,
 /** The editor with [scene] open and playing. */
 @Composable
 private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit, onOpen: () -> Unit) {
-    var selected by remember(session.engine) { mutableStateOf<String?>(null) }
+    var picked by remember(session.engine) { mutableStateOf(Selection()) }
     var panel by remember { mutableStateOf(Panel.Layers) }
     var naming by remember { mutableStateOf(false) }
     // A preset dragged from the library to the map.
@@ -99,17 +101,34 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
             val strengths = plumesFor(scene, session.description, session.telemetry).mapIndexed { index, plume ->
                 if (session.description?.sources?.getOrNull(index)?.slot in resting) 0f else plume.strength
             }
-            val chosen = session.description?.sources?.firstOrNull { it.id == selected }
+            val sounds = session.description?.sources.orEmpty()
+            // A sound taken out, by hand or by undo, is no longer selected.
+            val selection = picked.among(sounds.map { it.id })
+            val onSelection: (Selection) -> Unit = { picked = it }
+            val chosen = sounds.filter { it.id in selection }
             val deleteChosen = {
-                chosen?.let(session::remove)
-                selected = null
+                session.remove(chosen)
+                picked = Selection()
             }
-            val duplicateChosen: () -> Unit = { chosen?.let { session.duplicate(it) { id -> selected = id } } }
+            val duplicateChosen: () -> Unit = { session.duplicate(chosen) { ids -> picked = Selection(ids) } }
+            val heardAlone = rememberUpdatedState(chosen.map { it.id }.toSet())
             BoxWithConstraints(
                 Modifier.fillMaxSize().background(Backdrop)
                     .focusRequester(keys)
                     .focusable()
+                    // Hold S to hear the selection alone. It is taken here, after a text field has had
+                    // the key, so an S typed into a name stays a letter.
+                    .onKeyEvent { event ->
+                        val plain = !(event.isMetaPressed || event.isCtrlPressed)
+                        if (event.type != KeyEventType.KeyDown || event.key != Key.S || !plain || heardAlone.value.isEmpty()) {
+                            return@onKeyEvent false
+                        }
+                        session.hearAlone(heardAlone.value)
+                        true
+                    }
                     .onPreviewKeyEvent { event ->
+                        // Letting go of S always ends it, wherever the keys go by then.
+                        if (event.type == KeyEventType.KeyUp && event.key == Key.S) session.hearAlone(emptySet())
                         if (event.type != KeyEventType.KeyDown || naming) return@onPreviewKeyEvent false
                         val command = event.isMetaPressed || event.isCtrlPressed
                         when {
@@ -139,32 +158,32 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     ScrollArea(Modifier.weight(1f)) {
                                         when (list) {
                                             Panel.Library -> Library(session, carry, onAdded = { id ->
-                                                selected = id
+                                                picked = Selection(setOf(id))
                                                 panel = Panel.Layers
                                             })
                                             Panel.History -> HistoryPanel(session)
-                                            else -> Layers(session, strengths, selected, onSelect = { selected = it })
+                                            else -> Layers(session, strengths, selection, onSelection)
                                         }
                                         Spacer(Modifier.height(24.dp))
                                     }
                                     if (list == Panel.Layers) {
                                         Rule()
-                                        LayerActions(canChange = chosen != null, onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
+                                        LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
                                     }
                                 }
                                 Splitter(acrossWidth = true) { workspace.leftWidth += it }
                             }
                             Column(Modifier.weight(1f).fillMaxHeight()) {
-                                EditorMap(session, strengths, selected, onSelect = { selected = it }, carry, Modifier.weight(1f).fillMaxWidth())
+                                EditorMap(session, strengths, selection, onSelection, carry, Modifier.weight(1f).fillMaxWidth())
                                 if (workspace.bottomShown) {
                                     Splitter(acrossWidth = false) { workspace.bottomHeight -= it }
-                                    TracksPanel(session, selected, onSelect = { selected = it }, Modifier.fillMaxWidth().height(workspace.bottomHeight))
+                                    TracksPanel(session, selection, onSelection, Modifier.fillMaxWidth().height(workspace.bottomHeight))
                                 }
                             }
                             if (workspace.rightShown) {
                                 Splitter(acrossWidth = true) { workspace.rightWidth -= it }
                                 ScrollArea(Modifier.width(workspace.rightWidth).fillMaxHeight()) {
-                                    Inspector(session, scene, selected, Modifier.fillMaxWidth())
+                                    Inspector(session, scene, selection, Modifier.fillMaxWidth())
                                 }
                             }
                         }
@@ -174,15 +193,15 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                         when (panel) {
                             Panel.Layers -> {
                                 Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                    Layers(session, strengths, selected, onSelect = { selected = it })
+                                    Layers(session, strengths, selection, onSelection)
                                     Spacer(Modifier.height(24.dp))
                                 }
                                 Rule()
-                                LayerActions(canChange = chosen != null, onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
+                                LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
                             }
                             Panel.Library -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                                 Library(session, carry, onAdded = { id ->
-                                    selected = id
+                                    picked = Selection(setOf(id))
                                     panel = Panel.Map
                                 })
                                 Spacer(Modifier.height(24.dp))
@@ -191,10 +210,10 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                 HistoryPanel(session)
                             }
                             Panel.Map -> {
-                                EditorMap(session, strengths, selected, onSelect = { selected = it }, carry, Modifier.weight(1f).fillMaxWidth())
+                                EditorMap(session, strengths, selection, onSelection, carry, Modifier.weight(1f).fillMaxWidth())
                                 Rule()
                                 Inspector(
-                                    session, scene, selected,
+                                    session, scene, selection,
                                     Modifier.fillMaxWidth().heightIn(max = CompactInspector).verticalScroll(rememberScrollState()).padding(bottom = 18.dp),
                                 )
                             }

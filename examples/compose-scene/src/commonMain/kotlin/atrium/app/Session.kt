@@ -12,6 +12,7 @@ import atrium.engine.EditHistory
 import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
+import atrium.engine.LoudnessMap
 import atrium.engine.Output
 import atrium.engine.Position
 import atrium.engine.Preset
@@ -183,6 +184,11 @@ internal class Session(private val store: SettingsStore) {
         }
     }
 
+    /** Hear only the sounds [ids] for as long as a key is held; none lets every layer sound as its ear says. */
+    fun hearAlone(ids: Set<String>) {
+        if (mix.alone != ids) mix(mix.hearingAlone(ids))
+    }
+
     /** Set the level of the sound in [slot], in dB SPL at 1 m. */
     fun level(slot: UShort, level: Float) {
         val running = engine ?: return
@@ -282,10 +288,28 @@ internal class Session(private val store: SettingsStore) {
         build(onAdded) { addSound(preset, at) }
     }
 
-    /** Add a copy of [sound] a metre east of it; [onAdded] gets the copy's id once it sounds. */
-    fun duplicate(sound: SourceDescription, onAdded: (id: String) -> Unit) {
-        step("Duplicate ${sound.name}", "duplicate")
-        build(onAdded) { duplicateSound(sound.slot) }
+    /**
+     * Add a copy of each of [sounds], a metre east of it or else where [places] puts it, as one
+     * step; [onAdded] gets the copies' ids once they all sound.
+     */
+    fun duplicate(sounds: List<SourceDescription>, places: Map<UShort, Position> = emptyMap(), onAdded: (ids: Set<String>) -> Unit) {
+        val running = engine ?: return
+        if (sounds.isEmpty()) return
+        step(if (sounds.size == 1) "Duplicate ${sounds.first().name}" else "Duplicate ${sounds.size} sounds", "duplicate")
+        building.launch {
+            val added = mutableSetOf<String>()
+            libraryFailure = null
+            for (sound in sounds) {
+                runCatching { running.duplicateSound(sound.slot, places[sound.slot]) }
+                    .onSuccess { added += it.id }
+                    .onFailure { libraryFailure = it.message }
+            }
+            if (engine === running && added.isNotEmpty()) {
+                description = running.scene()
+                unsaved = true
+                onAdded(added)
+            }
+        }
     }
 
     /** Show [sound] as [name], in [color] (`#rrggbb`, or null for its voice's own) and under [group]. */
@@ -314,10 +338,12 @@ internal class Session(private val store: SettingsStore) {
         }
     }
 
-    /** Move the sound in [slot] to [position] while it is dragged. */
-    fun move(slot: UShort, position: Position) {
-        step("Move · ${nameOf(slot)}", "move:$slot")
-        command { setSourcePosition(slot, position) }
+    /** Move each sound to where [places] puts it, by its slot, while they are dragged: one step however many. */
+    fun move(places: Map<UShort, Position>) {
+        if (places.isEmpty()) return
+        val slots = places.keys.sorted()
+        step(if (slots.size == 1) "Move · ${nameOf(slots.first())}" else "Move ${slots.size} sounds", "move:${slots.joinToString(",")}")
+        places.forEach { (slot, position) -> command { setSourcePosition(slot, position) } }
         unsaved = true
     }
 
@@ -351,15 +377,61 @@ internal class Session(private val store: SettingsStore) {
         unsaved = true
     }
 
-    /**
-     * Take [sound] out of the playing scene. It is also dropped from the layer mix first, so
-     * that removing a layer that was heard alone lets the others sound again.
-     */
-    fun remove(sound: SourceDescription) {
+    /** Make the sound in [slot] sound [size] wide, from 0 (a point) to 1 (all around). */
+    fun size(slot: UShort, size: Float) {
         val running = engine ?: return
-        step("Remove ${sound.name}", "remove")
-        mix(mix.without(sound.id))
-        command { removeSound(sound.slot) }
+        step("Size · ${nameOf(slot)}", "size:$slot")
+        command { setSourceSize(slot, size) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /**
+     * Make [sound] ambient, heard everywhere, or a point again. The engine builds it again, which
+     * takes a moment, so this runs off the UI thread in turn with every other build.
+     */
+    fun ambient(sound: SourceDescription, ambient: Boolean) {
+        val running = engine ?: return
+        step(if (ambient) "Ambient · ${sound.name}" else "Point · ${sound.name}", "ambient:${sound.slot}:$ambient")
+        building.launch {
+            libraryFailure = runCatching { running.setSourceAmbient(sound.slot, ambient) }.exceptionOrNull()?.message
+            if (engine !== running) return@launch
+            description = running.scene()
+            unsaved = true
+            // Built anew, without the listener's mute.
+            if (mix.silences(sound.id)) command { setSourceMuted(sound.slot, true) }
+        }
+    }
+
+    /** Give the place air at [temperature] °C and [humidity] % relative humidity; it is saved with the scene. */
+    fun atmosphere(temperature: Float, humidity: Float) {
+        val running = engine ?: return
+        step("Air", "air")
+        command { setAtmosphere(temperature, humidity) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /**
+     * How loud the scene's direct sound is over the ground between [from] and [to], on [columns]
+     * by [rows] points: every sound that is heard, or [only] the one in that slot. Null with
+     * nothing playing.
+     */
+    fun loudness(from: Position, to: Position, columns: Int, rows: Int, only: UShort?): LoudnessMap? =
+        engine?.loudness(from, to, columns.toUInt(), rows.toUInt(), only)
+
+    /**
+     * Take [sounds] out of the playing scene, as one step. Each is also dropped from the layer mix
+     * first, so that removing a layer that was heard alone lets the others sound again.
+     */
+    fun remove(sounds: List<SourceDescription>) {
+        val running = engine ?: return
+        if (sounds.isEmpty()) return
+        step(if (sounds.size == 1) "Remove ${sounds.first().name}" else "Remove ${sounds.size} sounds", "remove")
+        sounds.forEach { sound ->
+            mix(mix.without(sound.id))
+            command { removeSound(sound.slot) }
+        }
         description = running.scene()
         unsaved = true
     }

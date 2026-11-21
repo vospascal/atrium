@@ -38,3 +38,13 @@ class TrackHistoryTest {
         assertEquals(1, history.clipsOf(0).size, "only what is inside the window is kept")
     }
 }
+
+class ChannelNamesTest {
+    @kotlin.test.Test
+    fun channelsAreNamedAsTheRoomNamesThem() {
+        val room = mapOf(0 to "L", 1 to "R", 2 to "C", 4 to "Ls", 5 to "Rs")
+        kotlin.test.assertEquals(listOf("L", "R", "C", "LFE", "Ls", "Rs"), channelNames(6, headphones = false, room))
+        kotlin.test.assertEquals(listOf("L", "R"), channelNames(2, headphones = true, room))
+        kotlin.test.assertEquals(listOf("1", "2", "3", "4"), channelNames(4, headphones = false, emptyMap()))
+    }
+}

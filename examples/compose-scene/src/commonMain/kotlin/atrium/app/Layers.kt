@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -27,7 +28,8 @@ import atrium.engine.SourceDescription
 /**
  * The sounds of the playing scene as layers, in their groups. The ear in
  * front of a layer silences it and brings it back, the way the eye in a layer
- * list hides a layer; a group's ear does it for the whole group.
+ * list hides a layer; a group's ear does it for the whole group. A click
+ * selects a layer, and with Shift or ⌘ held adds it to the others.
  *
  * [strengths] is how strongly each sound reaches the listener right now, from
  * 0 to 1, in the order the scene lists its sounds.
@@ -36,10 +38,11 @@ import atrium.engine.SourceDescription
 internal fun Layers(
     session: Session,
     strengths: List<Float>,
-    selected: String?,
-    onSelect: (String?) -> Unit,
+    selection: Selection,
+    onSelection: (Selection) -> Unit,
 ) {
     val sounds = session.description?.sources.orEmpty()
+    val keys = remember { HeldKeys() }
     val mix = session.mix
     var row = 0
     groupedInSceneOrder(sounds.withIndex().toList()) { it.value.group }.forEach { (group, members) ->
@@ -58,9 +61,10 @@ internal fun Layers(
                 sound,
                 strength = if (mix.silences(sound.id)) 0f else strengths.getOrElse(index) { 0f },
                 hearing = !mix.silences(sound.id),
-                selected = sound.id == selected,
+                selected = sound.id in selection,
                 onEar = { session.mix(mix.toggleMute(sound.id)) },
-                onSelect = { onSelect(if (sound.id == selected) null else sound.id) },
+                onSelect = { onSelection(selection.clickedInList(sound.id, keys.adding)) },
+                modifier = keys.watch,
             )
         }
     }
@@ -75,10 +79,11 @@ private fun LayerRow(
     selected: Boolean,
     onEar: () -> Unit,
     onSelect: () -> Unit,
+    modifier: Modifier,
 ) {
     val ink = LocalInkTint.current ?: parseColor(sound.color)
     Row(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .listRow(row, selected)
             .clickable(role = Role.Button, onClick = onSelect)
             .padding(start = 12.dp, end = 14.dp, top = 2.dp, bottom = 2.dp),

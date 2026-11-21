@@ -35,8 +35,16 @@ import kotlin.math.sin
  */
 @Composable
 internal fun ShapePart(session: Session, sound: SourceDescription, live: SourceTelemetry?) {
-    if (sound.emitterKind == EmitterKind.FIELD) {
+    val ambient = sound.emitterKind == EmitterKind.FIELD
+    // Any sound is either a point with a place, or the air of the place itself.
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Chip("Point", selected = !ambient) { if (ambient) session.ambient(sound, false) }
+        Chip("Ambient", selected = ambient) { if (!ambient) session.ambient(sound, true) }
+    }
+    Spacer(Modifier.height(10.dp))
+    if (ambient) {
         PaperText(shapeLine(sound), 15)
+        PaperText("It has no distance, direction or echo: its level is what is heard wherever the listener stands.", 14, Muted)
         return
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -76,6 +84,10 @@ internal fun ShapePart(session: Session, sound: SourceDescription, live: SourceT
         Spacer(Modifier.height(4.dp))
         PaperText("Facing ${bearingLabel(live?.facing ?: sound.facing)}. Turn it with the handle on the map.", 14, Muted)
     }
+    Spacer(Modifier.height(8.dp))
+    PaperText(if (sound.size <= 0f) "Size: a point" else "Size ${(sound.size * 100).roundToInt()} %", 15)
+    PaperLevel(sound.size, onChange = { session.size(sound.slot, it) }, modifier = Modifier.fillMaxWidth())
+    PaperText("A wider sound spreads over more loudspeakers and feeds less of the reverb; from 75 % none.", 14, Muted)
 }
 
 /** The shapes to start from. Each sets a width and how much is heard behind; both can be changed after. */

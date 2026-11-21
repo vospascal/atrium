@@ -19,19 +19,38 @@ import kotlin.math.roundToInt
 /**
  * What is selected, in the same order for every sound: what it is, how it
  * fills the air, where it is, when it plays, whether it travels. With nothing
- * selected it shows the scene itself.
+ * selected it shows the scene itself, and with several what can be done to
+ * them together.
  */
 @Composable
-internal fun Inspector(session: Session, scene: SceneFile, selected: String?, modifier: Modifier = Modifier) {
+internal fun Inspector(session: Session, scene: SceneFile, selection: Selection, modifier: Modifier = Modifier) {
     val sounds = session.description?.sources.orEmpty()
-    val sound = sounds.firstOrNull { it.id == selected }
+    val chosen = sounds.filter { it.id in selection }
     Column(modifier.padding(horizontal = 22.dp)) {
         when {
-            sound != null -> SoundInspector(session, sound)
-            selected == ListenerId -> ListenerInspector(session)
+            chosen.size > 1 -> SeveralInspector(chosen)
+            chosen.size == 1 -> SoundInspector(session, chosen.single())
+            selection.single == ListenerId -> ListenerInspector(session)
             else -> SceneInspector(session, scene, sounds.size)
         }
     }
+}
+
+/** Several sounds selected: which, and what applies to all of them at once. */
+@Composable
+private fun SeveralInspector(sounds: List<SourceDescription>) {
+    PaperText("${sounds.size} sounds", 26, weight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
+    PaperText("Select one of them alone to change its sound, shape or rhythm.", 14, Muted)
+
+    Part("Selected")
+    sounds.forEach { PaperText(it.name, 15) }
+
+    Part("Together")
+    PaperText("Drag one on the map and they all move; the arrow keys nudge them.", 14, Muted)
+    PaperText("Hold Alt while dragging to leave copies where you let go.", 14, Muted)
+    PaperText("Hold S to hear only these. ⌘D duplicates them; the bin under the layers removes them.", 14, Muted)
+
+    Spacer(Modifier.height(22.dp))
 }
 
 @Composable
@@ -44,7 +63,7 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     IdentityPart(session, sound)
 
     Part("Sound")
-    PaperText("Level ${sound.spl.roundToInt()} dB at 1 m", 15)
+    PaperText(if (sound.emitterKind == EmitterKind.FIELD) "Level ${sound.spl.roundToInt()} dB, everywhere" else "Level ${sound.spl.roundToInt()} dB at 1 m", 15)
     PaperLevel(
         ((sound.spl - QuietestLayerLevel) / (LoudestLayerLevel - QuietestLayerLevel)).coerceIn(0f, 1f),
         onChange = { session.level(sound.slot, QuietestLayerLevel + it * (LoudestLayerLevel - QuietestLayerLevel)) },
@@ -107,6 +126,27 @@ private fun SceneInspector(session: Session, scene: SceneFile, voices: Int) {
     Part("Weather")
     WeatherPart(session)
 
+    if (description != null) {
+        Part("Air")
+        val temperature = description.temperatureC
+        val humidity = description.humidityPct
+        PaperText("Temperature ${oneDecimal(temperature)} °C", 15)
+        PaperLevel(
+            (temperature - ColdestAir) / (WarmestAir - ColdestAir),
+            onChange = { session.atmosphere(ColdestAir + it * (WarmestAir - ColdestAir), humidity) },
+            // Half a degree an arrow press.
+            step = .5f / (WarmestAir - ColdestAir),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        PaperText("Humidity ${humidity.roundToInt()} %", 15)
+        PaperLevel(
+            humidity / 100f,
+            onChange = { session.atmosphere(temperature, it * 100f) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        PaperText("How fast sound travels, and how much treble the air takes from a distant sound.", 14, Muted)
+    }
+
     Part("Output")
     PaperText(telemetry?.output?.let { "${it.renderMode.label} · ${it.channelMode.label}" } ?: "—", 15)
     PaperText("Volume ${((telemetry?.volume ?: 0f) * 100).roundToInt()} %", 14, Muted)
@@ -128,6 +168,10 @@ private fun Part(title: String) {
     PaperText(title.uppercase(), 13, Muted, FontWeight.SemiBold, spacing = 2f)
     Spacer(Modifier.height(8.dp))
 }
+
+/** The coldest and warmest air a place can have (°C). The engine's limits. */
+private const val ColdestAir = -20f
+private const val WarmestAir = 50f
 
 /** How many sounds the engine can play at once. */
 internal const val VoiceCount = 16

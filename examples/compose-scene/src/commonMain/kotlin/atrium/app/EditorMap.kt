@@ -71,6 +71,8 @@ private data class Marker(
     val ambient: Boolean,
     val beamHalfAngle: Float?,
     val facing: Float,
+    /** How wide it sounds, 0 a point to 1 all around. */
+    val size: Float,
     val strength: Float,
     val silent: Boolean,
     /** Whether it is uttering something now; a voice with takes rests between them. */
@@ -83,16 +85,30 @@ private data class Marker(
 /** A sound whose facing handle is being dragged: the map owns its heading until the drag ends. */
 private data class Turned(val slot: UShort, val heading: Float)
 
-/** A sound being dragged: the map owns its place until the engine reports it there. */
-private data class Dragged(val slot: UShort, val offset: Point)
+/**
+ * The sounds being dragged, by slot: the map owns their places until the engine reports the one
+ * under the pointer, [lead], where it was dropped. Each keeps its distance to the lead, so several
+ * selected sounds move as one. While [copying], with Alt held, the sounds stay where they are
+ * and the places are where their copies will land.
+ */
+private data class Dragged(val lead: UShort, val start: Map<UShort, Point>, val offsets: Map<UShort, Point>, val copying: Boolean) {
+    /** With the lead at [at] and every other sound as far from it as when the drag began. */
+    fun movedTo(at: Point): Dragged {
+        val from = start.getValue(lead)
+        return copy(offsets = start.mapValues { (_, began) -> Point(began.x + at.x - from.x, began.y + at.y - from.y) })
+    }
+}
 
 /** The listener while it is dragged or turned: the map owns its place and heading until the drag ends. */
 private data class HeldListener(val offset: Point, val heading: Float, val turning: Boolean)
 
 /**
  * Every sound of the playing scene from above, in the player's paper style.
- * Click a sound to select it, drag it to move it, click the ground to select
- * nothing. A sound is black and white until it is selected. Its circle, or
+ * Click a sound to select it, with Shift or ⌘ to add it to the others, drag
+ * it to move it and every other selected sound with it, click the ground to
+ * select nothing. The listener lies on top of every sound, so it can always be
+ * picked. Hold Alt while dragging and copies land where the drag ends.
+ * A sound is black and white until it is selected. Its circle, or
  * its wedge when it is focused, is how far its level carries, and a ring
  * travels outward while it is heard. An ambient sound is bands arriving from
  * the side its anchor lies on, and can be grabbed near that anchor. The
@@ -103,8 +119,8 @@ private data class HeldListener(val offset: Point, val heading: Float, val turni
 internal fun EditorMap(
     session: Session,
     strengths: List<Float>,
-    selected: String?,
-    onSelect: (String?) -> Unit,
+    selection: Selection,
+    onSelection: (Selection) -> Unit,
     carry: Carry<Preset>,
     modifier: Modifier = Modifier,
 ) {
@@ -128,28 +144,29 @@ internal fun EditorMap(
 
     // Hand a dragged sound back to telemetry once the engine reports it where it was dropped.
     LaunchedEffect(telemetry) {
-        val held = dragged ?: return@LaunchedEffect
-        val reported = telemetry?.sources?.firstOrNull { it.slot == held.slot }?.position ?: return@LaunchedEffect
+        val held = dragged?.takeIf { !it.copying } ?: return@LaunchedEffect
+        val reported = telemetry?.sources?.firstOrNull { it.slot == held.lead }?.position ?: return@LaunchedEffect
         if (echo.accepts(Point(reported.x - origin.x, reported.y - origin.y))) dragged = null
     }
 
     val markers = description?.sources.orEmpty().mapIndexed { index, sound ->
         val live = telemetry?.sources?.firstOrNull { it.slot == sound.slot }
         val at = live?.position ?: sound.position
-        val held = dragged?.takeIf { it.slot == sound.slot }
+        val held = dragged?.takeIf { !it.copying }?.offsets?.get(sound.slot)
         val facing = live?.facing ?: sound.facing
         Marker(
             sound.slot,
             sound.id,
             sound.name,
-            held?.offset ?: Point(at.x - origin.x, at.y - origin.y),
+            held ?: Point(at.x - origin.x, at.y - origin.y),
             height = at.z,
             // Black and white until it is selected; then its own ink.
-            if (sound.id == selected) tint ?: parseColor(sound.color) else colors.foreground,
+            if (sound.id in selection) tint ?: parseColor(sound.color) else colors.foreground,
             reach = reachOf(sound.spl, sound.referenceDistance),
             ambient = sound.emitterKind == EmitterKind.FIELD,
             beamHalfAngle = sound.beamHalfAngle,
             facing = turned?.takeIf { it.slot == sound.slot }?.heading ?: atan2(facing.y, facing.x),
+            size = sound.size,
             strength = strengths.getOrElse(index) { 0f },
             silent = session.mix.silences(sound.id),
             sounding = live == null || live.take != null,
@@ -162,8 +179,11 @@ internal fun EditorMap(
     val framing = rememberUpdatedState(frame)
     val focus = remember { FocusRequester() }
     val current = rememberUpdatedState(markers)
-    val select = rememberUpdatedState(onSelect)
-    val chosen = rememberUpdatedState(selected)
+    val select = rememberUpdatedState(onSelection)
+    val chosen = rememberUpdatedState(selection)
+    val keys = remember { HeldKeys() }
+    // The loudness layer: off until asked for, then the whole scene, or the one selected sound alone.
+    var loud by remember { mutableStateOf(false) }
 
     /** The sound a pointer at [at] picks in [view], if any. */
     fun pick(view: TopDown, at: Offset, density: Float): Marker? {
@@ -188,17 +208,33 @@ internal fun EditorMap(
     // Whether a drag that began on empty ground is moving the view.
     var panning by remember { mutableStateOf(false) }
 
-    /** Move the selected sound, or the listener, over the ground by [step] metres. */
+    /** Move the selected sounds, or the listener, over the ground by [step] metres. */
     fun nudge(step: Point): Boolean {
-        if (chosen.value == ListenerId) {
+        if (chosen.value.single == ListenerId) {
             session.moveListener(Position(listener.x + step.x, listener.y + step.y, listener.z))
             session.placed()
             return true
         }
-        val sound = description?.sources?.firstOrNull { it.id == chosen.value } ?: return false
-        session.move(sound.slot, Position(sound.position.x + step.x, sound.position.y + step.y, sound.position.z))
+        val sounds = description?.sources.orEmpty().filter { it.id in chosen.value }
+        if (sounds.isEmpty()) return false
+        session.move(sounds.associate { it.slot to Position(it.position.x + step.x, it.position.y + step.y, it.position.z) })
         session.placed()
         return true
+    }
+
+    /** Where the sounds of [held] are in the world, each at its own height. */
+    fun placesOf(held: Dragged): Map<UShort, Position> = held.offsets.mapValues { (slot, at) ->
+        Position(origin.x + at.x, origin.y + at.y, current.value.firstOrNull { it.slot == slot }?.height ?: 0f)
+    }
+
+    val view = frame.view(size, reach)
+    val only = description?.sources?.firstOrNull { it.id == selection.single }
+    // Worked out again when a sound, the mix or the view changes: not at every point of a drag,
+    // during which the scene's description stands still.
+    // The loudest band is the loudest sound shown at 1 m, so the colours hold still while the map is moved.
+    val loudest = loudestBandTop((only?.let(::listOf) ?: description?.sources.orEmpty().filterNot { session.mix.silences(it.id) }).maxOfOrNull { it.spl } ?: 0f)
+    val loudness = remember(loud, description, session.mix, frame, size, reach, only?.slot) {
+        if (!loud) null else loudnessPatch(view, size, origin, listener.z)?.let { session.loudness(it.from, it.to, it.columns, it.rows, only?.slot) }
     }
 
     Box(modifier) {
@@ -208,9 +244,10 @@ internal fun EditorMap(
             // A preset dropped on the map is added where it was let go, at the listener's ear height.
             .carryTarget(carry) { preset, local ->
                 val at = framing.value.view(size, reach).toWorld(local)
-                session.add(preset.path, Position(origin.x + at.x, origin.y + at.y, listener.z), onSelect)
+                session.add(preset.path, Position(origin.x + at.x, origin.y + at.y, listener.z)) { id -> onSelection(Selection(setOf(id))) }
             }
             .clipToBounds()
+            .then(keys.watch)
             // The arrow keys nudge the selected sound once the map has been clicked.
             .focusRequester(focus)
             .focusable()
@@ -237,7 +274,8 @@ internal fun EditorMap(
                     focus.requestFocus()
                     val view = framing.value.view(size, reach)
                     val onListener = (view.toScreen(listenerNow.value.first) - at).getDistance() <= PickRadius * density
-                    select.value(pick(view, at, density)?.id ?: if (onListener) ListenerId else null)
+                    // The listener lies on top: a sound over it, or an ambient one anchored at it, never hides it.
+                    select.value(chosen.value.clicked(if (onListener) ListenerId else pick(view, at, density)?.id, keys.adding))
                 }
             }
             .pointerInput(session.engine, reach) {
@@ -248,7 +286,7 @@ internal fun EditorMap(
                         val top = framing.value.view(size, reach)
                         view = top
                         // The facing handle of the selected sound is tried first: it sits away from its dot.
-                        val focused = current.value.firstOrNull { it.id == chosen.value && it.turnable }
+                        val focused = current.value.firstOrNull { it.id == chosen.value.single && it.turnable }
                         val handle = focused?.let { facingHandle(top.toScreen(it.offset), it.facing, FacingReach * density) }
                         if (focused != null && handle != null && (handle - at).getDistance() <= HandleRadius * density) {
                             turned = Turned(focused.slot, focused.facing)
@@ -256,22 +294,27 @@ internal fun EditorMap(
                         }
                         val (listenerOffset, listenerFacing) = listenerNow.value
                         val listenerOnScreen = top.toScreen(listenerOffset)
-                        if (chosen.value == ListenerId &&
+                        if (chosen.value.single == ListenerId &&
                             (facingHandle(listenerOnScreen, listenerFacing, FacingReach * density) - at).getDistance() <= HandleRadius * density
                         ) {
                             heldListener = HeldListener(listenerOffset, listenerFacing, turning = true)
                             return@detectDragGestures
                         }
-                        val marker = pick(top, at, density)
-                        if (marker == null && (listenerOnScreen - at).getDistance() <= PickRadius * density) {
-                            select.value(ListenerId)
+                        // The listener before any sound, as it is drawn: on top.
+                        if ((listenerOnScreen - at).getDistance() <= PickRadius * density) {
+                            select.value(Selection(setOf(ListenerId)))
                             heldListener = HeldListener(listenerOffset, listenerFacing, turning = false)
                             return@detectDragGestures
                         }
+                        val marker = pick(top, at, density)
                         if (marker != null) {
-                            select.value(marker.id)
-                            echo.move()
-                            dragged = Dragged(marker.slot, marker.offset)
+                            // One of several selected sounds carries them all; any other sound is taken alone.
+                            val carried = chosen.value.grabbed(marker.id)
+                            if (carried != chosen.value) select.value(carried)
+                            val places = current.value.filter { it.id in carried }.associate { it.slot to it.offset }
+                            val copying = keys.copying
+                            if (!copying) echo.move()
+                            dragged = Dragged(marker.slot, places, places, copying)
                         } else {
                             panning = true
                         }
@@ -309,21 +352,29 @@ internal fun EditorMap(
                         }
                         val held = dragged
                         if (held != null && top != null) {
-                            val at = top.toWorld(change.position)
-                            val height = current.value.firstOrNull { it.slot == held.slot }?.height ?: 0f
-                            dragged = held.copy(offset = at)
-                            session.move(held.slot, Position(origin.x + at.x, origin.y + at.y, height))
+                            val moved = held.movedTo(top.toWorld(change.position))
+                            dragged = moved
+                            if (!moved.copying) session.move(placesOf(moved))
                         }
                     },
                     onDragEnd = {
-                        dragged?.let { echo.release(it.offset) }
+                        dragged?.let { held ->
+                            if (held.copying) {
+                                // The copies land where the drag ended, and are what is selected after.
+                                val originals = description?.sources.orEmpty().filter { it.slot in held.offsets }
+                                session.duplicate(originals, placesOf(held)) { ids -> select.value(Selection(ids)) }
+                                dragged = null
+                            } else {
+                                echo.release(held.offsets.getValue(held.lead))
+                            }
+                        }
                         heldListener = null
                         turned = null
                         panning = false
                         session.placed()
                     },
                     onDragCancel = {
-                        dragged?.let { echo.release(it.offset) }
+                        dragged?.let { held -> if (held.copying) dragged = null else echo.release(held.offsets.getValue(held.lead)) }
                         heldListener = null
                         turned = null
                         panning = false
@@ -332,7 +383,8 @@ internal fun EditorMap(
                 )
             },
     ) {
-        val view = frame.view(size, reach)
+        // The loudness of the ground lies under everything.
+        loudness?.let { drawLoudness(it, loudest, view, origin, colors.dark) }
         // The listener: rings of distance, ambient bands and bearings are measured from it.
         val centre = view.toScreen(listenerAt)
 
@@ -345,9 +397,9 @@ internal fun EditorMap(
         drawText(north, topLeft = Offset(centre.x - north.size.width / 2f, density * 6f))
 
         // Ambient washes first, so points and wedges stay readable on top of them.
-        markers.filter { it.ambient }.forEach { drawAmbient(it, listenerAt, view, colors, text, it.id == selected, beat) }
+        markers.filter { it.ambient }.forEach { drawAmbient(it, listenerAt, view, colors, text, it.id in selection, beat) }
         // Reaches under every point, so a small sound inside a large one can still be seen and picked.
-        markers.filterNot { it.ambient }.sortedByDescending { it.reach }.forEach { drawReach(view.toScreen(it.offset), it, view, beat, it.id == selected) }
+        markers.filterNot { it.ambient }.sortedByDescending { it.reach }.forEach { drawReach(view.toScreen(it.offset), it, view, beat, it.id in selection) }
 
         // The room's loudspeakers, under the sounds: filled by what each plays, an outline when the output passes them by.
         // On headphones none plays, and the room's speakers have nothing to do with what is heard, so none is drawn.
@@ -358,13 +410,33 @@ internal fun EditorMap(
             drawSpeaker(view.toScreen(offset), centre, speaker.name, speaker.channel in inUse, level, colors, text)
         }
 
-        drawListener(centre, listenerHeading.takeIf { liveFacing != null || heldListener != null }, colors, selected == ListenerId)
-
         markers.filterNot { it.ambient }.forEach { marker ->
             val at = view.toScreen(marker.offset)
-            if (marker.id == selected) drawBearingLine(centre, at, Point(marker.offset.x - listenerAt.x, marker.offset.y - listenerAt.y), colors, text)
-            if (marker.id == selected && marker.turnable) drawFacingHandle(at, marker, colors)
-            drawPoint(at, marker, colors, text, marker.id == selected)
+            // The bearing and the facing handle belong to one sound; with several selected they would crowd the map.
+            if (marker.id == selection.single) drawBearingLine(centre, at, Point(marker.offset.x - listenerAt.x, marker.offset.y - listenerAt.y), colors, text)
+            if (marker.id == selection.single && marker.turnable) drawFacingHandle(at, marker, colors)
+            drawPoint(at, marker, colors, text, marker.id in selection)
+        }
+
+        // The listener last of all that can be picked, so it is never under a sound.
+        drawListener(centre, listenerHeading.takeIf { liveFacing != null || heldListener != null }, colors, selection.single == ListenerId)
+
+        // Where the copies will land while Alt is held: an open dot each, joined to its original.
+        dragged?.takeIf { it.copying }?.let { held ->
+            held.offsets.forEach { (slot, offset) ->
+                val original = markers.firstOrNull { it.slot == slot } ?: return@forEach
+                val at = view.toScreen(offset)
+                drawLine(original.color.copy(alpha = .4f), view.toScreen(original.offset), at, strokeWidth = density, pathEffect = PathEffect.dashPathEffect(floatArrayOf(density * 4f, density * 4f)))
+                drawCircle(colors.backdrop, density * 6f, at)
+                drawCircle(original.color, density * 6f, at, style = Stroke(width = density * 1.6f))
+            }
+        }
+    }
+    Row(Modifier.align(Alignment.BottomStart).padding(12.dp), verticalAlignment = Alignment.Bottom) {
+        ToolButton("Loudness", strong = loud) { loud = !loud }
+        if (loud) {
+            Spacer(Modifier.width(10.dp))
+            LoudnessLegend(of = only?.name ?: "everything heard", top = loudest)
         }
     }
     ZoomControls(frame, Modifier.align(Alignment.BottomEnd).padding(12.dp)) { frame = it(size, reach) }
@@ -538,6 +610,8 @@ private fun DrawScope.drawReach(at: Offset, marker: Marker, view: TopDown, beat:
 }
 
 private fun DrawScope.drawPoint(at: Offset, marker: Marker, colors: PlayerColors, text: TextMeasurer, selected: Boolean) {
+    // Its size: a soft disc around the dot, wider the wider it sounds.
+    if (marker.size > 0f) drawCircle(marker.color.copy(alpha = if (marker.silent) .08f else .2f), density * (6f + WidestSize * marker.size), at)
     if (selected) drawCircle(colors.foreground, density * 11f, at, style = Stroke(width = density * 1.6f))
     if (marker.silent) {
         drawCircle(colors.backdrop, density * 6f, at)
@@ -599,6 +673,9 @@ private const val ZoomStep = 1.5f
  * case, so this one can never be a sound's.
  */
 internal const val ListenerId = "Listener"
+
+/** How far past its dot the disc of a sound that is all around reaches (dp). */
+private const val WidestSize = 22f
 
 /** How close to a sound a click or the start of a drag has to be (dp). */
 private const val PickRadius = 20f
