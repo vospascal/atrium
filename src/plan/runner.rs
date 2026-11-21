@@ -203,6 +203,15 @@ fn scheduled(due: Due, sample_rate: f32, moved_by: f64) -> Scheduled {
             param,
             value,
         },
+        Due::Air {
+            wind,
+            daylight,
+            wind_from,
+        } => Scheduled::Air {
+            wind,
+            daylight,
+            wind_from,
+        },
     }
 }
 

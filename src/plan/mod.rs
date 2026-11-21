@@ -28,5 +28,5 @@ pub use due::{Due, Scheduled};
 pub use rhythm::{Rests, Rhythm, TakeRhythm};
 pub use runner::Planner;
 pub use session::Plan;
-pub use story::{Story, Weather};
+pub use story::{Story, Weather, PREVAILING_WIND_FROM};
 pub use voice::Planned;

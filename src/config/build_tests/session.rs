@@ -269,3 +269,26 @@ fn a_paused_scene_is_silent_and_its_clock_stands_still() {
         "and runs on from where it stopped"
     );
 }
+
+/// A scene's weather says where the wind comes from, as a compass bearing.
+/// Left out it is the south-west and is not written back; set, it is kept.
+#[test]
+fn a_scenes_weather_names_where_the_wind_comes_from() {
+    use crate::config::WeatherConfig;
+    let plain: WeatherConfig = serde_yaml::from_str("story: held\nwind: 0.3\n").expect("parses");
+    assert_eq!(plain.wind_from, crate::plan::PREVAILING_WIND_FROM);
+    assert_eq!(plain.story(1).expect("a story").wind_from(), 225.0);
+    assert!(!serde_yaml::to_string(&plain)
+        .expect("writes")
+        .contains("wind_from"));
+
+    let westerly: WeatherConfig =
+        serde_yaml::from_str("story: held\nwind: 0.3\nwind_from: 270\n").expect("parses");
+    assert_eq!(westerly.story(1).expect("a story").wind_from(), 270.0);
+    let written = serde_yaml::to_string(&westerly).expect("writes");
+    assert!(written.contains("wind_from: 270"), "{written}");
+    assert_eq!(
+        serde_yaml::from_str::<WeatherConfig>(&written).expect("reads back"),
+        westerly
+    );
+}

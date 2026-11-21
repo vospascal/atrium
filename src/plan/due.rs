@@ -19,6 +19,14 @@ pub enum Scheduled {
     },
     /// Forget every appointment: the scene was moved to another moment.
     Cancel { slot: u16 },
+    /// The air of the place has changed: how hard the wind blows and how
+    /// bright the day is, each 0 to 1, and the compass bearing the wind
+    /// comes from (degrees).
+    Air {
+        wind: f32,
+        daylight: f32,
+        wind_from: f32,
+    },
 }
 
 /// What becomes due when the plan moves on.
@@ -28,4 +36,11 @@ pub enum Due {
     Set(usize, SynthParam, f32),
     /// Forget what the voice was told: the scene moved to another moment.
     Cancel(usize),
+    /// The air of the place: wind and daylight, 0 to 1, and the bearing the
+    /// wind comes from (degrees).
+    Air {
+        wind: f32,
+        daylight: f32,
+        wind_from: f32,
+    },
 }

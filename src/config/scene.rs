@@ -60,6 +60,7 @@ pub struct SceneConfig {
 ///   wind: [0.05, 0.25]     # the band it drifts in; one number holds it there
 ///   rain: 0
 ///   daylight: 1
+///   wind_from: 270         # compass degrees it blows from; here the west
 /// ```
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +74,21 @@ pub struct WeatherConfig {
     pub storm: Band,
     #[serde(default = "Band::full")]
     pub daylight: Band,
+    /// The compass bearing the wind comes from, in degrees: 0 north, 90
+    /// east. Left out, the south-west.
+    #[serde(
+        default = "prevailing_wind",
+        skip_serializing_if = "is_prevailing_wind"
+    )]
+    pub wind_from: f32,
+}
+
+fn prevailing_wind() -> f32 {
+    crate::plan::PREVAILING_WIND_FROM
+}
+
+fn is_prevailing_wind(wind_from: &f32) -> bool {
+    *wind_from == crate::plan::PREVAILING_WIND_FROM
 }
 
 /// One condition's band: a value it is held at, or the lowest and highest it
@@ -114,6 +130,9 @@ impl WeatherConfig {
                 weather.story
             )
         })?;
+        if !weather.wind_from.is_finite() {
+            return Err("`wind_from` must be a compass bearing in degrees".into());
+        }
         Ok(Weather::new(
             story,
             [
@@ -123,7 +142,8 @@ impl WeatherConfig {
                 weather.daylight.range(),
             ],
             seed,
-        ))
+        )
+        .with_wind_from(weather.wind_from))
     }
 }
 

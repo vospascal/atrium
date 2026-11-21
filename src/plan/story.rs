@@ -43,8 +43,14 @@ pub struct Weather {
     pub story: Story,
     /// Lowest and highest of each condition, in [`Condition::ALL`] order.
     pub bands: [(f32, f32); Condition::ALL.len()],
+    /// The compass bearing the wind comes from, in degrees: 0 north, 90 east.
+    wind_from: f32,
     seed: u64,
 }
+
+/// Where the wind comes from unless a scene says otherwise: the south-west,
+/// the prevailing wind of the Dutch coast the first scenes were made for.
+pub const PREVAILING_WIND_FROM: f32 = 225.0;
 
 /// Shortest and longest quiet spell between two storms (s).
 const QUIET_SECONDS: (f64, f64) = (8.0 * 60.0, 25.0 * 60.0);
@@ -60,7 +66,26 @@ impl Weather {
             let (low, high) = (low.clamp(0.0, 1.0), high.clamp(0.0, 1.0));
             (low.min(high), low.max(high))
         });
-        Self { story, bands, seed }
+        Self {
+            story,
+            bands,
+            wind_from: PREVAILING_WIND_FROM,
+            seed,
+        }
+    }
+
+    /// The same weather with the wind coming from `degrees` on the compass.
+    /// A bearing that is not a number leaves it as it was.
+    pub fn with_wind_from(mut self, degrees: f32) -> Self {
+        if degrees.is_finite() {
+            self.wind_from = degrees.rem_euclid(360.0);
+        }
+        self
+    }
+
+    /// The compass bearing the wind comes from, 0 up to 360 degrees.
+    pub fn wind_from(&self) -> f32 {
+        self.wind_from
     }
 
     /// A still, dry, bright day: nothing moves.

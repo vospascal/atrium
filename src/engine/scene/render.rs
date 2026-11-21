@@ -3,6 +3,7 @@
 //! push telemetry.
 
 use crate::audio::spectral_profile::BARK_BANDS;
+use crate::audio::turbulence::AirMotion;
 #[cfg(feature = "memprof")]
 use crate::engine::memprof::MemStage;
 use crate::engine::telemetry::compute_telemetry;
@@ -76,6 +77,13 @@ impl AudioScene {
                         if let Some(source) = self.sources.get_mut(slot as usize) {
                             source.set_synth_param(param, value);
                         }
+                    }
+                    crate::plan::Scheduled::Air {
+                        wind,
+                        daylight,
+                        wind_from,
+                    } => {
+                        self.environment.air = AirMotion::from_weather(wind, daylight, wind_from);
                     }
                 }
             }

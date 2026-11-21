@@ -4,7 +4,7 @@
 use atrium_core::commands::SynthParam;
 use atrium_core::telemetry::MAX_SOURCES;
 
-use super::conditions::{self, Conditions, Follow, Target};
+use super::conditions::{self, Condition, Conditions, Follow, Target};
 use super::due::Due;
 use super::rhythm::Rhythm;
 use super::story::Weather;
@@ -39,6 +39,9 @@ pub struct Plan {
     followers: Vec<Option<Follower>>,
     /// The scene was moved: every voice is to forget what it was told.
     moved: bool,
+    /// The air last sent to the audio thread: wind, daylight and the wind's
+    /// bearing. `None` until it has been sent, and whenever it must be again.
+    air_sent: Option<(f32, f32, f32)>,
 }
 
 impl Plan {
@@ -52,6 +55,7 @@ impl Plan {
             voices: vec![None; MAX_SOURCES],
             followers: vec![None; MAX_SOURCES],
             moved: false,
+            air_sent: None,
         }
     }
 
@@ -71,6 +75,7 @@ impl Plan {
         for follower in self.followers.iter_mut().flatten() {
             follower.sent.clear();
         }
+        self.air_sent = None;
     }
 
     /// The conditions at `seconds` on the session's clock.
@@ -203,6 +208,26 @@ impl Plan {
             }
         }
         let conditions = self.weather.at(self.clock.story_at(until));
+        // The air every path crosses, sent when it has moved and not every
+        // time the plan looks.
+        let air = (
+            conditions.get(Condition::Wind),
+            conditions.get(Condition::Daylight),
+            self.weather.wind_from(),
+        );
+        let moved = |sent: (f32, f32, f32)| {
+            (air.0 - sent.0).abs() > AIR_STEP
+                || (air.1 - sent.1).abs() > AIR_STEP
+                || air.2 != sent.2
+        };
+        if self.air_sent.is_none_or(moved) {
+            self.air_sent = Some(air);
+            due.push(Due::Air {
+                wind: air.0,
+                daylight: air.1,
+                wind_from: air.2,
+            });
+        }
         for (slot, follower) in self.followers.iter_mut().enumerate() {
             let Some(follower) = follower else { continue };
             for follow in &follower.follows {
@@ -256,6 +281,7 @@ impl Plan {
         for follower in self.followers.iter_mut().flatten() {
             follower.sent.clear();
         }
+        self.air_sent = None;
         self.moved = true;
     }
 
@@ -268,7 +294,7 @@ impl Plan {
             .into_iter()
             .filter_map(|due| match due {
                 Due::Utter(slot, planned) => Some((slot, planned)),
-                Due::Set(..) | Due::Cancel(_) => None,
+                Due::Set(..) | Due::Cancel(_) | Due::Air { .. } => None,
             })
             .collect()
     }
@@ -299,6 +325,10 @@ impl WeatherClock {
         self.story + (session - self.session) * self.speed
     }
 }
+
+/// How far wind or daylight moves before the air is sent again: half a
+/// hundredth of its range, well under what changes the wavering audibly.
+const AIR_STEP: f32 = 0.005;
 
 /// How far a followed setting moves before it is sent again: a hundredth of
 /// its size, so a slow drift is not a stream of tiny changes.
@@ -376,7 +406,7 @@ mod tests {
             .flat_map(|second| plan.take_due(second as f64))
             .filter_map(|due| match due {
                 Due::Utter(slot, planned) => Some((slot, planned)),
-                Due::Set(..) | Due::Cancel(_) => None,
+                Due::Set(..) | Due::Cancel(_) | Due::Air { .. } => None,
             })
             .collect();
         assert_eq!(played, shown);
@@ -400,7 +430,11 @@ mod tests {
         );
         assert!(plan.has_voice(0) && !plan.has_voice(1));
         plan.remove_voice(0);
-        assert!(plan.take_due(100.0).is_empty());
+        // Only the air of the place is still handed on; no voice is.
+        assert!(plan
+            .take_due(100.0)
+            .iter()
+            .all(|due| matches!(due, Due::Air { .. })));
     }
 
     fn rainy_bird() -> Vec<Follow> {
@@ -443,6 +477,74 @@ mod tests {
         assert!(
             wet / wet_seconds < 0.3 * dry / dry_seconds,
             "the rain hardly quietened it"
+        );
+    }
+
+    /// The air is sent once as the scene starts, again when wind or daylight
+    /// has moved, and again after the weather or the moment is changed; not
+    /// every time the plan looks.
+    #[test]
+    fn the_air_is_sent_when_it_has_moved() {
+        let air = |due: Vec<Due>| {
+            due.into_iter()
+                .filter_map(|due| match due {
+                    Due::Air {
+                        wind,
+                        daylight,
+                        wind_from,
+                    } => Some((wind, daylight, wind_from)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut plan = Plan::new(2);
+        assert_eq!(
+            air(plan.take_due(0.1)),
+            vec![(0.0, 1.0, crate::plan::PREVAILING_WIND_FROM)],
+            "a calm bright day, as the scene starts"
+        );
+        assert!(air(plan.take_due(0.2)).is_empty(), "nothing moved");
+
+        plan.set_weather(
+            Weather::new(
+                Story::Held,
+                [(0.4, 0.4), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5)],
+                2,
+            )
+            .with_wind_from(270.0),
+        );
+        assert_eq!(air(plan.take_due(0.3)), vec![(0.4, 0.5, 270.0)]);
+        assert!(air(plan.take_due(0.4)).is_empty());
+        plan.seek(600.0);
+        assert_eq!(air(plan.take_due(600.1)), vec![(0.4, 0.5, 270.0)]);
+
+        // Drifting wind is sent as it moves, in steps and not at every look.
+        plan.set_weather(Weather::new(
+            Story::Drifting,
+            [(0.0, 1.0), (0.0, 0.0), (0.0, 0.0), (1.0, 1.0)],
+            2,
+        ));
+        let sent: usize = (1..36_000)
+            .map(|tenth| air(plan.take_due(600.1 + tenth as f64 / 10.0)).len())
+            .sum();
+        assert!(sent > 100, "the wind drifted and only {sent} were sent");
+        assert!(
+            sent < 36_000 / 4,
+            "{sent} sent; most looks should send nothing"
+        );
+    }
+
+    /// A bearing wraps onto the compass, and one that is not a number is
+    /// left as it was.
+    #[test]
+    fn a_wind_bearing_stays_on_the_compass() {
+        let calm = Weather::calm(1);
+        assert_eq!(calm.wind_from(), crate::plan::PREVAILING_WIND_FROM);
+        assert_eq!(calm.clone().with_wind_from(-90.0).wind_from(), 270.0);
+        assert_eq!(calm.clone().with_wind_from(725.0).wind_from(), 5.0);
+        assert_eq!(
+            calm.clone().with_wind_from(f32::NAN).wind_from(),
+            crate::plan::PREVAILING_WIND_FROM
         );
     }
 
