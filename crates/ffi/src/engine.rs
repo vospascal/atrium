@@ -508,6 +508,7 @@ impl Engine {
     pub fn audition(&self, preset: Option<String>) -> Result<(), EngineError> {
         let mut edits = lock(&self.edits);
         edits.stop_audition()?;
+        self.planner.remove_voice(AUDITION_SLOT);
         let Some(preset) = preset else {
             return Ok(());
         };
@@ -530,6 +531,9 @@ impl Engine {
             bands: built.bands,
             amplitude: built.amplitude,
         })?;
+        // A kind that rests is told by the plan when to speak; heard on its
+        // own it speaks at once.
+        self.planner.preview_voice(AUDITION_SLOT, built.rhythm);
         edits.auditioned = true;
         Ok(())
     }
@@ -545,6 +549,7 @@ impl Engine {
     pub fn audition_take(&self, slot: u16, take: Option<u16>) -> Result<(), EngineError> {
         let mut edits = lock(&self.edits);
         edits.stop_audition()?;
+        self.planner.remove_voice(AUDITION_SLOT);
         let Some(take) = take else {
             return Ok(());
         };
@@ -596,6 +601,7 @@ impl Engine {
     pub fn add_sound(&self, preset: String) -> Result<SourceDescription, EngineError> {
         let mut edits = lock(&self.edits);
         edits.stop_audition()?;
+        self.planner.remove_voice(AUDITION_SLOT);
         let mut scene = lock(&self.scene);
         let slot = (0..MAX_SOURCES)
             .find(|slot| {
@@ -1430,6 +1436,51 @@ mod tests {
         assert_eq!(weather.wind, atrium::config::Band::Between([0.1, 0.3]));
         written.build().expect("the saved scene builds");
         let _ = std::fs::remove_file(&saved);
+    }
+
+    /// Hearing a kind before placing it, and one of a sound's takes on its
+    /// own: both are heard within a moment, even for a kind that rests
+    /// between takes. At zero volume:
+    /// `cargo test -p atrium-ffi -- --ignored --test-threads=1`.
+    #[test]
+    #[ignore = "opens the default output device"]
+    fn a_kind_and_a_take_are_heard_at_once_on_their_own() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        let engine = Engine::new("scenes/meadow-birds.yaml".into()).expect("scene should play");
+        engine.set_volume(0.0).expect("volume");
+        let heard_within = |seconds: u64| {
+            let deadline = Instant::now() + Duration::from_secs(seconds);
+            while Instant::now() < deadline {
+                if let Some(telemetry) = engine.latest_telemetry() {
+                    if telemetry.sources.iter().any(|source| {
+                        source.slot as usize == AUDITION_SLOT && source.take.is_some()
+                    }) {
+                        return true;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        engine
+            .audition(Some("sources/robin.yaml".into()))
+            .expect("the robin builds");
+        assert!(
+            heard_within(2),
+            "a kind that rests is heard at once when previewed"
+        );
+        engine.audition(None).expect("stops");
+
+        let robin = engine
+            .scene()
+            .sources
+            .iter()
+            .find(|source| source.id == "robin")
+            .expect("a robin")
+            .slot;
+        engine.audition_take(robin, Some(2)).expect("one take");
+        assert!(heard_within(2), "one take on its own is heard at once");
     }
 
     #[test]

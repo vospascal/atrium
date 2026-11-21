@@ -92,6 +92,15 @@ impl Planner {
         lock(&self.plan).conditions_at(now + ahead)
     }
 
+    /// Plan the voice in `slot` to be heard on its own: it follows no
+    /// condition, so the weather cannot silence it, and it starts at once.
+    pub fn preview_voice(&self, slot: usize, rhythm: Option<Rhythm>) {
+        let now = self.now();
+        let mut plan = lock(&self.plan);
+        plan.add_voice(slot, "preview", rhythm, Vec::new(), now);
+        plan.start_now(slot, now);
+    }
+
     pub fn remove_voice(&self, slot: usize) {
         lock(&self.plan).remove_voice(slot);
     }

@@ -57,6 +57,13 @@ impl VoicePlan {
         voice
     }
 
+    /// Utter the next take at `now` instead of after the opening rest: a
+    /// voice heard on its own, to judge it, should not keep anyone waiting.
+    pub(super) fn start_at(&mut self, now: f64) {
+        self.next_at = now;
+        self.last_end = now;
+    }
+
     /// When the next utterance starts (s).
     pub(super) fn next_at(&self) -> f64 {
         self.next_at

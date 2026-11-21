@@ -150,6 +150,14 @@ impl Plan {
         }
     }
 
+    /// Let the voice in `slot` utter its first take at `now` instead of after
+    /// its opening rest.
+    pub fn start_now(&mut self, slot: usize, now: f64) {
+        if let Some(Some(voice)) = self.voices.get_mut(slot) {
+            voice.plan.start_at(now);
+        }
+    }
+
     /// Stop planning for the voice in `slot`.
     pub fn remove_voice(&mut self, slot: usize) {
         if slot < MAX_SOURCES {
