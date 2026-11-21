@@ -75,8 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(tracker) => Some(atrium::head_tracking::start(
             tracker,
             producer.clone(),
-            scene_listener_position,
-            scene_listener_yaw,
+            atrium::head_tracking::Placement::new(atrium::head_tracking::Pose {
+                position: scene_listener_position,
+                yaw: scene_listener_yaw,
+            }),
         )?),
         None => None,
     };

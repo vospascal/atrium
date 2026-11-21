@@ -5,10 +5,11 @@
 //! the world crate says, sound by sound, the smallest changes that get there
 //! ([`atrium_world::changes`]), and each is played the way the edit that made
 //! it was. Only what the scene file holds and the editor changes is kept:
-//! the sounds and the weather. Mutes, volume, output and head tracking belong
+//! the sounds, the weather and where the listener stands. Mutes, volume, output and head tracking belong
 //! to the listener, and stay as they are.
 
-use atrium::config::{name_and_color, yaw_for_bearing, WeatherConfig};
+use atrium::config::{name_and_color, yaw_for_bearing, ListenerConfig, WeatherConfig};
+use atrium::head_tracking::Pose;
 use atrium_world::{changes, Change, Entities};
 
 use super::{lock, sound_in, Engine, Live};
@@ -19,6 +20,7 @@ use crate::api::{EditHistory, EngineError};
 pub(super) struct Version {
     sounds: Entities,
     weather: Option<WeatherConfig>,
+    listener: ListenerConfig,
 }
 
 impl Version {
@@ -26,6 +28,7 @@ impl Version {
         Self {
             sounds: scene.document.sounds.clone(),
             weather: scene.document.weather.clone(),
+            listener: scene.document.listener.clone(),
         }
     }
 }
@@ -87,6 +90,19 @@ impl Engine {
         if scene.document.weather != version.weather {
             self.play_weather(version.weather.as_ref())?;
             scene.document.weather = version.weather;
+        }
+        if scene.document.listener != version.listener {
+            let place = atrium_world::Place {
+                x: version.listener.position[0],
+                y: version.listener.position[1],
+                z: version.listener.position[2],
+            };
+            let pose = Pose {
+                position: self.sounds.world_at(place),
+                yaw: version.listener.yaw_degrees.to_radians(),
+            };
+            self.play_listener(&mut scene, pose)?;
+            scene.document.listener = version.listener;
         }
         for change in found {
             self.play_change(&mut edits, &mut scene, change)?;
@@ -258,6 +274,22 @@ mod tests {
         step("Remove", &|engine| {
             engine.remove_sound(frogs).expect("remove")
         });
+        step("Listener", &|engine| {
+            engine
+                .set_listener_position(Position {
+                    x: 2.0,
+                    y: -3.0,
+                    z: 1.6,
+                })
+                .expect("listener moves");
+            engine
+                .set_listener_facing(Position {
+                    x: 0.0,
+                    y: -1.0,
+                    z: 0.0,
+                })
+                .expect("listener turns");
+        });
         step("Storm", &|engine| {
             let band = |low, high| Band { low, high };
             engine
@@ -285,12 +317,14 @@ mod tests {
         for expected in seen.iter().rev().skip(1) {
             assert!(engine.undo().expect("undo"));
             assert_eq!(by_id(&engine.scene()), by_id(&expected.0));
+            assert_eq!(engine.scene().listener, expected.0.listener);
             assert_eq!(engine.weather(), expected.1);
         }
         assert!(!engine.undo().expect("nothing more"));
         for expected in seen.iter().skip(1) {
             assert!(engine.redo().expect("redo"));
             assert_eq!(by_id(&engine.scene()), by_id(&expected.0));
+            assert_eq!(engine.scene().listener, expected.0.listener);
             assert_eq!(engine.weather(), expected.1);
         }
         assert!(!engine.redo().expect("nothing more"));

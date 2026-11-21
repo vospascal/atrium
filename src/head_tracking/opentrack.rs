@@ -12,7 +12,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use atrium_core::commands::Command;
-use atrium_core::types::Vec3;
 
 /// OpenTrack's own default input port; every tracker bridge defaults to it.
 pub(super) const DEFAULT_PORT: u16 = 4242;
@@ -105,13 +104,12 @@ impl Drop for OpenTrackListener {
 ///
 /// Binds `127.0.0.1:port` (loopback only — a tracker on the network is not
 /// trusted to steer the listener) and sends a `SetListenerPose` for every
-/// valid packet: the scene's listener position, heading = scene heading + head
-/// turn. Returns an error only if the port cannot be bound.
+/// valid packet: where `placement` puts the listener, heading = its heading +
+/// head turn. Returns an error only if the port cannot be bound.
 pub(super) fn spawn(
     port: u16,
     producer: Arc<Mutex<rtrb::Producer<Command>>>,
-    scene_position: Vec3,
-    scene_yaw_radians: f32,
+    placement: super::Placement,
 ) -> std::io::Result<OpenTrackListener> {
     let socket = UdpSocket::bind(("127.0.0.1", port))?;
     socket.set_read_timeout(Some(STOP_CHECK_INTERVAL))?;
@@ -139,9 +137,10 @@ pub(super) fn spawn(
                         }
                         last_packet = Some(Instant::now());
                         receiving_now.store(true, Ordering::Relaxed);
+                        let placed = placement.get();
                         let command = Command::SetListenerPose {
-                            position: scene_position,
-                            yaw: listener_yaw(scene_yaw_radians, angles.yaw_degrees),
+                            position: placed.position,
+                            yaw: listener_yaw(placed.yaw, angles.yaw_degrees),
                         };
                         if let Ok(mut producer) = producer.lock() {
                             // A full ring means the audio thread is behind; the
@@ -181,6 +180,7 @@ pub(super) fn spawn(
 mod tests {
     use super::*;
     use crate::head_tracking::test_support::{free_port, next_command, packet, send_yaw};
+    use atrium_core::types::Vec3;
 
     #[test]
     fn decodes_yaw_pitch_roll_from_the_last_three_doubles() {
@@ -267,8 +267,10 @@ mod tests {
         let listener = spawn(
             port,
             Arc::new(Mutex::new(producer)),
-            scene_position,
-            scene_yaw,
+            super::super::Placement::new(super::super::Pose {
+                position: scene_position,
+                yaw: scene_yaw,
+            }),
         )
         .expect("a free port can be bound");
 
@@ -301,6 +303,33 @@ mod tests {
         UdpSocket::bind(("127.0.0.1", port)).expect("dropping the listener frees its port");
     }
 
+    /// An editor moves the listener while the head is tracked: the next head
+    /// turn is from the new place and heading, not the one tracking began at.
+    #[test]
+    fn a_moved_listener_turns_from_where_it_was_moved() {
+        let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let port = free_port();
+        let placement = super::super::Placement::new(super::super::Pose {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+        });
+        let _listener = spawn(port, Arc::new(Mutex::new(producer)), placement.clone())
+            .expect("a free port can be bound");
+        let moved = super::super::Pose {
+            position: Vec3::new(4.0, -2.0, 1.2),
+            yaw: 1.0,
+        };
+        placement.set(moved);
+        send_yaw(port, 0.0);
+        match next_command(&mut consumer) {
+            Command::SetListenerPose { position, yaw } => {
+                assert_eq!(position, moved.position);
+                assert!((yaw - moved.yaw).abs() < 1e-6);
+            }
+            other => panic!("expected a listener pose, got {other:?}"),
+        }
+    }
+
     /// Headphones that are switched off stop sending. After two seconds of
     /// silence the tracker is no longer reported, so a UI can say it is
     /// waiting instead of showing a frozen head.
@@ -308,8 +337,16 @@ mod tests {
     fn a_tracker_that_falls_silent_is_no_longer_reported() {
         let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
         let port = free_port();
-        let listener = spawn(port, Arc::new(Mutex::new(producer)), Vec3::ZERO, 0.0)
-            .expect("a free port can be bound");
+        let still = super::super::Pose {
+            position: Vec3::ZERO,
+            yaw: 0.0,
+        };
+        let listener = spawn(
+            port,
+            Arc::new(Mutex::new(producer)),
+            super::super::Placement::new(still),
+        )
+        .expect("a free port can be bound");
         send_yaw(port, 10.0);
         next_command(&mut consumer);
         assert!(listener.is_receiving());

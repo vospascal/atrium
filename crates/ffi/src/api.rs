@@ -50,7 +50,8 @@ pub struct SceneDescription {
     pub width: f32,
     /// Environment floor size along y (m).
     pub depth: f32,
-    /// Listener position at load time.
+    /// Where the scene puts the listener now: where it was loaded, or where
+    /// it was moved since. Which way it faces is in telemetry.
     pub listener: Position,
     /// The scene's sounds, each with the slot it plays from. Their order is
     /// the scene file's, with sounds added since at the end; it is not slot

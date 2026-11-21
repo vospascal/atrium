@@ -121,7 +121,7 @@ fn default_hrtf_path() -> String {
     "assets/hrtf/default.sofa".into()
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct ListenerConfig {
     pub position: [f32; 3],
     #[serde(default)]

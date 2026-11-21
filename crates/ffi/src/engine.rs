@@ -12,7 +12,7 @@ use atrium::config::{
 };
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
-use atrium::head_tracking::HeadTracking;
+use atrium::head_tracking::{HeadTracking, Placement, Pose};
 use atrium::plan::{Condition, Planner};
 use atrium_core::commands::Command;
 use atrium_core::directivity::SILENT_BEHIND_DB;
@@ -72,10 +72,9 @@ pub struct Engine {
     /// thread.
     commands: Arc<Mutex<rtrb::Producer<Command>>>,
     telemetry: Mutex<rtrb::Consumer<TelemetryFrame>>,
-    /// Where the scene puts the listener and which way it faces (radians).
-    /// Head turns are added to this heading.
-    listener_position: Vec3,
-    listener_yaw: f32,
+    /// Where the scene puts the listener and which way it faces. Head
+    /// tracking turns from it, and it moves when the listener is moved.
+    placement: Placement,
     /// The running tracker, if any.
     head_tracking: Mutex<Option<HeadTracking>>,
     /// Builds one more sound for this scene, as its own sounds were built.
@@ -112,8 +111,10 @@ impl Engine {
         built.scene.scene_edits = Some(edit_consumer);
         built.scene.retired_out = Some(retired_producer);
         let layout_channels = built.scene.speaker_layout.total_channels();
-        let listener_position = built.scene.listener.position;
-        let listener_yaw = built.scene.listener.yaw;
+        let placement = Placement::new(Pose {
+            position: built.scene.listener.position,
+            yaw: built.scene.listener.yaw,
+        });
         let output = OutputThread::start(built.scene, command_consumer)?;
 
         Ok(Arc::new(Self {
@@ -125,8 +126,7 @@ impl Engine {
             outputs: playable_outputs(layout_channels, output.device_channels),
             commands: Arc::new(Mutex::new(commands)),
             telemetry: Mutex::new(telemetry),
-            listener_position,
-            listener_yaw,
+            placement,
             head_tracking: Mutex::new(None),
             sounds: built.sounds,
             planner: built.planner,
@@ -474,6 +474,40 @@ impl Engine {
         self.play_facing(&mut scene, slot, yaw)
     }
 
+    /// Move the listener to `position`, facing the way it faced. Every sound
+    /// is heard from there at once; head tracking turns from there; the
+    /// scene file keeps it. A position that is not a number changes nothing.
+    pub fn set_listener_position(&self, position: Position) -> Result<(), EngineError> {
+        if !finite(position) {
+            return Ok(());
+        }
+        let mut scene = lock(&self.scene);
+        let pose = Pose {
+            position: position.into(),
+            ..self.placement.get()
+        };
+        self.play_listener(&mut scene, pose)?;
+        scene.document.listener = self.listener_in_file(pose);
+        Ok(())
+    }
+
+    /// Turn the listener to face along `facing`, a direction over the ground,
+    /// as `set_source_facing` turns a sound. Head tracking turns from there.
+    pub fn set_listener_facing(&self, facing: Position) -> Result<(), EngineError> {
+        let length = facing.x.hypot(facing.y);
+        if !length.is_finite() || length < 1e-6 {
+            return Ok(());
+        }
+        let mut scene = lock(&self.scene);
+        let pose = Pose {
+            yaw: facing.y.atan2(facing.x),
+            ..self.placement.get()
+        };
+        self.play_listener(&mut scene, pose)?;
+        scene.document.listener = self.listener_in_file(pose);
+        Ok(())
+    }
+
     /// The outputs this scene can play on the opened device.
     pub fn outputs(&self) -> Vec<Output> {
         self.outputs.clone()
@@ -592,10 +626,7 @@ impl Engine {
             return Ok(());
         };
         drop(scene);
-        let ahead = Vec3::new(self.listener_yaw.cos(), self.listener_yaw.sin(), 0.0);
-        entity.place = self
-            .sounds
-            .place_at(self.listener_position + ahead * AHEAD_OF_LISTENER);
+        entity.place = self.place_ahead();
         entity.shape.width = Some(ALL_ROUND);
         entity.moves = Moves::Still;
         let built = self
@@ -730,8 +761,7 @@ impl Engine {
         let started = atrium::head_tracking::start(
             tracker.into(),
             self.commands.clone(),
-            self.listener_position,
-            self.listener_yaw,
+            self.placement.clone(),
         )
         .map_err(|error| EngineError::HeadTracking(error.to_string()))?;
         *head_tracking = Some(started);
@@ -796,6 +826,36 @@ impl Engine {
             *source = built.description.into();
         }
         Ok(())
+    }
+
+    /// A short way ahead of the listener, at ear height, in the scene file's
+    /// coordinates.
+    fn place_ahead(&self) -> Place {
+        let pose = self.placement.get();
+        let ahead = Vec3::new(pose.yaw.cos(), pose.yaw.sin(), 0.0);
+        self.sounds
+            .place_at(pose.position + ahead * AHEAD_OF_LISTENER)
+    }
+
+    /// Put the listener at `pose`: heard from there at once, head tracking
+    /// turns from it, and `scene()` reports it.
+    fn play_listener(&self, scene: &mut Live, pose: Pose) -> Result<(), EngineError> {
+        self.command(Command::SetListenerPose {
+            position: pose.position,
+            yaw: pose.yaw,
+        })?;
+        self.placement.set(pose);
+        scene.description.listener = pose.position.into();
+        Ok(())
+    }
+
+    /// The listener as the scene file writes it, for `pose`.
+    fn listener_in_file(&self, pose: Pose) -> atrium::config::ListenerConfig {
+        let place = self.place_rounded(pose.position.into());
+        atrium::config::ListenerConfig {
+            position: [place.x, place.y, place.z],
+            yaw_degrees: rounded(pose.yaw.to_degrees().rem_euclid(360.0), 1.0),
+        }
     }
 
     /// Add `entity` to the scene under an id like `wanted`, in the lowest
@@ -984,7 +1044,6 @@ impl Engine {
     /// A sound made from `preset`, standing a short way ahead of where the
     /// scene puts the listener, at ear height.
     fn sound_ahead(&self, preset: String, name: Option<String>, group: Option<String>) -> Entity {
-        let ahead = Vec3::new(self.listener_yaw.cos(), self.listener_yaw.sin(), 0.0);
         Entity {
             name,
             color: None,
@@ -995,9 +1054,7 @@ impl Engine {
                 level: None,
             },
             shape: Shape::default(),
-            place: self
-                .sounds
-                .place_at(self.listener_position + ahead * AHEAD_OF_LISTENER),
+            place: self.place_ahead(),
             when: When::default(),
             follows: None,
             moves: Moves::Still,

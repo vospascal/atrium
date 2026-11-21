@@ -45,6 +45,39 @@ pub fn tracker_from_args(args: &[String]) -> Result<Option<Tracker>, String> {
     }
 }
 
+/// Where the scene puts the listener and which way it faces (radians from
+/// +x). Head turns are added to this heading. It is shared: an editor that
+/// moves the listener moves where the head turns from, while tracking runs.
+#[derive(Clone, Debug)]
+pub struct Placement(Arc<Mutex<Pose>>);
+
+/// A listener's position (m) and heading (radians from +x).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose {
+    pub position: Vec3,
+    pub yaw: f32,
+}
+
+impl Placement {
+    pub fn new(pose: Pose) -> Self {
+        Self(Arc::new(Mutex::new(pose)))
+    }
+
+    pub fn get(&self) -> Pose {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn set(&self, pose: Pose) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = pose;
+    }
+}
+
 /// Head tracking while it runs. Keep it alive for as long as the head should
 /// steer the listener. Dropping it stops any tracker bridge the engine
 /// started, stops listening, frees the port and turns the listener back to
@@ -53,8 +86,7 @@ pub struct HeadTracking {
     sony_bridge: Option<sony::SonyBridge>,
     listener: Option<opentrack::OpenTrackListener>,
     producer: Arc<Mutex<rtrb::Producer<Command>>>,
-    scene_position: Vec3,
-    scene_yaw_radians: f32,
+    placement: Placement,
 }
 
 impl HeadTracking {
@@ -78,9 +110,10 @@ impl Drop for HeadTracking {
             // Without this the listener would keep the last tracked heading:
             // someone who switched tracking off while looking left would hear
             // the place turned until the scene was restarted.
+            let pose = self.placement.get();
             let _ = producer.push(Command::SetListenerPose {
-                position: self.scene_position,
-                yaw: self.scene_yaw_radians,
+                position: pose.position,
+                yaw: pose.yaw,
             });
         }
     }
@@ -90,28 +123,20 @@ impl Drop for HeadTracking {
 pub fn start(
     tracker: Tracker,
     producer: Arc<Mutex<rtrb::Producer<Command>>>,
-    scene_position: Vec3,
-    scene_yaw_radians: f32,
+    placement: Placement,
 ) -> std::io::Result<HeadTracking> {
-    start_on(
-        opentrack::DEFAULT_PORT,
-        tracker,
-        producer,
-        scene_position,
-        scene_yaw_radians,
-    )
+    start_on(opentrack::DEFAULT_PORT, tracker, producer, placement)
 }
 
 fn start_on(
     port: u16,
     tracker: Tracker,
     producer: Arc<Mutex<rtrb::Producer<Command>>>,
-    scene_position: Vec3,
-    scene_yaw_radians: f32,
+    placement: Placement,
 ) -> std::io::Result<HeadTracking> {
     // Listen first: a bridge sending before the port is bound would lose packets,
     // and a port already in use should fail before a bridge is started.
-    let listener = opentrack::spawn(port, producer.clone(), scene_position, scene_yaw_radians)?;
+    let listener = opentrack::spawn(port, producer.clone(), placement.clone())?;
     let sony_bridge = match tracker {
         Tracker::External => None,
         Tracker::Sony => Some(sony::SonyBridge::start()?),
@@ -120,8 +145,7 @@ fn start_on(
         sony_bridge,
         listener: Some(listener),
         producer,
-        scene_position,
-        scene_yaw_radians,
+        placement,
     })
 }
 
@@ -169,8 +193,10 @@ mod tests {
             port,
             Tracker::External,
             Arc::new(Mutex::new(producer)),
-            scene_position,
-            scene_yaw,
+            Placement::new(Pose {
+                position: scene_position,
+                yaw: scene_yaw,
+            }),
         )
         .expect("a free port can be bound");
 
