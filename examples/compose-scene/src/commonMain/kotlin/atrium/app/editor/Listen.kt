@@ -15,8 +15,8 @@ import atrium.engine.Probe
 
 /**
  * Listening to one part of what the engine renders at a time: the direct sound, the
- * reflections, the late reverb or the ambient sounds, with single effects of the air and the
- * ground on or off, from every output or one loudspeaker or ear alone.
+ * reflections, the late reverb or the ambient sounds, with single effects of the air, the
+ * ground and the head on or off, from every output or one loudspeaker or ear alone.
  *
  * Nothing else about the scene changes, so the parts heard alone add up to the whole. It is
  * yours, like a mute: it is not saved with the scene, and undo leaves it alone.
@@ -30,6 +30,7 @@ internal val WholeRender = Probe(
     movingAir = true,
     groundEffect = true,
     wallColouring = true,
+    nearField = true,
     onlyChannel = null,
 )
 
@@ -72,12 +73,17 @@ internal fun Probe.everyPart(): Probe = copy(direct = true, reflections = true, 
 /** Whether [this] lets every part through. */
 internal val Probe.hearsEveryPart: Boolean get() = direct && reflections && reverb && ambient
 
-/** An effect of the air or the ground that can be switched off, to hear what it does. */
+/**
+ * An effect that can be switched off, to hear what it does: of the air, the ground, the walls, or
+ * the head. The near field is the head's: how much louder the near ear hears a sound inside about
+ * a metre, most of all in the bass. Only headphones render it; with speakers it changes nothing.
+ */
 internal enum class RenderEffect(val label: String, val said: String) {
     AirAbsorption("Air absorption", "air absorption"),
     MovingAir("Moving air", "moving air"),
     Ground("Ground", "ground effect"),
     Walls("Wall colour", "wall colour"),
+    NearField("Near field", "near field"),
     ;
 
     fun isOn(probe: Probe): Boolean = when (this) {
@@ -85,6 +91,7 @@ internal enum class RenderEffect(val label: String, val said: String) {
         MovingAir -> probe.movingAir
         Ground -> probe.groundEffect
         Walls -> probe.wallColouring
+        NearField -> probe.nearField
     }
 
     fun toggled(probe: Probe): Probe = when (this) {
@@ -92,6 +99,7 @@ internal enum class RenderEffect(val label: String, val said: String) {
         MovingAir -> probe.copy(movingAir = !probe.movingAir)
         Ground -> probe.copy(groundEffect = !probe.groundEffect)
         Walls -> probe.copy(wallColouring = !probe.wallColouring)
+        NearField -> probe.copy(nearField = !probe.nearField)
     }
 }
 

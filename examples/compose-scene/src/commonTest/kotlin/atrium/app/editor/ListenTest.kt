@@ -61,5 +61,20 @@ class ListenTest {
             probeLine(WholeRender.copy(reverb = false, ambient = false), room),
         )
         assertEquals("Hearing channel 3 only", probeLine(WholeRender.copy(onlyChannel = 2u), emptyList()))
+        assertEquals(
+            "Hearing without near field · R only",
+            probeLine(RenderEffect.NearField.toggled(WholeRender).copy(onlyChannel = 1u), room),
+        )
+    }
+
+    /** The near field is an effect like the others: on in the whole scene, switched by itself. */
+    @Test
+    fun theNearFieldIsSwitchedLikeTheOtherEffects() {
+        assertTrue(WholeRender.nearField)
+        val without = RenderEffect.NearField.toggled(WholeRender)
+        assertFalse(without.nearField)
+        assertFalse(without.isWhole)
+        assertTrue(without.hearsEveryPart)
+        assertEquals(listOf(RenderEffect.NearField), RenderEffect.entries.filterNot { it.isOn(without) })
     }
 }

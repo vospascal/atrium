@@ -84,7 +84,9 @@ panel or list gets them by using it.
   names its loudspeakers, bold when a channel clips.
 - **Listen** is in the inspector when nothing is selected. *Hear only* plays one part of the
   scene alone: the direct sound, the reflections, the late reverb or the ambient sounds. *With*
-  switches single effects off and on: air absorption, moving air, the ground, wall colour.
+  switches single effects off and on: air absorption, moving air, the ground, wall colour, and
+  the near field (on headphones, the near ear's extra level for a sound inside about a metre; the
+  engine's README, "A sound beside the ear").
   *From* plays one loudspeaker or one ear alone. While anything is hidden the top bar says
   what is heard, and pressing that brings the whole scene back. It is yours, like a mute: not
   saved, not undone.
