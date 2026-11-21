@@ -179,7 +179,7 @@ pub(super) fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::head_tracking::test_support::{free_port, next_command, packet, send_yaw};
+    use crate::head_tracking::test_support::{free_port, next_command, packet, ports, send_yaw};
     use atrium_core::types::Vec3;
 
     #[test]
@@ -261,6 +261,7 @@ mod tests {
     #[test]
     fn a_packet_steers_the_listener_and_dropping_frees_the_port() {
         let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let _ports = ports();
         let port = free_port();
         let scene_position = Vec3::new(30.0, 30.0, 1.2);
         let scene_yaw = 90f32.to_radians();
@@ -308,6 +309,7 @@ mod tests {
     #[test]
     fn a_moved_listener_turns_from_where_it_was_moved() {
         let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let _ports = ports();
         let port = free_port();
         let placement = super::super::Placement::new(super::super::Pose {
             position: Vec3::ZERO,
@@ -336,6 +338,7 @@ mod tests {
     #[test]
     fn a_tracker_that_falls_silent_is_no_longer_reported() {
         let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let _ports = ports();
         let port = free_port();
         let still = super::super::Pose {
             position: Vec3::ZERO,

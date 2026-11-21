@@ -14,6 +14,16 @@ pub(super) fn packet(values: [f64; 6]) -> Vec<u8> {
         .collect()
 }
 
+/// Held by every test that binds ports, so they run one at a time. A test
+/// that frees a port and checks it can be bound again would otherwise lose it
+/// to another test's sender, which the system gives the same free port.
+pub(super) fn ports() -> std::sync::MutexGuard<'static, ()> {
+    static PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    PORTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// A port nothing is bound to, found by letting the system pick one.
 pub(super) fn free_port() -> u16 {
     UdpSocket::bind(("127.0.0.1", 0))

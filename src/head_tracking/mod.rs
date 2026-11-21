@@ -183,9 +183,10 @@ mod tests {
     /// back on the scene's own pose as the last thing on the ring.
     #[test]
     fn stopping_turns_the_listener_back_to_the_scene_heading() {
-        use test_support::{free_port, next_command, send_yaw};
+        use test_support::{free_port, next_command, ports, send_yaw};
 
         let (producer, mut consumer) = rtrb::RingBuffer::<Command>::new(8);
+        let _ports = ports();
         let port = free_port();
         let scene_position = Vec3::new(30.0, 30.0, 1.2);
         let scene_yaw = 90f32.to_radians();
