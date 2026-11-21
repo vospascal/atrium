@@ -69,6 +69,10 @@ runs Cargo itself. There is nothing to build here by hand.
 - **The loudness map is worked out here, on the calling thread.** It is a pure function in the
   engine crate (`atrium::audio::loudness`) over what `scene()` already reports, so it needs no
   command, no telemetry and no audio thread, and its physics are unit-tested without a device.
+- **A probe is kept beside the mutes, not in the scene.** `set_probe` lets parts of the render
+  through to listen to them alone (the engine's README, "Listening to one part"). It is the
+  listener's: `Live` holds it next to the muted voices, the scene file never sees it, and undo
+  leaves it as it is.
 - **Every edit is two halves: what is heard and what the file records.** A `set_` call writes
   the scene file and calls a `play_` helper; undo writes the whole earlier file at once and calls
   the same helpers. Undoing a sound that was removed builds it again in the lowest free voice,

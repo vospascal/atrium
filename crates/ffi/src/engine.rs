@@ -122,6 +122,7 @@ impl Engine {
                 description: built.description.into(),
                 document,
                 muted: Default::default(),
+                probe: atrium_core::probe::Probe::WHOLE,
             }),
             outputs: playable_outputs(layout_channels, output.device_channels),
             commands: Arc::new(Mutex::new(commands)),
@@ -200,6 +201,9 @@ struct Live {
     /// The voices the listener silenced, so a sound built again stays silent.
     /// They belong to the listener, not the scene, and are never saved.
     muted: std::collections::BTreeSet<u16>,
+    /// Which parts of the render the listener is hearing: everything, unless
+    /// they are listening to one alone. Theirs too, and never saved.
+    probe: atrium_core::probe::Probe,
 }
 
 impl Live {

@@ -253,6 +253,65 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
     }
 }
 
+/// Which parts of the render reach the output, for listening to one at a
+/// time. With every part and effect on and no channel alone, the scene is
+/// heard as it is. It belongs to the listener, like a mute: it is not saved
+/// with the scene and undo leaves it alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct Probe {
+    /// The sound that travels straight from a source.
+    pub direct: bool,
+    /// The first bounces off the environment's faces.
+    pub reflections: bool,
+    /// The late reverb; heard alone it is still fed by the direct sound.
+    pub reverb: bool,
+    /// Ambient sounds, heard everywhere.
+    pub ambient: bool,
+    /// Treble lost to the air over distance.
+    pub air_absorption: bool,
+    /// The wavering of a far sound in wind-stirred, sunlit air.
+    pub moving_air: bool,
+    /// The ground's effect on a path over it.
+    pub ground_effect: bool,
+    /// The colour a wall gives a reflection.
+    pub wall_colouring: bool,
+    /// One output channel heard alone, as `Telemetry::peaks_db` counts them:
+    /// a loudspeaker, or an ear.
+    pub only_channel: Option<u8>,
+}
+
+impl From<atrium_core::probe::Probe> for Probe {
+    fn from(probe: atrium_core::probe::Probe) -> Self {
+        Self {
+            direct: probe.direct,
+            reflections: probe.reflections,
+            reverb: probe.reverb,
+            ambient: probe.ambient,
+            air_absorption: probe.air_absorption,
+            moving_air: probe.moving_air,
+            ground_effect: probe.ground_effect,
+            wall_colouring: probe.wall_colouring,
+            only_channel: probe.only_channel,
+        }
+    }
+}
+
+impl From<Probe> for atrium_core::probe::Probe {
+    fn from(probe: Probe) -> Self {
+        Self {
+            direct: probe.direct,
+            reflections: probe.reflections,
+            reverb: probe.reverb,
+            ambient: probe.ambient,
+            air_absorption: probe.air_absorption,
+            moving_air: probe.moving_air,
+            ground_effect: probe.ground_effect,
+            wall_colouring: probe.wall_colouring,
+            only_channel: probe.only_channel,
+        }
+    }
+}
+
 /// How loud the scene's direct sound is over a patch of ground, for a map
 /// to colour. A guide to reach: echoes, reverb and the air are left out.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
