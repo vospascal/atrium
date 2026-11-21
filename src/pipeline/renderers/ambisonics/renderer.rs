@@ -1,0 +1,237 @@
+//! The per-path FOA encoder, and its inline bilateral decode for a narrow bus.
+
+use atrium_core::ambisonics::{foa_encode, BilateralDecoder};
+use atrium_core::directivity::directivity_gain;
+use atrium_core::panner::distance_gain_at_model;
+use atrium_core::speaker::SpeakerLayout;
+
+use super::bus::{ambisonic_bus, AmbisonicBus};
+use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
+use crate::pipeline::renderer::SourceContext;
+use crate::pipeline::renderer::{OutputBuffer, Renderer};
+use crate::pipeline::renderers::field::FieldEncoding;
+
+/// The bus as the post-mix stages will see it.
+///
+/// The renderer is not handed `MixContext::render_channels`. The Ambisonics
+/// pipeline leaves `RenderPipeline::render_channels` at 0, so `render_pipeline`
+/// gives the stages `layout.total_channels().min(device_channels)`; passing
+/// `total_channels` here therefore reaches the identical decision (pinned by
+/// `ambisonics_pipeline_does_not_override_render_channels`).
+fn renderer_bus(layout: &SpeakerLayout, device_channels: usize) -> AmbisonicBus {
+    ambisonic_bus(layout, layout.total_channels(), device_channels)
+}
+
+/// Per-path FOA encode renderer. Encode-only on a B-format bus, inline
+/// bilateral decode otherwise (see [`ambisonic_bus`]).
+#[derive(Default)]
+pub struct AmbisonicsRenderer {
+    /// Previous per-path B-format per source (B-format bus).
+    /// [source][path] = [W, Y, Z, X] gains for ramping.
+    prev_bformat: Vec<[[f32; 4]; MAX_PATHS]>,
+    /// Previous per-path ear gains per source (bilateral bus): [left, right].
+    prev_stereo: Vec<[[f32; 2]; MAX_PATHS]>,
+}
+
+impl AmbisonicsRenderer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Encode a path to B-format in listener-local coordinates.
+fn encode_path(
+    path_kind: PathKind,
+    path_direction: atrium_core::types::Vec3,
+    path_distance: f32,
+    ctx: &SourceContext,
+    cos_y: f32,
+    sin_y: f32,
+) -> atrium_core::ambisonics::BFormat {
+    match path_kind {
+        PathKind::Direct => {
+            let dx = ctx.source_pos.x - ctx.listener.position.x;
+            let dy = ctx.source_pos.y - ctx.listener.position.y;
+            let dz = ctx.source_pos.z - ctx.listener.position.z;
+            let local_x = dx * cos_y + dy * sin_y;
+            let local_y = -dx * sin_y + dy * cos_y;
+            let azimuth = local_y.atan2(local_x);
+            let horiz = (local_x * local_x + local_y * local_y).sqrt();
+            let elevation = dz.atan2(horiz);
+
+            let dist_gain = distance_gain_at_model(
+                ctx.listener.position,
+                ctx.source_pos,
+                ctx.source_ref_distance,
+                ctx.distance_model.max_distance,
+                ctx.distance_model.rolloff,
+                ctx.distance_model.model,
+            );
+            let dir_gain = directivity_gain(
+                ctx.source_pos,
+                ctx.source_orientation,
+                ctx.listener.position,
+                ctx.source_directivity,
+            );
+
+            foa_encode(azimuth, elevation, dist_gain * dir_gain)
+        }
+        _ => {
+            let local_x = path_direction.x * cos_y + path_direction.y * sin_y;
+            let local_y = -path_direction.x * sin_y + path_direction.y * cos_y;
+            let local_z = path_direction.z;
+            let azimuth = local_y.atan2(local_x);
+            let horiz = (local_x * local_x + local_y * local_y).sqrt();
+            let elevation = local_z.atan2(horiz);
+            // Distance model for reflections — same law as the direct path.
+            // path.gain carries reflectivity only; distance is applied here.
+            let dist_gain = distance_gain_at_model(
+                ctx.listener.position,
+                ctx.listener.position + path_direction * path_distance,
+                ctx.source_ref_distance,
+                ctx.distance_model.max_distance,
+                ctx.distance_model.rolloff,
+                ctx.distance_model.model,
+            );
+            foa_encode(azimuth, elevation, dist_gain)
+        }
+    }
+}
+
+impl Renderer for AmbisonicsRenderer {
+    #[allow(clippy::needless_range_loop)]
+    fn render_source(
+        &mut self,
+        source_idx: usize,
+        source: &mut dyn atrium_core::source::SoundSource,
+        ctx: &SourceContext,
+        paths: &PathSet,
+        path_effects: &mut [PathEffectChain],
+        out: &mut OutputBuffer,
+    ) {
+        let path_slice = paths.as_slice();
+        let cos_y = ctx.listener.yaw.cos();
+        let sin_y = ctx.listener.yaw.sin();
+
+        match renderer_bus(ctx.layout, out.channels) {
+            AmbisonicBus::BFormat(_) => {
+                // Encode-only. Write B-format to channels 0-3; decode happens
+                // later in AmbisonicsDecodeStage.
+                let mut target_bf = [[0.0f32; 4]; MAX_PATHS];
+                for (pi, path) in path_slice.iter().enumerate() {
+                    let bf =
+                        encode_path(path.kind, path.direction, path.distance, ctx, cos_y, sin_y);
+                    target_bf[pi] = [bf.w, bf.y, bf.z, bf.x];
+                }
+
+                let inv_frames = 1.0 / out.num_frames as f32;
+                let prev = &self.prev_bformat[source_idx];
+
+                for frame in 0..out.num_frames {
+                    let t = frame as f32 * inv_frames;
+                    let raw = source.next_sample(out.sample_rate);
+                    let sample = raw;
+
+                    let base = frame * out.channels;
+                    for (pi, path) in path_slice.iter().enumerate() {
+                        let filtered = path_effects[pi].process_sample(sample);
+                        let path_sample = filtered * path.gain;
+                        for component in 0..4 {
+                            let gain = prev[pi][component]
+                                + (target_bf[pi][component] - prev[pi][component]) * t;
+                            out.buffer[base + component] += path_sample * gain;
+                        }
+                        // Only the direct path feeds the late reverb send.
+                        // Mono only (W channel): late reverb is physically omnidirectional,
+                        // so we don't inject directional B-format into the FDN. The FDN's
+                        // Z-rotation creates spatial decorrelation from the omni input.
+                        if path.kind == PathKind::Direct {
+                            if let Some(ref mut rev) = out.reverb_send {
+                                rev[base] += path_sample * ctx.reverb_send;
+                            }
+                        }
+                    }
+                }
+
+                self.prev_bformat[source_idx] = target_bf;
+                // The other bus's ramp restarts from silence if the bus changes.
+                self.prev_stereo[source_idx] = [[0.0; 2]; MAX_PATHS];
+            }
+            AmbisonicBus::InlineBilateral(ears) => {
+                // Inline bilateral decode to the bus's left/right channels.
+                let bilateral = BilateralDecoder::new();
+                let ear_channels = [ears.left, ears.right];
+
+                let mut target_stereo = [[0.0f32; 2]; MAX_PATHS];
+                for (pi, path) in path_slice.iter().enumerate() {
+                    let bformat =
+                        encode_path(path.kind, path.direction, path.distance, ctx, cos_y, sin_y);
+                    let (l, r) = bilateral.decode_stereo(&bformat);
+                    target_stereo[pi] = [l, r];
+                }
+
+                let inv_frames = 1.0 / out.num_frames as f32;
+                let prev = &self.prev_stereo[source_idx];
+
+                for frame in 0..out.num_frames {
+                    let t = frame as f32 * inv_frames;
+                    let raw = source.next_sample(out.sample_rate);
+                    let sample = raw;
+
+                    let base = frame * out.channels;
+                    for (pi, path) in path_slice.iter().enumerate() {
+                        let filtered = path_effects[pi].process_sample(sample);
+                        let path_sample = filtered * path.gain;
+                        for (ear, &channel) in ear_channels.iter().enumerate() {
+                            let gain = prev[pi][ear] + (target_stereo[pi][ear] - prev[pi][ear]) * t;
+                            out.buffer[base + channel] += path_sample * gain;
+                        }
+                        // Only the direct path feeds the late reverb send — same
+                        // as the B-format branch; without this, the bilateral bus
+                        // starves the FDN and produces no tail at all.
+                        if path.kind == PathKind::Direct {
+                            if let Some(ref mut rev) = out.reverb_send {
+                                rev[base] += path_sample * ctx.reverb_send;
+                            }
+                        }
+                    }
+                }
+
+                self.prev_stereo[source_idx] = target_stereo;
+                self.prev_bformat[source_idx] = [[0.0; 4]; MAX_PATHS];
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ambisonics"
+    }
+
+    fn field_encoding(&self, layout: &SpeakerLayout, device_channels: usize) -> FieldEncoding {
+        match renderer_bus(layout, device_channels) {
+            AmbisonicBus::BFormat(_) => FieldEncoding::Ambisonics,
+            AmbisonicBus::InlineBilateral(_) => FieldEncoding::Speaker,
+        }
+    }
+
+    fn ensure_topology(&mut self, source_count: usize, _layout: &SpeakerLayout, _sample_rate: f32) {
+        while self.prev_bformat.len() < source_count {
+            self.prev_bformat.push([[0.0; 4]; MAX_PATHS]);
+        }
+        while self.prev_stereo.len() < source_count {
+            self.prev_stereo.push([[0.0; 2]; MAX_PATHS]);
+        }
+    }
+
+    fn reset(&mut self) {
+        for bf in &mut self.prev_bformat {
+            *bf = [[0.0; 4]; MAX_PATHS];
+        }
+        for stereo in &mut self.prev_stereo {
+            *stereo = [[0.0; 2]; MAX_PATHS];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
