@@ -25,6 +25,7 @@ impl Engine {
             rain: band(Condition::Rain),
             storm: band(Condition::Storm),
             daylight: band(Condition::Daylight),
+            wind_from: weather.wind_from(),
         }
     }
 
@@ -36,6 +37,7 @@ impl Engine {
         if bands
             .iter()
             .any(|band| !(band.low.is_finite() && band.high.is_finite()))
+            || !weather.wind_from.is_finite()
         {
             return Ok(());
         }
@@ -55,6 +57,7 @@ impl Engine {
             rain: in_file(weather.rain),
             storm: in_file(weather.storm),
             daylight: in_file(weather.daylight),
+            wind_from: rounded(weather.wind_from.rem_euclid(360.0), 1.0) % 360.0,
         };
         let mut scene = lock(&self.scene);
         self.play_weather(Some(&weather))?;

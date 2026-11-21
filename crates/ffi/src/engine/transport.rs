@@ -155,6 +155,7 @@ mod tests {
                     low: 1.0,
                     high: 1.0,
                 },
+                wind_from: 225.0,
             })
             .expect("weather");
         assert_eq!(engine.weather().story, Story::PassingStorm);

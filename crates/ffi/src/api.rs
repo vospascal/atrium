@@ -574,6 +574,9 @@ pub struct Weather {
     pub rain: Band,
     pub storm: Band,
     pub daylight: Band,
+    /// The compass bearing the wind comes from, in degrees: 0 north, 90
+    /// east, 0 up to 360.
+    pub wind_from: f32,
 }
 
 /// Every condition at one moment, each from 0 to 1.

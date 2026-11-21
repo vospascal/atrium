@@ -332,6 +332,7 @@ mod tests {
                     rain: band(0.0, 0.8),
                     storm: band(0.0, 1.0),
                     daylight: band(0.5, 0.5),
+                    wind_from: 300.0,
                 })
                 .expect("weather");
         });
