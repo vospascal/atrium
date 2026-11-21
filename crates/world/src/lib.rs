@@ -10,10 +10,12 @@
 //! into a playing sound.
 
 mod api;
+mod changes;
 mod entities;
 mod id;
 
 pub use api::{Entity, Follow, Moves, Place, Shape, Sound, When};
+pub use changes::{changes, Change};
 pub use entities::Entities;
 pub use id::EntityId;
 

@@ -58,6 +58,14 @@ impl Entities {
         self.entries.iter().map(|(id, entity)| (id, entity))
     }
 
+    /// The sound with `id`.
+    pub fn get(&self, id: &EntityId) -> Option<&Entity> {
+        self.entries
+            .iter()
+            .find(|(own, _)| own == id)
+            .map(|(_, entity)| entity)
+    }
+
     /// The sound with `id`, to change it in place.
     pub fn get_mut(&mut self, id: &EntityId) -> Option<&mut Entity> {
         self.entries
