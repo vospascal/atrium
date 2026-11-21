@@ -36,6 +36,28 @@ pub struct Rests {
     pub level_variation_db: f32,
     /// Each take is up to this much higher or lower (cents).
     pub pitch_variation_cents: f32,
+    /// How many times one take is uttered before another is chosen, fewest
+    /// and most: `(1, 1)` changes every time, `(2, 5)` holds on to a take
+    /// for two to five utterances, the way a great tit keeps one song a while.
+    pub bout: (u32, u32),
+    /// Utter the first take at once instead of after a random part of the
+    /// longest gap. A voice heard on its own starts at once; voices in a
+    /// scene wait, so that several started together do not open with a chord.
+    pub starts_at_once: bool,
+}
+
+impl Rests {
+    /// Rest between `shortest` and `longest` seconds, choosing a new take
+    /// every time, with no variation.
+    pub fn plain(shortest: f32, longest: f32) -> Self {
+        Self {
+            gap_seconds: (shortest, longest),
+            level_variation_db: 0.0,
+            pitch_variation_cents: 0.0,
+            bout: (1, 1),
+            starts_at_once: false,
+        }
+    }
 }
 
 enum State {
@@ -57,6 +79,8 @@ pub struct VoiceNode {
     state: State,
     /// The take uttered last, so the next one differs from it.
     last_take: Option<usize>,
+    /// How many more times the last take is uttered before another is chosen.
+    left_in_bout: u32,
     random: u64,
     /// The output rate last seen, to count a changed rest in samples.
     sample_rate: f32,
@@ -85,6 +109,7 @@ impl VoiceNode {
             rests,
             state: State::Resting { samples_left: 0.0 },
             last_take: None,
+            left_in_bout: 0,
             // A zero state would stay zero in the generator below.
             random: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
             sample_rate: 0.0,
@@ -99,8 +124,13 @@ impl VoiceNode {
             signal_meter: None,
         };
         // Until the first sample tells it the output rate, count in seconds.
+        let opening = if rests.starts_at_once {
+            0.0
+        } else {
+            node.unit_random() * rests.gap_seconds.1
+        };
         node.state = State::Resting {
-            samples_left: -(node.unit_random() * rests.gap_seconds.1) as f64,
+            samples_left: -opening as f64,
         };
         node
     }
@@ -154,8 +184,28 @@ impl VoiceNode {
         chosen
     }
 
-    fn start_take(&mut self) {
+    /// The take for the next utterance: the same one again while a bout
+    /// lasts, else a new one by chance, which starts a bout of its own.
+    fn next_take(&mut self) -> usize {
+        if let Some(last) = self.last_take.filter(|_| self.left_in_bout > 0) {
+            self.left_in_bout -= 1;
+            return last;
+        }
         let take = self.choose_take();
+        let (fewest, most) = self.rests.bout;
+        // Only draw when there is a choice, so a voice without bouts makes
+        // the same choices it always made from the same seed.
+        let length = if most > fewest {
+            fewest + (self.unit_random() * (most - fewest + 1) as f32) as u32
+        } else {
+            fewest
+        };
+        self.left_in_bout = length.max(1) - 1;
+        take
+    }
+
+    fn start_take(&mut self) {
+        let take = self.next_take();
         self.last_take = Some(take);
         let gain = 10.0_f32.powf(self.signed_random() * self.rests.level_variation_db / 20.0);
         let rate =
@@ -312,6 +362,13 @@ impl SoundSource for VoiceNode {
         }
     }
 
+    fn set_bout(&mut self, fewest: u32, most: u32) {
+        if fewest >= 1 && most >= fewest {
+            self.rests.bout = (fewest, most);
+            self.left_in_bout = self.left_in_bout.min(most - 1);
+        }
+    }
+
     fn set_take_chance(&mut self, take: u8, chance: f32) {
         if let Some(take) = self.takes.get_mut(take as usize) {
             if chance >= 0.0 {
@@ -347,11 +404,7 @@ mod tests {
     }
 
     fn steady(gap_seconds: (f32, f32)) -> Rests {
-        Rests {
-            gap_seconds,
-            level_variation_db: 0.0,
-            pitch_variation_cents: 0.0,
-        }
+        Rests::plain(gap_seconds.0, gap_seconds.1)
     }
 
     fn voice(takes: Vec<Take>, rests: Rests, seed: u64) -> VoiceNode {
@@ -397,6 +450,44 @@ mod tests {
         for wanted in 0..3u8 {
             assert!(uttered.contains(&wanted), "take {wanted} was never uttered");
         }
+    }
+
+    /// In bouts a take is uttered a few times running before another is
+    /// chosen, and the bout lengths stay inside their range. A voice heard on
+    /// its own starts at once.
+    #[test]
+    fn in_bouts_a_take_is_held_for_a_few_utterances() {
+        let rests = Rests {
+            bout: (2, 4),
+            starts_at_once: true,
+            ..Rests::plain(0.01, 0.02)
+        };
+        let mut node = voice(
+            vec![take(0.1, 30, 1.0), take(0.2, 30, 1.0), take(0.3, 30, 1.0)],
+            rests,
+            11,
+        );
+        node.next_sample(RATE as f32);
+        assert!(node.sounding_take().is_some(), "it starts at once");
+        let uttered = takes_uttered(&mut node, 30);
+        let mut runs = Vec::new();
+        let mut length = 1;
+        for pair in uttered.windows(2) {
+            if pair[0] == pair[1] {
+                length += 1;
+            } else {
+                runs.push(length);
+                length = 1;
+            }
+        }
+        // The first run may have begun before counting; the rest are whole bouts.
+        let whole = &runs[1..];
+        assert!(whole.len() > 20, "only {} bouts", whole.len());
+        assert!(whole.iter().all(|run| (2..=4).contains(run)), "{whole:?}");
+        assert!(
+            whole.contains(&2) && whole.contains(&4),
+            "every length occurs: {whole:?}"
+        );
     }
 
     /// Edited while it plays: a take given chance 0 is no longer chosen, and
@@ -523,9 +614,8 @@ mod tests {
     #[test]
     fn each_utterance_is_a_little_louder_or_softer() {
         let rests = Rests {
-            gap_seconds: (0.01, 0.02),
             level_variation_db: 6.0,
-            pitch_variation_cents: 0.0,
+            ..Rests::plain(0.01, 0.02)
         };
         let mut node = voice(vec![take(0.5, 100, 1.0), take(0.5, 100, 1.0)], rests, 9);
         let mut peaks = Vec::new();

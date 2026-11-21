@@ -123,6 +123,10 @@ pub trait SoundSource: Send {
     /// Default: no-op, for sources that have no takes.
     fn set_gap(&mut self, _shortest: f32, _longest: f32) {}
 
+    /// Utter one take `fewest` to `most` times running before choosing
+    /// another. Default: no-op, for sources that have no takes.
+    fn set_bout(&mut self, _fewest: u32, _most: u32) {}
+
     /// Choose take `take` with `chance` next to the others. Default: no-op,
     /// for sources that have no takes.
     fn set_take_chance(&mut self, _take: u8, _chance: f32) {}

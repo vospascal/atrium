@@ -54,6 +54,10 @@ pub enum Command {
         longest: f32,
     },
 
+    /// Set how many times running a source with takes utters one before it
+    /// chooses another, fewest and most. A source without takes ignores it.
+    SetSourceBout { index: u16, fewest: u32, most: u32 },
+
     /// Set how often take `take` of a source is chosen next to its others.
     /// A source without that take ignores it.
     SetTakeChance { index: u16, take: u8, chance: f32 },

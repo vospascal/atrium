@@ -158,6 +158,15 @@ impl AudioScene {
                         source.set_gap(shortest, longest);
                     }
                 }
+                Command::SetSourceBout {
+                    index,
+                    fewest,
+                    most,
+                } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_bout(fewest, most);
+                    }
+                }
                 Command::SetTakeChance {
                     index,
                     take,
