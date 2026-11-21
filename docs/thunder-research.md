@@ -65,20 +65,24 @@ Fineberg, Walters and Reiss:
 7. **The ground.** Sound from low on the channel grazes the ground all the way and loses up to
    14 dB over kilometres; sound from high up comes down steeply and keeps it. That is why a
    strike a few kilometres off opens without a bang and its rumble holds.
-8. **Scattering.** Sound coming back from the ground, terrain and turbulent air: a dark
-   decaying network that fills between the pulses and lets the rumble die away.
+8. **A roar shaped by the channel.** The pulses alone stay a train of clicks however many
+   there are, and a delay network to fill between them rang like an echo (heard and judged
+   bad). So the body of the sound is noise, tilted down like thunder's spectrum, whose loudness
+   and brightness follow the channel's arrivals 10 ms at a time. The geometry still decides
+   every swell, how long the rumble holds and how it darkens; the pulses add the edge of a
+   crack, strongly close by and a little from far away.
 
 ## Tuned against the reference
 
-The first version of this model was heard and judged bad: crackly, sagging, too long. Measured
-against the reference it was spiky (crest 22–28 dB against 15.5) and lost its body after the
-first second. Fine crookedness, the ground's loss and more scattering brought a clap to:
+Heard twice and judged bad: first crackly and sagging (crest 22–28 dB against 15.5, lost its body
+after a second), then echoing (from the delay network added to fix that). Measured against the
+reference after the roar replaced the network:
 
 | | Reference | Clap |
 |---|---|---|
-| Spectral centroid | 199 Hz | 193–217 Hz |
-| Crest | 15.5 dB | 17–19 dB |
-| Shape | rises, holds about 2.5 s, falls | rises, holds 4–5 s, falls |
+| Spectral centroid | 199 Hz | 174–185 Hz |
+| Crest | 15.5 dB | 18–19 dB |
+| Shape | rises, holds about 2.5 s, falls | rises, holds about 4 s, falls |
 
 `THUNDER_OUT=target/thunder-samples cargo test --release --lib write_listening_samples` writes
 three claps of every kind to listen to.

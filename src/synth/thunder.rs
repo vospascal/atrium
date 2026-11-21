@@ -82,6 +82,24 @@ const MAX_FLASH_ANGLE: f32 = 1.05;
 /// as loud, since a flash keeps its energy along its whole run, which is
 /// what holds a rumble up for seconds instead of letting it sag at once.
 const IN_CLOUD_STRENGTH: f32 = 1.0;
+/// How long one moment of a clap's roar is (s): short enough to keep the
+/// flicker of a rumble, long enough to hold many pulses.
+const MOMENT_SECONDS: f32 = 0.010;
+/// The most moments a clap has: its longest kind, with room to spare.
+const MAX_MOMENTS: usize = 2_600;
+/// The roar's noise falls 6 dB an octave above this (Hz), as thunder's
+/// spectrum does above its peak.
+const ROAR_TILT_HZ: f32 = 260.0;
+/// Below this the roar is let go (Hz); the infrasonic swell lives under it.
+const ROAR_FLOOR_HZ: f32 = 70.0;
+/// The air's two filter stages sit this far above where it takes 3 dB off,
+/// so the two together lose 3 dB there: 1 / √(√2 − 1).
+const AIR_STAGE_FACTOR: f32 = 1.554;
+/// White noise from −1 to 1 has power 1/3; this makes it 1.
+const WHITE_TO_UNIT: f32 = 1.732;
+/// The roar's loudest moment, as a share of the kind's level, before the
+/// limit rounds the peaks of the noise.
+const ROAR_LEVEL: f32 = 0.28;
 /// How loud a branch is next to the main channel: it carries less current.
 const BRANCH_STRENGTH: f32 = 0.5;
 /// Output trim, so every kind peaks under full scale at every rate.
@@ -107,6 +125,9 @@ struct Kind {
     step: f32,
     /// Its loudest moment, before the output trim.
     level: f32,
+    /// How much of the pulses themselves is heard over the roar: the edge of
+    /// a crack close by, little of it from far away.
+    edge: f32,
     /// The infrasonic swell's level, as a share of `level`, and its length (s).
     infra: f32,
     infra_seconds: (f32, f32),
@@ -125,6 +146,7 @@ const KINDS: [Kind; 4] = [
         branches: 4,
         step: 3.0,
         level: 1.0,
+        edge: 0.9,
         infra: 0.01,
         infra_seconds: (0.10, 0.20),
         seconds: 9.0,
@@ -139,6 +161,7 @@ const KINDS: [Kind; 4] = [
         branches: 5,
         step: 4.0,
         level: 0.7,
+        edge: 0.3,
         infra: 0.02,
         infra_seconds: (0.15, 0.30),
         seconds: 12.0,
@@ -153,6 +176,7 @@ const KINDS: [Kind; 4] = [
         branches: 3,
         step: 5.0,
         level: 0.6,
+        edge: 0.25,
         infra: 0.025,
         infra_seconds: (0.20, 0.40),
         seconds: 22.0,
@@ -167,6 +191,7 @@ const KINDS: [Kind; 4] = [
         branches: 4,
         step: 6.0,
         level: 0.35,
+        edge: 0.15,
         infra: 0.03,
         infra_seconds: (0.25, 0.45),
         seconds: 16.0,
@@ -235,6 +260,14 @@ struct Sounding {
 /// One clap: its channel's pulses in arrival order, and those sounding now.
 struct Clap {
     pulses: Vec<Pulse>,
+    /// The channel's loudness and brightness, one [`Moment`] per [`MOMENT_SECONDS`].
+    moments: Vec<Moment>,
+    /// The roar's own noise, and its filters: a tilt, the air, and a floor.
+    noise: Rng,
+    tilt: f32,
+    air_first: f32,
+    air_second: f32,
+    floor: f32,
     next: usize,
     sounding: [Sounding; MAX_SOUNDING],
     sounding_count: usize,
@@ -252,9 +285,15 @@ struct Clap {
 }
 
 impl Clap {
-    fn new() -> Self {
+    fn new(seed: u64) -> Self {
         Self {
             pulses: Vec::with_capacity(MAX_PULSES),
+            moments: Vec::with_capacity(MAX_MOMENTS),
+            noise: Rng::new(seed),
+            tilt: 0.0,
+            air_first: 0.0,
+            air_second: 0.0,
+            floor: 0.0,
             next: 0,
             sounding: [Sounding::default(); MAX_SOUNDING],
             sounding_count: 0,
@@ -284,6 +323,11 @@ impl Clap {
         self.rate = rate;
         self.gain = gain;
         build_channel(kind(self.kind), random, &mut self.pulses);
+        shape_the_roar(kind(self.kind), &self.pulses, &mut self.moments);
+        self.tilt = 0.0;
+        self.air_first = 0.0;
+        self.air_second = 0.0;
+        self.floor = 0.0;
         // Started partway: skip what has long been heard.
         let skip = utterance.skip_seconds.max(0.0) * rate;
         self.next = self
@@ -344,19 +388,114 @@ impl Clap {
                 index += 1;
             }
         }
+        let roar = self.roar(sample_rate);
         self.elapsed += step;
+        let moments_over = self.elapsed / MOMENT_SECONDS >= self.moments.len() as f32;
 
         if self.releasing {
             self.steal_gain -= 1.0 / (STEAL_SECONDS * sample_rate);
         }
-        if self.steal_gain <= 0.0 || (self.next >= self.pulses.len() && self.sounding_count == 0) {
+        if self.steal_gain <= 0.0
+            || (self.next >= self.pulses.len() && self.sounding_count == 0 && moments_over)
+        {
             self.active = false;
             self.steal_gain = 0.0;
         }
         // Where pulses do line up, a gentle limit rounds the peak, as the air
         // near a strike and any microphone do; quieter than a fifth of full
         // scale it changes nothing.
-        soft_limit(sum * self.gain) * self.steal_gain.max(0.0)
+        soft_limit((roar + kind(self.kind).edge * sum) * self.gain) * self.steal_gain.max(0.0)
+    }
+
+    /// The roar at this moment: noise, tilted down like thunder's spectrum,
+    /// darkened by the air as the channel's arriving parts are, and as loud
+    /// as they are, both read from the moments and blended between them.
+    fn roar(&mut self, sample_rate: f32) -> f32 {
+        let position = self.elapsed / MOMENT_SECONDS;
+        let index = position as usize;
+        let Some(here) = self.moments.get(index).copied() else {
+            return 0.0;
+        };
+        let next = self.moments.get(index + 1).copied().unwrap_or(Moment {
+            loudness: 0.0,
+            ..here
+        });
+        let along = position - index as f32;
+        let loudness = here.loudness + (next.loudness - here.loudness) * along;
+        let cutoff = here.cutoff + (next.cutoff - here.cutoff) * along;
+
+        let coefficient = |hertz: f32| 1.0 - (-TAU * hertz * self.rate / sample_rate).exp();
+        let tilt = coefficient(ROAR_TILT_HZ);
+        let air = coefficient(cutoff * AIR_STAGE_FACTOR);
+        let floor = coefficient(ROAR_FLOOR_HZ);
+        let white = self.noise.next_bipolar();
+        self.tilt += tilt * (white - self.tilt);
+        self.air_first += air * (self.tilt - self.air_first);
+        self.air_second += air * (self.air_first - self.air_second);
+        self.floor += floor * (self.air_second - self.floor);
+        // White noise through the tilt keeps a share tilt / (2 − tilt) of its
+        // power: scale it back to steady power, so `loudness` is its level.
+        let steady = ((2.0 - tilt) / tilt).sqrt() * WHITE_TO_UNIT;
+        (self.air_second - self.floor) * steady * loudness
+    }
+}
+
+/// One stretch of a clap: how loud its arriving channel is, and how bright the
+/// air leaves it.
+#[derive(Clone, Copy, Debug)]
+struct Moment {
+    loudness: f32,
+    cutoff: f32,
+}
+
+/// How the channel's arrivals shape the roar: their energy and brightness,
+/// gathered per [`MOMENT_SECONDS`] and gently smoothed, at the kind's level.
+/// The swells, the holding and the darkening of a rumble come from here.
+fn shape_the_roar(kind: &Kind, pulses: &[Pulse], moments: &mut Vec<Moment>) {
+    moments.clear();
+    let Some(last) = pulses.last() else {
+        return;
+    };
+    let count = ((last.at / MOMENT_SECONDS) as usize + 2).min(MAX_MOMENTS);
+    for _ in 0..count {
+        moments.push(Moment {
+            loudness: 0.0,
+            cutoff: 0.0,
+        });
+    }
+    // Energy and an energy-weighted brightness per moment.
+    for pulse in pulses {
+        let index = (pulse.at / MOMENT_SECONDS) as usize;
+        if let Some(moment) = moments.get_mut(index) {
+            let heard = pulse.amplitude * (TAU * pulse.cutoff * pulse.seconds).min(1.0);
+            let power = heard * heard;
+            moment.loudness += power;
+            moment.cutoff += power * pulse.cutoff;
+        }
+    }
+    let mut last_cutoff = absorbed_above(kind.distance.0);
+    for moment in moments.iter_mut() {
+        if moment.loudness > 0.0 {
+            moment.cutoff /= moment.loudness;
+            last_cutoff = moment.cutoff;
+        } else {
+            moment.cutoff = last_cutoff;
+        }
+    }
+    // Smoothed over a few moments, then as loudness.
+    let mut previous = 0.0;
+    for index in 0..moments.len() {
+        let here = moments[index].loudness;
+        let next = moments.get(index + 1).map_or(0.0, |moment| moment.loudness);
+        moments[index].loudness = ((previous + 2.0 * here + next) / 4.0).sqrt();
+        previous = here;
+    }
+    let loudest = moments
+        .iter()
+        .fold(0.0f32, |loudest, moment| loudest.max(moment.loudness));
+    let scale = kind.level * ROAR_LEVEL / loudest.max(1e-9);
+    for moment in moments.iter_mut() {
+        moment.loudness *= scale;
     }
 }
 
@@ -602,82 +741,6 @@ fn build_channel(kind: &Kind, random: &mut Rng, pulses: &mut Vec<Pulse>) {
     }
 }
 
-/// The lengths of the scattering network's four lines (s): primes apart,
-/// so their echoes never line up.
-const SCATTER_LINES_SECONDS: [f32; 4] = [0.043_7, 0.059_3, 0.078_1, 0.097_1];
-/// How long the scattered sound takes to die away by 60 dB (s).
-const SCATTER_DECAY_SECONDS: f32 = 3.0;
-/// Above this the scattered sound is absorbed on each pass (Hz).
-const SCATTER_DARKNESS_HZ: f32 = 1_200.0;
-/// How much of the scattered sound is heard next to the direct pulses.
-const SCATTER_MIX: f32 = 1.0;
-/// The highest output rate the network keeps room for.
-const SCATTER_MOST_SAMPLES_PER_SECOND: f32 = 192_000.0;
-
-/// Sound scattered by the ground, the terrain and turbulent air on its way:
-/// it fills between the pulses, so a rumble is a continuous roar and not a
-/// train of clicks, and lets it die away instead of stopping. Four dark
-/// feedback lines mixed by a Hadamard matrix, made beforehand at the largest
-/// size any output rate needs.
-struct Scatter {
-    lines: [Vec<f32>; 4],
-    lengths: [usize; 4],
-    positions: [usize; 4],
-    feedback: [f32; 4],
-    dark: [f32; 4],
-    darkness: f32,
-    sample_rate: f32,
-}
-
-impl Scatter {
-    fn new() -> Self {
-        let room = |seconds: f32| {
-            vec![0.0; (seconds * SCATTER_MOST_SAMPLES_PER_SECOND).ceil() as usize + 1]
-        };
-        Self {
-            lines: SCATTER_LINES_SECONDS.map(room),
-            lengths: [1; 4],
-            positions: [0; 4],
-            feedback: [0.0; 4],
-            dark: [0.0; 4],
-            darkness: 0.0,
-            sample_rate: 0.0,
-        }
-    }
-
-    fn retune(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate;
-        for (line, &seconds) in SCATTER_LINES_SECONDS.iter().enumerate() {
-            self.lengths[line] =
-                ((seconds * sample_rate) as usize).clamp(1, self.lines[line].len() - 1);
-            self.positions[line] %= self.lengths[line];
-            self.feedback[line] = 10f32.powf(-3.0 * seconds / SCATTER_DECAY_SECONDS);
-        }
-        self.darkness = 1.0 - (-TAU * SCATTER_DARKNESS_HZ / sample_rate).exp();
-    }
-
-    fn next_sample(&mut self, input: f32, sample_rate: f32) -> f32 {
-        if sample_rate != self.sample_rate {
-            self.retune(sample_rate);
-        }
-        let outs: [f32; 4] = std::array::from_fn(|line| self.lines[line][self.positions[line]]);
-        // A Hadamard mix keeps the energy and spreads every echo to every line.
-        let mixed = [
-            0.5 * (outs[0] + outs[1] + outs[2] + outs[3]),
-            0.5 * (outs[0] - outs[1] + outs[2] - outs[3]),
-            0.5 * (outs[0] + outs[1] - outs[2] - outs[3]),
-            0.5 * (outs[0] - outs[1] - outs[2] + outs[3]),
-        ];
-        for (line, &into) in mixed.iter().enumerate() {
-            self.dark[line] += self.darkness * (into - self.dark[line]);
-            let position = self.positions[line];
-            self.lines[line][position] = input + self.dark[line] * self.feedback[line];
-            self.positions[line] = (position + 1) % self.lengths[line];
-        }
-        0.5 * (outs[0] + outs[1] + outs[2] + outs[3])
-    }
-}
-
 /// Procedural thunder, silent until told to strike.
 ///
 /// Each strike is an [`Utterance`]: `take` is the kind ([`KIND_CRACK`],
@@ -686,7 +749,6 @@ impl Scatter {
 /// sound at once; a third takes the place of the oldest after a 10 ms fade.
 pub struct ThunderSource {
     claps: [Clap; CLAPS],
-    scatter: Scatter,
     /// Upcoming strikes, earliest first; `None` is a free place.
     appointments: [Option<Utterance>; APPOINTMENTS],
     /// The session's clock, in output samples.
@@ -703,8 +765,10 @@ impl ThunderSource {
     /// A silent thunder source at `position`; `seed` makes its flashes.
     pub fn new(position: Vec3, seed: u64) -> Self {
         Self {
-            claps: [Clap::new(), Clap::new()],
-            scatter: Scatter::new(),
+            claps: [
+                Clap::new(seed.wrapping_add(11)),
+                Clap::new(seed.wrapping_add(23)),
+            ],
             appointments: [None; APPOINTMENTS],
             clock: 0,
             claps_started: 0,
@@ -754,14 +818,13 @@ impl SoundSource for ThunderSource {
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
         self.keep_appointments();
         self.clock += 1;
-        let mut direct = 0.0;
+        let mut sample = 0.0;
         for clap in &mut self.claps {
             if clap.active {
-                direct += clap.next_sample(sample_rate);
+                sample += clap.next_sample(sample_rate);
             }
         }
-        let scattered = self.scatter.next_sample(direct, sample_rate);
-        (direct + SCATTER_MIX * scattered) * self.master_gain * OUTPUT_TRIM
+        sample * self.master_gain * OUTPUT_TRIM
     }
 
     fn set_clock(&mut self, sample: u64) {
