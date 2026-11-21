@@ -96,6 +96,7 @@ one domain, so there is no `state.rs`, `gpu.rs` or domain directory yet.
 | `api.rs` | `Entity` and its parts, as plain data |
 | `id.rs` | `EntityId`, what makes an id usable, and a free id for a new sound |
 | `entities.rs` | `Entities`: unique ids in file order, and the mapping it reads and writes |
+| `changes.rs` | What differs between two versions of a scene's sounds, as the smallest changes |
 
 When the behaviours arrive (when a sound plays, how it wanders), each gets its own file in
 a private directory and the planning gets a `state.rs`.

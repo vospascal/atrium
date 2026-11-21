@@ -48,6 +48,24 @@ runs Cargo itself. There is nothing to build here by hand.
   its slot, which takes as long as adding one. The engine remembers which voices the listener
   muted, so a sound built again stays silent. The last take that can still be chosen cannot be
   given chance 0, so a sound never ends up with nothing to say.
+- **Undo keeps whole versions, not a list of reversible commands.** `remember` copies the
+  scene's sounds, weather and listener before each step (`engine/undo.rs`, with the generic
+  stacks in `history.rs`). Going back asks the world crate what differs (`atrium_world::changes`)
+  and plays only that, through the same `play_` helpers the edits use, so a moved sound is
+  moved, not built again, and nothing stops. Commands that each knew their own inverse would
+  have meant a second implementation of every edit, and one forgotten inverse would corrupt the
+  scene silently; a version cannot be inverted wrongly. A step that changed nothing is passed
+  over, so a drag let go where it began never needs an undo of its own. The app decides what a
+  step is (edits to one thing close together), so no control has to know undo exists.
+- **Every edit is two halves: what is heard and what the file records.** A `set_` call writes
+  the scene file and calls a `play_` helper; undo writes the whole earlier file at once and calls
+  the same helpers. Undoing a sound that was removed builds it again in the lowest free voice,
+  which may differ from the one it had, so the app finds sounds by id after an undo.
+- **The listener's placement is shared with head tracking.** Tracking adds the head's turn to a
+  placement it reads at every packet (`atrium::head_tracking::Placement`), so moving or turning
+  the listener in the editor while tracking runs keeps the head's turn on top of the new pose.
+  Before, tracking held the pose it started with, and a moved listener would have jumped back
+  at the next packet.
 - **`conditions` takes a stretch of time, past included.** The weather is a pure function of the
   session's clock and seed, so the conditions an hour ago and an hour ahead are computed, not
   recorded. A screen draws them as lanes without keeping any history.
@@ -196,8 +214,11 @@ runs Cargo itself. There is nothing to build here by hand.
   GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
   engine is compiled, so a build moved away from this repository cannot find it.
 - **A sound's size cannot be set.** `SetSourceSpread` exists in the engine; no screen uses it.
-- **A new sound always lands 2 m ahead of where the scene puts the listener.** Dropping it at a
-  chosen spot needs the map of all sounds.
+- **Undo does not keep mutes or which voice a sound had.** Mutes belong to the listener, and the
+  app puts them back by id after an undo. A sound brought back by undo, and one its slot colour
+  is taken from, may change colour when it lands in another voice, unless the scene gives it one.
+- **Speakers are shown, not moved.** `SceneDescription::speakers` is where the scene file puts
+  them; there is no call to move one, because the room's speakers are physical.
 - **A killed app leaves its Sony bridge running.** The bridge is stopped when the engine is
   closed. A process that is killed outright never closes it, and whether closing the app's
   window always does has not been checked. A bridge left behind keeps sending to a port nobody
