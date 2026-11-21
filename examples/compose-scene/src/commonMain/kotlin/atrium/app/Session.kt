@@ -12,7 +12,6 @@ import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
 import atrium.engine.Output
-import atrium.engine.Pattern
 import atrium.engine.Position
 import atrium.engine.Preset
 import atrium.engine.RenderMode
@@ -197,10 +196,10 @@ internal class Session(private val store: SettingsStore) {
         unsaved = true
     }
 
-    /** Change how the sound in [slot] radiates. */
-    fun shape(slot: UShort, pattern: Pattern) {
+    /** Make the sound in [slot] go out [width] degrees wide, with [behind] dB heard behind it. */
+    fun beam(slot: UShort, width: Float, behind: Float) {
         val running = engine ?: return
-        command { setSourcePattern(slot, pattern) }
+        command { setSourceBeam(slot, width, behind) }
         description = running.scene()
         unsaved = true
     }

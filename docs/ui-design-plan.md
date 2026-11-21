@@ -292,7 +292,7 @@ written in its layout. Its design record is `crates/world/README.md`.
 |---|---|---|
 | Identity | A stable id, a name, a colour, a group | the key of the entry, `name`, `color`, `group` |
 | Sound | The preset it starts from, what it overrides, its level | `sound: { preset, audio, level }` |
-| Shape | Ambient, omni or focused, and a size | `shape: { pattern, size }`. Ambient is fixed per generator |
+| Shape | Ambient or a beam of any width with some sound behind it, and a size | `shape: { width, behind, size, facing }`. Ambient is fixed per generator |
 | Place | Position and height | `place: [x, y, z]` |
 | When | A behaviour: always, now and then, in bouts | **nothing** |
 | Moves | A behaviour: still, orbit, path, wanders, perches | `moves: { orbit: { radius, speed } }` |
@@ -539,7 +539,7 @@ one binding method away. Bold marks what is missing.
 | Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (6) |
 | Mute | `SetSourceMuted` | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
 | Level | `SetSourceSpl` | `set_source_level` | exists: the selected layer |
-| Omni or focused | `SetSourceDirectivity` | `set_source_pattern` | exists: the inspector |
+| Width and what is heard behind | `SetSourceDirectivity` with a `Beam` | `set_source_beam` | exists: the inspector, with Omni, Focused and Narrow as starting points and a drawing of the beam |
 | Size | `SetSourceSpread` | **no call.** Size is not in the description | new (10) |
 | Orbit | `SetSourceOrbitSpeed`, `SetSourceOrbitRadius`, `SetSourceOrbitAngle` | **no call.** Orbit is not in the description | new (33) |
 | Temperature and humidity | `SetAtmosphere` | **no call** | new (39) |

@@ -3,7 +3,6 @@ package atrium.app
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import atrium.engine.EmitterKind
-import atrium.engine.Pattern
 import atrium.engine.Position
 import atrium.engine.SourceDescription
 import kotlin.math.abs
@@ -111,11 +110,25 @@ class TopDownTest {
 
     @Test
     fun theShapeIsSaidInALine() {
-        fun sound(kind: EmitterKind, beam: Float?) = SourceDescription(
-            "s", 0u, Pattern.OMNI, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, beam, Position(1f, 0f, 0f), emptyList(),
+        fun sound(kind: EmitterKind, width: Float, behind: Float) = SourceDescription(
+            "s", 0u, width, behind, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, null, Position(1f, 0f, 0f), emptyList(), null,
         )
-        assertEquals("Ambient: heard everywhere", shapeLine(sound(EmitterKind.FIELD, null)))
-        assertEquals("Omni: equal all round", shapeLine(sound(EmitterKind.OBJECT, null)))
-        assertEquals("Focused: a beam 60° wide", shapeLine(sound(EmitterKind.OBJECT, (30.0 * kotlin.math.PI / 180.0).toFloat())))
+        assertEquals("Ambient: heard everywhere", shapeLine(sound(EmitterKind.FIELD, 360f, -60f)))
+        assertEquals("All round: equal in every direction", shapeLine(sound(EmitterKind.OBJECT, 360f, -60f)))
+        assertEquals("A beam 60° wide, nothing behind", shapeLine(sound(EmitterKind.OBJECT, 60f, -60f)))
+        assertEquals("A beam 120° wide, -12 dB behind", shapeLine(sound(EmitterKind.OBJECT, 120f, -12f)))
+    }
+
+    /** The drawing follows the engine's beam: full ahead, halfway at the edge of the width, the level behind at the back. */
+    @Test
+    fun theBeamIsDrawnAsTheEngineShapesIt() {
+        val pi = kotlin.math.PI.toFloat()
+        assertEquals(1f, beamGain(120f, -12f, 0f), 1e-5f)
+        assertEquals(.251f, beamGain(120f, -12f, pi), 1e-3f)
+        assertEquals((1f + .251f) / 2f, beamGain(120f, -12f, pi / 3f), 1e-3f)
+        assertEquals(.5f, beamGain(180f, SilentBehind, pi / 2f), 1e-5f, "a half circle is a cardioid")
+        assertEquals(1f, beamGain(AllRound, SilentBehind, pi), 1e-5f, "all round")
+        assertEquals(StartingShape.Focused, StartingShape.entries.single { it.matches(180f, -60f) })
+        assertTrue(StartingShape.Omni.matches(360f, -12f), "behind does not matter all round")
     }
 }

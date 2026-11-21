@@ -1,9 +1,7 @@
 package atrium.app
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -14,7 +12,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import atrium.engine.EmitterKind
 import atrium.engine.HeadTrackingStatus
-import atrium.engine.Pattern
 import atrium.engine.SceneFile
 import atrium.engine.SourceDescription
 import kotlin.math.roundToInt
@@ -52,18 +49,7 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     )
 
     Part("Shape")
-    if (sound.emitterKind != EmitterKind.FIELD) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Pattern.entries.forEach { pattern ->
-                Chip(pattern.label, selected = pattern == sound.pattern) { session.shape(sound.slot, pattern) }
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-    }
-    PaperText(shapeLine(sound), 15)
-    if (sound.beamHalfAngle != null) {
-        PaperText("Facing ${bearingLabel(live?.facing ?: sound.facing)}. Turn it with the handle on the map.", 14, Muted)
-    }
+    ShapePart(session, sound, live)
 
     Part("Place")
     PaperText(awayLabel(offset), 15)
@@ -111,23 +97,6 @@ private fun Part(title: String) {
     Spacer(Modifier.height(24.dp))
     PaperText(title.uppercase(), 13, Muted, FontWeight.SemiBold, spacing = 2f)
     Spacer(Modifier.height(8.dp))
-}
-
-private val Pattern.label
-    get() = when (this) {
-        Pattern.OMNI -> "Omni"
-        Pattern.CARDIOID -> "Focused"
-        Pattern.SUPERCARDIOID -> "Narrow"
-    }
-
-/** How a sound fills the air, in a line. */
-internal fun shapeLine(sound: SourceDescription): String {
-    val beam = sound.beamHalfAngle
-    return when {
-        sound.emitterKind == EmitterKind.FIELD -> "Ambient: heard everywhere"
-        beam != null -> "Focused: a beam ${(beam * 2f * 180f / kotlin.math.PI.toFloat()).roundToInt()}° wide"
-        else -> "Omni: equal all round"
-    }
 }
 
 /** How many sounds the engine can play at once. */

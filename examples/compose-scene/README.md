@@ -67,7 +67,8 @@ and on desktop the window widens for it. It has three panels; in a narrow window
   distance and bearing on a dashed line, and a focused one has a handle at the end of its facing
   line: drag it to turn the sound.
 - **The inspector** shows the selected sound in a fixed order: its level, which can be set; its
-  shape, which can be Omni, Focused or Narrow; then its place, when it plays and whether it
+  shape, a width from a narrow beam to all round and how much is heard behind it, with Omni,
+  Focused and Narrow as starting points and a drawing of the beam turned the way it faces; then its place, when it plays and whether it
   moves. **When** is All the time or Now and then; Now and then has a range with two handles for
   the shortest and longest rest. Anything with takes lists them, with the one sounding now lit
   and "Resting" between two, and each take's chance as steps from never to four times as often. With nothing selected it shows the scene.
