@@ -18,6 +18,7 @@ pub mod soft_wind;
 pub mod storm_wind;
 pub mod thunder;
 pub mod wave;
+pub mod wind_behaviour;
 pub mod wisp;
 
 #[cfg(test)]

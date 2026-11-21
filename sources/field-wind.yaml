@@ -20,6 +20,16 @@ gust_duration_max: 10.0
 turbulence_time_min: 0.12  # fastest eddy/ruffle trajectory
 turbulence_time_max: 0.80
 gust_strength: 0.35        # fraction of the speed range reserved for gusts
+
+# What the wind does now and then, like a bird's repertoire: steady air most of
+# the time, and every minute or two a gust, a slow swell or a lull. Without this
+# the wind gusts about half the time, which suits a storm, not a breeze.
+behaviour:
+  rest: [40, 120]          # steady wind between two moves (s)
+  repertoire:
+    - { move: gust,  chance: 3, strength: [0.3, 0.8], seconds: [3, 8] }
+    - { move: swell, chance: 2, strength: [0.2, 0.5], seconds: [10, 25] }
+    - { move: lull,  chance: 1, strength: [0.3, 0.6], seconds: [8, 20] }
 rise_bias: 0.25            # >0 tends toward quicker rises and slower releases
 turbulence_depth: 0.20     # sub-second eddy modulation depth
 gust_brightness: 0.0       # optional extra spectral opening at gust peaks

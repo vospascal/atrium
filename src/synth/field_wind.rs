@@ -16,6 +16,7 @@ use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::types::Vec3;
 
 use super::noise::{white_noise_density_scale, OnePoleHP, OnePoleLP, PinkNoiseFull, Rng};
+use super::wind_behaviour::{WindBehaviour, WindMoves};
 
 /// Smooth random trajectory with segment durations specified in seconds.
 /// Cosine interpolation gives zero slope at target changes and avoids audible
@@ -104,6 +105,11 @@ pub(crate) struct WindDriver {
     weather: SmoothRandom,
     gust: SmoothRandom,
     eddy: SmoothRandom,
+    /// What the wind does now and then, when it has a repertoire. Without
+    /// one the gust trajectory above pushes the wind about half the time,
+    /// which suits a storm.
+    moves: Option<WindMoves>,
+    seed: u64,
 }
 
 impl WindDriver {
@@ -112,7 +118,15 @@ impl WindDriver {
             weather: SmoothRandom::new(seed.wrapping_add(101), 18.0, 55.0),
             gust: SmoothRandom::new(seed.wrapping_add(103), 2.5, 11.0),
             eddy: SmoothRandom::new(seed.wrapping_add(107), 0.12, 0.80),
+            moves: None,
+            seed,
         }
+    }
+
+    /// Let the wind follow `behaviour`: steady, with a gust, swell or lull
+    /// now and then.
+    pub(crate) fn set_behaviour(&mut self, behaviour: WindBehaviour) {
+        self.moves = Some(WindMoves::new(behaviour, self.seed.wrapping_add(109)));
     }
 
     pub(crate) fn set_change_time_range(&mut self, min_seconds: f32, max_seconds: f32) {
@@ -149,16 +163,25 @@ impl WindDriver {
         rise_bias: f32,
     ) -> WindFrame {
         let weather = 0.5 * (self.weather.next_shaped(sample_rate, rise_bias) + 1.0);
-        let gust = self.gust.next_shaped(sample_rate, rise_bias);
         let eddy = self.eddy.next(sample_rate);
 
         // The slow weather trajectory occupies the range left after reserving
-        // headroom for short positive gusts. Negative halves of the gust
-        // trajectory become genuine rests rather than downward oscillations.
+        // headroom for gusts. A lull takes the steady wind down for a while.
         let gust_strength = gust_strength.clamp(0.0, 1.0);
-        let gust_pressure = gust.max(0.0).powi(2);
-        let activity =
-            (weather * (1.0 - gust_strength) + gust_pressure * gust_strength).clamp(0.0, 1.0);
+        let (gust_pressure, lull) = match &mut self.moves {
+            Some(moves) => {
+                let push = moves.next(sample_rate);
+                (push.max(0.0), (-push).max(0.0))
+            }
+            // Negative halves of the gust trajectory become genuine rests
+            // rather than downward oscillations.
+            None => {
+                let gust = self.gust.next_shaped(sample_rate, rise_bias);
+                (gust.max(0.0).powi(2), 0.0)
+            }
+        };
+        let steady = weather * (1.0 - gust_strength) * (1.0 - lull);
+        let activity = (steady + gust_pressure * gust_strength).clamp(0.0, 1.0);
         let min_speed = min_speed.clamp(0.0, 25.0);
         let max_speed = max_speed.clamp(min_speed, 25.0);
         let speed = min_speed + (max_speed - min_speed) * activity;
@@ -295,6 +318,12 @@ impl FieldWindSource {
 
     pub fn set_change_time_range(&mut self, min_seconds: f32, max_seconds: f32) {
         self.driver.set_change_time_range(min_seconds, max_seconds);
+    }
+
+    /// Let the wind follow `behaviour`: steady, with a gust, swell or lull
+    /// now and then, instead of gusting about half the time.
+    pub fn set_behaviour(&mut self, behaviour: WindBehaviour) {
+        self.driver.set_behaviour(behaviour);
     }
 
     pub fn change_time_range(&self) -> (f32, f32) {
