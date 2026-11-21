@@ -31,5 +31,5 @@ master_gain: 1.0
 # A deliberately gentle artistic default. The recording has no calibrated SPL
 # metadata, so unlike the spectral and temporal values this is not a measurement.
 reference_spl: 55.0
-directivity: omni
+width: 360
 spread: 0.90

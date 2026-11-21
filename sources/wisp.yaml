@@ -21,5 +21,5 @@ hum_gain: 0.18        # pitched hum of the wingbeat
 master_gain: 1.0
 
 reference_spl: 62.0   # dB SPL at 1 m — a little louder than a real hummingbird (~55)
-directivity: omni
+width: 360
 spread: 0.0           # a point: it must be easy to place

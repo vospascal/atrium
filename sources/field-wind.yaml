@@ -34,5 +34,4 @@ air_gain: 0.08             # 3.8-10 kHz air
 master_gain: 1.0
 
 reference_spl: 48.0        # nominal field level; gust dynamics rise within this bed
-directivity: omni          # ignored by Field rendering; retained for schema compatibility
 spread: 1.0                # UI description only; Field does not use MDAP spread

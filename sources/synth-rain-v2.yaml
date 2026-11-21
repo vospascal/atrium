@@ -5,5 +5,5 @@ group: Weather
 synth: rain_v2
 intensity: 0.5      # 0-1 — moderate rainfall
 reference_spl: 55.0 # dB at 1 m
-directivity: omni
+width: 360
 spread: 0.9         # rain is a distributed source

@@ -12,7 +12,7 @@ sounds:
     color: "#6db33f"
     group: Creatures
     sound: { preset: sources/frog.yaml, level: 68 }
-    shape: { pattern: cardioid, size: 0.2, facing: 225 }
+    shape: { width: 180, behind: -12, size: 0.2, facing: 225 }
     place: [10.1, 10.1, 0.0]
     when: { gap: [20, 45], chance: { "Call 2": 3 } }
     moves:
@@ -47,6 +47,11 @@ This is version 1, the foundation. It changes nothing you hear. The design it fo
   sounds with one id impossible to write by accident. The order is kept, because it decides
   which voice and which default colour and seed a sound gets. `Entities` reads the mapping
   in file order with its own visitor, so no ordered-map crate is needed.
+- **A shape is a width and a level behind, not a named pattern.** Omni, cardioid and
+  supercardioid were three points on one range, and most real sounds fall between them. A width
+  of 180 with nothing behind is exactly the old cardioid, and 360 is omni, so nothing was lost.
+  The names live on in the editor as starting points. `behind` is in dB because that is how
+  an ear and a mixer think of "duller and softer from behind".
 - **`when:` is not about birds.** It holds the rest between takes and each take's chance,
   which a bell, lines of a story or a tone have as much as a bird. A gap of `[0, 0]` is "all
   the time", so there is no separate switch for it, and a recording that loops can be given a

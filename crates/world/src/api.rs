@@ -55,16 +55,23 @@ pub struct Sound {
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Shape {
-    /// How it radiates, in place of the preset's pattern.
+    /// How wide its sound goes out, in degrees, in place of the preset's:
+    /// 360 is all round, 180 a half circle, 60 a narrow beam. The width is
+    /// where the level is halfway between the front and the back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<Pattern>,
+    pub width: Option<f32>,
+    /// How much is heard straight behind it, in dB below the front: 0 as
+    /// loud, −12 duller and softer, −60 or lower nothing. In place of the
+    /// preset's. It only matters when the width is less than all round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<f32>,
     /// How wide it sounds, from 0 (a point) to 1 (all around), in place of
     /// the preset's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
     /// Which way it faces, as a compass bearing in degrees: 0 is north (+y),
     /// 90 is east (+x), the way scene files give directions. It matters for
-    /// a pattern that radiates more one way than another. Left out, the
+    /// a sound whose width is less than all round. Left out, the
     /// sound faces the way the engine would turn it by itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facing: Option<f32>,
@@ -105,29 +112,6 @@ pub struct When {
 impl When {
     fn is_the_presets_own(&self) -> bool {
         *self == Self::default()
-    }
-}
-
-/// A radiation pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Pattern {
-    /// Equally in every direction.
-    Omni,
-    /// Mostly forward, nothing straight behind.
-    Cardioid,
-    /// A narrower forward beam with a small lobe behind.
-    Supercardioid,
-}
-
-impl Pattern {
-    /// The name a preset file uses for this pattern.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Omni => "omni",
-            Self::Cardioid => "cardioid",
-            Self::Supercardioid => "supercardioid",
-        }
     }
 }
 

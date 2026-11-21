@@ -1,3 +1,4 @@
+use atrium_core::directivity::DirectivityPattern;
 use atrium_core::types::Vec3;
 
 use super::rain::RainSynthParams;
@@ -103,7 +104,7 @@ fn storm_wind_controls_parse_and_build_as_a_field() {
     let built = build_one_synth_source(
         &source.spec,
         source.reference_spl,
-        "omni",
+        DirectivityPattern::Omni,
         1.0,
         Vec3::ZERO,
         45,
@@ -146,7 +147,7 @@ fn canopy_wind_controls_parse_and_build_as_a_field() {
     let built = build_one_synth_source(
         &source.spec,
         source.reference_spl,
-        "omni",
+        DirectivityPattern::Omni,
         1.0,
         Vec3::ZERO,
         42,
@@ -227,7 +228,7 @@ fn soft_wind_controls_parse_and_build_as_a_field() {
     let built = build_one_synth_source(
         &source.spec,
         source.reference_spl,
-        "omni",
+        DirectivityPattern::Omni,
         1.0,
         Vec3::ZERO,
         46,
@@ -272,7 +273,7 @@ fn river_controls_parse_and_build_as_an_object() {
     let built = build_one_synth_source(
         &source.spec,
         source.reference_spl,
-        "omni",
+        DirectivityPattern::Omni,
         1.0,
         Vec3::ZERO,
         47,
@@ -296,7 +297,7 @@ fn field_wind_builds_as_a_field_emitter() {
     let built = build_one_synth_source(
         &source.spec,
         source.reference_spl,
-        "omni",
+        DirectivityPattern::Omni,
         1.0,
         Vec3::ZERO,
         42,
@@ -358,7 +359,7 @@ fn silent_synth_source_is_a_build_error() {
     let result = build_one_synth_source(
         &spec,
         55.0,
-        "omni",
+        DirectivityPattern::Omni,
         0.9,
         Vec3::ZERO,
         1,

@@ -11,4 +11,4 @@ rule:
     gap: [25, 50]             # seconds of rest before it starts again
     vary: { level: 2, pitch: 10 }
 reference_spl: 70.0        # ~70 dB SPL at 1m (loud, carrying call)
-directivity: omni           # calls scatter in all directions
+width: 360                  # calls scatter in all directions

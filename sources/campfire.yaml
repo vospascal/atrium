@@ -8,5 +8,5 @@ takes:
   - { file: assets/campfire.mp3, name: Campfire }
 rule: loops
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (close crackling/popping fire)
-directivity: omni           # radiates equally in all directions
+width: 360                  # radiates equally in all directions
 spread: 0.6                 # MDAP spread (0.0 = point source, 1.0 = full surround)

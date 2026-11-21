@@ -15,7 +15,7 @@ use atrium_world::Entity;
 use super::description::{beam_half_angle, SceneDescription, SourceDescription, TakeDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
-use super::sound_builder::{pattern_named, SoundBuilder};
+use super::sound_builder::SoundBuilder;
 use super::source::{resolve_spl, ResolvedTake};
 use super::synth::SynthSpec;
 use crate::audio::atmosphere::AtmosphericParams;
@@ -83,7 +83,9 @@ pub(super) struct SourceMeta {
     pub(super) ref_dist: f32,
     pub(super) amplitude: f32,
     pub(super) audible_radius: f32,
-    pub(super) directivity: String,
+    /// Width (degrees) and level behind (dB) it radiates with.
+    pub(super) width: f32,
+    pub(super) behind: f32,
     pub(super) directivity_alpha: f32,
     pub(super) spread: f32,
     pub(super) position: [f32; 3],
@@ -222,7 +224,8 @@ impl SceneConfig {
                 .map(|(slot, (meta, node))| SourceDescription {
                     id: meta.id.clone(),
                     slot: slot as u16,
-                    pattern: pattern_named(&meta.directivity),
+                    width: meta.width,
+                    behind: meta.behind,
                     takes: meta.takes.clone(),
                     gap: meta.gap,
                     name: meta.name.clone(),
@@ -427,7 +430,7 @@ pub(super) fn build_one_source(
     rests: Option<Rests>,
     seed: u64,
     reference_spl: f32,
-    directivity: &str,
+    pattern: DirectivityPattern,
     spread: f32,
     position: Vec3,
     orbit_radius: f32,
@@ -468,7 +471,6 @@ pub(super) fn build_one_source(
     let profile = resolve_spl(reference_spl);
     let amplitude = profile.amplitude(rms, normalization.target_rms, normalization.spl_reference);
     let ref_dist = profile.ref_distance(global_ref_dist);
-    let pattern = parse_directivity(directivity);
     let bands = longest.spectral_profile.bands;
     let audible_radius = profile.audible_radius(normalization.spl_threshold, max_distance);
 
@@ -539,7 +541,7 @@ const SYNTH_PREVIEW_SAMPLE_RATE: u32 = 48_000;
 pub(super) fn build_one_synth_source(
     spec: &SynthSpec,
     reference_spl: f32,
-    directivity: &str,
+    pattern: DirectivityPattern,
     spread: f32,
     position: Vec3,
     default_seed: u64,
@@ -569,7 +571,6 @@ pub(super) fn build_one_synth_source(
     let profile = resolve_spl(reference_spl);
     let amplitude = profile.amplitude(rms, normalization.target_rms, normalization.spl_reference);
     let ref_dist = profile.ref_distance(global_ref_dist);
-    let pattern = parse_directivity(directivity);
     let audible_radius = profile.audible_radius(normalization.spl_threshold, max_distance);
 
     // Base amplitude at 0 dB SPL, mirroring build_one_source.
@@ -594,20 +595,6 @@ pub(super) fn build_one_synth_source(
         audible_radius,
         directivity_alpha: pattern.alpha(),
     })
-}
-
-// ── String → enum helpers ───────────────────────────────────────────────────
-
-fn parse_directivity(s: &str) -> DirectivityPattern {
-    match s {
-        "omni" => DirectivityPattern::Omni,
-        "cardioid" => DirectivityPattern::cardioid(),
-        "supercardioid" => DirectivityPattern::supercardioid(),
-        _ => {
-            eprintln!("warning: unknown directivity '{}', defaulting to omni", s);
-            DirectivityPattern::Omni
-        }
-    }
 }
 
 fn parse_distance_model(s: &str) -> DistanceModelType {

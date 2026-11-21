@@ -123,7 +123,7 @@ impl<'de> Deserialize<'de> for Entities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Moves, Pattern, Place, Shape, Sound, When};
+    use crate::{Moves, Place, Shape, Sound, When};
 
     const MEADOW: &str = "\
 frogs:
@@ -131,7 +131,7 @@ frogs:
   color: \"#6db33f\"
   group: Creatures
   sound: { preset: sources/frog.yaml, level: 68 }
-  shape: { pattern: cardioid, size: 0.2, facing: 225 }
+  shape: { width: 180, behind: -12, size: 0.2, facing: 225 }
   place: [10.1, 10.1, 0.0]
 drum:
   sound: { audio: assets/djembe.mp3 }
@@ -163,7 +163,8 @@ drum:
                     level: Some(68.0),
                 },
                 shape: Shape {
-                    pattern: Some(Pattern::Cardioid),
+                    width: Some(180.0),
+                    behind: Some(-12.0),
                     size: Some(0.2),
                     facing: Some(225.0),
                 },

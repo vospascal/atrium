@@ -13,5 +13,5 @@ rule:
     gap: [2, 10]             # seconds of rest before it starts again
     vary: { level: 2, pitch: 10 }
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective chorus, like cicadas)
-directivity: omni           # stridulation scatters in all directions
+width: 360                  # stridulation scatters in all directions
 spread: 0.6                 # broad MDAP spread — a chorus, not a point

@@ -13,7 +13,7 @@ mod api;
 mod entities;
 mod id;
 
-pub use api::{Entity, Moves, Pattern, Place, Shape, Sound, When};
+pub use api::{Entity, Moves, Place, Shape, Sound, When};
 pub use entities::Entities;
 pub use id::EntityId;
 

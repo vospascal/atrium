@@ -12,5 +12,5 @@ rule:
     gap: [2, 15]             # seconds of rest before it starts again
     vary: { level: 2, pitch: 10 }
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective drone)
-directivity: omni           # diffuse, from all around the canopy
+width: 360                  # diffuse, from all around the canopy
 spread: 0.6                 # broad MDAP spread — not a point source

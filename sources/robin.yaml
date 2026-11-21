@@ -8,7 +8,7 @@
 name: Robin
 group: Creatures
 reference_spl: 58.0        # dB SPL at 1 m
-directivity: omni
+width: 360
 spread: 0.0                 # a point
 
 takes:

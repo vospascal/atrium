@@ -10,4 +10,4 @@ rule:
     gap: [5, 20]             # seconds of rest before it starts again
     vary: { level: 2, pitch: 10 }
 reference_spl: 65.0        # ~60-70 dB SPL at 1m (chorus of croaks)
-directivity: omni           # croaks radiate in all directions
+width: 360                  # croaks radiate in all directions

@@ -6,6 +6,10 @@ use serde::Deserialize;
 
 use super::description::title_from_path;
 use crate::audio::voice_node::Rests;
+use atrium_core::directivity::SILENT_BEHIND_DB;
+
+/// The width of a sound that goes out all round (degrees).
+pub(super) const ALL_ROUND: f32 = 360.0;
 
 use super::synth::SynthSpec;
 use crate::audio::sound_profile::SoundProfile;
@@ -27,7 +31,10 @@ pub(super) enum ResolvedSound {
 pub(super) struct ResolvedSource {
     pub(super) sound: ResolvedSound,
     pub(super) reference_spl: f32,
-    pub(super) directivity: String,
+    /// How wide it goes out (degrees, 360 all round) and how much is heard
+    /// straight behind it (dB below the front).
+    pub(super) width: f32,
+    pub(super) behind: f32,
     pub(super) spread: f32,
 }
 
@@ -43,22 +50,17 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
     };
 
     // Split the def into its sound identity + intrinsic defaults.
-    let (def_sound, def_spl, def_directivity, def_spread) = match def {
+    let (def_sound, def_spl, def_beam, def_spread) = match def {
         Some(SourceDef::Sample(sample)) => {
             let level = sample.reference_spl;
-            let directivity = sample.directivity.clone();
+            let beam = (sample.width, sample.behind);
             let spread = sample.spread;
-            (
-                Some(sample.sound()?),
-                Some(level),
-                Some(directivity),
-                Some(spread),
-            )
+            (Some(sample.sound()?), Some(level), Some(beam), Some(spread))
         }
         Some(SourceDef::Synth(synth)) => (
             Some(ResolvedSound::Synth { spec: synth.spec }),
             Some(synth.reference_spl),
-            Some(synth.directivity),
+            Some((synth.width, synth.behind)),
             Some(synth.spread),
         ),
         None => (None, None, None, None),
@@ -90,12 +92,16 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
     Ok(ResolvedSource {
         sound: with_when(sound, &entity.when)?,
         reference_spl: entity.sound.level.or(def_spl).unwrap_or(70.0),
-        directivity: entity
+        width: entity
             .shape
-            .pattern
-            .map(|pattern| pattern.name().to_string())
-            .or(def_directivity)
-            .unwrap_or_else(|| "omni".into()),
+            .width
+            .or(def_beam.and_then(|(width, _)| width))
+            .unwrap_or(ALL_ROUND),
+        behind: entity
+            .shape
+            .behind
+            .or(def_beam.and_then(|(_, behind)| behind))
+            .unwrap_or(SILENT_BEHIND_DB),
         spread: entity.shape.size.or(def_spread).unwrap_or(0.0),
     })
 }
@@ -186,8 +192,13 @@ pub(super) struct SampleSourceDef {
     /// What plays when.
     pub rule: RuleDef,
     pub reference_spl: SplValue,
-    #[serde(default = "default_directivity")]
-    pub directivity: String,
+    /// How wide it goes out, in degrees; 360, all round, when left out.
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// How much is heard straight behind, in dB below the front; nothing
+    /// when left out.
+    #[serde(default)]
+    pub behind: Option<f32>,
     #[serde(default)]
     pub spread: f32,
 }
@@ -314,14 +325,15 @@ pub(super) struct SynthSourceDef {
     #[serde(flatten)]
     pub spec: SynthSpec,
     pub reference_spl: SplValue,
-    #[serde(default = "default_directivity")]
-    pub directivity: String,
+    /// How wide it goes out, in degrees; 360, all round, when left out.
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// How much is heard straight behind, in dB below the front; nothing
+    /// when left out.
+    #[serde(default)]
+    pub behind: Option<f32>,
     #[serde(default)]
     pub spread: f32,
-}
-
-fn default_directivity() -> String {
-    "omni".into()
 }
 
 /// SPL value in dB at 1 meter (IEC 61672 measurement distance).

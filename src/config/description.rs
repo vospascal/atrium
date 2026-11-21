@@ -11,7 +11,6 @@ use atrium_core::directivity::DirectivityPattern;
 use atrium_core::source::EmitterKind;
 use atrium_core::telemetry::MAX_SOURCES;
 use atrium_core::types::Vec3;
-use atrium_world::Pattern;
 
 use super::build::{arr_to_vec3, source_color};
 use super::scene::SceneConfig;
@@ -38,8 +37,10 @@ pub struct SourceDescription {
     pub id: String,
     /// The engine voice it plays from: the index commands and telemetry use.
     pub slot: u16,
-    /// How it radiates.
-    pub pattern: Pattern,
+    /// How wide it goes out (degrees; 360 is all round).
+    pub width: f32,
+    /// How much is heard straight behind it (dB below the front).
+    pub behind: f32,
     /// What it can utter, in the order telemetry counts its takes. Empty
     /// for a generator, which has no recordings.
     pub takes: Vec<TakeDescription>,
@@ -82,6 +83,9 @@ pub(super) fn beam_half_angle(kind: EmitterKind, pattern: DirectivityPattern) ->
         DirectivityPattern::Cone {
             outer, outer_gain, ..
         } if outer_gain < 1.0 => Some(outer),
+        DirectivityPattern::Beam { half_width, .. } if half_width < std::f32::consts::PI - 1e-4 => {
+            Some(half_width)
+        }
         DirectivityPattern::Polar { alpha } if alpha < 1.0 => {
             Some(((0.5 - alpha) / (1.0 - alpha)).clamp(-1.0, 1.0).acos())
         }

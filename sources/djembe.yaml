@@ -2,7 +2,8 @@
 # West African goblet drum — loud percussive transients.
 # Played with hands, projects sound forward from the drum head.
 #
-# Available directivity patterns: omni, cardioid, supercardioid
+# width is how wide its sound goes out (360 all round); behind is how much is
+# heard straight behind it, in dB below the front (left out: nothing).
 
 name: Djembe
 group: Music
@@ -10,4 +11,4 @@ takes:
   - { file: assets/djembe.mp3, name: Djembe }
 rule: loops
 reference_spl: 75.0        # ~75 dB SPL at 1m (moderate playing)
-directivity: cardioid       # forward-projecting polar pattern (alpha=0.5)
+width: 180                  # forward-projecting: a half circle, nothing straight behind

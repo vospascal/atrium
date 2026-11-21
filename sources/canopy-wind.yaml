@@ -34,5 +34,4 @@ contact_gain: 0.75         # discrete leaf-on-leaf grains
 master_gain: 1.0
 
 reference_spl: 48.0        # nominal environmental bed, not a 1 m point event
-directivity: omni          # ignored by Field rendering
 spread: 1.0                # descriptive only; Field uses diffuse rendering

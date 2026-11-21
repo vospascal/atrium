@@ -4,7 +4,7 @@
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::types::Vec3;
-use atrium_world::{Entity, EntityId, Moves, Pattern, Place};
+use atrium_world::{Entity, EntityId, Moves, Place};
 
 use super::build::{
     arr_to_vec3, build_one_source, build_one_synth_source, source_color, BuiltSource, SourceMeta,
@@ -62,7 +62,8 @@ impl SoundBuilder {
         let description = SourceDescription {
             id: meta.id,
             slot: slot as u16,
-            pattern: pattern_named(&meta.directivity),
+            width: meta.width,
+            behind: meta.behind,
             takes: meta.takes,
             gap: meta.gap,
             name: meta.name,
@@ -128,7 +129,7 @@ impl SoundBuilder {
                     // and the same way when the scene is loaded again.
                     1000 + slot as u64,
                     resolved.reference_spl,
-                    &resolved.directivity,
+                    DirectivityPattern::beam(resolved.width, resolved.behind),
                     resolved.spread,
                     position,
                     orbit_radius,
@@ -145,7 +146,7 @@ impl SoundBuilder {
                 build_one_synth_source(
                     spec,
                     resolved.reference_spl,
-                    &resolved.directivity,
+                    DirectivityPattern::beam(resolved.width, resolved.behind),
                     resolved.spread,
                     position,
                     // Slot-stable default seed: reloading the scene sounds
@@ -192,7 +193,8 @@ impl SoundBuilder {
             ref_dist: built.ref_dist,
             amplitude: built.amplitude,
             audible_radius: built.audible_radius,
-            directivity: resolved.directivity.clone(),
+            width: resolved.width,
+            behind: resolved.behind,
             directivity_alpha: built.directivity_alpha,
             spread: resolved.spread,
             position: place,
@@ -217,24 +219,11 @@ pub fn bearing_for_heading(yaw: f32) -> f32 {
     (90.0 - yaw.to_degrees()).rem_euclid(360.0)
 }
 
-/// The pattern a preset or a scene names. A name the engine does not know
-/// plays as omni, and is reported as that.
-pub(super) fn pattern_named(name: &str) -> Pattern {
-    match name {
-        "cardioid" => Pattern::Cardioid,
-        "supercardioid" => Pattern::Supercardioid,
-        _ => Pattern::Omni,
-    }
-}
-
-/// How the engine radiates a pattern, and how wide its beam is drawn: `None`
-/// for a pattern that is equal all round.
-pub fn radiation_of(pattern: Pattern) -> (DirectivityPattern, Option<f32>) {
-    let radiation = match pattern {
-        Pattern::Omni => DirectivityPattern::Omni,
-        Pattern::Cardioid => DirectivityPattern::cardioid(),
-        Pattern::Supercardioid => DirectivityPattern::supercardioid(),
-    };
+/// How the engine radiates a sound `width_degrees` wide with `behind_db`
+/// behind it, and how wide its beam is drawn: `None` for one that goes out
+/// all round.
+pub fn radiation_of(width_degrees: f32, behind_db: f32) -> (DirectivityPattern, Option<f32>) {
+    let radiation = DirectivityPattern::beam(width_degrees, behind_db);
     (radiation, beam_half_angle(EmitterKind::Object, radiation))
 }
 
@@ -266,16 +255,13 @@ mod tests {
         }
     }
 
-    /// A cardioid is half as loud at 90° off its axis, so its beam is drawn
-    /// 90° to each side. Omni has no beam to draw.
+    /// A beam is drawn as wide as it was given; all round has no beam to draw.
     #[test]
-    fn a_pattern_gives_the_beam_a_map_draws() {
-        assert_eq!(radiation_of(Pattern::Omni).1, None);
-        let (_, cardioid) = radiation_of(Pattern::Cardioid);
-        assert!((cardioid.expect("a beam") - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
-        let (_, narrow) = radiation_of(Pattern::Supercardioid);
-        assert!(narrow.expect("a beam") < std::f32::consts::FRAC_PI_2);
-        assert_eq!(pattern_named("cardioid"), Pattern::Cardioid);
-        assert_eq!(pattern_named("no such pattern"), Pattern::Omni);
+    fn a_width_gives_the_beam_a_map_draws() {
+        assert_eq!(radiation_of(360.0, -60.0).1, None);
+        let (_, half) = radiation_of(180.0, -60.0);
+        assert!((half.expect("a beam") - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let (_, narrow) = radiation_of(60.0, -12.0);
+        assert!((narrow.expect("a beam") - 30f32.to_radians()).abs() < 1e-5);
     }
 }

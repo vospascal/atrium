@@ -35,5 +35,4 @@ tear_gain: 0.35             # 1.8-9.5 kHz high-speed tearing
 master_gain: 0.85
 
 reference_spl: 60.0         # forceful environmental bed, still below point events
-directivity: omni           # ignored by Field rendering
 spread: 1.0                 # descriptive only; Field rendering is diffuse
