@@ -3,6 +3,7 @@ pub mod convolver;
 pub mod decode;
 pub mod distance;
 pub mod filters;
+pub mod loudness;
 pub mod masking;
 pub mod output;
 pub mod propagation;
