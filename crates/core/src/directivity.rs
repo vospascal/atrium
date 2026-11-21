@@ -30,7 +30,24 @@ pub enum DirectivityPattern {
     /// Polar pattern: gain = alpha + (1 - alpha) * cos(θ).
     /// alpha=1.0 → omni, 0.5 → cardioid, 0.37 → supercardioid, 0.25 → hypercardioid.
     Polar { alpha: f32 },
+
+    /// A beam of any width with some sound behind it, the way a sound's
+    /// shape is set: `gain = behind + (1 − behind) · ((1 + cos θ) / 2)^k`.
+    /// `k` puts the point where the gain is halfway between front and back
+    /// at `half_width`. A half width of π is omni; π/2 with nothing behind is
+    /// exactly a cardioid. Build it with [`DirectivityPattern::beam`].
+    Beam {
+        /// Half the beam's width (radians).
+        half_width: f32,
+        /// Gain straight behind, 0–1.
+        behind: f32,
+        /// The exponent that gives `half_width`.
+        sharpness: f32,
+    },
 }
+
+/// A level this far below the front, or lower, is silence behind (dB).
+pub const SILENT_BEHIND_DB: f32 = -60.0;
 
 impl DirectivityPattern {
     pub const OMNI: DirectivityPattern = DirectivityPattern::Omni;
@@ -43,6 +60,31 @@ impl DirectivityPattern {
         DirectivityPattern::Polar { alpha: 0.37 }
     }
 
+    /// A beam `width_degrees` wide, from a few degrees up to 360 (all round),
+    /// with the sound straight behind it `behind_db` below the front: 0 dB
+    /// as loud, [`SILENT_BEHIND_DB`] or lower silent. The width is where the
+    /// level is halfway between front and back.
+    pub fn beam(width_degrees: f32, behind_db: f32) -> Self {
+        let half_width = (width_degrees.clamp(1.0, 360.0) / 2.0).to_radians();
+        let behind = if behind_db <= SILENT_BEHIND_DB {
+            0.0
+        } else {
+            10f32.powf(behind_db.min(0.0) / 20.0)
+        };
+        // ((1 + cos w) / 2)^k = 1/2 at the half width w.
+        let at_edge = (1.0 + half_width.cos()) / 2.0;
+        let sharpness = if at_edge <= 1e-6 {
+            0.0
+        } else {
+            0.5f32.ln() / at_edge.ln()
+        };
+        DirectivityPattern::Beam {
+            half_width,
+            behind,
+            sharpness,
+        }
+    }
+
     /// Return the polar alpha coefficient (1.0 for omni, 0.5 for cardioid, etc.).
     /// Used for serialization to the browser UI.
     pub fn alpha(&self) -> f32 {
@@ -50,6 +92,8 @@ impl DirectivityPattern {
             DirectivityPattern::Omni => 1.0,
             DirectivityPattern::Polar { alpha } => *alpha,
             DirectivityPattern::Cone { .. } => 1.0,
+            // A polar pattern's alpha is its gain at 90°.
+            DirectivityPattern::Beam { .. } => self.gain_at_angle(std::f32::consts::FRAC_PI_2),
         }
     }
 
@@ -76,6 +120,12 @@ impl DirectivityPattern {
                 // gain = alpha + (1 - alpha) * cos(theta)
                 // Clamp to 0 — hypercardioid can go slightly negative at rear
                 (alpha + (1.0 - alpha) * angle.cos()).max(0.0)
+            }
+            DirectivityPattern::Beam {
+                behind, sharpness, ..
+            } => {
+                let lobe = ((1.0 + angle.cos()) / 2.0).max(0.0).powf(*sharpness);
+                behind + (1.0 - behind) * lobe
             }
         }
     }
@@ -158,6 +208,50 @@ pub fn directivity_gain(
 mod tests {
     use super::*;
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+    /// A beam is as loud as the front ahead, halfway between front and back
+    /// at the edge of its width, and as loud as `behind` straight behind.
+    #[test]
+    fn a_beam_has_the_width_and_the_level_behind_it_was_given() {
+        for (width, behind_db) in [(60.0, -60.0), (120.0, -12.0), (200.0, -6.0), (300.0, -20.0)] {
+            let beam = DirectivityPattern::beam(width, behind_db);
+            let behind = if behind_db <= SILENT_BEHIND_DB {
+                0.0
+            } else {
+                10f32.powf(behind_db / 20.0)
+            };
+            assert!(
+                (beam.gain_at_angle(0.0) - 1.0).abs() < 1e-5,
+                "{width}°: front"
+            );
+            assert!(
+                (beam.gain_at_angle(PI) - behind).abs() < 1e-4,
+                "{width}°: behind"
+            );
+            let edge = beam.gain_at_angle((width / 2.0_f32).to_radians());
+            assert!(
+                (edge - (1.0 + behind) / 2.0).abs() < 1e-3,
+                "{width}°: halfway at the edge, got {edge}"
+            );
+        }
+    }
+
+    /// The named shapes are points on the same range: all round is omni, and
+    /// 180° with nothing behind is exactly a cardioid.
+    #[test]
+    fn omni_and_cardioid_are_beams_too() {
+        let all_round = DirectivityPattern::beam(360.0, -60.0);
+        for angle in [0.0, FRAC_PI_4, FRAC_PI_2, PI] {
+            assert!((all_round.gain_at_angle(angle) - 1.0).abs() < 1e-6);
+        }
+        let half = DirectivityPattern::beam(180.0, -60.0);
+        let cardioid = DirectivityPattern::cardioid();
+        for angle in [0.0, 0.5, FRAC_PI_4, FRAC_PI_2, 2.0, PI] {
+            assert!((half.gain_at_angle(angle) - cardioid.gain_at_angle(angle)).abs() < 1e-5);
+        }
+        assert!((directivity_factor(&half) - 3.0).abs() < 0.05);
+        assert!((half.alpha() - 0.5).abs() < 1e-5);
+    }
 
     #[test]
     fn omni_is_unity_everywhere() {
