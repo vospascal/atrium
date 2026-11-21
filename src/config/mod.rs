@@ -28,6 +28,6 @@ pub use description::{
     SceneDescription, SceneSummary, SoundSummary, SourceDescription, TakeDescription,
 };
 pub use presets::{list_presets, read_preset, PresetSummary};
-pub use scene::SceneConfig;
+pub use scene::{Band, SceneConfig, WeatherConfig};
 pub use scene_file::{saved_by_editor, EDITOR_MARK};
 pub use sound_builder::{bearing_for_heading, radiation_of, BuiltSound, SoundBuilder};

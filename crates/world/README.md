@@ -2,7 +2,7 @@
 
 The sounds of a scene as entities. An entity is one sound: an id, and the parts that say
 what it is (`Sound`), how it fills the air (`Shape`), where it is (`Place`), when it sounds
-(`When`) and whether it travels (`Moves`). `Entities` is the set a scene holds, and is what the `sounds:` section
+(`When`), what it follows (`Follow`) and whether it travels (`Moves`). `Entities` is the set a scene holds, and is what the `sounds:` section
 of a scene file reads into and writes from.
 
 ```yaml
@@ -58,6 +58,11 @@ This is version 1, the foundation. It changes nothing you hear. The design it fo
   gap to make it come and go. Chances are keyed by take name, not position, so a kind that
   gains a take does not shift what a scene said about the others. `bout` holds on to one take
   for a few utterances before choosing another, the way a great tit keeps one song a while.
+- **`follows:` is names, not types.** A link says `condition: rain, setting: activity`. The
+  crate does not know which conditions or settings exist; the engine checks the names when it
+  builds the sound, against what the sound is (a recording has activity and level, a generator
+  its own settings). New conditions or settings then need no change here. `follows:` on an
+  entity replaces its preset's links; an empty list cuts them all.
 - **`moves:` is a struct with one optional key per way of moving, not a tagged enum.**
   serde_yaml writes an enum variant as a YAML tag (`!orbit`). A hand-written scene file
   should not need tags, and the crate should not depend on one YAML library's behaviour.
@@ -99,7 +104,7 @@ a private directory and the planning gets a `state.rs`.
   voices only when a scene is loaded.
 - **Telemetry still speaks in voice numbers.** The scene description carries each sound's id
   and group, and the app's layer list is drawn from them.
-- **Wander, follow and conditions are not here.** They are the
+- **Wander is not here.** They are the
   components this version makes room for.
 - **A generator cannot orbit.** The engine refuses `moves: orbit` on a generator preset, as
   it did before entities.

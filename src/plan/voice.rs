@@ -20,6 +20,10 @@ pub struct Planned {
     pub rate: f32,
 }
 
+/// How soon a voice that skipped an appointment looks again, at the least
+/// (s): a voice without rests would otherwise look again at once, forever.
+const MIN_RECHECK_SECONDS: f32 = 1.0;
+
 /// What one voice has decided so far, and what it will decide next.
 #[derive(Clone, Debug)]
 pub(super) struct VoicePlan {
@@ -56,6 +60,21 @@ impl VoicePlan {
     /// When the next utterance starts (s).
     pub(super) fn next_at(&self) -> f64 {
         self.next_at
+    }
+
+    /// Decide the next utterance and the rest after it, as sounded under
+    /// conditions that give it `activity` (0 to 1) and `level_db`. At its
+    /// appointment it sounds with a chance of `activity`; otherwise it rests
+    /// again, so less activity means longer silences and none means none.
+    pub(super) fn next_under(&mut self, activity: f32, level_db: f32) -> Option<Planned> {
+        if activity < 1.0 && self.unit_random() >= activity {
+            self.last_end = self.next_at;
+            self.next_at += self.rest().max(MIN_RECHECK_SECONDS) as f64;
+            return None;
+        }
+        let mut planned = self.next();
+        planned.gain *= 10f32.powf(level_db / 20.0);
+        Some(planned)
     }
 
     /// Decide the next utterance and the rest after it.

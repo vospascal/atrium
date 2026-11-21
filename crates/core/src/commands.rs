@@ -121,3 +121,88 @@ pub enum SynthParam {
     HoverTimeMin,
     HoverTimeMax,
 }
+
+impl SynthParam {
+    /// Every setting, in the order they are declared.
+    pub const ALL: [SynthParam; 34] = [
+        SynthParam::FlowSpeedMin,
+        SynthParam::FlowSpeedMax,
+        SynthParam::RiverSplashRate,
+        SynthParam::MinSpeed,
+        SynthParam::MaxSpeed,
+        SynthParam::ChangeTimeMin,
+        SynthParam::ChangeTimeMax,
+        SynthParam::GustDurationMin,
+        SynthParam::GustDurationMax,
+        SynthParam::TurbulenceTimeMin,
+        SynthParam::TurbulenceTimeMax,
+        SynthParam::GustStrength,
+        SynthParam::RiseBias,
+        SynthParam::GustBrightness,
+        SynthParam::TurbulenceBrightness,
+        SynthParam::LowGain,
+        SynthParam::BodyGain,
+        SynthParam::MidGain,
+        SynthParam::PresenceGain,
+        SynthParam::AirGain,
+        SynthParam::TurbulenceDepth,
+        SynthParam::FoliageDensity,
+        SynthParam::LeafDryness,
+        SynthParam::BranchLevel,
+        SynthParam::DebrisLevel,
+        SynthParam::StructureLevel,
+        SynthParam::MasterGain,
+        SynthParam::Intensity,
+        SynthParam::DropRate,
+        SynthParam::DripRate,
+        SynthParam::WavePeriod,
+        SynthParam::CrashChance,
+        SynthParam::HoverTimeMin,
+        SynthParam::HoverTimeMax,
+    ];
+
+    /// The name a file uses for this setting, in snake case.
+    pub fn name(self) -> &'static str {
+        match self {
+            SynthParam::FlowSpeedMin => "flow_speed_min",
+            SynthParam::FlowSpeedMax => "flow_speed_max",
+            SynthParam::RiverSplashRate => "river_splash_rate",
+            SynthParam::MinSpeed => "min_speed",
+            SynthParam::MaxSpeed => "max_speed",
+            SynthParam::ChangeTimeMin => "change_time_min",
+            SynthParam::ChangeTimeMax => "change_time_max",
+            SynthParam::GustDurationMin => "gust_duration_min",
+            SynthParam::GustDurationMax => "gust_duration_max",
+            SynthParam::TurbulenceTimeMin => "turbulence_time_min",
+            SynthParam::TurbulenceTimeMax => "turbulence_time_max",
+            SynthParam::GustStrength => "gust_strength",
+            SynthParam::RiseBias => "rise_bias",
+            SynthParam::GustBrightness => "gust_brightness",
+            SynthParam::TurbulenceBrightness => "turbulence_brightness",
+            SynthParam::LowGain => "low_gain",
+            SynthParam::BodyGain => "body_gain",
+            SynthParam::MidGain => "mid_gain",
+            SynthParam::PresenceGain => "presence_gain",
+            SynthParam::AirGain => "air_gain",
+            SynthParam::TurbulenceDepth => "turbulence_depth",
+            SynthParam::FoliageDensity => "foliage_density",
+            SynthParam::LeafDryness => "leaf_dryness",
+            SynthParam::BranchLevel => "branch_level",
+            SynthParam::DebrisLevel => "debris_level",
+            SynthParam::StructureLevel => "structure_level",
+            SynthParam::MasterGain => "master_gain",
+            SynthParam::Intensity => "intensity",
+            SynthParam::DropRate => "drop_rate",
+            SynthParam::DripRate => "drip_rate",
+            SynthParam::WavePeriod => "wave_period",
+            SynthParam::CrashChance => "crash_chance",
+            SynthParam::HoverTimeMin => "hover_time_min",
+            SynthParam::HoverTimeMax => "hover_time_max",
+        }
+    }
+
+    /// The setting a file names, if there is one.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|param| param.name() == name)
+    }
+}

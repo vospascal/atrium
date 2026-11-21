@@ -28,7 +28,7 @@ use crate::audio::voice_node::VoiceNode;
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::environment::Environment;
 use crate::pipeline::{build_all_pipelines, PipelineParams};
-use crate::plan::{Clock, Plan, Planner, Rests, Rhythm, TakeRhythm};
+use crate::plan::{Clock, Follow, Plan, Planner, Rests, Rhythm, TakeRhythm};
 
 pub struct BuildResult {
     pub scene: AudioScene,
@@ -60,6 +60,8 @@ struct BuildSourcesResult {
     source_amplitudes: Vec<f32>,
     /// Per-source takes and rests, for the plan; `None` for one that needs none.
     rhythms: Vec<Option<Rhythm>>,
+    /// Per-source links to the place's conditions.
+    follows: Vec<Vec<Follow>>,
 }
 
 /// Default color palette for sources when no color is specified in YAML.
@@ -173,10 +175,14 @@ impl SceneConfig {
         // The session: every choice follows from the seed, decided ahead.
         let seed = self.seed.unwrap_or_else(fresh_seed);
         let mut plan = Plan::new(seed);
-        for (slot, ((id, _), rhythm)) in self.sounds.iter().zip(build.rhythms).enumerate() {
-            if let Some(rhythm) = rhythm {
-                plan.add_voice(slot, id.as_str(), rhythm, 0.0);
-            }
+        plan.set_weather(self.weather_story(seed)?);
+        for (slot, ((id, _), (rhythm, follows))) in self
+            .sounds
+            .iter()
+            .zip(build.rhythms.into_iter().zip(build.follows))
+            .enumerate()
+        {
+            plan.add_voice(slot, id.as_str(), rhythm, follows, 0.0);
         }
         let clock = std::sync::Arc::new(Clock::default());
         let (to_audio, plan_in) = rtrb::RingBuffer::new(PLAN_CAPACITY);
@@ -390,6 +396,7 @@ impl SceneConfig {
         let mut spectral_profiles = Vec::<[f32; crate::audio::spectral_profile::BARK_BANDS]>::new();
         let mut source_amplitudes = Vec::<f32>::new();
         let mut rhythms = Vec::new();
+        let mut follows = Vec::new();
 
         for (slot, (id, entity)) in self.sounds.iter().enumerate() {
             let (built, meta) = builder.build_parts(id, entity, slot, |_| Ok(()))?;
@@ -401,6 +408,7 @@ impl SceneConfig {
             spectral_profiles.push(built.bands);
             source_amplitudes.push(built.amplitude);
             rhythms.push(built.rhythm);
+            follows.push(built.follows);
             nodes.push(built.source);
         }
 
@@ -410,6 +418,7 @@ impl SceneConfig {
             spectral_profiles,
             source_amplitudes,
             rhythms,
+            follows,
         })
     }
 
@@ -444,6 +453,8 @@ pub(super) struct BuiltSource {
     /// Its takes and rests, for the plan; `None` for a sound that sounds all
     /// the time.
     pub rhythm: Option<Rhythm>,
+    /// How it follows the place's conditions, checked against what it is.
+    pub follows: Vec<Follow>,
 }
 
 /// How many utterances can wait between the planner and the audio thread:
@@ -568,6 +579,7 @@ pub(super) fn build_one_source(
         audible_radius,
         directivity_alpha: pattern.alpha(),
         rhythm,
+        follows: Vec::new(),
     })
 }
 
@@ -642,6 +654,7 @@ pub(super) fn build_one_synth_source(
         audible_radius,
         directivity_alpha: pattern.alpha(),
         rhythm: None,
+        follows: Vec::new(),
     })
 }
 
@@ -667,4 +680,31 @@ pub(super) fn parse_render_mode(s: &str) -> RenderMode {
 
 pub(super) fn arr_to_vec3(a: [f32; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
+}
+
+impl SceneConfig {
+    /// The weather story this scene names, with its bands. Without a
+    /// `weather:` section, a still, dry, bright day.
+    fn weather_story(&self, seed: u64) -> Result<crate::plan::Weather, Box<dyn std::error::Error>> {
+        use crate::plan::{Story, Weather};
+        let Some(weather) = &self.weather else {
+            return Ok(Weather::calm(seed));
+        };
+        let story = Story::named(&weather.story).ok_or_else(|| {
+            format!(
+                "`story: {}` is not a weather story; use held, drifting or passing storm",
+                weather.story
+            )
+        })?;
+        Ok(Weather::new(
+            story,
+            [
+                weather.wind.range(),
+                weather.rain.range(),
+                weather.storm.range(),
+                weather.daylight.range(),
+            ],
+            seed,
+        ))
+    }
 }

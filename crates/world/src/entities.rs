@@ -174,6 +174,7 @@ drum:
                     z: 0.0
                 },
                 when: When::default(),
+                follows: None,
                 moves: Moves::Still,
             }
         );
@@ -263,6 +264,7 @@ frogs:
                         z: 0.0
                     },
                     when: When::default(),
+                    follows: None,
                     moves: Moves::Still,
                 }
             )]),

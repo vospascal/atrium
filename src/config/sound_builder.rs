@@ -14,7 +14,7 @@ use super::scene::NormalizationConfig;
 use super::source::{display_name, resolve, ResolvedSound, ResolvedSource};
 use crate::audio::silence_node::SilenceNode;
 use crate::audio::spectral_profile::BARK_BANDS;
-use crate::plan::{Rests, Rhythm};
+use crate::plan::{Follow, Rests, Rhythm};
 
 /// What it takes to build a sound for one scene: its loudness calibration,
 /// its distance model, and where the scene sits in the world.
@@ -32,6 +32,8 @@ pub struct BuiltSound {
     /// Its takes and rests, for the session's plan; `None` for a sound that
     /// sounds all the time.
     pub rhythm: Option<Rhythm>,
+    /// How it follows the place's conditions.
+    pub follows: Vec<Follow>,
     /// 24 Bark-band spectral profile (dB relative to RMS).
     pub bands: [f32; BARK_BANDS],
     /// Base playback amplitude, before spatial attenuation.
@@ -129,6 +131,7 @@ impl SoundBuilder {
         Ok(BuiltSound {
             source: built.source,
             rhythm: built.rhythm,
+            follows: built.follows,
             bands: built.bands,
             amplitude: built.amplitude,
             description,
@@ -210,6 +213,21 @@ impl SoundBuilder {
         };
 
         let mut built = built;
+        let generator = matches!(resolved.sound, ResolvedSound::Synth { .. });
+        built.follows = resolved
+            .follows
+            .iter()
+            .map(|follow| {
+                Follow::named(
+                    &follow.condition,
+                    &follow.setting,
+                    follow.from,
+                    follow.to,
+                    generator,
+                )
+                .map_err(|reason| format!("sound `{id}`: {reason}"))
+            })
+            .collect::<Result<_, _>>()?;
         if let Some(bearing) = entity.shape.facing {
             built.source.set_facing(yaw_for_bearing(bearing));
         }

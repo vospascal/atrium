@@ -9,7 +9,7 @@ use atrium::config::{bearing_for_heading, radiation_of, read_preset, SceneConfig
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
-use atrium::plan::Planner;
+use atrium::plan::{Condition, Planner};
 use atrium_core::commands::Command;
 use atrium_core::directivity::SILENT_BEHIND_DB;
 use atrium_core::telemetry::{TelemetryFrame, MAX_SOURCES};
@@ -17,7 +17,8 @@ use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place, Shape, Sound, When};
 
 use crate::api::{
-    Bout, EmitterKind, EngineError, Gap, Position, SceneDescription, SourceDescription, Telemetry,
+    Band, Bout, Conditions, EmitterKind, EngineError, Gap, PlannedTake, Position, SceneDescription,
+    SourceDescription, Telemetry, Weather,
 };
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::output::{playable_outputs, Output};
@@ -31,6 +32,10 @@ const TELEMETRY_CAPACITY: usize = 4;
 const EDIT_CAPACITY: usize = 8;
 /// How far ahead of the listener an auditioned or newly added sound stands (m).
 const AHEAD_OF_LISTENER: f32 = 2.0;
+/// The most moments one `conditions` call returns.
+const MAX_CONDITION_STEPS: u32 = 2048;
+/// How far ahead `planned` looks at most (s).
+const MAX_PLANNED_SECONDS: f32 = 60.0;
 /// The narrowest beam a sound can be given, and all round (degrees).
 const MIN_WIDTH: f32 = 10.0;
 const ALL_ROUND: f32 = 360.0;
@@ -199,6 +204,92 @@ impl Engine {
             source.gap = Some(Gap { shortest, longest });
         }
         Ok(())
+    }
+
+    /// The scene's weather: its story and the band of each condition.
+    pub fn weather(&self) -> Weather {
+        let weather = self.planner.weather();
+        let band = |condition| {
+            let (low, high) = weather.band(condition);
+            Band { low, high }
+        };
+        Weather {
+            story: weather.story.into(),
+            wind: band(Condition::Wind),
+            rain: band(Condition::Rain),
+            storm: band(Condition::Storm),
+            daylight: band(Condition::Daylight),
+        }
+    }
+
+    /// Let `weather` move the conditions from now on, and keep it with the
+    /// scene. Every sound that follows a condition follows the new story;
+    /// what is already handed to the audio thread still plays.
+    pub fn set_weather(&self, weather: Weather) -> Result<(), EngineError> {
+        let bands = [weather.wind, weather.rain, weather.storm, weather.daylight];
+        if bands
+            .iter()
+            .any(|band| !(band.low.is_finite() && band.high.is_finite()))
+        {
+            return Ok(());
+        }
+        let seed = self.planner.seed();
+        let story: atrium::plan::Story = weather.story.into();
+        let plan_weather =
+            atrium::plan::Weather::new(story, bands.map(|band| (band.low, band.high)), seed);
+        self.planner.set_weather(plan_weather.clone());
+        let in_file = |condition| {
+            let (low, high) = plan_weather.band(condition);
+            let (low, high) = (rounded(low, 100.0), rounded(high, 100.0));
+            if low == high {
+                atrium::config::Band::At(low)
+            } else {
+                atrium::config::Band::Between([low, high])
+            }
+        };
+        lock(&self.scene).document.weather = Some(atrium::config::WeatherConfig {
+            story: story.name().to_string(),
+            wind: in_file(Condition::Wind),
+            rain: in_file(Condition::Rain),
+            storm: in_file(Condition::Storm),
+            daylight: in_file(Condition::Daylight),
+        });
+        Ok(())
+    }
+
+    /// The conditions from `from` to `to` seconds around now (negative is
+    /// the past), at `steps` evenly spaced moments. The weather is a pure
+    /// function of time, so the past is what was, and the future what will be
+    /// unless the weather is changed.
+    pub fn conditions(&self, from: f32, to: f32, steps: u32) -> Vec<Conditions> {
+        let steps = steps.clamp(1, MAX_CONDITION_STEPS);
+        (0..steps)
+            .map(|step| {
+                let along = if steps == 1 {
+                    0.0
+                } else {
+                    step as f32 / (steps - 1) as f32
+                };
+                self.planner
+                    .conditions((from + (to - from) * along) as f64)
+                    .into()
+            })
+            .collect()
+    }
+
+    /// The takes the plan has decided for the next `seconds`, at most a
+    /// minute ahead.
+    pub fn planned(&self, seconds: f32) -> Vec<PlannedTake> {
+        self.planner
+            .upcoming(seconds.clamp(0.0, MAX_PLANNED_SECONDS) as f64)
+            .into_iter()
+            .map(|(slot, planned)| PlannedTake {
+                slot: slot as u16,
+                take: planned.take,
+                starts_in: planned.at as f32,
+                seconds: planned.seconds as f32,
+            })
+            .collect()
     }
 
     /// Let the sound in `slot` utter one take `fewest` to `most` times
@@ -536,7 +627,8 @@ impl Engine {
             bands: built.bands,
             amplitude: built.amplitude,
         })?;
-        self.planner.add_voice(slot, id.as_str(), built.rhythm);
+        self.planner
+            .add_voice(slot, id.as_str(), built.rhythm, built.follows);
         let added: SourceDescription = built.description.into();
         scene.description.sources.push(added.clone());
         scene
@@ -643,6 +735,7 @@ impl Engine {
             built.source.set_muted(true);
         }
         let rhythm = built.rhythm.take();
+        let follows = std::mem::take(&mut built.follows);
         edits.send(SceneEdit::AddSource {
             slot,
             source: built.source,
@@ -650,7 +743,8 @@ impl Engine {
             amplitude: built.amplitude,
         })?;
         // After the new voice is on its way, so no utterance reaches the old one.
-        self.planner.add_voice(slot as usize, id.as_str(), rhythm);
+        self.planner
+            .add_voice(slot as usize, id.as_str(), rhythm, follows);
         if let Some(source) = sound_in(&mut scene.description, slot) {
             *source = built.description.into();
         }
@@ -675,6 +769,7 @@ impl Engine {
                 .sounds
                 .place_at(self.listener_position + ahead * AHEAD_OF_LISTENER),
             when: When::default(),
+            follows: None,
             moves: Moves::Still,
         }
     }
@@ -820,6 +915,7 @@ impl Drop for OutputThread {
 mod tests {
     use super::*;
 
+    use crate::api::Story;
     use crate::output::{ChannelMode, RenderMode};
     use std::time::{Duration, Instant};
 
@@ -1289,6 +1385,51 @@ mod tests {
             !heard.is_empty(),
             "the blackbird was planned but never heard"
         );
+
+        // What is planned is there to read, and the weather can be changed and
+        // saved; conditions are known for the past and the future alike.
+        assert!(engine
+            .planned(30.0)
+            .iter()
+            .any(|take| take.slot == blackbird));
+        engine
+            .set_weather(Weather {
+                story: Story::PassingStorm,
+                wind: Band {
+                    low: 0.1,
+                    high: 0.3,
+                },
+                rain: Band {
+                    low: 0.0,
+                    high: 0.0,
+                },
+                storm: Band {
+                    low: 0.0,
+                    high: 0.0,
+                },
+                daylight: Band {
+                    low: 1.0,
+                    high: 1.0,
+                },
+            })
+            .expect("weather");
+        assert_eq!(engine.weather().story, Story::PassingStorm);
+        let hour = engine.conditions(-3600.0, 3600.0, 721);
+        assert_eq!(hour.len(), 721);
+        assert!(hour.iter().all(|now| (0.0..=1.0).contains(&now.wind)));
+        let saved =
+            std::env::temp_dir().join(format!("atrium-weather-{}.yaml", std::process::id()));
+        let saved = saved.to_str().expect("utf-8").to_owned();
+        let _ = std::fs::remove_file(&saved);
+        engine
+            .save_scene(saved.clone(), String::new())
+            .expect("saves");
+        let written = SceneConfig::load(&saved).expect("reads");
+        let weather = written.weather.clone().expect("the weather is saved");
+        assert_eq!(weather.story, "passing storm");
+        assert_eq!(weather.wind, atrium::config::Band::Between([0.1, 0.3]));
+        written.build().expect("the saved scene builds");
+        let _ = std::fs::remove_file(&saved);
     }
 
     #[test]

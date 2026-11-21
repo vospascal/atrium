@@ -409,3 +409,85 @@ mod tests {
         assert_eq!(Position::from(Vec3::from(position)), position);
     }
 }
+
+/// How the place's conditions move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum Story {
+    /// They stay in the middle of their bands.
+    Held,
+    /// They wander slowly inside their bands.
+    Drifting,
+    /// They drift, and now and then a storm passes.
+    PassingStorm,
+}
+
+impl From<atrium::plan::Story> for Story {
+    fn from(story: atrium::plan::Story) -> Self {
+        match story {
+            atrium::plan::Story::Held => Self::Held,
+            atrium::plan::Story::Drifting => Self::Drifting,
+            atrium::plan::Story::PassingStorm => Self::PassingStorm,
+        }
+    }
+}
+
+impl From<Story> for atrium::plan::Story {
+    fn from(story: Story) -> Self {
+        match story {
+            Story::Held => Self::Held,
+            Story::Drifting => Self::Drifting,
+            Story::PassingStorm => Self::PassingStorm,
+        }
+    }
+}
+
+/// The lowest and highest a condition goes, each from 0 to 1.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct Band {
+    pub low: f32,
+    pub high: f32,
+}
+
+/// A scene's weather: the story and the band of each condition.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Weather {
+    pub story: Story,
+    pub wind: Band,
+    pub rain: Band,
+    pub storm: Band,
+    pub daylight: Band,
+}
+
+/// Every condition at one moment, each from 0 to 1.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct Conditions {
+    pub wind: f32,
+    pub rain: f32,
+    pub storm: f32,
+    pub daylight: f32,
+}
+
+impl From<atrium::plan::Conditions> for Conditions {
+    fn from(conditions: atrium::plan::Conditions) -> Self {
+        use atrium::plan::Condition;
+        Self {
+            wind: conditions.get(Condition::Wind),
+            rain: conditions.get(Condition::Rain),
+            storm: conditions.get(Condition::Storm),
+            daylight: conditions.get(Condition::Daylight),
+        }
+    }
+}
+
+/// A take the plan has decided, still to come.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct PlannedTake {
+    /// The voice it will sound from.
+    pub slot: u16,
+    /// Which take, counted from 0.
+    pub take: u8,
+    /// How long from now it starts (s).
+    pub starts_in: f32,
+    /// How long it lasts (s).
+    pub seconds: f32,
+}

@@ -12,7 +12,7 @@ Kotlin can reach is declared here:
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_beam`,
   `set_source_muted`, `set_source_level`, `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition`, `audition_take`,
-  `add_sound`, `remove_sound`, `save_scene`, `set_head_tracker` and `latest_telemetry()`.
+  `add_sound`, `remove_sound`, `save_scene`, `weather`, `set_weather`, `conditions`, `planned`, `set_head_tracker` and `latest_telemetry()`.
 - The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
   editor wrote it), `Output`, `Telemetry`. Telemetry
   includes where the listener faces and whether a head tracker is sending.
@@ -48,6 +48,9 @@ runs Cargo itself. There is nothing to build here by hand.
   its slot, which takes as long as adding one. The engine remembers which voices the listener
   muted, so a sound built again stays silent. The last take that can still be chosen cannot be
   given chance 0, so a sound never ends up with nothing to say.
+- **`conditions` takes a stretch of time, past included.** The weather is a pure function of the
+  session's clock and seed, so the conditions an hour ago and an hour ahead are computed, not
+  recorded. A screen draws them as lanes without keeping any history.
 - **`save_scene` refuses to replace a hand-written scene.** A saved file is rewritten from
   values and loses its comments. A file the editor wrote starts with its mark, and only such a
   file is replaced. The rule is in the engine, not only in the app, so no screen can break it.

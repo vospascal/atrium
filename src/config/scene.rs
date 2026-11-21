@@ -45,6 +45,60 @@ pub struct SceneConfig {
     /// new session; set, the scene plays the same way every time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// What moves the place's conditions, and the bands it keeps them in.
+    /// Left out, a still, dry, bright day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weather: Option<WeatherConfig>,
+}
+
+/// The weather of a scene:
+///
+/// ```yaml
+/// weather:
+///   story: passing storm   # held, drifting or passing storm
+///   wind: [0.05, 0.25]     # the band it drifts in; one number holds it there
+///   rain: 0
+///   daylight: 1
+/// ```
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherConfig {
+    pub story: String,
+    #[serde(default = "Band::none")]
+    pub wind: Band,
+    #[serde(default = "Band::none")]
+    pub rain: Band,
+    #[serde(default = "Band::none")]
+    pub storm: Band,
+    #[serde(default = "Band::full")]
+    pub daylight: Band,
+}
+
+/// One condition's band: a value it is held at, or the lowest and highest it
+/// drifts between, each from 0 to 1.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Band {
+    At(f32),
+    Between([f32; 2]),
+}
+
+impl Band {
+    fn none() -> Self {
+        Band::At(0.0)
+    }
+
+    fn full() -> Self {
+        Band::At(1.0)
+    }
+
+    /// Lowest and highest.
+    pub fn range(self) -> (f32, f32) {
+        match self {
+            Band::At(value) => (value, value),
+            Band::Between([low, high]) => (low, high),
+        }
+    }
 }
 
 impl SceneConfig {

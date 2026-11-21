@@ -349,8 +349,17 @@ impl AudioScene {
         let now = self.clock.samples();
         if let Some(plan) = &mut self.plan_in {
             while let Ok(scheduled) = plan.pop() {
-                if let Some(source) = self.sources.get_mut(scheduled.slot as usize) {
-                    source.schedule(scheduled.utterance);
+                match scheduled {
+                    crate::plan::Scheduled::Utter { slot, utterance } => {
+                        if let Some(source) = self.sources.get_mut(slot as usize) {
+                            source.schedule(utterance);
+                        }
+                    }
+                    crate::plan::Scheduled::Set { slot, param, value } => {
+                        if let Some(source) = self.sources.get_mut(slot as usize) {
+                            source.set_synth_param(param, value);
+                        }
+                    }
                 }
             }
         }

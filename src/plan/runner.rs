@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use atrium_core::source::Utterance;
 
-use super::{Clock, Plan, Planned, Rhythm, Scheduled};
+use super::{Clock, Conditions, Due, Follow, Plan, Planned, Rhythm, Scheduled, Weather};
 
 /// How far ahead of the clock utterances are handed to the audio thread (s).
 /// Longer than a wake-up and an audio buffer together, so nothing is late;
@@ -42,10 +42,10 @@ impl Planner {
                             continue;
                         };
                         let due = lock(&plan).take_due(clock.seconds() + LEAD_SECONDS);
-                        for (slot, planned) in due {
+                        for due in due {
                             // A full ring only happens when the audio thread has
-                            // stopped; that utterance is then not heard.
-                            let _ = audio.push(scheduled(slot, planned, rate));
+                            // stopped; that change is then not heard.
+                            let _ = audio.push(scheduled(due, rate));
                         }
                     }
                 })
@@ -69,15 +69,27 @@ impl Planner {
         lock(&self.plan).seed()
     }
 
-    /// Plan the voice in `slot` for entity `id` from now; nothing for a sound
-    /// without rests.
-    pub fn add_voice(&self, slot: usize, id: &str, rhythm: Option<Rhythm>) {
+    /// Plan the voice in `slot` for entity `id` from now, following
+    /// `follows`; nothing for a sound without rests that follows nothing.
+    pub fn add_voice(&self, slot: usize, id: &str, rhythm: Option<Rhythm>, follows: Vec<Follow>) {
         let now = self.now();
-        let mut plan = lock(&self.plan);
-        match rhythm {
-            Some(rhythm) => plan.add_voice(slot, id, rhythm, now),
-            None => plan.remove_voice(slot),
-        }
+        lock(&self.plan).add_voice(slot, id, rhythm, follows, now);
+    }
+
+    /// The weather story moving the conditions.
+    pub fn weather(&self) -> Weather {
+        lock(&self.plan).weather().clone()
+    }
+
+    /// Let `weather` move the conditions from now on.
+    pub fn set_weather(&self, weather: Weather) {
+        lock(&self.plan).set_weather(weather);
+    }
+
+    /// The conditions `ahead` seconds from now (0 for now).
+    pub fn conditions(&self, ahead: f64) -> Conditions {
+        let now = self.now();
+        lock(&self.plan).conditions_at(now + ahead)
     }
 
     pub fn remove_voice(&self, slot: usize) {
@@ -125,14 +137,21 @@ impl Drop for Planner {
     }
 }
 
-fn scheduled(slot: usize, planned: Planned, sample_rate: f32) -> Scheduled {
-    Scheduled {
-        slot: slot as u16,
-        utterance: Utterance {
-            take: planned.take,
-            at_sample: (planned.at * sample_rate as f64).round().max(0.0) as u64,
-            gain: planned.gain,
-            rate: planned.rate,
+fn scheduled(due: Due, sample_rate: f32) -> Scheduled {
+    match due {
+        Due::Utter(slot, planned) => Scheduled::Utter {
+            slot: slot as u16,
+            utterance: Utterance {
+                take: planned.take,
+                at_sample: (planned.at * sample_rate as f64).round().max(0.0) as u64,
+                gain: planned.gain,
+                rate: planned.rate,
+            },
+        },
+        Due::Set(slot, param, value) => Scheduled::Set {
+            slot: slot as u16,
+            param,
+            value,
         },
     }
 }

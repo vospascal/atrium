@@ -1,7 +1,7 @@
 //! How a scene's sound resolves against the preset it names, and the preset
 //! formats in `sources/*.yaml` (sample file or procedural synth).
 
-use atrium_world::{Entity, EntityId, When};
+use atrium_world::{Entity, EntityId, Follow, When};
 use serde::Deserialize;
 
 use super::description::title_from_path;
@@ -35,6 +35,9 @@ pub(super) struct ResolvedSource {
     /// straight behind it (dB below the front).
     pub(super) width: f32,
     pub(super) behind: f32,
+    /// How it follows the place's conditions: the scene's links, else the
+    /// preset's.
+    pub(super) follows: Vec<Follow>,
     pub(super) spread: f32,
 }
 
@@ -50,6 +53,11 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
     };
 
     // Split the def into its sound identity + intrinsic defaults.
+    let def_follows = match &def {
+        Some(SourceDef::Sample(sample)) => sample.follows.clone(),
+        Some(SourceDef::Synth(synth)) => synth.follows.clone(),
+        None => Vec::new(),
+    };
     let (def_sound, def_spl, def_beam, def_spread) = match def {
         Some(SourceDef::Sample(sample)) => {
             let level = sample.reference_spl;
@@ -92,6 +100,7 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
     Ok(ResolvedSource {
         sound: with_when(sound, &entity.when)?,
         reference_spl: entity.sound.level.or(def_spl).unwrap_or(70.0),
+        follows: entity.follows.clone().unwrap_or(def_follows),
         width: entity
             .shape
             .width
@@ -207,6 +216,9 @@ pub(super) struct SampleSourceDef {
     pub behind: Option<f32>,
     #[serde(default)]
     pub spread: f32,
+    /// How it follows the place's conditions, unless a scene says otherwise.
+    #[serde(default)]
+    pub follows: Vec<Follow>,
 }
 
 /// One take of a kind: a recording, the name a list shows for it, and how
@@ -357,6 +369,9 @@ pub(super) struct SynthSourceDef {
     pub behind: Option<f32>,
     #[serde(default)]
     pub spread: f32,
+    /// How it follows the place's conditions, unless a scene says otherwise.
+    #[serde(default)]
+    pub follows: Vec<Follow>,
 }
 
 /// SPL value in dB at 1 meter (IEC 61672 measurement distance).

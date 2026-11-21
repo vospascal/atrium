@@ -28,6 +28,12 @@ pub struct Entity {
     pub place: Place,
     #[serde(default, skip_serializing_if = "When::is_the_presets_own")]
     pub when: When,
+    /// What it does as the place's conditions change, in place of the
+    /// preset's: the robin falls silent as the rain comes, the wind blows
+    /// harder as the wind rises. Left out, the preset's own links hold; an
+    /// empty list cuts them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<Vec<Follow>>,
     #[serde(default, skip_serializing_if = "Moves::is_still")]
     pub moves: Moves,
 }
@@ -118,6 +124,28 @@ impl When {
     fn is_the_presets_own(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// A setting tied to one of the place's conditions.
+///
+/// ```yaml
+/// follows:
+///   - { condition: rain, setting: activity, from: 1, to: 0 }
+///   - { condition: wind, setting: max_speed, from: 3, to: 14 }
+/// ```
+///
+/// When the condition is 0 the setting is `from`, when it is 1 the setting is
+/// `to`, and in between it moves in a straight line. The names are the
+/// engine's: a condition such as `wind`, `rain`, `storm` or `daylight`, and a
+/// setting such as `activity` (how often it sounds), `level` (dB up or down),
+/// or a generator's own setting such as `intensity`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Follow {
+    pub condition: String,
+    pub setting: String,
+    pub from: f32,
+    pub to: f32,
 }
 
 /// Where an entity is, in metres. Written `[x, y, z]` in a scene file, in the
