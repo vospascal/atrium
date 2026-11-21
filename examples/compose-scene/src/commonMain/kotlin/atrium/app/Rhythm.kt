@@ -153,7 +153,7 @@ private val BoutMarks = listOf(1f to "1", 4f to "4", LongestBout to "8")
  * written under the track where their values lie.
  */
 @Composable
-private fun TwoHandleRange(
+internal fun TwoHandleRange(
     low: Float,
     high: Float,
     toTrack: (Float) -> Float,

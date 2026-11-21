@@ -58,6 +58,9 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     Part("When")
     WhenPart(session, sound, live)
 
+    Part("Follows")
+    FollowsPart(sound.follows)
+
     Part("Moves")
     // The engine reports where a sound is, not why: one that is away from where it was placed is travelling.
     val away = Point(at.x - sound.position.x, at.y - sound.position.y)
@@ -76,6 +79,9 @@ private fun SceneInspector(session: Session, scene: SceneFile, voices: Int) {
     Part("World")
     if (description != null) PaperText("${description.width.roundToInt()} × ${description.depth.roundToInt()} m", 15)
     PaperText("$voices of $VoiceCount voices", 14, Muted)
+
+    Part("Weather")
+    WeatherPart(session)
 
     Part("Output")
     PaperText(telemetry?.output?.let { "${it.renderMode.label} · ${it.channelMode.label}" } ?: "—", 15)

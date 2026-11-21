@@ -122,11 +122,19 @@ private val TrackZooms = listOf(30.0 to "30 s", 120.0 to "2 min", TrackMemory to
 internal val trackClock = TimeSource.Monotonic.markNow()
 internal fun trackSeconds(): Double = trackClock.elapsedNow().inWholeMicroseconds / 1e6
 
+/** The share of the strip given to what is still to come: a quarter, right of now. */
+private const val AheadShare = .25
+
+/** How many moments a condition lane is drawn from. */
+private const val LaneSteps = 160
+
 /**
  * Every voice of the engine as a track, the way a multitrack editor shows
- * them: a header with the voice's number and the sound in it, and the last two
- * minutes as clips, each named after its take and outlined by its level. Now
- * is the right edge. An empty voice is a free track a sound can be added to.
+ * them: a header with the voice's number and the sound in it, the past as
+ * clips, each named after its take and outlined by its level, and right of
+ * the "now" line the takes the plan has already decided, drawn open. Above
+ * the voices, the place's conditions as lanes, past and future alike. An
+ * empty voice is a free track a sound can be added to.
  */
 @Composable
 internal fun TracksPanel(
@@ -146,6 +154,17 @@ internal fun TracksPanel(
     val muted = Muted
     val tint = LocalInkTint.current
     var shown by remember { mutableStateOf(TrackZooms[1].first) }
+    val ahead = (shown * AheadShare).coerceAtMost(PlannedAhead.toDouble())
+    val span = shown + ahead
+    val lanes by produceState(emptyList<atrium.engine.Conditions>(), shown, session.engine) {
+        while (true) {
+            value = session.conditionsAround(-shown.toFloat(), ahead.toFloat(), LaneSteps)
+            kotlinx.coroutines.delay(500)
+        }
+    }
+    // Where a moment on the session's clock lies across the strip, 0 to 1.
+    fun along(seconds: Double) = ((seconds - (now - shown)) / span).toFloat()
+    val nowAt = (shown / span).toFloat()
     Column(modifier) {
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             PaperText("TRACKS", 12, Muted, FontWeight.SemiBold, spacing = 2f, modifier = Modifier.weight(1f))
@@ -161,7 +180,29 @@ internal fun TracksPanel(
         }
         Row(Modifier.fillMaxWidth().padding(end = 14.dp, bottom = 2.dp)) {
             Spacer(Modifier.width(HeaderWidth))
-            Ruler(shown, Modifier.weight(1f).height(14.dp))
+            Ruler(shown, ahead, Modifier.weight(1f).height(14.dp))
+        }
+        for (condition in Condition.entries) {
+            Row(Modifier.fillMaxWidth().height(LaneHeight), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.width(HeaderWidth).padding(start = 36.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PaperText(condition.label, 11, Muted)
+                }
+                Canvas(Modifier.weight(1f).fillMaxHeight().padding(end = 14.dp)) {
+                    drawLine(faint, Offset(0f, size.height), Offset(size.width, size.height), 1f)
+                    if (lanes.size < 2) return@Canvas
+                    val area = Path().apply {
+                        moveTo(0f, size.height)
+                        lanes.forEachIndexed { index, conditions ->
+                            val x = size.width * index / (lanes.size - 1)
+                            lineTo(x, size.height - (size.height - 2.dp.toPx()) * condition.of(conditions))
+                        }
+                        lineTo(size.width, size.height)
+                        close()
+                    }
+                    drawPath(area, ink.copy(alpha = .14f))
+                    drawLine(ink.copy(alpha = .5f), Offset(size.width * nowAt, 0f), Offset(size.width * nowAt, size.height), 1.dp.toPx())
+                }
+            }
         }
         for (slot in 0 until VoiceCount) {
             val sound = sounds.firstOrNull { it.slot.toInt() == slot }
@@ -196,23 +237,46 @@ internal fun TracksPanel(
                     }
                     clipRect {
                         for (clip in history.clipsOf(slot)) {
-                            val left = ((clip.start - (now - shown)) / shown * size.width).toFloat()
-                            val right = ((clip.end - (now - shown)) / shown * size.width).toFloat().coerceAtLeast(left + 2f)
+                            val left = size.width * along(clip.start)
+                            val right = (size.width * along(clip.end)).coerceAtLeast(left + 2f)
                             val alpha = if (clip.muted) .18f else if (chosen) .9f else .55f
                             drawRoundRect(color.copy(alpha = alpha * .35f), Offset(left, top), Size(right - left, height), CornerRadius(3.dp.toPx()))
                             drawOutline(clip, left, right, top, height, color.copy(alpha = alpha))
-                            val name = sound?.takes?.getOrNull(clip.take)?.name
-                            if (name != null && right - left > 60.dp.toPx()) {
-                                val label = text.measure(name, TextStyle(fontSize = 10.sp, color = ink))
-                                if (label.size.width < right - left - 8.dp.toPx()) {
-                                    drawText(label, topLeft = Offset(left + 4.dp.toPx(), top + 1.dp.toPx()))
-                                }
-                            }
+                            drawTakeName(sound?.takes?.getOrNull(clip.take)?.name, left, right, top, text, ink)
+                        }
+                        // What the plan has decided, still to come: open clips right of now.
+                        for (planned in session.planned) {
+                            if (planned.slot.toInt() != slot) continue
+                            val left = size.width * along(now + planned.startsIn)
+                            val right = (size.width * along(now + planned.startsIn + planned.seconds)).coerceAtLeast(left + 2f)
+                            drawRoundRect(
+                                color.copy(alpha = if (chosen) .8f else .45f),
+                                Offset(left, top), Size(right - left, height), CornerRadius(3.dp.toPx()),
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()),
+                            )
+                            drawTakeName(sound?.takes?.getOrNull(planned.take.toInt())?.name, left, right, top, text, muted)
                         }
                     }
+                    drawLine(ink.copy(alpha = .5f), Offset(size.width * nowAt, 0f), Offset(size.width * nowAt, size.height), 1.dp.toPx())
                 }
             }
         }
+    }
+}
+
+/** A take's name inside its clip, when the clip is wide enough to hold it. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawTakeName(
+    name: String?,
+    left: Float,
+    right: Float,
+    top: Float,
+    text: androidx.compose.ui.text.TextMeasurer,
+    color: androidx.compose.ui.graphics.Color,
+) {
+    if (name == null || right - left <= 60.dp.toPx()) return
+    val label = text.measure(name, TextStyle(fontSize = 10.sp, color = color))
+    if (label.size.width < right - left - 8.dp.toPx()) {
+        drawText(label, topLeft = Offset(left + 4.dp.toPx(), top + 1.dp.toPx()))
     }
 }
 
@@ -240,16 +304,24 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawOutline(
     drawPath(outline, color)
 }
 
-/** Minutes and seconds back from now along the top of the tracks, [shown] seconds wide. */
+/** Time along the top of the tracks: back from now on the left, ahead of it on the right. */
 @Composable
-private fun Ruler(shown: Double, modifier: Modifier) {
+private fun Ruler(shown: Double, ahead: Double, modifier: Modifier) {
     val text = rememberTextMeasurer()
     val muted = Muted
+    val span = shown + ahead
     val step = (shown / 4).toInt()
     Canvas(modifier) {
-        for (secondsBack in (0..4).map { it * step }) {
-            val x = size.width * (1f - secondsBack / shown.toFloat())
-            val label = if (secondsBack == 0) "now" else "−${secondsBack / 60}:${(secondsBack % 60).toString().padStart(2, '0')}"
+        val marks = (0..4).map { -it * step } + if (ahead >= step) listOf(step) else emptyList()
+        for (secondsFromNow in marks) {
+            val x = size.width * ((secondsFromNow + shown) / span).toFloat()
+            val magnitude = kotlin.math.abs(secondsFromNow)
+            val clock = "${magnitude / 60}:${(magnitude % 60).toString().padStart(2, '0')}"
+            val label = when {
+                secondsFromNow == 0 -> "now"
+                secondsFromNow < 0 -> "−$clock"
+                else -> "+$clock"
+            }
             val measured = text.measure(label, TextStyle(fontSize = 10.sp, color = muted))
             val at = (x - measured.size.width / 2f).coerceIn(0f, size.width - measured.size.width)
             drawText(measured, topLeft = Offset(at, 0f))
@@ -258,10 +330,11 @@ private fun Ruler(shown: Double, modifier: Modifier) {
 }
 
 private val TrackHeight = 17.dp
+private val LaneHeight = 14.dp
 private val HeaderWidth = 150.dp
 
 /** The voice a preset or a take is heard from on its own; shown as Preview when no sound holds it. */
 private const val AuditionTrack = VoiceCount - 1
 
 /** A strip as high as all its tracks. */
-internal val TracksPanelHeight = TrackHeight * VoiceCount + 46.dp
+internal val TracksPanelHeight = TrackHeight * VoiceCount + LaneHeight * Condition.entries.size + 46.dp

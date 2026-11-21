@@ -59,7 +59,12 @@ and on desktop the window widens for it. It has three panels; in a narrow window
 - **Tracks** under the map are the engine's 16 voices, as in a multitrack editor. Each shows the
   sound in it, or Empty, and the last minutes as clips: where it sounded, which take, and how
   loud the take itself was. A sound that rests leaves gaps; one that loops is one long clip; a
-  muted one is faint. Click a track to select its sound. It zooms to 30 s, 2 min or 10 min.
+  muted one is faint. Right of the "now" line are the takes the plan has already decided, drawn
+  open. Above the voices, wind, rain, storm and daylight are lanes, the past and what the weather
+  story will do next. Click a track to select its sound. It zooms to 30 s, 2 min or 10 min.
+- **Weather** is in the inspector when nothing is selected: the story (Held, Drifting or Passing
+  storm) and the band each condition keeps to, with where it is now. A selected sound's
+  **Follows** says how it answers them, such as "Activity 100 % → 0 % as rain rises".
 - **The map** shows every sound from above, north up, with you in the middle and rings at 5, 10
   and 20 m. Sounds are black and white, and the selected one is in its own colour. A sound's
   circle is how far its level carries, so a louder sound is larger; a focused sound has a wedge

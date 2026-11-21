@@ -112,7 +112,7 @@ class TopDownTest {
     @Test
     fun theShapeIsSaidInALine() {
         fun sound(kind: EmitterKind, width: Float, behind: Float) = SourceDescription(
-            "s", 0u, width, behind, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, null, Position(1f, 0f, 0f), emptyList(), null, Bout(1u, 1u),
+            "s", 0u, width, behind, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, null, Position(1f, 0f, 0f), emptyList(), null, Bout(1u, 1u), emptyList(),
         )
         assertEquals("Ambient: heard everywhere", shapeLine(sound(EmitterKind.FIELD, 360f, -60f)))
         assertEquals("All round: equal in every direction", shapeLine(sound(EmitterKind.OBJECT, 360f, -60f)))

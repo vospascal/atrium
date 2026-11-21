@@ -446,7 +446,9 @@ The planned half is the session, and it changes when you change the scene.
 Built 2026-11-21 as **Tracks**, the heard half only: all 16 voices as tracks, the way a
 multitrack editor shows them, each with the sound in it or "Empty", and clips where it sounded,
 named after the take and outlined by the voice's own level. It zooms to 30 s, 2 min or 10 min.
-It is recorded in the app from telemetry, so it starts empty when a scene starts.
+It is recorded in the app from telemetry, so it starts empty when a scene starts. Right of
+"now" it shows the takes the plan has already decided, drawn open (feature 23), and above
+the voices the four conditions as lanes, past and future, read from the weather story.
 
 For a place the strip is not a timeline. A place has no start and no end, so there is no
 playhead to scrub, and the strip only makes rhythm visible. For a piece it is one: the
@@ -564,9 +566,9 @@ one binding method away. Bold marks what is missing.
 | The session: a plan made ahead, kept and shared | `src/plan/`: a seed, a sample clock, and a plan per voice with takes, handed to the audio thread 0.4 s ahead. **Not kept, not shared, no pause; generators unplanned** | rhythm calls change the plan | the tracks show what was heard (23 would add what is planned) |
 | A piece: a composed scene of set length | **nothing** | | new (41) |
 | A setting that wanders | **nothing** at the scene level. The winds and the river vary inside themselves | | new (28) |
-| Conditions, and settings that follow them | **nothing.** No scene seed or clock; each generator has its own seed | | new (29) |
-| Weather stories | **nothing** | | new (30) |
-| Thunder | **nothing.** It was never ported from the earlier project | | new (31) |
+| Conditions, and settings that follow them | `src/plan/`: wind, rain, storm and daylight; `follows:` on kinds and sounds ties activity, level or a generator setting to one | `weather`, `set_weather`, `conditions`; each sound's `follows` | the scene inspector's Weather, a sound's Follows, and condition lanes over the tracks |
+| Weather stories | held, drifting and a passing storm, pure functions of time and seed; `weather:` in a scene | `set_weather` | the story picker in the scene inspector |
+| Thunder | `src/synth/thunder.rs`, ported from the spatial project: a strike and a rolling rumble with an infra layer for the LFE, never the same clap twice. Its distances are its takes, and the plan strikes it as storm rises | through `set_weather` | `sources/thunder.yaml`, `scenes/passing-storm.yaml` |
 | Paths, wandering, perches | **nothing** beyond orbit and the wisp's own flight | | new (33) |
 | Tone generator | **nothing** | | new (43) |
 | Group level | **nothing** | | new (36) |

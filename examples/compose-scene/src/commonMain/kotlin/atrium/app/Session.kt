@@ -21,6 +21,9 @@ import atrium.engine.SourceDescription
 import atrium.engine.Telemetry
 import atrium.engine.listPresets
 import atrium.engine.listScenes
+import atrium.engine.Conditions
+import atrium.engine.PlannedTake
+import atrium.engine.Weather
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -68,6 +71,25 @@ internal class Session(private val store: SettingsStore) {
      */
     var chosenOutput by mutableStateOf(outputSaved(store.read(OutputKey)))
         private set
+
+    /** The scene's weather story and bands, as the engine has them. */
+    var weather by mutableStateOf<Weather?>(null)
+        internal set
+
+    /** The takes the plan has decided for the next minute, refreshed a few times a second. */
+    var planned by mutableStateOf<List<PlannedTake>>(emptyList())
+        internal set
+
+    /** Let [next] move the place's conditions from now on; it is saved with the scene. */
+    fun setWeather(next: Weather) {
+        command { setWeather(next) }
+        weather = next
+        unsaved = true
+    }
+
+    /** The conditions from [from] to [to] seconds around now, at [steps] moments; empty with nothing playing. */
+    fun conditionsAround(from: Float, to: Float, steps: Int): List<Conditions> =
+        engine?.conditions(from, to, steps.toUInt()).orEmpty()
 
     /** What every voice did over the last two minutes, for the tracks under the map. */
     val tracks = TrackHistory()
@@ -354,6 +376,7 @@ internal fun RunSession(session: Session) {
             session.forgetMix()
             session.tracks.clear()
             session.unsaved = false
+            session.weather = running.weather()
             session.description = running.scene()
             session.outputs = running.outputs()
             session.engine = running
@@ -362,8 +385,13 @@ internal fun RunSession(session: Session) {
             // The engine that played before has closed by now and let go of the
             // tracker's port, so this one can take it.
             if (session.headTracker != null) session.followHeadTracker(running)
+            var lastPlanned = 0L
             while (true) {
-                withFrameMillis { }
+                val frame = withFrameMillis { it }
+                if (frame - lastPlanned >= PlannedEveryMillis) {
+                    session.planned = running.planned(PlannedAhead)
+                    lastPlanned = frame
+                }
                 running.latestTelemetry()?.let {
                     session.telemetry = it
                     session.tracks.record(trackSeconds(), it.sources)
@@ -372,12 +400,17 @@ internal fun RunSession(session: Session) {
         } finally {
             session.engine = null
             session.description = null
+            session.planned = emptyList()
             session.outputs = emptyList()
             session.telemetry = null
             running.close()
         }
     }
 }
+
+/** How far ahead the tracks can show what is planned (s), and how often that is read again. */
+internal const val PlannedAhead = 60f
+private const val PlannedEveryMillis = 250L
 
 /** The voice a preset or a single take is heard from on its own: the engine's last. */
 private const val AuditionVoice = 15
