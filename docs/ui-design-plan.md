@@ -171,9 +171,11 @@ What this gives:
 It runs in the engine because the engine plays with no app open, and a timer in the app
 would stop the place when the app closes.
 
-None of this exists. The engine has no scene seed or clock, each generator has its own
-seed, a command takes effect when the audio thread next reads it and carries no time, and
-there is no link between devices.
+Built 2026-11-21 for voices with takes (`src/plan/`): a scene seed (`seed:`, or a new one
+each play), a clock the audio thread counts in samples, and a plan per voice decided from the
+seed and the entity's id. A planner thread hands the audio thread only the next 0.4 s, so an
+edit is heard almost at once. Not yet: generators are not planned (each still has its own
+seed), there is no pause, a session cannot be kept, and there is no link between devices.
 
 ### A place or a piece
 
@@ -558,8 +560,8 @@ one binding method away. Bold marks what is missing.
 | Turn a sound | `SetSourceFacing`; a scene file's `shape.facing` | `set_source_facing` | exists: a handle on the map for a focused sound |
 | Save a scene | `SceneConfig::save`, which refuses a hand-written file | `save_scene`; every edit is recorded in the scene file the engine keeps | exists: Save and Save as in the editor's bar, ⌘S |
 | Several takes per sound | a preset lists `takes`; four bird kinds use 19 of the 20 on disk | `scene()` names them, telemetry says which is sung | exists: the inspector lists them, the map dims a resting bird |
-| When: gaps and chances | a `rests` rule with a gap range and level and pitch variation, decided on the audio thread from a seed; a scene's `when:` changes gap and chance per sound | `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition_take` | exists: the inspector's When, with bouts and a play button per take. Planning ahead (22) is not |
-| The session: a plan made ahead, kept and shared | **nothing.** A command takes effect when the audio thread next reads it and carries no time. No link between devices | | new (21–25) |
+| When: gaps and chances | a `rests` rule with a gap range, bouts and level and pitch variation; a scene's `when:` changes them per sound | `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition_take` | exists: the inspector's When, with bouts and a play button per take |
+| The session: a plan made ahead, kept and shared | `src/plan/`: a seed, a sample clock, and a plan per voice with takes, handed to the audio thread 0.4 s ahead. **Not kept, not shared, no pause; generators unplanned** | rhythm calls change the plan | the tracks show what was heard (23 would add what is planned) |
 | A piece: a composed scene of set length | **nothing** | | new (41) |
 | A setting that wanders | **nothing** at the scene level. The winds and the river vary inside themselves | | new (28) |
 | Conditions, and settings that follow them | **nothing.** No scene seed or clock; each generator has its own seed | | new (29) |
@@ -583,8 +585,7 @@ to exist first.
 **Built so far.** The sound model and its crate, the three-panel editor (layers with an ear
 and a live meter, library with play and add, one top-down map, the inspector), remove, move,
 turn, mute, level, omni or focused, head tracking on desktop, and kinds with takes that sing
-with gaps from a range and a small level and pitch offset. Nothing is saved yet, and the
-singing is decided on the audio thread, not planned ahead.
+with gaps from a range and a small level and pitch offset.
 
 ### Suggested order
 
