@@ -74,7 +74,8 @@ A rendered scene is a sum: direct sound, first reflections, late reverb and
 ambient fields, each shaped by the air and the ground. To judge one of them by
 ear, a probe (`atrium_core::probe::Probe`, `Command::SetProbe`) lets only some
 of them reach the output, switches single effects off (air absorption, moving
-air, ground effect, wall colour), or leaves one loudspeaker or one ear alone.
+air, ground effect, wall colour, and on headphones the near field), or leaves
+one loudspeaker or one ear alone.
 
 Nothing else about the scene changes, which a test holds every render mode
 to: the four parts heard alone add up, sample for sample, to the whole.
@@ -228,6 +229,94 @@ Known gaps:
   many places, each with its own direction and arrival. One loud frog in the
   recording is everywhere at once. Many sources, or a multichannel recording,
   would be the real thing.
+
+## A sound beside the ear
+
+On headphones the direct sound is convolved with head-related impulse
+responses measured on a dummy head (`assets/hrtf/default.sofa`, MIT KEMAR) at
+one distance: 1.4 m. Without more, a sound 15 cm from the ear would get the
+same two ear responses as one 15 m off in that direction, only louder. In
+reality, inside about a metre the near ear hears a sound markedly louder than
+the far one, most of all in the bass, where far off the ears differ hardly at
+all. That bass difference is what makes a sound feel beside your ear and not
+merely loud. `src/audio/near_field.rs` works it out, and the headphone
+renderer applies it to each ear of the direct sound.
+
+The physics is the rigid sphere of Duda and Martens (JASA 104, 1998), a point
+source at any distance from a sphere of the standard 8.75 cm head radius. The
+correction is Kan, Jin and van Schaik's distance variation function (JASA 125,
+2009): the sphere's response at the source's distance over its response at the
+measurement distance, per ear, with the ears at ±100°. Each ear gets it as a
+gain and a first-order shelf, the filter of Spagnol, Tavazzi and Avanzini
+(Applied Acoustics 115, 2017), fitted to the sphere when the renderer first
+loads. For a source straight to the side, the ears' level difference:
+
+| Distance | Sphere, 200 Hz | Sphere, 4 kHz | Added to the 1.4 m set, 200 Hz | Added, 4 kHz |
+|---|---|---|---|---|
+| 15 cm | 16.3 dB | 23.1 dB | 14.5 dB | 13.6 dB |
+| 25 cm | 9.3 dB | 16.5 dB | 7.6 dB | 7.0 dB |
+| 50 cm | 4.6 dB | 12.1 dB | 2.9 dB | 2.6 dB |
+| 1 m | 2.4 dB | 10.1 dB | 0.6 dB | 0.6 dB |
+
+At 1.4 m the sphere's are 1.7 and 9.5 dB; the dummy head's own difference is
+in the measured responses and is left as it is. Through the whole headphone
+render, a 200 Hz tone 20 cm to the right gains 9.9 dB of level difference
+over the same tone at 5 m, where the sphere says 10.1. The probe's near field
+switch turns it off; off, and for any source 1.2 m or further, the output is
+the same sample for sample as without it.
+
+Decisions that look wrong and are right:
+
+- **Spagnol's filter, not Spagnol's coefficients.** Their published table
+  was the plan. Checked against the sphere, its 90° row has a sign that puts
+  the bass gain 0.75 dB off where every neighbour is within 0.005 dB, its
+  120° row has a pole inside the range, the unit of the corner frequency is
+  not stated (it is kHz), and it is fitted against a source infinitely far
+  where this needs 1.4 m. Fitting the sphere directly costs some tens of
+  milliseconds once, and is within 0.81 dB of the sphere from 100 Hz to 8 kHz
+  at every distance and angle tested.
+- **No 1/r in the correction.** The distance variation function as published
+  includes the change in level with distance. The engine already applies its
+  distance law from the head's centre, so only the change in each ear's
+  response relative to that is added; with both, a near sound would get
+  louder twice.
+- **It leaves the signal at 1.2 m, not 1.4 m.** There the sphere changes no
+  ear by more than 0.22 dB at any frequency and angle, and the ears'
+  difference by 0.32 dB, under the half decibel that is about the smallest
+  interaural change anyone hears. At 1 m it is still 0.53 and 0.76 dB, so it
+  stays in up to 1.2 m.
+- **Some angles do not fade steadily with distance.** Between about 20° and
+  90° from an ear, its correction grows and shrinks again as the source comes
+  in, and changes sign: where the response crosses 0 dB moves towards the
+  source as it nears. That is the sphere (Spagnol's "low-frequency parallax"),
+  and the correction follows it.
+- **Only the direct sound.** Reflections arrive from image sources metres
+  away, and loudspeakers have no ears to correct.
+- **Arrival time is left alone.** The sphere's interaural time difference
+  grows too up close, by at most 49 µs at 20 cm and 14 µs at 50 cm at the
+  onset (Duda and Martens' equation 15), and by under 20 µs in the bass. That
+  is under the 90 µs anyone notices, so the measured delays stand.
+
+Known gaps:
+
+- **Acoustic parallax.** Each ear sees a near source from a different
+  direction than the head's centre does, and the HRIR is still chosen from
+  the centre: up to 26° off at 20 cm (23° more than the 1.4 m measurements
+  already contain) and 10° at 50 cm (6.5° more).
+- **One head for everyone.** The sphere is 8.75 cm, the measured head is
+  KEMAR's; neither is the listener's.
+- **A sphere has no pinna and no shoulders.** Above a few kHz near the ear
+  the outer ear shapes the sound in ways that also change with distance, and
+  the correction knows nothing of them.
+- **A point source.** A real bird 15 cm from the ear is not a point; Duda and
+  Martens' own bowling-ball measurements part from the theory inside two head
+  radii for that reason. Nearer than 10 mm from the skin a source is taken as
+  there.
+- **The wisp seldom comes close.** As `scenes/wisp.yaml` flies it, the wisp
+  is within 1 m of the listener for about 2 % of the time and within 50 cm
+  for about half a percent, over ten minutes. Within 25 cm it is only for
+  its first second: it starts 1.2 m above its anchor, which in that scene is
+  exactly where the listener's head is.
 
 ## Project structure
 
