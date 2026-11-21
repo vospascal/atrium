@@ -8,7 +8,7 @@ use atrium_core::telemetry::MAX_SOURCES;
 use atrium_world::{Entity, EntityId, Moves, Shape, Sound, When};
 
 use super::edits::Edits;
-use super::{finite, lock, sound_in, Engine, Live, AUDITION_SLOT};
+use super::{finite, lock, sound_in, Engine, Live};
 use crate::api::{EngineError, Position, SourceDescription};
 
 /// How far east of its original a copy stands (m).
@@ -191,8 +191,7 @@ impl Engine {
     /// free voice, stopping any audition first.
     fn add_entity(&self, wanted: &str, entity: Entity) -> Result<SourceDescription, EngineError> {
         let mut edits = lock(&self.edits);
-        edits.stop_audition()?;
-        self.planner.remove_voice(AUDITION_SLOT);
+        self.end_audition(&mut edits)?;
         let mut scene = lock(&self.scene);
         let id = EntityId::unused(
             wanted,

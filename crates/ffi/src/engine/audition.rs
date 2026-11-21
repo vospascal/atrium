@@ -5,6 +5,7 @@ use atrium::config::read_preset;
 use atrium::engine::edit::SceneEdit;
 use atrium_world::{EntityId, Moves};
 
+use super::edits::Edits;
 use super::shape::ALL_ROUND;
 use super::{lock, Engine, AUDITION_SLOT};
 use crate::api::EngineError;
@@ -23,17 +24,11 @@ impl Engine {
     /// this call takes a moment. Keep it off a UI thread.
     pub fn audition(&self, preset: Option<String>) -> Result<(), EngineError> {
         let mut edits = lock(&self.edits);
-        edits.stop_audition()?;
-        self.planner.remove_voice(AUDITION_SLOT);
+        self.end_audition(&mut edits)?;
         let Some(preset) = preset else {
             return Ok(());
         };
-        let taken = lock(&self.scene)
-            .description
-            .sources
-            .iter()
-            .any(|source| source.slot as usize == AUDITION_SLOT);
-        if taken {
+        if self.audition_voice_taken() {
             return Err(EngineError::NoFreeVoice);
         }
         let id = EntityId::unused("audition", []);
@@ -65,17 +60,20 @@ impl Engine {
     /// listener and all round, to hear it on its own; or stop with `None`.
     /// It plays from the audition voice, like `audition`, and stops any
     /// audition in progress. Telemetry reports the audition voice's take while
-    /// it sounds and nothing once it has ended.
+    /// it sounds and nothing once it has ended. In a scene whose sounds take
+    /// every voice there is none to hear it from, and it is refused.
     ///
     /// Building it decodes the recording, so this takes a moment. Keep it off
     /// a UI thread.
     pub fn audition_take(&self, slot: u16, take: Option<u16>) -> Result<(), EngineError> {
         let mut edits = lock(&self.edits);
-        edits.stop_audition()?;
-        self.planner.remove_voice(AUDITION_SLOT);
+        self.end_audition(&mut edits)?;
         let Some(take) = take else {
             return Ok(());
         };
+        if self.audition_voice_taken() {
+            return Err(EngineError::NoFreeVoice);
+        }
         let scene = lock(&self.scene);
         let Some(source) = scene
             .description
@@ -115,10 +113,105 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Stop the audition in progress, if there is one, and the plan for its
+    /// voice. With none, nothing is touched: the last voice may then hold one
+    /// of the scene's own sounds, whose plan must stay.
+    pub(super) fn end_audition(&self, edits: &mut Edits) -> Result<(), EngineError> {
+        if edits.auditioned {
+            edits.stop_audition()?;
+            self.planner.remove_voice(AUDITION_SLOT);
+        }
+        Ok(())
+    }
+
+    /// Whether one of the scene's own sounds plays from the audition voice.
+    fn audition_voice_taken(&self) -> bool {
+        lock(&self.scene)
+            .description
+            .sources
+            .iter()
+            .any(|source| source.slot as usize == AUDITION_SLOT)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// In a scene whose sounds take all sixteen voices, the last one is the
+    /// scene's: hearing a kind or a take is refused, and stopping an
+    /// audition that never started leaves that sound's plan alone. Before,
+    /// the play button on a take replaced the sixteenth sound outright.
+    #[test]
+    fn a_full_scene_keeps_its_last_voice() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        let mut scene = atrium::config::SceneConfig::load("scenes/frog.yaml").expect("reads");
+        let (id, frog) = scene.sounds.iter().next().expect("a frog");
+        let (id, frog) = (id.to_string(), frog.clone());
+        // Robins fill the other voices: their phrases last a second or two and
+        // come every few seconds, so the plan always has one coming. A frog's
+        // chorus lasts over a minute and is rarely in the plan's window.
+        for copy in 2..=atrium_core::telemetry::MAX_SOURCES {
+            let mut placed = frog.clone();
+            placed.sound.preset = Some("sources/robin.yaml".into());
+            placed.place.x += copy as f32;
+            scene
+                .sounds
+                .push(
+                    EntityId::new(format!("{id}-{copy}")).expect("an id"),
+                    placed,
+                )
+                .expect("added");
+        }
+        let path = std::env::temp_dir().join(format!("atrium-full-{}.yaml", std::process::id()));
+        let path = path.to_str().expect("utf-8").to_owned();
+        scene.save(&path).expect("saved");
+        let engine = Engine::new(path.clone()).expect("scene should play");
+        let _ = std::fs::remove_file(&path);
+        engine.set_volume(0.0).expect("volume");
+        let last_is_planned = || {
+            engine
+                .planned(60.0)
+                .iter()
+                .any(|take| take.slot as usize == AUDITION_SLOT)
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !last_is_planned() {
+            assert!(
+                Instant::now() < deadline,
+                "the last robin was never planned"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        engine.audition(None).expect("nothing to stop");
+        engine.audition_take(0, None).expect("nothing to stop");
+        assert!(
+            last_is_planned(),
+            "stopping nothing dropped the last robin's plan"
+        );
+        assert!(matches!(
+            engine.audition(Some("sources/frog.yaml".into())),
+            Err(EngineError::NoFreeVoice)
+        ));
+        assert!(matches!(
+            engine.audition_take(0, Some(0)),
+            Err(EngineError::NoFreeVoice)
+        ));
+        assert!(
+            last_is_planned(),
+            "a refused audition dropped the last robin's plan"
+        );
+        let last = engine.scene().sources.into_iter().last().expect("sixteen");
+        assert_eq!(last.slot as usize, AUDITION_SLOT);
+        assert!(
+            last.id.ends_with("-16"),
+            "the sixteenth sound is still the scene's"
+        );
+    }
 
     /// Hearing a kind before placing it, and one of a sound's takes on its
     /// own: both are heard within a moment, even for a kind that rests

@@ -91,8 +91,7 @@ impl Engine {
     /// Make `version` the scene, changing only what differs.
     fn restore(&self, version: Version) -> Result<(), EngineError> {
         let mut edits = lock(&self.edits);
-        edits.stop_audition()?;
-        self.planner.remove_voice(super::AUDITION_SLOT);
+        self.end_audition(&mut edits)?;
         let mut scene = lock(&self.scene);
         let found = changes(&scene.document.sounds, &version.sounds);
         // First, so a sound built again is built as it was.

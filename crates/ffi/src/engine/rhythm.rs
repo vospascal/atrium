@@ -35,11 +35,21 @@ impl Engine {
         }
         let loops_now = source.gap.is_none();
         let loops_after = longest == 0.0 && source.takes.len() == 1;
-        if let Some(entity) = scene.entity_in(slot) {
-            entity.when.gap = Some([shortest, longest]);
-        }
+        let Some(entity) = scene.entity_in(slot) else {
+            return Ok(());
+        };
+        let before = entity.when.gap;
+        entity.when.gap = Some([shortest, longest]);
         if loops_now != loops_after {
-            return self.rebuild(&mut edits, &mut scene, slot);
+            // A sound that cannot rest the new way (one that orbits, say)
+            // keeps the rest it had in the file too, so a save stays loadable.
+            let rebuilt = self.rebuild(&mut edits, &mut scene, slot);
+            if rebuilt.is_err() {
+                if let Some(entity) = scene.entity_in(slot) {
+                    entity.when.gap = before;
+                }
+            }
+            return rebuilt;
         }
         if loops_after {
             return Ok(());
@@ -113,6 +123,56 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::super::test_support::telemetry_when;
+
+    /// An orbiting recording cannot rest, so giving it a rest is refused, and
+    /// the scene file keeps the rest it had: what is saved still loads.
+    #[test]
+    fn a_refused_rest_is_not_written() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        let mut scene = atrium::config::SceneConfig::load("scenes/frog.yaml").expect("reads");
+        let (id, mut frog) = scene
+            .sounds
+            .iter()
+            .next()
+            .map(|(id, frog)| (id.clone(), frog.clone()))
+            .expect("a frog");
+        frog.when.gap = Some([0.0, 0.0]);
+        frog.moves = atrium_world::Moves::Orbit {
+            radius: 1.0,
+            speed: 0.5,
+        };
+        *scene.sounds.get_mut(&id).expect("the frog") = frog;
+        let directory = std::env::temp_dir();
+        let opened = directory.join(format!("atrium-orbit-{}.yaml", std::process::id()));
+        let saved = directory.join(format!("atrium-orbit-saved-{}.yaml", std::process::id()));
+        let (opened, saved) = (
+            opened.to_str().expect("utf-8").to_owned(),
+            saved.to_str().expect("utf-8").to_owned(),
+        );
+        scene.save(&opened).expect("written");
+        let engine = Engine::new(opened.clone()).expect("an orbiting loop plays");
+        let _ = std::fs::remove_file(&opened);
+        engine.set_volume(0.0).expect("volume");
+        let slot = engine.scene().sources[0].slot;
+
+        assert!(
+            engine.set_source_gap(slot, 2.0, 8.0).is_err(),
+            "an orbiting voice cannot rest"
+        );
+        assert_eq!(engine.scene().sources[0].gap, None, "it still loops");
+        engine
+            .save_scene(saved.clone(), String::new())
+            .expect("saves");
+        let written = atrium::config::SceneConfig::load(&saved).expect("reads back");
+        let _ = std::fs::remove_file(&saved);
+        assert_eq!(
+            written.sounds.get(&id).expect("the frog").when.gap,
+            Some([0.0, 0.0]),
+            "the file keeps the rest it had"
+        );
+        written.build().expect("what was saved still builds");
+    }
     use super::super::AUDITION_SLOT;
     use super::*;
     use atrium::config::SceneConfig;
