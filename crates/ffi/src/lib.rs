@@ -13,8 +13,8 @@ mod output;
 mod scenes;
 
 pub use api::{
-    EmitterKind, EngineError, Pattern, Position, SceneDescription, SourceDescription, SourceSignal,
-    SourceTelemetry, Telemetry,
+    EmitterKind, EngineError, Gap, Pattern, Position, SceneDescription, SourceDescription,
+    SourceSignal, SourceTelemetry, Take, Telemetry,
 };
 pub use engine::Engine;
 pub use head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};

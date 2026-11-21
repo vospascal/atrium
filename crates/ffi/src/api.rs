@@ -77,9 +77,27 @@ pub struct SourceDescription {
     pub beam_half_angle: Option<f32>,
     /// Initial forward vector in world coordinates.
     pub facing: Position,
-    /// The names of what it can utter, in the order `SourceTelemetry::take`
-    /// counts them. One name for a recording that loops, none for a generator.
-    pub takes: Vec<String>,
+    /// What it can utter, in the order `SourceTelemetry::take` counts them.
+    /// One for a recording that loops, none for a generator.
+    pub takes: Vec<Take>,
+    /// How long it rests between two takes, or `None` when it plays all the
+    /// time.
+    pub gap: Option<Gap>,
+}
+
+/// One thing a sound can utter, and how often it is chosen next to the
+/// others: a take with chance 3 three times as often as one with chance 1.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Take {
+    pub name: String,
+    pub chance: f32,
+}
+
+/// The shortest and longest rest between two takes (s).
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct Gap {
+    pub shortest: f32,
+    pub longest: f32,
 }
 
 /// How a localized sound radiates.
@@ -157,7 +175,17 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
             emitter_kind: source.emitter_kind.into(),
             beam_half_angle: source.beam_half_angle,
             facing: source.facing.into(),
-            takes: source.takes,
+            takes: source
+                .takes
+                .into_iter()
+                .map(|take| Take {
+                    name: take.name,
+                    chance: take.chance,
+                })
+                .collect(),
+            gap: source
+                .gap
+                .map(|[shortest, longest]| Gap { shortest, longest }),
         }
     }
 }

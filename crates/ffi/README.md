@@ -11,8 +11,8 @@ Kotlin can reach is declared here:
 - `head_trackers()`: the head trackers that can work on this platform.
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_pattern`,
-  `set_source_muted`, `set_source_level`, `audition`, `add_sound`, `remove_sound`,
-  `save_scene`, `set_head_tracker` and `latest_telemetry()`.
+  `set_source_muted`, `set_source_level`, `set_source_gap`, `set_take_chance`, `audition`,
+  `add_sound`, `remove_sound`, `save_scene`, `set_head_tracker` and `latest_telemetry()`.
 - The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
   editor wrote it), `Output`, `Telemetry`. Telemetry
   includes where the listener faces and whether a head tracker is sending.
@@ -42,6 +42,12 @@ runs Cargo itself. There is nothing to build here by hand.
   belongs to the place is recorded: a mute, the volume, the output and head tracking belong to
   the listener and are never saved. Places are kept to the centimetre, facings to the degree
   and levels to a tenth of a dB, so a saved file stays readable.
+- **`set_source_gap` sometimes builds the sound again.** Within one way of playing, a new gap
+  or chance is a command and is heard at once; a rest longer than the new longest is cut short.
+  Between looping and resting the sound is a different kind of voice, so it is built again in
+  its slot, which takes as long as adding one. The engine remembers which voices the listener
+  muted, so a sound built again stays silent. The last take that can still be chosen cannot be
+  given chance 0, so a sound never ends up with nothing to say.
 - **`save_scene` refuses to replace a hand-written scene.** A saved file is rewritten from
   values and loses its comments. A file the editor wrote starts with its mark, and only such a
   file is replaced. The rule is in the engine, not only in the app, so no screen can break it.
