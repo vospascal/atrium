@@ -107,7 +107,11 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
                                 }
                             }
                             Upright()
-                            EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxHeight())
+                            Column(Modifier.weight(1f).fillMaxHeight()) {
+                                EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxWidth())
+                                Rule()
+                                TracksPanel(session, selected, onSelect = { selected = it }, Modifier.fillMaxWidth().height(TracksPanelHeight))
+                            }
                             Upright()
                             Inspector(
                                 session, scene, selected,

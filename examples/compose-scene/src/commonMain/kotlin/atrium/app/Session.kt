@@ -69,6 +69,9 @@ internal class Session(private val store: SettingsStore) {
     var chosenOutput by mutableStateOf(outputSaved(store.read(OutputKey)))
         private set
 
+    /** What every voice did over the last two minutes, for the tracks under the map. */
+    val tracks = TrackHistory()
+
     /** What the listener silenced or asked to hear alone; forgotten when the scene changes. */
     var mix by mutableStateOf(LayerMix())
         private set
@@ -349,6 +352,7 @@ internal fun RunSession(session: Session) {
         }
         try {
             session.forgetMix()
+            session.tracks.clear()
             session.unsaved = false
             session.description = running.scene()
             session.outputs = running.outputs()
@@ -360,7 +364,10 @@ internal fun RunSession(session: Session) {
             if (session.headTracker != null) session.followHeadTracker(running)
             while (true) {
                 withFrameMillis { }
-                running.latestTelemetry()?.let { session.telemetry = it }
+                running.latestTelemetry()?.let {
+                    session.telemetry = it
+                    session.tracks.record(trackSeconds(), it.sources)
+                }
             }
         } finally {
             session.engine = null

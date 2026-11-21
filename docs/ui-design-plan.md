@@ -441,6 +441,11 @@ for when you need to type one.
 Under the map: the last two minutes as they were heard and the next 45 seconds as planned.
 The planned half is the session, and it changes when you change the scene.
 
+Built 2026-11-21 as **Tracks**, the heard half only: all 16 voices as tracks, the way a
+multitrack editor shows them, each with the sound in it or "Empty", and clips where it sounded,
+named after the take and outlined by the voice's own level. It zooms to 30 s, 2 min or 10 min.
+It is recorded in the app from telemetry, so it starts empty when a scene starts.
+
 For a place the strip is not a timeline. A place has no start and no end, so there is no
 playhead to scrub, and the strip only makes rhythm visible. For a piece it is one: the
 length is fixed, and its condition curves, blocks and single events are edited on it.

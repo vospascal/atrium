@@ -56,6 +56,10 @@ and on desktop the window widens for it. It has three panels; in a narrow window
   from the repository is written by hand and keeps its comments, so its first save asks for a
   name and writes a copy beside it. That copy is the editor's own, and later saves replace it.
   Mutes, volume, output and head tracking are yours and are not saved with the scene.
+- **Tracks** under the map are the engine's 16 voices, as in a multitrack editor. Each shows the
+  sound in it, or Empty, and the last minutes as clips: where it sounded, which take, and how
+  loud the take itself was. A sound that rests leaves gaps; one that loops is one long clip; a
+  muted one is faint. Click a track to select its sound. It zooms to 30 s, 2 min or 10 min.
 - **The map** shows every sound from above, north up, with you in the middle and rings at 5, 10
   and 20 m. Sounds are black and white, and the selected one is in its own colour. A sound's
   circle is how far its level carries, so a louder sound is larger; a focused sound has a wedge
