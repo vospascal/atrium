@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import atrium.engine.ChannelMode
+import atrium.engine.EditHistory
 import atrium.engine.Engine
 import atrium.engine.EngineException
 import atrium.engine.HeadTracker
@@ -123,6 +124,7 @@ internal class Session(private val store: SettingsStore) {
 
     /** Let [next] move the place's conditions from now on; it is saved with the scene. */
     fun setWeather(next: Weather) {
+        step("Weather", "weather")
         command { setWeather(next) }
         weather = next
         unsaved = true
@@ -184,6 +186,7 @@ internal class Session(private val store: SettingsStore) {
     /** Set the level of the sound in [slot], in dB SPL at 1 m. */
     fun level(slot: UShort, level: Float) {
         val running = engine ?: return
+        step("Level · ${nameOf(slot)}", "level:$slot")
         command { setSourceLevel(slot, level) }
         description = running.scene()
         unsaved = true
@@ -199,6 +202,7 @@ internal class Session(private val store: SettingsStore) {
      * this runs off the UI thread, and while a handle is dragged only the newest value is sent.
      */
     fun gap(slot: UShort, shortest: Float, longest: Float) {
+        step("Rests · ${nameOf(slot)}", "gap:$slot")
         unsaved = true
         wantedGaps.trySend(Triple(slot, shortest, longest))
         if (applyingGaps) return
@@ -222,6 +226,7 @@ internal class Session(private val store: SettingsStore) {
     /** Let the sound in [slot] utter one take [fewest] to [most] times running before choosing another. */
     fun bout(slot: UShort, fewest: Int, most: Int) {
         val running = engine ?: return
+        step("Repeats · ${nameOf(slot)}", "bout:$slot")
         command { setSourceBout(slot, fewest.toUInt(), most.toUInt()) }
         description = running.scene()
         unsaved = true
@@ -254,6 +259,7 @@ internal class Session(private val store: SettingsStore) {
     /** How often take [take] of the sound in [slot] is chosen next to its others; 0 is never. */
     fun chance(slot: UShort, take: Int, chance: Float) {
         val running = engine ?: return
+        step("Chance · ${nameOf(slot)}", "chance:$slot:$take")
         command { setTakeChance(slot, take.toUShort(), chance) }
         description = running.scene()
         unsaved = true
@@ -270,6 +276,7 @@ internal class Session(private val store: SettingsStore) {
     /** Add a sound made from [preset] to the playing scene; [onAdded] gets its id once it sounds. */
     fun add(preset: String, onAdded: (id: String) -> Unit) {
         val running = engine ?: return
+        step("Add ${preset.substringAfterLast('/').substringBeforeLast('.')}", "add")
         building.launch {
             runCatching { running.addSound(preset) }
                 .onSuccess { added ->
@@ -286,12 +293,14 @@ internal class Session(private val store: SettingsStore) {
 
     /** Move the sound in [slot] to [position] while it is dragged. */
     fun move(slot: UShort, position: Position) {
+        step("Move · ${nameOf(slot)}", "move:$slot")
         command { setSourcePosition(slot, position) }
         unsaved = true
     }
 
     /** Turn the sound in [slot] to face along [facing] while its handle is dragged. */
     fun face(slot: UShort, facing: Position) {
+        step("Turn · ${nameOf(slot)}", "face:$slot")
         command { setSourceFacing(slot, facing) }
         unsaved = true
     }
@@ -299,6 +308,7 @@ internal class Session(private val store: SettingsStore) {
     /** Make the sound in [slot] go out [width] degrees wide, with [behind] dB heard behind it. */
     fun beam(slot: UShort, width: Float, behind: Float) {
         val running = engine ?: return
+        step("Beam · ${nameOf(slot)}", "beam:$slot")
         command { setSourceBeam(slot, width, behind) }
         description = running.scene()
         unsaved = true
@@ -310,6 +320,7 @@ internal class Session(private val store: SettingsStore) {
      */
     fun remove(sound: SourceDescription) {
         val running = engine ?: return
+        step("Remove ${sound.name}", "remove")
         mix(mix.without(sound.id))
         command { removeSound(sound.slot) }
         description = running.scene()
@@ -335,6 +346,60 @@ internal class Session(private val store: SettingsStore) {
         val directory = path.substringBeforeLast('/', ".")
         val written = runCatching { listScenes(directory) }.getOrNull()?.firstOrNull { it.path == path }
         if (written != null) request = playing.copy(scene = written)
+    }
+
+    /** The steps that can be undone and redone in the playing scene; null with nothing playing. */
+    var history by mutableStateOf<EditHistory?>(null)
+        internal set
+
+    /** Which edits make one step: a whole drag is undone at once. */
+    private val steps = Steps()
+
+    /** Let the engine keep the scene as it is, before an edit that starts a new step called [label]. */
+    private fun step(label: String, key: String) {
+        val running = engine ?: return
+        if (!steps.starts(key)) return
+        running.remember(label)
+        history = running.history()
+    }
+
+    private fun nameOf(slot: UShort) = description?.sources?.firstOrNull { it.slot == slot }?.name ?: "sound"
+
+    /** Take the scene back one step. */
+    fun undo() = travel(-1)
+
+    /** Take again the last step undone. */
+    fun redo() = travel(1)
+
+    /** Take the scene to entry [index] of its history line, 0 being as it was opened. */
+    fun travelTo(index: Int) {
+        val at = history?.undoable?.size ?: return
+        travel(index - at)
+    }
+
+    /**
+     * Go [steps] back (negative) or forward. Bringing a sound back builds it again, so this runs
+     * off the UI thread, in turn with every other build.
+     */
+    private fun travel(by: Int) {
+        val running = engine ?: return
+        if (by == 0) return
+        steps.end()
+        building.launch {
+            for (step in 1..kotlin.math.abs(by)) {
+                val moved = runCatching { if (by < 0) running.undo() else running.redo() }.getOrDefault(false)
+                if (!moved) break
+            }
+            if (engine !== running) return@launch
+            description = running.scene()
+            weather = running.weather()
+            history = running.history()
+            unsaved = true
+            // A sound brought back is built anew, without the listener's mute.
+            description?.sources?.forEach { sound ->
+                if (mix.silences(sound.id)) command { setSourceMuted(sound.slot, true) }
+            }
+        }
     }
 
     /** A drag has ended: take over where the engine now says the scene's sounds were placed. */
@@ -418,6 +483,7 @@ internal fun RunSession(session: Session) {
             session.tracks.clear()
             session.unsaved = false
             session.weather = running.weather()
+            session.history = running.history()
             session.resetTransport()
             session.description = running.scene()
             session.outputs = running.outputs()
@@ -443,6 +509,7 @@ internal fun RunSession(session: Session) {
             session.engine = null
             session.description = null
             session.planned = emptyList()
+            session.history = null
             session.outputs = emptyList()
             session.telemetry = null
             running.close()

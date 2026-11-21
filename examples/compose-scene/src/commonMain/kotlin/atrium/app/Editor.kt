@@ -113,6 +113,8 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                             command && event.key == Key.S -> if (event.isShiftPressed) naming = true else save()
                             !command && event.key == Key.Tab -> workspace.toggleAll()
                             !command && event.key == Key.Spacebar -> session.togglePause()
+                            command && event.key == Key.Z -> if (event.isShiftPressed) session.redo() else session.undo()
+                            command && event.key == Key.Y -> session.redo()
                             else -> return@onPreviewKeyEvent false
                         }
                         true
@@ -128,7 +130,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                         Row(Modifier.weight(1f)) {
                             if (workspace.leftShown) {
                                 Column(Modifier.width(workspace.leftWidth).fillMaxHeight()) {
-                                    PanelTabs(listOf(Panel.Layers, Panel.Library), list) { panel = it }
+                                    PanelTabs(listOf(Panel.Layers, Panel.Library, Panel.History), list) { panel = it }
                                     Rule()
                                     ScrollArea(Modifier.weight(1f)) {
                                         when (list) {
@@ -136,6 +138,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                                 selected = id
                                                 panel = Panel.Layers
                                             })
+                                            Panel.History -> HistoryPanel(session)
                                             else -> Layers(session, strengths, selected, onSelect = { selected = it })
                                         }
                                         Spacer(Modifier.height(24.dp))
@@ -179,6 +182,9 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     panel = Panel.Map
                                 })
                                 Spacer(Modifier.height(24.dp))
+                            }
+                            Panel.History -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                                HistoryPanel(session)
                             }
                             Panel.Map -> {
                                 EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxWidth())
@@ -228,6 +234,13 @@ private fun TopBar(
             PaperText(note, 14, if (session.saveFailure != null) Foreground else Muted)
             Spacer(Modifier.width(14.dp))
         }
+        session.history?.let { history ->
+            // Undo and redo, named by the step they take back or again.
+            ToolButton("Undo", enabled = history.undoable.isNotEmpty(), onClick = session::undo)
+            Spacer(Modifier.width(4.dp))
+            ToolButton("Redo", enabled = history.redoable.isNotEmpty(), onClick = session::redo)
+            Spacer(Modifier.width(16.dp))
+        }
         if (scene != null && session.engine != null) {
             // Play and pause, as in a video editor; the space bar does the same.
             ToolButton(if (session.paused) "▶  Play" else "❚❚  Pause", strong = session.paused, onClick = session::togglePause)
@@ -273,7 +286,7 @@ private fun Rule() {
 }
 
 /** The three parts of the editor. Map is a tab only where the window is too narrow to show it beside the lists. */
-private enum class Panel { Layers, Library, Map }
+private enum class Panel { Layers, Library, History, Map }
 
 /** From this width the three panels stand side by side. */
 private val WideFrom = 900.dp
