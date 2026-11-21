@@ -14,7 +14,12 @@
 //! function (`near_field`), so a source beside the head is heard beside it
 //! and not merely loud. Reflections arrive from image sources far away and
 //! never need it.
+//!
+//! **Ambient sound** has no direction to look up. It joins one bus, and two
+//! fixed filters derived from all the measured directions together give
+//! each ear what this head hears of a diffuse field (`diffuse_field`).
 
+mod diffuse_field;
 mod direction;
 mod itd_delay;
 mod near_field;

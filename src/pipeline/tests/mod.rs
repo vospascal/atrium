@@ -15,6 +15,9 @@ use atrium_core::source::SoundSource;
 use atrium_core::speaker::{RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
 
+mod ambient_cost;
+mod ambient_headphones;
+mod ambient_listening;
 mod channel_routing;
 mod dbap;
 mod field_emitters;
@@ -283,6 +286,15 @@ struct Rig {
 }
 
 impl Rig {
+    /// The free field on headphones: a stereo device, the listener at the
+    /// origin facing +y.
+    fn headphones(sample_rate: f32) -> Self {
+        let mut rig = Self::free_field(sample_rate);
+        rig.layout = SpeakerLayout::stereo(Vec3::new(-1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0));
+        rig.channels = 2;
+        rig
+    }
+
     /// Anechoic free field: listener at the origin facing +y, every wall
     /// `open` (reflection gain √(1−1) = 0, FDN gated off), hard ground,
     /// inverse law with ref 1 m and a 1 km clamp, quad speakers 2 m out.

@@ -1,4 +1,5 @@
-//! The HRTF renderer: SOFA loading and the per-source render loop.
+//! The HRTF renderer: SOFA loading, the per-source render loop, and the
+//! ambient bus heard through the head's diffuse field.
 
 use realfft::num_complex::Complex;
 use sofar::reader::{Filter, OpenOptions, Sofar};
@@ -7,6 +8,7 @@ use atrium_core::directivity::directivity_gain;
 use atrium_core::panner::distance_gain_at_model;
 use atrium_core::speaker::SpeakerLayout;
 
+use super::diffuse_field::DiffuseField;
 use super::direction::{equal_power_pan, to_sofa_coords};
 use super::itd_delay::DELAY_BUF_SIZE;
 use super::near_field::{near_field_corrections, shared_table};
@@ -15,6 +17,7 @@ use crate::audio::near_field::NearFieldTable;
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
+use crate::pipeline::renderers::field::FieldEncoding;
 
 pub struct HrtfRenderer {
     sofa: Option<Sofar>,
@@ -23,6 +26,9 @@ pub struct HrtfRenderer {
     /// The near-field corrections, with the HRIRs; `None` while there are
     /// none.
     near_field: Option<&'static NearFieldTable>,
+    /// What the two ears hear of the ambient bus, from the same HRIRs;
+    /// `None` while there are none.
+    diffuse_field: Option<DiffuseField>,
     base_buf: Vec<f32>,
     mono_buf: Vec<f32>,
     left_buf: Vec<f32>,
@@ -51,6 +57,7 @@ impl HrtfRenderer {
             sources: Vec::new(),
             filter: None,
             near_field: None,
+            diffuse_field: None,
             base_buf: vec![0.0; BLOCK_SIZE],
             mono_buf: vec![0.0; BLOCK_SIZE],
             left_buf: vec![0.0; BLOCK_SIZE],
@@ -78,6 +85,7 @@ impl HrtfRenderer {
                 let fft_size = (BLOCK_SIZE + filter_length - 1).next_power_of_two();
                 self.input_spectrum = vec![Complex::new(0.0, 0.0); fft_size / 2 + 1];
                 self.filter = Some(Filter::new(filter_length));
+                self.diffuse_field = Some(DiffuseField::new(&self.hrtf_path, &sofa, sample_rate));
                 self.sofa = Some(sofa);
                 self.near_field = Some(shared_table());
             }
@@ -86,6 +94,7 @@ impl HrtfRenderer {
                 self.sofa = None;
                 self.filter = None;
                 self.near_field = None;
+                self.diffuse_field = None;
             }
         }
     }
@@ -390,6 +399,23 @@ impl Renderer for HrtfRenderer {
         "hrtf"
     }
 
+    /// Ambient sound goes through the head: one mono bus, given each ear's
+    /// diffuse field. Without HRIRs there is no head, and ambient sound is
+    /// written to the two channels as the speaker modes write it.
+    fn field_encoding(&self, _layout: &SpeakerLayout, _device_channels: usize) -> FieldEncoding {
+        if self.diffuse_field.is_some() {
+            FieldEncoding::Ears
+        } else {
+            FieldEncoding::Speaker
+        }
+    }
+
+    fn render_ambient_bus(&mut self, bus: &[f32], fed: bool, out: &mut OutputBuffer) {
+        if let Some(diffuse_field) = &mut self.diffuse_field {
+            diffuse_field.render(bus, fed, out);
+        }
+    }
+
     fn ensure_topology(&mut self, source_count: usize, _layout: &SpeakerLayout, sample_rate: f32) {
         if sample_rate != self.sample_rate {
             self.load(sample_rate);
@@ -403,6 +429,9 @@ impl Renderer for HrtfRenderer {
     }
 
     fn reset(&mut self) {
+        if let Some(diffuse_field) = &mut self.diffuse_field {
+            diffuse_field.reset();
+        }
         for (source_idx, src) in self.sources.iter_mut().enumerate() {
             src.update_counter = source_idx % FILTER_UPDATE_INTERVAL;
             src.near_field_left.reset();

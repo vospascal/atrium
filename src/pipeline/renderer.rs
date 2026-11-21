@@ -5,7 +5,8 @@
 //!
 //! - **MultichannelRenderer**: gain ramp × sample per channel (VBAP)
 //! - **WorldLockedRenderer**: per-speaker propagation + gain ramp (WorldLocked)
-//! - **HrtfRenderer**: per-path HRTF convolution to stereo headphones (Hrtf)
+//! - **HrtfRenderer**: per-path HRTF convolution to stereo headphones, and
+//!   ambient sound through the head's diffuse field (Hrtf)
 //! - **DbapRenderer**: per-path DBAP gain ramp × sample per channel (DBAP)
 //! - **AmbisonicsRenderer**: per-path FOA encode to a B-format bus, or inline
 //!   bilateral decode (Ambisonics)
@@ -108,6 +109,13 @@ pub trait Renderer: Send {
     fn field_encoding(&self, _layout: &SpeakerLayout, _device_channels: usize) -> FieldEncoding {
         FieldEncoding::Speaker
     }
+
+    /// Add what the listener hears of the mono ambient bus to `out`, once per
+    /// callback after every source. Asked only of a renderer whose
+    /// `field_encoding` is `FieldEncoding::Ears`; `fed` says whether any
+    /// ambient sound wrote to the bus this callback, so a renderer can stop
+    /// working once its filters have rung out.
+    fn render_ambient_bus(&mut self, _bus: &[f32], _fed: bool, _out: &mut OutputBuffer) {}
 
     /// The receiver position this renderer's propagation paths are resolved
     /// towards. Listener-relative renderers hear the room from the listener;

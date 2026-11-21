@@ -19,9 +19,10 @@ use super::noise::{white_noise_density_scale, OnePoleHP, OnePoleLP, PinkNoiseFul
 use super::wind_behaviour::WindBehaviour;
 pub(crate) use driver::WindDriver;
 
-/// Open-field wind signal. Spatial diffuseness is supplied by
-/// `pipeline::renderers::field::FieldRenderer`; this struct only creates the
-/// mono stochastic texture that all decorrelated field voices share.
+/// Open-field wind signal. Spatial diffuseness is supplied by the pipeline
+/// (`pipeline::renderers::field::FieldRenderer`, and on headphones the
+/// ears' diffuse field); this struct only creates the mono stochastic
+/// texture it spreads around the listener.
 pub struct FieldWindSource {
     driver: WindDriver,
 

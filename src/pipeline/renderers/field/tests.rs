@@ -107,3 +107,37 @@ fn speaker_field_skips_lfe_and_splits_power_equally_over_5_speakers() {
     );
     assert!((total - 1.0).abs() < 5e-4, "total field power {total}");
 }
+
+/// On headphones the field is not decorrelated here: each source is added
+/// to the mono bus as it is, faded by the probe's glide from one callback's
+/// share to the next (1 to 0 over four frames: 1, ¾, ½, ¼).
+#[test]
+fn ears_encoding_adds_the_source_to_the_bus_as_it_is() {
+    struct Constant;
+    impl SoundSource for Constant {
+        fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+            1.0
+        }
+        fn position(&self) -> Vec3 {
+            Vec3::ZERO
+        }
+        fn tick(&mut self, _dt: f32) {}
+    }
+    let layout = SpeakerLayout::stereo(Vec3::new(-1.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0));
+    let mut renderer = FieldRenderer::default();
+    renderer.ensure_topology(1, 48000.0);
+    let mut bus = vec![0.5f32; 4];
+    renderer.render_source(
+        0,
+        &mut Constant,
+        FieldEncoding::Ears,
+        &layout,
+        48000.0,
+        1,
+        2,
+        4,
+        (1.0, 0.0),
+        &mut bus,
+    );
+    assert_eq!(bus, [1.5, 1.25, 1.0, 0.75]);
+}

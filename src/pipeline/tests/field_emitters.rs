@@ -74,9 +74,10 @@ fn field_emitter_bypasses_position_and_room_acoustics() {
 }
 
 /// HRTF renders point sources to channels 0–1 only (`render_channels = 2`),
-/// but Field emitters bypass the renderer and are spread over every active
-/// *speaker* channel of the layout — on a 5.1 layout in HRTF mode, wind
-/// and rain leak into C, Ls and Rs while every object stays binaural.
+/// and ambient sound must stay there too. Fields once bypassed the renderer
+/// and were spread over every active *speaker* channel of the layout: on a
+/// 5.1 layout in HRTF mode, wind and rain leaked into C, Ls and Rs while
+/// every object stayed binaural. Now the two ears carry them.
 #[test]
 fn hrtf_mode_keeps_field_emitters_on_the_binaural_pair() {
     let mut rig = Rig::free_field(48_000.0);
@@ -92,5 +93,10 @@ fn hrtf_mode_keeps_field_emitters_on_the_binaural_pair() {
     assert!(
         surround == 0.0,
         "HRTF mode wrote field energy {surround:e} to channels 2–5"
+    );
+    assert!(
+        energy(&output, rig.channels, &[0], 0) > 0.0
+            && energy(&output, rig.channels, &[1], 0) > 0.0,
+        "the ears carry no field"
     );
 }

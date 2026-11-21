@@ -57,6 +57,9 @@ pub struct RenderPipeline {
     /// How much of the ambient fields the last buffer let through, so a
     /// probe fades them and never cuts.
     ambient_heard: f32,
+    /// The mono bus ambient sound joins when the renderer hears fields
+    /// through two ears (`FieldEncoding::Ears`).
+    ambient_bus: Vec<f32>,
 }
 
 impl RenderPipeline {
@@ -82,6 +85,7 @@ impl RenderPipeline {
             reverb_rt60_override,
             probe: Probe::WHOLE,
             ambient_heard: 1.0,
+            ambient_bus: Vec::new(),
         }
     }
 
@@ -95,6 +99,7 @@ impl RenderPipeline {
         // audio thread.
         self.reverb_send_buffer
             .reserve(LARGEST_EXPECTED_CALLBACK_FRAMES * ctx.channels);
+        self.ambient_bus.reserve(LARGEST_EXPECTED_CALLBACK_FRAMES);
     }
 
     /// Reset all state (called on mode switch).
@@ -182,6 +187,7 @@ pub fn render_pipeline(
         reverb_rt60_override,
         probe,
         ambient_heard: ambient_was_heard,
+        ambient_bus,
     } = pipeline;
     let probe = *probe;
     let ambient_heard = if probe.ambient { 1.0 } else { 0.0 };
@@ -215,35 +221,53 @@ pub fn render_pipeline(
     reverb_send_buffer.resize(output.len(), 0.0);
     reverb_send_buffer.fill(0.0);
 
+    // How this pipeline wants environmental fields written. The one place
+    // that decides it; the match below names every encoding.
+    let field_encoding: FieldEncoding = renderer.field_encoding(params.layout, params.channels);
+    // A field may only use the channels this pipeline renders to: the
+    // binaural pair in HRTF mode, even when the layout is 5.1.
+    let field_channels = if *render_channels > 0 {
+        (*render_channels).min(params.channels)
+    } else {
+        params.channels
+    };
+    let mut ambient_bus_fed = false;
+    if field_encoding == FieldEncoding::Ears {
+        ambient_bus.resize(num_frames, 0.0);
+        ambient_bus.fill(0.0);
+    }
+
     // Per-source pipeline
     for (i, source) in sources.iter_mut().enumerate() {
         if !source.is_active() {
             continue;
         }
 
-        // Environmental fields are already the surrounding acoustic energy.
-        // Render them directly as decorrelated channels: no point position,
-        // distance law, image-source paths, propagation filters, or room send.
+        // Environmental fields are already the surrounding acoustic energy:
+        // no point position, distance law, image-source paths, propagation
+        // filters, or room send. Speakers get decorrelated channels; on
+        // headphones they join the bus the ears hear as a diffuse field.
         if source.emitter_kind() == atrium_core::source::EmitterKind::Field {
-            let encoding: FieldEncoding = renderer.field_encoding(params.layout, params.channels);
-            // A field may only use the channels this pipeline renders to: the
-            // binaural pair in HRTF mode, even when the layout is 5.1.
-            let field_channels = if *render_channels > 0 {
-                (*render_channels).min(params.channels)
-            } else {
-                params.channels
+            let (target, target_channels) = match field_encoding {
+                FieldEncoding::Speaker | FieldEncoding::Ambisonics => {
+                    (&mut output[..], params.channels)
+                }
+                FieldEncoding::Ears => {
+                    ambient_bus_fed = true;
+                    (&mut ambient_bus[..], 1)
+                }
             };
             field_renderer.render_source(
                 i,
                 source.as_mut(),
-                encoding,
+                field_encoding,
                 params.layout,
                 params.sample_rate,
-                params.channels,
+                target_channels,
                 field_channels,
                 num_frames,
                 (ambient_was_heard, ambient_heard),
-                output,
+                target,
             );
             continue;
         }
@@ -323,6 +347,19 @@ pub fn render_pipeline(
             };
             renderer.render_source(i, source.as_mut(), &ctx, &paths, effect_chains, &mut out);
         }
+    }
+
+    // What the listener hears of the ambient bus, after every source has
+    // joined it.
+    if field_encoding == FieldEncoding::Ears {
+        let mut out = OutputBuffer {
+            buffer: output,
+            reverb_send: None,
+            channels: params.channels,
+            num_frames,
+            sample_rate: params.sample_rate,
+        };
+        renderer.render_ambient_bus(ambient_bus, ambient_bus_fed, &mut out);
     }
 
     // A probe that hides the late reverb starves it: what it already holds

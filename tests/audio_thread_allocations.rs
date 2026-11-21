@@ -225,6 +225,8 @@ fn audio_callback_never_touches_the_heap() {
     for path in [
         "scenes/default.yaml",
         "scenes/nature.yaml",
+        // Its field wind is ambient, so on headphones the ears' diffuse
+        // field is measured too.
         "scenes/synth-test.yaml",
         "scenes/wisp.yaml",
     ] {

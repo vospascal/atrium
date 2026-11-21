@@ -2,14 +2,19 @@
 //!
 //! Field emitters are not point sources made artificially wide. They bypass
 //! distance attenuation, directivity, propagation paths, early reflections,
-//! and the room-reverb send. A mono generator is phase-decorrelated into the
-//! active spatial channels with constant total power, approximating mutually
-//! incoherent arrivals around the listener.
+//! and the room-reverb send. For loudspeakers and the ambisonic bus a mono
+//! generator is phase-decorrelated into the active spatial channels with
+//! constant total power, approximating mutually incoherent arrivals around
+//! the listener.
 //!
 //! Any sound can be ambient, so the decorrelation must leave an attack (a
 //! croak, a drop of rain) heard once: each channel gets a short all-pass
 //! cascade (`decorrelator`) that spends over 90 % of an attack's energy in
 //! its first 10 ms.
+//!
+//! On headphones the field is not decorrelated here. It joins one mono bus,
+//! and the headphone renderer gives each ear what the measured head hears of
+//! a diffuse field (`renderers::binaural`).
 
 use atrium_core::source::SoundSource;
 use atrium_core::speaker::{SpeakerLayout, MAX_CHANNELS};
@@ -28,6 +33,9 @@ pub enum FieldEncoding {
     /// Ambisonics decode stage. Only valid on a B-format bus
     /// (`AmbisonicBus::BFormat`), which guarantees at least four channels.
     Ambisonics,
+    /// Add the mono signal, undecorrelated, to the ambient bus that the
+    /// renderer then hears through two ears (`Renderer::render_ambient_bus`).
+    Ears,
 }
 
 struct FieldSourceState {
@@ -93,6 +101,10 @@ impl FieldRenderer {
         let Some(state) = self.sources.get_mut(source_index) else {
             return;
         };
+        // How much of the field reaches the output glides from the last
+        // buffer's share to this one's, so a probe fades it and never cuts.
+        let (was_heard, now_heard) = heard;
+        let glide = (now_heard - was_heard) / num_frames.max(1) as f32;
 
         let mut target_channels = [usize::MAX; MAX_CHANNELS];
         let mut target_count = 0;
@@ -132,16 +144,22 @@ impl FieldRenderer {
                     }
                 }
             }
+            FieldEncoding::Ears => {
+                // One bus for every ambient sound: the two ears' filters
+                // that follow make it diffuse, and they are linear, so each
+                // source needs nothing of its own.
+                for frame in 0..num_frames {
+                    let level = was_heard + glide * frame as f32;
+                    output[frame * channels] += source.next_sample(sample_rate) * level;
+                }
+                return;
+            }
         }
 
         if target_count == 0 {
             return;
         }
         let gain = 1.0 / (target_count as f32).sqrt();
-        // How much of the field reaches the output glides from the last
-        // buffer's share to this one's, so a probe fades it and never cuts.
-        let (was_heard, now_heard) = heard;
-        let glide = (now_heard - was_heard) / num_frames.max(1) as f32;
         for frame in 0..num_frames {
             let mono = source.next_sample(sample_rate);
             let base = frame * channels;
@@ -157,9 +175,3 @@ impl FieldRenderer {
 
 #[cfg(test)]
 mod tests;
-
-/// The field as WAV files, to judge by ear before and after a change:
-/// `AMBIENT_OUT=target/listening/ambient cargo test --release --lib write_ambient_listening_samples`.
-/// Without `AMBIENT_OUT` it writes nothing.
-#[cfg(test)]
-mod listening_samples;
