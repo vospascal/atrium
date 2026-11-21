@@ -64,7 +64,25 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
     Spacer(Modifier.height(10.dp))
     if (resting) {
         PaperText("Rests ${seconds(gap!!.shortest)} to ${seconds(gap.longest)} between takes", 15)
-        RestRange(gap, onChange = { shortest, longest -> session.gap(sound.slot, shortest, longest) })
+        TwoHandleRange(
+            gap.shortest, gap.longest,
+            toTrack = { sqrt((it / LongestRest).coerceIn(0f, 1f)) },
+            fromTrack = { it * it * LongestRest },
+            marks = RestMarks,
+            onChange = { shortest, longest -> session.gap(sound.slot, shortest, longest) },
+        )
+        if (sound.takes.size > 1) {
+            Spacer(Modifier.height(10.dp))
+            val bout = sound.bout
+            PaperText(boutLine(bout.fewest.toInt(), bout.most.toInt()), 15)
+            TwoHandleRange(
+                bout.fewest.toFloat(), bout.most.toFloat(),
+                toTrack = { (it - 1f) / (LongestBout - 1f) },
+                fromTrack = { (1f + it * (LongestBout - 1f)).roundToInt().toFloat() },
+                marks = BoutMarks,
+                onChange = { fewest, most -> session.bout(sound.slot, fewest.roundToInt(), most.roundToInt()) },
+            )
+        }
     } else if (sound.takes.size > 1) {
         PaperText("One take after another, without a rest", 14, Muted)
     } else {
@@ -80,10 +98,19 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
         Spacer(Modifier.height(4.dp))
         sound.takes.forEachIndexed { index, take ->
             val now = live?.take?.toInt() == index
+            val heard = session.isHearing(sound.slot, index)
             Row(
-                Modifier.fillMaxWidth().background(if (now) Highlight else Backdrop).padding(start = 8.dp, top = 3.dp, bottom = 3.dp),
+                Modifier.fillMaxWidth().background(if (now) Highlight else Backdrop).padding(top = 2.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                Box(
+                    Modifier.size(28.dp).clickable(role = Role.Button) {
+                        session.hearTake(sound.slot, index.takeUnless { heard })
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (heard) StopIcon(Foreground, 12.dp) else PlayIcon(Foreground, 14.dp, outline = true)
+                }
                 PaperText(
                     take.name,
                     15,
@@ -103,31 +130,54 @@ private val DefaultGap = Gap(2f, 8f)
 /** The longest rest the range reaches (s). A scene file may give a longer one. */
 private const val LongestRest = 120f
 
+/** The longest bout the range reaches. */
+private const val LongestBout = 8f
+
 /** Seconds as a range shows them: tenths below ten, whole seconds above. */
 private fun seconds(value: Float): String =
     if (value < 10f) "${(value * 10).roundToInt() / 10f} s".replace(".0 s", " s") else "${value.roundToInt()} s"
 
+/** How a sound holds on to a take, in a line. */
+internal fun boutLine(fewest: Int, most: Int): String = when {
+    most <= 1 -> "A new take every time"
+    fewest == most -> "Each take $most times running"
+    else -> "Each take $fewest to $most times running"
+}
+
+private val BoutMarks = listOf(1f to "1", 4f to "4", LongestBout to "8")
+
 /**
- * A range with two handles, for the shortest and longest rest. Short rests get
- * more of the track than long ones, because a second matters more there.
+ * A range with two handles: a low and a high value on one track. [toTrack]
+ * and [fromTrack] map a value to its place on the track, 0 to 1, and back, so
+ * a range can give more room to the values that matter most. [marks] are
+ * written under the track where their values lie.
  */
 @Composable
-private fun RestRange(gap: Gap, onChange: (Float, Float) -> Unit) {
+private fun TwoHandleRange(
+    low: Float,
+    high: Float,
+    toTrack: (Float) -> Float,
+    fromTrack: (Float) -> Float,
+    marks: List<Pair<Float, String>>,
+    onChange: (Float, Float) -> Unit,
+) {
     val change by rememberUpdatedState(onChange)
-    val current by rememberUpdatedState(gap)
+    val now by rememberUpdatedState(low to high)
+    val place by rememberUpdatedState(toTrack)
+    val value by rememberUpdatedState(fromTrack)
     var dragging by remember { mutableStateOf<Int?>(null) }
     val track = Hairline
     val ink = Foreground
     val paper = Backdrop
-    fun toTrack(value: Float) = sqrt((value / LongestRest).coerceIn(0f, 1f))
-    fun fromTrack(fraction: Float) = (fraction.coerceIn(0f, 1f).let { it * it } * LongestRest)
     fun moveTo(handle: Int, fraction: Float) {
-        val value = fromTrack(fraction)
-        if (handle == 0) change(value.coerceAtMost(current.longest), current.longest)
-        else change(current.shortest, value.coerceAtLeast(current.shortest))
+        val wanted = value(fraction.coerceIn(0f, 1f))
+        val (lowNow, highNow) = now
+        if (handle == 0) change(wanted.coerceAtMost(highNow), highNow) else change(lowNow, wanted.coerceAtLeast(lowNow))
     }
-    fun nearest(fraction: Float) =
-        if (abs(fraction - toTrack(current.shortest)) <= abs(fraction - toTrack(current.longest))) 0 else 1
+    fun nearest(fraction: Float): Int {
+        val (lowNow, highNow) = now
+        return if (abs(fraction - place(lowNow)) <= abs(fraction - place(highNow))) 0 else 1
+    }
 
     Box(
         Modifier.fillMaxWidth().height(34.dp)
@@ -147,8 +197,8 @@ private fun RestRange(gap: Gap, onChange: (Float, Float) -> Unit) {
     ) {
         Canvas(Modifier.fillMaxWidth().height(34.dp)) {
             val middle = size.height / 2
-            val from = size.width * toTrack(gap.shortest)
-            val to = size.width * toTrack(gap.longest)
+            val from = size.width * toTrack(low)
+            val to = size.width * toTrack(high)
             drawLine(track, Offset(0f, middle), Offset(size.width, middle), strokeWidth = 2.dp.toPx())
             drawLine(ink, Offset(from, middle), Offset(to, middle), strokeWidth = 4.dp.toPx())
             for (x in listOf(from, to)) {
@@ -159,8 +209,8 @@ private fun RestRange(gap: Gap, onChange: (Float, Float) -> Unit) {
     }
     // Marks under the track, each where its value lies on it.
     BoxWithConstraints(Modifier.fillMaxWidth().height(16.dp)) {
-        for ((value, label) in RestMarks) {
-            val fraction = toTrack(value)
+        for ((at, label) in marks) {
+            val fraction = toTrack(at)
             val labelWidth = 40.dp
             val left = (maxWidth * fraction - labelWidth * fraction).coerceAtLeast(0.dp)
             PaperText(

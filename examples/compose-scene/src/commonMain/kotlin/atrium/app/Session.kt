@@ -28,6 +28,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /**
  * The one engine the app runs, shared by the player and the editor.
@@ -149,6 +151,38 @@ internal class Session(private val store: SettingsStore) {
                 if (engine === running) description = running.scene()
             }
         }
+    }
+
+    /** Let the sound in [slot] utter one take [fewest] to [most] times running before choosing another. */
+    fun bout(slot: UShort, fewest: Int, most: Int) {
+        val running = engine ?: return
+        command { setSourceBout(slot, fewest.toUInt(), most.toUInt()) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /** The take being heard on its own, as the sound's slot and the take, and when it was asked for. */
+    private var heardTake by mutableStateOf<Pair<UShort, Int>?>(null)
+    private var heardSince = TimeSource.Monotonic.markNow()
+
+    /** Hear take [take] of the sound in [slot] on its own, once, just ahead of the listener; null stops it. */
+    fun hearTake(slot: UShort, take: Int?) {
+        val running = engine ?: return
+        heardTake = take?.let { slot to it }
+        heardSince = TimeSource.Monotonic.markNow()
+        building.launch {
+            libraryFailure = runCatching { running.auditionTake(slot, take?.toUShort()) }.exceptionOrNull()?.message
+        }
+    }
+
+    /**
+     * Whether take [take] of the sound in [slot] is being heard on its own: asked for, and either
+     * still being built or sounding from the audition voice.
+     */
+    fun isHearing(slot: UShort, take: Int): Boolean {
+        if (heardTake != (slot to take)) return false
+        val sounding = telemetry?.sources?.any { it.slot.toInt() == AuditionVoice && it.take != null } == true
+        return sounding || heardSince.elapsedNow() < BuildingTakes
     }
 
     /** How often take [take] of the sound in [slot] is chosen next to its others; 0 is never. */
@@ -337,6 +371,12 @@ internal fun RunSession(session: Session) {
         }
     }
 }
+
+/** The voice a preset or a single take is heard from on its own: the engine's last. */
+private const val AuditionVoice = 15
+
+/** How long building a take to hear it may take before it is heard (it decodes a recording). */
+private val BuildingTakes = 1.5.seconds
 
 /** Where the presets are, relative to the working directory, like the scenes. */
 private const val PresetDirectory = "sources"

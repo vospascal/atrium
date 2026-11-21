@@ -2,6 +2,7 @@ package atrium.app
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import atrium.engine.Bout
 import atrium.engine.EmitterKind
 import atrium.engine.Position
 import atrium.engine.SourceDescription
@@ -111,7 +112,7 @@ class TopDownTest {
     @Test
     fun theShapeIsSaidInALine() {
         fun sound(kind: EmitterKind, width: Float, behind: Float) = SourceDescription(
-            "s", 0u, width, behind, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, null, Position(1f, 0f, 0f), emptyList(), null,
+            "s", 0u, width, behind, "S", null, "#000000", Position(0f, 0f, 0f), 65f, 1f, kind, null, Position(1f, 0f, 0f), emptyList(), null, Bout(1u, 1u),
         )
         assertEquals("Ambient: heard everywhere", shapeLine(sound(EmitterKind.FIELD, 360f, -60f)))
         assertEquals("All round: equal in every direction", shapeLine(sound(EmitterKind.OBJECT, 360f, -60f)))
@@ -130,5 +131,12 @@ class TopDownTest {
         assertEquals(1f, beamGain(AllRound, SilentBehind, pi), 1e-5f, "all round")
         assertEquals(StartingShape.Focused, StartingShape.entries.single { it.matches(180f, -60f) })
         assertTrue(StartingShape.Omni.matches(360f, -12f), "behind does not matter all round")
+    }
+
+    @Test
+    fun aBoutIsSaidInALine() {
+        assertEquals("A new take every time", boutLine(1, 1))
+        assertEquals("Each take 3 times running", boutLine(3, 3))
+        assertEquals("Each take 2 to 5 times running", boutLine(2, 5))
     }
 }

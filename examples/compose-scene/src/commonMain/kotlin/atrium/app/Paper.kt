@@ -216,6 +216,13 @@ internal fun PlayIcon(color: Color, size: Dp, outline: Boolean = false) {
 }
 
 @Composable
+internal fun StopIcon(color: Color, size: Dp) {
+    Canvas(Modifier.size(size)) {
+        drawRoundRect(color, cornerRadius = CornerRadius(this.size.width * .12f))
+    }
+}
+
+@Composable
 internal fun PauseIcon(color: Color, size: Dp) {
     Canvas(Modifier.size(size)) {
         val bar = Size(this.size.width * .2f, this.size.height * .64f)

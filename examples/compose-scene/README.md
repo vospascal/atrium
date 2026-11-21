@@ -71,7 +71,10 @@ and on desktop the window widens for it. It has three panels; in a narrow window
   Focused and Narrow as starting points and a drawing of the beam turned the way it faces; then its place, when it plays and whether it
   moves. **When** is All the time or Now and then; Now and then has a range with two handles for
   the shortest and longest rest. Anything with takes lists them, with the one sounding now lit
-  and "Resting" between two, and each take's chance as steps from never to four times as often. With nothing selected it shows the scene.
+  and "Resting" between two, and each take's chance as steps from never to four times as often.
+  The play button in front of a take plays that take once on its own, just ahead of you. A
+  sound with several takes that comes and goes can hold on to one for a bout: a second range
+  sets how many times running it is uttered before another is chosen. With nothing selected it shows the scene.
 
 A scene can set `title:`. Without it, the player makes one from the file name.
 

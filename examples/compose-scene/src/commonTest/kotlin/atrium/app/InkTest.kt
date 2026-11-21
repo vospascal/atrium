@@ -1,6 +1,7 @@
 package atrium.app
 
 import atrium.engine.ChannelMode
+import atrium.engine.Bout
 import atrium.engine.EmitterKind
 import atrium.engine.HeadTrackingStatus
 import atrium.engine.Output
@@ -40,7 +41,7 @@ class InkTest {
         width = 60f,
         depth = 60f,
         listener = listener,
-        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), 360f, -60f, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null) },
+        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), 360f, -60f, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null, Bout(1u, 1u)) },
     )
 
     private fun heard(at: Position, gainDb: Float, muted: Boolean = false, signal: SourceSignal? = null) = Telemetry(
