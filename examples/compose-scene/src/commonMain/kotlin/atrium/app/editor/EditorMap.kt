@@ -210,6 +210,13 @@ internal fun EditorMap(
                 detectDragGestures(
                     onDragStart = { at ->
                         focus.requestFocus()
+                        // A gesture cut off when this handler restarts (a new scene, a new reach)
+                        // may end without onDragEnd or onDragCancel, so every drag starts clean:
+                        // a pan left on would otherwise turn the next drag of a sound into a pan.
+                        panning = false
+                        heldListener = null
+                        turned = null
+                        if (dragged?.copying == true) dragged = null
                         val top = framing.value.view(size, reach)
                         view = top
                         val (listenerOffset, listenerFacing) = listenerNow.value

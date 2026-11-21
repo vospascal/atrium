@@ -76,7 +76,7 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
     }
     Spacer(Modifier.height(10.dp))
     if (resting) {
-        PaperText("Rests ${seconds(gap!!.shortest)} to ${seconds(gap.longest)} between takes", 15)
+        PaperText("Rests ${seconds(gap.shortest)} to ${seconds(gap.longest)} between takes", 15)
         TwoHandleRange(
             gap.shortest, gap.longest,
             toTrack = { sqrt((it / LongestRest).coerceIn(0f, 1f)) },
