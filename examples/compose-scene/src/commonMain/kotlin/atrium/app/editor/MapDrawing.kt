@@ -20,6 +20,37 @@ import kotlin.math.sin
 import atrium.app.ui.PlayerColors
 import atrium.app.Point
 import atrium.app.bearingLabel
+import atrium.app.compassLabel
+
+/**
+ * Which way the wind blows, in the map's top-left corner: an arrow pointing where it goes, on a
+ * map with north up, and the bearing it comes from.
+ */
+internal fun DrawScope.drawWind(fromDegrees: Float, colors: PlayerColors, text: TextMeasurer) {
+    val middle = Offset(density * 30f, density * 30f)
+    val (east, north) = windToward(fromDegrees)
+    val half = density * WindArrow
+    // North is up on the map, so north is toward the top of the screen.
+    val along = Offset(east * half, -north * half)
+    val tip = middle + along
+    drawLine(colors.muted, middle - along, tip, strokeWidth = density * 1.4f)
+    val barb = density * 6f
+    val across = Offset(-along.y, along.x) / half
+    val back = along / half
+    drawLine(colors.muted, tip, tip - back * barb + across * (barb * .6f), strokeWidth = density * 1.4f)
+    drawLine(colors.muted, tip, tip - back * barb - across * (barb * .6f), strokeWidth = density * 1.4f)
+    val label = text.measure("wind from ${compassLabel(fromDegrees)}", TextStyle(color = colors.muted, fontSize = 11.sp))
+    drawText(label, topLeft = Offset(density * 10f, middle.y + half + density * 6f))
+}
+
+/** The unit vector over the ground, east and north, that a wind coming from [fromDegrees] on the compass blows toward. */
+internal fun windToward(fromDegrees: Float): Pair<Float, Float> {
+    val bearing = fromDegrees * PI.toFloat() / 180f
+    return -sin(bearing) to -cos(bearing)
+}
+
+/** Half the length of the wind arrow (dp). */
+private const val WindArrow = 14f
 
 internal fun DrawScope.drawListener(centre: Offset, heading: Float?, colors: PlayerColors, selected: Boolean) {
     if (heading != null) {

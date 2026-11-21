@@ -18,4 +18,34 @@ class WeatherTest {
         )
         assertEquals("Crash chance 0.1 → 0.8 as wind rises", followLine(Follow("wind", "crash_chance", .1f, .8f, Band(0f, 1f))))
     }
+
+    /** A bearing is said in whole degrees and the nearest of eight compass points, wherever it wraps. */
+    @Test
+    fun aBearingIsSaidOnTheCompass() {
+        assertEquals("225° SW", atrium.app.compassLabel(225f))
+        assertEquals("0° N", atrium.app.compassLabel(360f))
+        assertEquals("270° W", atrium.app.compassLabel(-90f))
+        assertEquals("23° NE", atrium.app.compassLabel(23f))
+        assertEquals("22° N", atrium.app.compassLabel(22f))
+    }
+
+    /** The slider runs once round the compass: its far end is north again, never 360. */
+    @Test
+    fun theWindSliderGoesOnceRoundTheCompass() {
+        assertEquals(0f, windFromAt(0f))
+        assertEquals(180f, windFromAt(.5f))
+        assertEquals(225f, windFromAt(225f / 360f))
+        assertEquals(0f, windFromAt(1f))
+        assertEquals(0f, windFromAt(7f))
+    }
+
+    /** A west wind blows toward the east and a north wind toward the south: the arrow points where the wind goes. */
+    @Test
+    fun theWindArrowPointsWhereTheWindGoes() {
+        fun near(a: Float, b: Float) = kotlin.math.abs(a - b) < 1e-5f
+        val (east, north) = windToward(270f)
+        kotlin.test.assertTrue(near(east, 1f) && near(north, 0f), "west wind: $east, $north")
+        val (southEast, southNorth) = windToward(0f)
+        kotlin.test.assertTrue(near(southEast, 0f) && near(southNorth, -1f), "north wind: $southEast, $southNorth")
+    }
 }

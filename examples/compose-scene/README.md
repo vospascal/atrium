@@ -82,6 +82,9 @@ panel or list gets them by using it.
   point to all around, drawn as a soft disc on the map.
 - **Channel meters** sit in the header of the tracks: one per output channel, named as the room
   names its loudspeakers, bold when a channel clips.
+- **Wind from** is under the wind's band in Weather: the compass bearing the wind comes from. An
+  arrow in the map's top-left corner points where it blows. It decides how fast far sounds waver
+  in the moving air (the engine's README, "Moving air").
 - **Weather** is in the inspector when nothing is selected: the story (Held, Drifting or Passing
   storm) and the band each condition keeps to, with where it is now. A selected sound's
   **Follows** says how it answers them, such as "Activity 100 % → 0 % as rain rises".

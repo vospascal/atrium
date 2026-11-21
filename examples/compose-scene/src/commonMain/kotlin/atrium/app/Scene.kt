@@ -19,8 +19,12 @@ internal fun Position.toPoint() = Point(x, y, z)
  * A facing as a compass bearing, the way the scene files give directions:
  * degrees clockwise from north (+Y), with the nearest of the eight compass points.
  */
-internal fun bearingLabel(facing: Position): String {
-    val degrees = ((atan2(facing.x, facing.y) * 180.0 / PI).roundToInt() + 360) % 360
+internal fun bearingLabel(facing: Position): String =
+    compassLabel((atan2(facing.x, facing.y) * 180.0 / PI).toFloat())
+
+/** A compass bearing in degrees as "225° SW": whole degrees from 0 up to 360, and the nearest of eight points. */
+internal fun compassLabel(bearing: Float): String {
+    val degrees = ((bearing.roundToInt() % 360) + 360) % 360
     val point = CompassPoints[((degrees + 22) / 45) % 8]
     return "$degrees° $point"
 }

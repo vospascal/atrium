@@ -22,6 +22,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.drawText
+import atrium.app.compassLabel
 import atrium.engine.Band
 import atrium.engine.Conditions
 import atrium.engine.Follow
@@ -33,6 +34,7 @@ import atrium.app.ui.Chip
 import atrium.app.ui.Foreground
 import atrium.app.ui.Hairline
 import atrium.app.ui.Muted
+import atrium.app.ui.PaperLevel
 import atrium.app.ui.PaperText
 import atrium.app.session.Session
 import atrium.app.ui.labelsThatFit
@@ -121,8 +123,22 @@ internal fun WeatherPart(session: Session) {
             step = .01f,
             onChange = { low, high -> session.setWeather(condition.with(weather, Band(low, high))) },
         )
+        if (condition == Condition.Wind) {
+            // Where the wind comes from: it decides how fast far sounds waver, across a path or along it.
+            PaperText("Wind from ${compassLabel(weather.windFrom)}", 15)
+            PaperLevel(
+                weather.windFrom / 360f,
+                onChange = { session.setWeather(weather.copy(windFrom = windFromAt(it))) },
+                // Five degrees an arrow press.
+                step = 5f / 360f,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
+
+/** The bearing a slider at [fraction] of its track gives: whole degrees from 0 to 359, the far end being north again. */
+internal fun windFromAt(fraction: Float): Float = ((fraction.coerceIn(0f, 1f) * 360f).roundToInt() % 360).toFloat()
 
 private val ConditionMarks = listOf(0f to "0", .5f to "half", 1f to "full")
 
