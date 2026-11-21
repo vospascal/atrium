@@ -321,6 +321,20 @@ internal class Session(private val store: SettingsStore) {
         unsaved = true
     }
 
+    /** Move the listener to [position] while it is dragged: every sound is heard from there. */
+    fun moveListener(position: Position) {
+        step("Move listener", "listener:move")
+        command { setListenerPosition(position) }
+        unsaved = true
+    }
+
+    /** Turn the listener to face along [facing] while its handle is dragged. */
+    fun faceListener(facing: Position) {
+        step("Turn listener", "listener:face")
+        command { setListenerFacing(facing) }
+        unsaved = true
+    }
+
     /** Turn the sound in [slot] to face along [facing] while its handle is dragged. */
     fun face(slot: UShort, facing: Position) {
         step("Turn · ${nameOf(slot)}", "face:$slot")

@@ -26,7 +26,11 @@ internal fun Inspector(session: Session, scene: SceneFile, selected: String?, mo
     val sounds = session.description?.sources.orEmpty()
     val sound = sounds.firstOrNull { it.id == selected }
     Column(modifier.padding(horizontal = 22.dp)) {
-        if (sound != null) SoundInspector(session, sound) else SceneInspector(session, scene, sounds.size)
+        when {
+            sound != null -> SoundInspector(session, sound)
+            selected == ListenerId -> ListenerInspector(session)
+            else -> SceneInspector(session, scene, sounds.size)
+        }
     }
 }
 
@@ -68,6 +72,25 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     PaperText(if (away.groundDistanceTo(Point(0f, 0f)) > StillWithin) "Moving by itself" else "Still", 15)
 
     Spacer(Modifier.height(22.dp))
+}
+
+/** Where the listener stands and faces: what every sound is heard from. */
+@Composable
+private fun ListenerInspector(session: Session) {
+    val listener = session.description?.listener ?: return
+    val telemetry = session.telemetry
+    PaperText("Listener", 26, weight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
+    PaperText("Where every sound is heard from. Drag it on the map, turn it by its handle, or nudge it with the arrow keys.", 14, Muted)
+
+    Part("Place")
+    PaperText("${oneDecimal(listener.x)} m east · ${oneDecimal(listener.y)} m north", 15)
+    PaperText("Ears ${oneDecimal(listener.z)} m above the ground", 14, Muted)
+
+    Part("Facing")
+    PaperText(telemetry?.listenerFacing?.let(::bearingLabel) ?: "—", 15)
+    if (telemetry?.headTracking == HeadTrackingStatus.RECEIVING) {
+        PaperText("Head tracking turns it from here.", 14, Muted)
+    }
 }
 
 @Composable
