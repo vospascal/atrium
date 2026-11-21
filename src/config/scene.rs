@@ -19,6 +19,7 @@ pub struct SceneConfig {
     pub environment: String,
     /// Path to atrium definition file (e.g. "rooms/atrium_6x4.yaml").
     /// The physical speaker room dimensions. Optional — defaults to environment dims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atrium: Option<String>,
     pub listener: ListenerConfig,
     #[serde(default = "default_master_gain")]
@@ -33,6 +34,7 @@ pub struct SceneConfig {
     pub sounds: Entities,
     /// Path to atmosphere definition file (e.g. "atmospheres/default.yaml").
     /// Omit for standard conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atmosphere: Option<String>,
     /// Path to SOFA HRTF file for HRTF rendering (e.g. "assets/hrtf/default.sofa").
     /// Defaults to "assets/hrtf/default.sofa" if omitted.
@@ -126,13 +128,20 @@ fn default_dbap_rolloff() -> f32 {
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct SpeakerPositions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fl: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fr: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rl: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rr: Option<[f32; 3]>,
     // stereo
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r: Option<[f32; 3]>,
 }
 

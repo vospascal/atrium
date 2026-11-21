@@ -57,6 +57,33 @@ impl Entities {
     pub fn iter(&self) -> impl Iterator<Item = (&EntityId, &Entity)> {
         self.entries.iter().map(|(id, entity)| (id, entity))
     }
+
+    /// The sound with `id`, to change it in place.
+    pub fn get_mut(&mut self, id: &EntityId) -> Option<&mut Entity> {
+        self.entries
+            .iter_mut()
+            .find(|(own, _)| own == id)
+            .map(|(_, entity)| entity)
+    }
+
+    /// Add `entity` after the others, under `id`. Refused for the same
+    /// reasons a scene file is: an id already taken, or nothing to play.
+    pub fn push(&mut self, id: EntityId, entity: Entity) -> Result<(), WorldError> {
+        if self.entries.iter().any(|(own, _)| *own == id) {
+            return Err(WorldError::DuplicateId(id));
+        }
+        if entity.sound.preset.is_none() && entity.sound.audio.is_none() {
+            return Err(WorldError::NothingToPlay(id));
+        }
+        self.entries.push((id, entity));
+        Ok(())
+    }
+
+    /// Take the sound with `id` out, keeping the others in their order.
+    pub fn remove(&mut self, id: &EntityId) -> Option<Entity> {
+        let position = self.entries.iter().position(|(own, _)| own == id)?;
+        Some(self.entries.remove(position).1)
+    }
 }
 
 impl Serialize for Entities {
@@ -266,6 +293,31 @@ frogs:
         let yaml = "Frog Pond:\n  sound: { preset: sources/frog.yaml }\n  place: [0, 0, 0]\n";
         let refusal = read(yaml).expect_err("a capitalised id with a space");
         assert!(refusal.contains("Frog Pond"), "{refusal}");
+    }
+
+    /// An editor adds, changes and removes sounds; the rules of a scene file
+    /// still hold, and the others keep their order.
+    #[test]
+    fn sounds_are_added_changed_and_removed_by_id() {
+        let mut sounds = read(MEADOW).expect("the meadow reads");
+        let frogs = EntityId::new("frogs").expect("usable");
+        let (_, template) = sounds.iter().next().expect("frogs");
+        let template = template.clone();
+
+        assert_eq!(
+            sounds.push(frogs.clone(), template.clone()),
+            Err(WorldError::DuplicateId(frogs.clone()))
+        );
+        let bell = EntityId::new("bell").expect("usable");
+        sounds.push(bell.clone(), template).expect("a new id");
+        sounds.get_mut(&bell).expect("added").sound.level = Some(80.0);
+
+        assert!(sounds.remove(&frogs).is_some());
+        assert!(sounds.remove(&frogs).is_none(), "already gone");
+        let ids: Vec<&str> = sounds.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["drum", "bell"]);
+        let (_, bell) = sounds.iter().nth(1).expect("bell");
+        assert_eq!(bell.sound.level, Some(80.0));
     }
 
     #[test]

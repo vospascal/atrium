@@ -82,9 +82,9 @@ a private directory and the planning gets a `state.rs`.
 
 ## Known gaps
 
-- **Nothing adds, removes or changes an entity in memory.** `Entities` can be built whole
-  and walked. A sound added from the app's library is built from an `Entity` and plays, but
-  it is not put into a scene's `Entities`; that comes with saving.
+- **Changes are by id, one at a time.** `Entities` can add one at the end, change one in place
+  and take one out. Reordering is not offered, because nothing needs it yet: the order decides
+  voices only when a scene is loaded.
 - **Telemetry still speaks in voice numbers.** The scene description carries each sound's id
   and group, and the app's layer list is drawn from them.
 - **When, wander, follow, vary-per-play and conditions are not here.** They are the

@@ -197,6 +197,12 @@ fn yaw_for_bearing(bearing_degrees: f32) -> f32 {
     (90.0 - bearing_degrees).to_radians()
 }
 
+/// The compass bearing a scene file writes for the engine's heading `yaw`:
+/// degrees clockwise from north, from 0 up to 360.
+pub fn bearing_for_heading(yaw: f32) -> f32 {
+    (90.0 - yaw.to_degrees()).rem_euclid(360.0)
+}
+
 /// The pattern a preset or a scene names. A name the engine does not know
 /// plays as omni, and is reported as that.
 pub(super) fn pattern_named(name: &str) -> Pattern {
@@ -237,6 +243,13 @@ mod tests {
             (yaw_for_bearing(180.0).sin() + 1.0).abs() < 1e-6,
             "south is −Y"
         );
+        for bearing in [0.0, 45.0, 90.0, 180.0, 270.0, 359.0] {
+            let back = bearing_for_heading(yaw_for_bearing(bearing));
+            assert!(
+                (back - bearing).abs() < 1e-3,
+                "{bearing} came back as {back}"
+            );
+        }
     }
 
     /// A cardioid is half as loud at 90° off its axis, so its beam is drawn
