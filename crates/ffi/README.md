@@ -12,8 +12,9 @@ Kotlin can reach is declared here:
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_pattern`,
   `set_source_muted`, `set_source_level`, `audition`, `add_sound`, `remove_sound`,
-  `set_head_tracker` and `latest_telemetry()`.
-- The records it returns: `Position`, `SceneDescription`, `Output`, `Telemetry`. Telemetry
+  `save_scene`, `set_head_tracker` and `latest_telemetry()`.
+- The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
+  editor wrote it), `Output`, `Telemetry`. Telemetry
   includes where the listener faces and whether a head tracker is sending.
 - `EngineError`.
 
@@ -36,6 +37,14 @@ runs Cargo itself. There is nothing to build here by hand.
   the description this object holds, and the app reads `scene()` again after each. The position
   kept there is where a sound was placed; telemetry has where it is, which differs for one
   that moves by itself.
+- **The same calls also change the scene file this object keeps, and `save_scene` writes it.**
+  The description and the file are held under one lock, so they cannot disagree. Only what
+  belongs to the place is recorded: a mute, the volume, the output and head tracking belong to
+  the listener and are never saved. Places are kept to the centimetre, facings to the degree
+  and levels to a tenth of a dB, so a saved file stays readable.
+- **`save_scene` refuses to replace a hand-written scene.** A saved file is rewritten from
+  values and loses its comments. A file the editor wrote starts with its mark, and only such a
+  file is replaced. The rule is in the engine, not only in the app, so no screen can break it.
 - **Each sound in `scene()` carries the voice it plays from.** The list is the scene's sounds,
   not the engine's 16 voices. Once a sound is removed and another added, the third entry is no
   longer in the third voice, so the app matches telemetry by `slot` and never by place in the
@@ -175,8 +184,6 @@ runs Cargo itself. There is nothing to build here by hand.
 - **The first Sony start on a machine builds the bridge.** The script clones a pinned commit from
   GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
   engine is compiled, so a build moved away from this repository cannot find it.
-- **Nothing is saved.** A sound that was added, removed, moved, turned or reshaped is as the
-  scene file has it once the scene is played again. Save comes with scenes as documents.
 - **A sound's size cannot be set.** `SetSourceSpread` exists in the engine; no screen uses it.
 - **A new sound always lands 2 m ahead of where the scene puts the listener.** Dropping it at a
   chosen spot needs the map of all sounds.

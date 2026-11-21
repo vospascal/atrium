@@ -1,6 +1,6 @@
 //! The scenes a player can choose from.
 
-use atrium::config::SceneConfig;
+use atrium::config::{saved_by_editor, SceneConfig};
 
 use crate::api::{EngineError, Position};
 
@@ -13,6 +13,9 @@ pub struct SceneFile {
     pub path: String,
     /// The scene's `title`, else one made from the file name.
     pub title: String,
+    /// Whether the editor wrote this file, so that saving may replace it. A
+    /// hand-written scene is saved under a new name instead.
+    pub saved_by_editor: bool,
     /// In slot order, as they will play.
     pub sounds: Vec<SoundSummary>,
 }
@@ -52,6 +55,7 @@ pub fn list_scenes(directory: String) -> Result<Vec<SceneFile>, EngineError> {
             };
             Some(SceneFile {
                 name,
+                saved_by_editor: saved_by_editor(&path),
                 path,
                 title: summary.title,
                 sounds: summary
@@ -92,6 +96,10 @@ mod tests {
             .find(|scene| scene.name == "frog")
             .expect("frog scene listed");
         assert_eq!(frogs.title, "Frog");
+        assert!(
+            !frogs.saved_by_editor,
+            "the repository's scenes are written by hand"
+        );
         assert!(!frogs.sounds.is_empty());
     }
 

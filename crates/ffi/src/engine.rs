@@ -5,14 +5,14 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use atrium::audio::output::{AudioOutput, CpalOutput};
-use atrium::config::{radiation_of, read_preset, SceneConfig, SoundBuilder};
+use atrium::config::{bearing_for_heading, radiation_of, read_preset, SceneConfig, SoundBuilder};
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
 use atrium_core::commands::Command;
 use atrium_core::telemetry::{TelemetryFrame, MAX_SOURCES};
 use atrium_core::types::Vec3;
-use atrium_world::{Entity, EntityId, Moves, Shape, Sound};
+use atrium_world::{Entity, EntityId, Moves, Place, Shape, Sound};
 
 use crate::api::{
     EmitterKind, EngineError, Pattern, Position, SceneDescription, SourceDescription, Telemetry,
@@ -40,9 +40,8 @@ const AUDITION_SLOT: usize = MAX_SOURCES - 1;
 /// frame when it draws, so nothing calls into Kotlin from an engine thread.
 #[derive(uniffi::Object)]
 pub struct Engine {
-    /// The scene as it is now. The audio thread does not report a sound's
-    /// level back, so a change made through this object is recorded here.
-    description: Mutex<SceneDescription>,
+    /// The scene as it is now, as a UI shows it and as a file saves it.
+    scene: Mutex<Live>,
     /// What this scene can play on the opened device; fixed for its lifetime.
     outputs: Vec<Output>,
     /// Shared with head tracking, which steers the listener from its own
@@ -68,8 +67,11 @@ impl Engine {
     /// scene file resolve against the process working directory.
     #[uniffi::constructor]
     pub fn new(scene_path: String) -> Result<Arc<Self>, EngineError> {
-        let mut built = SceneConfig::load(&scene_path)
-            .and_then(SceneConfig::build)
+        let document = SceneConfig::load(&scene_path)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        let mut built = document
+            .clone()
+            .build()
             .map_err(|error| EngineError::Scene(error.to_string()))?;
 
         let (telemetry_producer, telemetry) = rtrb::RingBuffer::new(TELEMETRY_CAPACITY);
@@ -85,7 +87,10 @@ impl Engine {
         let output = OutputThread::start(built.scene, command_consumer)?;
 
         Ok(Arc::new(Self {
-            description: Mutex::new(built.description.into()),
+            scene: Mutex::new(Live {
+                description: built.description.into(),
+                document,
+            }),
             outputs: playable_outputs(layout_channels, output.device_channels),
             commands: Arc::new(Mutex::new(commands)),
             telemetry: Mutex::new(telemetry),
@@ -104,7 +109,27 @@ impl Engine {
 
     /// The scene as it is now: as built, with every level set since.
     pub fn scene(&self) -> SceneDescription {
-        lock(&self.description).clone()
+        lock(&self.scene).description.clone()
+    }
+
+    /// Write the scene as it is now to `path`, under `title`. Every change
+    /// made through this object is in it: levels, places, shapes, facings,
+    /// sounds added and removed. What belongs to the listener is not: mutes,
+    /// volume, output and head tracking.
+    ///
+    /// A file already at `path` is replaced only if the editor wrote it. A
+    /// hand-written scene keeps its comments and is refused, so it is saved
+    /// under a new name.
+    pub fn save_scene(&self, path: String, title: String) -> Result<(), EngineError> {
+        let mut scene = lock(&self.scene);
+        let title = title.trim();
+        if !title.is_empty() {
+            scene.document.title = Some(title.to_owned());
+        }
+        scene
+            .document
+            .save(&path)
+            .map_err(|error| EngineError::Scene(error.to_string()))
     }
 
     /// Silence the source in `slot`, or let it sound again. It keeps running
@@ -119,13 +144,17 @@ impl Engine {
     /// distance. `scene()` reports the new level from then on. A slot that
     /// holds no source, or a level that is not a number, changes nothing.
     pub fn set_source_level(&self, slot: u16, level: f32) -> Result<(), EngineError> {
-        let mut description = lock(&self.description);
-        let Some(source) = sound_in(&mut description, slot) else {
-            return Ok(());
-        };
+        let mut scene = lock(&self.scene);
         if !level.is_finite() {
             return Ok(());
         }
+        let Some(entity) = scene.entity_in(slot) else {
+            return Ok(());
+        };
+        entity.sound.level = Some(rounded(level, 10.0));
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
         lock(&self.commands)
             .push(Command::SetSourceSpl {
                 index: slot,
@@ -140,15 +169,24 @@ impl Engine {
     /// from then on, as where the source was placed; telemetry has where it
     /// is, which differs for a source that moves by itself.
     pub fn set_source_position(&self, slot: u16, position: Position) -> Result<(), EngineError> {
-        let mut description = lock(&self.description);
+        let mut scene = lock(&self.scene);
         lock(&self.commands)
             .push(Command::SetSourcePosition {
                 index: slot,
                 position: position.into(),
             })
             .map_err(|_| EngineError::CommandQueueFull)?;
-        if let Some(source) = sound_in(&mut description, slot) {
+        if let Some(source) = sound_in(&mut scene.description, slot) {
             source.position = position;
+        }
+        let place = self.sounds.place_at(position.into());
+        if let Some(entity) = scene.entity_in(slot) {
+            // Centimetres are plenty for a place, and keep a saved file short.
+            entity.place = Place {
+                x: rounded(place.x, 100.0),
+                y: rounded(place.y, 100.0),
+                z: rounded(place.z, 100.0),
+            };
         }
         Ok(())
     }
@@ -157,8 +195,11 @@ impl Engine {
     /// pattern and the beam it gives from then on. A field has no beam,
     /// whatever its pattern.
     pub fn set_source_pattern(&self, slot: u16, pattern: Pattern) -> Result<(), EngineError> {
-        let mut description = lock(&self.description);
-        let Some(source) = sound_in(&mut description, slot) else {
+        let mut scene = lock(&self.scene);
+        if let Some(entity) = scene.entity_in(slot) {
+            entity.shape.pattern = Some(pattern.into());
+        }
+        let Some(source) = sound_in(&mut scene.description, slot) else {
             return Ok(());
         };
         let (radiation, beam_half_angle) = radiation_of(pattern.into());
@@ -184,15 +225,16 @@ impl Engine {
         if !length.is_finite() || length < 1e-6 {
             return Ok(());
         }
-        let mut description = lock(&self.description);
-        let Some(source) = sound_in(&mut description, slot) else {
+        let mut scene = lock(&self.scene);
+        let yaw = facing.y.atan2(facing.x);
+        if let Some(entity) = scene.entity_in(slot) {
+            entity.shape.facing = Some(rounded(bearing_for_heading(yaw), 1.0) % 360.0);
+        }
+        let Some(source) = sound_in(&mut scene.description, slot) else {
             return Ok(());
         };
         lock(&self.commands)
-            .push(Command::SetSourceFacing {
-                index: slot,
-                yaw: facing.y.atan2(facing.x),
-            })
+            .push(Command::SetSourceFacing { index: slot, yaw })
             .map_err(|_| EngineError::CommandQueueFull)?;
         source.facing = Position {
             x: facing.x / length,
@@ -250,7 +292,8 @@ impl Engine {
         let Some(preset) = preset else {
             return Ok(());
         };
-        let taken = lock(&self.description)
+        let taken = lock(&self.scene)
+            .description
             .sources
             .iter()
             .any(|source| source.slot as usize == AUDITION_SLOT);
@@ -279,10 +322,11 @@ impl Engine {
     pub fn add_sound(&self, preset: String) -> Result<SourceDescription, EngineError> {
         let mut edits = lock(&self.edits);
         edits.stop_audition()?;
-        let mut description = lock(&self.description);
+        let mut scene = lock(&self.scene);
         let slot = (0..MAX_SOURCES)
             .find(|slot| {
-                description
+                scene
+                    .description
                     .sources
                     .iter()
                     .all(|source| source.slot as usize != *slot)
@@ -292,7 +336,11 @@ impl Engine {
             read_preset(&preset).map_err(|error| EngineError::Scene(error.to_string()))?;
         let id = EntityId::unused(
             &summary.name,
-            description.sources.iter().map(|source| source.id.as_str()),
+            scene
+                .description
+                .sources
+                .iter()
+                .map(|source| source.id.as_str()),
         );
         let entity = self.sound_ahead(preset, Some(summary.name), summary.group);
         let built = self
@@ -306,7 +354,12 @@ impl Engine {
             amplitude: built.amplitude,
         })?;
         let added: SourceDescription = built.description.into();
-        description.sources.push(added.clone());
+        scene.description.sources.push(added.clone());
+        scene
+            .document
+            .sounds
+            .push(id, entity)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
         Ok(added)
     }
 
@@ -315,15 +368,22 @@ impl Engine {
     /// that holds no sound changes nothing.
     pub fn remove_sound(&self, slot: u16) -> Result<(), EngineError> {
         let mut edits = lock(&self.edits);
-        let mut description = lock(&self.description);
-        if sound_in(&mut description, slot).is_none() {
+        let mut scene = lock(&self.scene);
+        let Some(id) = sound_in(&mut scene.description, slot).map(|source| source.id.clone())
+        else {
             return Ok(());
-        }
+        };
         edits.send(SceneEdit::RemoveSource {
             slot,
             filler: SoundBuilder::silence(),
         })?;
-        description.sources.retain(|source| source.slot != slot);
+        scene
+            .description
+            .sources
+            .retain(|source| source.slot != slot);
+        if let Ok(id) = EntityId::new(&id) {
+            scene.document.sounds.remove(&id);
+        }
         Ok(())
     }
 
@@ -400,6 +460,33 @@ fn sound_in(description: &mut SceneDescription, slot: u16) -> Option<&mut Source
         .sources
         .iter_mut()
         .find(|source| source.slot == slot)
+}
+
+/// The scene twice over: as a UI shows it, and as a scene file saves it.
+/// Both change together, under one lock, so they cannot disagree.
+struct Live {
+    description: SceneDescription,
+    /// The scene file as loaded, with every edit since.
+    document: SceneConfig,
+}
+
+impl Live {
+    /// The entity playing from `slot`, to record a change to it.
+    fn entity_in(&mut self, slot: u16) -> Option<&mut Entity> {
+        let id = self
+            .description
+            .sources
+            .iter()
+            .find(|source| source.slot == slot)?
+            .id
+            .clone();
+        self.document.sounds.get_mut(&EntityId::new(&id).ok()?)
+    }
+}
+
+/// `value` rounded to steps of `1 / per_unit`.
+fn rounded(value: f32, per_unit: f32) -> f32 {
+    (value * per_unit).round() / per_unit
 }
 
 /// The way sounds reach the audio thread while it runs, and come back.
@@ -786,6 +873,33 @@ mod tests {
                 .any(|source| source.slot == 1 && source.position == moved)
         });
         assert_eq!(level_of(2), Some(65.0), "only that layer");
+
+        // Saving: every change above is in the file, and a hand-written scene
+        // is never saved over.
+        let saved = std::env::temp_dir().join(format!("atrium-saved-{}.yaml", std::process::id()));
+        let saved = saved.to_str().expect("utf-8").to_owned();
+        let _ = std::fs::remove_file(&saved);
+        assert!(engine
+            .save_scene("scenes/frog.yaml".into(), "Frog".into())
+            .is_err());
+        engine
+            .save_scene(saved.clone(), "Three frogs".into())
+            .expect("a new file");
+        let written = SceneConfig::load(&saved).expect("the saved scene reads");
+        assert_eq!(written.title.as_deref(), Some("Three frogs"));
+        let ids: Vec<&str> = written.sounds.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["frogs", "frog-2", "frog"]);
+        let (_, frogs) = written.sounds.iter().next().expect("frogs");
+        assert_eq!(frogs.shape.pattern, Some(atrium_world::Pattern::Cardioid));
+        assert_eq!(frogs.shape.facing, Some(0.0), "north");
+        let (_, frog) = written.sounds.iter().nth(2).expect("frog");
+        let expected = engine.sounds.place_at(moved.into());
+        assert!(
+            (frog.place.x - expected.x).abs() < 0.01 && (frog.place.y - expected.y).abs() < 0.01
+        );
+        let rebuilt = written.build().expect("the saved scene builds");
+        assert_eq!(rebuilt.description.sources.len(), 3);
+        let _ = std::fs::remove_file(&saved);
     }
 
     #[test]
