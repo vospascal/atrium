@@ -68,8 +68,9 @@ and on desktop the window widens for it. It has three panels; in a narrow window
   line: drag it to turn the sound.
 - **The inspector** shows the selected sound in a fixed order: its level, which can be set; its
   shape, which can be Omni, Focused or Narrow; then its place, when it plays and whether it
-  moves. For a kind with takes, such as a bird or a bell, it lists them with the one sounding now lit,
-  and says when it is resting. With nothing selected it shows the scene.
+  moves. **When** is All the time or Now and then; Now and then has a range with two handles for
+  the shortest and longest rest. Anything with takes lists them, with the one sounding now lit
+  and "Resting" between two, and each take's chance as steps from never to four times as often. With nothing selected it shows the scene.
 
 A scene can set `title:`. Without it, the player makes one from the file name.
 

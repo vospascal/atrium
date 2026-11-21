@@ -51,22 +51,6 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
         Modifier.fillMaxWidth(),
     )
 
-    if (sound.takes.size > 1) {
-        // What it can say, with the one it is saying now lit. Between two it rests.
-        Spacer(Modifier.height(10.dp))
-        PaperText(if (live != null && live.take == null) "Resting" else "Sounding", 14, Muted)
-        sound.takes.forEachIndexed { index, take ->
-            val now = live?.take?.toInt() == index
-            PaperText(
-                take,
-                15,
-                if (now) Foreground else Muted,
-                if (now) FontWeight.Bold else FontWeight.Normal,
-                modifier = Modifier.fillMaxWidth().background(if (now) Highlight else Backdrop).padding(horizontal = 8.dp, vertical = 3.dp),
-            )
-        }
-    }
-
     Part("Shape")
     if (sound.emitterKind != EmitterKind.FIELD) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -86,7 +70,7 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     PaperText("${oneDecimal(at.z)} m above the ground", 14, Muted)
 
     Part("When")
-    PaperText("Always", 15)
+    WhenPart(session, sound, live)
 
     Part("Moves")
     // The engine reports where a sound is, not why: one that is away from where it was placed is travelling.

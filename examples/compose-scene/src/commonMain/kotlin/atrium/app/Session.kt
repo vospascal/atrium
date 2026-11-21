@@ -26,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -117,6 +118,44 @@ internal class Session(private val store: SettingsStore) {
     fun level(slot: UShort, level: Float) {
         val running = engine ?: return
         command { setSourceLevel(slot, level) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /** Rests asked for while a handle is dragged; one coroutine applies the newest for each sound. */
+    private val wantedGaps = Channel<Triple<UShort, Float, Float>>(Channel.UNLIMITED)
+    private var applyingGaps = false
+
+    /**
+     * Let the sound in [slot] rest between [shortest] and [longest] seconds between takes; both 0
+     * is all the time. Switching between the two builds the sound again, which takes a moment, so
+     * this runs off the UI thread, and while a handle is dragged only the newest value is sent.
+     */
+    fun gap(slot: UShort, shortest: Float, longest: Float) {
+        unsaved = true
+        wantedGaps.trySend(Triple(slot, shortest, longest))
+        if (applyingGaps) return
+        applyingGaps = true
+        building.launch {
+            for (first in wantedGaps) {
+                val newest = mutableMapOf(first.first to first)
+                while (true) {
+                    val more = wantedGaps.tryReceive().getOrNull() ?: break
+                    newest[more.first] = more
+                }
+                val running = engine ?: continue
+                for ((slotWanted, shortestWanted, longestWanted) in newest.values) {
+                    runCatching { running.setSourceGap(slotWanted, shortestWanted, longestWanted) }
+                }
+                if (engine === running) description = running.scene()
+            }
+        }
+    }
+
+    /** How often take [take] of the sound in [slot] is chosen next to its others; 0 is never. */
+    fun chance(slot: UShort, take: Int, chance: Float) {
+        val running = engine ?: return
+        command { setTakeChance(slot, take.toUShort(), chance) }
         description = running.scene()
         unsaved = true
     }

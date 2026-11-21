@@ -13,6 +13,7 @@ import atrium.engine.SoundSummary
 import atrium.engine.SourceDescription
 import atrium.engine.SourceSignal
 import atrium.engine.SourceTelemetry
+import atrium.engine.Take
 import atrium.engine.Telemetry
 import kotlin.math.PI
 import kotlin.test.Test
@@ -40,7 +41,7 @@ class InkTest {
         width = 60f,
         depth = 60f,
         listener = listener,
-        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), Pattern.OMNI, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f), listOf("Take")) },
+        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), Pattern.OMNI, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null) },
     )
 
     private fun heard(at: Position, gainDb: Float, muted: Boolean = false, signal: SourceSignal? = null) = Telemetry(

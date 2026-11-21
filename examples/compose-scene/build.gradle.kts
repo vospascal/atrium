@@ -49,7 +49,10 @@ compose.desktop {
     }
 }
 
-// The engine opens scene files relative to the working directory.
+// The engine opens scene files relative to the working directory, when the app runs and in tests.
 tasks.withType<JavaExec>().configureEach {
+    workingDir = atriumRoot
+}
+tasks.withType<Test>().configureEach {
     workingDir = atriumRoot
 }

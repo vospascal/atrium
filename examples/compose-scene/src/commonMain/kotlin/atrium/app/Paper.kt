@@ -36,6 +36,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -152,11 +153,12 @@ internal fun PaperText(
     weight: FontWeight = FontWeight.Normal,
     spacing: Float = 0f,
     modifier: Modifier = Modifier,
+    align: TextAlign = TextAlign.Unspecified,
 ) {
     BasicText(
         value,
         modifier,
-        style = TextStyle(color = color, fontSize = size.sp, fontWeight = weight, letterSpacing = spacing.sp),
+        style = TextStyle(color = color, fontSize = size.sp, fontWeight = weight, letterSpacing = spacing.sp, textAlign = align),
     )
 }
 
