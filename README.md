@@ -60,7 +60,7 @@ each step depends on the render mode.
 |---|---|---|---|---|
 | `world_locked` | speakers | direct only | each speaker is a microphone in the world: its own delay, air absorption, reflection taps | bass management, static delay compensation, master gain |
 | `vbap` | 3 or more speakers | direct + reflections | amplitude panning relative to the listener | reverb, bass management, listener-relative delay compensation, master gain |
-| `hrtf` | headphones | direct + reflections | HRTF convolution to two ears | reverb, master gain |
+| `hrtf` | headphones | direct + reflections | HRTF convolution to two ears; ambient sound through the head's diffuse field | reverb, master gain |
 | `dbap` | speakers | direct + reflections | distance-based panning from source to speaker positions | reverb, bass management, static delay compensation, master gain |
 | `ambisonics` | speakers or stereo | direct + reflections | first-order B-format encode | B-format delays, decode, reverb, bass management, listener-relative delay compensation, master gain |
 
@@ -161,19 +161,21 @@ Known gaps:
 
 ## Ambient sound
 
-An ambient sound (`shape.ambient`) has no position. Every speaker, or each
-ear, gets its own copy of it through its own filter, so the copies sound the
-same and carry the same power but are different waveforms, and the ear hears
-width instead of a point in the middle.
+An ambient sound (`shape.ambient`) has no position: it is the sound around
+the listener. Any sound can be ambient: a frog chorus, a robin, rain with
+single drops. So whatever spreads it around must leave an attack heard once.
 
-Any sound can be ambient: a frog chorus, a robin, rain with single drops. So
-the filter must leave an attack heard once. It is four Schroeder all-passes in
-series per channel (Schroeder and Logan, "Colorless artificial
-reverberation", 1961), each with gain 0.5 and a delay between 0.5 and 2 ms
-drawn from a fixed seed per channel (`src/pipeline/renderers/field/`). It
-replaced one all-pass per channel with a delay of 7 to 31 ms, which answered
-every click with a train of echoes. Worst channel or pair, at 44.1, 48 and
-96 kHz:
+### On speakers
+
+Every speaker gets its own copy through its own filter, so the copies sound
+the same and carry the same power but are different waveforms, and the room
+fills instead of the sound sitting in one speaker. The filter is four
+Schroeder all-passes in series per channel (Schroeder and Logan, "Colorless
+artificial reverberation", 1961), each with gain 0.5 and a delay between 0.5
+and 2 ms drawn from a fixed seed per channel (`src/pipeline/renderers/field/`).
+It replaced one all-pass per channel with a delay of 7 to 31 ms, which
+answered every click with a train of echoes. Worst channel or pair, at 44.1,
+48 and 96 kHz:
 
 | | Before | Now |
 |---|---|---|
@@ -185,9 +187,65 @@ every click with a train of echoes. Worst channel or pair, at 44.1, 48 and
 | Coherence below 200 Hz, mean over 28 pairs | 0.32 | 0.64 |
 
 Each channel keeps all of the source's energy, so N channels at 1/√N add up
-to it. `AMBIENT_OUT=target/listening/ambient cargo test --release --lib
-write_ambient_listening_samples` writes clicks, frogs, a robin and noise
-through it, as headphones play them.
+to it. The ambisonic bus gets four of these copies as W, Y, Z and X.
+
+### On headphones
+
+The ears hear an ambient sound as the measured head hears a diffuse field:
+sound of equal strength from every direction at once, unrelated between
+directions. What that does at two ears is known from the head itself. From
+all 710 measured directions of `assets/hrtf/default.sofa`, each weighted by
+the solid angle it covers, follow each ear's diffuse-field response, its
+colour (the ear canal lifts 2.5 kHz some 20 dB above 250 Hz), and the two
+ears' coherence at each frequency: nearly the same in the bass, unrelated
+from about 500 Hz up (`src/pipeline/renderers/binaural/diffuse_field/`).
+
+Every ambient sound joins one mono bus, and two fixed filters give the left
+and the right ear exactly that colour and that coherence. Each is the ear's
+diffuse-field response, then the sound and one echo of it, the echo of
+opposite sign in the two ears: Lauridsen's complementary comb (1954), with
+the echo as strong as the head's coherence asks at each frequency. The echo
+comes later as the frequency falls, 2.3 ms at 8 kHz, 9.8 ms at 1 kHz and
+30 ms below 300 Hz, so that within every third octave it is unrelated to the
+sound and later than the ±1 ms over which the ear compares its two inputs.
+
+The coherence, as the ear compares (the largest normalised cross-correlation
+within ±1 ms, per third octave, ISO 3382-1's IACC by band), of ambient white
+noise:
+
+| | 125 Hz | 500 Hz | 1 kHz | 2 kHz | 4 kHz |
+|---|---|---|---|---|---|
+| The measured head, all 710 directions | 0.91 | 0.05 | 0.07 | 0.03 | 0.00 |
+| Rendered now | 0.91 | 0.10 | 0.16 | 0.05 | 0.08 |
+| Before: two decorrelated copies, no head | 1.00 | 0.87 | 0.96 | 0.53 | 0.41 |
+
+From 100 Hz to 8 kHz no third octave is off by more than 0.085. Each ear is
+within 0.8 dB of the head's diffuse-field response in every third octave from
+100 Hz to 12.5 kHz (before there was no head at all), the two ears within
+0.02 dB of each other, and a click keeps 99.9 % of its energy within 13 ms,
+with nothing after 18 ms above −48 dB. Facing any way, and turning, the ears
+hear the same sample for sample: a diffuse field is the same from every side.
+
+An ambient sound at level L is as loud at each ear as a point source of
+level L at its reference distance straight ahead: for white noise, +0.05 dB.
+By third octave it is −0.1 dB at 125 Hz, +0.2 dB at 500 Hz, +1.5 dB at 1 kHz,
+−0.3 dB at 2.5 kHz, −1.5 dB at 4 kHz and +12.9 dB at 8 kHz, where the
+response from straight ahead has a deep notch that sound from all round
+fills in. Before, each ear got half the power and no ear's colour, so
+ambient sounds on headphones are now 3 dB louder than they were, and as
+bright as an ear makes them: at the same scale, the frog listening sample
+peaks 4.4 times higher.
+
+It costs one mono bus and two convolutions of 60 ms filters however many
+ambient sounds play: 18.5 µs per 512-frame callback at 48 kHz with one and
+21 µs with four (3.4 and 12.5 µs before), a quarter of what one point source
+costs (77 to 113 µs), and nothing when none plays
+(`cargo test --release --lib ambient_sound_cost -- --ignored --nocapture`).
+
+`AMBIENT_OUT=target/listening/ambient-headphones/after cargo test --release
+--lib write_ambient_listening_samples` writes the field wind, frogs, a robin,
+clicks, and white noise while the head turns a full circle, through the whole
+headphone render.
 
 Decisions that look wrong and are right:
 
@@ -201,34 +259,108 @@ Decisions that look wrong and are right:
   bass coherence is 0.94, and only one sequence in twenty stays within 3 dB.
   The all-pass is flat by construction and decorrelates better on every
   measure.
-- **Its four numbers are measured, not published.** No paper gives a short
-  cascade for this. Four stages, gain 0.5 and 0.5 to 2 ms is the one point of
-  a coarse grid (two to six stages, gain 0.5, 0.618 or 0.7, shortest delay
-  0.5 ms, longest 1 to 3 ms) where a typical draw of delays meets every
+- **The speakers' four numbers are measured, not published.** No paper gives
+  a short cascade for this. Four stages, gain 0.5 and 0.5 to 2 ms is the one
+  point of a coarse grid (two to six stages, gain 0.5, 0.618 or 0.7, shortest
+  delay 0.5 ms, longest 1 to 3 ms) where a typical draw of delays meets every
   criterion: shorter delays leave channels alike, longer ones smear the
-  attack. The seeds are the first set that passes at all three
-  rates, because with filters this short a single rounded delay can make one
-  pair too alike.
+  attack. The seeds are the first set that passes at all three rates,
+  because with filters this short a single rounded delay can make one pair
+  too alike.
 - **The old filter decorrelated the bass better.** Its delays were ten times
   longer. That is the price of hearing an attack once.
+- **Not a set of directions around the head.** The plan was a fixed set of
+  directions, each fed its own decorrelated copy and heard through its own
+  measured HRIR, so that colour and coherence would follow from the ears. It
+  was measured first, on every arrangement that fits the set (third-octave
+  errors against the 710 directions, 100 Hz to 8 kHz for coherence, to
+  12.5 kHz for colour; coherence here without the ±1 ms search, which only
+  adds):
+
+  | Directions | Coherence off by | Colour off by | With truly unrelated signals |
+  |---|---|---|---|
+  | Cube, 8 | 0.85–0.88 | 7.4 dB | 0.63–0.68, 3.8–6.7 dB |
+  | Ring of 8 at ear height | 0.74 | 7.8 dB | 0.50, 3.8 dB |
+  | Two rings, 4 at ±30° | 0.67 | 8.1 dB | 0.60, 3.4 dB |
+  | Ring of 5 at −20°, 3 at +50° | 0.70 | 6.7 dB | 0.49, 1.8 dB |
+  | Ring of 6, 3 at +50°, top, 10 | 0.82 | 7.2 dB | 0.47, 1.6 dB |
+  | Ring of 8, 4 at +45°, top, 13 | 0.81 | 8.7 dB | 0.41, 3.3 dB |
+
+  One signal decorrelated a few ways stays one signal below 400 Hz: the
+  copies add up there, 6 to 9 dB too much bass, and what likeness is left
+  between them makes the ears alike everywhere. With truly unrelated
+  signals, a dozen directions still do not average the interaural phase as
+  710 do. An icosahedron or a dodecahedron cannot even be placed within the
+  set: turned any way, one vertex is below −52°, and nothing below −40° was
+  measured. A diffuse field at two ears is three spectra; rendering those
+  directly is exact by construction, and costs less.
+- **Nothing follows the head.** Planned too: directions fixed in the world,
+  their HRIRs following the head. A diffuse field is the same from every
+  side, so there is nothing to keep in place; the ears hear the same however
+  the head turns, as they do in a real one.
+- **An echo, not an all-pass.** Schroeder's all-pass around the same delay
+  keeps each ear's colour exact in every bin, and was built first. It puts
+  most of the energy where the ears are alike at the delay: every sound's
+  bass 30 to 50 ms behind its treble. The comb keeps the sound first and adds
+  one echo. Its notches lie closer together than the ear resolves; smoothed
+  over an equivalent rectangular bandwidth it is gone, under 0.2 dB from
+  300 Hz to 10 kHz.
+- **The delay's three numbers are measured.** Two turns of its phase per
+  third octave, 1.2 ms past the ear's ±1 ms, and 30 ms at most. On a grid of
+  turns (1, 1.5, 2, 3, 4), margin (1.0, 1.2, 1.5 ms) and longest delay (30,
+  40, 50 ms, all within the 50 ms over which the ear fuses a later sound with
+  the first), two turns is the fewest at which all nine combinations pass
+  every test, and 1.2 ms with 30 ms gives it the most margin. Fewer turns
+  leave the echo too like the sound; more push it later.
+- **The measured directions are counted nearest, not interpolated.** The SOFA
+  reader interpolates by blending neighbouring responses sample by sample,
+  and responses that arrive at slightly different times blended dull the
+  treble: over the sphere, 1.8 dB at 8 kHz and 2.6 dB at 12.5 kHz. Each
+  measured direction counts for the share of 2048 evenly spread directions
+  nearest to it, its Voronoi cell, which is within 0.01 dB of the exact one.
+- **The coherence below 100 Hz is held at 100 Hz.** The set's measurement
+  loudspeaker gave little bass (the diffuse response is 13 dB down at
+  100 Hz), and its coherence falls towards 0.91 at 0 Hz, where two ears hear
+  the same pressure.
+- **No decorrelator on headphones.** The two filters do all of it, from one
+  bus; the decorrelator stays for speakers and the ambisonic bus.
 
 Known gaps:
 
-- **The deep bass stays together.** Below 200 Hz two channels have a
-  coherence of 0.64 on average, from −0.53 to 0.99 by pair: a filter a few
-  milliseconds long cannot move a 10 ms wave far. At the ears that is close
-  to real; a diffuse field is coherent between two points 18 cm apart up to a
-  few hundred hertz (sin kd / kd, Cook et al. 1955). Between speakers 3 m apart
-  a real field is coherent only below about 30 Hz.
-- **A pair can be alike at one pitch.** An all-pass gives each pair a phase
-  difference that changes with frequency, so a tonal sound can land where a
-  pair is nearly in phase. The frog sample's two channels correlate 0.51 now,
-  −0.20 before.
-- **An ambient recording is not a diffuse field.** Decorrelating one mono
+- **On speakers the deep bass stays together.** Below 200 Hz two channels
+  have a coherence of 0.64 on average, from −0.53 to 0.99 by pair: a filter a
+  few milliseconds long cannot move a 10 ms wave far. Between speakers 3 m
+  apart a real field is coherent only below about 30 Hz (sin kd / kd, Cook et
+  al. 1955). On headphones this is solved: the ears' bass coherence is the
+  head's.
+- **On speakers a pair can be alike at one pitch.** An all-pass gives each
+  pair a phase difference that changes with frequency, so a tonal sound can
+  land where a pair is nearly in phase.
+- **On headphones an attack where the ears are unalike has a faint echo.**
+  Above 500 Hz about half of a click's energy comes again 2 to 19 ms later
+  (the later, the lower), of opposite sign in the two ears. Two ears cannot be unrelated across a third
+  octave unless something in each spans about the inverse of its width; a
+  real diffuse field has countless such arrivals, this has one. Whether it
+  is heard on a dry click is for the ear to judge.
+- **The rendered ears are a little too alike where the head's are not.**
+  Where its ears are unrelated (0.00 to 0.07: at 500 Hz and from 1 kHz up)
+  the rendered ones reach 0.04 to 0.16: within a band the echo does not
+  become quite unrelated to the sound.
+- **Below the measured sphere the lowest ring stands in.** Nothing below −40°
+  was measured. The renderer gives the cap under it to the −40° ring, as it
+  plays a point source down there; the test counts only the measured part.
+  The two differ by at most 0.4 dB and 0.03 in coherence.
+- **One head.** The diffuse field is KEMAR's, not the listener's.
+- **An ambient recording is not a diffuse field.** Spreading one mono
   recording makes copies of the same sound; a real chorus is many frogs in
   many places, each with its own direction and arrival. One loud frog in the
-  recording is everywhere at once. Many sources, or a multichannel recording,
-  would be the real thing.
+  recording is everywhere at once, and on headphones its echo is the same
+  frog again. Many sources, or a multichannel recording, would be the real
+  thing.
+- **Attacks still flutter in the ambisonics modes.**
+  `src/pipeline/stages/ambi_multi_delay.rs` mixes four delayed copies, at 7,
+  11, 17 and 23 ms and each 16.5 dB down, into the whole B-format bus,
+  ambient or not, so every attack there is followed by four quiet echoes.
 
 ## A sound beside the ear
 
