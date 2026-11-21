@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.focusable
@@ -300,6 +301,14 @@ internal fun EditorMap(
         // Reaches under every point, so a small sound inside a large one can still be seen and picked.
         markers.filterNot { it.ambient }.sortedByDescending { it.reach }.forEach { drawReach(view.toScreen(it.offset), it, view, beat, it.id == selected) }
 
+        // The room's loudspeakers, under the sounds: filled by what each plays, an outline when the output passes them by.
+        val inUse = telemetry?.channelsInUse.orEmpty().toSet()
+        description?.speakers.orEmpty().forEach { speaker ->
+            val offset = Point(speaker.position.x - listener.x, speaker.position.y - listener.y)
+            val level = telemetry?.peaksDb?.getOrNull(speaker.channel.toInt())?.let(::meterOf) ?: 0f
+            drawSpeaker(view.toScreen(offset), centre, speaker.name, speaker.channel in inUse, level, colors, text)
+        }
+
         drawListener(centre, telemetry?.listenerFacing, colors)
 
         markers.filterNot { it.ambient }.forEach { marker ->
@@ -349,6 +358,42 @@ private fun DrawScope.drawListener(centre: Offset, facing: Position?, colors: Pl
     drawCircle(colors.foreground, density * 6f, centre, style = Stroke(width = density * 1.6f))
     drawCircle(colors.foreground, density * 2f, centre)
 }
+
+/**
+ * A loudspeaker: a small cabinet turned toward the listener, its name beside it. One the output
+ * plays through is filled as far as its level; one it passes by is a faint outline.
+ */
+private fun DrawScope.drawSpeaker(at: Offset, listener: Offset, name: String, inUse: Boolean, level: Float, colors: PlayerColors, text: TextMeasurer) {
+    val toward = atan2(listener.y - at.y, listener.x - at.x)
+    val half = density * SpeakerHalf
+    val ink = if (inUse) colors.foreground else colors.hairline
+    rotate(toward * 180f / PI.toFloat(), at) {
+        val box = androidx.compose.ui.geometry.Rect(at.x - half, at.y - half, at.x + half * .6f, at.y + half)
+        drawRect(colors.backdrop, box.topLeft, box.size)
+        if (inUse && level > 0f) {
+            drawRect(colors.foreground.copy(alpha = .25f + .6f * level), box.topLeft, box.size.copy(width = box.width * level))
+        }
+        drawRect(ink, box.topLeft, box.size, style = Stroke(width = density * 1.2f))
+        // The cone, facing the listener.
+        val cone = Path().apply {
+            moveTo(at.x + half * .6f, at.y - half * .55f)
+            lineTo(at.x + half * 1.2f, at.y - half)
+            lineTo(at.x + half * 1.2f, at.y + half)
+            lineTo(at.x + half * .6f, at.y + half * .55f)
+        }
+        drawPath(cone, ink, style = Stroke(width = density * 1.2f))
+    }
+    val label = text.measure(name, TextStyle(color = if (inUse) colors.muted else colors.hairline, fontSize = 11.sp))
+    drawText(label, topLeft = at + Offset(-label.size.width / 2f, half + density * 4f))
+}
+
+/** How full a speaker's meter is for a peak of [peakDb] dBFS: empty at −60, full at 0. */
+internal fun meterOf(peakDb: Float): Float = ((peakDb - QuietestMeter) / -QuietestMeter).coerceIn(0f, 1f)
+
+private const val QuietestMeter = -60f
+
+/** Half a speaker's size on the map (dp). */
+private const val SpeakerHalf = 7f
 
 /**
  * An ambient sound is heard everywhere, so it has no circle of its own: broad

@@ -184,3 +184,12 @@ class MapFrameTest {
         assertNull(nudgeFor(androidx.compose.ui.input.key.Key.A, coarse = false))
     }
 }
+
+class SpeakerMeterTest {
+    @Test
+    fun aMeterRunsFromSixtyDecibelsDownToFull() {
+        assertEquals(0f, meterOf(-90f))
+        assertEquals(.5f, meterOf(-30f))
+        assertEquals(1f, meterOf(3f))
+    }
+}

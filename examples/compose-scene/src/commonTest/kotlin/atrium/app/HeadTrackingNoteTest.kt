@@ -16,6 +16,7 @@ class HeadTrackingNoteTest {
             sources = emptyList(),
             peaksDb = listOf(-20f, -20f),
             output = Output(renderMode, ChannelMode.STEREO),
+            channelsInUse = emptyList(),
             volume = 1f,
             listenerFacing = facing,
             headTracking = status,
