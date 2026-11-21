@@ -25,11 +25,11 @@ This is primarily data plumbing. The physics (`WallMaterial` struct, absorption 
 
 ### Files affected
 - `src/pipeline/path.rs` — `PathContribution.wall_index` type change, `WallMaterial` table
-- `src/pipeline/path_resolvers.rs` — `ImageSourceResolver` geometry queries
-- `src/pipeline/path_effects.rs` — `WallAbsorptionEffect` material lookup
+- `src/pipeline/path_resolvers/image_source.rs` — `ImageSourceResolver` geometry queries
+- `src/pipeline/path_effects/wall_absorption.rs` — `WallAbsorptionEffect` material lookup
 - `src/pipeline/mix_stage.rs` — `MixContext.wall_materials` type change
 - `src/pipeline/builders/` — pipeline construction, one file per render mode
-- `src/engine/scene.rs` — material storage
+- `src/engine/scene/mod.rs` — material storage
 - `crates/core/src/room.rs` — `Room` trait extension
 
 ---
@@ -113,7 +113,7 @@ Estimated scope: 2000–5000 lines for core ray tracer + BVH + resolver. The pip
 - `src/spatial/bvh.rs` — **NEW**: BVH construction + traversal
 - `src/spatial/ray.rs` — **NEW**: Ray/RayHit types
 - `src/spatial/mod.rs` — **NEW**: module declaration
-- `src/pipeline/path_resolvers.rs` — add `RayTraceResolver`
+- `src/pipeline/path_resolvers/` — add `RayTraceResolver`
 - `src/pipeline/path.rs` — increase `MAX_PATHS` or make dynamic, extend `ResolveContext`
 - `crates/core/src/room.rs` — extend `Room` trait with intersection methods
 - `src/pipeline/builders/` — new pipeline variant using `RayTraceResolver`

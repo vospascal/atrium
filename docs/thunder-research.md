@@ -2,7 +2,7 @@
 
 Written 2026-11-21, when the first port (filtered noise bursts from the TypeScript garden)
 sounded artificial. This note says what real thunder is made of, what that port got wrong,
-and what the generator in `src/synth/thunder.rs` does instead.
+and what the generator in `src/synth/thunder/` does instead.
 
 ## What thunder is
 

@@ -78,7 +78,7 @@ for each frame:
 - `src/pipeline/renderers/multichannel.rs` — current MultichannelRenderer (base pattern)
 - `src/pipeline/builders/vbap.rs` — the VBAP pipeline constructor
 - `src/pipeline/renderer.rs` — Renderer trait
-- `crates/core/src/speaker.rs:394` — compute_gains_vbap()
+- `crates/core/src/speaker/vbap.rs` — compute_gains_vbap()
 
 ### Notes
 - Image sources use omnidirectional directivity (reflections scatter)

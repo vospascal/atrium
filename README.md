@@ -74,7 +74,7 @@ src/
 ├── main.rs                 # entry point: load a scene, open the device, run
 ├── audio/                  # decoding, output device, filters, atmosphere,
 │                           #   ISO 9613-2 ground effect, HRTF convolver
-├── synth/                  # procedural sources, one file per generator
+├── synth/                  # procedural sources, one file or folder per generator
 ├── config/                 # scene YAML → AudioScene
 │   ├── scene.rs            #   the scene file's own fields
 │   ├── environment.rs      #   environment file, wall material names
@@ -82,7 +82,8 @@ src/
 │   ├── synth/              #   one file per synth's parameters
 │   └── build.rs            #   builds the engine's AudioScene
 ├── engine/
-│   ├── scene.rs            # AudioScene: all state owned by the audio thread
+│   ├── scene/              # AudioScene: all state owned by the audio thread;
+│                           #   commands, render, channels, edits, reset
 │   ├── edit.rs             # live add/remove of sources
 │   ├── telemetry.rs        # levels and positions sent back to the control side
 │   ├── profiler.rs         # profile_span! (feature `profiler`)
@@ -91,8 +92,8 @@ src/
 │   ├── environment.rs      # Environment: bounds, wall materials, ground, air
 │   ├── wall_material.rs    # absorption per octave band
 │   ├── path.rs             # PathResolver and PathEffect contracts
-│   ├── path_resolvers.rs   # direct path, image sources
-│   ├── path_effects.rs     # delay, air absorption, ground effect, wall absorption
+│   ├── path_resolvers/     # direct path, image sources
+│   ├── path_effects/       # delay, air absorption, ground effect, wall absorption
 │   ├── renderer.rs         # Renderer contract, SourceContext
 │   ├── renderers/          # one file per renderer, plus diffuse field emitters
 │   ├── mix_stage.rs        # MixStage contract
@@ -157,14 +158,14 @@ Two optional features, both compiled out when disabled. Commands are in
 | Span | Location | What it measures |
 |---|---|---|
 | `callback` | `audio/output.rs` | The whole cpal callback |
-| `process_commands` | `engine/scene.rs` | Draining the command queue |
-| `render` | `engine/scene.rs` | One buffer: tick, analysis, pipeline, telemetry |
-| `source_tick` | `engine/scene.rs` | Advancing every source |
-| `perceptual` | `engine/scene.rs` | Masking analysis (telemetry only) |
-| `pipeline` | `engine/scene.rs` | The active render pipeline |
+| `process_commands` | `engine/scene/commands.rs` | Draining the command queue |
+| `render` | `engine/scene/render.rs` | One buffer: tick, analysis, pipeline, telemetry |
+| `source_tick` | `engine/scene/render.rs` | Advancing every source |
+| `perceptual` | `engine/scene/render.rs` | Masking analysis (telemetry only) |
+| `pipeline` | `engine/scene/render.rs` | The active render pipeline |
 | `renderer` | `pipeline/render.rs` | One source through its renderer |
 | `mix_stages` | `pipeline/render.rs` | The post-mix chain |
-| `telemetry` | `engine/scene.rs` | Building and pushing a telemetry frame |
+| `telemetry` | `engine/scene/render.rs` | Building and pushing a telemetry frame |
 
 For external profilers (Instruments, perf) there is a `profiling` Cargo profile:
 a release build with debug symbols.

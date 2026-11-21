@@ -570,7 +570,7 @@ one binding method away. Bold marks what is missing.
 | A setting that wanders | **nothing** at the scene level. The winds and the river vary inside themselves | | new (28) |
 | Conditions, and settings that follow them | `src/plan/`: wind, rain, storm and daylight; `follows:` on kinds and sounds ties activity, level or a generator setting to one | `weather`, `set_weather`, `conditions`; each sound's `follows` | the scene inspector's Weather, a sound's Follows, and condition lanes over the tracks |
 | Weather stories | held, drifting and a passing storm, pure functions of time and seed; `weather:` in a scene | `set_weather` | the story picker in the scene inspector |
-| Thunder | `src/synth/thunder.rs`, ported from the spatial project: a strike and a rolling rumble with an infra layer for the LFE, never the same clap twice. Its distances are its takes, and the plan strikes it as storm rises | through `set_weather` | `sources/thunder.yaml`, `scenes/passing-storm.yaml` |
+| Thunder | `src/synth/thunder/`, ported from the spatial project: a strike and a rolling rumble with an infra layer for the LFE, never the same clap twice. Its distances are its takes, and the plan strikes it as storm rises | through `set_weather` | `sources/thunder.yaml`, `scenes/passing-storm.yaml` |
 | Paths, wandering, perches | **nothing** beyond orbit and the wisp's own flight | | new (33) |
 | Tone generator | **nothing** | | new (43) |
 | Group level | **nothing** | | new (36) |

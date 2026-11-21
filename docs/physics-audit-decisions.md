@@ -195,7 +195,7 @@ pub fn sanitize_finite(x: f32) -> f32 {
 **Files changed**:
 - `src/pipeline/mix_stage.rs`: added `measurement_mode: bool` to `MixContext`
 - `src/pipeline/mod.rs`: added `measurement_mode: bool` to `RenderParams`, propagated to `MixContext`
-- `src/engine/scene.rs`: added `measurement_mode: bool` to `AudioScene`
+- `src/engine/scene/mod.rs`: added `measurement_mode: bool` to `AudioScene`
 - `src/config.rs`: default `measurement_mode: false` in AudioScene construction
 - `src/pipeline/stages/mod.rs`: added `sanitize_finite()` helper
 - `src/pipeline/stages/master_gain.rs`: conditional soft_clip vs sanitize_finite
