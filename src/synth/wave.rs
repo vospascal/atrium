@@ -9,6 +9,7 @@
 
 use std::f32::consts::TAU;
 
+use atrium_core::commands::SynthParam;
 use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 
@@ -108,6 +109,21 @@ impl WaveSource {
 }
 
 impl SoundSource for WaveSource {
+    /// What changes while it plays; any other setting is not one it has.
+    fn set_synth_param(&mut self, param: SynthParam, value: f32) {
+        // `f32::clamp` passes NaN through, and one NaN would turn every later
+        // sample into NaN: keep the previous value instead.
+        if !value.is_finite() {
+            return;
+        }
+        match param {
+            SynthParam::WavePeriod => self.period = value.max(1.0),
+            SynthParam::CrashChance => self.crash_prob = value.clamp(0.0, 1.0),
+            SynthParam::MasterGain => self.master_gain = value.clamp(0.0, 2.0),
+            _ => {}
+        }
+    }
+
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
@@ -394,5 +410,20 @@ mod tests {
             (drop - 9.4).abs() < 1.5,
             "plateau-to-4.5 kHz drop {drop:.1} dB"
         );
+    }
+
+    /// What changes while it plays reaches the sound: the period and the
+    /// chance of a crash are kept in range, and master gain 0 silences it.
+    #[test]
+    fn its_period_crashes_and_gain_change_while_it_plays() {
+        use atrium_core::commands::SynthParam;
+        use atrium_core::source::SoundSource;
+        let mut sea = WaveSource::new(Vec3::ZERO, 8.0, 0.3, 4);
+        sea.set_synth_param(SynthParam::WavePeriod, 0.2);
+        sea.set_synth_param(SynthParam::CrashChance, 2.0);
+        assert_eq!((sea.period, sea.crash_prob), (1.0, 1.0));
+        sea.set_synth_param(SynthParam::MasterGain, 0.0);
+        let energy: f32 = (0..96_000).map(|_| sea.next_sample(48_000.0).powi(2)).sum();
+        assert_eq!(energy, 0.0);
     }
 }

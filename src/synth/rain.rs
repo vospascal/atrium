@@ -10,6 +10,7 @@
 // The TS version included an inline Freeverb — we omit it because the
 // scene's FdnReverb processor handles reverberation with proper room geometry.
 
+use atrium_core::commands::SynthParam;
 use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 
@@ -193,6 +194,22 @@ impl RainSource {
 }
 
 impl SoundSource for RainSource {
+    /// What changes while it plays; any other setting is not one it has.
+    fn set_synth_param(&mut self, param: SynthParam, value: f32) {
+        // `f32::clamp` passes NaN through, and one NaN would turn every later
+        // sample into NaN: keep the previous value instead.
+        if !value.is_finite() {
+            return;
+        }
+        match param {
+            SynthParam::Intensity => self.intensity = value.clamp(0.0, 1.0),
+            SynthParam::DropRate => self.drop_rate = value.max(0.0),
+            SynthParam::DripRate => self.drip_rate = value.max(0.0),
+            SynthParam::MasterGain => self.master_gain = value.clamp(0.0, 2.0),
+            _ => {}
+        }
+    }
+
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
@@ -605,5 +622,24 @@ mod tests {
             "subnormal output {tail:e} (env_state {:e})",
             rain.env_state
         );
+    }
+
+    /// What changes while it plays reaches the sound: heavier rain is
+    /// louder, no rain is silent, and master gain 0 silences it.
+    #[test]
+    fn its_intensity_and_gain_change_while_it_plays() {
+        use atrium_core::commands::SynthParam;
+        use atrium_core::source::SoundSource;
+        let energy = |intensity: f32, gain: f32| {
+            let mut rain = RainSource::new(Vec3::ZERO, 0.5, 3);
+            rain.set_synth_param(SynthParam::Intensity, intensity);
+            rain.set_synth_param(SynthParam::MasterGain, gain);
+            rain.set_synth_param(SynthParam::Intensity, f32::NAN);
+            (0..96_000)
+                .map(|_| rain.next_sample(48_000.0).powi(2))
+                .sum::<f32>()
+        };
+        assert!(energy(1.0, 1.0) > energy(0.1, 1.0) * 2.0);
+        assert_eq!(energy(1.0, 0.0), 0.0);
     }
 }

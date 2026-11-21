@@ -28,6 +28,7 @@
 
 use std::f32::consts::TAU;
 
+use atrium_core::commands::SynthParam;
 use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 
@@ -160,6 +161,22 @@ impl WispSource {
 }
 
 impl SoundSource for WispSource {
+    /// What changes while it plays; any other setting is not one it has.
+    fn set_synth_param(&mut self, param: SynthParam, value: f32) {
+        // `f32::clamp` passes NaN through, and one NaN would turn every later
+        // sample into NaN: keep the previous value instead.
+        if !value.is_finite() {
+            return;
+        }
+        match param {
+            SynthParam::MaxSpeed => self.max_speed = value.clamp(0.1, 30.0),
+            SynthParam::HoverTimeMin => self.hover_time_min = value.clamp(0.0, self.hover_time_max),
+            SynthParam::HoverTimeMax => self.hover_time_max = value.max(self.hover_time_min),
+            SynthParam::MasterGain => self.master_gain = value.clamp(0.0, 2.0),
+            _ => {}
+        }
+    }
+
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
         if self.sample_rate_cached != sample_rate {
             // The lowpasses follow the speed and are retuned every sample
@@ -817,5 +834,33 @@ mod tests {
             high / low
         );
         assert!(dc.abs() < 0.01);
+    }
+
+    /// What changes while it flies reaches it: its top speed and how long it
+    /// hovers, each kept in range, and master gain 0 silences it.
+    #[test]
+    fn its_speed_hovering_and_gain_change_while_it_flies() {
+        use atrium_core::commands::SynthParam;
+        use atrium_core::source::SoundSource;
+        let mut wisp = WispSource::new(Vec3::ZERO, 5);
+        wisp.set_synth_param(SynthParam::MaxSpeed, 2.0);
+        wisp.set_synth_param(SynthParam::HoverTimeMin, 0.2);
+        wisp.set_synth_param(SynthParam::HoverTimeMax, 0.1);
+        assert_eq!(
+            (wisp.max_speed, wisp.hover_time_min, wisp.hover_time_max),
+            (2.0, 0.2, 0.2),
+            "the longest hover is never shorter than the shortest"
+        );
+        for _ in 0..240_000 {
+            wisp.next_sample(48_000.0);
+            wisp.tick(1.0 / 48_000.0);
+            assert!(
+                wisp.speed() <= 2.0 + 1e-3,
+                "it flies faster than it was told"
+            );
+        }
+        wisp.set_synth_param(SynthParam::MasterGain, 0.0);
+        let energy: f32 = (0..9_600).map(|_| wisp.next_sample(48_000.0).powi(2)).sum();
+        assert_eq!(energy, 0.0);
     }
 }

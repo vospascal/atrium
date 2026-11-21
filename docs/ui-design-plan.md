@@ -553,7 +553,7 @@ one binding method away. Bold marks what is missing.
 | Listener position and facing | `SetListenerPose` | **no call** | new (39) |
 | Head tracking | listens for OpenTrack packets and can start the Sony bridge. Telemetry carries the listener's heading | `head_trackers`, `set_head_tracker`; telemetry reports the facing and whether a tracker is sending | exists on desktop: Settings switches it and says whether head movement arrives; the 3D map draws where the listener faces. Seen working with the Sony headphones on 2026-11-20. The Sony bridge is a Mac script, so iPhone needs its own source of head motion |
 | Move a speaker | `SetSpeakerPosition` | **no call** | new |
-| Generator settings while playing | `SetSynthParam` reaches the four winds and the river. **Rain, waves and the wisp ignore it** | **no call, and no list of a generator's settings** | new (26, 27) |
+| Generator settings while playing | `SetSynthParam` reaches every generator: the winds and the river, rain intensity, drop and drip rate, the waves' period and crash chance, the wisp's speed and hovering, and every master gain | **no call, and no list of a generator's settings** | new (27) |
 | Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn. Any sound ambient is 11 |
 | Add a sound, hear a preset first | `SceneEdit` add, and a builder kept from the scene build | `list_presets`, `audition`, `add_sound` | exists: the editor's library |
 | Remove a sound | `SceneEdit` remove | `remove_sound`; each sound in `scene()` carries its voice | exists: the inspector |

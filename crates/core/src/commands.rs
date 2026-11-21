@@ -107,4 +107,17 @@ pub enum SynthParam {
     DebrisLevel,
     StructureLevel,
     MasterGain,
+    /// How hard it rains, 0 to 1.
+    Intensity,
+    /// Drops per second at full intensity.
+    DropRate,
+    /// Large drips per second at full intensity.
+    DripRate,
+    /// Seconds from one wave to the next.
+    WavePeriod,
+    /// How likely a wave breaks with a crash, 0 to 1.
+    CrashChance,
+    /// Shortest and longest a flying source hovers before it moves on (s).
+    HoverTimeMin,
+    HoverTimeMax,
 }

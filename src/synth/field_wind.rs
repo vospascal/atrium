@@ -432,6 +432,14 @@ impl SoundSource for FieldWindSource {
             return;
         }
         match param {
+            // Settings of rain, waves and flying sources; not this one's.
+            SynthParam::Intensity
+            | SynthParam::DropRate
+            | SynthParam::DripRate
+            | SynthParam::WavePeriod
+            | SynthParam::CrashChance
+            | SynthParam::HoverTimeMin
+            | SynthParam::HoverTimeMax => {}
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => {
                 self.min_speed = value.clamp(0.0, self.max_speed);
