@@ -118,6 +118,7 @@ impl SoundBuilder {
             takes: meta.takes,
             gap: meta.gap,
             bout: meta.bout,
+            follows: meta.follows,
             name: meta.name,
             group: meta.group,
             color: meta.color,
@@ -213,7 +214,11 @@ impl SoundBuilder {
         };
 
         let mut built = built;
-        let generator = matches!(resolved.sound, ResolvedSound::Synth { .. });
+        // Takes to follow with activity or level: a recording, or a generator
+        // the plan tells when to sound. Settings: any generator.
+        let has_takes =
+            built.rhythm.is_some() || matches!(resolved.sound, ResolvedSound::Sample { .. });
+        let has_settings = matches!(resolved.sound, ResolvedSound::Synth { .. });
         built.follows = resolved
             .follows
             .iter()
@@ -223,7 +228,8 @@ impl SoundBuilder {
                     &follow.setting,
                     follow.from,
                     follow.to,
-                    generator,
+                    has_takes,
+                    has_settings,
                 )
                 .map_err(|reason| format!("sound `{id}`: {reason}"))
             })
@@ -254,6 +260,7 @@ impl SoundBuilder {
                 } => Some([rests.gap_seconds.0, rests.gap_seconds.1]),
                 _ => None,
             },
+            follows: resolved.follows.clone(),
             bout: match &resolved.sound {
                 ResolvedSound::Sample {
                     rests: Some(rests), ..

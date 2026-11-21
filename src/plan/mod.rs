@@ -131,23 +131,22 @@ impl Plan {
         if slot >= MAX_SOURCES {
             return;
         }
-        match rhythm {
-            Some(rhythm) if !rhythm.takes.is_empty() => {
-                self.voices[slot] = Some(Voice {
-                    plan: VoicePlan::new(rhythm, voice_seed(self.seed, id), now),
-                    follows,
-                });
-            }
-            _ if follows
-                .iter()
-                .any(|follow| matches!(follow.target, Target::Setting(_))) =>
-            {
-                self.followers[slot] = Some(Follower {
-                    follows,
-                    sent: Vec::new(),
-                });
-            }
-            _ => {}
+        // A generator with takes, such as thunder, is both: its takes are
+        // planned, and its own settings follow too.
+        if follows
+            .iter()
+            .any(|follow| matches!(follow.target, Target::Setting(_)))
+        {
+            self.followers[slot] = Some(Follower {
+                follows: follows.clone(),
+                sent: Vec::new(),
+            });
+        }
+        if let Some(rhythm) = rhythm.filter(|rhythm| !rhythm.takes.is_empty()) {
+            self.voices[slot] = Some(Voice {
+                plan: VoicePlan::new(rhythm, voice_seed(self.seed, id), now),
+                follows,
+            });
         }
     }
 
@@ -345,7 +344,7 @@ mod tests {
     }
 
     fn rainy_bird() -> Vec<Follow> {
-        vec![Follow::named("rain", "activity", 1.0, 0.0, false).expect("rain")]
+        vec![Follow::named("rain", "activity", 1.0, 0.0, true, false).expect("rain")]
     }
 
     /// A bird that stops in the rain sings through a dry spell and falls
@@ -397,7 +396,7 @@ mod tests {
             [(0.1, 0.1), (0.0, 0.0), (0.0, 0.0), (1.0, 1.0)],
             2,
         ));
-        let rain = vec![Follow::named("rain", "intensity", 0.0, 1.0, true).expect("rain")];
+        let rain = vec![Follow::named("rain", "intensity", 0.0, 1.0, false, true).expect("rain")];
         plan.add_voice(4, "rain", None, rain, 0.0);
         let mut sent = Vec::new();
         for tenth in 1..(3 * 3600 * 10) {

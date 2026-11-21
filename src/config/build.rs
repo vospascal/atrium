@@ -86,6 +86,7 @@ pub(super) struct SourceMeta {
     /// Shortest and longest rest between takes; `None` when it plays all the time.
     pub(super) gap: Option<[f32; 2]>,
     pub(super) bout: [u32; 2],
+    pub(super) follows: Vec<atrium_world::Follow>,
     pub(super) group: Option<String>,
     pub(super) name: String,
     pub(super) color: String,
@@ -255,6 +256,7 @@ impl SceneConfig {
                     takes: meta.takes.clone(),
                     gap: meta.gap,
                     bout: meta.bout,
+                    follows: meta.follows.clone(),
                     name: meta.name.clone(),
                     group: meta.group.clone(),
                     color: meta.color.clone(),
@@ -611,6 +613,23 @@ pub(super) fn build_one_synth_source(
     // Preview render: measure RMS + spectral profile exactly like a decoded file.
     let sample_rate = SYNTH_PREVIEW_SAMPLE_RATE as f32;
     let mut preview_generator = spec.build_generator(position, default_seed);
+    let rhythm = spec.rhythm();
+    // A generator the plan tells when to sound is silent by itself: book its
+    // likeliest take at once, so the preview has something to measure.
+    if let Some(rhythm) = &rhythm {
+        let likeliest = rhythm
+            .takes
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.chance.total_cmp(&right.chance))
+            .map_or(0, |(index, _)| index as u8);
+        preview_generator.schedule(atrium_core::source::Utterance {
+            take: likeliest,
+            at_sample: 0,
+            gain: 1.0,
+            rate: 1.0,
+        });
+    }
     let total_samples = (SYNTH_PREVIEW_SECONDS * sample_rate) as usize;
     let mut samples = vec![0.0_f32; total_samples];
     for sample in samples.iter_mut() {
@@ -653,7 +672,7 @@ pub(super) fn build_one_synth_source(
         ref_dist,
         audible_radius,
         directivity_alpha: pattern.alpha(),
-        rhythm: None,
+        rhythm,
         follows: Vec::new(),
     })
 }

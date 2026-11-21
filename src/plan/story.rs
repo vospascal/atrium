@@ -48,6 +48,9 @@ pub struct Weather {
 
 /// Shortest and longest quiet spell between two storms (s).
 const QUIET_SECONDS: (f64, f64) = (8.0 * 60.0, 25.0 * 60.0);
+/// The first quiet spell, before the first storm: short, so a scene with a
+/// passing storm shows what it is within minutes (s).
+const FIRST_QUIET_SECONDS: (f64, f64) = (60.0, 180.0);
 /// Shortest and longest storm, from first gust to the last drip (s).
 const STORM_SECONDS: (f64, f64) = (14.0 * 60.0, 30.0 * 60.0);
 
@@ -109,8 +112,15 @@ impl Weather {
     fn storm_phase(&self, seconds: f64) -> Option<f32> {
         let mut random = Random::new(self.seed ^ 0x0057_07A1);
         let mut start = 0.0;
+        let mut first = true;
         loop {
-            let quiet = between(QUIET_SECONDS, random.unit());
+            let spell = if first {
+                FIRST_QUIET_SECONDS
+            } else {
+                QUIET_SECONDS
+            };
+            first = false;
+            let quiet = between(spell, random.unit());
             let length = between(STORM_SECONDS, random.unit());
             let storm_start = start + quiet;
             if seconds < storm_start {

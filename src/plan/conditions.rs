@@ -80,23 +80,24 @@ pub struct Follow {
 }
 
 impl Follow {
-    /// A link as a file writes it, with the names checked. `generator` says
-    /// whether the sound is made by a generator, which has settings but no
-    /// takes, so no activity or level to follow with.
+    /// A link as a file writes it, with the names checked against what the
+    /// sound has: `takes` to follow with activity or level (a recording, or
+    /// thunder), `settings` to follow with a generator's own settings.
     pub fn named(
         condition: &str,
         setting: &str,
         from: f32,
         to: f32,
-        generator: bool,
+        takes: bool,
+        settings: bool,
     ) -> Result<Self, String> {
         let condition = Condition::named(condition).ok_or_else(|| {
             format!("`{condition}` is not a condition; use wind, rain, storm or daylight")
         })?;
         let target = match setting {
-            "activity" | "level" if generator => {
+            "activity" | "level" if !takes => {
                 return Err(format!(
-                    "a generator has no takes, so it cannot follow with `{setting}`; follow with one of its own settings, such as `master_gain`"
+                    "this sound has no takes, so it cannot follow with `{setting}`; follow with one of its own settings, such as `master_gain`"
                 ))
             }
             "activity" => Target::Activity,
@@ -105,12 +106,10 @@ impl Follow {
                 format!("`{other}` is not a setting; use activity, level or a generator's setting such as intensity")
             })?),
         };
-        if let Target::Setting(_) = target {
-            if !generator {
-                return Err(format!(
-                    "`{setting}` is a generator's setting, and this sound is a recording; follow with activity or level"
-                ));
-            }
+        if matches!(target, Target::Setting(_)) && !settings {
+            return Err(format!(
+                "`{setting}` is a generator's setting, and this sound is a recording; follow with activity or level"
+            ));
         }
         if !(from.is_finite() && to.is_finite()) {
             return Err("`from` and `to` must be numbers".into());
@@ -165,8 +164,8 @@ mod tests {
     #[test]
     fn activity_follows_every_link_together() {
         let follows = [
-            Follow::named("rain", "activity", 1.0, 0.0, false).expect("rain"),
-            Follow::named("daylight", "activity", 0.2, 1.0, false).expect("daylight"),
+            Follow::named("rain", "activity", 1.0, 0.0, true, false).expect("rain"),
+            Follow::named("daylight", "activity", 0.2, 1.0, true, false).expect("daylight"),
         ];
         assert!((activity(&follows, &under(&[(Condition::Daylight, 1.0)])) - 1.0).abs() < 1e-6);
         assert!(
@@ -188,8 +187,8 @@ mod tests {
     #[test]
     fn level_links_add_up_in_db() {
         let follows = [
-            Follow::named("wind", "level", 0.0, -6.0, false).expect("wind"),
-            Follow::named("rain", "level", 0.0, -6.0, false).expect("rain"),
+            Follow::named("wind", "level", 0.0, -6.0, true, false).expect("wind"),
+            Follow::named("rain", "level", 0.0, -6.0, true, false).expect("rain"),
         ];
         let level = level_db(
             &follows,
@@ -202,17 +201,22 @@ mod tests {
     /// what it has.
     #[test]
     fn a_link_must_name_what_the_sound_has() {
-        assert!(Follow::named("fog", "activity", 0.0, 1.0, false).is_err());
-        assert!(Follow::named("rain", "loudness", 0.0, 1.0, false).is_err());
+        assert!(Follow::named("fog", "activity", 0.0, 1.0, true, false).is_err());
+        assert!(Follow::named("rain", "loudness", 0.0, 1.0, true, false).is_err());
         assert!(
-            Follow::named("rain", "activity", 0.0, 1.0, true).is_err(),
+            Follow::named("rain", "activity", 0.0, 1.0, false, true).is_err(),
             "a generator has no takes"
         );
         assert!(
-            Follow::named("rain", "intensity", 0.0, 1.0, false).is_err(),
+            Follow::named("rain", "intensity", 0.0, 1.0, true, false).is_err(),
             "a recording has no intensity"
         );
-        let rain = Follow::named("rain", "intensity", 0.0, 1.0, true).expect("rain makes rain");
+        let rain =
+            Follow::named("rain", "intensity", 0.0, 1.0, false, true).expect("rain makes rain");
+        assert!(
+            Follow::named("storm", "activity", 0.0, 1.0, true, true).is_ok(),
+            "thunder has both"
+        );
         assert_eq!(rain.target, Target::Setting(SynthParam::Intensity));
     }
 }

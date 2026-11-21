@@ -9,6 +9,7 @@ mod rain_v2;
 mod river;
 mod soft_wind;
 mod storm_wind;
+mod thunder;
 mod waves;
 mod wisp;
 
@@ -26,6 +27,7 @@ use rain_v2::RainV2SynthParams;
 use river::RiverSynthParams;
 use soft_wind::SoftWindSynthParams;
 use storm_wind::StormWindSynthParams;
+use thunder::ThunderSynthParams;
 use waves::WaveSynthParams;
 use wisp::WispSynthParams;
 
@@ -42,6 +44,7 @@ pub(in crate::config) enum SynthSpec {
     Rain(RainSynthParams),
     RainV2(RainV2SynthParams),
     River(RiverSynthParams),
+    Thunder(ThunderSynthParams),
     Waves(WaveSynthParams),
     Wisp(WispSynthParams),
 }
@@ -56,6 +59,7 @@ impl SynthSpec {
             SynthSpec::Rain(_) => "rain",
             SynthSpec::RainV2(_) => "rain_v2",
             SynthSpec::River(_) => "river",
+            SynthSpec::Thunder(_) => "thunder",
             SynthSpec::Waves(_) => "waves",
             SynthSpec::Wisp(_) => "wisp",
         }
@@ -64,6 +68,15 @@ impl SynthSpec {
     /// Construct the generator at `position`. `default_seed` applies when the
     /// params don't pin one — the scene builder passes a slot-stable seed so
     /// reloading a scene sounds statistically identical.
+    /// A generator that is told when to sound has a rhythm: its takes and
+    /// rests, for the session's plan. One that sounds all the time has none.
+    pub(in crate::config) fn rhythm(&self) -> Option<crate::plan::Rhythm> {
+        match self {
+            SynthSpec::Thunder(params) => Some(params.rhythm()),
+            _ => None,
+        }
+    }
+
     pub(in crate::config) fn build_generator(
         &self,
         position: Vec3,
@@ -77,6 +90,7 @@ impl SynthSpec {
             SynthSpec::Rain(params) => params.build_generator(position, default_seed),
             SynthSpec::RainV2(params) => params.build_generator(position, default_seed),
             SynthSpec::River(params) => params.build_generator(position, default_seed),
+            SynthSpec::Thunder(params) => params.build_generator(position, default_seed),
             SynthSpec::Waves(params) => params.build_generator(position, default_seed),
             SynthSpec::Wisp(params) => params.build_generator(position, default_seed),
         }

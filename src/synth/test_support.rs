@@ -157,9 +157,10 @@ mod conformance {
     use crate::synth::river::RiverSource;
     use crate::synth::soft_wind::SoftWindSource;
     use crate::synth::storm_wind::StormWindSource;
+    use crate::synth::thunder::{ThunderSource, PRESET_MID};
     use crate::synth::wave::WaveSource;
     use crate::synth::wisp::WispSource;
-    use atrium_core::source::SoundSource;
+    use atrium_core::source::{SoundSource, Utterance};
     use atrium_core::types::Vec3;
 
     type Maker = Box<dyn Fn() -> Box<dyn SoundSource>>;
@@ -201,6 +202,20 @@ mod conformance {
             (
                 "canopy_wind",
                 Box::new(|| Box::new(CanopyWindSource::new(Vec3::ZERO, 8.0, 8.0, 42))),
+            ),
+            (
+                // Silent until told to strike: one mid clap from the start.
+                "thunder",
+                Box::new(|| {
+                    let mut thunder = ThunderSource::new(Vec3::ZERO, 42);
+                    thunder.schedule(Utterance {
+                        take: PRESET_MID,
+                        at_sample: 0,
+                        gain: 1.0,
+                        rate: 1.0,
+                    });
+                    Box::new(thunder)
+                }),
             ),
         ]
     }

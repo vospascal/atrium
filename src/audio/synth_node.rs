@@ -71,6 +71,20 @@ impl SoundSource for SynthNode {
         self.signal_meter.as_ref().map(SignalMeter::signal)
     }
 
+    /// The generator's own: a generator that keeps appointments (thunder)
+    /// rests between them; one that never rests is always on take 0.
+    fn sounding_take(&self) -> Option<u8> {
+        self.generator.sounding_take()
+    }
+
+    fn set_clock(&mut self, sample: u64) {
+        self.generator.set_clock(sample);
+    }
+
+    fn schedule(&mut self, utterance: atrium_core::source::Utterance) {
+        self.generator.schedule(utterance);
+    }
+
     fn position(&self) -> Vec3 {
         // Anchor plus whatever the generator has flown since (zero for
         // stationary generators).

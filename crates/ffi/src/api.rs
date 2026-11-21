@@ -88,6 +88,20 @@ pub struct SourceDescription {
     pub gap: Option<Gap>,
     /// How many times running one take is uttered before another is chosen.
     pub bout: Bout,
+    /// How it follows the place's conditions.
+    pub follows: Vec<Follow>,
+}
+
+/// A setting tied to a condition: `from` when the condition is 0, `to` when
+/// it is 1, a straight line between.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Follow {
+    /// `wind`, `rain`, `storm` or `daylight`.
+    pub condition: String,
+    /// `activity`, `level` or a generator's own setting such as `intensity`.
+    pub setting: String,
+    pub from: f32,
+    pub to: f32,
 }
 
 /// The fewest and most times running one take is uttered before another is
@@ -173,6 +187,16 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
                 fewest: source.bout[0],
                 most: source.bout[1],
             },
+            follows: source
+                .follows
+                .into_iter()
+                .map(|follow| Follow {
+                    condition: follow.condition,
+                    setting: follow.setting,
+                    from: follow.from,
+                    to: follow.to,
+                })
+                .collect(),
         }
     }
 }

@@ -1,0 +1,83 @@
+# Scene: Passing storm — a meadow on a fair day that a storm crosses now and
+# then. Within a few minutes the wind picks up, the birds fall silent, rain
+# comes down and thunder rolls in from the west; then it eases, drips, and the
+# birds come back. Every storm, and every quiet spell between, is different.
+#   cargo run --release -- scenes/passing-storm.yaml
+#
+# Positions are [x, y, z] in metres, relative to the listener's spot.
+
+title: Passing storm
+environment: environments/meadow.yaml
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 60.0
+
+speakers:
+  layout: "5.1"
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c:  [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0
+
+sounds:
+  wind:
+    name: Wind
+    group: Weather
+    sound: { preset: sources/field-wind.yaml }
+    place: [0.0, 0.0, 1.2]
+
+  rain:
+    name: Rain
+    group: Weather
+    sound: { preset: sources/synth-rain-v2.yaml }
+    place: [0.0, 4.0, 3.0]
+
+  thunder:  # the storm comes in from the west
+    name: Thunder
+    group: Weather
+    sound: { preset: sources/thunder.yaml }
+    place: [-45.0, 20.0, 25.0]
+
+  blackbird:
+    name: Blackbird
+    color: "#3d3d3d"
+    group: Creatures
+    sound: { preset: sources/blackbird.yaml }
+    place: [9.0, 11.0, 7.0]
+
+  robin:
+    name: Robin
+    color: "#e0703a"
+    group: Creatures
+    sound: { preset: sources/robin.yaml }
+    place: [-10.0, 3.0, 2.5]
+
+  frog:  # frogs like the rain
+    name: Frog
+    group: Creatures
+    sound: { preset: sources/frog.yaml }
+    place: [6.0, -9.0, 0.0]
+
+atmosphere: atmospheres/default.yaml
+
+weather:
+  story: passing storm
+  wind: [0.05, 0.25]
+  daylight: [0.8, 1.0]

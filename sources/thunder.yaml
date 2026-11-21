@@ -1,0 +1,15 @@
+# Synth source: procedural thunder (strike crack + tail, then a rolling rumble
+# with an infra layer under 25 Hz for the LFE channel). Silent until the plan
+# tells it to strike. Its takes are distances: near, mid, far and massive, and
+# no two claps are the same.
+name: Thunder
+group: Weather
+synth: thunder
+reference_spl: 75.0 # dB at 1 m, over a mid clap — the loudest weather, a point event
+width: 360
+spread: 0.9         # heard from the storm's direction, but wide
+gap: [8, 40]        # seconds between claps at the height of a storm
+
+# Strikes only in a storm, and more often the stronger it is.
+follows:
+  - { condition: storm, setting: activity, from: 0, to: 1 }

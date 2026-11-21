@@ -592,3 +592,36 @@ fn a_seed_in_the_scene_plays_the_same_session_again() {
     let (fresh_again, _) = pinned(None);
     assert_ne!(fresh, fresh_again, "without a seed each play is new");
 }
+
+/// The passing storm builds, and its plan strikes thunder only in a storm,
+/// with the birds quiet in the downpour: over three hours of plan there is
+/// thunder, and none of it in the first dry minute.
+#[test]
+fn the_passing_storm_strikes_thunder_only_in_its_storms() {
+    let mut scene = SceneConfig::load("scenes/passing-storm.yaml").expect("scene should load");
+    scene.seed = Some(3);
+    let result = scene.build().expect("scene should build");
+    let thunder = result
+        .description
+        .sources
+        .iter()
+        .find(|source| source.id == "thunder")
+        .expect("thunder")
+        .slot as usize;
+    let weather = result.planner.weather();
+    let claps: Vec<_> = result
+        .planner
+        .upcoming(3.0 * 3600.0)
+        .into_iter()
+        .filter(|(slot, _)| *slot == thunder)
+        .collect();
+    assert!(
+        claps.len() > 10,
+        "only {} claps in three hours",
+        claps.len()
+    );
+    for (_, clap) in &claps {
+        let storm = weather.at(clap.at).get(crate::plan::Condition::Storm);
+        assert!(storm > 0.0, "a clap at {:.0} s with no storm", clap.at);
+    }
+}

@@ -50,6 +50,8 @@ pub struct SourceDescription {
     /// How many times running one take is uttered, fewest and most, before
     /// another is chosen. `[1, 1]` for a sound that changes every time.
     pub bout: [u32; 2],
+    /// How it follows the place's conditions, as its file names them.
+    pub follows: Vec<atrium_world::Follow>,
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,

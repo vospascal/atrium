@@ -42,6 +42,10 @@ fn synth_source_defs_parse_with_integer_values() {
                 "waves",
             ),
             ("synth: wisp\nrange: 6\nmax_speed: 7\nreference_spl: 55\n", "wisp"),
+            (
+                "synth: thunder\nmaster_gain: 1\nseed: 3\nreference_spl: 75\n",
+                "thunder",
+            ),
         ];
     for (yaml, expected_kind) in cases {
         match serde_yaml::from_str::<SourceDef>(yaml)
@@ -57,6 +61,7 @@ fn synth_source_defs_parse_with_integer_values() {
                         "soft_wind" => 42,
                         "river" => 45,
                         "storm_wind" => 60,
+                        "thunder" => 75,
                         _ => 55,
                     }
                 );
@@ -368,4 +373,61 @@ fn silent_synth_source_is_a_build_error() {
         40.0,
     );
     assert!(result.is_err(), "zero-intensity rain should fail the build");
+}
+
+/// Thunder builds: its preview books one clap to measure, while the built
+/// source is silent until the plan strikes it, and then keeps that strike.
+/// It has a rhythm, so the plan can strike it: its distances are its takes.
+#[test]
+fn thunder_is_silent_until_the_plan_strikes_it() {
+    use crate::synth::thunder::{clap_seconds, PRESET_NEAR};
+    use atrium_core::source::{EmitterKind, Utterance};
+
+    let source: SynthSourceDef =
+        serde_yaml::from_str(&std::fs::read_to_string("sources/thunder.yaml").unwrap()).unwrap();
+    assert_eq!(source.spec.kind_name(), "thunder");
+    let mut built = build_one_synth_source(
+        &source.spec,
+        source.reference_spl,
+        DirectivityPattern::Omni,
+        source.spread,
+        Vec3::ZERO,
+        7,
+        &NormalizationConfig::default(),
+        1.0,
+        40.0,
+    )
+    .expect("thunder should build");
+    assert_eq!(built.source.emitter_kind(), EmitterKind::Object);
+    assert_eq!(built.source.spread(), 0.9);
+    let rhythm = built.rhythm.as_ref().expect("thunder has a rhythm");
+    assert_eq!(rhythm.takes.len(), 4);
+    assert_eq!(rhythm.takes[0].seconds, clap_seconds(PRESET_NEAR));
+    assert_eq!(rhythm.rests.gap_seconds, (8.0, 40.0));
+
+    let sample_rate = 48_000.0;
+    for _ in 0..4_800 {
+        assert_eq!(
+            built.source.next_sample(sample_rate),
+            0.0,
+            "silent by itself"
+        );
+    }
+    built.source.set_clock(10_000);
+    built.source.schedule(Utterance {
+        take: PRESET_NEAR,
+        at_sample: 10_100,
+        gain: 1.0,
+        rate: 1.0,
+    });
+    for _ in 0..100 {
+        built.source.next_sample(sample_rate);
+    }
+    assert_eq!(built.source.sounding_take(), None, "not yet");
+    built.source.next_sample(sample_rate);
+    assert_eq!(
+        built.source.sounding_take(),
+        Some(PRESET_NEAR),
+        "the plan's strike"
+    );
 }
