@@ -15,5 +15,5 @@ width: 360                  # calls scatter in all directions
 
 # Calls less in the rain and not at all in a storm.
 follows:
-  - { condition: rain, setting: activity, from: 1, to: 0.3 }
-  - { condition: storm, setting: activity, from: 1, to: 0 }
+  - { condition: rain, setting: activity, from: 1, to: 0.3, over: [0.2, 0.7] }
+  - { condition: storm, setting: activity, from: 1, to: 0, over: [0, 0.4] }

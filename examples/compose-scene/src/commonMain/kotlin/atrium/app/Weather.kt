@@ -144,5 +144,7 @@ internal fun followLine(follow: Follow): String {
             else -> if (amount == amount.roundToInt().toFloat()) "${amount.roundToInt()}" else "${(amount * 100).roundToInt() / 100f}"
         }
     }
-    return "$setting ${value(follow.from)} → ${value(follow.to)} as $condition rises"
+    val over = follow.over
+    val stretch = if (over.low <= 0f && over.high >= 1f) "as $condition rises" else "as $condition goes from ${percent(over.low)} to ${percent(over.high)}"
+    return "$setting ${value(follow.from)} → ${value(follow.to)} $stretch"
 }

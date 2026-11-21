@@ -36,6 +36,6 @@ master_gain: 1.0
 reference_spl: 48.0        # nominal field level; gust dynamics rise within this bed
 spread: 1.0                # UI description only; Field does not use MDAP spread
 
-# Blows harder as the wind rises.
+# A breeze: it blows up with the wind, but stays a breeze; a storm brings its own wind.
 follows:
-  - { condition: wind, setting: max_speed, from: 3, to: 14 }
+  - { condition: wind, setting: max_speed, from: 2, to: 9, over: [0, 0.7] }

@@ -12,7 +12,9 @@ rule:
 reference_spl: 65.0        # ~60-70 dB SPL at 1m (chorus of croaks)
 width: 360                  # croaks radiate in all directions
 
-# Croaks more in the rain and at night.
+# Croaks more in light rain and at night, but not in a downpour or strong wind.
 follows:
-  - { condition: rain, setting: activity, from: 0.6, to: 1 }
+  - { condition: rain, setting: activity, from: 0.6, to: 1, over: [0, 0.3] }
+  - { condition: rain, setting: activity, from: 1, to: 0, over: [0.6, 0.85] }
+  - { condition: wind, setting: activity, from: 1, to: 0, over: [0.45, 0.75] }
   - { condition: daylight, setting: activity, from: 1, to: 0.5 }

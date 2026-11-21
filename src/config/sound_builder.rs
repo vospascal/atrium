@@ -231,6 +231,10 @@ impl SoundBuilder {
                     has_takes,
                     has_settings,
                 )
+                .and_then(|link| match follow.over {
+                    Some([low, high]) => link.over(low, high),
+                    None => Ok(link),
+                })
                 .map_err(|reason| format!("sound `{id}`: {reason}"))
             })
             .collect::<Result<_, _>>()?;

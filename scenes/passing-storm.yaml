@@ -1,7 +1,7 @@
 # Scene: Passing storm — a meadow on a fair day that a storm crosses now and
-# then. Within a few minutes the wind picks up, the birds fall silent, rain
-# comes down and thunder rolls in from the west; then it eases, drips, and the
-# birds come back. Every storm, and every quiet spell between, is different.
+# then. Within a few minutes the breeze picks up and a storm wind rises under
+# it, the birds fall silent, rain comes down and thunder rolls in from the
+# west, loud above the wind; then it eases, drips, and the birds come back. Every storm, and every quiet spell between, is different.
 #   cargo run --release -- scenes/passing-storm.yaml
 #
 # Positions are [x, y, z] in metres, relative to the listener's spot.
@@ -37,11 +37,20 @@ normalization:
   spl_threshold: 0
 
 sounds:
-  wind:
-    name: Wind
+  breeze:  # blows up with the wind, but stays a breeze
+    name: Breeze
     group: Weather
     sound: { preset: sources/field-wind.yaml }
     place: [0.0, 0.0, 1.2]
+
+  storm-wind:  # silent until a storm comes, then howls with it
+    name: Storm wind
+    group: Weather
+    sound: { preset: sources/storm-wind.yaml }
+    place: [-20.0, 10.0, 1.2]
+    follows:
+      - { condition: storm, setting: master_gain, from: 0, to: 0.85, over: [0.05, 0.6] }
+      - { condition: wind, setting: max_speed, from: 10, to: 22 }
 
   rain:
     name: Rain

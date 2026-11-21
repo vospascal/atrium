@@ -62,7 +62,10 @@ This is version 1, the foundation. It changes nothing you hear. The design it fo
   crate does not know which conditions or settings exist; the engine checks the names when it
   builds the sound, against what the sound is (a recording has activity and level, a generator
   its own settings). New conditions or settings then need no change here. `follows:` on an
-  entity replaces its preset's links; an empty list cuts them all.
+  entity replaces its preset's links; an empty list cuts them all. `over: [low, high]` limits a link to
+  part of its condition, because nature is rarely a straight line: birds stop as soon as it
+  really rains, not halfway through a downpour. Several links on one setting multiply, so a frog
+  can like light rain and still stop in a downpour or a gale.
 - **`moves:` is a struct with one optional key per way of moving, not a tagged enum.**
   serde_yaml writes an enum variant as a YAML tag (`!orbit`). A hand-written scene file
   should not need tags, and the crate should not depend on one YAML library's behaviour.

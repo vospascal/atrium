@@ -32,6 +32,9 @@ const TELEMETRY_CAPACITY: usize = 4;
 const EDIT_CAPACITY: usize = 8;
 /// How far ahead of the listener an auditioned or newly added sound stands (m).
 const AHEAD_OF_LISTENER: f32 = 2.0;
+/// The loudest a preview of a kind plays (dB SPL at 1 m), however loud the
+/// kind itself is.
+const PREVIEW_LEVEL_LIMIT: f32 = 80.0;
 /// The most moments one `conditions` call returns.
 const MAX_CONDITION_STEPS: u32 = 2048;
 /// How far ahead `planned` looks at most (s).
@@ -521,9 +524,16 @@ impl Engine {
             return Err(EngineError::NoFreeVoice);
         }
         let id = EntityId::unused("audition", []);
+        // Heard two metres away, a kind as loud as thunder would hurt: a
+        // preview is never louder than a raised voice.
+        let level = read_preset(&preset)
+            .map_err(|error| EngineError::Scene(error.to_string()))?
+            .level;
+        let mut previewed = self.sound_ahead(preset, None, None);
+        previewed.sound.level = Some(level.min(PREVIEW_LEVEL_LIMIT));
         let built = self
             .sounds
-            .build(&id, &self.sound_ahead(preset, None, None), AUDITION_SLOT)
+            .build(&id, &previewed, AUDITION_SLOT)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         edits.send(SceneEdit::AddSource {
             slot: AUDITION_SLOT as u16,

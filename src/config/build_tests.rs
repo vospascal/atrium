@@ -625,3 +625,42 @@ fn the_passing_storm_strikes_thunder_only_in_its_storms() {
         assert!(storm > 0.0, "a clap at {:.0} s with no storm", clap.at);
     }
 }
+
+/// Under the passing storm's weather, as the plan decides it: the birds stop
+/// as soon as it really rains, the frog croaks in light rain but not in the
+/// downpour or a gale, and the storm wind is silent until a storm comes.
+#[test]
+fn in_the_passing_storm_each_creature_keeps_to_its_weather() {
+    use crate::plan::Condition;
+    let mut scene = SceneConfig::load("scenes/passing-storm.yaml").expect("scene should load");
+    scene.seed = Some(3);
+    let result = scene.build().expect("scene should build");
+    let weather = result.planner.weather();
+    let slot = |id: &str| {
+        result
+            .description
+            .sources
+            .iter()
+            .find(|source| source.id == id)
+            .expect(id)
+            .slot as usize
+    };
+    let planned = result.planner.upcoming(3.0 * 3600.0);
+    let under = |id: &str, condition: Condition| -> Vec<f32> {
+        planned
+            .iter()
+            .filter(|(own, _)| *own == slot(id))
+            .map(|(_, utterance)| weather.at(utterance.at).get(condition))
+            .collect()
+    };
+    for bird in ["robin", "blackbird"] {
+        let rain = under(bird, Condition::Rain);
+        assert!(rain.len() > 100, "{bird} hardly sang");
+        assert!(rain.iter().all(|rain| *rain < 0.35), "{bird} sang in real rain");
+    }
+    let frog_rain = under("frog", Condition::Rain);
+    let frog_wind = under("frog", Condition::Wind);
+    assert!(frog_rain.iter().any(|rain| *rain > 0.1), "the frog never croaked in light rain");
+    assert!(frog_rain.iter().all(|rain| *rain < 0.85), "the frog croaked in the downpour");
+    assert!(frog_wind.iter().all(|wind| *wind < 0.75), "the frog croaked in a gale");
+}

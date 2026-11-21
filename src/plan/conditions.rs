@@ -77,6 +77,9 @@ pub struct Follow {
     pub target: Target,
     pub from: f32,
     pub to: f32,
+    /// The part of the condition over which the setting moves: below it the
+    /// setting is `from`, above it `to`.
+    pub over: (f32, f32),
 }
 
 impl Follow {
@@ -119,13 +122,30 @@ impl Follow {
             target,
             from,
             to,
+            over: (0.0, 1.0),
         })
     }
 
     /// The setting's value under `conditions`.
     pub fn value(&self, conditions: &Conditions) -> f32 {
-        let along = conditions.get(self.condition);
+        let (low, high) = self.over;
+        let along = ((conditions.get(self.condition) - low) / (high - low)).clamp(0.0, 1.0);
         self.from + (self.to - self.from) * along
+    }
+
+    /// The same link, changing only while the condition goes from `low` to
+    /// `high`. Refused unless 0 ≤ low < high ≤ 1.
+    pub fn over(self, low: f32, high: f32) -> Result<Self, String> {
+        let in_order = (0.0..1.0).contains(&low) && high > low && high <= 1.0;
+        if !in_order {
+            return Err(format!(
+                "`over: [{low}, {high}]` must run from low to high, inside 0 to 1"
+            ));
+        }
+        Ok(Self {
+            over: (low, high),
+            ..self
+        })
     }
 }
 
@@ -182,6 +202,23 @@ mod tests {
             (activity(&[], &under(&[])) - 1.0).abs() < 1e-6,
             "no links: as its rests say"
         );
+    }
+
+    /// Birds that stop as soon as it really rains: at full song through a
+    /// drizzle, silent from a third of the way up, half way between.
+    #[test]
+    fn a_link_changes_only_over_its_part_of_the_condition() {
+        let birds = Follow::named("rain", "activity", 1.0, 0.0, true, false)
+            .and_then(|follow| follow.over(0.05, 0.35))
+            .expect("a link over part of the rain");
+        let at = |rain| birds.value(&under(&[(Condition::Rain, rain)]));
+        assert_eq!(at(0.0), 1.0);
+        assert_eq!(at(0.05), 1.0);
+        assert!((at(0.2) - 0.5).abs() < 1e-5);
+        assert_eq!(at(0.35), 0.0);
+        assert_eq!(at(0.9), 0.0);
+        assert!(birds.over(0.5, 0.2).is_err());
+        assert!(birds.over(0.0, 1.5).is_err());
     }
 
     #[test]

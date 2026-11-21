@@ -16,7 +16,8 @@ reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective chorus, like cicada
 width: 360                  # stridulation scatters in all directions
 spread: 0.6                 # broad MDAP spread — a chorus, not a point
 
-# Chirps at night, hardly in the rain.
+# Chirps at night; stops in rain and quietens in wind.
 follows:
-  - { condition: daylight, setting: activity, from: 1, to: 0.15 }
-  - { condition: rain, setting: activity, from: 1, to: 0.2 }
+  - { condition: daylight, setting: activity, from: 1, to: 0.15, over: [0.2, 0.8] }
+  - { condition: rain, setting: activity, from: 1, to: 0, over: [0.1, 0.4] }
+  - { condition: wind, setting: activity, from: 1, to: 0.3, over: [0.5, 0.9] }

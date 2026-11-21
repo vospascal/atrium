@@ -102,6 +102,8 @@ pub struct Follow {
     pub setting: String,
     pub from: f32,
     pub to: f32,
+    /// The part of the condition over which the setting moves, 0 to 1.
+    pub over: Band,
 }
 
 /// The fewest and most times running one take is uttered before another is
@@ -195,6 +197,13 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
                     setting: follow.setting,
                     from: follow.from,
                     to: follow.to,
+                    over: follow.over.map_or(
+                        Band {
+                            low: 0.0,
+                            high: 1.0,
+                        },
+                        |[low, high]| Band { low, high },
+                    ),
                 })
                 .collect(),
         }

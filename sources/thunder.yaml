@@ -5,7 +5,7 @@
 name: Thunder
 group: Weather
 synth: thunder
-reference_spl: 75.0 # dB at 1 m, over a mid clap — the loudest weather, a point event
+reference_spl: 112.0 # dB at 1 m: a clap is among the loudest sounds in nature, heard over any wind
 width: 360
 spread: 0.9         # heard from the storm's direction, but wide
 gap: [8, 40]        # seconds between claps at the height of a storm

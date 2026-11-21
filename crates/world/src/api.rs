@@ -135,7 +135,10 @@ impl When {
 /// ```
 ///
 /// When the condition is 0 the setting is `from`, when it is 1 the setting is
-/// `to`, and in between it moves in a straight line. The names are the
+/// `to`, and in between it moves in a straight line. With `over: [low, high]`
+/// the change happens only while the condition goes from `low` to `high`:
+/// birds that stop as soon as it really rains say
+/// `{ condition: rain, setting: activity, from: 1, to: 0, over: [0.05, 0.35] }`. The names are the
 /// engine's: a condition such as `wind`, `rain`, `storm` or `daylight`, and a
 /// setting such as `activity` (how often it sounds), `level` (dB up or down),
 /// or a generator's own setting such as `intensity`.
@@ -146,6 +149,10 @@ pub struct Follow {
     pub setting: String,
     pub from: f32,
     pub to: f32,
+    /// The part of the condition, from 0 to 1, over which the setting moves
+    /// from `from` to `to`. Left out, the whole of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<[f32; 2]>,
 }
 
 /// Where an entity is, in metres. Written `[x, y, z]` in a scene file, in the
