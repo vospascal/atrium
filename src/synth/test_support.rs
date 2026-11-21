@@ -157,7 +157,7 @@ mod conformance {
     use crate::synth::river::RiverSource;
     use crate::synth::soft_wind::SoftWindSource;
     use crate::synth::storm_wind::StormWindSource;
-    use crate::synth::thunder::{ThunderSource, PRESET_MID};
+    use crate::synth::thunder::{ThunderSource, KIND_CLAP};
     use crate::synth::wave::WaveSource;
     use crate::synth::wisp::WispSource;
     use atrium_core::source::{SoundSource, Utterance};
@@ -209,7 +209,7 @@ mod conformance {
                 Box::new(|| {
                     let mut thunder = ThunderSource::new(Vec3::ZERO, 42);
                     thunder.schedule(Utterance {
-                        take: PRESET_MID,
+                        take: KIND_CLAP,
                         at_sample: 0,
                         gain: 1.0,
                         rate: 1.0,

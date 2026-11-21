@@ -380,7 +380,7 @@ fn silent_synth_source_is_a_build_error() {
 /// It has a rhythm, so the plan can strike it: its distances are its takes.
 #[test]
 fn thunder_is_silent_until_the_plan_strikes_it() {
-    use crate::synth::thunder::{clap_seconds, PRESET_NEAR};
+    use crate::synth::thunder::{clap_seconds, KIND_CRACK};
     use atrium_core::source::{EmitterKind, Utterance};
 
     let source: SynthSourceDef =
@@ -402,7 +402,7 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
     assert_eq!(built.source.spread(), 0.9);
     let rhythm = built.rhythm.as_ref().expect("thunder has a rhythm");
     assert_eq!(rhythm.takes.len(), 4);
-    assert_eq!(rhythm.takes[0].seconds, clap_seconds(PRESET_NEAR));
+    assert_eq!(rhythm.takes[0].seconds, clap_seconds(KIND_CRACK));
     assert_eq!(rhythm.rests.gap_seconds, (8.0, 40.0));
 
     let sample_rate = 48_000.0;
@@ -415,7 +415,7 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
     }
     built.source.set_clock(10_000);
     built.source.schedule(Utterance {
-        take: PRESET_NEAR,
+        take: KIND_CRACK,
         at_sample: 10_100,
         gain: 1.0,
         rate: 1.0,
@@ -428,7 +428,7 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
     built.source.next_sample(sample_rate);
     assert_eq!(
         built.source.sounding_take(),
-        Some(PRESET_NEAR),
+        Some(KIND_CRACK),
         "the plan's strike"
     );
 }

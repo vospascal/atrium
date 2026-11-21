@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::plan::{Rests, Rhythm, TakeRhythm};
 use crate::synth::thunder::{
-    clap_seconds, ThunderSource, PRESET_FAR, PRESET_MASSIVE, PRESET_MID, PRESET_NEAR,
+    clap_seconds, ThunderSource, KIND_CLAP, KIND_CRACK, KIND_DISTANT, KIND_ROLLING,
 };
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -41,9 +41,10 @@ impl ThunderSynthParams {
         Box::new(generator)
     }
 
-    /// Thunder as the plan sees it: its distances are its takes, each a clap
-    /// as long as that distance rolls, and it rests between claps. Middle and
-    /// far claps are the common ones; a massive one is rare. Every clap is a
+    /// Thunder as the plan sees it: its kinds are its takes (a crack close
+    /// by, a clap a few kilometres off, rolling thunder from a cloud flash, a
+    /// distant grumble), each as long as that kind lasts, and it rests between
+    /// claps. A crack close by is the rare one. Every clap is a
     /// little louder or softer and higher or lower than the last.
     pub(super) fn rhythm(&self) -> Rhythm {
         let [shortest, longest] = self.gap.unwrap_or(DEFAULT_GAP);
@@ -53,10 +54,10 @@ impl ThunderSynthParams {
         };
         Rhythm {
             takes: vec![
-                take(PRESET_NEAR, 2.0),
-                take(PRESET_MID, 3.0),
-                take(PRESET_FAR, 3.0),
-                take(PRESET_MASSIVE, 1.0),
+                take(KIND_CRACK, 1.0),
+                take(KIND_CLAP, 3.0),
+                take(KIND_ROLLING, 3.0),
+                take(KIND_DISTANT, 3.0),
             ],
             rests: Rests {
                 level_variation_db: 3.0,

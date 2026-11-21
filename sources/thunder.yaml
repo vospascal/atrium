@@ -1,7 +1,7 @@
-# Synth source: procedural thunder (strike crack + tail, then a rolling rumble
-# with an infra layer under 25 Hz for the LFE channel). Silent until the plan
-# tells it to strike. Its takes are distances: near, mid, far and massive, and
-# no two claps are the same.
+# Synth source: thunder worked out from a lightning channel (see
+# docs/thunder-research.md). Silent until the plan tells it to strike. Its takes
+# are kinds of thunder: a crack close by, a clap a few kilometres off, rolling
+# thunder from a cloud flash, and a distant grumble; every clap is a new flash.
 name: Thunder
 group: Weather
 synth: thunder
