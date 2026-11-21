@@ -64,6 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scene_listener_position = result.scene.listener.position;
     let scene_listener_yaw = result.scene.listener.yaw;
     let (producer, consumer) = rtrb::RingBuffer::<Command>::new(256);
+    // The session's plan runs beside the audio for as long as it plays.
+    let _planner = result.planner;
     let handle = CpalOutput.start(result.scene, consumer)?;
     let producer = Arc::new(Mutex::new(producer));
 

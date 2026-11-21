@@ -46,22 +46,6 @@ pub enum Command {
     /// more one way than another.
     SetSourceFacing { index: u16, yaw: f32 },
 
-    /// Set how long a source with takes rests between two (s). A source
-    /// without takes ignores it.
-    SetSourceGap {
-        index: u16,
-        shortest: f32,
-        longest: f32,
-    },
-
-    /// Set how many times running a source with takes utters one before it
-    /// chooses another, fewest and most. A source without takes ignores it.
-    SetSourceBout { index: u16, fewest: u32, most: u32 },
-
-    /// Set how often take `take` of a source is chosen next to its others.
-    /// A source without that take ignores it.
-    SetTakeChance { index: u16, take: u8, chance: f32 },
-
     /// Set orbit speed for a source (0 = paused).
     SetSourceOrbitSpeed { index: u16, speed: f32 },
 

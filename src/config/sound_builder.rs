@@ -2,7 +2,7 @@
 //! sound added while it plays both go through, so the two cannot differ.
 
 use atrium_core::directivity::DirectivityPattern;
-use atrium_core::source::{EmitterKind, SoundSource};
+use atrium_core::source::{EmitterKind, SoundSource, Utterance};
 use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place};
 
@@ -14,7 +14,7 @@ use super::scene::NormalizationConfig;
 use super::source::{display_name, resolve, ResolvedSound, ResolvedSource};
 use crate::audio::silence_node::SilenceNode;
 use crate::audio::spectral_profile::BARK_BANDS;
-use crate::audio::voice_node::Rests;
+use crate::plan::{Rests, Rhythm};
 
 /// What it takes to build a sound for one scene: its loudness calibration,
 /// its distance model, and where the scene sits in the world.
@@ -29,6 +29,9 @@ pub struct SoundBuilder {
 /// A sound ready to be handed to the audio thread, and how a UI shows it.
 pub struct BuiltSound {
     pub source: Box<dyn SoundSource>,
+    /// Its takes and rests, for the session's plan; `None` for a sound that
+    /// sounds all the time.
+    pub rhythm: Option<Rhythm>,
     /// 24 Bark-band spectral profile (dB relative to RMS).
     pub bands: [f32; BARK_BANDS],
     /// Base playback amplitude, before spatial attenuation.
@@ -63,7 +66,8 @@ impl SoundBuilder {
     }
 
     /// Build only take `take` of `entity`, to hear it on its own: it is
-    /// uttered once, at once, and then the voice stays silent. A sound
+    /// uttered once, at once, and then the voice stays silent. It has no
+    /// rhythm, so no plan picks it up. A sound
     /// without that take is refused.
     pub fn build_take(
         &self,
@@ -80,11 +84,19 @@ impl SoundBuilder {
                 return Err(format!("sound `{id}` has no take {take}").into());
             }
             *takes = vec![takes.swap_remove(take)];
-            *rests = Some(Rests {
-                starts_at_once: true,
-                ..Rests::plain(HEARD_ONCE_REST, HEARD_ONCE_REST)
-            });
+            // Rests make it a voice that keeps appointments; it is given one.
+            *rests = Some(Rests::plain(0.0, 0.0));
             Ok(())
+        })
+        .map(|mut built| {
+            built.source.schedule(Utterance {
+                take: 0,
+                at_sample: 0,
+                gain: 1.0,
+                rate: 1.0,
+            });
+            built.rhythm = None;
+            built
         })
     }
 
@@ -116,6 +128,7 @@ impl SoundBuilder {
         };
         Ok(BuiltSound {
             source: built.source,
+            rhythm: built.rhythm,
             bands: built.bands,
             amplitude: built.amplitude,
             description,
@@ -165,9 +178,6 @@ impl SoundBuilder {
                 build_one_source(
                     takes,
                     *rests,
-                    // Slot-stable, like a generator's: each voice keeps its own rhythm,
-                    // and the same way when the scene is loaded again.
-                    1000 + slot as u64,
                     resolved.reference_spl,
                     DirectivityPattern::beam(resolved.width, resolved.behind),
                     resolved.spread,
@@ -252,10 +262,6 @@ impl SoundBuilder {
         Ok((built, meta))
     }
 }
-
-/// How long a take heard on its own rests after it ends (s): longer than
-/// anyone listens, so it is heard once.
-const HEARD_ONCE_REST: f32 = 3600.0;
 
 /// The engine's heading for a compass bearing: a bearing is degrees clockwise
 /// from north (+Y), a heading is radians counter-clockwise from +X.

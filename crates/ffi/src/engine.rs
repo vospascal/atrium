@@ -9,6 +9,7 @@ use atrium::config::{bearing_for_heading, radiation_of, read_preset, SceneConfig
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
+use atrium::plan::Planner;
 use atrium_core::commands::Command;
 use atrium_core::directivity::SILENT_BEHIND_DB;
 use atrium_core::telemetry::{TelemetryFrame, MAX_SOURCES};
@@ -60,6 +61,8 @@ pub struct Engine {
     head_tracking: Mutex<Option<HeadTracking>>,
     /// Builds one more sound for this scene, as its own sounds were built.
     sounds: SoundBuilder,
+    /// The session's plan: what every voice with takes will do, decided ahead.
+    planner: Planner,
     edits: Mutex<Edits>,
     /// Dropped last; dropping it stops the audio.
     _output: OutputThread,
@@ -103,6 +106,7 @@ impl Engine {
             listener_yaw,
             head_tracking: Mutex::new(None),
             sounds: built.sounds,
+            planner: built.planner,
             edits: Mutex::new(Edits {
                 to_audio,
                 retired,
@@ -190,13 +194,7 @@ impl Engine {
         if loops_after {
             return Ok(());
         }
-        lock(&self.commands)
-            .push(Command::SetSourceGap {
-                index: slot,
-                shortest,
-                longest,
-            })
-            .map_err(|_| EngineError::CommandQueueFull)?;
+        self.planner.set_gap(slot as usize, shortest, longest);
         if let Some(source) = sound_in(&mut scene.description, slot) {
             source.gap = Some(Gap { shortest, longest });
         }
@@ -217,13 +215,7 @@ impl Engine {
         if source.gap.is_none() {
             return Ok(());
         }
-        lock(&self.commands)
-            .push(Command::SetSourceBout {
-                index: slot,
-                fewest,
-                most,
-            })
-            .map_err(|_| EngineError::CommandQueueFull)?;
+        self.planner.set_bout(slot as usize, fewest, most);
         source.bout = Bout { fewest, most };
         if let Some(entity) = scene.entity_in(slot) {
             entity.when.bout = Some([fewest, most]);
@@ -258,13 +250,8 @@ impl Engine {
         if chance == 0.0 && !others_can_be_chosen {
             return Ok(());
         }
-        lock(&self.commands)
-            .push(Command::SetTakeChance {
-                index: slot,
-                take: take as u8,
-                chance,
-            })
-            .map_err(|_| EngineError::CommandQueueFull)?;
+        self.planner
+            .set_chance(slot as usize, take as usize, chance);
         source.takes[take as usize].chance = chance;
         if let Some(entity) = scene.entity_in(slot) {
             entity.when.chance.insert(name, chance);
@@ -549,6 +536,7 @@ impl Engine {
             bands: built.bands,
             amplitude: built.amplitude,
         })?;
+        self.planner.add_voice(slot, id.as_str(), built.rhythm);
         let added: SourceDescription = built.description.into();
         scene.description.sources.push(added.clone());
         scene
@@ -573,6 +561,7 @@ impl Engine {
             slot,
             filler: SoundBuilder::silence(),
         })?;
+        self.planner.remove_voice(slot as usize);
         scene
             .description
             .sources
@@ -653,12 +642,15 @@ impl Engine {
         if scene.muted.contains(&slot) {
             built.source.set_muted(true);
         }
+        let rhythm = built.rhythm.take();
         edits.send(SceneEdit::AddSource {
             slot,
             source: built.source,
             bands: built.bands,
             amplitude: built.amplitude,
         })?;
+        // After the new voice is on its way, so no utterance reaches the old one.
+        self.planner.add_voice(slot as usize, id.as_str(), rhythm);
         if let Some(source) = sound_in(&mut scene.description, slot) {
             *source = built.description.into();
         }
@@ -1258,6 +1250,45 @@ mod tests {
         assert_eq!(cricket.when.bout, Some([2, 3]));
         written.build().expect("the saved scene builds");
         let _ = std::fs::remove_file(&saved);
+    }
+
+    /// The session's plan reaches the audio thread: birds whose takes are
+    /// decided ahead are heard uttering them, and a rest made short is heard
+    /// at once. At zero volume:
+    /// `cargo test -p atrium-ffi -- --ignored --test-threads=1`.
+    #[test]
+    #[ignore = "opens the default output device"]
+    fn planned_takes_are_heard_and_a_shorter_rest_at_once() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        let engine = Engine::new("scenes/meadow-birds.yaml".into()).expect("scene should play");
+        engine.set_volume(0.0).expect("volume");
+        let blackbird = engine
+            .scene()
+            .sources
+            .iter()
+            .find(|source| source.id == "blackbird")
+            .expect("a blackbird")
+            .slot;
+        engine
+            .set_source_gap(blackbird, 0.1, 0.2)
+            .expect("a short rest");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut heard = std::collections::BTreeSet::new();
+        while Instant::now() < deadline {
+            if let Some(telemetry) = engine.latest_telemetry() {
+                for source in &telemetry.sources {
+                    if source.slot == blackbird {
+                        heard.extend(source.take);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !heard.is_empty(),
+            "the blackbird was planned but never heard"
+        );
     }
 
     #[test]

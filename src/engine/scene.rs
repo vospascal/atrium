@@ -41,6 +41,12 @@ pub struct AudioScene {
     pub speaker_layout: SpeakerLayout,
     /// Ring buffer producer for sending telemetry to the main thread.
     pub telemetry_out: Option<rtrb::Producer<TelemetryFrame>>,
+    /// The session's clock, counted here in output samples and read by the
+    /// planner.
+    pub clock: std::sync::Arc<crate::plan::Clock>,
+    /// Utterances the session's plan hands over, a fraction of a second
+    /// ahead of when they are due.
+    pub plan_in: Option<rtrb::Consumer<crate::plan::Scheduled>>,
     /// Consumer for live source-pool edits (add/remove) from the control thread.
     pub scene_edits: Option<rtrb::Consumer<SceneEdit>>,
     /// Producer that ships displaced source boxes back to the control thread to
@@ -147,33 +153,6 @@ impl AudioScene {
                 Command::SetSourceFacing { index, yaw } => {
                     if let Some(source) = self.sources.get_mut(index as usize) {
                         source.set_facing(yaw);
-                    }
-                }
-                Command::SetSourceGap {
-                    index,
-                    shortest,
-                    longest,
-                } => {
-                    if let Some(source) = self.sources.get_mut(index as usize) {
-                        source.set_gap(shortest, longest);
-                    }
-                }
-                Command::SetSourceBout {
-                    index,
-                    fewest,
-                    most,
-                } => {
-                    if let Some(source) = self.sources.get_mut(index as usize) {
-                        source.set_bout(fewest, most);
-                    }
-                }
-                Command::SetTakeChance {
-                    index,
-                    take,
-                    chance,
-                } => {
-                    if let Some(source) = self.sources.get_mut(index as usize) {
-                        source.set_take_chance(take, chance);
                     }
                 }
                 Command::SetSourceOrbitSpeed { index, speed } => {
@@ -366,6 +345,19 @@ impl AudioScene {
         let num_frames = output.len() / channels;
         let dt = num_frames as f32 / self.sample_rate;
 
+        // Hand every voice what the plan made due, and the time it is now.
+        let now = self.clock.samples();
+        if let Some(plan) = &mut self.plan_in {
+            while let Ok(scheduled) = plan.pop() {
+                if let Some(source) = self.sources.get_mut(scheduled.slot as usize) {
+                    source.schedule(scheduled.utterance);
+                }
+            }
+        }
+        for source in &mut self.sources {
+            source.set_clock(now);
+        }
+
         // Advance time-varying state on all sources
         {
             let _s = profile_span!("source_tick").entered();
@@ -436,6 +428,7 @@ impl AudioScene {
             };
             render_pipeline(pipeline, &mut self.sources, &params, output);
         }
+        self.clock.advance(num_frames as u64, self.sample_rate);
         #[cfg(feature = "memprof")]
         self.memprof.record_stage(MemStage::Mix);
 

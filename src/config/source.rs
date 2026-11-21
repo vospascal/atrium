@@ -5,7 +5,7 @@ use atrium_world::{Entity, EntityId, When};
 use serde::Deserialize;
 
 use super::description::title_from_path;
-use crate::audio::voice_node::Rests;
+use crate::plan::Rests;
 use atrium_core::directivity::SILENT_BEHIND_DB;
 
 /// The width of a sound that goes out all round (degrees).
@@ -327,7 +327,6 @@ impl SampleSourceDef {
                     level_variation_db: rests.vary.level,
                     pitch_variation_cents: rests.vary.pitch,
                     bout: rests.bout.map(checked_bout).transpose()?.unwrap_or((1, 1)),
-                    starts_at_once: false,
                 })
             }
         };

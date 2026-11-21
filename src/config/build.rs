@@ -24,13 +24,18 @@ use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 use crate::audio::synth_node::SynthNode;
 use crate::audio::test_node::TestNode;
-use crate::audio::voice_node::{Rests, Take, VoiceNode};
+use crate::audio::voice_node::VoiceNode;
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::environment::Environment;
 use crate::pipeline::{build_all_pipelines, PipelineParams};
+use crate::plan::{Clock, Plan, Planner, Rests, Rhythm, TakeRhythm};
 
 pub struct BuildResult {
     pub scene: AudioScene,
+    /// The session's plan: what every voice with takes will do, decided
+    /// ahead on its own thread. Keep it as long as the scene plays; dropping
+    /// it stops the planning and the voices fall silent.
+    pub planner: Planner,
     /// Builds one more sound for this scene while it plays, the same way
     /// the scene's own sounds were built.
     pub sounds: SoundBuilder,
@@ -53,6 +58,8 @@ struct BuildSourcesResult {
     spectral_profiles: Vec<[f32; crate::audio::spectral_profile::BARK_BANDS]>,
     /// Per-source base amplitude (sone-based gain, before spatial attenuation).
     source_amplitudes: Vec<f32>,
+    /// Per-source takes and rests, for the plan; `None` for one that needs none.
+    rhythms: Vec<Option<Rhythm>>,
 }
 
 /// Default color palette for sources when no color is specified in YAML.
@@ -162,6 +169,18 @@ impl SceneConfig {
         let source_metas = build.metas;
         let mut spectral_profiles = build.spectral_profiles;
         let mut source_amplitudes = build.source_amplitudes;
+
+        // The session: every choice follows from the seed, decided ahead.
+        let seed = self.seed.unwrap_or_else(fresh_seed);
+        let mut plan = Plan::new(seed);
+        for (slot, ((id, _), rhythm)) in self.sounds.iter().zip(build.rhythms).enumerate() {
+            if let Some(rhythm) = rhythm {
+                plan.add_voice(slot, id.as_str(), rhythm, 0.0);
+            }
+        }
+        let clock = std::sync::Arc::new(Clock::default());
+        let (to_audio, plan_in) = rtrb::RingBuffer::new(PLAN_CAPACITY);
+        let planner = Planner::start(plan, clock.clone(), to_audio);
 
         // Pre-warm the source pool to a fixed 16 slots with silent placeholders.
         // Live add/remove only swaps a Box into/out of an existing slot, so the
@@ -295,6 +314,8 @@ impl SceneConfig {
             distance_model,
             speaker_layout,
             telemetry_out: None,
+            clock,
+            plan_in: Some(plan_in),
             scene_edits: None,
             retired_out: None,
             telemetry_counter: 0,
@@ -328,6 +349,7 @@ impl SceneConfig {
 
         Ok(BuildResult {
             scene,
+            planner,
             sounds: sound_builder,
             description,
             scene_json,
@@ -367,6 +389,7 @@ impl SceneConfig {
         let mut metas: Vec<SourceMeta> = Vec::new();
         let mut spectral_profiles = Vec::<[f32; crate::audio::spectral_profile::BARK_BANDS]>::new();
         let mut source_amplitudes = Vec::<f32>::new();
+        let mut rhythms = Vec::new();
 
         for (slot, (id, entity)) in self.sounds.iter().enumerate() {
             let (built, meta) = builder.build_parts(id, entity, slot, |_| Ok(()))?;
@@ -377,6 +400,7 @@ impl SceneConfig {
             metas.push(meta);
             spectral_profiles.push(built.bands);
             source_amplitudes.push(built.amplitude);
+            rhythms.push(built.rhythm);
             nodes.push(built.source);
         }
 
@@ -385,6 +409,7 @@ impl SceneConfig {
             metas,
             spectral_profiles,
             source_amplitudes,
+            rhythms,
         })
     }
 
@@ -416,6 +441,21 @@ pub(super) struct BuiltSource {
     pub audible_radius: f32,
     /// Directivity polar coefficient (1.0 omni, 0.5 cardioid, …).
     pub directivity_alpha: f32,
+    /// Its takes and rests, for the plan; `None` for a sound that sounds all
+    /// the time.
+    pub rhythm: Option<Rhythm>,
+}
+
+/// How many utterances can wait between the planner and the audio thread:
+/// the planner hands over less than half a second at a time.
+const PLAN_CAPACITY: usize = 256;
+
+/// A seed for a session nobody asked to repeat: the time, to the nanosecond.
+fn fresh_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos() as u64)
+        .unwrap_or(1)
 }
 
 /// Decode a kind's recordings and build one `SoundSource` with its amplitude,
@@ -424,13 +464,13 @@ pub(super) struct BuiltSource {
 /// source matches a reloaded one exactly). `position` is world coordinates
 /// (already offset by the environment spawn point).
 ///
-/// Without `rests` the one take loops. With it, the takes are uttered with
-/// rests between them, and `seed` decides the choices.
+/// Without `rests` the one take loops. With it, the voice utters its takes
+/// when the session's plan says, and the rhythm it returns is what the plan
+/// decides from.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_one_source(
     takes: &[ResolvedTake],
     rests: Option<Rests>,
-    seed: u64,
     reference_spl: f32,
     pattern: DirectivityPattern,
     spread: f32,
@@ -485,6 +525,7 @@ pub(super) fn build_one_source(
     };
     let unit_amplitude = rms_correction * 10.0_f32.powf(-normalization.spl_reference / 20.0);
 
+    let mut rhythm = None;
     let source: Box<dyn atrium_core::source::SoundSource> = match rests {
         None => {
             let mut node = TestNode::new(buffers[0].clone(), position, orbit_radius, orbit_speed);
@@ -497,15 +538,18 @@ pub(super) fn build_one_source(
             Box::new(node)
         }
         Some(rests) => {
-            let voice = buffers
-                .iter()
-                .zip(takes)
-                .map(|(audio, take)| Take {
-                    audio: audio.clone(),
-                    chance: take.chance,
-                })
-                .collect();
-            let mut node = VoiceNode::new(voice, rests, position, seed);
+            rhythm = Some(Rhythm {
+                takes: buffers
+                    .iter()
+                    .zip(takes)
+                    .map(|(audio, take)| TakeRhythm {
+                        seconds: audio.samples.len() as f32 / audio.sample_rate as f32,
+                        chance: take.chance,
+                    })
+                    .collect(),
+                rests,
+            });
+            let mut node = VoiceNode::new(buffers.clone(), position);
             node.amplitude = amplitude;
             node.unit_amplitude = unit_amplitude;
             node.ref_dist = ref_dist;
@@ -523,6 +567,7 @@ pub(super) fn build_one_source(
         ref_dist,
         audible_radius,
         directivity_alpha: pattern.alpha(),
+        rhythm,
     })
 }
 
@@ -596,6 +641,7 @@ pub(super) fn build_one_synth_source(
         ref_dist,
         audible_radius,
         directivity_alpha: pattern.alpha(),
+        rhythm: None,
     })
 }
 

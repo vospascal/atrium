@@ -28,6 +28,20 @@ impl EmitterKind {
     }
 }
 
+/// One take to utter at a set moment: what a plan asks of a voice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Utterance {
+    /// Which take, counted from 0.
+    pub take: u8,
+    /// When, in output samples on the session's clock. A moment already past
+    /// is kept at once.
+    pub at_sample: u64,
+    /// How much louder or softer than the take itself (linear).
+    pub gain: f32,
+    /// How much faster or slower, and so higher or lower (1 is as recorded).
+    pub rate: f32,
+}
+
 /// Trait for anything that generates audio samples and has a position.
 /// Implementations must be Send (moved to audio thread) and must not allocate.
 pub trait SoundSource: Send {
@@ -119,17 +133,16 @@ pub trait SoundSource: Send {
     /// no-op, for sources that have no facing to turn.
     fn set_facing(&mut self, _yaw: f32) {}
 
-    /// Rest between `shortest` and `longest` seconds between two takes.
-    /// Default: no-op, for sources that have no takes.
-    fn set_gap(&mut self, _shortest: f32, _longest: f32) {}
+    /// The session's clock at the start of the next block, in output
+    /// samples since the scene started. Called before every block, so a
+    /// source added later counts from the same moment as the others.
+    /// Default: no-op, for sources that keep no appointments.
+    fn set_clock(&mut self, _sample: u64) {}
 
-    /// Utter one take `fewest` to `most` times running before choosing
-    /// another. Default: no-op, for sources that have no takes.
-    fn set_bout(&mut self, _fewest: u32, _most: u32) {}
-
-    /// Choose take `take` with `chance` next to the others. Default: no-op,
-    /// for sources that have no takes.
-    fn set_take_chance(&mut self, _take: u8, _chance: f32) {}
+    /// Utter a take when the clock reaches `utterance.at_sample`. A plan made
+    /// on another thread decides what and when; the source only keeps the
+    /// appointment. Default: no-op, for sources that have no takes.
+    fn schedule(&mut self, _utterance: Utterance) {}
 
     /// Set a procedural-synth parameter live. Sources that don't model the
     /// given parameter ignore it. Default: no-op (sample players etc.).

@@ -40,6 +40,11 @@ pub struct SceneConfig {
     /// Defaults to "assets/hrtf/default.sofa" if omitted.
     #[serde(default = "default_hrtf_path")]
     pub hrtf: String,
+    /// What every choice of the session follows from: which take, every rest
+    /// and every small change of level and pitch. Left out, each play is a
+    /// new session; set, the scene plays the same way every time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 impl SceneConfig {

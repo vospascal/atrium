@@ -454,7 +454,7 @@ fn every_repository_scene_reads_and_names_its_sounds() {
 #[test]
 fn the_meadow_birds_sing_their_own_takes_with_rests() {
     let scene = SceneConfig::load("scenes/meadow-birds.yaml").expect("scene should load");
-    let mut result = scene.build().expect("scene should build");
+    let result = scene.build().expect("scene should build");
     let birds: Vec<_> = result
         .description
         .sources
@@ -486,25 +486,23 @@ fn the_meadow_birds_sing_their_own_takes_with_rests() {
         "the wind has no takes"
     );
 
+    // The session plans every bird ahead: two minutes of it, read without
+    // playing, are what two minutes of playing would utter.
+    let planned = result.planner.upcoming(120.0);
     let mut uttered: Vec<Vec<u8>> = vec![Vec::new(); birds.len()];
-    let mut before: Vec<Option<u8>> = vec![None; birds.len()];
-    let mut resting = vec![0usize; birds.len()];
-    for _ in 0..120 * 48_000 {
-        for (index, (_, slot, _)) in birds.iter().enumerate() {
-            let source = &mut result.scene.sources[*slot];
-            source.next_sample(48_000.0);
-            let now = source.sounding_take();
-            if now.is_none() {
-                resting[index] += 1;
-            }
-            if now != before[index] {
-                if let Some(take) = now {
-                    uttered[index].push(take);
-                }
-                before[index] = now;
-            }
+    let mut sounding = vec![0f64; birds.len()];
+    for (slot, utterance) in &planned {
+        if let Some(index) = birds.iter().position(|bird| bird.1 == *slot) {
+            uttered[index].push(utterance.take);
+            sounding[index] += utterance.seconds;
         }
     }
+    assert!(
+        planned
+            .iter()
+            .all(|(slot, _)| birds.iter().any(|bird| bird.1 == *slot)),
+        "only voices with takes and rests are planned; the wind is not"
+    );
     for (index, (name, _, takes)) in birds.iter().enumerate() {
         let uttered_by_one = &uttered[index];
         assert!(
@@ -517,11 +515,11 @@ fn the_meadow_birds_sing_their_own_takes_with_rests() {
             "{name} repeated a phrase"
         );
         assert!(uttered_by_one.iter().all(|take| (*take as usize) < *takes));
-        let share = resting[index] as f32 / (120.0 * 48_000.0);
+        let resting = 1.0 - sounding[index] / 120.0;
         assert!(
-            share > 0.4,
+            resting > 0.4,
             "{name} rested only {:.0} % of the time",
-            share * 100.0
+            resting * 100.0
         );
     }
     assert_ne!(
@@ -567,4 +565,30 @@ fn one_take_is_heard_on_its_own_at_once() {
     let (wind_id, wind) = scene.sounds.iter().next().expect("the wind");
     assert!(result.sounds.build_take(wind_id, wind, 0, 15).is_err());
     assert!(result.sounds.build_take(id, blackbird, 9, 15).is_err());
+}
+
+/// A scene can pin its seed: then two builds plan the same session. Without
+/// one, every play is a new session.
+#[test]
+fn a_seed_in_the_scene_plays_the_same_session_again() {
+    let pinned = |seed: Option<u64>| {
+        let mut scene = SceneConfig::load("scenes/meadow-birds.yaml").expect("scene should load");
+        scene.seed = seed;
+        let result = scene.build().expect("scene should build");
+        (result.planner.seed(), result.planner.upcoming(60.0))
+    };
+    let (seed, first) = pinned(Some(7));
+    assert_eq!(seed, 7);
+    let (_, again) = pinned(Some(7));
+    let takes = |plan: &[(usize, crate::plan::Planned)]| {
+        plan.iter()
+            .map(|(slot, planned)| (*slot, planned.take))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(takes(&first), takes(&again));
+    let (_, other) = pinned(Some(8));
+    assert_ne!(takes(&first), takes(&other));
+    let (fresh, _) = pinned(None);
+    let (fresh_again, _) = pinned(None);
+    assert_ne!(fresh, fresh_again, "without a seed each play is new");
 }
