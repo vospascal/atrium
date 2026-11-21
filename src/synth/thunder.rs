@@ -28,7 +28,7 @@ use atrium_core::commands::SynthParam;
 use atrium_core::source::{SoundSource, Utterance};
 use atrium_core::types::Vec3;
 
-use super::noise::Rng;
+use super::noise::{white_noise_density_scale, Rng, REFERENCE_SAMPLE_RATE};
 use crate::audio::filters::Biquad;
 
 /// The kinds of thunder, as `Utterance::take` names them.
@@ -277,6 +277,8 @@ struct Sounding {
 /// One clap: its channel's pulses in arrival order, and those sounding now.
 struct Clap {
     pulses: Vec<Pulse>,
+    /// Which pulse is the infrasonic swell; `u32::MAX` when there is none.
+    swell: u32,
     /// The channel's loudness and brightness, one [`Moment`] per [`MOMENT_SECONDS`].
     moments: Vec<Moment>,
     /// The roar's own noise, and its filters: a tilt, the air, and a floor.
@@ -309,6 +311,7 @@ impl Clap {
     fn new(seed: u64) -> Self {
         Self {
             pulses: Vec::with_capacity(MAX_PULSES),
+            swell: u32::MAX,
             moments: Vec::with_capacity(MAX_MOMENTS),
             noise: Rng::new(seed),
             tilt: 0.0,
@@ -344,7 +347,8 @@ impl Clap {
         };
         self.rate = rate;
         self.gain = gain;
-        build_channel(kind(self.kind), random, &mut self.pulses);
+        self.swell = build_channel(kind(self.kind), random, &mut self.pulses)
+            .map_or(u32::MAX, |index| index as u32);
         shape_the_roar(kind(self.kind), &self.pulses, &mut self.moments);
         self.tilt = 0.0;
         self.air_first = 0.0;
@@ -389,6 +393,7 @@ impl Clap {
         }
 
         let mut sum = 0.0;
+        let mut swell = 0.0;
         let mut index = 0;
         while index < self.sounding_count {
             let sounding = &mut self.sounding[index];
@@ -402,7 +407,11 @@ impl Clap {
             sounding.first += sounding.coefficient * (value - sounding.first);
             sounding.second += sounding.coefficient * (sounding.first - sounding.second);
             sounding.third += sounding.coefficient * (sounding.second - sounding.third);
-            sum += sounding.third;
+            if sounding.pulse == self.swell {
+                swell += sounding.third;
+            } else {
+                sum += sounding.third;
+            }
             sounding.elapsed += step;
             if sounding.elapsed > pulse.lifetime() {
                 self.sounding_count -= 1;
@@ -427,9 +436,12 @@ impl Clap {
         // Where pulses do line up, a gentle limit rounds the peak, as the air
         // near a strike and any microphone do; quieter than a fifth of full
         // scale it changes nothing.
-        let coloured =
-            self.colour
-                .process(roar + kind(self.kind).edge * sum, self.elapsed, sample_rate);
+        let coloured = self.colour.process(
+            roar,
+            kind(self.kind).edge * sum + swell,
+            self.elapsed,
+            sample_rate,
+        );
         soft_limit(coloured * self.gain) * self.steal_gain.max(0.0)
     }
 
@@ -454,14 +466,18 @@ impl Clap {
         let tilt = coefficient(ROAR_TILT_HZ);
         let air = coefficient(cutoff * AIR_STAGE_FACTOR);
         let floor = coefficient(ROAR_FLOOR_HZ);
-        let white = self.noise.next_bipolar();
+        // Scaled like every generator's white noise, so its density per Hz
+        // is the same at any output rate.
+        let white = self.noise.next_bipolar() * white_noise_density_scale(sample_rate);
         self.tilt += tilt * (white - self.tilt);
         self.air_first += air * (self.tilt - self.air_first);
         self.air_second += air * (self.air_first - self.air_second);
         self.floor += floor * (self.air_second - self.floor);
         // White noise through the tilt keeps a share tilt / (2 − tilt) of its
-        // power: scale it back to steady power, so `loudness` is its level.
-        let steady = ((2.0 - tilt) / tilt).sqrt() * WHITE_TO_UNIT;
+        // power at the reference rate: scale it back to steady power, so
+        // `loudness` is its level.
+        let reference_tilt = 1.0 - (-TAU * ROAR_TILT_HZ * self.rate / REFERENCE_SAMPLE_RATE).exp();
+        let steady = ((2.0 - reference_tilt) / reference_tilt).sqrt() * WHITE_TO_UNIT;
         (self.air_second - self.floor) * steady * loudness
     }
 }
@@ -515,7 +531,9 @@ impl Colour {
         self.cliff_second.reset();
     }
 
-    fn process(&mut self, sample: f32, elapsed: f32, sample_rate: f32) -> f32 {
+    /// `roar` is thinned below the boom; `pulses` are not, since they carry
+    /// the infrasonic swell for the LFE channel.
+    fn process(&mut self, roar: f32, pulses: f32, elapsed: f32, sample_rate: f32) -> f32 {
         if sample_rate != self.sample_rate {
             self.sample_rate = sample_rate;
             self.low_cut = Biquad::highpass(LOW_CUT_HZ, sample_rate);
@@ -530,7 +548,7 @@ impl Colour {
                 .set_peak(self.boom_hz * drift, BOOM_DB, BOOM_Q, sample_rate);
             self.moved_at = elapsed;
         }
-        let shaped = self.boom.process(self.low_cut.process(sample));
+        let shaped = self.boom.process(self.low_cut.process(roar) + pulses);
         self.cliff_second.process(self.cliff_first.process(shaped))
     }
 }
@@ -673,7 +691,9 @@ fn between((low, high): (f32, f32), random: &mut Rng) -> f32 {
 
 /// Build one flash of `kind` with the listener at the origin, as pulses in
 /// arrival order, the first at 0, its loudest moment at the kind's level.
-fn build_channel(kind: &Kind, random: &mut Rng, pulses: &mut Vec<Pulse>) {
+/// Returns which pulse is the infrasonic swell, which is heard in full
+/// whatever a kind's edge is.
+fn build_channel(kind: &Kind, random: &mut Rng, pulses: &mut Vec<Pulse>) -> Option<usize> {
     pulses.clear();
     let bearing = random.next_f32() * TAU;
     let distance = between(kind.distance, random);
@@ -776,7 +796,7 @@ fn build_channel(kind: &Kind, random: &mut Rng, pulses: &mut Vec<Pulse>) {
     }
 
     if pulses.is_empty() {
-        return;
+        return None;
     }
     pulses.sort_unstable_by(|left, right| left.at.total_cmp(&right.at));
     let first = pulses[0].at;
@@ -832,8 +852,10 @@ fn build_channel(kind: &Kind, random: &mut Rng, pulses: &mut Vec<Pulse>) {
         if swell.at + swell.lifetime() < kind.seconds {
             let at = pulses.partition_point(|pulse| pulse.at <= swell.at);
             pulses.insert(at, swell);
+            return Some(at);
         }
     }
+    None
 }
 
 /// Procedural thunder, silent until told to strike.
