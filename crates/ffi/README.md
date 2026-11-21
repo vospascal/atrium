@@ -10,7 +10,7 @@ Kotlin can reach is declared here:
   whether each is a recording or a generator.
 - `head_trackers()`: the head trackers that can work on this platform.
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
-  `set_volume`, `set_source_position`, `set_source_facing`, `set_source_pattern`,
+  `set_volume`, `set_source_position`, `set_source_facing`, `set_source_beam`,
   `set_source_muted`, `set_source_level`, `set_source_gap`, `set_take_chance`, `audition`,
   `add_sound`, `remove_sound`, `save_scene`, `set_head_tracker` and `latest_telemetry()`.
 - The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
@@ -26,13 +26,13 @@ runs Cargo itself. There is nothing to build here by hand.
 ## Decisions that look wrong and are right
 
 - **Only the commands a screen uses are exported:** moving a source (the editor's map), the output,
-  volume and head tracker (the player's Settings), and mute, level, pattern, facing, audition,
+  volume and head tracker (the player's Settings), and mute, level, width, facing, audition,
   add and remove (the editor). Every other `Command` gets a method when a
   Kotlin screen calls it. An exported method with no caller is surface the generated Kotlin
   carries for nothing.
 - **`scene()` is the scene as it is now, kept by this object.** The audio thread reports where a
   sound is and whether it is muted, but not its level, and it knows nothing of names, ids or
-  groups. So every call that changes a sound (level, position, facing, pattern, add, remove)
+  groups. So every call that changes a sound (level, position, facing, width, add, remove)
   records it in
   the description this object holds, and the app reads `scene()` again after each. The position
   kept there is where a sound was placed; telemetry has where it is, which differs for one

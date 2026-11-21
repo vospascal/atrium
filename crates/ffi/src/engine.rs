@@ -10,13 +10,13 @@ use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
 use atrium_core::commands::Command;
+use atrium_core::directivity::SILENT_BEHIND_DB;
 use atrium_core::telemetry::{TelemetryFrame, MAX_SOURCES};
 use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place, Shape, Sound, When};
 
 use crate::api::{
-    EmitterKind, EngineError, Gap, Pattern, Position, SceneDescription, SourceDescription,
-    Telemetry,
+    EmitterKind, EngineError, Gap, Position, SceneDescription, SourceDescription, Telemetry,
 };
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::output::{playable_outputs, Output};
@@ -30,6 +30,9 @@ const TELEMETRY_CAPACITY: usize = 4;
 const EDIT_CAPACITY: usize = 8;
 /// How far ahead of the listener an auditioned or newly added sound stands (m).
 const AHEAD_OF_LISTENER: f32 = 2.0;
+/// The narrowest beam a sound can be given, and all round (degrees).
+const MIN_WIDTH: f32 = 10.0;
+const ALL_ROUND: f32 = 360.0;
 /// The voice an auditioned preset plays from: the last one, so a scene's own
 /// sounds, which fill voices from the first, reach it last.
 const AUDITION_SLOT: usize = MAX_SOURCES - 1;
@@ -292,25 +295,34 @@ impl Engine {
         Ok(())
     }
 
-    /// Change how the source in `slot` radiates. `scene()` reports the
-    /// pattern and the beam it gives from then on. A field has no beam,
-    /// whatever its pattern.
-    pub fn set_source_pattern(&self, slot: u16, pattern: Pattern) -> Result<(), EngineError> {
+    /// Change how the source in `slot` radiates: `width` degrees wide, from
+    /// a narrow beam up to 360 (all round), with the sound straight behind
+    /// it `behind` dB below the front, −60 or lower for nothing. `scene()`
+    /// reports both and the beam they give from then on. A field has no
+    /// beam, whatever its width.
+    pub fn set_source_beam(&self, slot: u16, width: f32, behind: f32) -> Result<(), EngineError> {
+        if !(width.is_finite() && behind.is_finite()) {
+            return Ok(());
+        }
+        let width = rounded(width.clamp(MIN_WIDTH, ALL_ROUND), 1.0);
+        let behind = rounded(behind.clamp(SILENT_BEHIND_DB, 0.0), 1.0);
         let mut scene = lock(&self.scene);
         if let Some(entity) = scene.entity_in(slot) {
-            entity.shape.pattern = Some(pattern.into());
+            entity.shape.width = Some(width);
+            entity.shape.behind = Some(behind);
         }
         let Some(source) = sound_in(&mut scene.description, slot) else {
             return Ok(());
         };
-        let (radiation, beam_half_angle) = radiation_of(pattern.into());
+        let (radiation, beam_half_angle) = radiation_of(width, behind);
         lock(&self.commands)
             .push(Command::SetSourceDirectivity {
                 index: slot,
                 pattern: radiation,
             })
             .map_err(|_| EngineError::CommandQueueFull)?;
-        source.pattern = pattern;
+        source.width = width;
+        source.behind = behind;
         source.beam_half_angle = match source.emitter_kind {
             EmitterKind::Object => beam_half_angle,
             EmitterKind::Field => None,
@@ -969,16 +981,14 @@ mod tests {
         assert_eq!(engine.scene().sources.len(), 3);
         assert_eq!(engine.scene().sources[2].id, "frog", "added ones go last");
 
-        // A shape and a direction: a cardioid's beam is 90° to each side, and
+        // A shape and a direction: a half circle's beam is 90° to each side, and
         // a sound turned north faces +Y on the audio thread too.
-        assert_eq!(engine.scene().sources[0].pattern, Pattern::Omni);
+        assert_eq!(engine.scene().sources[0].width, 360.0);
         assert_eq!(engine.scene().sources[0].beam_half_angle, None);
-        engine
-            .set_source_pattern(0, Pattern::Cardioid)
-            .expect("pattern");
+        engine.set_source_beam(0, 180.0, -60.0).expect("width");
         let shaped = engine.scene().sources[0].clone();
-        assert_eq!(shaped.pattern, Pattern::Cardioid);
-        let beam = shaped.beam_half_angle.expect("a cardioid has a beam");
+        assert_eq!((shaped.width, shaped.behind), (180.0, -60.0));
+        let beam = shaped.beam_half_angle.expect("a half circle has a beam");
         assert!((beam - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
         let north = Position {
             x: 0.0,
@@ -1032,7 +1042,7 @@ mod tests {
         let ids: Vec<&str> = written.sounds.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["frogs", "frog-2", "frog"]);
         let (_, frogs) = written.sounds.iter().next().expect("frogs");
-        assert_eq!(frogs.shape.pattern, Some(atrium_world::Pattern::Cardioid));
+        assert_eq!(frogs.shape.width, Some(180.0));
         assert_eq!(frogs.shape.facing, Some(0.0), "north");
         let (_, frog) = written.sounds.iter().nth(2).expect("frog");
         let expected = engine.sounds.place_at(moved.into());

@@ -58,8 +58,11 @@ pub struct SourceDescription {
     /// The engine voice it plays from: what every call that takes a `slot`
     /// means, and what telemetry reports it under.
     pub slot: u16,
-    /// How it radiates. A field ignores it.
-    pub pattern: Pattern,
+    /// How wide it goes out, in degrees: 360 is all round. A field ignores it.
+    pub width: f32,
+    /// How much is heard straight behind it, in dB below the front; −60 is
+    /// nothing. It only matters when the width is less than all round.
+    pub behind: f32,
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,
@@ -100,37 +103,6 @@ pub struct Gap {
     pub longest: f32,
 }
 
-/// How a localized sound radiates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum Pattern {
-    /// Equally in every direction.
-    Omni,
-    /// Mostly the way it faces, nothing straight behind.
-    Cardioid,
-    /// A narrower beam the way it faces, with a small lobe behind.
-    Supercardioid,
-}
-
-impl From<atrium_world::Pattern> for Pattern {
-    fn from(pattern: atrium_world::Pattern) -> Self {
-        match pattern {
-            atrium_world::Pattern::Omni => Self::Omni,
-            atrium_world::Pattern::Cardioid => Self::Cardioid,
-            atrium_world::Pattern::Supercardioid => Self::Supercardioid,
-        }
-    }
-}
-
-impl From<Pattern> for atrium_world::Pattern {
-    fn from(pattern: Pattern) -> Self {
-        match pattern {
-            Pattern::Omni => Self::Omni,
-            Pattern::Cardioid => Self::Cardioid,
-            Pattern::Supercardioid => Self::Supercardioid,
-        }
-    }
-}
-
 /// Whether the engine renders a source as a localized object or a diffuse field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum EmitterKind {
@@ -165,7 +137,8 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
         Self {
             id: source.id,
             slot: source.slot,
-            pattern: source.pattern.into(),
+            width: source.width,
+            behind: source.behind,
             name: source.name,
             group: source.group,
             color: source.color,
