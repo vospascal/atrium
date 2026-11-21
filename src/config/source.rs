@@ -1,7 +1,7 @@
 //! How a scene's sound resolves against the preset it names, and the preset
 //! formats in `sources/*.yaml` (sample file or procedural synth).
 
-use atrium_world::{Entity, EntityId};
+use atrium_world::{Entity, EntityId, When};
 use serde::Deserialize;
 
 use super::description::title_from_path;
@@ -88,7 +88,7 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
     };
 
     Ok(ResolvedSource {
-        sound,
+        sound: with_when(sound, &entity.when)?,
         reference_spl: entity.sound.level.or(def_spl).unwrap_or(70.0),
         directivity: entity
             .shape
@@ -98,6 +98,61 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
             .unwrap_or_else(|| "omni".into()),
         spread: entity.shape.size.or(def_spread).unwrap_or(0.0),
     })
+}
+
+/// `sound` with what an entity's `when:` changes: the rest between takes and
+/// each take's chance. A gap of `[0, 0]` on a sound with one take is that take
+/// round and round, as a kind that loops plays it.
+fn with_when(
+    sound: ResolvedSound,
+    when: &When,
+) -> Result<ResolvedSound, Box<dyn std::error::Error>> {
+    if *when == When::default() {
+        return Ok(sound);
+    }
+    let ResolvedSound::Sample { mut takes, rests } = sound else {
+        return Err("`when:` changes takes and rests, and a generator has neither".into());
+    };
+    for (name, chance) in &when.chance {
+        if chance.is_nan() || *chance < 0.0 {
+            return Err(format!("`when.chance` for `{name}` must be 0 or more").into());
+        }
+        let take = takes
+            .iter_mut()
+            .find(|take| take.name == *name)
+            .ok_or_else(|| {
+                format!("`when.chance` names `{name}`, which is not one of its takes")
+            })?;
+        take.chance = *chance;
+    }
+    if takes.iter().all(|take| take.chance <= 0.0) {
+        return Err("`when.chance` leaves no take that can be chosen".into());
+    }
+    let rests = match when.gap {
+        None => rests,
+        Some([shortest, longest]) => {
+            if !(shortest >= 0.0 && longest >= shortest) {
+                return Err(
+                    format!("`gap: [{shortest}, {longest}]` must run from short to long").into(),
+                );
+            }
+            if longest == 0.0 && takes.len() == 1 {
+                None
+            } else {
+                // A kind that loops has no variation of its own to keep.
+                let kind = rests.unwrap_or(Rests {
+                    gap_seconds: (0.0, 0.0),
+                    level_variation_db: 0.0,
+                    pitch_variation_cents: 0.0,
+                });
+                Some(Rests {
+                    gap_seconds: (shortest, longest),
+                    ..kind
+                })
+            }
+        }
+    };
+    Ok(ResolvedSound::Sample { takes, rests })
 }
 
 /// The name a list shows: the entity's own `name`, else its id.
@@ -289,7 +344,7 @@ mod tests {
     }
 
     /// Every recording kind is written the same way: its takes, and a rule.
-    /// A looping kind has one take and no way of rests.
+    /// A looping kind has one take and does not rest.
     #[test]
     fn a_looping_kind_has_one_take_and_the_loops_rule() {
         let yaml = "reference_spl: 68.0\ntakes:\n  - { file: assets/campfire.mp3, name: Fire }\nrule: loops\n";
@@ -307,10 +362,86 @@ mod tests {
         }
     }
 
+    fn two_takes() -> ResolvedSound {
+        kind("reference_spl: 60\ntakes:\n  - { file: a.mp3, name: Low }\n  - { file: b.mp3, name: High }\nrule: { rests: { gap: [3, 8], vary: { level: 2 } } }\n")
+            .expect("reads")
+    }
+
+    /// A sound's own `when:` changes its kind's rests and chances, by take
+    /// name, and keeps the kind's variation.
+    #[test]
+    fn when_changes_rests_and_chances_of_one_sound() {
+        let when = When {
+            gap: Some([20.0, 40.0]),
+            chance: [("High".to_string(), 0.0)].into(),
+        };
+        let ResolvedSound::Sample { takes, rests } =
+            with_when(two_takes(), &when).expect("applies")
+        else {
+            panic!("a recording");
+        };
+        assert_eq!((takes[0].chance, takes[1].chance), (1.0, 0.0));
+        let rests = rests.expect("still rests");
+        assert_eq!(rests.gap_seconds, (20.0, 40.0));
+        assert_eq!(rests.level_variation_db, 2.0, "the kind's variation stays");
+    }
+
+    /// Anything that loops can be made to come and go, and one take with no
+    /// rest at all loops again.
+    #[test]
+    fn a_gap_makes_a_loop_come_and_go_and_none_makes_it_loop() {
+        let fire = || {
+            kind("reference_spl: 68\ntakes:\n  - { file: fire.mp3 }\nrule: loops\n").expect("reads")
+        };
+        let coming = When {
+            gap: Some([5.0, 9.0]),
+            ..When::default()
+        };
+        let ResolvedSound::Sample { rests, .. } = with_when(fire(), &coming).expect("applies")
+        else {
+            panic!("a recording");
+        };
+        assert_eq!(rests.expect("rests now").gap_seconds, (5.0, 9.0));
+        let always = When {
+            gap: Some([0.0, 0.0]),
+            ..When::default()
+        };
+        let ResolvedSound::Sample { rests, .. } = with_when(fire(), &always).expect("applies")
+        else {
+            panic!("a recording");
+        };
+        assert!(rests.is_none(), "one take with no rest loops");
+    }
+
+    #[test]
+    fn when_refuses_what_it_cannot_mean() {
+        let unknown = When {
+            chance: [("Song".to_string(), 2.0)].into(),
+            ..When::default()
+        };
+        assert!(
+            with_when(two_takes(), &unknown).is_err(),
+            "no take of that name"
+        );
+        let silent = When {
+            chance: [("Low".to_string(), 0.0), ("High".to_string(), 0.0)].into(),
+            ..When::default()
+        };
+        assert!(
+            with_when(two_takes(), &silent).is_err(),
+            "nothing left to choose"
+        );
+        let backwards = When {
+            gap: Some([9.0, 2.0]),
+            ..When::default()
+        };
+        assert!(with_when(two_takes(), &backwards).is_err());
+    }
+
     #[test]
     fn a_resting_kind_reads_its_gap_variation_and_chances() {
         let yaml = "reference_spl: 60\ntakes:\n  - { file: a.mp3, chance: 3 }\n  - { file: b-song.mp3 }\nrule:\n  rests:\n    gap: [3, 8]\n    vary: { level: 2, pitch: 15 }\n";
-        match kind(yaml).expect("a rests kind reads") {
+        match kind(yaml).expect("a resting kind reads") {
             ResolvedSound::Sample { takes, rests } => {
                 assert_eq!(takes[0].chance, 3.0);
                 assert_eq!(

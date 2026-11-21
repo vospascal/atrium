@@ -9,7 +9,7 @@ use atrium_world::{Entity, EntityId, Moves, Pattern, Place};
 use super::build::{
     arr_to_vec3, build_one_source, build_one_synth_source, source_color, BuiltSource, SourceMeta,
 };
-use super::description::{beam_half_angle, SourceDescription};
+use super::description::{beam_half_angle, SourceDescription, TakeDescription};
 use super::scene::NormalizationConfig;
 use super::source::{display_name, resolve, ResolvedSound};
 use crate::audio::silence_node::SilenceNode;
@@ -64,6 +64,7 @@ impl SoundBuilder {
             slot: slot as u16,
             pattern: pattern_named(&meta.directivity),
             takes: meta.takes,
+            gap: meta.gap,
             name: meta.name,
             group: meta.group,
             color: meta.color,
@@ -169,10 +170,20 @@ impl SoundBuilder {
         let meta = SourceMeta {
             id: id.to_string(),
             takes: match &resolved.sound {
-                ResolvedSound::Sample { takes, .. } => {
-                    takes.iter().map(|take| take.name.clone()).collect()
-                }
+                ResolvedSound::Sample { takes, .. } => takes
+                    .iter()
+                    .map(|take| TakeDescription {
+                        name: take.name.clone(),
+                        chance: take.chance,
+                    })
+                    .collect(),
                 ResolvedSound::Synth { .. } => Vec::new(),
+            },
+            gap: match &resolved.sound {
+                ResolvedSound::Sample {
+                    rests: Some(rests), ..
+                } => Some([rests.gap_seconds.0, rests.gap_seconds.1]),
+                _ => None,
             },
             group: entity.group.clone(),
             name: display_name(id, entity),

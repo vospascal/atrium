@@ -2,8 +2,10 @@
 //!
 //! The parts answer one question each, and an editor shows them in this
 //! order: what is it ([`Sound`]), how does it fill the air ([`Shape`]), where
-//! is it ([`Place`]), does it travel ([`Moves`]). A part left out of a scene
+//! is it ([`Place`]), when does it sound ([`When`]), does it travel ([`Moves`]). A part left out of a scene
 //! file means "nothing special": the preset's own shape, standing still.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,8 @@ pub struct Entity {
     #[serde(default, skip_serializing_if = "Shape::is_the_presets_own")]
     pub shape: Shape,
     pub place: Place,
+    #[serde(default, skip_serializing_if = "When::is_the_presets_own")]
+    pub when: When,
     #[serde(default, skip_serializing_if = "Moves::is_still")]
     pub moves: Moves,
 }
@@ -67,6 +71,38 @@ pub struct Shape {
 }
 
 impl Shape {
+    fn is_the_presets_own(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// When an entity sounds, where it differs from its preset.
+///
+/// A preset with takes utters one, rests, and utters another. These change
+/// how long it rests and which take it is likely to choose. The same holds for
+/// anything with takes: a bird, a bell, lines of a story, a tone.
+///
+/// ```yaml
+/// when:
+///   gap: [20, 45]
+///   chance: { "Call 2": 3 }
+/// ```
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct When {
+    /// Shortest and longest rest between two takes (s), in place of the
+    /// preset's. `[0, 0]` is no rest at all: it sounds all the time. On a
+    /// preset that plays all the time, a longer gap makes it come and go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<[f32; 2]>,
+    /// How often a take is chosen next to the others, by the take's name, in
+    /// place of the preset's chance. A take with chance 3 is chosen three
+    /// times as often as one with chance 1, and one with 0 never.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chance: BTreeMap<String, f32>,
+}
+
+impl When {
     fn is_the_presets_own(&self) -> bool {
         *self == Self::default()
     }

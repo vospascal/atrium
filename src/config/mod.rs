@@ -24,7 +24,9 @@ mod synth;
 mod build_tests;
 
 pub use build::BuildResult;
-pub use description::{SceneDescription, SceneSummary, SoundSummary, SourceDescription};
+pub use description::{
+    SceneDescription, SceneSummary, SoundSummary, SourceDescription, TakeDescription,
+};
 pub use presets::{list_presets, read_preset, PresetSummary};
 pub use scene::SceneConfig;
 pub use scene_file::{saved_by_editor, EDITOR_MARK};

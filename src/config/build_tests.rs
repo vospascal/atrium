@@ -480,7 +480,7 @@ fn the_meadow_birds_sing_their_own_takes_with_rests() {
             ("Blue tit", 6)
         ]
     );
-    assert_eq!(result.description.sources[1].takes[0], "Phrase 1");
+    assert_eq!(result.description.sources[1].takes[0].name, "Phrase 1");
     assert!(
         result.description.sources[0].takes.is_empty(),
         "the wind has no takes"

@@ -12,7 +12,7 @@ use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
 use atrium_world::Entity;
 
-use super::description::{beam_half_angle, SceneDescription, SourceDescription};
+use super::description::{beam_half_angle, SceneDescription, SourceDescription, TakeDescription};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
 use super::sound_builder::{pattern_named, SoundBuilder};
@@ -72,8 +72,10 @@ pub(super) fn source_color(entity: &Entity, slot: usize) -> String {
 /// Metadata collected during source building, serialized to JSON for the browser.
 pub(super) struct SourceMeta {
     pub(super) id: String,
-    /// The names of its takes, in the order telemetry counts them.
-    pub(super) takes: Vec<String>,
+    /// Its takes, in the order telemetry counts them.
+    pub(super) takes: Vec<TakeDescription>,
+    /// Shortest and longest rest between takes; `None` when it plays all the time.
+    pub(super) gap: Option<[f32; 2]>,
     pub(super) group: Option<String>,
     pub(super) name: String,
     pub(super) color: String,
@@ -222,6 +224,7 @@ impl SceneConfig {
                     slot: slot as u16,
                     pattern: pattern_named(&meta.directivity),
                     takes: meta.takes.clone(),
+                    gap: meta.gap,
                     name: meta.name.clone(),
                     group: meta.group.clone(),
                     color: meta.color.clone(),

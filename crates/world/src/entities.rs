@@ -123,7 +123,7 @@ impl<'de> Deserialize<'de> for Entities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Moves, Pattern, Place, Shape, Sound};
+    use crate::{Moves, Pattern, Place, Shape, Sound, When};
 
     const MEADOW: &str = "\
 frogs:
@@ -172,6 +172,7 @@ drum:
                     y: 10.1,
                     z: 0.0
                 },
+                when: When::default(),
                 moves: Moves::Still,
             }
         );
@@ -260,6 +261,7 @@ frogs:
                         y: 0.0,
                         z: 0.0
                     },
+                    when: When::default(),
                     moves: Moves::Still,
                 }
             )]),

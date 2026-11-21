@@ -40,9 +40,12 @@ pub struct SourceDescription {
     pub slot: u16,
     /// How it radiates.
     pub pattern: Pattern,
-    /// The names of what it can utter, in the order telemetry counts its
-    /// takes. Empty for a generator, which has no recordings.
-    pub takes: Vec<String>,
+    /// What it can utter, in the order telemetry counts its takes. Empty
+    /// for a generator, which has no recordings.
+    pub takes: Vec<TakeDescription>,
+    /// Shortest and longest rest between two takes (s). `None` for a sound
+    /// that plays all the time, round and round.
+    pub gap: Option<[f32; 2]>,
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,
@@ -61,6 +64,14 @@ pub struct SourceDescription {
     pub beam_half_angle: Option<f32>,
     /// The node's initial forward vector in world coordinates.
     pub facing: Vec3,
+}
+
+/// One take of a sound: its name, and how often it is chosen next to the
+/// others.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TakeDescription {
+    pub name: String,
+    pub chance: f32,
 }
 
 pub(super) fn beam_half_angle(kind: EmitterKind, pattern: DirectivityPattern) -> Option<f32> {
