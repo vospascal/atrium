@@ -4,6 +4,7 @@ use sofar::reader::{Filter, Sofar};
 
 use super::itd_delay::ItdDelay;
 use crate::audio::convolver::Convolver;
+use crate::audio::near_field::EarFilter;
 use crate::pipeline::path::MAX_PATHS;
 
 pub(super) const BLOCK_SIZE: usize = 128;
@@ -39,6 +40,10 @@ pub(super) struct HrtfSource {
     /// for some sources when the source count shares a factor with the
     /// interval — with 2 sources, source 1 would never update its direction.
     pub(super) update_counter: usize,
+    /// Each ear's near-field correction of the direct path, out of the
+    /// signal while the source is far.
+    pub(super) near_field_left: EarFilter,
+    pub(super) near_field_right: EarFilter,
 }
 
 impl HrtfSource {
@@ -81,6 +86,8 @@ impl HrtfSource {
             // Stagger initial phases so at most one source recomputes its
             // HRTF filter per buffer (for source counts ≤ the interval).
             update_counter: source_idx % FILTER_UPDATE_INTERVAL,
+            near_field_left: EarFilter::new(),
+            near_field_right: EarFilter::new(),
         }
     }
 }

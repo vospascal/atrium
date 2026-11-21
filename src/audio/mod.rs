@@ -5,6 +5,7 @@ pub mod distance;
 pub mod filters;
 pub mod loudness;
 pub mod masking;
+pub(crate) mod near_field;
 pub mod output;
 pub mod propagation;
 mod signal_meter;

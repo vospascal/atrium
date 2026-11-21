@@ -8,9 +8,16 @@
 //! **Reflection paths** use cheap equal-power stereo panning from their
 //! azimuth angle — no FFT convolution. This keeps CPU cost manageable
 //! (reflections contribute spaciousness, not precise localization).
+//!
+//! The HRIRs were measured at one distance. A **direct path closer than
+//! that** gets each ear corrected by the rigid sphere's distance variation
+//! function (`near_field`), so a source beside the head is heard beside it
+//! and not merely loud. Reflections arrive from image sources far away and
+//! never need it.
 
 mod direction;
 mod itd_delay;
+mod near_field;
 mod renderer;
 mod source_state;
 

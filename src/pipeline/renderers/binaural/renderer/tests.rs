@@ -59,11 +59,17 @@ fn direct_path(listener: &Listener, source_position: Vec3) -> PathSet {
 
 /// Everything a `SourceContext` borrows, for an anechoic free field with
 /// the inverse distance law (reference 1 m) and an omni source.
+///
+/// The probe has the near field off: these tests are about the measured
+/// HRIRs and the machinery that convolves them, with sources at 1 m, inside
+/// the distance the near-field correction starts at. The near field has its
+/// own tests (`binaural/near_field/tests.rs`).
 struct Scene {
     environment: Environment,
     distance_model: DistanceModel,
     directivity: DirectivityPattern,
     layout: SpeakerLayout,
+    probe: atrium_core::probe::Probe,
 }
 
 impl Scene {
@@ -81,6 +87,10 @@ impl Scene {
             },
             directivity: DirectivityPattern::Omni,
             layout: SpeakerLayout::stereo(Vec3::new(1.0, 1.0, 0.0), Vec3::new(1.0, -1.0, 0.0)),
+            probe: atrium_core::probe::Probe {
+                near_field: false,
+                ..atrium_core::probe::Probe::WHOLE
+            },
         }
     }
 
@@ -109,7 +119,7 @@ impl Scene {
             distance_model: &self.distance_model,
             layout: &self.layout,
             reverb_send: reverb_send_level,
-            probe: atrium_core::probe::Probe::WHOLE,
+            probe: self.probe,
         };
         let mut chains: Vec<PathEffectChain> = (0..MAX_PATHS)
             .map(|_| PathEffectChain::new(Vec::new()))

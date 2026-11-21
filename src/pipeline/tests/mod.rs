@@ -21,6 +21,7 @@ mod field_emitters;
 mod levels_and_timing;
 mod mode_layout_matrix;
 mod mode_switching;
+mod near_field;
 mod probe;
 mod reflections;
 mod reverb;

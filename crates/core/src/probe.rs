@@ -28,6 +28,10 @@ pub struct Probe {
     pub ground_effect: bool,
     /// The colour a wall gives a reflection.
     pub wall_colouring: bool,
+    /// What a head does to a sound inside about a metre: the near ear hears
+    /// it louder than far-off measurements say, most of all in the bass.
+    /// Headphones only; no other render mode has ears.
+    pub near_field: bool,
     /// One output channel heard alone: a loudspeaker, or an ear.
     pub only_channel: Option<u8>,
 }
@@ -43,6 +47,7 @@ impl Probe {
         moving_air: true,
         ground_effect: true,
         wall_colouring: true,
+        near_field: true,
         only_channel: None,
     };
 

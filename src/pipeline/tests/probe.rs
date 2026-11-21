@@ -203,6 +203,33 @@ fn moving_air_switched_off_is_still_air() {
     }
 }
 
+/// The near field is not a path effect but the headphone renderer's own: a
+/// correction to each ear. Switched off, a source close by sounds exactly
+/// as the measured HRIRs alone render it; on, the headphones change and no
+/// other mode does, since no other mode has ears. Every probe switch is one
+/// of these or a path effect below.
+#[test]
+fn the_near_field_is_the_headphones_alone() {
+    let rig = glass_room(48_000.0);
+    for mode in MODES {
+        let render = |probe: Probe| {
+            let mut pipeline = rig.build(mode);
+            pipeline.probe = probe;
+            let mut sources = vec![ToneSource::boxed(Vec3::new(0.25, 0.1, 0.0), 300.0, 24_000)];
+            rig.render(&mut pipeline, &mut sources, 24_000)
+        };
+        let off = render(Probe {
+            near_field: false,
+            ..Probe::WHOLE
+        });
+        assert_eq!(
+            render(Probe::WHOLE) != off,
+            mode == RenderMode::Hrtf,
+            "{mode:?}: the near field switch"
+        );
+    }
+}
+
 /// Every effect a path can have is one the probe knows how to switch, or the
 /// delay, which it never does. A new effect has to be decided here.
 #[test]

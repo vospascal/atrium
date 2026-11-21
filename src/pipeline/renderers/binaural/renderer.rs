@@ -9,7 +9,9 @@ use atrium_core::speaker::SpeakerLayout;
 
 use super::direction::{equal_power_pan, to_sofa_coords};
 use super::itd_delay::DELAY_BUF_SIZE;
+use super::near_field::{near_field_corrections, shared_table};
 use super::source_state::{HrtfSource, BLOCK_SIZE, FILTER_UPDATE_INTERVAL};
+use crate::audio::near_field::NearFieldTable;
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
@@ -18,6 +20,9 @@ pub struct HrtfRenderer {
     sofa: Option<Sofar>,
     sources: Vec<HrtfSource>,
     filter: Option<Filter>,
+    /// The near-field corrections, with the HRIRs; `None` while there are
+    /// none.
+    near_field: Option<&'static NearFieldTable>,
     base_buf: Vec<f32>,
     mono_buf: Vec<f32>,
     left_buf: Vec<f32>,
@@ -45,6 +50,7 @@ impl HrtfRenderer {
             sofa: None,
             sources: Vec::new(),
             filter: None,
+            near_field: None,
             base_buf: vec![0.0; BLOCK_SIZE],
             mono_buf: vec![0.0; BLOCK_SIZE],
             left_buf: vec![0.0; BLOCK_SIZE],
@@ -73,11 +79,13 @@ impl HrtfRenderer {
                 self.input_spectrum = vec![Complex::new(0.0, 0.0); fft_size / 2 + 1];
                 self.filter = Some(Filter::new(filter_length));
                 self.sofa = Some(sofa);
+                self.near_field = Some(shared_table());
             }
             Err(error) => {
                 eprintln!("HRTF not available: {error}");
                 self.sofa = None;
                 self.filter = None;
+                self.near_field = None;
             }
         }
     }
@@ -185,6 +193,29 @@ impl Renderer for HrtfRenderer {
                     hpath.itd_right.target_delay_samples = (filter.rdelay * sr).min(max_delay);
                 }
             }
+        }
+
+        // The near-field corrections, aimed at once a buffer and glided to.
+        // With the probe's near field off they glide home and leave the
+        // signal, exactly as when the source is far.
+        let corrections = match self.near_field {
+            Some(table) if ctx.probe.near_field => {
+                near_field_corrections(ctx.source_pos, ctx.listener, table)
+            }
+            _ => None,
+        };
+        {
+            let source_state = &mut self.sources[source_idx];
+            source_state.near_field_left.glide_to(
+                corrections.map(|ears| ears.left),
+                out.num_frames,
+                out.sample_rate,
+            );
+            source_state.near_field_right.glide_to(
+                corrections.map(|ears| ears.right),
+                out.num_frames,
+                out.sample_rate,
+            );
         }
 
         let inv_frames = 1.0 / out.num_frames as f32;
@@ -296,13 +327,17 @@ impl Renderer for HrtfRenderer {
                             xfade_rem.saturating_sub(block_len);
                     }
 
-                    // ITD delay + accumulate into stereo output
-                    let itd = &mut self.sources[source_idx].paths[pi];
+                    // Near-field correction, ITD delay, accumulate into
+                    // stereo output.
+                    let source_state = &mut self.sources[source_idx];
+                    let itd = &mut source_state.paths[pi];
                     for i in 0..block_len {
                         let base = (frame + i) * out.channels;
-                        out.buffer[base] += itd.itd_left.process(self.left_buf[i]);
+                        let left = source_state.near_field_left.process(self.left_buf[i]);
+                        let right = source_state.near_field_right.process(self.right_buf[i]);
+                        out.buffer[base] += itd.itd_left.process(left);
                         if out.channels > 1 {
-                            out.buffer[base + 1] += itd.itd_right.process(self.right_buf[i]);
+                            out.buffer[base + 1] += itd.itd_right.process(right);
                         }
                     }
                 } else {
@@ -370,6 +405,8 @@ impl Renderer for HrtfRenderer {
     fn reset(&mut self) {
         for (source_idx, src) in self.sources.iter_mut().enumerate() {
             src.update_counter = source_idx % FILTER_UPDATE_INTERVAL;
+            src.near_field_left.reset();
+            src.near_field_right.reset();
             for path in &mut src.paths {
                 path.prev_gain = 0.0;
                 path.previous_pan_gains = None;
