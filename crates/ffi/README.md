@@ -57,6 +57,18 @@ runs Cargo itself. There is nothing to build here by hand.
   scene silently; a version cannot be inverted wrongly. A step that changed nothing is passed
   over, so a drag let go where it began never needs an undo of its own. The app decides what a
   step is (edits to one thing close together), so no control has to know undo exists.
+- **Ambient or point is a new build, not a command.** `set_source_ambient` writes
+  `shape.ambient` and builds the sound again in its voice, as a change of gap between looping
+  and resting does. The two kinds go through different renderers that each keep state per
+  voice (gain ramps, delay lines, decorrelation filters); switching a playing voice from one to
+  the other would leave the old one's state to click or ring on. A new build costs a restart of
+  the recording, once, on a choice that is made rarely.
+- **A scene's air is a file or its own values.** `atmosphere:` in a scene names a file shared
+  between scenes, or holds the values. `set_atmosphere` writes the values, so an edited scene
+  stops following the file; it never writes into `atmospheres/`, which other scenes read.
+- **The loudness map is worked out here, on the calling thread.** It is a pure function in the
+  engine crate (`atrium::audio::loudness`) over what `scene()` already reports, so it needs no
+  command, no telemetry and no audio thread, and its physics are unit-tested without a device.
 - **Every edit is two halves: what is heard and what the file records.** A `set_` call writes
   the scene file and calls a `play_` helper; undo writes the whole earlier file at once and calls
   the same helpers. Undoing a sound that was removed builds it again in the lowest free voice,
@@ -213,7 +225,16 @@ runs Cargo itself. There is nothing to build here by hand.
 - **The first Sony start on a machine builds the bridge.** The script clones a pinned commit from
   GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
   engine is compiled, so a build moved away from this repository cannot find it.
-- **A sound's size cannot be set.** `SetSourceSpread` exists in the engine; no screen uses it.
+- **Size is heard through loudspeakers and in the reverb, hardly on headphones.** `set_source_size`
+  sets the engine's spread. VBAP spreads a wider sound over more loudspeakers, and every output
+  feeds less of the room's reverb the wider a sound is, none from 0.75. The binaural, DBAP and
+  world-locked renderers do not widen the direct sound, so there only the reverb changes.
+- **An ambient sound keeps its level, so it jumps in loudness.** A point 10 m off is heard 20 dB
+  below its level; made ambient it is heard at its level. `set_source_ambient` does not lower the
+  level to make up for it, because which distance to make up for is the user's to say.
+- **The loudness map is direct sound only.** No reflections, reverb, ground effect or air
+  absorption, and a sound is taken where the scene places it, not where it has flown to. It uses
+  the level `scene()` reports, so a level that follows the weather is not in it.
 - **Undo does not keep mutes or which voice a sound had.** Mutes belong to the listener, and the
   app puts them back by id after an undo. A sound brought back by undo, and one its slot colour
   is taken from, may change colour when it lands in another voice, unless the scene gives it one.

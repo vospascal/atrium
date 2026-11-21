@@ -6,6 +6,8 @@ mod undo;
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
+use atrium::audio::distance::DistanceModel;
+use atrium::audio::loudness::{level_map, Emitter, Grid};
 use atrium::audio::output::{AudioOutput, CpalOutput};
 use atrium::config::{
     bearing_for_heading, radiation_of, read_preset, SceneConfig, SoundBuilder, WeatherConfig,
@@ -21,8 +23,8 @@ use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place, Shape, Sound, When};
 
 use crate::api::{
-    Band, Bout, Conditions, EmitterKind, EngineError, Gap, PlannedTake, Position, SceneDescription,
-    SourceDescription, Telemetry, Weather,
+    Band, Bout, Conditions, EmitterKind, EngineError, Gap, LoudnessMap, PlannedTake, Position,
+    SceneDescription, SourceDescription, Telemetry, Weather,
 };
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::history::History;
@@ -53,6 +55,11 @@ const MAX_PLANNED_SECONDS: f32 = 60.0;
 /// The narrowest beam a sound can be given, and all round (degrees).
 const MIN_WIDTH: f32 = 10.0;
 const ALL_ROUND: f32 = 360.0;
+/// The coldest and warmest air a scene can be given (°C).
+const COLDEST: f32 = -20.0;
+const WARMEST: f32 = 50.0;
+/// The most points a loudness map has along one side.
+const MAX_MAP_SIDE: u32 = 160;
 /// The voice an auditioned preset plays from: the last one, so a scene's own
 /// sounds, which fill voices from the first, reach it last.
 const AUDITION_SLOT: usize = MAX_SOURCES - 1;
@@ -79,6 +86,8 @@ pub struct Engine {
     head_tracking: Mutex<Option<HeadTracking>>,
     /// Builds one more sound for this scene, as its own sounds were built.
     sounds: SoundBuilder,
+    /// How the scene's sounds fade with distance; fixed for its lifetime.
+    distance: DistanceModel,
     /// The session's plan: what every voice with takes will do, decided ahead.
     planner: Planner,
     /// Whether the scene was last paused; the audio thread keeps its own.
@@ -111,6 +120,7 @@ impl Engine {
         built.scene.scene_edits = Some(edit_consumer);
         built.scene.retired_out = Some(retired_producer);
         let layout_channels = built.scene.speaker_layout.total_channels();
+        let distance = built.scene.distance_model;
         let placement = Placement::new(Pose {
             position: built.scene.listener.position,
             yaw: built.scene.listener.yaw,
@@ -129,6 +139,7 @@ impl Engine {
             placement,
             head_tracking: Mutex::new(None),
             sounds: built.sounds,
+            distance,
             planner: built.planner,
             paused: std::sync::atomic::AtomicBool::new(false),
             edits: Mutex::new(Edits {
@@ -458,6 +469,130 @@ impl Engine {
         self.play_beam(&mut scene, slot, width, behind)
     }
 
+    /// Make the source in `slot` sound `size` wide, from 0 (a point) to 1
+    /// (all around). A wider sound spreads over more loudspeakers and feeds
+    /// less of the room's reverb; from 0.75 it feeds none. `scene()` reports
+    /// it from then on. A field ignores its size.
+    pub fn set_source_size(&self, slot: u16, size: f32) -> Result<(), EngineError> {
+        if !size.is_finite() {
+            return Ok(());
+        }
+        let size = rounded(size.clamp(0.0, 1.0), 100.0);
+        let mut scene = lock(&self.scene);
+        if let Some(entity) = scene.entity_in(slot) {
+            entity.shape.size = Some(size);
+        }
+        self.play_size(&mut scene, slot, size)
+    }
+
+    /// Make the source in `slot` ambient, heard everywhere as the air of the
+    /// place, or a point again. An ambient sound has no distance, direction,
+    /// beam or echo: its level is what is heard wherever the listener
+    /// stands, so one that stood far off becomes much louder. This builds
+    /// the sound again in its voice, which takes a moment, like `add_sound`,
+    /// and a recording starts over.
+    pub fn set_source_ambient(&self, slot: u16, ambient: bool) -> Result<(), EngineError> {
+        let mut edits = lock(&self.edits);
+        let mut scene = lock(&self.scene);
+        let Some(entity) = scene.entity_in(slot) else {
+            return Ok(());
+        };
+        let before = entity.shape.ambient;
+        entity.shape.ambient = Some(ambient);
+        let rebuilt = self.rebuild(&mut edits, &mut scene, slot);
+        if rebuilt.is_err() {
+            if let Some(entity) = scene.entity_in(slot) {
+                entity.shape.ambient = before;
+            }
+        }
+        rebuilt
+    }
+
+    /// Set the air sound travels through: `temperature` in °C, from −20 to
+    /// 50, and relative `humidity` in %. They decide how fast sound travels
+    /// and how much treble the air takes from a distant sound. `scene()`
+    /// reports them from then on, and the scene file keeps them as its own.
+    pub fn set_atmosphere(&self, temperature: f32, humidity: f32) -> Result<(), EngineError> {
+        if !(temperature.is_finite() && humidity.is_finite()) {
+            return Ok(());
+        }
+        let temperature = rounded(temperature.clamp(COLDEST, WARMEST), 2.0);
+        let humidity = rounded(humidity.clamp(0.0, 100.0), 1.0);
+        let mut scene = lock(&self.scene);
+        scene
+            .document
+            .set_air(temperature, humidity)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        self.play_air(&mut scene, temperature, humidity)
+    }
+
+    /// How loud the scene is over the ground between `from` and `to`, at
+    /// `from`'s height, on `columns` by `rows` points: all its sounds that
+    /// are not silenced, or only the one in `only`. Each point adds up the
+    /// direct sound of every source, from its level as `scene()` reports it,
+    /// the scene's distance law and the source's beam.
+    pub fn loudness(
+        &self,
+        from: Position,
+        to: Position,
+        columns: u32,
+        rows: u32,
+        only: Option<u16>,
+    ) -> LoudnessMap {
+        let columns = columns.clamp(1, MAX_MAP_SIDE);
+        let rows = rows.clamp(1, MAX_MAP_SIDE);
+        let (west, east) = (from.x.min(to.x), from.x.max(to.x));
+        let (south, north) = (from.y.min(to.y), from.y.max(to.y));
+        let corner = Position {
+            x: west,
+            y: south,
+            z: from.z,
+        };
+        if !(finite(from) && finite(to)) {
+            return LoudnessMap {
+                corner,
+                cell: 0.0,
+                columns: 0,
+                rows: 0,
+                levels_db: Vec::new(),
+            };
+        }
+        // Square cells that cover the wider side.
+        let cell = ((east - west) / columns as f32).max((north - south) / rows as f32);
+        let grid = Grid {
+            // Each point stands in the middle of its cell.
+            corner: Vec3::new(west + cell / 2.0, south + cell / 2.0, from.z),
+            cell,
+            columns: columns as usize,
+            rows: rows as usize,
+        };
+        let scene = lock(&self.scene);
+        let emitters: Vec<Emitter> = scene
+            .description
+            .sources
+            .iter()
+            .filter(|source| match only {
+                Some(slot) => source.slot == slot,
+                None => !scene.muted.contains(&source.slot),
+            })
+            .map(|source| Emitter {
+                position: source.position.into(),
+                level_db: source.spl,
+                reference_distance: source.reference_distance,
+                pattern: radiation_of(source.width, source.behind).0,
+                facing: source.facing.into(),
+                ambient: source.emitter_kind == EmitterKind::Field,
+            })
+            .collect();
+        LoudnessMap {
+            corner,
+            cell,
+            columns,
+            rows,
+            levels_db: level_map(&emitters, &self.distance, &grid),
+        }
+    }
+
     /// Turn the source in `slot` to face along `facing`, a direction over
     /// the ground; its length and height are ignored. A direction with no
     /// length changes nothing.
@@ -662,10 +797,15 @@ impl Engine {
         self.add_entity(&summary.name, entity)
     }
 
-    /// Add a copy of the sound in `slot`, a metre east of it, named as a
-    /// copy, and report it. Everything else about it is the same: its kind,
-    /// level, shape, rests and weather. Like `add_sound`, this takes a moment.
-    pub fn duplicate_sound(&self, slot: u16) -> Result<SourceDescription, EngineError> {
+    /// Add a copy of the sound in `slot`, named as a copy, and report it: at
+    /// `position`, where it was dropped, or else a metre east of the
+    /// original. Everything else about it is the same: its kind, level,
+    /// shape, rests and weather. Like `add_sound`, this takes a moment.
+    pub fn duplicate_sound(
+        &self,
+        slot: u16,
+        position: Option<Position>,
+    ) -> Result<SourceDescription, EngineError> {
         let (id, mut entity) = {
             let mut scene = lock(&self.scene);
             let id = sound_in(&mut scene.description, slot)
@@ -682,7 +822,10 @@ impl Engine {
         };
         let (id, name) = id;
         entity.name = Some(format!("{name} copy"));
-        entity.place.x += COPY_OFFSET;
+        match position.filter(|position| finite(*position)) {
+            Some(position) => entity.place = self.place_rounded(position),
+            None => entity.place.x += COPY_OFFSET,
+        }
         self.add_entity(&id, entity)
     }
 
@@ -951,6 +1094,35 @@ impl Engine {
             EmitterKind::Object => beam_half_angle,
             EmitterKind::Field => None,
         };
+        Ok(())
+    }
+
+    /// Make the sound in `slot` sound `size` wide.
+    fn play_size(&self, scene: &mut Live, slot: u16, size: f32) -> Result<(), EngineError> {
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        self.command(Command::SetSourceSpread {
+            index: slot,
+            spread: size,
+        })?;
+        source.size = size;
+        Ok(())
+    }
+
+    /// Give the place air at `temperature` °C and `humidity` %.
+    fn play_air(
+        &self,
+        scene: &mut Live,
+        temperature: f32,
+        humidity: f32,
+    ) -> Result<(), EngineError> {
+        self.command(Command::SetAtmosphere {
+            temperature_c: temperature,
+            humidity_pct: humidity,
+        })?;
+        scene.description.temperature_c = temperature;
+        scene.description.humidity_pct = humidity;
         Ok(())
     }
 

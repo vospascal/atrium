@@ -5,10 +5,11 @@
 //! the world crate says, sound by sound, the smallest changes that get there
 //! ([`atrium_world::changes`]), and each is played the way the edit that made
 //! it was. Only what the scene file holds and the editor changes is kept:
-//! the sounds, the weather and where the listener stands. Mutes, volume, output and head tracking belong
-//! to the listener, and stay as they are.
+//! the sounds, the weather, the air and where the listener stands. Mutes,
+//! volume, output and head tracking belong to the listener, and stay as they
+//! are.
 
-use atrium::config::{name_and_color, yaw_for_bearing, ListenerConfig, WeatherConfig};
+use atrium::config::{name_and_color, yaw_for_bearing, Atmosphere, ListenerConfig, WeatherConfig};
 use atrium::head_tracking::Pose;
 use atrium_world::{changes, Change, Entities};
 
@@ -21,6 +22,9 @@ pub(super) struct Version {
     sounds: Entities,
     weather: Option<WeatherConfig>,
     listener: ListenerConfig,
+    /// The air as the scene file names it, and as it then is (°C, %).
+    atmosphere: Option<Atmosphere>,
+    air: (f32, f32),
 }
 
 impl Version {
@@ -29,6 +33,11 @@ impl Version {
             sounds: scene.document.sounds.clone(),
             weather: scene.document.weather.clone(),
             listener: scene.document.listener.clone(),
+            atmosphere: scene.document.atmosphere.clone(),
+            air: (
+                scene.description.temperature_c,
+                scene.description.humidity_pct,
+            ),
         }
     }
 }
@@ -104,6 +113,10 @@ impl Engine {
             self.play_listener(&mut scene, pose)?;
             scene.document.listener = version.listener;
         }
+        if scene.document.atmosphere != version.atmosphere {
+            self.play_air(&mut scene, version.air.0, version.air.1)?;
+            scene.document.atmosphere = version.atmosphere;
+        }
         for change in found {
             self.play_change(&mut edits, &mut scene, change)?;
         }
@@ -162,6 +175,11 @@ impl Engine {
             Change::Beam { id, width, behind } => {
                 if let Some(slot) = slot_of(scene, &id) {
                     self.play_beam(scene, slot, width, behind)?;
+                }
+            }
+            Change::Size { id, size } => {
+                if let Some(slot) = slot_of(scene, &id) {
+                    self.play_size(scene, slot, size)?;
                 }
             }
             Change::Facing { id, facing } => {
@@ -240,6 +258,21 @@ mod tests {
                 )
                 .expect("facing")
         });
+        step("Wide", &|engine| {
+            engine.set_source_size(frogs, 0.4).expect("size")
+        });
+        step("Air", &|engine| {
+            engine.set_atmosphere(8.0, 85.0).expect("air");
+            assert_eq!(engine.scene().temperature_c, 8.0);
+            assert_eq!(engine.scene().humidity_pct, 85.0);
+        });
+        step("Ambient", &|engine| {
+            engine.set_source_ambient(frogs, true).expect("ambient");
+            let frog = engine.scene().sources[0].clone();
+            assert_eq!(frog.emitter_kind, crate::api::EmitterKind::Field);
+            assert_eq!(frog.beam_half_angle, None);
+            assert_eq!(frog.size, 0.4, "it keeps what was set before");
+        });
         step("Add", &|engine| {
             engine
                 .add_sound("sources/cricket.yaml".into(), None)
@@ -251,7 +284,7 @@ mod tests {
                 .expect("identity")
         });
         step("Duplicate", &|engine| {
-            let copy = engine.duplicate_sound(frogs).expect("duplicate");
+            let copy = engine.duplicate_sound(frogs, None).expect("duplicate");
             assert_eq!(copy.name, "Pond copy");
             assert_eq!(copy.color, "#336699");
             assert_eq!(copy.spl, 71.5);
@@ -318,6 +351,10 @@ mod tests {
             assert!(engine.undo().expect("undo"));
             assert_eq!(by_id(&engine.scene()), by_id(&expected.0));
             assert_eq!(engine.scene().listener, expected.0.listener);
+            assert_eq!(
+                (engine.scene().temperature_c, engine.scene().humidity_pct),
+                (expected.0.temperature_c, expected.0.humidity_pct)
+            );
             assert_eq!(engine.weather(), expected.1);
         }
         assert!(!engine.undo().expect("nothing more"));

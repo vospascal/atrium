@@ -50,6 +50,11 @@ pub struct SceneDescription {
     pub width: f32,
     /// Environment floor size along y (m).
     pub depth: f32,
+    /// The air sound travels through: the scene's, until
+    /// `Engine::set_atmosphere` changes it.
+    pub temperature_c: f32,
+    /// Relative humidity (%).
+    pub humidity_pct: f32,
     /// Where the scene puts the listener now: where it was loaded, or where
     /// it was moved since. Which way it faces is in telemetry.
     pub listener: Position,
@@ -101,6 +106,9 @@ pub struct SourceDescription {
     pub emitter_kind: EmitterKind,
     /// Visual half-angle of a directional lobe in radians, when present.
     pub beam_half_angle: Option<f32>,
+    /// How wide it sounds, from 0 (a point) to 1 (all around). A field
+    /// ignores it.
+    pub size: f32,
     /// Initial forward vector in world coordinates.
     pub facing: Position,
     /// What it can utter, in the order `SourceTelemetry::take` counts them.
@@ -175,6 +183,8 @@ impl From<atrium::config::SceneDescription> for SceneDescription {
         Self {
             width: scene.width,
             depth: scene.depth,
+            temperature_c: scene.temperature_c,
+            humidity_pct: scene.humidity_pct,
             listener: scene.listener.into(),
             sources: scene.sources.into_iter().map(Into::into).collect(),
             speakers: scene
@@ -205,6 +215,7 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
             reference_distance: source.reference_distance,
             emitter_kind: source.emitter_kind.into(),
             beam_half_angle: source.beam_half_angle,
+            size: source.size,
             facing: source.facing.into(),
             takes: source
                 .takes
@@ -240,6 +251,22 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
                 .collect(),
         }
     }
+}
+
+/// How loud the scene's direct sound is over a patch of ground, for a map
+/// to colour. A guide to reach: echoes, reverb and the air are left out.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct LoudnessMap {
+    /// The first point, in world coordinates; its height is every point's.
+    pub corner: Position,
+    /// Distance between neighbouring points (m).
+    pub cell: f32,
+    /// Points along +x and along +y.
+    pub columns: u32,
+    pub rows: u32,
+    /// Level at each point (dB SPL), row by row from the corner: `columns`
+    /// values going east, then the next row to the north. 0 is silence.
+    pub levels_db: Vec<f32>,
 }
 
 /// What the engine is doing right now.
