@@ -41,7 +41,9 @@ the same paint in both. Only the backdrop, text, controls and listener rings cha
 draws every plume in the opposite of the backdrop, black on white or white on black. It gets its
 depth from tone instead of hue.
 
-**The editor** is opened from Settings while a scene plays. It is in the player's paper style,
+**The editor** is opened from Settings, with or without a scene playing. Without one it lists the
+scenes to open; Open… (⌘O) in its top bar switches to another scene at any time, and asks first
+when the one open has changes that are not saved. It is in the player's paper style,
 and on desktop the window widens for it. It has three panels; in a narrow window they are tabs.
 
 The editor works like other editors. The layers and library on the left, the inspector on the

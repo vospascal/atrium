@@ -46,6 +46,9 @@ internal fun Settings(session: Session, look: Look, onEdit: () -> Unit) {
             Chip("Monochrome", selected = look.monochrome) { look.monochrome = true }
         }
 
+        Section("Edit")
+        Chip("Open the editor", selected = false, onClick = onEdit)
+
         if (session.engine == null) {
             Spacer(Modifier.height(28.dp))
             PaperText("Play a scene to choose its output and volume.", 16, Muted)
@@ -104,9 +107,6 @@ internal fun Settings(session: Session, look: Look, onEdit: () -> Unit) {
             held = level
             session.command { setVolume(level) }
         }, Modifier.fillMaxWidth())
-
-        Section("Edit")
-        Chip("Open the editor", selected = false, onClick = onEdit)
 
         Spacer(Modifier.height(24.dp))
         val peak = session.telemetry?.peaksDb?.maxOrNull()

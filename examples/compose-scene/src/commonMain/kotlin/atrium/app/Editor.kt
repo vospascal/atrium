@@ -50,7 +50,38 @@ import atrium.engine.SceneFile
  * same parts are tabs.
  */
 @Composable
-internal fun Editor(scene: SceneFile, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit) {
+internal fun Editor(open: SceneFile?, scenes: List<SceneFile>, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit) {
+    var opening by remember { mutableStateOf(false) }
+    PlayerTheme(look.appearance) {
+        Box(
+            Modifier.fillMaxSize().background(Backdrop).onPreviewKeyEvent { event ->
+                val command = event.isMetaPressed || event.isCtrlPressed
+                if (event.type != KeyEventType.KeyDown || !command || event.key != Key.O || opening) return@onPreviewKeyEvent false
+                opening = true
+                true
+            },
+        ) {
+            when {
+                open == null -> Column(Modifier.fillMaxSize()) {
+                    TopBar(null, session, null, onBack, onSave = {}, onSaveAs = {}, onOpen = { opening = true })
+                    Rule()
+                    StartScreen(scenes, session, Modifier.weight(1f).fillMaxWidth())
+                }
+                session.engine == null -> Column(Modifier.fillMaxSize()) {
+                    TopBar(open, session, null, onBack, onSave = {}, onSaveAs = {}, onOpen = { opening = true })
+                    Rule()
+                    StartingNote(open, session, Modifier.weight(1f).fillMaxWidth())
+                }
+                else -> SceneEditor(open, session, look, workspace, onBack, onOpen = { opening = true })
+            }
+            if (opening) OpenDialog(scenes, session, open, onDone = { opening = false })
+        }
+    }
+}
+
+/** The editor with [scene] open and playing. */
+@Composable
+private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit, onOpen: () -> Unit) {
     var selected by remember(session.engine) { mutableStateOf<String?>(null) }
     var panel by remember { mutableStateOf(Panel.Layers) }
     var naming by remember { mutableStateOf(false) }
@@ -88,7 +119,7 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, workspace: W
             ) {
                 val wide = maxWidth >= WideFrom
                 Column(Modifier.fillMaxSize()) {
-                    TopBar(scene, session, if (wide) workspace else null, onBack, onSave = save, onSaveAs = { naming = true })
+                    TopBar(scene, session, if (wide) workspace else null, onBack, onSave = save, onSaveAs = { naming = true }, onOpen = onOpen)
                     Rule()
                     if (wide) {
                         // The map is always there, so the left panel only switches between its two lists.
@@ -176,23 +207,35 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, workspace: W
  * window the toggles for the three panels.
  */
 @Composable
-private fun TopBar(scene: SceneFile, session: Session, workspace: Workspace?, onBack: () -> Unit, onSave: () -> Unit, onSaveAs: () -> Unit) {
+private fun TopBar(
+    scene: SceneFile?,
+    session: Session,
+    workspace: Workspace?,
+    onBack: () -> Unit,
+    onSave: () -> Unit,
+    onSaveAs: () -> Unit,
+    onOpen: () -> Unit,
+) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         PaperText("‹ Player", 16, Muted, modifier = Modifier.clickable(role = Role.Button, onClick = onBack))
         Spacer(Modifier.width(22.dp))
-        PaperText(scene.title + if (session.unsaved) "  •" else "", 22, weight = FontWeight.Bold)
+        PaperText((scene?.title ?: "No scene open") + if (session.unsaved) "  •" else "", 22, weight = FontWeight.Bold)
         Spacer(Modifier.width(12.dp))
-        PaperText(scene.path.substringAfterLast('/'), 14, Muted, modifier = Modifier.weight(1f))
+        PaperText(scene?.path?.substringAfterLast('/').orEmpty(), 14, Muted, modifier = Modifier.weight(1f))
         val note = session.saveFailure ?: if (session.unsaved) null else "Saved"
         if (note != null && session.saves > 0) {
             PaperText(note, 14, if (session.saveFailure != null) Foreground else Muted)
             Spacer(Modifier.width(14.dp))
         }
-        ToolButton("Save", strong = session.unsaved, onClick = onSave)
-        Spacer(Modifier.width(8.dp))
-        ToolButton("Save as…", onClick = onSaveAs)
-        Spacer(Modifier.width(20.dp))
-        PaperText("${session.description?.sources?.size ?: 0} / $VoiceCount voices", 14, Muted)
+        ToolButton("Open…", onClick = onOpen)
+        if (scene != null && session.engine != null) {
+            Spacer(Modifier.width(8.dp))
+            ToolButton("Save", strong = session.unsaved, onClick = onSave)
+            Spacer(Modifier.width(8.dp))
+            ToolButton("Save as…", onClick = onSaveAs)
+            Spacer(Modifier.width(20.dp))
+            PaperText("${session.description?.sources?.size ?: 0} / $VoiceCount voices", 14, Muted)
+        }
         if (workspace != null) {
             Spacer(Modifier.width(16.dp))
             PanelToggle(PanelSide.Left, workspace.leftShown) { workspace.leftShown = !workspace.leftShown }

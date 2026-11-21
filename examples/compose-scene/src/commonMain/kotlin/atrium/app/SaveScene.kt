@@ -88,19 +88,7 @@ internal fun SaveAsDialog(scene: SceneFile, session: Session, onDone: () -> Unit
         }
     }
 
-    // A veil over the editor that takes every press, so nothing under it changes while naming.
-    Box(
-        Modifier.fillMaxSize().background(Foreground.copy(alpha = .18f)).pointerInput(Unit) {
-            awaitPointerEventScope { while (true) awaitPointerEvent() }
-        },
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            Modifier.width(420.dp)
-                .background(Backdrop, RoundedCornerShape(10.dp))
-                .border(1.dp, Hairline, RoundedCornerShape(10.dp))
-                .padding(24.dp),
-        ) {
+    Sheet {
             PaperText("Save as", 22, weight = FontWeight.Bold)
             Spacer(Modifier.height(16.dp))
             PaperText("NAME", 12, Muted, FontWeight.SemiBold, spacing = 2f)
@@ -139,7 +127,6 @@ internal fun SaveAsDialog(scene: SceneFile, session: Session, onDone: () -> Unit
                 Spacer(Modifier.width(8.dp))
                 ToolButton("Save", strong = true, enabled = target !is SaveTarget.HandWritten && title.isNotBlank(), onClick = save)
             }
-        }
     }
 }
 

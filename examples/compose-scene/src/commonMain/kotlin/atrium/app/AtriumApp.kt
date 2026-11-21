@@ -25,11 +25,10 @@ internal fun AtriumApp(sceneDirectory: String, onEditing: (Boolean) -> Unit = {}
 
     RunSession(session)
 
-    // The editor exists only while a scene plays.
-    val playing = session.request?.scene.takeIf { editing && session.engine != null }
-    LaunchedEffect(playing != null) { onEditing(playing != null) }
-    if (playing != null) {
-        Editor(playing, session, look, workspace, onBack = { editing = false })
+    // The editor opens with or without a scene: without one it offers the scenes to open.
+    LaunchedEffect(editing) { onEditing(editing) }
+    if (editing) {
+        Editor(session.request?.scene, scenes.getOrNull().orEmpty(), session, look, workspace, onBack = { editing = false })
     } else {
         Player(scenes, session, look, onEdit = { editing = true })
     }

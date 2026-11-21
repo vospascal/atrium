@@ -3,6 +3,8 @@ package atrium.app
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -246,4 +248,26 @@ internal fun Modifier.keyboardSlider(focus: FocusRequester, onSteps: (Int) -> Un
                 drawRoundRect(ring, cornerRadius = CornerRadius(6.dp.toPx()), style = Stroke(1.5.dp.toPx()))
             }
         }
+}
+
+/**
+ * A dialog over the editor: a veil that takes every press, so nothing under
+ * it changes, and a paper sheet [width] wide in the middle.
+ */
+@Composable
+internal fun Sheet(width: Dp = 440.dp, content: @Composable ColumnScope.() -> Unit) {
+    Box(
+        Modifier.fillMaxSize().background(Foreground.copy(alpha = .18f)).pointerInput(Unit) {
+            awaitPointerEventScope { while (true) awaitPointerEvent() }
+        },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.width(width)
+                .background(Backdrop, androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                .border(1.dp, Hairline, androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                .padding(24.dp),
+            content = content,
+        )
+    }
 }
