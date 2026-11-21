@@ -448,8 +448,8 @@ fn every_repository_scene_reads_and_names_its_sounds() {
     }
 }
 
-/// The meadow of singing birds builds: each bird kind reports its takes by
-/// name, rests and sings by itself, and no two birds utter the same sequence.
+/// The meadow of rests birds builds: each bird kind reports its takes by
+/// name, utters and rests by itself, and no two birds utter the same sequence.
 /// Rendered without an audio device, at 48 kHz for two minutes.
 #[test]
 fn the_meadow_birds_sing_their_own_takes_with_rests() {
@@ -506,17 +506,17 @@ fn the_meadow_birds_sing_their_own_takes_with_rests() {
         }
     }
     for (index, (name, _, takes)) in birds.iter().enumerate() {
-        let sung = &uttered[index];
+        let uttered_by_one = &uttered[index];
         assert!(
-            sung.len() >= 8,
+            uttered_by_one.len() >= 8,
             "{name} sang only {} phrases in two minutes",
-            sung.len()
+            uttered_by_one.len()
         );
         assert!(
-            sung.windows(2).all(|pair| pair[0] != pair[1]),
+            uttered_by_one.windows(2).all(|pair| pair[0] != pair[1]),
             "{name} repeated a phrase"
         );
-        assert!(sung.iter().all(|take| (*take as usize) < *takes));
+        assert!(uttered_by_one.iter().all(|take| (*take as usize) < *takes));
         let share = resting[index] as f32 / (120.0 * 48_000.0);
         assert!(
             share > 0.4,
@@ -526,6 +526,6 @@ fn the_meadow_birds_sing_their_own_takes_with_rests() {
     }
     assert_ne!(
         uttered[1], uttered[2],
-        "two birds with five takes must not sing in step"
+        "two birds with five takes must not fall into step"
     );
 }

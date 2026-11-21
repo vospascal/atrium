@@ -54,7 +54,7 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     if (sound.takes.size > 1) {
         // What it can say, with the one it is saying now lit. Between two it rests.
         Spacer(Modifier.height(10.dp))
-        PaperText(if (live != null && live.take == null) "Resting" else "Singing", 14, Muted)
+        PaperText(if (live != null && live.take == null) "Resting" else "Sounding", 14, Muted)
         sound.takes.forEachIndexed { index, take ->
             val now = live?.take?.toInt() == index
             PaperText(

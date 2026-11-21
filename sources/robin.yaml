@@ -1,7 +1,7 @@
 # Kind: Robin
 # Thin, wistful phrases, each a little different.
 #
-# A kind that sings: it utters one of its takes, rests, and utters another,
+# A kind that rests between takes: it utters one of its takes, rests, and utters another,
 # never the same one twice running. The level and the gaps are a first guess
 # by ear, not measured.
 
@@ -19,6 +19,6 @@ takes:
   - { file: assets/birds/roodborst/roodborst-zang_5.mp3, name: Phrase 5 }
 
 rule:
-  sings:
+  rests:
     gap: [4, 10]             # seconds of rest between two phrases
     vary: { level: 2, pitch: 15 }   # each phrase up to 2 dB and 15 cents different

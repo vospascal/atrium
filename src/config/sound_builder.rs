@@ -113,14 +113,17 @@ impl SoundBuilder {
             Moves::Orbit { radius, speed } => (radius, speed),
         };
         let built = match &resolved.sound {
-            ResolvedSound::Sample { takes, singing } => {
-                if singing.is_some() && entity.moves != Moves::Still {
-                    return Err(format!("sound `{id}`: a voice that sings cannot orbit yet").into());
+            ResolvedSound::Sample { takes, rests } => {
+                if rests.is_some() && entity.moves != Moves::Still {
+                    return Err(format!(
+                        "sound `{id}`: a voice that rests between takes cannot orbit yet"
+                    )
+                    .into());
                 }
                 build_one_source(
                     takes,
-                    *singing,
-                    // Slot-stable, like a generator's: each voice sings its own way,
+                    *rests,
+                    // Slot-stable, like a generator's: each voice keeps its own rhythm,
                     // and the same way when the scene is loaded again.
                     1000 + slot as u64,
                     resolved.reference_spl,

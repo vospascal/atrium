@@ -88,7 +88,7 @@ private fun PresetRow(preset: Preset, heard: Boolean, onHear: () -> Unit, onAdd:
             PaperText(
                 when {
                     preset.generated -> "Generator"
-                    preset.takes > 1u -> "Sings · ${preset.takes} phrases"
+                    preset.takes > 1u -> "${preset.takes} takes, with rests"
                     else -> "Recording"
                 },
                 13,

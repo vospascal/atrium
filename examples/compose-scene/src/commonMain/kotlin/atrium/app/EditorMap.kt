@@ -51,7 +51,7 @@ private data class Marker(
     val facing: Float,
     val strength: Float,
     val silent: Boolean,
-    /** Whether it is uttering something now; a voice that sings rests between its takes. */
+    /** Whether it is uttering something now; a voice with takes rests between them. */
     val sounding: Boolean,
 ) {
     /** A sound with a beam can be turned; an ambient or omni one sounds the same whichever way it faces. */

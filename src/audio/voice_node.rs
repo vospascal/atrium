@@ -1,6 +1,6 @@
 //! A voice with a repertoire: it utters one take, rests, and utters another.
 //!
-//! This is the "sings" rule of a kind. A take is one recording played from
+//! This is the "rests" rule of a kind. A take is one recording played from
 //! start to end; between takes the voice is silent for a gap that is never
 //! the same twice. Everything is decided here on the audio thread from a
 //! seeded generator, with no allocation: the takes are decoded beforehand.
@@ -26,10 +26,10 @@ pub struct Take {
     pub chance: f32,
 }
 
-/// How a voice sings: how long it rests between takes, and how much one
+/// How a voice rests: how long it rests between takes, and how much one
 /// utterance may differ from the next.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Singing {
+pub struct Rests {
     /// Shortest and longest rest between two takes (s).
     pub gap_seconds: (f32, f32),
     /// Each take is up to this much louder or softer (dB).
@@ -50,10 +50,10 @@ enum State {
     },
 }
 
-/// A source that sings its takes with rests between them.
+/// A source that utters its takes with rests between them.
 pub struct VoiceNode {
     takes: Vec<Take>,
-    singing: Singing,
+    rests: Rests,
     state: State,
     /// The take uttered last, so the next one differs from it.
     last_take: Option<usize>,
@@ -71,16 +71,16 @@ pub struct VoiceNode {
 }
 
 impl VoiceNode {
-    /// A voice at `position` that sings `takes`. `seed` decides every choice
+    /// A voice at `position` that utters `takes`. `seed` decides every choice
     /// it makes, so two voices with different seeds never fall into step and
-    /// one voice with the same seed sings the same way again.
+    /// one voice with the same seed does the same again.
     ///
     /// It starts resting, for a random part of its longest gap, so several
     /// voices that start together do not open with a chord.
-    pub fn new(takes: Vec<Take>, singing: Singing, position: Vec3, seed: u64) -> Self {
+    pub fn new(takes: Vec<Take>, rests: Rests, position: Vec3, seed: u64) -> Self {
         let mut node = Self {
             takes,
-            singing,
+            rests,
             state: State::Resting { samples_left: 0.0 },
             last_take: None,
             // A zero state would stay zero in the generator below.
@@ -97,7 +97,7 @@ impl VoiceNode {
         };
         // Until the first sample tells it the output rate, count in seconds.
         node.state = State::Resting {
-            samples_left: -(node.unit_random() * singing.gap_seconds.1) as f64,
+            samples_left: -(node.unit_random() * rests.gap_seconds.1) as f64,
         };
         node
     }
@@ -154,9 +154,9 @@ impl VoiceNode {
     fn start_take(&mut self) {
         let take = self.choose_take();
         self.last_take = Some(take);
-        let gain = 10.0_f32.powf(self.signed_random() * self.singing.level_variation_db / 20.0);
-        let rate = 2.0_f64
-            .powf((self.signed_random() * self.singing.pitch_variation_cents) as f64 / 1200.0);
+        let gain = 10.0_f32.powf(self.signed_random() * self.rests.level_variation_db / 20.0);
+        let rate =
+            2.0_f64.powf((self.signed_random() * self.rests.pitch_variation_cents) as f64 / 1200.0);
         self.state = State::Sounding {
             take,
             position: 0.0,
@@ -166,7 +166,7 @@ impl VoiceNode {
     }
 
     fn start_rest(&mut self, sample_rate: f32) {
-        let (shortest, longest) = self.singing.gap_seconds;
+        let (shortest, longest) = self.rests.gap_seconds;
         let seconds = shortest + self.unit_random() * (longest - shortest).max(0.0);
         self.state = State::Resting {
             samples_left: (seconds * sample_rate) as f64,
@@ -220,7 +220,7 @@ impl SoundSource for VoiceNode {
         };
 
         if self.muted {
-            // It keeps singing while muted, so it comes back where it would be.
+            // It keeps going while muted, so it comes back where it would be.
             return 0.0;
         }
         let output = sample * self.amplitude;
@@ -319,16 +319,16 @@ mod tests {
         }
     }
 
-    fn steady(gap_seconds: (f32, f32)) -> Singing {
-        Singing {
+    fn steady(gap_seconds: (f32, f32)) -> Rests {
+        Rests {
             gap_seconds,
             level_variation_db: 0.0,
             pitch_variation_cents: 0.0,
         }
     }
 
-    fn voice(takes: Vec<Take>, singing: Singing, seed: u64) -> VoiceNode {
-        let mut node = VoiceNode::new(takes, singing, Vec3::ZERO, seed);
+    fn voice(takes: Vec<Take>, rests: Rests, seed: u64) -> VoiceNode {
+        let mut node = VoiceNode::new(takes, rests, Vec3::ZERO, seed);
         node.amplitude = 1.0;
         node
     }
@@ -435,10 +435,10 @@ mod tests {
         }
     }
 
-    /// Two voices with different seeds do not sing in step, and the same
-    /// seed sings the same way again.
+    /// Two voices with different seeds do not fall into step, and the same
+    /// seed does the same again.
     #[test]
-    fn a_seed_decides_the_singing() {
+    fn a_seed_decides_every_choice() {
         let build = |seed| {
             voice(
                 vec![take(0.1, 50, 1.0), take(0.2, 50, 1.0), take(0.3, 50, 1.0)],
@@ -464,12 +464,12 @@ mod tests {
     /// softest at least half, and they are not all the same.
     #[test]
     fn each_utterance_is_a_little_louder_or_softer() {
-        let singing = Singing {
+        let rests = Rests {
             gap_seconds: (0.01, 0.02),
             level_variation_db: 6.0,
             pitch_variation_cents: 0.0,
         };
-        let mut node = voice(vec![take(0.5, 100, 1.0), take(0.5, 100, 1.0)], singing, 9);
+        let mut node = voice(vec![take(0.5, 100, 1.0), take(0.5, 100, 1.0)], rests, 9);
         let mut peaks = Vec::new();
         let mut peak = 0.0f32;
         for _ in 0..30 * RATE as usize {
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn a_muted_voice_is_silent_and_keeps_singing() {
+    fn a_muted_voice_is_silent_and_keeps_going() {
         let mut node = voice(
             vec![take(0.5, 100, 1.0), take(0.5, 100, 1.0)],
             steady((0.05, 0.1)),

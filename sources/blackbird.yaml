@@ -1,7 +1,7 @@
 # Kind: Blackbird
 # Loud, fluting phrases from a high perch.
 #
-# A kind that sings: it utters one of its takes, rests, and utters another,
+# A kind that rests between takes: it utters one of its takes, rests, and utters another,
 # never the same one twice running. The level and the gaps are a first guess
 # by ear, not measured.
 
@@ -17,6 +17,6 @@ takes:
   - { file: assets/birds/merel/merel-zang_3.mp3, name: Phrase 3 }
 
 rule:
-  sings:
+  rests:
     gap: [3, 8]             # seconds of rest between two phrases
     vary: { level: 2, pitch: 15 }   # each phrase up to 2 dB and 15 cents different

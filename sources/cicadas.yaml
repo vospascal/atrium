@@ -8,7 +8,7 @@ takes:
   - { file: assets/cicadas.ogg, name: Drone }
   - { file: assets/cicadas2.ogg, name: Second drone }
 rule:
-  sings:
+  rests:
     gap: [2, 15]             # seconds of rest before it starts again
     vary: { level: 2, pitch: 10 }
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective drone)

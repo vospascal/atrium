@@ -5,17 +5,17 @@ use atrium_world::{Entity, EntityId};
 use serde::Deserialize;
 
 use super::description::title_from_path;
-use crate::audio::voice_node::Singing;
+use crate::audio::voice_node::Rests;
 
 use super::synth::SynthSpec;
 use crate::audio::sound_profile::SoundProfile;
 
 /// The sound identity an entity resolved to: a sample file or a synth spec.
 pub(super) enum ResolvedSound {
-    /// Recordings: one that loops, or several that are sung with rests.
+    /// Recordings: one that loops, or several uttered with rests between.
     Sample {
         takes: Vec<ResolvedTake>,
-        singing: Option<Singing>,
+        rests: Option<Rests>,
     },
     Synth {
         spec: SynthSpec,
@@ -70,15 +70,15 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
         (Some(_), Some(ResolvedSound::Synth { .. })) => {
             return Err("`audio:` cannot replace the sound of a generator preset".into())
         }
-        // One recording in place of the preset's takes; it keeps the preset's way of singing.
+        // One recording in place of the preset's takes; it keeps the preset's way of rests.
         (Some(file), preset) => ResolvedSound::Sample {
             takes: vec![ResolvedTake {
                 name: title_from_path(&file),
                 file,
                 chance: 1.0,
             }],
-            singing: match preset {
-                Some(ResolvedSound::Sample { singing, .. }) => singing,
+            rests: match preset {
+                Some(ResolvedSound::Sample { rests, .. }) => rests,
                 _ => None,
             },
         },
@@ -154,7 +154,7 @@ fn default_chance() -> f32 {
 }
 
 /// The rule of a kind: what plays when. Written `rule: loops`, or
-/// `rule: { sings: { gap: [3, 8] } }`.
+/// `rule: { rests: { gap: [3, 8] } }`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub(super) enum RuleDef {
@@ -162,12 +162,12 @@ pub(super) enum RuleDef {
     /// take plays round and round.
     Named(String),
     /// Utter a take, rest, utter another.
-    Sings { sings: SingsDef },
+    Rests { rests: RestsDef },
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SingsDef {
+pub(super) struct RestsDef {
     /// Shortest and longest rest between two takes (s).
     pub gap: [f32; 2],
     #[serde(default)]
@@ -212,7 +212,7 @@ impl SampleSourceDef {
                 chance: take.chance,
             })
             .collect();
-        let singing = match self.rule {
+        let rests = match self.rule {
             RuleDef::Named(name) if name == "loops" => {
                 if takes.len() != 1 {
                     return Err(format!(
@@ -224,24 +224,24 @@ impl SampleSourceDef {
                 None
             }
             RuleDef::Named(name) => {
-                return Err(format!("`rule: {name}` is not a rule; use `loops` or `sings`").into())
+                return Err(format!("`rule: {name}` is not a rule; use `loops` or `rests`").into())
             }
-            RuleDef::Sings { sings } => {
-                let [shortest, longest] = sings.gap;
+            RuleDef::Rests { rests } => {
+                let [shortest, longest] = rests.gap;
                 if !(shortest >= 0.0 && longest >= shortest) {
                     return Err(format!(
                         "`gap: [{shortest}, {longest}]` must run from short to long"
                     )
                     .into());
                 }
-                Some(Singing {
+                Some(Rests {
                     gap_seconds: (shortest, longest),
-                    level_variation_db: sings.vary.level,
-                    pitch_variation_cents: sings.vary.pitch,
+                    level_variation_db: rests.vary.level,
+                    pitch_variation_cents: rests.vary.pitch,
                 })
             }
         };
-        Ok(ResolvedSound::Sample { takes, singing })
+        Ok(ResolvedSound::Sample { takes, rests })
     }
 }
 
@@ -289,37 +289,37 @@ mod tests {
     }
 
     /// Every recording kind is written the same way: its takes, and a rule.
-    /// A looping kind has one take and no way of singing.
+    /// A looping kind has one take and no way of rests.
     #[test]
     fn a_looping_kind_has_one_take_and_the_loops_rule() {
         let yaml = "reference_spl: 68.0\ntakes:\n  - { file: assets/campfire.mp3, name: Fire }\nrule: loops\n";
         match kind(yaml).expect("a looping kind reads") {
-            ResolvedSound::Sample { takes, singing } => {
+            ResolvedSound::Sample { takes, rests } => {
                 assert_eq!(takes.len(), 1);
                 assert_eq!(
                     (takes[0].file.as_str(), takes[0].name.as_str()),
                     ("assets/campfire.mp3", "Fire")
                 );
                 assert_eq!(takes[0].chance, 1.0);
-                assert!(singing.is_none());
+                assert!(rests.is_none());
             }
             ResolvedSound::Synth { .. } => panic!("a recording, not a generator"),
         }
     }
 
     #[test]
-    fn a_singing_kind_reads_its_gap_variation_and_chances() {
-        let yaml = "reference_spl: 60\ntakes:\n  - { file: a.mp3, chance: 3 }\n  - { file: b-song.mp3 }\nrule:\n  sings:\n    gap: [3, 8]\n    vary: { level: 2, pitch: 15 }\n";
-        match kind(yaml).expect("a singing kind reads") {
-            ResolvedSound::Sample { takes, singing } => {
+    fn a_resting_kind_reads_its_gap_variation_and_chances() {
+        let yaml = "reference_spl: 60\ntakes:\n  - { file: a.mp3, chance: 3 }\n  - { file: b-song.mp3 }\nrule:\n  rests:\n    gap: [3, 8]\n    vary: { level: 2, pitch: 15 }\n";
+        match kind(yaml).expect("a rests kind reads") {
+            ResolvedSound::Sample { takes, rests } => {
                 assert_eq!(takes[0].chance, 3.0);
                 assert_eq!(
                     takes[1].name, "B Song",
                     "a take without a name is named after its file"
                 );
                 assert_eq!(
-                    singing,
-                    Some(Singing {
+                    rests,
+                    Some(Rests {
                         gap_seconds: (3.0, 8.0),
                         level_variation_db: 2.0,
                         pitch_variation_cents: 15.0,
@@ -349,7 +349,7 @@ mod tests {
                 "is not a rule",
             ),
             (
-                format!("reference_spl: 60\n{two}rule: {{ sings: {{ gap: [8, 3] }} }}\n"),
+                format!("reference_spl: 60\n{two}rule: {{ rests: {{ gap: [8, 3] }} }}\n"),
                 "short to long",
             ),
             (

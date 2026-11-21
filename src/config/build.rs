@@ -24,7 +24,7 @@ use crate::audio::distance::DistanceModel;
 use crate::audio::propagation::GroundProperties;
 use crate::audio::synth_node::SynthNode;
 use crate::audio::test_node::TestNode;
-use crate::audio::voice_node::{Singing, Take, VoiceNode};
+use crate::audio::voice_node::{Rests, Take, VoiceNode};
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::environment::Environment;
 use crate::pipeline::{build_all_pipelines, PipelineParams};
@@ -416,12 +416,12 @@ pub(super) struct BuiltSource {
 /// source matches a reloaded one exactly). `position` is world coordinates
 /// (already offset by the environment spawn point).
 ///
-/// Without `singing` the one take loops. With it, the takes are sung with
+/// Without `rests` the one take loops. With it, the takes are uttered with
 /// rests between them, and `seed` decides the choices.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_one_source(
     takes: &[ResolvedTake],
-    singing: Option<Singing>,
+    rests: Option<Rests>,
     seed: u64,
     reference_spl: f32,
     directivity: &str,
@@ -478,7 +478,7 @@ pub(super) fn build_one_source(
     };
     let unit_amplitude = rms_correction * 10.0_f32.powf(-normalization.spl_reference / 20.0);
 
-    let source: Box<dyn atrium_core::source::SoundSource> = match singing {
+    let source: Box<dyn atrium_core::source::SoundSource> = match rests {
         None => {
             let mut node = TestNode::new(buffers[0].clone(), position, orbit_radius, orbit_speed);
             node.amplitude = amplitude;
@@ -489,7 +489,7 @@ pub(super) fn build_one_source(
             node.meter_signal();
             Box::new(node)
         }
-        Some(singing) => {
+        Some(rests) => {
             let voice = buffers
                 .iter()
                 .zip(takes)
@@ -498,7 +498,7 @@ pub(super) fn build_one_source(
                     chance: take.chance,
                 })
                 .collect();
-            let mut node = VoiceNode::new(voice, singing, position, seed);
+            let mut node = VoiceNode::new(voice, rests, position, seed);
             node.amplitude = amplitude;
             node.unit_amplitude = unit_amplitude;
             node.ref_dist = ref_dist;

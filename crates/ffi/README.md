@@ -55,7 +55,7 @@ runs Cargo itself. There is nothing to build here by hand.
   a heading that then wins over both. A sound that was never turned behaves as before.
 - **`set_source_facing` takes a direction, not an angle.** The app has the vector from the sound
   to the pointer and should not need to know which way the engine counts angles.
-- **A kind can sing.** A preset with `takes` and a `sings` rule utters one take, rests for a gap
+- **A kind can rest between takes.** A preset with `takes` and a `rests` rule utters one take, rests for a gap
   from a range, and utters another, never the same twice running. `scene()` gives each sound's
   take names and telemetry says which one it is uttering, or nothing while it rests. The choice
   is made on the audio thread from a seed per voice, not planned ahead: that was chosen on
