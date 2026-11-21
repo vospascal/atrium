@@ -29,6 +29,7 @@ use atrium_core::source::{SoundSource, Utterance};
 use atrium_core::types::Vec3;
 
 use super::noise::Rng;
+use crate::audio::filters::Biquad;
 
 /// The kinds of thunder, as `Utterance::take` names them.
 pub const KIND_CRACK: u8 = 0;
@@ -74,7 +75,7 @@ const STAGE_CUTOFF_FACTOR: f32 = 1.961;
 /// clap's loudest moment (s).
 const LOUDEST_WINDOW_SECONDS: f32 = 0.015;
 /// Share of a clap's own span over which its last arrivals fade.
-const FADE_SHARE: f32 = 0.15;
+const FADE_SHARE: f32 = 0.4;
 /// How far a cloud flash's course turns from running straight away from the
 /// listener (radians): up to 60° either way.
 const MAX_FLASH_ANGLE: f32 = 1.05;
@@ -82,6 +83,15 @@ const MAX_FLASH_ANGLE: f32 = 1.05;
 /// as loud, since a flash keeps its energy along its whole run, which is
 /// what holds a rumble up for seconds instead of letting it sag at once.
 const IN_CLOUD_STRENGTH: f32 = 1.0;
+/// Below this a clap thins out (Hz).
+const LOW_CUT_HZ: f32 = 90.0;
+/// Where a flash's boom can sit (Hz), and how much it lifts (dB) and how broad it is.
+const BOOM_HZ: (f32, f32) = (170.0, 230.0);
+const BOOM_DB: f32 = 4.0;
+const BOOM_Q: f32 = 1.0;
+/// How far the boom drifts either way, as a share of its pitch, and how fast (Hz).
+const BOOM_DRIFT: f32 = 0.15;
+const BOOM_DRIFT_HZ: (f32, f32) = (0.15, 0.4);
 /// How long one moment of a clap's roar is (s): short enough to keep the
 /// flicker of a rumble, long enough to hold many pulses.
 const MOMENT_SECONDS: f32 = 0.010;
@@ -128,6 +138,9 @@ struct Kind {
     /// How much of the pulses themselves is heard over the roar: the edge of
     /// a crack close by, little of it from far away.
     edge: f32,
+    /// Above this the sound falls steeply (Hz): thunder heard from a few
+    /// kilometres keeps almost nothing above about 1 kHz.
+    cliff_hz: f32,
     /// The infrasonic swell's level, as a share of `level`, and its length (s).
     infra: f32,
     infra_seconds: (f32, f32),
@@ -146,6 +159,7 @@ const KINDS: [Kind; 4] = [
         branches: 4,
         step: 3.0,
         level: 1.0,
+        cliff_hz: 2_500.0,
         edge: 0.9,
         infra: 0.01,
         infra_seconds: (0.10, 0.20),
@@ -155,12 +169,13 @@ const KINDS: [Kind; 4] = [
     Kind {
         ground: true,
         distance: (1_500.0, 3_000.0),
-        length: (2_500.0, 4_000.0),
+        length: (2_000.0, 3_000.0),
         height: (2_000.0, 3_000.0),
-        in_cloud: (1_000.0, 2_500.0),
+        in_cloud: (500.0, 1_500.0),
         branches: 5,
         step: 4.0,
         level: 0.7,
+        cliff_hz: 1_100.0,
         edge: 0.3,
         infra: 0.02,
         infra_seconds: (0.15, 0.30),
@@ -176,6 +191,7 @@ const KINDS: [Kind; 4] = [
         branches: 3,
         step: 5.0,
         level: 0.6,
+        cliff_hz: 950.0,
         edge: 0.25,
         infra: 0.025,
         infra_seconds: (0.20, 0.40),
@@ -191,6 +207,7 @@ const KINDS: [Kind; 4] = [
         branches: 4,
         step: 6.0,
         level: 0.35,
+        cliff_hz: 650.0,
         edge: 0.15,
         infra: 0.03,
         infra_seconds: (0.25, 0.45),
@@ -268,6 +285,10 @@ struct Clap {
     air_first: f32,
     air_second: f32,
     floor: f32,
+    /// The clap's colour: less below the boom, the boom itself, and the
+    /// cliff above, set when the output rate is known and the boom moving
+    /// slowly through the clap.
+    colour: Colour,
     next: usize,
     sounding: [Sounding; MAX_SOUNDING],
     sounding_count: usize,
@@ -294,6 +315,7 @@ impl Clap {
             air_first: 0.0,
             air_second: 0.0,
             floor: 0.0,
+            colour: Colour::new(),
             next: 0,
             sounding: [Sounding::default(); MAX_SOUNDING],
             sounding_count: 0,
@@ -328,6 +350,7 @@ impl Clap {
         self.air_first = 0.0;
         self.air_second = 0.0;
         self.floor = 0.0;
+        self.colour.start(kind(self.kind), random);
         // Started partway: skip what has long been heard.
         let skip = utterance.skip_seconds.max(0.0) * rate;
         self.next = self
@@ -404,7 +427,10 @@ impl Clap {
         // Where pulses do line up, a gentle limit rounds the peak, as the air
         // near a strike and any microphone do; quieter than a fifth of full
         // scale it changes nothing.
-        soft_limit((roar + kind(self.kind).edge * sum) * self.gain) * self.steal_gain.max(0.0)
+        let coloured =
+            self.colour
+                .process(roar + kind(self.kind).edge * sum, self.elapsed, sample_rate);
+        soft_limit(coloured * self.gain) * self.steal_gain.max(0.0)
     }
 
     /// The roar at this moment: noise, tilted down like thunder's spectrum,
@@ -437,6 +463,75 @@ impl Clap {
         // power: scale it back to steady power, so `loudness` is its level.
         let steady = ((2.0 - tilt) / tilt).sqrt() * WHITE_TO_UNIT;
         (self.air_second - self.floor) * steady * loudness
+    }
+}
+
+/// The colour every clap of thunder has, measured on a recording a few
+/// kilometres off: little below about 90 Hz, a boom around 200 Hz where most of
+/// its energy sits, and a cliff above which almost nothing is left. The boom's
+/// pitch differs from flash to flash and drifts slowly through each.
+struct Colour {
+    low_cut: Biquad,
+    boom: Biquad,
+    cliff_first: Biquad,
+    cliff_second: Biquad,
+    boom_hz: f32,
+    drift_rate: f32,
+    drift_phase: f32,
+    cliff_hz: f32,
+    /// The output rate the filters are set for; 0 until a clap starts.
+    sample_rate: f32,
+    /// When the boom was last moved (s into the clap).
+    moved_at: f32,
+}
+
+impl Colour {
+    fn new() -> Self {
+        Self {
+            low_cut: Biquad::unity(),
+            boom: Biquad::unity(),
+            cliff_first: Biquad::unity(),
+            cliff_second: Biquad::unity(),
+            boom_hz: BOOM_HZ.0,
+            drift_rate: 0.0,
+            drift_phase: 0.0,
+            cliff_hz: 1_000.0,
+            sample_rate: 0.0,
+            moved_at: 0.0,
+        }
+    }
+
+    fn start(&mut self, kind: &Kind, random: &mut Rng) {
+        self.boom_hz = BOOM_HZ.0 + (BOOM_HZ.1 - BOOM_HZ.0) * random.next_f32();
+        self.drift_rate = BOOM_DRIFT_HZ.0 + (BOOM_DRIFT_HZ.1 - BOOM_DRIFT_HZ.0) * random.next_f32();
+        self.drift_phase = random.next_f32() * TAU;
+        self.cliff_hz = kind.cliff_hz;
+        // Set afresh on the first sample, when the output rate is known.
+        self.sample_rate = 0.0;
+        self.moved_at = f32::NEG_INFINITY;
+        self.low_cut.reset();
+        self.boom.reset();
+        self.cliff_first.reset();
+        self.cliff_second.reset();
+    }
+
+    fn process(&mut self, sample: f32, elapsed: f32, sample_rate: f32) -> f32 {
+        if sample_rate != self.sample_rate {
+            self.sample_rate = sample_rate;
+            self.low_cut = Biquad::highpass(LOW_CUT_HZ, sample_rate);
+            self.cliff_first = Biquad::lowpass(self.cliff_hz, sample_rate);
+            self.cliff_second = Biquad::lowpass(self.cliff_hz, sample_rate);
+            self.moved_at = f32::NEG_INFINITY;
+        }
+        if elapsed - self.moved_at >= MOMENT_SECONDS {
+            let drift =
+                1.0 + BOOM_DRIFT * (TAU * self.drift_rate * elapsed + self.drift_phase).sin();
+            self.boom
+                .set_peak(self.boom_hz * drift, BOOM_DB, BOOM_Q, sample_rate);
+            self.moved_at = elapsed;
+        }
+        let shaped = self.boom.process(self.low_cut.process(sample));
+        self.cliff_second.process(self.cliff_first.process(shaped))
     }
 }
 

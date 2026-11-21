@@ -74,15 +74,25 @@ Fineberg, Walters and Reiss:
 
 ## Tuned against the reference
 
-Heard twice and judged bad: first crackly and sagging (crest 22–28 dB against 15.5, lost its body
-after a second), then echoing (from the delay network added to fix that). Measured against the
-reference after the roar replaced the network:
+Heard three times and judged bad: first crackly and sagging (crest 22–28 dB against 15.5), then
+echoing (a delay network added to fill between the pulses), then still not right. A finer
+comparison, in third-octave bands, showed what was missing: the reference has little below
+90 Hz, a boom around 200 Hz holding most of its energy, about −10 dB through 500–800 Hz, and a
+cliff above 1 kHz (−21 dB at 1 kHz, −37 at 2 kHz). The noise roar was flat in the lows and
+fell far too gently above. A colour stage per clap now gives it all three: a low cut at
+90 Hz, a boom of +4 dB between 170 and 230 Hz that differs per flash and drifts slowly, and a
+steep cliff per kind (2.5 kHz for a crack, 1.1 kHz for a clap, lower from farther away).
 
 | | Reference | Clap |
 |---|---|---|
-| Spectral centroid | 199 Hz | 174–185 Hz |
-| Crest | 15.5 dB | 18–19 dB |
-| Shape | rises, holds about 2.5 s, falls | rises, holds about 4 s, falls |
+| Colour, 63 Hz to 1.25 kHz | | within about 3 dB band by band |
+| Spectral flatness, 100 Hz–1 kHz | 0.148 | 0.154–0.163 |
+| Level flicker | 3.5 dB | 3.6–3.8 dB |
+| Centroid, p10–p90 | 181–304 Hz | 211–304 Hz |
+| Length above −30 dB | 4.1 s | 3.8–4.5 s |
+
+The comparison script is a few lines of numpy over third-octave bands; the numbers above are
+what it reported.
 
 `THUNDER_OUT=target/thunder-samples cargo test --release --lib write_listening_samples` writes
 three claps of every kind to listen to.
