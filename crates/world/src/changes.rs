@@ -3,7 +3,7 @@
 //! Undo restores an earlier version of a scene, and the engine has to turn
 //! the version playing into that one without stopping. This says, sound by
 //! sound, the smallest thing that does it: a sound to add or take out, a
-//! move, a new level or beam, a new name, or, when nothing smaller fits,
+//! move, a new level, beam or size, a new name, or, when nothing smaller fits,
 //! building the sound again. Working it out needs no engine, so it is tested
 //! on its own.
 
@@ -29,6 +29,9 @@ pub enum Change {
     },
     /// Which way it faces differs, and the scene sets it (compass degrees).
     Facing { id: EntityId, facing: f32 },
+    /// How wide it sounds differs, and the scene sets it (0 a point, 1 all
+    /// around).
+    Size { id: EntityId, size: f32 },
     /// What a list shows for it: its name, colour or group. Nothing heard.
     Identity {
         id: EntityId,
@@ -82,7 +85,7 @@ fn changes_of_one(id: &EntityId, now: &Entity, wanted: &Entity) -> Vec<Change> {
     let same_sound =
         now.sound.preset == wanted.sound.preset && now.sound.audio == wanted.sound.audio;
     let same_build = same_sound
-        && now.shape.size == wanted.shape.size
+        && now.shape.ambient == wanted.shape.ambient
         && now.when == wanted.when
         && now.follows == wanted.follows
         && now.moves == wanted.moves;
@@ -116,6 +119,15 @@ fn changes_of_one(id: &EntityId, now: &Entity, wanted: &Entity) -> Vec<Change> {
         found.push(Change::Facing {
             id: id.clone(),
             facing,
+        });
+    }
+    if now.shape.size != wanted.shape.size {
+        let Some(size) = wanted.shape.size else {
+            return rebuilt();
+        };
+        found.push(Change::Size {
+            id: id.clone(),
+            size,
         });
     }
     if now.place != wanted.place {
@@ -201,8 +213,8 @@ mod tests {
         );
     }
 
-    /// A drag, a level, a beam, a turn and a new name are each done as they
-    /// are, without building the sound again.
+    /// A drag, a level, a beam, a turn, a size and a new name are each done
+    /// as they are, without building the sound again.
     #[test]
     fn small_changes_stay_small() {
         let before = scene(vec![("robin", sound("sources/robin.yaml", 1.0))]);
@@ -211,6 +223,7 @@ mod tests {
         changed.shape.width = Some(120.0);
         changed.shape.behind = Some(-12.0);
         changed.shape.facing = Some(90.0);
+        changed.shape.size = Some(0.4);
         changed.name = Some("Robin in the hedge".into());
         let after = scene(vec![("robin", changed)]);
         assert_eq!(
@@ -228,6 +241,10 @@ mod tests {
                 Change::Facing {
                     id: id("robin"),
                     facing: 90.0
+                },
+                Change::Size {
+                    id: id("robin"),
+                    size: 0.4
                 },
                 Change::Moved {
                     id: id("robin"),

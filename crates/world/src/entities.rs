@@ -139,7 +139,7 @@ frogs:
   color: \"#6db33f\"
   group: Creatures
   sound: { preset: sources/frog.yaml, level: 68 }
-  shape: { width: 180, behind: -12, size: 0.2, facing: 225 }
+  shape: { width: 180, behind: -12, size: 0.2, facing: 225, ambient: true }
   place: [10.1, 10.1, 0.0]
 drum:
   sound: { audio: assets/djembe.mp3 }
@@ -175,6 +175,7 @@ drum:
                     behind: Some(-12.0),
                     size: Some(0.2),
                     facing: Some(225.0),
+                    ambient: Some(true),
                 },
                 place: Place {
                     x: 10.1,

@@ -12,7 +12,7 @@ sounds:
     color: "#6db33f"
     group: Creatures
     sound: { preset: sources/frog.yaml, level: 68 }
-    shape: { width: 180, behind: -12, size: 0.2, facing: 225 }
+    shape: { width: 180, behind: -12, size: 0.2, facing: 225, ambient: false }
     place: [10.1, 10.1, 0.0]
     when: { gap: [20, 45], bout: [2, 4], chance: { "Call 2": 3 } }
     moves:

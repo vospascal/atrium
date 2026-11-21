@@ -81,6 +81,13 @@ pub struct Shape {
     /// sound faces the way the engine would turn it by itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facing: Option<f32>,
+    /// Whether it is heard everywhere, as the air of the place, in place of
+    /// what its preset makes it: `true` for rain or a recorded forest that
+    /// should surround the listener, `false` to put a wind at a point. An
+    /// ambient sound has no distance, direction, beam or echo; its level is
+    /// what is heard wherever the listener stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambient: Option<bool>,
 }
 
 impl Shape {
