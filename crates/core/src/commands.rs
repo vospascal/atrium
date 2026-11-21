@@ -125,11 +125,17 @@ pub enum SynthParam {
     /// Shortest and longest a flying source hovers before it moves on (s).
     HoverTimeMin,
     HoverTimeMax,
+    /// How long a wind stays steady between two moves of its repertoire, as
+    /// a share of its preset's rest: 1 as written, 0.2 five times as often.
+    MoveRest,
+    /// How strong a wind's moves are, as a share of its preset's: 1 as
+    /// written, 2 twice as strong.
+    MoveStrength,
 }
 
 impl SynthParam {
     /// Every setting, in the order they are declared.
-    pub const ALL: [SynthParam; 34] = [
+    pub const ALL: [SynthParam; 36] = [
         SynthParam::FlowSpeedMin,
         SynthParam::FlowSpeedMax,
         SynthParam::RiverSplashRate,
@@ -164,6 +170,8 @@ impl SynthParam {
         SynthParam::CrashChance,
         SynthParam::HoverTimeMin,
         SynthParam::HoverTimeMax,
+        SynthParam::MoveRest,
+        SynthParam::MoveStrength,
     ];
 
     /// The name a file uses for this setting, in snake case.
@@ -203,6 +211,8 @@ impl SynthParam {
             SynthParam::CrashChance => "crash_chance",
             SynthParam::HoverTimeMin => "hover_time_min",
             SynthParam::HoverTimeMax => "hover_time_max",
+            SynthParam::MoveRest => "move_rest",
+            SynthParam::MoveStrength => "move_strength",
         }
     }
 

@@ -37,6 +37,17 @@ master_gain: 0.85
 reference_spl: 60.0         # forceful environmental bed, still below point events
 spread: 1.0                 # descriptive only; Field rendering is diffuse
 
-# Blows harder as the wind rises.
+# What a storm does: it is restless, with a gust every few seconds, long
+# surging swells and only short lulls.
+behaviour:
+  rest: [3, 12]
+  repertoire:
+    - { move: gust,  chance: 4, strength: [0.5, 1.0], seconds: [1.5, 8] }
+    - { move: swell, chance: 2, strength: [0.4, 0.8], seconds: [8, 20] }
+    - { move: lull,  chance: 1, strength: [0.2, 0.5], seconds: [3, 8] }
+
+# Blows harder as the wind rises, and the harder it blows the more it surges.
 follows:
   - { condition: wind, setting: max_speed, from: 10, to: 22 }
+  - { condition: wind, setting: move_rest, from: 1.5, to: 0.5, over: [0.3, 1] }
+  - { condition: wind, setting: move_strength, from: 0.8, to: 1.2 }

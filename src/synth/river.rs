@@ -536,6 +536,8 @@ impl SoundSource for RiverSource {
             | SynthParam::GustDurationMin
             | SynthParam::GustDurationMax
             | SynthParam::GustStrength
+            | SynthParam::MoveRest
+            | SynthParam::MoveStrength
             | SynthParam::RiseBias
             | SynthParam::GustBrightness
             | SynthParam::TurbulenceBrightness

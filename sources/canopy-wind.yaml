@@ -36,6 +36,18 @@ master_gain: 1.0
 reference_spl: 48.0        # nominal environmental bed, not a 1 m point event
 spread: 1.0                # descriptive only; Field uses diffuse rendering
 
+# What the wind does now and then: trees mostly sway in slow swells, with a gust
+# or a lull between, and steady rustling for half a minute or more in between.
+behaviour:
+  rest: [25, 80]
+  repertoire:
+    - { move: swell, chance: 3, strength: [0.3, 0.6], seconds: [6, 18] }
+    - { move: gust,  chance: 2, strength: [0.4, 0.9], seconds: [3, 8] }
+    - { move: lull,  chance: 1, strength: [0.3, 0.6], seconds: [6, 15] }
+
 # Blows harder as the wind rises.
 follows:
   - { condition: wind, setting: max_speed, from: 3, to: 14 }
+  # Windier weather: moves come more often and push harder.
+  - { condition: wind, setting: move_rest, from: 1, to: 0.25, over: [0.2, 1] }
+  - { condition: wind, setting: move_strength, from: 0.8, to: 1.5 }

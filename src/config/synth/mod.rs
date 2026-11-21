@@ -11,6 +11,7 @@ mod soft_wind;
 mod storm_wind;
 mod thunder;
 mod waves;
+mod wind_behaviour;
 mod wisp;
 
 #[cfg(test)]

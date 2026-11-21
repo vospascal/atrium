@@ -146,6 +146,12 @@ impl StormWindSource {
         self.max_speed = min_speed.max(max_speed.clamp(0.0, 25.0));
     }
 
+    /// Let the wind follow `behaviour`: steady, with a gust, swell or lull
+    /// now and then, instead of gusting about half the time.
+    pub fn set_behaviour(&mut self, behaviour: crate::synth::wind_behaviour::WindBehaviour) {
+        self.driver.set_behaviour(behaviour);
+    }
+
     pub fn set_change_time_range(&mut self, min_seconds: f32, max_seconds: f32) {
         self.driver.set_change_time_range(min_seconds, max_seconds);
     }
@@ -395,6 +401,8 @@ impl SoundSource for StormWindSource {
                 self.set_turbulence_time_range(min, value.max(min));
             }
             SynthParam::GustStrength => self.gust_strength = value.clamp(0.0, 1.0),
+            SynthParam::MoveRest => self.driver.set_move_rest(value),
+            SynthParam::MoveStrength => self.driver.set_move_strength(value),
             SynthParam::RiseBias => self.rise_bias = value.clamp(-1.0, 1.0),
             SynthParam::GustBrightness => self.gust_brightness = value.clamp(0.0, 1.0),
             SynthParam::TurbulenceBrightness => self.turbulence_brightness = value.clamp(0.0, 1.0),

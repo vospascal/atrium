@@ -53,6 +53,10 @@ pub(crate) struct WindMoves {
     length: usize,
     /// Nothing has been played yet: the first rest starts partway.
     first: bool,
+    /// What the weather makes of the repertoire: rests this share as long,
+    /// moves this share as strong.
+    rest_share: f32,
+    strength_share: f32,
 }
 
 impl WindMoves {
@@ -64,7 +68,26 @@ impl WindMoves {
             position: 0,
             length: 0,
             first: true,
+            rest_share: 1.0,
+            strength_share: 1.0,
         }
+    }
+
+    /// Rest `share` as long as written, from now on: a rest under way is
+    /// shortened or lengthened at once, so a storm that arrives during a long
+    /// calm does not wait for it to end.
+    pub(crate) fn set_rest_share(&mut self, share: f32) {
+        let share = share.clamp(MIN_REST_SHARE, MAX_REST_SHARE);
+        if self.playing.is_none() && !self.first {
+            let left = self.length.saturating_sub(self.position) as f32;
+            self.length = self.position + (left * share / self.rest_share) as usize;
+        }
+        self.rest_share = share;
+    }
+
+    /// Make moves `share` as strong as written, at once.
+    pub(crate) fn set_strength_share(&mut self, share: f32) {
+        self.strength_share = share.clamp(0.0, MAX_STRENGTH_SHARE);
     }
 
     /// The push of the wind now, per sample: above 0 adds to the steady wind
@@ -96,14 +119,15 @@ impl WindMoves {
         } else {
             1.0
         };
-        sign * strength * shape
+        (sign * strength * self.strength_share * shape).clamp(-1.0, 1.0)
     }
 
     fn start_rest(&mut self, sample_rate: f32) {
         self.playing = None;
         let (shortest, longest) = self.behaviour.rest;
         self.position = 0;
-        self.length = (self.between(shortest, longest) * sample_rate).max(1.0) as usize;
+        let seconds = self.between(shortest, longest) * self.rest_share;
+        self.length = (seconds * sample_rate).max(1.0) as usize;
     }
 
     fn start_move(&mut self, sample_rate: f32) {
@@ -139,6 +163,12 @@ impl WindMoves {
         low + self.rng.next_f32() * (high - low)
     }
 }
+
+/// The shortest and longest a rest can be made against the repertoire's own,
+/// and the strongest its moves can be made.
+const MIN_REST_SHARE: f32 = 0.02;
+const MAX_REST_SHARE: f32 = 10.0;
+const MAX_STRENGTH_SHARE: f32 = 3.0;
 
 /// A gust's shape along its length, 0 to 1 and back: a quick rise over the
 /// first fifth, then a long easing off.
@@ -202,6 +232,46 @@ mod tests {
         assert!(share < 0.25, "moving {share} of the time");
         assert!((20..=60).contains(&starts), "{starts} moves in an hour");
         assert!(up && down, "gusts or swells, and lulls, are both heard");
+    }
+
+    /// A storm makes the same repertoire restless: with rests a fifth as
+    /// long, moves come several times as often, and a long calm under way is
+    /// cut short at once rather than played out.
+    #[test]
+    fn weather_shortens_the_rests() {
+        let count = |share: f32| {
+            let mut moves = WindMoves::new(breeze(), 3);
+            let rate = 100.0;
+            moves.next(rate);
+            moves.set_rest_share(share);
+            let (mut starts, mut was) = (0usize, false);
+            let mut first_move = None;
+            for step in 0..(3600.0 * rate) as usize {
+                let now = moves.next(rate).abs() > 1e-3;
+                if now && !was {
+                    starts += 1;
+                    first_move.get_or_insert(step as f32 / rate);
+                }
+                was = now;
+            }
+            (starts, first_move.unwrap_or(f32::MAX))
+        };
+        let (calm, _) = count(1.0);
+        let (storm, first) = count(0.2);
+        assert!(storm > 3 * calm, "{storm} moves against {calm}");
+        assert!(first < 30.0, "the first move came after {first} s");
+    }
+
+    #[test]
+    fn strength_follows_the_weather_at_once() {
+        let mut moves = WindMoves::new(breeze(), 3);
+        let rate = 100.0;
+        let mut loudest = 0.0f32;
+        moves.set_strength_share(2.0);
+        for _ in 0..(1800.0 * rate) as usize {
+            loudest = loudest.max(moves.next(rate));
+        }
+        assert!(loudest > 0.85, "strongest push {loudest}");
     }
 
     #[test]

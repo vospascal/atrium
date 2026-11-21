@@ -35,6 +35,18 @@ reference_spl: 42.0
 width: 360
 spread: 1.0
 
+# What the wind does now and then: steady air with a light gust, swell or lull
+# every half minute to a minute and a half. Its quick ruffles stay in the eddies.
+behaviour:
+  rest: [30, 90]
+  repertoire:
+    - { move: gust,  chance: 3, strength: [0.3, 0.7], seconds: [2, 6] }
+    - { move: swell, chance: 2, strength: [0.2, 0.5], seconds: [8, 20] }
+    - { move: lull,  chance: 1, strength: [0.3, 0.6], seconds: [6, 15] }
+
 # Blows harder as the wind rises.
 follows:
   - { condition: wind, setting: max_speed, from: 2, to: 9 }
+  # Windier weather: moves come more often and push harder.
+  - { condition: wind, setting: move_rest, from: 1, to: 0.25, over: [0.2, 1] }
+  - { condition: wind, setting: move_strength, from: 0.8, to: 1.5 }

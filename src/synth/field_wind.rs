@@ -129,6 +129,21 @@ impl WindDriver {
         self.moves = Some(WindMoves::new(behaviour, self.seed.wrapping_add(109)));
     }
 
+    /// Rest `share` as long as the repertoire says between two moves. A wind
+    /// without a repertoire has no rests to change.
+    pub(crate) fn set_move_rest(&mut self, share: f32) {
+        if let Some(moves) = &mut self.moves {
+            moves.set_rest_share(share);
+        }
+    }
+
+    /// Make the repertoire's moves `share` as strong as it says.
+    pub(crate) fn set_move_strength(&mut self, share: f32) {
+        if let Some(moves) = &mut self.moves {
+            moves.set_strength_share(share);
+        }
+    }
+
     pub(crate) fn set_change_time_range(&mut self, min_seconds: f32, max_seconds: f32) {
         self.weather.set_duration_range(min_seconds, max_seconds);
     }
@@ -501,6 +516,8 @@ impl SoundSource for FieldWindSource {
                 self.set_turbulence_time_range(min, value.max(min));
             }
             SynthParam::GustStrength => self.gust_strength = value.clamp(0.0, 1.0),
+            SynthParam::MoveRest => self.driver.set_move_rest(value),
+            SynthParam::MoveStrength => self.driver.set_move_strength(value),
             SynthParam::RiseBias => self.rise_bias = value.clamp(-1.0, 1.0),
             SynthParam::GustBrightness => self.gust_brightness = value.clamp(0.0, 1.0),
             SynthParam::TurbulenceBrightness => self.turbulence_brightness = value.clamp(0.0, 1.0),

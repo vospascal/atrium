@@ -5,6 +5,8 @@ use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 use serde::Deserialize;
 
+use super::wind_behaviour::BehaviourParams;
+
 use crate::synth::storm_wind::StormWindSource;
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -18,6 +20,8 @@ pub(in crate::config) struct StormWindSynthParams {
     pub turbulence_time_min: Option<f32>,
     pub turbulence_time_max: Option<f32>,
     pub gust_strength: Option<f32>,
+    /// What the wind does now and then; without it, it gusts about half the time.
+    pub behaviour: Option<BehaviourParams>,
     pub rise_bias: Option<f32>,
     pub turbulence_depth: Option<f32>,
     pub gust_brightness: Option<f32>,
@@ -61,6 +65,9 @@ impl StormWindSynthParams {
             self.turbulence_time_min.unwrap_or(default_min),
             self.turbulence_time_max.unwrap_or(default_max),
         );
+        if let Some(behaviour) = &self.behaviour {
+            generator.set_behaviour(behaviour.to_behaviour());
+        }
         if let Some(value) = self.gust_strength {
             generator.gust_strength = value.clamp(0.0, 1.0);
         }
