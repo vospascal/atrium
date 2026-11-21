@@ -24,6 +24,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.focusable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -39,6 +51,11 @@ import atrium.engine.SceneFile
 internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -> Unit) {
     var selected by remember(session.engine) { mutableStateOf<String?>(null) }
     var panel by remember { mutableStateOf(Panel.Layers) }
+    var naming by remember { mutableStateOf(false) }
+    // Save writes over the editor's own file; a hand-written scene is saved as a copy, so it asks for a name.
+    val save = { if (scene.savedByEditor) session.save(scene.path, scene.title) else naming = true }
+    val keys = remember { FocusRequester() }
+    LaunchedEffect(Unit) { keys.requestFocus() }
     PlayerTheme(look.appearance) {
         val tint = if (look.monochrome) LocalPlayerColors.current.monochromeInk else null
         CompositionLocalProvider(LocalInkTint provides tint) {
@@ -52,10 +69,20 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
                 chosen?.let(session::remove)
                 selected = null
             }
-            BoxWithConstraints(Modifier.fillMaxSize().background(Backdrop)) {
+            BoxWithConstraints(
+                Modifier.fillMaxSize().background(Backdrop)
+                    .focusRequester(keys)
+                    .focusable()
+                    .onPreviewKeyEvent { event ->
+                        val command = event.isMetaPressed || event.isCtrlPressed
+                        if (event.type != KeyEventType.KeyDown || !command || event.key != Key.S) return@onPreviewKeyEvent false
+                        if (event.isShiftPressed) naming = true else save()
+                        true
+                    },
+            ) {
                 val wide = maxWidth >= WideFrom
                 Column(Modifier.fillMaxSize()) {
-                    TopBar(scene, session, onBack)
+                    TopBar(scene, session, onBack, onSave = save, onSaveAs = { naming = true })
                     Rule()
                     if (wide) {
                         // The map is always there, so the left panel only switches between its two lists.
@@ -117,18 +144,39 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
                         }
                     }
                 }
+                if (naming) {
+                    SaveAsDialog(scene, session, onDone = {
+                        naming = false
+                        keys.requestFocus()
+                    })
+                }
             }
         }
     }
 }
 
+/**
+ * The document bar: back to the player, the scene and its file with a dot
+ * while it has changes that are not saved, and the file actions.
+ */
 @Composable
-private fun TopBar(scene: SceneFile, session: Session, onBack: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun TopBar(scene: SceneFile, session: Session, onBack: () -> Unit, onSave: () -> Unit, onSaveAs: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         PaperText("‹ Player", 16, Muted, modifier = Modifier.clickable(role = Role.Button, onClick = onBack))
         Spacer(Modifier.width(22.dp))
-        PaperText(scene.title, 22, weight = FontWeight.Bold, modifier = Modifier.weight(1f))
-        PaperText("${session.description?.sources?.size ?: 0} of $VoiceCount voices", 15, Muted)
+        PaperText(scene.title + if (session.unsaved) "  •" else "", 22, weight = FontWeight.Bold)
+        Spacer(Modifier.width(12.dp))
+        PaperText(scene.path.substringAfterLast('/'), 14, Muted, modifier = Modifier.weight(1f))
+        val note = session.saveFailure ?: if (session.unsaved) null else "Saved"
+        if (note != null && session.saves > 0) {
+            PaperText(note, 14, if (session.saveFailure != null) Foreground else Muted)
+            Spacer(Modifier.width(14.dp))
+        }
+        ToolButton("Save", strong = session.unsaved, onClick = onSave)
+        Spacer(Modifier.width(8.dp))
+        ToolButton("Save as…", onClick = onSaveAs)
+        Spacer(Modifier.width(20.dp))
+        PaperText("${session.description?.sources?.size ?: 0} / $VoiceCount voices", 14, Muted)
     }
 }
 

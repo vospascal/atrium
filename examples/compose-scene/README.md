@@ -50,8 +50,12 @@ and on desktop the window widens for it. It has three panels; in a narrow window
   has the actions: plus opens the library, and the bin deletes the selected layer.
 - **Library** lists the presets in `sources/`. The play button in front of one plays it just
   ahead of you until you press it again; the sound starts about half a second after the press.
-  Add puts it in the scene there, as a new layer. An added sound lasts until the scene is played
-  again, because scenes cannot be saved yet.
+  Add puts it in the scene there, as a new layer.
+- **Save** is in the bar at the top, next to the scene's name and file; a dot after the name
+  means there are changes that are not saved. ⌘S saves and ⇧⌘S saves under a new name. A scene
+  from the repository is written by hand and keeps its comments, so its first save asks for a
+  name and writes a copy beside it. That copy is the editor's own, and later saves replace it.
+  Mutes, volume, output and head tracking are yours and are not saved with the scene.
 - **The map** shows every sound from above, north up, with you in the middle and rings at 5, 10
   and 20 m. Sounds are black and white, and the selected one is in its own colour. A sound's
   circle is how far its level carries, so a louder sound is larger; a focused sound has a wedge

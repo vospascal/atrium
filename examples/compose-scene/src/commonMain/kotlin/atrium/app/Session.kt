@@ -21,6 +21,7 @@ import atrium.engine.SceneFile
 import atrium.engine.SourceDescription
 import atrium.engine.Telemetry
 import atrium.engine.listPresets
+import atrium.engine.listScenes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -70,6 +71,16 @@ internal class Session(private val store: SettingsStore) {
     var mix by mutableStateOf(LayerMix())
         private set
 
+    /** Whether the playing scene was changed since it was opened or last saved. */
+    var unsaved by mutableStateOf(false)
+        internal set
+    /** Why the last save did not work; null once one does. */
+    var saveFailure by mutableStateOf<String?>(null)
+        private set
+    /** Counts saves, so that lists of scene files are read again after one. */
+    var saves by mutableStateOf(0)
+        private set
+
     /** The presets a sound can be made from, read when the library is first opened. */
     val presets: Result<List<Preset>> by lazy { runCatching { listPresets(PresetDirectory) } }
     /** Why the last audition or add did not work; null once one does. */
@@ -107,6 +118,7 @@ internal class Session(private val store: SettingsStore) {
         val running = engine ?: return
         command { setSourceLevel(slot, level) }
         description = running.scene()
+        unsaved = true
     }
 
     /** Play [preset] just ahead of the listener to hear it before placing it, or stop with null. */
@@ -126,6 +138,7 @@ internal class Session(private val store: SettingsStore) {
                     libraryFailure = null
                     if (engine === running) {
                         description = running.scene()
+                        unsaved = true
                         onAdded(added.id)
                     }
                 }
@@ -134,16 +147,23 @@ internal class Session(private val store: SettingsStore) {
     }
 
     /** Move the sound in [slot] to [position] while it is dragged. */
-    fun move(slot: UShort, position: Position) = command { setSourcePosition(slot, position) }
+    fun move(slot: UShort, position: Position) {
+        command { setSourcePosition(slot, position) }
+        unsaved = true
+    }
 
     /** Turn the sound in [slot] to face along [facing] while its handle is dragged. */
-    fun face(slot: UShort, facing: Position) = command { setSourceFacing(slot, facing) }
+    fun face(slot: UShort, facing: Position) {
+        command { setSourceFacing(slot, facing) }
+        unsaved = true
+    }
 
     /** Change how the sound in [slot] radiates. */
     fun shape(slot: UShort, pattern: Pattern) {
         val running = engine ?: return
         command { setSourcePattern(slot, pattern) }
         description = running.scene()
+        unsaved = true
     }
 
     /**
@@ -155,6 +175,28 @@ internal class Session(private val store: SettingsStore) {
         mix(mix.without(sound.id))
         command { removeSound(sound.slot) }
         description = running.scene()
+        unsaved = true
+    }
+
+    /**
+     * Write the playing scene to [path] under [title]. From then on the scene that plays is that
+     * file, without restarting it, so the next save goes there too.
+     */
+    fun save(path: String, title: String) {
+        val running = engine ?: return
+        val playing = request ?: return
+        try {
+            running.saveScene(path, title)
+        } catch (refused: EngineException) {
+            saveFailure = refused.message
+            return
+        }
+        saveFailure = null
+        unsaved = false
+        saves++
+        val directory = path.substringBeforeLast('/', ".")
+        val written = runCatching { listScenes(directory) }.getOrNull()?.firstOrNull { it.path == path }
+        if (written != null) request = playing.copy(scene = written)
     }
 
     /** A drag has ended: take over where the engine now says the scene's sounds were placed. */
@@ -212,7 +254,9 @@ internal data class PlayRequest(val scene: SceneFile, val number: Int)
 @Composable
 internal fun RunSession(session: Session) {
     val request = session.request
-    LaunchedEffect(request) {
+    // Keyed on the request's number, not the request: saving under a new name changes which
+    // file the request names, and that must not restart the scene.
+    LaunchedEffect(request?.number) {
         if (request == null) {
             session.failure = null
             session.status = "Nothing playing"
@@ -233,6 +277,7 @@ internal fun RunSession(session: Session) {
         }
         try {
             session.forgetMix()
+            session.unsaved = false
             session.description = running.scene()
             session.outputs = running.outputs()
             session.engine = running

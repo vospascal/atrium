@@ -27,6 +27,7 @@ class InkTest {
         name = "test",
         path = "scenes/test.yaml",
         title = "Test",
+        savedByEditor = false,
         sounds = offsets.mapIndexed { index, offset -> SoundSummary("Sound $index", "#26c6da", offset) },
     )
 
