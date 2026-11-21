@@ -259,3 +259,31 @@ fn any_sound_can_be_ambient_or_a_point() {
         frame.sources[1].gain_db
     );
 }
+
+/// A name the scene file gets wrong is said, not played as something else:
+/// before, an unknown render mode became VBAP, an unknown distance law the
+/// inverse one, and an unknown speaker layout a stereo pair, all silently.
+#[test]
+fn an_unknown_name_in_a_scene_file_is_refused() {
+    let refused = |from: &str, to: &str| {
+        let yaml = SMALL_ATRIUM_SCENE.replace(from, to);
+        assert_ne!(yaml, SMALL_ATRIUM_SCENE, "the scene names {from}");
+        let scene: SceneConfig = serde_yaml::from_str(&yaml).expect("parses");
+        match scene.build() {
+            Ok(_) => panic!("{to} was accepted"),
+            Err(error) => error.to_string(),
+        }
+    };
+    assert_eq!(
+        refused("render_mode: dbap", "render_mode: dbpa"),
+        "speakers.render_mode `dbpa` is not one of world_locked, vbap, hrtf, dbap, ambisonics"
+    );
+    assert_eq!(
+        refused("model: exponential", "model: exponentail"),
+        "distance_model.model `exponentail` is not one of linear, inverse, exponential"
+    );
+    assert_eq!(
+        refused("layout: \"5.1\"", "layout: surround"),
+        "speakers.layout `surround` is not one of 5.1, quad, stereo"
+    );
+}

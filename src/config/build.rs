@@ -99,8 +99,8 @@ impl SceneConfig {
         let listener = Listener::new(listener_pos, self.listener.yaw_degrees.to_radians());
 
         // Build speaker layout (atrium-local positions offset by spawn)
-        let speaker_layout = self.build_speakers(spawn);
-        let render_mode = parse_render_mode(&self.speakers.render_mode);
+        let speaker_layout = self.build_speakers(spawn)?;
+        let render_mode = parse_render_mode(&self.speakers.render_mode)?;
 
         // Decode audio and build sources (also collects metadata for the browser)
         let build = self.build_sources(spawn)?;
@@ -153,7 +153,7 @@ impl SceneConfig {
             ref_distance: self.distance_model.ref_distance,
             max_distance: self.distance_model.max_distance,
             rolloff: self.distance_model.rolloff,
-            model: parse_distance_model(&self.distance_model.model),
+            model: parse_distance_model(&self.distance_model.model)?,
         };
 
         // Load atmosphere from file (or defaults if omitted)
@@ -170,6 +170,7 @@ impl SceneConfig {
             &atrium_cfg,
             spawn,
             &speaker_layout,
+            render_mode,
             &source_metas,
             &atmosphere,
         );
@@ -315,10 +316,12 @@ impl SceneConfig {
         })
     }
 
-    fn build_speakers(&self, spawn: Vec3) -> SpeakerLayout {
+    /// The room's loudspeakers as `speakers.layout` names them. A name it does
+    /// not know is refused rather than built as a stereo pair.
+    fn build_speakers(&self, spawn: Vec3) -> Result<SpeakerLayout, String> {
         let p = &self.speakers.positions;
         let s = |arr: [f32; 3]| arr_to_vec3(arr) + spawn;
-        match self.speakers.layout.as_str() {
+        Ok(match self.speakers.layout.as_str() {
             "5.1" => SpeakerLayout::surround_5_1(
                 s(p.fl.unwrap_or([-3.0, 2.0, 0.0])),
                 s(p.fr.unwrap_or([3.0, 2.0, 0.0])),
@@ -332,11 +335,16 @@ impl SceneConfig {
                 s(p.rl.unwrap_or([-3.0, -2.0, 0.0])),
                 s(p.rr.unwrap_or([3.0, -2.0, 0.0])),
             ),
-            _ => SpeakerLayout::stereo(
+            "stereo" => SpeakerLayout::stereo(
                 s(p.l.or(p.fl).unwrap_or([-3.0, 2.0, 0.0])),
                 s(p.r.or(p.fr).unwrap_or([3.0, 2.0, 0.0])),
             ),
-        }
+            other => {
+                return Err(format!(
+                    "speakers.layout `{other}` is not one of 5.1, quad, stereo"
+                ))
+            }
+        })
     }
 
     fn build_sources(&self, spawn: Vec3) -> Result<BuildSourcesResult, Box<dyn std::error::Error>> {

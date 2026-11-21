@@ -6,17 +6,19 @@ use atrium_core::types::Vec3;
 
 use super::built_source::SourceMeta;
 use super::environment::EnvironmentConfig;
-use super::parse::{arr_to_vec3, parse_render_mode};
+use super::parse::arr_to_vec3;
 use super::scene::{AtriumConfig, SceneConfig};
 use crate::audio::atmosphere::AtmosphericParams;
 
 impl SceneConfig {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_scene_json(
         &self,
         environment_cfg: &EnvironmentConfig,
         atrium_cfg: &AtriumConfig,
         spawn: Vec3,
         layout: &SpeakerLayout,
+        render_mode: RenderMode,
         source_metas: &[SourceMeta],
         atmosphere: &AtmosphericParams,
     ) -> String {
@@ -102,7 +104,7 @@ impl SceneConfig {
             },
             "render_mode": self.speakers.render_mode,
             "dbap_rolloff_db": self.speakers.dbap_rolloff_db,
-            "channel_mode": ChannelMode::valid_for(parse_render_mode(&self.speakers.render_mode))
+            "channel_mode": ChannelMode::valid_for(render_mode)
                 .last().map(|m| m.as_str()).unwrap_or("5.1"),
             "render_modes": RenderMode::ALL.iter().map(|m| {
                 serde_json::json!({

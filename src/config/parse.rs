@@ -17,23 +17,32 @@ pub(super) fn load_yaml<T: serde::de::DeserializeOwned>(
     serde_yaml::from_str(&contents).map_err(|e| format!("{}: {}", path, e).into())
 }
 
-pub(super) fn parse_distance_model(s: &str) -> DistanceModelType {
-    match s {
-        "linear" => DistanceModelType::Linear,
-        "inverse" => DistanceModelType::Inverse,
-        "exponential" => DistanceModelType::Exponential,
-        _ => DistanceModelType::Inverse,
+/// The distance law a scene's `distance_model.model` names. A name it does
+/// not know is refused rather than taken as the inverse law, so a typo in a
+/// scene file is said and not heard as a quietly different falloff.
+pub(super) fn parse_distance_model(name: &str) -> Result<DistanceModelType, String> {
+    match name {
+        "linear" => Ok(DistanceModelType::Linear),
+        "inverse" => Ok(DistanceModelType::Inverse),
+        "exponential" => Ok(DistanceModelType::Exponential),
+        other => Err(format!(
+            "distance_model.model `{other}` is not one of linear, inverse, exponential"
+        )),
     }
 }
 
-pub(super) fn parse_render_mode(s: &str) -> RenderMode {
-    match s {
-        "world_locked" => RenderMode::WorldLocked,
-        "vbap" => RenderMode::Vbap,
-        "hrtf" => RenderMode::Hrtf,
-        "dbap" => RenderMode::Dbap,
-        "ambisonics" => RenderMode::Ambisonics,
-        _ => RenderMode::Vbap,
+/// The render mode a scene's `speakers.render_mode` names. A name it does not
+/// know is refused rather than played as VBAP.
+pub(super) fn parse_render_mode(name: &str) -> Result<RenderMode, String> {
+    match name {
+        "world_locked" => Ok(RenderMode::WorldLocked),
+        "vbap" => Ok(RenderMode::Vbap),
+        "hrtf" => Ok(RenderMode::Hrtf),
+        "dbap" => Ok(RenderMode::Dbap),
+        "ambisonics" => Ok(RenderMode::Ambisonics),
+        other => Err(format!(
+            "speakers.render_mode `{other}` is not one of world_locked, vbap, hrtf, dbap, ambisonics"
+        )),
     }
 }
 
