@@ -39,6 +39,7 @@ fn test_environment(atmosphere: AtmosphericParams) -> Environment {
         wall_materials: [WallMaterial::HARD_WALL; 6],
         ground: GroundProperties::hard(),
         atmosphere,
+        air: crate::audio::turbulence::AirMotion::STILL,
     }
 }
 

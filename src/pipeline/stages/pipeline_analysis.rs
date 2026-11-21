@@ -292,6 +292,7 @@ mod tests {
             wall_materials: default_wall_materials(),
             ground: default_ground(),
             atmosphere: default_atmosphere(),
+            air: crate::audio::turbulence::AirMotion::STILL,
         }
     }
 

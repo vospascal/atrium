@@ -11,6 +11,7 @@ use atrium_core::types::Vec3;
 
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::propagation::GroundProperties;
+use crate::audio::turbulence::AirMotion;
 use crate::pipeline::wall_material::WallMaterial;
 
 /// Number of faces of the box.
@@ -52,9 +53,20 @@ pub struct Environment {
     pub ground: GroundProperties,
     /// Air temperature, humidity and pressure.
     pub atmosphere: AtmosphericParams,
+    /// The wind and the heat rising from the ground, which stir the air.
+    pub air: AirMotion,
 }
 
+/// Index of the ceiling (+Z face).
+pub const CEILING_WALL_INDEX: usize = 5;
+
 impl Environment {
+    /// Whether the place lies under the open sky: its ceiling reflects
+    /// nothing. Only there do wind and sun stir the air a sound crosses.
+    pub fn is_open_air(&self) -> bool {
+        self.wall_materials[CEILING_WALL_INDEX].broadband_reflection_gain() <= 0.0
+    }
+
     /// Middle of the box.
     pub fn centre(&self) -> Vec3 {
         (self.min + self.max) * 0.5
@@ -133,6 +145,7 @@ impl Environment {
             wall_materials: std::array::from_fn(|_| WallMaterial::open()),
             ground: GroundProperties::hard(),
             atmosphere: AtmosphericParams::default(),
+            air: crate::audio::turbulence::AirMotion::STILL,
         }
     }
 

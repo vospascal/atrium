@@ -24,15 +24,22 @@ use atrium_core::types::Vec3;
 
 use crate::audio::filters::AirAbsorptionFilter;
 use crate::audio::propagation::ground_effect_gain;
+use crate::audio::turbulence::{AirPath, AirWaver, Wavering};
 use crate::pipeline::path::{PathEffectChain, PathSet};
 use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::room_acoustics;
 use crate::pipeline::stages::reflections::ReflectionCore;
 
+/// Where the seeds of the paths' wavering start; kept apart from the other
+/// modes' paths and the generators' seeds.
+const PATH_SEED: u64 = 9_000;
+
 /// Per source × speaker propagation state.
 struct SpeakerPropagation {
     air_absorption: AirAbsorptionFilter,
+    /// The wavering of this path through wind-stirred, sunlit air.
+    air_waver: AirWaver,
     reflections: ReflectionCore,
     /// Arrival delay in samples at the end of the previous buffer.
     /// `None` until the first buffer, so a new source starts at its true delay
@@ -167,9 +174,15 @@ impl WorldLockedRenderer {
         }
     }
 
-    fn new_speaker_propagation(sample_rate: f32, reflection_capacity: usize) -> SpeakerPropagation {
+    /// `path` counts the paths made so far: each gets a wander of its own.
+    fn new_speaker_propagation(
+        sample_rate: f32,
+        reflection_capacity: usize,
+        path: u64,
+    ) -> SpeakerPropagation {
         SpeakerPropagation {
             air_absorption: AirAbsorptionFilter::new(sample_rate),
+            air_waver: AirWaver::new(PATH_SEED + path),
             reflections: ReflectionCore::new(reflection_capacity),
             delay_samples: None,
         }
@@ -217,6 +230,21 @@ impl Renderer for WorldLockedRenderer {
                 // Air absorption filter update
                 prop.air_absorption
                     .update(dist, &ctx.environment.atmosphere);
+
+                // The air's wavering along this speaker's own path.
+                prop.air_waver.set(
+                    Wavering::along(&AirPath {
+                        air: &ctx.environment.air,
+                        open_air: ctx.environment.is_open_air(),
+                        from: ctx.source_pos,
+                        to: speaker.position,
+                        ground: ctx.environment.min.z,
+                        distance: dist,
+                        temperature_c: ctx.environment.atmosphere.temperature_c,
+                        speed_of_sound,
+                    }),
+                    out.sample_rate,
+                );
 
                 // Reflections tap update
                 prop.reflections.update(
@@ -286,10 +314,10 @@ impl Renderer for WorldLockedRenderer {
                 }
                 let prop = &mut self.propagation[source_idx][spk_idx];
 
-                // Arrival delay → air absorption → reflection delay taps.
+                // Arrival delay → air absorption and wavering → reflection delay taps.
                 let delay = delay_start[spk_idx] + (delay_end[spk_idx] - delay_start[spk_idx]) * t;
                 let arrived = delay_line.read(delay);
-                let filtered = prop.air_absorption.process(arrived);
+                let filtered = prop.air_waver.process(prop.air_absorption.process(arrived));
                 let with_reflections = filtered + prop.reflections.process_sample(filtered);
 
                 // Broadband gain (cached) × gain ramp
@@ -328,7 +356,10 @@ impl Renderer for WorldLockedRenderer {
         // Grow source dimension
         while self.propagation.len() < source_count {
             let speakers: Vec<SpeakerPropagation> = (0..self.speaker_count)
-                .map(|_| Self::new_speaker_propagation(sample_rate, reflection_capacity))
+                .map(|speaker| {
+                    let path = (self.propagation.len() * MAX_CHANNELS + speaker) as u64;
+                    Self::new_speaker_propagation(sample_rate, reflection_capacity, path)
+                })
                 .collect();
             self.propagation.push(speakers);
         }
@@ -338,11 +369,13 @@ impl Renderer for WorldLockedRenderer {
         }
 
         // Grow speaker dimension if layout changed
-        for source_props in &mut self.propagation {
+        for (source, source_props) in self.propagation.iter_mut().enumerate() {
             while source_props.len() < self.speaker_count {
+                let path = (source * MAX_CHANNELS + source_props.len()) as u64;
                 source_props.push(Self::new_speaker_propagation(
                     sample_rate,
                     reflection_capacity,
+                    path,
                 ));
             }
         }

@@ -77,13 +77,18 @@ fn longest_reflection_delay_seconds(p: &PipelineParams) -> f32 {
     max_dist / AtmosphericParams::default().speed_of_sound()
 }
 
+/// Where the seeds of the paths' wavering start; any number, kept apart from
+/// the generators' own seeds.
+const PATH_SEED: u64 = 7_000;
+
 /// Smallest ring for a per-path propagation delay line, in samples.
 const MIN_PROPAGATION_DELAY_CAPACITY: usize = 8192;
 
 /// The per-path effects every image-source mode applies, in order: propagation
-/// delay, air absorption, ground effect, wall absorption. VBAP, HRTF, DBAP and
-/// Ambisonics all share this exact list; WorldLocked has none because it
-/// resolves a single direct path and models propagation per speaker instead.
+/// delay, air absorption, the air's wavering, ground effect, wall absorption.
+/// VBAP, HRTF, DBAP and Ambisonics all share this exact list; WorldLocked has
+/// none because it resolves a single direct path and models propagation per
+/// speaker instead.
 fn image_source_path_effect_factories(p: &PipelineParams) -> Vec<PathEffectFactory> {
     let longest_delay_seconds = longest_reflection_delay_seconds(p);
 
@@ -100,6 +105,16 @@ fn image_source_path_effect_factories(p: &PipelineParams) -> Vec<PathEffectFacto
         }),
         Box::new(|sample_rate| {
             Box::new(path_effects::AirAbsorptionEffect::new(sample_rate)) as Box<dyn PathEffect>
+        }),
+        Box::new({
+            // Every path gets a wander of its own, the same ones in the same
+            // order each time the scene is built.
+            let paths_built = std::sync::atomic::AtomicU64::new(0);
+            move |_sample_rate| {
+                let seed = paths_built.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::new(path_effects::TurbulenceEffect::new(PATH_SEED + seed))
+                    as Box<dyn PathEffect>
+            }
         }),
         Box::new(|sample_rate| {
             Box::new(path_effects::GroundEffectFilter::new(sample_rate)) as Box<dyn PathEffect>

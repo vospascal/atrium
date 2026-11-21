@@ -93,6 +93,7 @@ fn test_environment(
         wall_materials,
         ground: default_ground(),
         atmosphere: default_atmosphere(),
+        air: crate::audio::turbulence::AirMotion::STILL,
     }
 }
 
@@ -297,6 +298,7 @@ impl Rig {
                 wall_materials: uniform_walls(wall_material::WallMaterial::open()),
                 ground: GroundProperties::hard(),
                 atmosphere: default_atmosphere(),
+                air: crate::audio::turbulence::AirMotion::STILL,
             },
             reverb_rt60_seconds: None,
             distance_model: DistanceModel {

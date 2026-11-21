@@ -263,6 +263,7 @@ impl SceneConfig {
                 wall_materials,
                 ground,
                 atmosphere,
+                air: crate::audio::turbulence::AirMotion::STILL,
             },
             master_gain: self.master_gain,
             paused: false,

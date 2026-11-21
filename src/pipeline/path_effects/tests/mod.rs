@@ -13,6 +13,7 @@ mod air_absorption;
 mod chain;
 mod ground_effect;
 mod propagation_delay;
+mod turbulence;
 mod wall_absorption;
 
 fn default_wall_materials() -> [WallMaterial; 6] {
@@ -40,6 +41,7 @@ fn test_environment(
         wall_materials: wall_materials.clone(),
         ground: ground.clone(),
         atmosphere: atmosphere.clone(),
+        air: crate::audio::turbulence::AirMotion::STILL,
     }
 }
 

@@ -49,6 +49,7 @@ mod tests {
             wall_materials: [WallMaterial::HARD_WALL; 6],
             ground: GroundProperties::hard(),
             atmosphere: AtmosphericParams::default(),
+            air: crate::audio::turbulence::AirMotion::STILL,
         }
     }
 
