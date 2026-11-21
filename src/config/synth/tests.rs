@@ -3,7 +3,7 @@ use atrium_core::types::Vec3;
 
 use super::rain::RainSynthParams;
 use super::*;
-use crate::config::build::build_one_synth_source;
+use crate::config::built_source::build_one_synth_source;
 use crate::config::scene::NormalizationConfig;
 use crate::config::source::{SourceDef, SynthSourceDef};
 

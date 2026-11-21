@@ -112,7 +112,7 @@ fn spaced(yaml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::build::load_yaml;
+    use crate::config::parse::load_yaml;
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let directory =

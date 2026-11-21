@@ -12,7 +12,8 @@ use atrium_core::source::EmitterKind;
 use atrium_core::telemetry::MAX_SOURCES;
 use atrium_core::types::Vec3;
 
-use super::build::{arr_to_vec3, source_color};
+use super::built_source::source_color;
+use super::parse::arr_to_vec3;
 use super::scene::SceneConfig;
 use super::source::display_name;
 

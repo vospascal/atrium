@@ -110,7 +110,7 @@ pub(super) fn build_wall_materials(
 mod tests {
     use atrium_core::types::Vec3;
 
-    use crate::config::build::load_yaml;
+    use crate::config::parse::load_yaml;
 
     use super::*;
 

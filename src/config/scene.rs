@@ -102,6 +102,31 @@ impl Band {
     }
 }
 
+impl WeatherConfig {
+    /// The weather this names, with its bands, played from `seed`. A scene
+    /// without a `weather:` section has `Weather::calm`.
+    pub fn story(&self, seed: u64) -> Result<crate::plan::Weather, Box<dyn std::error::Error>> {
+        use crate::plan::{Story, Weather};
+        let weather = self;
+        let story = Story::named(&weather.story).ok_or_else(|| {
+            format!(
+                "`story: {}` is not a weather story; use held, drifting or passing storm",
+                weather.story
+            )
+        })?;
+        Ok(Weather::new(
+            story,
+            [
+                weather.wind.range(),
+                weather.rain.range(),
+                weather.storm.range(),
+                weather.daylight.range(),
+            ],
+            seed,
+        ))
+    }
+}
+
 impl SceneConfig {
     /// The same scene for headphones: two channels, rendered binaurally.
     ///
@@ -270,7 +295,7 @@ impl SceneConfig {
     /// conditions.
     pub(super) fn air(&self) -> Result<AtmosphereConfig, Box<dyn std::error::Error>> {
         match &self.atmosphere {
-            Some(Atmosphere::File(path)) => super::build::load_yaml(path),
+            Some(Atmosphere::File(path)) => super::parse::load_yaml(path),
             Some(Atmosphere::Air(air)) => Ok(air.clone()),
             None => Ok(AtmosphereConfig::default()),
         }
@@ -328,7 +353,7 @@ fn default_pressure() -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::build::load_yaml;
+    use crate::config::parse::load_yaml;
 
     use super::*;
 

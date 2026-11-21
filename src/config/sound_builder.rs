@@ -6,10 +6,11 @@ use atrium_core::source::{EmitterKind, SoundSource, Utterance};
 use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place};
 
-use super::build::{
-    arr_to_vec3, build_one_source, build_one_synth_source, source_color, BuiltSource, SourceMeta,
+use super::built_source::{
+    build_one_source, build_one_synth_source, source_color, BuiltSource, SourceMeta,
 };
 use super::description::{beam_half_angle, SourceDescription, TakeDescription};
+use super::parse::arr_to_vec3;
 use super::scene::NormalizationConfig;
 use super::source::{display_name, resolve, ResolvedSound, ResolvedSource};
 use crate::audio::silence_node::SilenceNode;
@@ -317,7 +318,7 @@ impl SoundBuilder {
 pub fn name_and_color(id: &EntityId, entity: &Entity, slot: usize) -> (String, String) {
     (
         super::source::display_name(id, entity),
-        super::build::source_color(entity, slot),
+        super::built_source::source_color(entity, slot),
     )
 }
 

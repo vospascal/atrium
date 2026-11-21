@@ -4,8 +4,9 @@
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
 
-use super::build::{arr_to_vec3, parse_render_mode, SourceMeta};
+use super::built_source::SourceMeta;
 use super::environment::EnvironmentConfig;
+use super::parse::{arr_to_vec3, parse_render_mode};
 use super::scene::{AtriumConfig, SceneConfig};
 use crate::audio::atmosphere::AtmosphericParams;
 

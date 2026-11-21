@@ -10,8 +10,10 @@
 //! parameters (speakers, normalization, distance model).
 
 mod build;
+mod built_source;
 mod description;
 mod environment;
+mod parse;
 mod presets;
 mod scene;
 mod scene_file;
