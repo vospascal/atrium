@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -28,6 +29,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.sp
 import atrium.engine.EmitterKind
 import atrium.engine.Position
+import atrium.engine.Preset
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -80,6 +82,7 @@ internal fun EditorMap(
     strengths: List<Float>,
     selected: String?,
     onSelect: (String?) -> Unit,
+    carry: Carry<Preset>,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalPlayerColors.current
@@ -146,8 +149,15 @@ internal fun EditorMap(
         while (true) withFrameMillis { value = (it - start) / 1000f }
     }
 
+    var size by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
     Canvas(
         modifier
+            .onSizeChanged { size = androidx.compose.ui.geometry.Size(it.width.toFloat(), it.height.toFloat()) }
+            // A preset dropped on the map is added where it was let go, at the listener's ear height.
+            .carryTarget(carry) { preset, local ->
+                val at = TopDown(size, reach).toWorld(local)
+                session.add(preset.path, Position(listener.x + at.x, listener.y + at.y, listener.z), onSelect)
+            }
             .clipToBounds()
             .pointerInput(session.engine, reach) {
                 detectTapGestures { at ->

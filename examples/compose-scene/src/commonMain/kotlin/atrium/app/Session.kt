@@ -273,12 +273,35 @@ internal class Session(private val store: SettingsStore) {
         }
     }
 
-    /** Add a sound made from [preset] to the playing scene; [onAdded] gets its id once it sounds. */
-    fun add(preset: String, onAdded: (id: String) -> Unit) {
-        val running = engine ?: return
+    /**
+     * Add a sound made from [preset] to the playing scene, at [at] where it was dropped or else
+     * just ahead of the listener; [onAdded] gets its id once it sounds.
+     */
+    fun add(preset: String, at: Position? = null, onAdded: (id: String) -> Unit) {
         step("Add ${preset.substringAfterLast('/').substringBeforeLast('.')}", "add")
+        build(onAdded) { addSound(preset, at) }
+    }
+
+    /** Add a copy of [sound] a metre east of it; [onAdded] gets the copy's id once it sounds. */
+    fun duplicate(sound: SourceDescription, onAdded: (id: String) -> Unit) {
+        step("Duplicate ${sound.name}", "duplicate")
+        build(onAdded) { duplicateSound(sound.slot) }
+    }
+
+    /** Show [sound] as [name], in [color] (`#rrggbb`, or null for its voice's own) and under [group]. */
+    fun identify(sound: SourceDescription, name: String, color: String?, group: String?) {
+        val running = engine ?: return
+        step("Rename ${sound.name}", "identity:${sound.slot}")
+        command { setSourceIdentity(sound.slot, name, color, group) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /** Build a sound with [adding], off the UI thread, and tell [onAdded] its id once it sounds. */
+    private fun build(onAdded: (id: String) -> Unit, adding: Engine.() -> SourceDescription) {
+        val running = engine ?: return
         building.launch {
-            runCatching { running.addSound(preset) }
+            runCatching { running.adding() }
                 .onSuccess { added ->
                     libraryFailure = null
                     if (engine === running) {

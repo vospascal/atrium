@@ -37,8 +37,7 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     val at = live?.position ?: sound.position
     val offset = Point(at.x - listener.x, at.y - listener.y)
 
-    PaperText(sound.name, 26, weight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
-    PaperText(sound.group ?: UngroupedLayers, 14, Muted)
+    IdentityPart(session, sound)
 
     Part("Sound")
     PaperText("Level ${sound.spl.roundToInt()} dB at 1 m", 15)

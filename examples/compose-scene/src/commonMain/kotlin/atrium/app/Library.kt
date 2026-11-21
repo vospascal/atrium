@@ -24,7 +24,7 @@ import atrium.engine.Preset
  * there.
  */
 @Composable
-internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
+internal fun Library(session: Session, carry: Carry<Preset>, onAdded: (id: String) -> Unit) {
     // The preset being heard. A press starts or stops it; the sound itself follows about half
     // a second later, which is why this is a switch and not something to hold down.
     var heard by remember(session.engine) { mutableStateOf<String?>(null) }
@@ -32,7 +32,7 @@ internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
     DisposableEffect(session.engine) { onDispose { session.audition(null) } }
 
     PaperText(
-        session.libraryFailure ?: "Preview plays a sound just ahead of you until you stop it; it takes a moment to start. Add puts it in the scene there.",
+        session.libraryFailure ?: "Preview plays a sound just ahead of you until you stop it; it takes a moment to start. Add puts it in the scene there, or drag it onto the map.",
         13,
         Muted,
         modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 18.dp),
@@ -53,6 +53,7 @@ internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
             PresetRow(
                 row,
                 preset,
+                carry,
                 heard = heard == preset.path,
                 onHear = {
                     heard = if (heard == preset.path) null else preset.path
@@ -61,7 +62,7 @@ internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
                 onAdd = {
                     // Adding stops the audition in the engine, so the button goes back to play.
                     heard = null
-                    session.add(preset.path, onAdded)
+                    session.add(preset.path, onAdded = onAdded)
                 },
             )
         }
@@ -69,12 +70,13 @@ internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
 }
 
 @Composable
-private fun PresetRow(row: Int, preset: Preset, heard: Boolean, onHear: () -> Unit, onAdd: () -> Unit) {
+private fun PresetRow(row: Int, preset: Preset, carry: Carry<Preset>, heard: Boolean, onHear: () -> Unit, onAdd: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().listRow(row, selected = heard).padding(start = 14.dp, end = 22.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
+        // The name can be dragged onto the map, to put the sound where it is let go.
+        Column(Modifier.weight(1f).carrySource(carry, preset)) {
             PaperText(preset.name, 18)
             PaperText(
                 when {

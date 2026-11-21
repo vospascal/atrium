@@ -95,10 +95,10 @@ private fun LayerRow(
 
 /**
  * The bar under the layers, where a layer list keeps its actions: add a sound
- * from the library, and delete the selected layer.
+ * from the library, and duplicate or delete the selected layer.
  */
 @Composable
-internal fun LayerActions(canDelete: Boolean, onAdd: () -> Unit, onDelete: () -> Unit) {
+internal fun LayerActions(canChange: Boolean, onAdd: () -> Unit, onDuplicate: () -> Unit, onDelete: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -106,7 +106,9 @@ internal fun LayerActions(canDelete: Boolean, onAdd: () -> Unit, onDelete: () ->
         Spacer(Modifier.weight(1f))
         ActionIcon(Foreground, onAdd) { color -> plus(color) }
         Spacer(Modifier.width(6.dp))
-        ActionIcon(if (canDelete) Foreground else Hairline, onClick = { if (canDelete) onDelete() }) { color -> bin(color) }
+        ActionIcon(if (canChange) Foreground else Hairline, onClick = { if (canChange) onDuplicate() }) { color -> copies(color) }
+        Spacer(Modifier.width(6.dp))
+        ActionIcon(if (canChange) Foreground else Hairline, onClick = { if (canChange) onDelete() }) { color -> bin(color) }
     }
 }
 
@@ -119,6 +121,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.plus(color: Color) 
     val stroke = 1.8.dp.toPx()
     drawLine(color, Offset(size.width / 2, size.height * .12f), Offset(size.width / 2, size.height * .88f), stroke, StrokeCap.Round)
     drawLine(color, Offset(size.width * .12f, size.height / 2), Offset(size.width * .88f, size.height / 2), stroke, StrokeCap.Round)
+}
+
+/** Two sheets, one over the other: a copy. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.copies(color: Color) {
+    val stroke = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.6.dp.toPx())
+    val corner = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx())
+    val sheet = androidx.compose.ui.geometry.Size(size.width * .62f, size.height * .62f)
+    drawRoundRect(color, Offset(size.width * .08f, size.height * .08f), sheet, corner, style = stroke)
+    drawRoundRect(color, Offset(size.width * .30f, size.height * .30f), sheet, corner, style = stroke)
 }
 
 /** A waste bin: a lid with a handle, and a tapering body with two ribs. */

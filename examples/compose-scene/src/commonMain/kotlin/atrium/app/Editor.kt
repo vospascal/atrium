@@ -85,6 +85,8 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
     var selected by remember(session.engine) { mutableStateOf<String?>(null) }
     var panel by remember { mutableStateOf(Panel.Layers) }
     var naming by remember { mutableStateOf(false) }
+    // A preset dragged from the library to the map.
+    val carry = remember { Carry<atrium.engine.Preset>() }
     // Save writes over the editor's own file; a hand-written scene is saved as a copy, so it asks for a name.
     val save = { if (scene.savedByEditor) session.save(scene.path, scene.title) else naming = true }
     val keys = remember { FocusRequester() }
@@ -102,6 +104,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                 chosen?.let(session::remove)
                 selected = null
             }
+            val duplicateChosen: () -> Unit = { chosen?.let { session.duplicate(it) { id -> selected = id } } }
             BoxWithConstraints(
                 Modifier.fillMaxSize().background(Backdrop)
                     .focusRequester(keys)
@@ -115,6 +118,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                             !command && event.key == Key.Spacebar -> session.togglePause()
                             command && event.key == Key.Z -> if (event.isShiftPressed) session.redo() else session.undo()
                             command && event.key == Key.Y -> session.redo()
+                            command && event.key == Key.D -> duplicateChosen()
                             else -> return@onPreviewKeyEvent false
                         }
                         true
@@ -134,7 +138,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     Rule()
                                     ScrollArea(Modifier.weight(1f)) {
                                         when (list) {
-                                            Panel.Library -> Library(session, onAdded = { id ->
+                                            Panel.Library -> Library(session, carry, onAdded = { id ->
                                                 selected = id
                                                 panel = Panel.Layers
                                             })
@@ -145,13 +149,13 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     }
                                     if (list == Panel.Layers) {
                                         Rule()
-                                        LayerActions(canDelete = chosen != null, onAdd = { panel = Panel.Library }, onDelete = deleteChosen)
+                                        LayerActions(canChange = chosen != null, onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
                                     }
                                 }
                                 Splitter(acrossWidth = true) { workspace.leftWidth += it }
                             }
                             Column(Modifier.weight(1f).fillMaxHeight()) {
-                                EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxWidth())
+                                EditorMap(session, strengths, selected, onSelect = { selected = it }, carry, Modifier.weight(1f).fillMaxWidth())
                                 if (workspace.bottomShown) {
                                     Splitter(acrossWidth = false) { workspace.bottomHeight -= it }
                                     TracksPanel(session, selected, onSelect = { selected = it }, Modifier.fillMaxWidth().height(workspace.bottomHeight))
@@ -174,10 +178,10 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     Spacer(Modifier.height(24.dp))
                                 }
                                 Rule()
-                                LayerActions(canDelete = chosen != null, onAdd = { panel = Panel.Library }, onDelete = deleteChosen)
+                                LayerActions(canChange = chosen != null, onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
                             }
                             Panel.Library -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                Library(session, onAdded = { id ->
+                                Library(session, carry, onAdded = { id ->
                                     selected = id
                                     panel = Panel.Map
                                 })
@@ -187,7 +191,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                 HistoryPanel(session)
                             }
                             Panel.Map -> {
-                                EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxWidth())
+                                EditorMap(session, strengths, selected, onSelect = { selected = it }, carry, Modifier.weight(1f).fillMaxWidth())
                                 Rule()
                                 Inspector(
                                     session, scene, selected,
@@ -195,6 +199,11 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                 )
                             }
                         }
+                    }
+                }
+                CarryGhost(carry) { preset, over ->
+                    Box(Modifier.background(if (over) Foreground else Backdrop, androidx.compose.foundation.shape.RoundedCornerShape(6.dp)).padding(horizontal = 10.dp, vertical = 5.dp)) {
+                        PaperText(if (over) "Add ${preset.name} here" else preset.name, 14, if (over) Backdrop else Foreground, FontWeight.SemiBold)
                     }
                 }
                 if (naming) {
