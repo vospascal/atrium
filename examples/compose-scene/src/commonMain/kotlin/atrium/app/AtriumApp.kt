@@ -7,6 +7,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import atrium.engine.listScenes
+import atrium.app.editor.Editor
+import atrium.app.ui.Look
+import atrium.app.player.Player
+import atrium.app.session.RunSession
+import atrium.app.session.Session
+import atrium.app.editor.Workspace
 
 /**
  * The app: a player for the scenes in [sceneDirectory], and an editor for
