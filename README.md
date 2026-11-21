@@ -50,8 +50,9 @@ each step depends on the render mode.
 1. **Resolve paths.** How does the sound reach the receiver: directly, and off
    up to six faces of the environment (first-order image sources).
 2. **Per-path effects, then the renderer.** Each path gets its own delay, air
-   absorption (ISO 9613-1), ground effect (ISO 9613-2) and wall colouring; the
-   renderer then places it in the output.
+   absorption (ISO 9613-1), the wavering of wind-stirred air (see
+   [Moving air](#moving-air)), ground effect (ISO 9613-2) and wall colouring;
+   the renderer then places it in the output.
 3. **Mix stages** on the whole buffer: late reverb (FDN), bass management,
    speaker delay compensation, master gain.
 
@@ -66,6 +67,70 @@ each step depends on the render mode.
 `world_locked` and `dbap` do not depend on where the listener stands: everyone
 in the room gets the same speaker feed. `vbap` and `ambisonics` are rendered for
 one listening position.
+
+## Moving air
+
+Outdoors a far sound does not arrive steadily. Wind shear and the sun on the
+ground fill the air with eddies, and the level of a distant sound comes and
+goes with them, the treble most. `src/audio/turbulence.rs` computes how much
+from published theory, and every path through open air gets it.
+
+It is the line-of-sight theory of Ostashev and Wilson for a spherical wave in
+von Kármán turbulence, with the surface layer from Monin–Obukhov similarity,
+as written out by Kamrath et al. (Acta Acustica 8, 2024), who render it the
+same way: a time-variant high-shelving filter. For a bird 40 m off:
+
+| Air | 500 Hz | 1 kHz | 4 kHz |
+|---|---|---|---|
+| Light air, 2 m/s, night | 0.3 dB | 0.4 dB | 0.9 dB |
+| Breeze, 5 m/s, night | 0.6 dB | 0.9 dB | 1.9 dB |
+| Still, clear noon | 0.5 dB | 0.8 dB | 1.6 dB |
+| Strong wind, 9 m/s, night | 1.1 dB | 1.6 dB | 3.0 dB |
+
+These are standard deviations of the level. At 5 m they are a few tenths of a
+dB in the treble and less below, so a near sound stays steady; indoors and in
+still air at night the filter is not in the signal at all, bit for bit.
+
+The scene's weather drives it: the wind condition is metres per second (1 is
+13 m/s at 10 m), daylight is the heat of the sun (1 is 200 W/m² into the air),
+and `weather.wind_from` is the compass bearing the wind comes from. A wind
+across a path makes it waver faster than one along it.
+
+Decisions that look wrong and are right:
+
+- **Nothing is exaggerated.** The first plan was to push the effect until it
+  was audible. Working the theory through showed it is audible as it is, at
+  the distances a scene has, so the numbers are the theory's.
+- **Arrival time is left alone.** The same eddies also move a path's travel
+  time, by some 65 µs at 40 m in a breeze. On one path that is under a cent of
+  pitch, slowly; nothing can hear it, so it is not rendered.
+- **Thermals set the pace, not the depth.** The large eddies of a sunny day
+  (hundreds of metres) hardly change a level over 40 m. They are left out of
+  the strength, as the paper leaves them out, and only help decide how fast
+  the air moves across a path on a still day.
+- **A still sunny scene wavers.** Every scene without weather is a calm,
+  bright day, so its far sounds shimmer a little. That is the heat, and real.
+
+Known gaps:
+
+- **Two parts stand in for a smooth curve.** The filter splits the sound at
+  2.4 kHz. Measured on tones it is within 15 % of the theory for a sound 40 m
+  off in a breeze, and up to a fifth short in a gale at 60 m.
+- **Saturation is borrowed.** How strong fluctuations level off (never past
+  5.6 dB) uses the paper's fit to aircraft flyovers; near the ground that is
+  an extrapolation. It matters only in gales at the far edge of a scene.
+- **The pace is a rule of thumb.** The level holds for as long as the air
+  takes to carry a Fresnel zone (at 4 kHz) across the path. The depth is
+  theory; this timing is the usual frozen-turbulence estimate, not measured.
+- **The wind does not bend sound yet.** Upwind of a breeze a sound near the
+  ground can fall into a shadow within tens of metres, and downwind it carries
+  further. Now that the wind has a direction this can be built; it is not.
+- **The wind does not veer.** Its bearing is one number per scene; a passing
+  storm does not turn it.
+- **Clouds do not dim the sun.** Daylight alone sets the heat; rain and storm
+  do not lower it.
+- **Each speaker's path wavers by itself in world-locked.** Paths to speakers
+  a few metres apart share some of their eddies in reality.
 
 ## Project structure
 
