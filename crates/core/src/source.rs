@@ -40,6 +40,9 @@ pub struct Utterance {
     pub gain: f32,
     /// How much faster or slower, and so higher or lower (1 is as recorded).
     pub rate: f32,
+    /// How far into the take to start (s, as heard): 0 from its start. A
+    /// scene moved to the middle of a take starts it in the middle.
+    pub skip_seconds: f32,
 }
 
 /// Trait for anything that generates audio samples and has a position.
@@ -143,6 +146,11 @@ pub trait SoundSource: Send {
     /// on another thread decides what and when; the source only keeps the
     /// appointment. Default: no-op, for sources that have no takes.
     fn schedule(&mut self, _utterance: Utterance) {}
+
+    /// Forget every appointment and stop what is uttered now: the scene was
+    /// moved to another moment, and what was planned for this one no longer
+    /// holds. Default: no-op, for sources that keep no appointments.
+    fn cancel(&mut self) {}
 
     /// Set a procedural-synth parameter live. Sources that don't model the
     /// given parameter ignore it. Default: no-op (sample players etc.).

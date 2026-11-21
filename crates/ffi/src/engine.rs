@@ -71,6 +71,8 @@ pub struct Engine {
     sounds: SoundBuilder,
     /// The session's plan: what every voice with takes will do, decided ahead.
     planner: Planner,
+    /// Whether the scene was last paused; the audio thread keeps its own.
+    paused: std::sync::atomic::AtomicBool,
     edits: Mutex<Edits>,
     /// Dropped last; dropping it stops the audio.
     _output: OutputThread,
@@ -115,6 +117,7 @@ impl Engine {
             head_tracking: Mutex::new(None),
             sounds: built.sounds,
             planner: built.planner,
+            paused: std::sync::atomic::AtomicBool::new(false),
             edits: Mutex::new(Edits {
                 to_audio,
                 retired,
@@ -278,6 +281,47 @@ impl Engine {
                     .into()
             })
             .collect()
+    }
+
+    /// Pause the scene, or play it on. Paused, the session's clock stops:
+    /// every sound, the plan and the weather hold where they are, and resume
+    /// from there. It fades out and in, so nothing clicks.
+    pub fn set_paused(&self, paused: bool) -> Result<(), EngineError> {
+        lock(&self.commands)
+            .push(Command::SetPaused { paused })
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        self.paused
+            .store(paused, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether the scene is paused.
+    pub fn paused(&self) -> bool {
+        self.paused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Let the weather run `speed` times as fast as the scene: 60 runs an hour
+    /// of weather in a minute, a time-lapse, while every sound still plays
+    /// at its own pace.
+    pub fn set_weather_speed(&self, speed: f32) {
+        self.planner.set_weather_speed(speed as f64);
+    }
+
+    pub fn weather_speed(&self) -> f32 {
+        self.planner.weather_speed() as f32
+    }
+
+    /// Seconds into the scene: what a timeline's playhead shows. It stands
+    /// still while the scene is paused, and jumps when it is moved.
+    pub fn scene_time(&self) -> f32 {
+        self.planner.now() as f32
+    }
+
+    /// Move the scene to `seconds`, as a playhead is dragged along its
+    /// timeline: every sound and the weather are as they would be there, a
+    /// take under way starts partway, and it plays on from that moment.
+    pub fn seek(&self, seconds: f32) {
+        self.planner.seek(seconds as f64);
     }
 
     /// The takes the plan has decided for the next `seconds`, at most a
@@ -1401,6 +1445,33 @@ mod tests {
             !heard.is_empty(),
             "the blackbird was planned but never heard"
         );
+
+        // Paused, the scene's clock stands still: what is planned does not
+        // come closer. Scrubbing the weather moves its story at once.
+        engine.set_paused(true).expect("pause");
+        std::thread::sleep(Duration::from_millis(300));
+        let before = engine.planned(30.0).first().map(|take| take.starts_in);
+        std::thread::sleep(Duration::from_millis(500));
+        let after = engine.planned(30.0).first().map(|take| take.starts_in);
+        assert!(engine.paused());
+        assert_eq!(before, after, "a paused plan stands still");
+        let paused_at = engine.scene_time();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            engine.scene_time(),
+            paused_at,
+            "the scene's time stands still"
+        );
+        engine.set_paused(false).expect("play");
+        engine.seek(1234.0);
+        assert!(
+            (engine.scene_time() - 1234.0).abs() < 0.5,
+            "moved to 1234 s"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(engine.scene_time() > 1234.0, "and plays on from there");
+        engine.set_weather_speed(60.0);
+        assert_eq!(engine.weather_speed(), 60.0);
 
         // What is planned is there to read, and the weather can be changed and
         // saved; conditions are known for the past and the future alike.

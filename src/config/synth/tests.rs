@@ -419,6 +419,7 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
         at_sample: 10_100,
         gain: 1.0,
         rate: 1.0,
+        skip_seconds: 0.0,
     });
     for _ in 0..100 {
         built.source.next_sample(sample_rate);

@@ -15,6 +15,11 @@ pub enum Command {
     /// Set master output gain (0.0 to 1.0).
     SetMasterGain { gain: f32 },
 
+    /// Pause or resume the whole scene. Paused, the session's clock stops,
+    /// so every sound, the plan and the weather hold where they are; the
+    /// sound fades out and back in so nothing clicks.
+    SetPaused { paused: bool },
+
     /// Mute or unmute a source by index.
     SetSourceMuted { index: u16, muted: bool },
 

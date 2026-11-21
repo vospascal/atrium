@@ -1,5 +1,6 @@
 //! Running a plan on its own thread, next to the audio.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -20,6 +21,9 @@ const WAKE_EVERY: Duration = Duration::from_millis(50);
 pub struct Planner {
     plan: Arc<Mutex<Plan>>,
     clock: Arc<Clock>,
+    /// Scene time minus the audio clock (s, as `f64` bits): 0 until the scene
+    /// is moved.
+    offset: Arc<AtomicU64>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -28,10 +32,12 @@ impl Planner {
     /// Run `plan` against `clock`, handing what is due to `audio`.
     pub fn start(plan: Plan, clock: Arc<Clock>, mut audio: rtrb::Producer<Scheduled>) -> Self {
         let plan = Arc::new(Mutex::new(plan));
+        let offset = Arc::new(AtomicU64::new(0f64.to_bits()));
         let (stop, stopped) = mpsc::channel::<()>();
         let thread = {
             let plan = plan.clone();
             let clock = clock.clone();
+            let offset = offset.clone();
             std::thread::Builder::new()
                 .name("atrium-planner".into())
                 .spawn(move || {
@@ -41,11 +47,14 @@ impl Planner {
                         let Some(rate) = clock.sample_rate() else {
                             continue;
                         };
-                        let due = lock(&plan).take_due(clock.seconds() + LEAD_SECONDS);
+                        let mut plan = lock(&plan);
+                        let moved_by = f64::from_bits(offset.load(Ordering::Acquire));
+                        let due = plan.take_due(clock.seconds() + moved_by + LEAD_SECONDS);
+                        drop(plan);
                         for due in due {
                             // A full ring only happens when the audio thread has
                             // stopped; that change is then not heard.
-                            let _ = audio.push(scheduled(due, rate));
+                            let _ = audio.push(scheduled(due, rate, moved_by));
                         }
                     }
                 })
@@ -54,14 +63,16 @@ impl Planner {
         Self {
             plan,
             clock,
+            offset,
             stop: Some(stop),
             thread,
         }
     }
 
-    /// Seconds on the session's clock.
+    /// Seconds into the scene: the audio clock, moved by any seek. It stands
+    /// still while the scene is paused.
     pub fn now(&self) -> f64 {
-        self.clock.seconds()
+        self.clock.seconds() + f64::from_bits(self.offset.load(Ordering::Acquire))
     }
 
     /// The seed every choice follows from.
@@ -84,6 +95,30 @@ impl Planner {
     /// Let `weather` move the conditions from now on.
     pub fn set_weather(&self, weather: Weather) {
         lock(&self.plan).set_weather(weather);
+    }
+
+    /// Let the weather run `speed` times as fast as the session from now.
+    pub fn set_weather_speed(&self, speed: f64) {
+        let now = self.now();
+        lock(&self.plan).set_weather_speed(now, speed);
+    }
+
+    pub fn weather_speed(&self) -> f64 {
+        lock(&self.plan).weather_speed()
+    }
+
+    /// Move the scene to `seconds`, as a playhead is dragged along its
+    /// timeline: every voice and the weather are as they would be there, and
+    /// it plays on from that moment.
+    pub fn seek(&self, seconds: f64) {
+        if !seconds.is_finite() {
+            return;
+        }
+        let to = seconds.max(0.0);
+        let mut plan = lock(&self.plan);
+        self.offset
+            .store((to - self.clock.seconds()).to_bits(), Ordering::Release);
+        plan.seek(to);
     }
 
     /// The conditions `ahead` seconds from now (0 for now).
@@ -146,17 +181,23 @@ impl Drop for Planner {
     }
 }
 
-fn scheduled(due: Due, sample_rate: f32) -> Scheduled {
+/// What the audio thread is told for `due`, with its moment turned from
+/// scene time into the audio clock's samples.
+fn scheduled(due: Due, sample_rate: f32, moved_by: f64) -> Scheduled {
     match due {
         Due::Utter(slot, planned) => Scheduled::Utter {
             slot: slot as u16,
             utterance: Utterance {
                 take: planned.take,
-                at_sample: (planned.at * sample_rate as f64).round().max(0.0) as u64,
+                at_sample: ((planned.at - moved_by) * sample_rate as f64)
+                    .round()
+                    .max(0.0) as u64,
                 gain: planned.gain,
                 rate: planned.rate,
+                skip_seconds: planned.skip as f32,
             },
         },
+        Due::Cancel(slot) => Scheduled::Cancel { slot: slot as u16 },
         Due::Set(slot, param, value) => Scheduled::Set {
             slot: slot as u16,
             param,

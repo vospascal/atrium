@@ -25,10 +25,12 @@ const APPOINTMENTS: usize = 8;
 
 enum State {
     Silent,
-    /// Uttering `take` from `position` (in the take's own samples).
+    /// Uttering `take` from `position` (in the take's own samples), having
+    /// started at `start`.
     Sounding {
         take: usize,
         position: f64,
+        start: f64,
         gain: f32,
         rate: f64,
     },
@@ -88,10 +90,15 @@ impl VoiceNode {
         };
         self.appointments.rotate_left(1);
         self.appointments[APPOINTMENTS - 1] = None;
-        if (utterance.take as usize) < self.takes.len() {
+        if let Some(audio) = self.takes.get(utterance.take as usize) {
+            // Started partway, the take is that far along at its own rate.
+            let skipped = utterance.skip_seconds.max(0.0) as f64
+                * audio.sample_rate as f64
+                * utterance.rate as f64;
             self.state = State::Sounding {
                 take: utterance.take as usize,
-                position: 0.0,
+                position: skipped,
+                start: skipped,
                 gain: utterance.gain,
                 rate: utterance.rate as f64,
             };
@@ -108,6 +115,7 @@ impl SoundSource for VoiceNode {
             State::Sounding {
                 take,
                 position,
+                start,
                 gain,
                 rate,
             } => {
@@ -123,7 +131,8 @@ impl SoundSource for VoiceNode {
                         + (audio.samples[index + 1] - audio.samples[index]) * fraction;
                     // Fade the first and last few milliseconds.
                     let edge = (EDGE_FADE_SECONDS * audio.sample_rate as f32).max(1.0);
-                    let from_start = *position as f32 / edge;
+                    // Fade in from wherever it started, so a take begun partway does not click.
+                    let from_start = (*position - *start) as f32 / edge;
                     let from_end = (length as f64 - 1.0 - *position) as f32 / edge;
                     let fade = from_start.min(from_end).clamp(0.0, 1.0);
                     let out = value * *gain * fade;
@@ -159,6 +168,11 @@ impl SoundSource for VoiceNode {
             self.appointments[at..].rotate_right(1);
             self.appointments[at] = Some(utterance);
         }
+    }
+
+    fn cancel(&mut self) {
+        self.appointments = [None; APPOINTMENTS];
+        self.state = State::Silent;
     }
 
     fn signal(&self) -> Option<SourceSignal> {
@@ -259,6 +273,7 @@ mod tests {
             at_sample: sample,
             gain: 1.0,
             rate: 1.0,
+            skip_seconds: 0.0,
         }
     }
 
@@ -328,6 +343,42 @@ mod tests {
         );
     }
 
+    /// A take moved into partway starts there, and cancelling stops it and
+    /// forgets what was to come.
+    #[test]
+    fn a_take_starts_partway_and_cancelling_forgets_it() {
+        let mut node = voice();
+        node.schedule(Utterance {
+            skip_seconds: 0.08,
+            ..at(0, 1)
+        });
+        node.schedule(at(500, 0));
+        let heard: Vec<f32> = (0..40).map(|_| node.next_sample(RATE as f32)).collect();
+        assert!(heard[0] < 0.2 * 0.5, "it fades in where it starts");
+        assert!(
+            heard[6..10]
+                .iter()
+                .all(|sample| (*sample - 0.2).abs() < 1e-6),
+            "from 80 of its 100 samples"
+        );
+        assert!(
+            heard[25..].iter().all(|sample| *sample == 0.0),
+            "so it ends 20 samples later"
+        );
+        node.schedule(at(0, 0));
+        node.next_sample(RATE as f32);
+        node.cancel();
+        assert_eq!(node.sounding_take(), None);
+        for _ in 0..1000 {
+            node.next_sample(RATE as f32);
+        }
+        assert_eq!(
+            node.sounding_take(),
+            None,
+            "the appointment at 500 was forgotten"
+        );
+    }
+
     /// A muted voice is silent, and keeps its appointments so it comes back
     /// where it would have been.
     #[test]
@@ -351,6 +402,7 @@ mod tests {
             at_sample: 0,
             gain: 2.0,
             rate: 2.0,
+            skip_seconds: 0.0,
         });
         let output: Vec<f32> = (0..200).map(|_| node.next_sample(RATE as f32)).collect();
         assert!((output[25] - 0.2).abs() < 1e-6);

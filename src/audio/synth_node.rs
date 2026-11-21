@@ -85,6 +85,10 @@ impl SoundSource for SynthNode {
         self.generator.schedule(utterance);
     }
 
+    fn cancel(&mut self) {
+        self.generator.cancel();
+    }
+
     fn position(&self) -> Vec3 {
         // Anchor plus whatever the generator has flown since (zero for
         // stationary generators).

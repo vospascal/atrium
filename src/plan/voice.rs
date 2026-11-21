@@ -18,6 +18,9 @@ pub struct Planned {
     pub gain: f32,
     /// Faster and higher, or slower and lower (1 is as recorded).
     pub rate: f32,
+    /// How far into the take it starts (s, as heard): more than 0 only for a
+    /// take the scene was moved into the middle of.
+    pub skip: f64,
 }
 
 /// How soon a voice that skipped an appointment looks again, at the least
@@ -37,6 +40,9 @@ pub(super) struct VoicePlan {
     next_at: f64,
     /// When the last utterance ended, which a changed rest counts from (s).
     last_end: f64,
+    /// What its choices follow from, and when it began deciding (s).
+    seed: u64,
+    born: f64,
 }
 
 impl VoicePlan {
@@ -52,9 +58,18 @@ impl VoicePlan {
             left_in_bout: 0,
             next_at: from,
             last_end: from,
+            seed,
+            born: from,
         };
         voice.next_at = from + (voice.unit_random() * voice.rhythm.rests.gap_seconds.1) as f64;
         voice
+    }
+
+    /// The same voice as it was when it began, with its rhythm as it is now:
+    /// deciding again from there makes the same choices it made, which is
+    /// how the scene is moved to another moment.
+    pub(super) fn restarted(&self) -> Self {
+        Self::new(self.rhythm.clone(), self.seed, self.born)
     }
 
     /// Utter the next take at `now` instead of after the opening rest: a
@@ -101,6 +116,7 @@ impl VoicePlan {
             seconds,
             gain,
             rate,
+            skip: 0.0,
         }
     }
 

@@ -30,12 +30,20 @@ pub struct InitialSourceState {
 /// The complete audio state owned by the audio thread.
 /// Updated by draining commands from the ring buffer.
 /// Never shared with the control thread directly.
+/// How long pausing and resuming fade (s): long enough not to click.
+pub const PAUSE_FADE_SECONDS: f32 = 0.05;
+
 pub struct AudioScene {
     pub listener: Listener,
     pub sources: Vec<Box<dyn SoundSource>>,
     /// The virtual acoustic space: bounds, surfaces, ground and air.
     pub environment: Environment,
     pub master_gain: f32,
+    /// Whether the scene is paused: its clock stands still and it is silent.
+    pub paused: bool,
+    /// How far the sound is faded in, 0 (paused, silent) to 1, moving toward
+    /// `paused` over [`PAUSE_FADE_SECONDS`].
+    pub pause_gain: f32,
     pub sample_rate: f32,
     pub distance_model: DistanceModel,
     pub speaker_layout: SpeakerLayout,
@@ -106,6 +114,9 @@ impl AudioScene {
                 }
                 Command::SetMasterGain { gain } => {
                     self.master_gain = gain;
+                }
+                Command::SetPaused { paused } => {
+                    self.paused = paused;
                 }
                 Command::SetSourceMuted { index, muted } => {
                     if let Some(source) = self.sources.get_mut(index as usize) {
@@ -330,6 +341,26 @@ impl AudioScene {
         }
     }
 
+    /// Fade `output` toward silence while pausing and back while playing,
+    /// a frame at a time.
+    fn fade_for_pause(&mut self, output: &mut [f32], channels: usize) {
+        let target = if self.paused { 0.0 } else { 1.0 };
+        if self.pause_gain == target {
+            return;
+        }
+        let step = 1.0 / (PAUSE_FADE_SECONDS * self.sample_rate.max(1.0));
+        for frame in output.chunks_mut(channels.max(1)) {
+            self.pause_gain = if target > self.pause_gain {
+                (self.pause_gain + step).min(target)
+            } else {
+                (self.pause_gain - step).max(target)
+            };
+            for sample in frame {
+                *sample *= self.pause_gain;
+            }
+        }
+    }
+
     /// Render one buffer of audio.
     /// `output` is an interleaved sample buffer (e.g. [L, R, L, R, ...] for stereo).
     pub fn render(&mut self, output: &mut [f32], channels: usize) {
@@ -345,6 +376,12 @@ impl AudioScene {
         let num_frames = output.len() / channels;
         let dt = num_frames as f32 / self.sample_rate;
 
+        // Paused and faded out: nothing moves, not even the clock.
+        if self.paused && self.pause_gain <= 0.0 {
+            output.fill(0.0);
+            return;
+        }
+
         // Hand every voice what the plan made due, and the time it is now.
         let now = self.clock.samples();
         if let Some(plan) = &mut self.plan_in {
@@ -353,6 +390,11 @@ impl AudioScene {
                     crate::plan::Scheduled::Utter { slot, utterance } => {
                         if let Some(source) = self.sources.get_mut(slot as usize) {
                             source.schedule(utterance);
+                        }
+                    }
+                    crate::plan::Scheduled::Cancel { slot } => {
+                        if let Some(source) = self.sources.get_mut(slot as usize) {
+                            source.cancel();
                         }
                     }
                     crate::plan::Scheduled::Set { slot, param, value } => {
@@ -438,6 +480,7 @@ impl AudioScene {
             render_pipeline(pipeline, &mut self.sources, &params, output);
         }
         self.clock.advance(num_frames as u64, self.sample_rate);
+        self.fade_for_pause(output, channels);
         #[cfg(feature = "memprof")]
         self.memprof.record_stage(MemStage::Mix);
 

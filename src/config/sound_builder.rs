@@ -96,6 +96,7 @@ impl SoundBuilder {
                 at_sample: 0,
                 gain: 1.0,
                 rate: 1.0,
+                skip_seconds: 0.0,
             });
             built.rhythm = None;
             built

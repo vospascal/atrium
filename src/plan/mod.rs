@@ -44,6 +44,8 @@ pub enum Scheduled {
         param: SynthParam,
         value: f32,
     },
+    /// Forget every appointment: the scene was moved to another moment.
+    Cancel { slot: u16 },
 }
 
 /// What becomes due when the plan moves on.
@@ -51,6 +53,8 @@ pub enum Scheduled {
 pub enum Due {
     Utter(usize, Planned),
     Set(usize, SynthParam, f32),
+    /// Forget what the voice was told: the scene moved to another moment.
+    Cancel(usize),
 }
 
 /// A planned voice with takes, and what it follows.
@@ -58,6 +62,8 @@ pub enum Due {
 struct Voice {
     plan: VoicePlan,
     follows: Vec<Follow>,
+    /// A take the scene was moved into the middle of, to start partway.
+    resume: Option<Planned>,
 }
 
 /// A generator that follows conditions, and the settings last sent to it.
@@ -75,8 +81,11 @@ struct Follower {
 pub struct Plan {
     seed: u64,
     weather: Weather,
+    clock: WeatherClock,
     voices: Vec<Option<Voice>>,
     followers: Vec<Option<Follower>>,
+    /// The scene was moved: every voice is to forget what it was told.
+    moved: bool,
 }
 
 impl Plan {
@@ -86,8 +95,10 @@ impl Plan {
         Self {
             seed,
             weather: Weather::calm(seed),
+            clock: WeatherClock::default(),
             voices: vec![None; MAX_SOURCES],
             followers: vec![None; MAX_SOURCES],
+            moved: false,
         }
     }
 
@@ -109,9 +120,26 @@ impl Plan {
         }
     }
 
-    /// The conditions at `seconds`.
+    /// The conditions at `seconds` on the session's clock.
     pub fn conditions_at(&self, seconds: f64) -> Conditions {
-        self.weather.at(seconds)
+        self.weather.at(self.clock.story_at(seconds))
+    }
+
+    /// Let the weather run `speed` times as fast as the session from `now`:
+    /// a time-lapse, while every sound still plays at its own pace.
+    pub fn set_weather_speed(&mut self, now: f64, speed: f64) {
+        if speed.is_finite() && speed > 0.0 {
+            self.clock = WeatherClock {
+                session: now,
+                story: self.clock.story_at(now),
+                speed,
+            };
+        }
+    }
+
+    /// How fast the weather runs, 1 being as fast as the session.
+    pub fn weather_speed(&self) -> f64 {
+        self.clock.speed
     }
 
     /// Plan the voice in `slot` from `now` (s), for the entity `id`, following
@@ -146,6 +174,7 @@ impl Plan {
             self.voices[slot] = Some(Voice {
                 plan: VoicePlan::new(rhythm, voice_seed(self.seed, id), now),
                 follows,
+                resume: None,
             });
         }
     }
@@ -197,10 +226,22 @@ impl Plan {
     /// and every generator setting that has moved by then.
     pub fn take_due(&mut self, until: f64) -> Vec<Due> {
         let mut due = Vec::new();
+        if std::mem::take(&mut self.moved) {
+            due.extend(
+                self.voices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, voice)| voice.is_some())
+                    .map(|(slot, _)| Due::Cancel(slot)),
+            );
+        }
         for (slot, voice) in self.voices.iter_mut().enumerate() {
             let Some(voice) = voice else { continue };
+            if let Some(resumed) = voice.resume.take() {
+                due.push(Due::Utter(slot, resumed));
+            }
             while voice.plan.next_at() < until {
-                let conditions = self.weather.at(voice.plan.next_at());
+                let conditions = self.weather.at(self.clock.story_at(voice.plan.next_at()));
                 let activity = conditions::activity(&voice.follows, &conditions);
                 let level = conditions::level_db(&voice.follows, &conditions);
                 if let Some(planned) = voice.plan.next_under(activity, level) {
@@ -208,7 +249,7 @@ impl Plan {
                 }
             }
         }
-        let conditions = self.weather.at(until);
+        let conditions = self.weather.at(self.clock.story_at(until));
         for (slot, follower) in self.followers.iter_mut().enumerate() {
             let Some(follower) = follower else { continue };
             for follow in &follower.follows {
@@ -234,6 +275,37 @@ impl Plan {
         due
     }
 
+    /// Move the scene to `to` seconds: every voice decides again from when
+    /// it began, with the same choices, up to `to`, so the scene there is
+    /// what it would have been. A take sounding at `to` starts partway; what
+    /// the voices were told for the old moment is forgotten.
+    pub fn seek(&mut self, to: f64) {
+        let weather = &self.weather;
+        let clock = self.clock;
+        for voice in self.voices.iter_mut().flatten() {
+            voice.plan = voice.plan.restarted();
+            voice.resume = None;
+            while voice.plan.next_at() < to {
+                let conditions = weather.at(clock.story_at(voice.plan.next_at()));
+                let activity = conditions::activity(&voice.follows, &conditions);
+                let level = conditions::level_db(&voice.follows, &conditions);
+                if let Some(planned) = voice.plan.next_under(activity, level) {
+                    if planned.at + planned.seconds > to {
+                        voice.resume = Some(Planned {
+                            at: to,
+                            skip: to - planned.at,
+                            ..planned
+                        });
+                    }
+                }
+            }
+        }
+        for follower in self.followers.iter_mut().flatten() {
+            follower.sent.clear();
+        }
+        self.moved = true;
+    }
+
     /// What is planned from now until `until` (s), without deciding it for
     /// real: the same utterances [`Plan::take_due`] will give, for a screen
     /// to draw ahead of time.
@@ -243,9 +315,35 @@ impl Plan {
             .into_iter()
             .filter_map(|due| match due {
                 Due::Utter(slot, planned) => Some((slot, planned)),
-                Due::Set(..) => None,
+                Due::Set(..) | Due::Cancel(_) => None,
             })
             .collect()
+    }
+}
+
+/// Where the weather story stands at a moment of the session: it was at
+/// `story` seconds when the session was at `session`, and runs `speed` times
+/// as fast. As it starts, the story is the session's own time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WeatherClock {
+    session: f64,
+    story: f64,
+    speed: f64,
+}
+
+impl Default for WeatherClock {
+    fn default() -> Self {
+        Self {
+            session: 0.0,
+            story: 0.0,
+            speed: 1.0,
+        }
+    }
+}
+
+impl WeatherClock {
+    fn story_at(&self, session: f64) -> f64 {
+        self.story + (session - self.session) * self.speed
     }
 }
 
@@ -324,7 +422,7 @@ mod tests {
             .flat_map(|second| plan.take_due(second as f64))
             .filter_map(|due| match due {
                 Due::Utter(slot, planned) => Some((slot, planned)),
-                Due::Set(..) => None,
+                Due::Set(..) | Due::Cancel(_) => None,
             })
             .collect();
         assert_eq!(played, shown);
@@ -425,5 +523,81 @@ mod tests {
             sent.len()
         );
         assert_eq!(sent[0], 0.0, "the first send is the dry start");
+    }
+
+    /// A time-lapse runs a whole storm past in a few minutes while the
+    /// birds still sing at their own pace.
+    #[test]
+    fn the_weather_can_run_fast() {
+        let storm = || {
+            Weather::new(
+                Story::PassingStorm,
+                [(0.1, 0.2), (0.0, 0.0), (0.0, 0.0), (1.0, 1.0)],
+                9,
+            )
+        };
+        let mut fast = Plan::new(9);
+        fast.set_weather(storm());
+        fast.set_weather_speed(0.0, 60.0);
+        assert_eq!(fast.weather_speed(), 60.0);
+        assert!(
+            (0..300).any(|second| fast.conditions_at(second as f64).get(Condition::Rain) > 0.9),
+            "a storm within five minutes"
+        );
+        fast.add_voice(0, "robin", Some(birdsong()), Vec::new(), 0.0);
+        let sung = fast.upcoming(60.0).len();
+        assert!(
+            (5..40).contains(&sung),
+            "the robin keeps its own pace: {sung} phrases in a minute"
+        );
+    }
+
+    /// Moved to any moment, the scene is what it would have been there:
+    /// the same takes at the same times as playing up to it, a take under
+    /// way starts partway, and the voices forget what they were told before.
+    #[test]
+    fn the_scene_can_be_moved_to_any_moment() {
+        let played = || {
+            let mut plan = Plan::new(4);
+            plan.add_voice(2, "robin", Some(birdsong()), Vec::new(), 0.0);
+            plan
+        };
+        let whole: Vec<Planned> = played()
+            .upcoming(600.0)
+            .into_iter()
+            .map(|(_, planned)| planned)
+            .collect();
+        let under_way = whole
+            .iter()
+            .find(|planned| planned.at > 100.0)
+            .expect("a take after 100 s");
+        let middle = under_way.at + under_way.seconds / 2.0;
+
+        let mut plan = played();
+        plan.take_due(30.0);
+        plan.seek(middle);
+        let due = plan.take_due(middle + 120.0);
+        assert_eq!(due[0], Due::Cancel(2), "first, forget the old moment");
+        let Due::Utter(2, resumed) = due[1] else {
+            panic!("then the take under way: {:?}", due[1])
+        };
+        assert_eq!(resumed.take, under_way.take);
+        assert!(
+            (resumed.skip - under_way.seconds / 2.0).abs() < 1e-9,
+            "from its middle"
+        );
+        let after: Vec<Planned> = due[2..]
+            .iter()
+            .filter_map(|due| match due {
+                Due::Utter(_, planned) => Some(*planned),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<Planned> = whole
+            .iter()
+            .filter(|planned| planned.at >= middle && planned.at < middle + 120.0)
+            .copied()
+            .collect();
+        assert_eq!(after, expected, "and on from there as it would have played");
     }
 }

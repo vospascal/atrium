@@ -656,11 +656,61 @@ fn in_the_passing_storm_each_creature_keeps_to_its_weather() {
     for bird in ["robin", "blackbird"] {
         let rain = under(bird, Condition::Rain);
         assert!(rain.len() > 100, "{bird} hardly sang");
-        assert!(rain.iter().all(|rain| *rain < 0.35), "{bird} sang in real rain");
+        assert!(
+            rain.iter().all(|rain| *rain < 0.35),
+            "{bird} sang in real rain"
+        );
     }
     let frog_rain = under("frog", Condition::Rain);
     let frog_wind = under("frog", Condition::Wind);
-    assert!(frog_rain.iter().any(|rain| *rain > 0.1), "the frog never croaked in light rain");
-    assert!(frog_rain.iter().all(|rain| *rain < 0.85), "the frog croaked in the downpour");
-    assert!(frog_wind.iter().all(|wind| *wind < 0.75), "the frog croaked in a gale");
+    assert!(
+        frog_rain.iter().any(|rain| *rain > 0.1),
+        "the frog never croaked in light rain"
+    );
+    assert!(
+        frog_rain.iter().all(|rain| *rain < 0.85),
+        "the frog croaked in the downpour"
+    );
+    assert!(
+        frog_wind.iter().all(|wind| *wind < 0.75),
+        "the frog croaked in a gale"
+    );
+}
+
+/// Pausing fades the sound out, then stops the session's clock, so the plan
+/// and the weather hold where they are; resuming fades back in from there.
+#[test]
+fn a_paused_scene_is_silent_and_its_clock_stands_still() {
+    let mut result = SceneConfig::load("scenes/frog.yaml")
+        .expect("scene should load")
+        .build()
+        .expect("scene should build");
+    let scene = &mut result.scene;
+    scene.sample_rate = 48_000.0;
+    let channels = scene.speaker_layout.total_channels();
+    let mut block = vec![0.0f32; 512 * channels];
+    for _ in 0..20 {
+        scene.render(&mut block, channels);
+    }
+    scene.paused = true;
+    // 50 ms of fade is under five blocks of 512 at 48 kHz.
+    for _ in 0..6 {
+        scene.render(&mut block, channels);
+    }
+    let stopped_at = scene.clock.samples();
+    for _ in 0..20 {
+        scene.render(&mut block, channels);
+        assert!(
+            block.iter().all(|sample| *sample == 0.0),
+            "silent while paused"
+        );
+    }
+    assert_eq!(scene.clock.samples(), stopped_at, "the clock stood still");
+    scene.paused = false;
+    scene.render(&mut block, channels);
+    assert_eq!(
+        scene.clock.samples(),
+        stopped_at + 512,
+        "and runs on from where it stopped"
+    );
 }

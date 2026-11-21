@@ -318,6 +318,8 @@ impl SceneConfig {
                 atmosphere,
             },
             master_gain: self.master_gain,
+            paused: false,
+            pause_gain: 1.0,
             sample_rate: 0.0, // set by audio backend
             distance_model,
             speaker_layout,
@@ -628,6 +630,7 @@ pub(super) fn build_one_synth_source(
             at_sample: 0,
             gain: 1.0,
             rate: 1.0,
+            skip_seconds: 0.0,
         });
     }
     let total_samples = (SYNTH_PREVIEW_SECONDS * sample_rate) as usize;

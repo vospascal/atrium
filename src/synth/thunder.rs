@@ -635,6 +635,11 @@ impl SoundSource for ThunderSource {
         }
     }
 
+    /// Claps already rolling roll on; only the ones still to come are dropped.
+    fn cancel(&mut self) {
+        self.appointments = [None; APPOINTMENTS];
+    }
+
     /// The preset of the newest clap sounding, `None` when silent.
     fn sounding_take(&self) -> Option<u8> {
         self.voices
@@ -664,6 +669,7 @@ mod tests {
             at_sample,
             gain: 1.0,
             rate: 1.0,
+            skip_seconds: 0.0,
         }
     }
 
@@ -732,6 +738,7 @@ mod tests {
             at_sample: 0,
             gain: 1.0,
             rate: 2.0,
+            skip_seconds: 0.0,
         });
         let half = (clap_seconds(PRESET_FAR) / 2.0 * SAMPLE_RATE) as usize;
         for _ in 0..half {
@@ -896,6 +903,7 @@ mod tests {
                 at_sample: index * (7.5 * SAMPLE_RATE) as u64,
                 gain: if index == 3 { f32::INFINITY } else { 1.0 },
                 rate: rates[index as usize % rates.len()],
+                skip_seconds: 0.0,
             });
         }
         let samples = render(60.0, SAMPLE_RATE, |rate| thunder.next_sample(rate));

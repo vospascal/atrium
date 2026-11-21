@@ -110,27 +110,30 @@ impl Weather {
     /// How far through a storm `seconds` is, 0 to 1, or `None` in a quiet
     /// spell. Spells and storms follow each other with lengths from the seed.
     fn storm_phase(&self, seconds: f64) -> Option<f32> {
+        let (start, length) = self
+            .storms()
+            .find(|(start, length)| seconds < start + length)?;
+        (seconds >= start).then(|| ((seconds - start) / length) as f32)
+    }
+
+    /// Every storm, as its start and its length (s), in order: a quiet spell,
+    /// a storm, a quiet spell, each length from the seed.
+    fn storms(&self) -> impl Iterator<Item = (f64, f64)> {
         let mut random = Random::new(self.seed ^ 0x0057_07A1);
-        let mut start = 0.0;
+        let mut end_of_last = 0.0;
         let mut first = true;
-        loop {
+        std::iter::from_fn(move || {
             let spell = if first {
                 FIRST_QUIET_SECONDS
             } else {
                 QUIET_SECONDS
             };
             first = false;
-            let quiet = between(spell, random.unit());
+            let start = end_of_last + between(spell, random.unit());
             let length = between(STORM_SECONDS, random.unit());
-            let storm_start = start + quiet;
-            if seconds < storm_start {
-                return None;
-            }
-            if seconds < storm_start + length {
-                return Some(((seconds - storm_start) / length) as f32);
-            }
-            start = storm_start + length;
-        }
+            end_of_last = start + length;
+            Some((start, length))
+        })
     }
 }
 
