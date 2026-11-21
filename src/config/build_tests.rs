@@ -529,3 +529,42 @@ fn the_meadow_birds_sing_their_own_takes_with_rests() {
         "two birds with five takes must not fall into step"
     );
 }
+
+/// A take heard on its own: only that take, uttered at once and then
+/// silence, whatever the sound's own rests are. A generator has no takes.
+#[test]
+fn one_take_is_heard_on_its_own_at_once() {
+    let scene = SceneConfig::load("scenes/meadow-birds.yaml").expect("scene should load");
+    let result = scene.clone().build().expect("scene should build");
+    let (id, blackbird) = scene
+        .sounds
+        .iter()
+        .find(|(id, _)| id.as_str() == "blackbird")
+        .expect("a blackbird");
+    let mut built = result
+        .sounds
+        .build_take(id, blackbird, 1, 15)
+        .expect("its second take builds");
+    assert_eq!(built.description.takes.len(), 1);
+    assert_eq!(built.description.takes[0].name, "Phrase 2");
+    assert_eq!(built.description.slot, 15);
+
+    let rate = 48_000.0;
+    built.source.next_sample(rate);
+    assert_eq!(built.source.sounding_take(), Some(0), "it starts at once");
+    let mut heard_for = 0usize;
+    for _ in 0..(rate as usize * 20) {
+        built.source.next_sample(rate);
+        if built.source.sounding_take().is_some() {
+            heard_for += 1;
+        }
+    }
+    assert!(
+        heard_for > 0 && heard_for < rate as usize * 20,
+        "once, then silent"
+    );
+
+    let (wind_id, wind) = scene.sounds.iter().next().expect("the wind");
+    assert!(result.sounds.build_take(wind_id, wind, 0, 15).is_err());
+    assert!(result.sounds.build_take(id, blackbird, 9, 15).is_err());
+}

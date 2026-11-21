@@ -107,6 +107,11 @@ pub struct When {
     /// times as often as one with chance 1, and one with 0 never.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chance: BTreeMap<String, f32>,
+    /// How many times one take is uttered running, fewest and most, before
+    /// another is chosen, in place of the preset's: `[1, 1]` a new take every
+    /// time, `[2, 5]` holding on to one for a while.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bout: Option<[u32; 2]>,
 }
 
 impl When {

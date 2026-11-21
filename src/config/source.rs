@@ -134,6 +134,16 @@ fn with_when(
     if takes.iter().all(|take| take.chance <= 0.0) {
         return Err("`when.chance` leaves no take that can be chosen".into());
     }
+    let rests = match when.bout {
+        None => rests,
+        Some(bout) => {
+            let bout = checked_bout(bout)?;
+            Some(Rests {
+                bout,
+                ..rests.unwrap_or(Rests::plain(0.0, 0.0))
+            })
+        }
+    };
     let rests = match when.gap {
         None => rests,
         Some([shortest, longest]) => {
@@ -146,11 +156,7 @@ fn with_when(
                 None
             } else {
                 // A kind that loops has no variation of its own to keep.
-                let kind = rests.unwrap_or(Rests {
-                    gap_seconds: (0.0, 0.0),
-                    level_variation_db: 0.0,
-                    pitch_variation_cents: 0.0,
-                });
+                let kind = rests.unwrap_or(Rests::plain(0.0, 0.0));
                 Some(Rests {
                     gap_seconds: (shortest, longest),
                     ..kind
@@ -238,6 +244,22 @@ pub(super) struct RestsDef {
     pub gap: [f32; 2],
     #[serde(default)]
     pub vary: VaryDef,
+    /// How many times one take is uttered running, fewest and most, before
+    /// another is chosen. Left out, a new take every time.
+    #[serde(default)]
+    pub bout: Option<[u32; 2]>,
+}
+
+/// A bout as written, checked: at least once, and from few to many.
+fn checked_bout([fewest, most]: [u32; 2]) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    if fewest >= 1 && most >= fewest {
+        Ok((fewest, most))
+    } else {
+        Err(
+            format!("`bout: [{fewest}, {most}]` must run from at least 1 to as many or more")
+                .into(),
+        )
+    }
 }
 
 /// How much one utterance may differ from the next.
@@ -304,6 +326,8 @@ impl SampleSourceDef {
                     gap_seconds: (shortest, longest),
                     level_variation_db: rests.vary.level,
                     pitch_variation_cents: rests.vary.pitch,
+                    bout: rests.bout.map(checked_bout).transpose()?.unwrap_or((1, 1)),
+                    starts_at_once: false,
                 })
             }
         };
@@ -386,6 +410,7 @@ mod tests {
         let when = When {
             gap: Some([20.0, 40.0]),
             chance: [("High".to_string(), 0.0)].into(),
+            bout: Some([2, 3]),
         };
         let ResolvedSound::Sample { takes, rests } =
             with_when(two_takes(), &when).expect("applies")
@@ -396,6 +421,15 @@ mod tests {
         let rests = rests.expect("still rests");
         assert_eq!(rests.gap_seconds, (20.0, 40.0));
         assert_eq!(rests.level_variation_db, 2.0, "the kind's variation stays");
+        assert_eq!(rests.bout, (2, 3));
+        let backwards = When {
+            bout: Some([3, 1]),
+            ..When::default()
+        };
+        assert!(
+            with_when(two_takes(), &backwards).is_err(),
+            "a bout runs from few to many"
+        );
     }
 
     /// Anything that loops can be made to come and go, and one take with no
@@ -463,9 +497,9 @@ mod tests {
                 assert_eq!(
                     rests,
                     Some(Rests {
-                        gap_seconds: (3.0, 8.0),
                         level_variation_db: 2.0,
                         pitch_variation_cents: 15.0,
+                        ..Rests::plain(3.0, 8.0)
                     })
                 );
             }

@@ -76,6 +76,7 @@ pub(super) struct SourceMeta {
     pub(super) takes: Vec<TakeDescription>,
     /// Shortest and longest rest between takes; `None` when it plays all the time.
     pub(super) gap: Option<[f32; 2]>,
+    pub(super) bout: [u32; 2],
     pub(super) group: Option<String>,
     pub(super) name: String,
     pub(super) color: String,
@@ -228,6 +229,7 @@ impl SceneConfig {
                     behind: meta.behind,
                     takes: meta.takes.clone(),
                     gap: meta.gap,
+                    bout: meta.bout,
                     name: meta.name.clone(),
                     group: meta.group.clone(),
                     color: meta.color.clone(),
@@ -367,7 +369,7 @@ impl SceneConfig {
         let mut source_amplitudes = Vec::<f32>::new();
 
         for (slot, (id, entity)) in self.sounds.iter().enumerate() {
-            let (built, meta) = builder.build_parts(id, entity, slot)?;
+            let (built, meta) = builder.build_parts(id, entity, slot, |_| Ok(()))?;
             println!(
                 "  {} → SPL={:.0} dB, amplitude={:.4}, ref_dist={:.2}m, audible={:.2}m",
                 meta.name, meta.spl, built.amplitude, built.ref_dist, built.audible_radius,

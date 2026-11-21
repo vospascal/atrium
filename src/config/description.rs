@@ -47,6 +47,9 @@ pub struct SourceDescription {
     /// Shortest and longest rest between two takes (s). `None` for a sound
     /// that plays all the time, round and round.
     pub gap: Option<[f32; 2]>,
+    /// How many times running one take is uttered, fewest and most, before
+    /// another is chosen. `[1, 1]` for a sound that changes every time.
+    pub bout: [u32; 2],
     pub name: String,
     /// The family it belongs to in a list, when the scene gives it one.
     pub group: Option<String>,

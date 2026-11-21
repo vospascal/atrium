@@ -11,9 +11,10 @@ use super::build::{
 };
 use super::description::{beam_half_angle, SourceDescription, TakeDescription};
 use super::scene::NormalizationConfig;
-use super::source::{display_name, resolve, ResolvedSound};
+use super::source::{display_name, resolve, ResolvedSound, ResolvedSource};
 use crate::audio::silence_node::SilenceNode;
 use crate::audio::spectral_profile::BARK_BANDS;
+use crate::audio::voice_node::Rests;
 
 /// What it takes to build a sound for one scene: its loudness calibration,
 /// its distance model, and where the scene sits in the world.
@@ -58,7 +59,43 @@ impl SoundBuilder {
         entity: &Entity,
         slot: usize,
     ) -> Result<BuiltSound, Box<dyn std::error::Error>> {
-        let (built, meta) = self.build_parts(id, entity, slot)?;
+        self.build_with(id, entity, slot, |_| Ok(()))
+    }
+
+    /// Build only take `take` of `entity`, to hear it on its own: it is
+    /// uttered once, at once, and then the voice stays silent. A sound
+    /// without that take is refused.
+    pub fn build_take(
+        &self,
+        id: &EntityId,
+        entity: &Entity,
+        take: usize,
+        slot: usize,
+    ) -> Result<BuiltSound, Box<dyn std::error::Error>> {
+        self.build_with(id, entity, slot, |resolved| {
+            let ResolvedSound::Sample { takes, rests } = &mut resolved.sound else {
+                return Err(format!("sound `{id}` has no takes").into());
+            };
+            if take >= takes.len() {
+                return Err(format!("sound `{id}` has no take {take}").into());
+            }
+            *takes = vec![takes.swap_remove(take)];
+            *rests = Some(Rests {
+                starts_at_once: true,
+                ..Rests::plain(HEARD_ONCE_REST, HEARD_ONCE_REST)
+            });
+            Ok(())
+        })
+    }
+
+    fn build_with(
+        &self,
+        id: &EntityId,
+        entity: &Entity,
+        slot: usize,
+        adjust: impl FnOnce(&mut ResolvedSource) -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<BuiltSound, Box<dyn std::error::Error>> {
+        let (built, meta) = self.build_parts(id, entity, slot, adjust)?;
         let description = SourceDescription {
             id: meta.id,
             slot: slot as u16,
@@ -66,6 +103,7 @@ impl SoundBuilder {
             behind: meta.behind,
             takes: meta.takes,
             gap: meta.gap,
+            bout: meta.bout,
             name: meta.name,
             group: meta.group,
             color: meta.color,
@@ -105,9 +143,11 @@ impl SoundBuilder {
         id: &EntityId,
         entity: &Entity,
         slot: usize,
+        adjust: impl FnOnce(&mut ResolvedSource) -> Result<(), Box<dyn std::error::Error>>,
     ) -> Result<(BuiltSource, SourceMeta), Box<dyn std::error::Error>> {
         // Merge the preset (if any) with what the entity changes.
-        let resolved = resolve(entity)?;
+        let mut resolved = resolve(entity)?;
+        adjust(&mut resolved)?;
         let place: [f32; 3] = entity.place.into();
         let position = arr_to_vec3(place) + self.spawn;
         let (orbit_radius, orbit_speed) = match entity.moves {
@@ -186,6 +226,12 @@ impl SoundBuilder {
                 } => Some([rests.gap_seconds.0, rests.gap_seconds.1]),
                 _ => None,
             },
+            bout: match &resolved.sound {
+                ResolvedSound::Sample {
+                    rests: Some(rests), ..
+                } => [rests.bout.0, rests.bout.1],
+                _ => [1, 1],
+            },
             group: entity.group.clone(),
             name: display_name(id, entity),
             color: source_color(entity, slot),
@@ -206,6 +252,10 @@ impl SoundBuilder {
         Ok((built, meta))
     }
 }
+
+/// How long a take heard on its own rests after it ends (s): longer than
+/// anyone listens, so it is heard once.
+const HEARD_ONCE_REST: f32 = 3600.0;
 
 /// The engine's heading for a compass bearing: a bearing is degrees clockwise
 /// from north (+Y), a heading is radians counter-clockwise from +X.

@@ -14,7 +14,7 @@ sounds:
     sound: { preset: sources/frog.yaml, level: 68 }
     shape: { width: 180, behind: -12, size: 0.2, facing: 225 }
     place: [10.1, 10.1, 0.0]
-    when: { gap: [20, 45], chance: { "Call 2": 3 } }
+    when: { gap: [20, 45], bout: [2, 4], chance: { "Call 2": 3 } }
     moves:
       orbit: { radius: 1.5, speed: 1.0 }
 ```
@@ -56,7 +56,8 @@ This is version 1, the foundation. It changes nothing you hear. The design it fo
   which a bell, lines of a story or a tone have as much as a bird. A gap of `[0, 0]` is "all
   the time", so there is no separate switch for it, and a recording that loops can be given a
   gap to make it come and go. Chances are keyed by take name, not position, so a kind that
-  gains a take does not shift what a scene said about the others.
+  gains a take does not shift what a scene said about the others. `bout` holds on to one take
+  for a few utterances before choosing another, the way a great tit keeps one song a while.
 - **`moves:` is a struct with one optional key per way of moving, not a tagged enum.**
   serde_yaml writes an enum variant as a YAML tag (`!orbit`). A hand-written scene file
   should not need tags, and the crate should not depend on one YAML library's behaviour.
@@ -98,7 +99,7 @@ a private directory and the planning gets a `state.rs`.
   voices only when a scene is loaded.
 - **Telemetry still speaks in voice numbers.** The scene description carries each sound's id
   and group, and the app's layer list is drawn from them.
-- **Bouts, wander, follow and conditions are not here.** They are the
+- **Wander, follow and conditions are not here.** They are the
   components this version makes room for.
 - **A generator cannot orbit.** The engine refuses `moves: orbit` on a generator preset, as
   it did before entities.
