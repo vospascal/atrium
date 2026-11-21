@@ -8,14 +8,15 @@
 mod api;
 mod engine;
 mod head_tracking;
+mod history;
 mod library;
 mod output;
 mod scenes;
 
 pub use api::{
-    Band, Bout, Conditions, EmitterKind, EngineError, Follow, Gap, PlannedTake, Position,
-    SceneDescription, SourceDescription, SourceSignal, SourceTelemetry, Story, Take, Telemetry,
-    Weather,
+    Band, Bout, Conditions, EditHistory, EmitterKind, EngineError, Follow, Gap, PlannedTake,
+    Position, SceneDescription, SourceDescription, SourceSignal, SourceTelemetry, Story, Take,
+    Telemetry, Weather,
 };
 pub use engine::Engine;
 pub use head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};

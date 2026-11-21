@@ -151,6 +151,11 @@ impl SoundBuilder {
         }
     }
 
+    /// Where an entity's `place` is in the world: the inverse of `place_at`.
+    pub fn world_at(&self, place: Place) -> Vec3 {
+        self.spawn + Vec3::new(place.x, place.y, place.z)
+    }
+
     /// The placeholder that fills a voice when its sound is taken out.
     pub fn silence() -> Box<dyn SoundSource> {
         Box::new(SilenceNode)
@@ -293,9 +298,18 @@ impl SoundBuilder {
     }
 }
 
+/// What a list shows for `entity` playing from `slot`: its name and colour,
+/// or, where the scene gives none, its id and the slot's colour.
+pub fn name_and_color(id: &EntityId, entity: &Entity, slot: usize) -> (String, String) {
+    (
+        super::source::display_name(id, entity),
+        super::build::source_color(entity, slot),
+    )
+}
+
 /// The engine's heading for a compass bearing: a bearing is degrees clockwise
 /// from north (+Y), a heading is radians counter-clockwise from +X.
-fn yaw_for_bearing(bearing_degrees: f32) -> f32 {
+pub fn yaw_for_bearing(bearing_degrees: f32) -> f32 {
     (90.0 - bearing_degrees).to_radians()
 }
 

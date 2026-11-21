@@ -34,6 +34,15 @@ impl From<Position> for Vec3 {
     }
 }
 
+/// The steps a UI can undo and redo, by name.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct EditHistory {
+    /// Oldest first; the last is undone next.
+    pub undoable: Vec<String>,
+    /// The first is redone next.
+    pub redoable: Vec<String>,
+}
+
 /// The scene the engine is playing.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SceneDescription {

@@ -1,11 +1,15 @@
 //! The running engine: scene, audio output, and the two rings that connect a
 //! UI to the audio thread.
 
+mod undo;
+
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use atrium::audio::output::{AudioOutput, CpalOutput};
-use atrium::config::{bearing_for_heading, radiation_of, read_preset, SceneConfig, SoundBuilder};
+use atrium::config::{
+    bearing_for_heading, radiation_of, read_preset, SceneConfig, SoundBuilder, WeatherConfig,
+};
 use atrium::engine::edit::{Retired, SceneEdit};
 use atrium::engine::scene::AudioScene;
 use atrium::head_tracking::HeadTracking;
@@ -21,6 +25,7 @@ use crate::api::{
     SourceDescription, Telemetry, Weather,
 };
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
+use crate::history::History;
 use crate::output::{playable_outputs, Output};
 
 /// Commands the audio thread can fall behind by before new ones are refused.
@@ -30,6 +35,10 @@ const TELEMETRY_CAPACITY: usize = 4;
 /// Sound changes the audio thread can fall behind by. Each is one press in a
 /// UI, so a handful is plenty.
 const EDIT_CAPACITY: usize = 8;
+/// How long, and how often, a full edit ring is waited on: some 200 ms, many
+/// audio callbacks.
+const EDIT_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+const EDIT_WAITS: usize = 40;
 /// How far ahead of the listener an auditioned or newly added sound stands (m).
 const AHEAD_OF_LISTENER: f32 = 2.0;
 /// The loudest a preview of a kind plays (dB SPL at 1 m), however loud the
@@ -74,6 +83,8 @@ pub struct Engine {
     /// Whether the scene was last paused; the audio thread keeps its own.
     paused: std::sync::atomic::AtomicBool,
     edits: Mutex<Edits>,
+    /// Earlier and later versions of the scene, for undo and redo.
+    history: Mutex<History<undo::Version>>,
     /// Dropped last; dropping it stops the audio.
     _output: OutputThread,
 }
@@ -123,6 +134,7 @@ impl Engine {
                 retired,
                 auditioned: false,
             }),
+            history: Mutex::new(History::default()),
             _output: output,
         }))
     }
@@ -239,27 +251,26 @@ impl Engine {
         {
             return Ok(());
         }
-        let seed = self.planner.seed();
         let story: atrium::plan::Story = weather.story.into();
-        let plan_weather =
-            atrium::plan::Weather::new(story, bands.map(|band| (band.low, band.high)), seed);
-        self.planner.set_weather(plan_weather.clone());
-        let in_file = |condition| {
-            let (low, high) = plan_weather.band(condition);
-            let (low, high) = (rounded(low, 100.0), rounded(high, 100.0));
+        let in_file = |band: Band| {
+            let (low, high) = (band.low.clamp(0.0, 1.0), band.high.clamp(0.0, 1.0));
+            let (low, high) = (rounded(low.min(high), 100.0), rounded(low.max(high), 100.0));
             if low == high {
                 atrium::config::Band::At(low)
             } else {
                 atrium::config::Band::Between([low, high])
             }
         };
-        lock(&self.scene).document.weather = Some(atrium::config::WeatherConfig {
+        let weather = WeatherConfig {
             story: story.name().to_string(),
-            wind: in_file(Condition::Wind),
-            rain: in_file(Condition::Rain),
-            storm: in_file(Condition::Storm),
-            daylight: in_file(Condition::Daylight),
-        });
+            wind: in_file(weather.wind),
+            rain: in_file(weather.rain),
+            storm: in_file(weather.storm),
+            daylight: in_file(weather.daylight),
+        };
+        let mut scene = lock(&self.scene);
+        self.play_weather(Some(&weather))?;
+        scene.document.weather = Some(weather);
         Ok(())
     }
 
@@ -408,18 +419,9 @@ impl Engine {
         let Some(entity) = scene.entity_in(slot) else {
             return Ok(());
         };
-        entity.sound.level = Some(rounded(level, 10.0));
-        let Some(source) = sound_in(&mut scene.description, slot) else {
-            return Ok(());
-        };
-        lock(&self.commands)
-            .push(Command::SetSourceSpl {
-                index: slot,
-                spl: level,
-            })
-            .map_err(|_| EngineError::CommandQueueFull)?;
-        source.spl = level;
-        Ok(())
+        let level = rounded(level, 10.0);
+        entity.sound.level = Some(level);
+        self.play_level(&mut scene, slot, level)
     }
 
     /// Move the source in `slot` to `position`. `scene()` reports it there
@@ -427,15 +429,7 @@ impl Engine {
     /// is, which differs for a source that moves by itself.
     pub fn set_source_position(&self, slot: u16, position: Position) -> Result<(), EngineError> {
         let mut scene = lock(&self.scene);
-        lock(&self.commands)
-            .push(Command::SetSourcePosition {
-                index: slot,
-                position: position.into(),
-            })
-            .map_err(|_| EngineError::CommandQueueFull)?;
-        if let Some(source) = sound_in(&mut scene.description, slot) {
-            source.position = position;
-        }
+        self.play_position(&mut scene, slot, position)?;
         let place = self.sounds.place_at(position.into());
         if let Some(entity) = scene.entity_in(slot) {
             // Centimetres are plenty for a place, and keep a saved file short.
@@ -464,23 +458,7 @@ impl Engine {
             entity.shape.width = Some(width);
             entity.shape.behind = Some(behind);
         }
-        let Some(source) = sound_in(&mut scene.description, slot) else {
-            return Ok(());
-        };
-        let (radiation, beam_half_angle) = radiation_of(width, behind);
-        lock(&self.commands)
-            .push(Command::SetSourceDirectivity {
-                index: slot,
-                pattern: radiation,
-            })
-            .map_err(|_| EngineError::CommandQueueFull)?;
-        source.width = width;
-        source.behind = behind;
-        source.beam_half_angle = match source.emitter_kind {
-            EmitterKind::Object => beam_half_angle,
-            EmitterKind::Field => None,
-        };
-        Ok(())
+        self.play_beam(&mut scene, slot, width, behind)
     }
 
     /// Turn the source in `slot` to face along `facing`, a direction over
@@ -496,18 +474,7 @@ impl Engine {
         if let Some(entity) = scene.entity_in(slot) {
             entity.shape.facing = Some(rounded(bearing_for_heading(yaw), 1.0) % 360.0);
         }
-        let Some(source) = sound_in(&mut scene.description, slot) else {
-            return Ok(());
-        };
-        lock(&self.commands)
-            .push(Command::SetSourceFacing { index: slot, yaw })
-            .map_err(|_| EngineError::CommandQueueFull)?;
-        source.facing = Position {
-            x: facing.x / length,
-            y: facing.y / length,
-            z: 0.0,
-        };
-        Ok(())
+        self.play_facing(&mut scene, slot, yaw)
     }
 
     /// The outputs this scene can play on the opened device.
@@ -657,15 +624,6 @@ impl Engine {
         edits.stop_audition()?;
         self.planner.remove_voice(AUDITION_SLOT);
         let mut scene = lock(&self.scene);
-        let slot = (0..MAX_SOURCES)
-            .find(|slot| {
-                scene
-                    .description
-                    .sources
-                    .iter()
-                    .all(|source| source.slot as usize != *slot)
-            })
-            .ok_or(EngineError::NoFreeVoice)?;
         let summary =
             read_preset(&preset).map_err(|error| EngineError::Scene(error.to_string()))?;
         let id = EntityId::unused(
@@ -677,20 +635,7 @@ impl Engine {
                 .map(|source| source.id.as_str()),
         );
         let entity = self.sound_ahead(preset, Some(summary.name), summary.group);
-        let built = self
-            .sounds
-            .build(&id, &entity, slot)
-            .map_err(|error| EngineError::Scene(error.to_string()))?;
-        edits.send(SceneEdit::AddSource {
-            slot: slot as u16,
-            source: built.source,
-            bands: built.bands,
-            amplitude: built.amplitude,
-        })?;
-        self.planner
-            .add_voice(slot, id.as_str(), built.rhythm, built.follows);
-        let added: SourceDescription = built.description.into();
-        scene.description.sources.push(added.clone());
+        let added = self.play_added(&mut edits, &mut scene, &id, &entity)?;
         scene
             .document
             .sounds
@@ -709,16 +654,7 @@ impl Engine {
         else {
             return Ok(());
         };
-        edits.send(SceneEdit::RemoveSource {
-            slot,
-            filler: SoundBuilder::silence(),
-        })?;
-        self.planner.remove_voice(slot as usize);
-        scene
-            .description
-            .sources
-            .retain(|source| source.slot != slot);
-        scene.muted.remove(&slot);
+        self.play_removed(&mut edits, &mut scene, slot)?;
         if let Ok(id) = EntityId::new(&id) {
             scene.document.sounds.remove(&id);
         }
@@ -811,6 +747,154 @@ impl Engine {
         Ok(())
     }
 
+    /// Each `play_` call below changes what is heard and what `scene()`
+    /// reports, and leaves the scene file to its caller: an edit records what
+    /// was asked, and undo puts back a whole earlier version at once.
+
+    /// Set the level of the sound in `slot`.
+    fn play_level(&self, scene: &mut Live, slot: u16, level: f32) -> Result<(), EngineError> {
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        self.command(Command::SetSourceSpl {
+            index: slot,
+            spl: level,
+        })?;
+        source.spl = level;
+        Ok(())
+    }
+
+    /// Move the sound in `slot` to `position`, in the world.
+    fn play_position(
+        &self,
+        scene: &mut Live,
+        slot: u16,
+        position: Position,
+    ) -> Result<(), EngineError> {
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        self.command(Command::SetSourcePosition {
+            index: slot,
+            position: position.into(),
+        })?;
+        source.position = position;
+        Ok(())
+    }
+
+    /// Give the sound in `slot` a beam `width` degrees wide, `behind` dB
+    /// down straight behind it.
+    fn play_beam(
+        &self,
+        scene: &mut Live,
+        slot: u16,
+        width: f32,
+        behind: f32,
+    ) -> Result<(), EngineError> {
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        let (radiation, beam_half_angle) = radiation_of(width, behind);
+        self.command(Command::SetSourceDirectivity {
+            index: slot,
+            pattern: radiation,
+        })?;
+        source.width = width;
+        source.behind = behind;
+        source.beam_half_angle = match source.emitter_kind {
+            EmitterKind::Object => beam_half_angle,
+            EmitterKind::Field => None,
+        };
+        Ok(())
+    }
+
+    /// Turn the sound in `slot` to the heading `yaw` (radians from +x).
+    fn play_facing(&self, scene: &mut Live, slot: u16, yaw: f32) -> Result<(), EngineError> {
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        self.command(Command::SetSourceFacing { index: slot, yaw })?;
+        source.facing = Position {
+            x: yaw.cos(),
+            y: yaw.sin(),
+            z: 0.0,
+        };
+        Ok(())
+    }
+
+    /// Let `weather` move the conditions from now on; none is a calm day.
+    fn play_weather(&self, weather: Option<&WeatherConfig>) -> Result<(), EngineError> {
+        let seed = self.planner.seed();
+        let weather = match weather {
+            Some(weather) => weather
+                .story(seed)
+                .map_err(|error| EngineError::Scene(error.to_string()))?,
+            None => atrium::plan::Weather::calm(seed),
+        };
+        self.planner.set_weather(weather);
+        Ok(())
+    }
+
+    /// Build `entity` as `id` in the lowest free voice and start it.
+    fn play_added(
+        &self,
+        edits: &mut Edits,
+        scene: &mut Live,
+        id: &EntityId,
+        entity: &Entity,
+    ) -> Result<SourceDescription, EngineError> {
+        let slot = (0..MAX_SOURCES)
+            .find(|slot| {
+                scene
+                    .description
+                    .sources
+                    .iter()
+                    .all(|source| source.slot as usize != *slot)
+            })
+            .ok_or(EngineError::NoFreeVoice)?;
+        let built = self
+            .sounds
+            .build(id, entity, slot)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        edits.send(SceneEdit::AddSource {
+            slot: slot as u16,
+            source: built.source,
+            bands: built.bands,
+            amplitude: built.amplitude,
+        })?;
+        self.planner
+            .add_voice(slot, id.as_str(), built.rhythm, built.follows);
+        let added: SourceDescription = built.description.into();
+        scene.description.sources.push(added.clone());
+        Ok(added)
+    }
+
+    /// Silence the voice in `slot` and free it.
+    fn play_removed(
+        &self,
+        edits: &mut Edits,
+        scene: &mut Live,
+        slot: u16,
+    ) -> Result<(), EngineError> {
+        edits.send(SceneEdit::RemoveSource {
+            slot,
+            filler: SoundBuilder::silence(),
+        })?;
+        self.planner.remove_voice(slot as usize);
+        scene
+            .description
+            .sources
+            .retain(|source| source.slot != slot);
+        scene.muted.remove(&slot);
+        Ok(())
+    }
+
+    fn command(&self, command: Command) -> Result<(), EngineError> {
+        lock(&self.commands)
+            .push(command)
+            .map_err(|_| EngineError::CommandQueueFull)
+    }
+
     /// A sound made from `preset`, standing a short way ahead of where the
     /// scene puts the listener, at ear height.
     fn sound_ahead(&self, preset: String, name: Option<String>, group: Option<String>) -> Entity {
@@ -884,11 +968,20 @@ struct Edits {
 }
 
 impl Edits {
+    /// Hand `edit` to the audio thread. Undo can send several at once, more
+    /// than the ring holds, so a full ring is waited on for a few audio
+    /// callbacks before the edit is refused.
     fn send(&mut self, edit: SceneEdit) -> Result<(), EngineError> {
-        while self.retired.pop().is_ok() {}
-        self.to_audio
-            .push(edit)
-            .map_err(|_| EngineError::CommandQueueFull)
+        let mut edit = edit;
+        for _ in 0..EDIT_WAITS {
+            while self.retired.pop().is_ok() {}
+            match self.to_audio.push(edit) {
+                Ok(()) => return Ok(()),
+                Err(rtrb::PushError::Full(returned)) => edit = returned,
+            }
+            std::thread::sleep(EDIT_WAIT);
+        }
+        Err(EngineError::CommandQueueFull)
     }
 
     fn stop_audition(&mut self) -> Result<(), EngineError> {

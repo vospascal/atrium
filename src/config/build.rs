@@ -176,7 +176,10 @@ impl SceneConfig {
         // The session: every choice follows from the seed, decided ahead.
         let seed = self.seed.unwrap_or_else(fresh_seed);
         let mut plan = Plan::new(seed);
-        plan.set_weather(self.weather_story(seed)?);
+        plan.set_weather(match &self.weather {
+            Some(weather) => weather.story(seed)?,
+            None => crate::plan::Weather::calm(seed),
+        });
         for (slot, ((id, _), (rhythm, follows))) in self
             .sounds
             .iter()
@@ -704,14 +707,12 @@ pub(super) fn arr_to_vec3(a: [f32; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
 
-impl SceneConfig {
-    /// The weather story this scene names, with its bands. Without a
-    /// `weather:` section, a still, dry, bright day.
-    fn weather_story(&self, seed: u64) -> Result<crate::plan::Weather, Box<dyn std::error::Error>> {
+impl super::WeatherConfig {
+    /// The weather this names, with its bands, played from `seed`. A scene
+    /// without a `weather:` section has `Weather::calm`.
+    pub fn story(&self, seed: u64) -> Result<crate::plan::Weather, Box<dyn std::error::Error>> {
         use crate::plan::{Story, Weather};
-        let Some(weather) = &self.weather else {
-            return Ok(Weather::calm(seed));
-        };
+        let weather = self;
         let story = Story::named(&weather.story).ok_or_else(|| {
             format!(
                 "`story: {}` is not a weather story; use held, drifting or passing storm",
