@@ -350,8 +350,9 @@ internal fun EditorMap(
         markers.filterNot { it.ambient }.sortedByDescending { it.reach }.forEach { drawReach(view.toScreen(it.offset), it, view, beat, it.id == selected) }
 
         // The room's loudspeakers, under the sounds: filled by what each plays, an outline when the output passes them by.
+        // On headphones none plays, and the room's speakers have nothing to do with what is heard, so none is drawn.
         val inUse = telemetry?.channelsInUse.orEmpty().toSet()
-        description?.speakers.orEmpty().forEach { speaker ->
+        if (inUse.isNotEmpty()) description?.speakers.orEmpty().forEach { speaker ->
             val offset = Point(speaker.position.x - origin.x, speaker.position.y - origin.y)
             val level = telemetry?.peaksDb?.getOrNull(speaker.channel.toInt())?.let(::meterOf) ?: 0f
             drawSpeaker(view.toScreen(offset), centre, speaker.name, speaker.channel in inUse, level, colors, text)
