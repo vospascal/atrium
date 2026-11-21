@@ -27,6 +27,18 @@ pub struct SceneDescription {
     pub listener: Vec3,
     /// The scene's sources, each with the slot it plays from.
     pub sources: Vec<SourceDescription>,
+    /// The room's loudspeakers, wherever the scene puts them, whether or not
+    /// the output in use plays through them.
+    pub speakers: Vec<SpeakerDescription>,
+}
+
+/// One loudspeaker of the room.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeakerDescription {
+    /// The output channel it plays: what telemetry's peaks are counted by.
+    pub channel: u16,
+    /// Where it stands in the world (m).
+    pub position: Vec3,
 }
 
 /// One source as built.

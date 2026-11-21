@@ -25,7 +25,8 @@ mod build_tests;
 
 pub use build::BuildResult;
 pub use description::{
-    SceneDescription, SceneSummary, SoundSummary, SourceDescription, TakeDescription,
+    SceneDescription, SceneSummary, SoundSummary, SourceDescription, SpeakerDescription,
+    TakeDescription,
 };
 pub use presets::{list_presets, read_preset, PresetSummary};
 pub use scene::{Band, SceneConfig, WeatherConfig};

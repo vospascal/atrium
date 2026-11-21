@@ -56,6 +56,19 @@ pub struct SceneDescription {
     /// the scene file's, with sounds added since at the end; it is not slot
     /// order once a sound has been removed and another added.
     pub sources: Vec<SourceDescription>,
+    /// The room's loudspeakers. Which of them the output in use plays
+    /// through is in telemetry: none on headphones.
+    pub speakers: Vec<Speaker>,
+}
+
+/// One loudspeaker of the room.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct Speaker {
+    /// The output channel it plays; `Telemetry::peaks_db` is counted by it.
+    pub channel: u16,
+    /// Its name in a 5.1 room: L, R, C, Ls or Rs.
+    pub name: String,
+    pub position: Position,
 }
 
 /// One source as it is now.
@@ -163,6 +176,15 @@ impl From<atrium::config::SceneDescription> for SceneDescription {
             depth: scene.depth,
             listener: scene.listener.into(),
             sources: scene.sources.into_iter().map(Into::into).collect(),
+            speakers: scene
+                .speakers
+                .into_iter()
+                .map(|speaker| Speaker {
+                    channel: speaker.channel,
+                    name: channel_name(speaker.channel).to_owned(),
+                    position: speaker.position.into(),
+                })
+                .collect(),
         }
     }
 }
@@ -228,6 +250,9 @@ pub struct Telemetry {
     pub peaks_db: Vec<f32>,
     /// The output being rendered.
     pub output: Output,
+    /// The output channels it plays through loudspeakers: none on
+    /// headphones, and on a 5.1 room only those its channels use.
+    pub channels_in_use: Vec<u16>,
     /// Master gain in effect (linear, 0–1).
     pub volume: f32,
     /// The listener's current horizontal forward vector. It turns with the
@@ -311,6 +336,15 @@ impl From<&TelemetryFrame> for Telemetry {
                 render_mode: frame.render_mode.into(),
                 channel_mode: frame.channel_mode.into(),
             },
+            channels_in_use: match frame.render_mode {
+                atrium_core::speaker::RenderMode::Hrtf => Vec::new(),
+                _ => frame
+                    .channel_mode
+                    .active_channels()
+                    .iter()
+                    .map(|channel| *channel as u16)
+                    .collect(),
+            },
             volume: frame.master_gain,
             listener_facing: Position {
                 x: frame.listener_yaw.cos(),
@@ -319,6 +353,20 @@ impl From<&TelemetryFrame> for Telemetry {
             },
             head_tracking: HeadTrackingStatus::Off,
         }
+    }
+}
+
+/// The name of output `channel` in the 5.1 order every layout here uses:
+/// stereo is its first two, quad its first two and last two.
+fn channel_name(channel: u16) -> &'static str {
+    match channel {
+        0 => "L",
+        1 => "R",
+        2 => "C",
+        3 => "LFE",
+        4 => "Ls",
+        5 => "Rs",
+        _ => "?",
     }
 }
 

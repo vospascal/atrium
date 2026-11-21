@@ -12,7 +12,9 @@ use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
 use atrium_world::Entity;
 
-use super::description::{beam_half_angle, SceneDescription, SourceDescription, TakeDescription};
+use super::description::{
+    beam_half_angle, SceneDescription, SourceDescription, SpeakerDescription, TakeDescription,
+};
 use super::environment::{build_wall_materials, EnvironmentConfig};
 use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
 use super::sound_builder::SoundBuilder;
@@ -269,6 +271,14 @@ impl SceneConfig {
                     emitter_kind: meta.emitter_kind,
                     beam_half_angle: beam_half_angle(meta.emitter_kind, node.directivity()),
                     facing: node.orientation(),
+                })
+                .collect(),
+            speakers: speaker_layout
+                .speakers()
+                .iter()
+                .map(|speaker| SpeakerDescription {
+                    channel: speaker.channel as u16,
+                    position: speaker.position,
                 })
                 .collect(),
         };
