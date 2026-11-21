@@ -45,12 +45,12 @@ internal fun Layers(
     groupedInSceneOrder(sounds.withIndex().toList()) { it.value.group }.forEach { (group, members) ->
         val ids = members.map { it.value.id }
         Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 22.dp, top = 18.dp, bottom = 2.dp),
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 14.dp, top = 12.dp, bottom = 1.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Ear(hearing = !mix.muted.containsAll(ids), Muted) { session.mix(mix.toggleMuteAll(ids)) }
-            Spacer(Modifier.width(10.dp))
-            PaperText(group.uppercase(), 13, Muted, FontWeight.SemiBold, spacing = 2f)
+            Ear(hearing = !mix.muted.containsAll(ids), Muted, size = CompactEar) { session.mix(mix.toggleMuteAll(ids)) }
+            Spacer(Modifier.width(6.dp))
+            PaperText(group.uppercase(), 11, Muted, FontWeight.SemiBold, spacing = 1.5f, singleLine = true)
         }
         members.forEach { (index, sound) ->
             LayerRow(
@@ -81,17 +81,21 @@ private fun LayerRow(
         Modifier.fillMaxWidth()
             .listRow(row, selected)
             .clickable(role = Role.Button, onClick = onSelect)
-            .padding(start = 16.dp, end = 22.dp, top = 6.dp, bottom = 6.dp),
+            .padding(start = 12.dp, end = 14.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Ear(hearing, Foreground, onClick = onEar)
-        Spacer(Modifier.width(10.dp))
-        Canvas(Modifier.size(10.dp)) { drawCircle(ink.copy(alpha = if (hearing) 1f else .35f)) }
-        Spacer(Modifier.width(10.dp))
-        PaperText(sound.name, 18, if (hearing) Foreground else Muted, modifier = Modifier.weight(1f))
-        Meter(strength, Modifier.width(72.dp).height(14.dp))
+        Ear(hearing, Foreground, size = CompactEar, onClick = onEar)
+        Spacer(Modifier.width(6.dp))
+        Canvas(Modifier.size(8.dp)) { drawCircle(ink.copy(alpha = if (hearing) 1f else .35f)) }
+        Spacer(Modifier.width(8.dp))
+        PaperText(sound.name, 15, if (hearing) Foreground else Muted, singleLine = true, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        Meter(strength, Modifier.width(56.dp).height(10.dp))
     }
 }
+
+/** The ear in front of a layer and a group, small enough for a dense list but still easy to hit. */
+private val CompactEar = 22.dp
 
 /**
  * The bar under the layers, where a layer list keeps its actions: add a sound
