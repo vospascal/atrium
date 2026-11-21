@@ -545,19 +545,20 @@ one binding method away. Bold marks what is missing.
 | Output and volume | `SetRenderMode`, `SetChannelMode`, `SetMasterGain` | `set_output`, `set_volume` | exists: Settings |
 | Move a sound | `SetSourcePosition` | `set_source_position` | exists: drag any sound on the editor's map. `scene()` remembers where it was put |
 | Every sound on one map | scene description | `scene()` reports each sound's position, level, ambient or not, beam width and facing | exists: the editor's map |
-| Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | each layer and each sound on the map shows how strongly it reaches the listener. Channel peaks are not drawn |
-| Speakers and the block | the scene has a speaker layout | **not in the scene description** | new (6) |
+| Levels | telemetry: per sound, and a peak per output channel | `latest_telemetry` | each layer and each sound on the map shows how strongly it reaches the listener. Channel peaks are meters in the tracks' header |
+| Speakers and the block | the scene has a speaker layout | `scene()` reports the speakers; telemetry which the output plays through | exists: speakers on the map, metered. The block as a whole is 37 |
+| Several sounds at once | | `duplicate_sound` takes a place | exists: Shift or ⌘ adds to the selection, a drag moves them all, Alt-drag leaves copies, S held hears them alone |
 | Mute | `SetSourceMuted` | `set_source_muted`; telemetry reports `muted` | exists: the editor's layers |
 | Level | `SetSourceSpl` | `set_source_level` | exists: the selected layer |
 | Width and what is heard behind | `SetSourceDirectivity` with a `Beam` | `set_source_beam` | exists: the inspector, with Omni, Focused and Narrow as starting points and a drawing of the beam |
-| Size | `SetSourceSpread` | **no call.** Size is not in the description | new (10) |
+| Size | `SetSourceSpread` | `set_source_size`; `scene()` reports `size` | exists: the inspector's Shape, and a disc on the map |
 | Orbit | `SetSourceOrbitSpeed`, `SetSourceOrbitRadius`, `SetSourceOrbitAngle` | **no call.** Orbit is not in the description | new (33) |
-| Temperature and humidity | `SetAtmosphere` | **no call** | new (39) |
-| Listener position and facing | `SetListenerPose` | **no call** | new (39) |
+| Temperature and humidity | `SetAtmosphere`; a scene's `atmosphere:` is a file or its own values | `set_atmosphere`; `scene()` reports both | exists: Air in the scene inspector |
+| Listener position and facing | `SetListenerPose` | `set_listener_position`, `set_listener_facing` | exists: drag and turn the listener on the map |
 | Head tracking | listens for OpenTrack packets and can start the Sony bridge. Telemetry carries the listener's heading | `head_trackers`, `set_head_tracker`; telemetry reports the facing and whether a tracker is sending | exists on desktop: Settings switches it and says whether head movement arrives; the 3D map draws where the listener faces. Seen working with the Sony headphones on 2026-11-20. The Sony bridge is a Mac script, so iPhone needs its own source of head motion |
 | Move a speaker | `SetSpeakerPosition` | **no call** | new |
 | Generator settings while playing | `SetSynthParam` reaches every generator: the winds and the river, rain intensity, drop and drip rate, the waves' period and crash chance, the wisp's speed and hovering, and every master gain | **no call, and no list of a generator's settings** | new (27) |
-| Ambient or point | **fixed per generator**: only the four winds are ambient | reported | drawn. Any sound ambient is 11 |
+| Ambient or point | a scene's `shape.ambient` makes any sound a field or a point, at build | `set_source_ambient`, which builds the sound again | exists: Point or Ambient in the inspector's Shape |
 | Add a sound, hear a preset first | `SceneEdit` add, and a builder kept from the scene build | `list_presets`, `audition`, `add_sound` | exists: the editor's library |
 | Remove a sound | `SceneEdit` remove | `remove_sound`; each sound in `scene()` carries its voice | exists: the inspector |
 | Turn a sound | `SetSourceFacing`; a scene file's `shape.facing` | `set_source_facing` | exists: a handle on the map for a focused sound |
@@ -574,7 +575,7 @@ one binding method away. Bold marks what is missing.
 | Tone generator | **nothing** | | new (43) |
 | Group level | **nothing** | | new (36) |
 | Drag the block | **no command.** Speakers, listener and block rectangle must move together in one step | | new (37) |
-| Loudness layer | **nothing yet.** Needs a pure function over the scene and a coarse grid | | new (38) |
+| Loudness layer | `audio/loudness.rs`: direct sound over a grid, pure | `loudness` | exists: Loudness on the map, all that is heard or the selected sound alone |
 | What arrives at a speaker | **nothing yet.** Telemetry has per-sound level at the listener and per-channel peaks, not per-sound-per-speaker | | new |
 | Spectrum per output channel | **nothing yet** | | new |
 
@@ -619,8 +620,8 @@ Without these, nothing done in the editor survives a restart.
 
 9. **Width in degrees plus how much is heard behind**, replacing Omni, Focused and Narrow
    (see `entity-idea.md`, "Shape and reach"). **M**, engine, binding and app
-10. **Size settable.** The engine has `SetSourceSpread`. **S**
-11. **Any sound can be ambient**: rain, a recorded forest bed. **M**
+10. **Size settable.** Built 2026-11-21. **S**
+11. **Any sound can be ambient**: rain, a recorded forest bed. Built 2026-11-21. **M**
 12. **Each kind comes with its own shape and reach.** **S**, needs 9
 13. **Show what an individual changed**, with a way back to the kind's value. **S**, needs 1
 
@@ -665,10 +666,11 @@ The base for pause, sharing between devices, pieces and the storybook.
 
 ### 6. The whole place
 
-36. **Group level**: all the birds louder or softer together. **S**
+36. **Group level**: all the birds louder or softer together. **S**. Set aside 2026-11-21:
+    Pascal sees no use for it.
 37. **Move the block, speakers and listener together**, in one command. **M**
-38. **The loudness layer** on the map. **M**
-39. **Listener position, temperature and humidity** in the scene inspector. **S**
+38. **The loudness layer** on the map. Built 2026-11-21. **M**
+39. **Listener position, temperature and humidity** in the scene inspector. Built 2026-11-21. **S**
 40. **"Why can't I hear it?"**: too far, muted, or drowned out. The engine has a perceptual
     score the binding does not report. **S–M**
 
