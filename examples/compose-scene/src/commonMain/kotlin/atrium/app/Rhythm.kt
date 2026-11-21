@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -94,16 +95,13 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
 
     if (sound.takes.size > 1 || resting) {
         Spacer(Modifier.height(14.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            PaperText(if (live != null && live.take == null) "Resting" else "Sounding", 14, Muted, modifier = Modifier.weight(1f))
-            if (sound.takes.size > 1) PaperText("Chance", 14, Muted)
-        }
+        PaperText(if (live != null && live.take == null) "Resting" else "Sounding", 14, Muted)
         Spacer(Modifier.height(4.dp))
         sound.takes.forEachIndexed { index, take ->
             val now = live?.take?.toInt() == index
             val heard = session.isHearing(sound.slot, index)
             Row(
-                Modifier.fillMaxWidth().listRow(index, selected = now).padding(top = 2.dp, bottom = 2.dp),
+                Modifier.fillMaxWidth().listRow(index, selected = now).padding(top = 3.dp, bottom = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
@@ -114,14 +112,24 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
                 ) {
                     if (heard) StopIcon(Foreground, 12.dp) else PlayIcon(Foreground, 14.dp, outline = true)
                 }
-                PaperText(
-                    take.name,
-                    15,
-                    if (now) Foreground else if (take.chance > 0f) Foreground.copy(alpha = .8f) else Muted,
-                    if (now) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.weight(1f),
-                )
-                if (sound.takes.size > 1) ChanceSteps(take.chance) { session.chance(sound.slot, index, it) }
+                // The name on a line of its own, and its chance under it: side by side, a narrow
+                // inspector left the name a few letters a line.
+                Column(Modifier.weight(1f)) {
+                    PaperText(
+                        take.name,
+                        15,
+                        if (now) Foreground else if (take.chance > 0f) Foreground.copy(alpha = .8f) else Muted,
+                        if (now) FontWeight.Bold else FontWeight.Normal,
+                        singleLine = true,
+                    )
+                    if (sound.takes.size > 1) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PaperText("Chance", 12, Muted, singleLine = true)
+                            Spacer(Modifier.width(6.dp))
+                            ChanceSteps(take.chance) { session.chance(sound.slot, index, it) }
+                        }
+                    }
+                }
             }
         }
     }
