@@ -140,3 +140,47 @@ class TopDownTest {
         assertEquals("Each take 2 to 5 times running", boutLine(2, 5))
     }
 }
+
+class MapFrameTest {
+    private val size = Size(800f, 600f)
+    private val reach = 30f
+
+    private fun close(expected: Float, actual: Float) =
+        assertTrue(kotlin.math.abs(expected - actual) < 1e-3f, "expected $expected, got $actual")
+
+    /** Zooming about the pointer keeps the ground under it where it is, as in a map or Photoshop. */
+    @Test
+    fun zoomingKeepsThePointUnderThePointer() {
+        val pointer = Offset(650f, 120f)
+        val before = MapFrame().view(size, reach).toWorld(pointer)
+        val zoomed = MapFrame().zoomedAbout(2f, pointer, size, reach)
+        close(2f, zoomed.zoom)
+        val after = zoomed.view(size, reach).toWorld(pointer)
+        close(before.x, after.x)
+        close(before.y, after.y)
+        close(20f, zoomed.view(size, reach).pixelsPerMetre)
+    }
+
+    @Test
+    fun zoomStopsAtItsLimits() {
+        close(NearestZoom, MapFrame().zoomedAbout(1000f, Offset.Zero, size, reach).zoom)
+        close(FarthestZoom, MapFrame().zoomedAbout(.001f, Offset.Zero, size, reach).zoom)
+    }
+
+    /** Dragged 100 px right and down, the ground follows the pointer: the middle now shows 10 m west and north. */
+    @Test
+    fun panningMovesTheGroundWithThePointer() {
+        val panned = MapFrame().pannedBy(Offset(100f, 100f), size, reach)
+        close(-10f, panned.centre.x)
+        close(10f, panned.centre.y)
+        val view = panned.view(size, reach)
+        assertEquals(Offset(500f, 400f), view.toScreen(Point(0f, 0f)))
+    }
+
+    @Test
+    fun arrowsNudgeByADecimetreOrAMetre() {
+        assertEquals(Point(.1f, 0f), nudgeFor(androidx.compose.ui.input.key.Key.DirectionRight, coarse = false))
+        assertEquals(Point(0f, -1f), nudgeFor(androidx.compose.ui.input.key.Key.DirectionDown, coarse = true))
+        assertNull(nudgeFor(androidx.compose.ui.input.key.Key.A, coarse = false))
+    }
+}

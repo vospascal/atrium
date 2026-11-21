@@ -22,6 +22,25 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.unit.dp
+import kotlin.math.pow
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -126,6 +145,10 @@ internal fun EditorMap(
     }
     // Sized by where sounds were placed, so the view holds still while one is dragged or moves by itself.
     val reach = reachFor(description?.sources.orEmpty().map { Point(it.position.x - listener.x, it.position.y - listener.y) })
+    // Zoomed and panned by the listener; a new scene starts showing all of it.
+    var frame by remember(session.engine) { mutableStateOf(MapFrame()) }
+    val framing = rememberUpdatedState(frame)
+    val focus = remember { FocusRequester() }
     val current = rememberUpdatedState(markers)
     val select = rememberUpdatedState(onSelect)
     val chosen = rememberUpdatedState(selected)
@@ -150,18 +173,52 @@ internal fun EditorMap(
     }
 
     var size by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
+    // Whether a drag that began on empty ground is moving the view.
+    var panning by remember { mutableStateOf(false) }
+
+    /** Move the selected sound over the ground by [step] metres. */
+    fun nudge(step: Point): Boolean {
+        val sound = description?.sources?.firstOrNull { it.id == chosen.value } ?: return false
+        session.move(sound.slot, Position(sound.position.x + step.x, sound.position.y + step.y, sound.position.z))
+        session.placed()
+        return true
+    }
+
+    Box(modifier) {
     Canvas(
-        modifier
+        Modifier.fillMaxSize()
             .onSizeChanged { size = androidx.compose.ui.geometry.Size(it.width.toFloat(), it.height.toFloat()) }
             // A preset dropped on the map is added where it was let go, at the listener's ear height.
             .carryTarget(carry) { preset, local ->
-                val at = TopDown(size, reach).toWorld(local)
+                val at = framing.value.view(size, reach).toWorld(local)
                 session.add(preset.path, Position(listener.x + at.x, listener.y + at.y, listener.z), onSelect)
             }
             .clipToBounds()
+            // The arrow keys nudge the selected sound once the map has been clicked.
+            .focusRequester(focus)
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                val step = nudgeFor(event.key, coarse = event.isShiftPressed) ?: return@onKeyEvent false
+                nudge(step)
+            }
+            // The wheel or two fingers zoom about the pointer, as on a map.
+            .pointerInput(session.engine, reach) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type != PointerEventType.Scroll) continue
+                        val change = event.changes.firstOrNull() ?: continue
+                        val factor = ZoomPerNotch.pow(-change.scrollDelta.y)
+                        frame = framing.value.zoomedAbout(factor, change.position, size, reach)
+                        change.consume()
+                    }
+                }
+            }
             .pointerInput(session.engine, reach) {
                 detectTapGestures { at ->
-                    val view = TopDown(androidx.compose.ui.geometry.Size(size.width.toFloat(), size.height.toFloat()), reach)
+                    focus.requestFocus()
+                    val view = framing.value.view(size, reach)
                     select.value(pick(view, at, density)?.id)
                 }
             }
@@ -169,7 +226,8 @@ internal fun EditorMap(
                 var view: TopDown? = null
                 detectDragGestures(
                     onDragStart = { at ->
-                        val top = TopDown(androidx.compose.ui.geometry.Size(size.width.toFloat(), size.height.toFloat()), reach)
+                        focus.requestFocus()
+                        val top = framing.value.view(size, reach)
                         view = top
                         // The facing handle of the selected sound is tried first: it sits away from its dot.
                         val focused = current.value.firstOrNull { it.id == chosen.value && it.turnable }
@@ -183,9 +241,15 @@ internal fun EditorMap(
                             select.value(marker.id)
                             echo.move()
                             dragged = Dragged(marker.slot, marker.offset)
+                        } else {
+                            panning = true
                         }
                     },
-                    onDrag = { change, _ ->
+                    onDrag = { change, distance ->
+                        if (panning) {
+                            frame = framing.value.pannedBy(distance, size, reach)
+                            return@detectDragGestures
+                        }
                         val turning = turned
                         val top = view
                         if (turning != null && top != null) {
@@ -208,17 +272,19 @@ internal fun EditorMap(
                     onDragEnd = {
                         dragged?.let { echo.release(it.offset) }
                         turned = null
+                        panning = false
                         session.placed()
                     },
                     onDragCancel = {
                         dragged?.let { echo.release(it.offset) }
                         turned = null
+                        panning = false
                         session.placed()
                     },
                 )
             },
     ) {
-        val view = TopDown(size, reach)
+        val view = frame.view(size, reach)
         val centre = view.toScreen(Point(0f, 0f))
 
         ringsWithin(reach).forEach { metres ->
@@ -242,6 +308,20 @@ internal fun EditorMap(
             if (marker.id == selected && marker.turnable) drawFacingHandle(at, marker, colors)
             drawPoint(at, marker, colors, text, marker.id == selected)
         }
+    }
+    ZoomControls(frame, Modifier.align(Alignment.BottomEnd).padding(12.dp)) { frame = it(size, reach) }
+    }
+}
+
+/** Zoom out, the zoom as a percentage, zoom in, and Fit, which shows the whole scene again. */
+@Composable
+private fun ZoomControls(frame: MapFrame, modifier: Modifier, onFrame: ((Size, Float) -> MapFrame) -> Unit) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        ToolButton("−") { onFrame { size, reach -> frame.zoomedAbout(1f / ZoomStep, Offset(size.width / 2f, size.height / 2f), size, reach) } }
+        PaperText("${(frame.zoom * 100).roundToInt()} %", 13, Muted, modifier = Modifier.padding(horizontal = 8.dp))
+        ToolButton("+") { onFrame { size, reach -> frame.zoomedAbout(ZoomStep, Offset(size.width / 2f, size.height / 2f), size, reach) } }
+        Spacer(Modifier.width(6.dp))
+        ToolButton("Fit", enabled = frame != MapFrame()) { onFrame { _, _ -> MapFrame() } }
     }
 }
 
@@ -404,6 +484,10 @@ internal fun oneDecimal(value: Float): String {
     val sign = if (tenths < 0) "-" else ""
     return "$sign${kotlin.math.abs(tenths) / 10}.${kotlin.math.abs(tenths) % 10}"
 }
+
+/** How much one notch of a mouse wheel zooms, and one press of a zoom button. */
+private const val ZoomPerNotch = 1.12f
+private const val ZoomStep = 1.5f
 
 /** How close to a sound a click or the start of a drag has to be (dp). */
 private const val PickRadius = 20f
