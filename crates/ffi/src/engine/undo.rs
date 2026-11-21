@@ -13,6 +13,7 @@ use atrium::config::{name_and_color, yaw_for_bearing, Atmosphere, ListenerConfig
 use atrium::head_tracking::Pose;
 use atrium_world::{changes, Change, Entities};
 
+use super::edits::Edits;
 use super::{lock, sound_in, Engine, Live};
 use crate::api::{EditHistory, EngineError};
 
@@ -135,7 +136,7 @@ impl Engine {
 
     fn play_change(
         &self,
-        edits: &mut super::Edits,
+        edits: &mut Edits,
         scene: &mut Live,
         change: Change,
     ) -> Result<(), EngineError> {
