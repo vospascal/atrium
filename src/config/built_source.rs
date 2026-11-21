@@ -33,7 +33,8 @@ pub(super) fn source_color(entity: &Entity, slot: usize) -> String {
         .unwrap_or_else(|| SOURCE_COLORS[slot % SOURCE_COLORS.len()].to_string())
 }
 
-/// Metadata collected during source building, serialized to JSON for the browser.
+/// What building a source learned about it: what a UI's scene description
+/// and the browser's scene JSON are made from.
 pub(super) struct SourceMeta {
     pub(super) id: String,
     /// Its takes, in the order telemetry counts them.

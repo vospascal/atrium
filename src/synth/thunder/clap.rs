@@ -32,7 +32,7 @@ const AIR_STAGE_FACTOR: f32 = 1.554;
 /// White noise from −1 to 1 has power 1/3; this makes it 1.
 const WHITE_TO_UNIT: f32 = 1.732;
 
-/// A pulse being heard: which one, how far into it, and its two filter stages.
+/// A pulse being heard: which one, how far into it, and its three filter stages.
 #[derive(Clone, Copy, Debug, Default)]
 struct Sounding {
     pulse: u32,

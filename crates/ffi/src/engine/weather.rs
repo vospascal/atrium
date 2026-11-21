@@ -89,6 +89,8 @@ impl Engine {
         self.planner.set_weather_speed(speed as f64);
     }
 
+    /// How many times as fast as the scene the weather runs: 1 until
+    /// `set_weather_speed` changes it.
     pub fn weather_speed(&self) -> f32 {
         self.planner.weather_speed() as f32
     }

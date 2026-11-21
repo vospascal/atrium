@@ -167,7 +167,3 @@ program argument.
   to 60 dB, losing 6 dB for every doubling of distance. Air, ground and direction are left
   out, so it compares sounds and does not say what you hear. That is computed in Kotlin, not
   by the engine.
-- **The editor's map cannot be zoomed or panned.** It fits the scene: the farthest placed sound
-  decides how much ground it shows.
-- **The speakers are not on the editor's map.** The engine's scene description does not report
-  them yet.
