@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use atrium_core::directivity::DirectivityPattern;
+use atrium_core::source::EmitterKind;
 use atrium_core::source::{SoundSource, Utterance};
 use atrium_core::telemetry::SourceSignal;
 use atrium_core::types::Vec3;
@@ -53,6 +54,7 @@ pub struct VoiceNode {
     pub ref_dist: f32,
     facing: Option<f32>,
     muted: bool,
+    emitter_kind: EmitterKind,
     signal_meter: Option<SignalMeter>,
 }
 
@@ -72,6 +74,7 @@ impl VoiceNode {
             ref_dist: 1.0,
             facing: None,
             muted: false,
+            emitter_kind: EmitterKind::Object,
             signal_meter: None,
         }
     }
@@ -188,6 +191,14 @@ impl SoundSource for VoiceNode {
 
     fn position(&self) -> Vec3 {
         self.position
+    }
+
+    fn emitter_kind(&self) -> EmitterKind {
+        self.emitter_kind
+    }
+
+    fn set_emitter_kind(&mut self, kind: EmitterKind) {
+        self.emitter_kind = kind;
     }
 
     fn tick(&mut self, _dt: f32) {}

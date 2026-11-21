@@ -128,6 +128,7 @@ impl SoundBuilder {
             reference_distance: meta.ref_dist,
             emitter_kind: meta.emitter_kind,
             beam_half_angle: beam_half_angle(meta.emitter_kind, built.source.directivity()),
+            size: meta.spread,
             facing: built.source.orientation(),
         };
         Ok(BuiltSound {
@@ -246,6 +247,19 @@ impl SoundBuilder {
             .collect::<Result<_, _>>()?;
         if let Some(bearing) = entity.shape.facing {
             built.source.set_facing(yaw_for_bearing(bearing));
+        }
+        if let Some(ambient) = resolved.ambient {
+            let wanted = if ambient {
+                EmitterKind::Field
+            } else {
+                EmitterKind::Object
+            };
+            built.source.set_emitter_kind(wanted);
+            if built.source.emitter_kind() != wanted {
+                return Err(
+                    format!("sound `{id}`: `shape.ambient` cannot change this sound").into(),
+                );
+            }
         }
 
         let synth_kind = match &resolved.sound {

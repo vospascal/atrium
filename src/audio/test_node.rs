@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::audio::decode::AudioBuffer;
 use crate::audio::signal_meter::SignalMeter;
 use atrium_core::directivity::DirectivityPattern;
-use atrium_core::source::SoundSource;
+use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::telemetry::SourceSignal;
 use atrium_core::types::Vec3;
 
@@ -27,6 +27,7 @@ pub struct TestNode {
     /// its orbit centre.
     facing: Option<f32>,
     muted: bool,
+    emitter_kind: EmitterKind,
     signal_meter: Option<SignalMeter>,
 }
 
@@ -51,6 +52,7 @@ impl TestNode {
             ref_dist: 1.0,
             facing: None,
             muted: false,
+            emitter_kind: EmitterKind::Object,
             signal_meter: None,
         }
     }
@@ -95,6 +97,14 @@ impl SoundSource for TestNode {
 
     fn signal(&self) -> Option<SourceSignal> {
         self.signal_meter.as_ref().map(SignalMeter::signal)
+    }
+
+    fn emitter_kind(&self) -> EmitterKind {
+        self.emitter_kind
+    }
+
+    fn set_emitter_kind(&mut self, kind: EmitterKind) {
+        self.emitter_kind = kind;
     }
 
     fn position(&self) -> Vec3 {

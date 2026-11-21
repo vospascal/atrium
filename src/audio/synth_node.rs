@@ -28,6 +28,8 @@ pub struct SynthNode {
     /// The heading it was turned to (radians); +X until it is turned.
     facing: Option<f32>,
     muted: bool,
+    /// What the scene made of it, in place of the generator's own kind.
+    emitter_kind: Option<atrium_core::source::EmitterKind>,
     signal_meter: Option<SignalMeter>,
 }
 
@@ -43,6 +45,7 @@ impl SynthNode {
             position,
             facing: None,
             muted: false,
+            emitter_kind: None,
             signal_meter: None,
         }
     }
@@ -96,7 +99,12 @@ impl SoundSource for SynthNode {
     }
 
     fn emitter_kind(&self) -> atrium_core::source::EmitterKind {
-        self.generator.emitter_kind()
+        self.emitter_kind
+            .unwrap_or_else(|| self.generator.emitter_kind())
+    }
+
+    fn set_emitter_kind(&mut self, kind: atrium_core::source::EmitterKind) {
+        self.emitter_kind = Some(kind);
     }
 
     fn tick(&mut self, dt: f32) {

@@ -23,6 +23,9 @@ pub struct SceneDescription {
     pub width: f32,
     /// Environment floor size along y (m).
     pub depth: f32,
+    /// The air at load time: temperature (°C) and relative humidity (%).
+    pub temperature_c: f32,
+    pub humidity_pct: f32,
     /// Listener position at load time.
     pub listener: Vec3,
     /// The scene's sources, each with the slot it plays from.
@@ -80,6 +83,8 @@ pub struct SourceDescription {
     /// Outer half-angle in radians for a cone, or the half-gain angle for a polar pattern.
     /// Absent for sources that render without a directional beam.
     pub beam_half_angle: Option<f32>,
+    /// How wide it sounds, from 0 (a point) to 1 (all around).
+    pub size: f32,
     /// The node's initial forward vector in world coordinates.
     pub facing: Vec3,
 }

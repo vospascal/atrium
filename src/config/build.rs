@@ -16,7 +16,7 @@ use super::description::{
     beam_half_angle, SceneDescription, SourceDescription, SpeakerDescription, TakeDescription,
 };
 use super::environment::{build_wall_materials, EnvironmentConfig};
-use super::scene::{AtmosphereConfig, AtriumConfig, NormalizationConfig, SceneConfig};
+use super::scene::{AtriumConfig, NormalizationConfig, SceneConfig};
 use super::sound_builder::SoundBuilder;
 use super::source::{resolve_spl, ResolvedTake};
 use super::synth::SynthSpec;
@@ -222,16 +222,11 @@ impl SceneConfig {
         };
 
         // Load atmosphere from file (or defaults if omitted)
-        let atmosphere = match &self.atmosphere {
-            Some(path) => {
-                let cfg: AtmosphereConfig = load_yaml(path)?;
-                AtmosphericParams {
-                    temperature_c: cfg.temperature_c,
-                    humidity_pct: cfg.humidity_pct,
-                    pressure_kpa: cfg.pressure_kpa,
-                }
-            }
-            None => AtmosphericParams::default(),
+        let air = self.air()?;
+        let atmosphere = AtmosphericParams {
+            temperature_c: air.temperature_c,
+            humidity_pct: air.humidity_pct,
+            pressure_kpa: air.pressure_kpa,
         };
 
         // Build comprehensive JSON for the browser (all computed values)
@@ -247,6 +242,8 @@ impl SceneConfig {
         let description = SceneDescription {
             width: environment_cfg.width,
             depth: environment_cfg.depth,
+            temperature_c: atmosphere.temperature_c,
+            humidity_pct: atmosphere.humidity_pct,
             listener: listener_pos,
             sources: source_metas
                 .iter()
@@ -270,6 +267,7 @@ impl SceneConfig {
                     reference_distance: meta.ref_dist,
                     emitter_kind: meta.emitter_kind,
                     beam_half_angle: beam_half_angle(meta.emitter_kind, node.directivity()),
+                    size: meta.spread,
                     facing: node.orientation(),
                 })
                 .collect(),

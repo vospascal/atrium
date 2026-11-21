@@ -714,3 +714,89 @@ fn a_paused_scene_is_silent_and_its_clock_stands_still() {
         "and runs on from where it stopped"
     );
 }
+
+/// A scene can hold its own air in place of an atmosphere file: 8 °C gives
+/// c = 331.3 + 0.606 × 8 = 336.15 m/s. It is written back as it was read,
+/// and `set_air` keeps the pressure it had.
+#[test]
+fn a_scene_holds_its_own_air() {
+    let yaml = SMALL_ATRIUM_SCENE.replace(
+        "atmosphere: atmospheres/default.yaml",
+        "atmosphere: { temperature_c: 8, humidity_pct: 85, pressure_kpa: 99.0 }",
+    );
+    let result = build_inline_scene(&yaml);
+    let air = result.scene.environment.atmosphere;
+    assert_eq!(
+        (air.temperature_c, air.humidity_pct, air.pressure_kpa),
+        (8.0, 85.0, 99.0)
+    );
+    assert!((air.speed_of_sound() - 336.15).abs() < 0.2);
+    assert_eq!(
+        (
+            result.description.temperature_c,
+            result.description.humidity_pct
+        ),
+        (8.0, 85.0)
+    );
+
+    let mut scene: SceneConfig = serde_yaml::from_str(&yaml).expect("parses");
+    scene.set_air(-3.0, 40.0).expect("air");
+    let written = serde_yaml::to_string(&scene).expect("writes");
+    let read: SceneConfig = serde_yaml::from_str(&written).expect("reads back");
+    assert_eq!(
+        read.atmosphere,
+        Some(super::Atmosphere::Air(super::AtmosphereConfig {
+            temperature_c: -3.0,
+            humidity_pct: 40.0,
+            pressure_kpa: 99.0,
+        }))
+    );
+}
+
+/// `shape.ambient` makes a recording a field, and a wind a point: the frog
+/// is then heard at its level wherever the listener stands, so telemetry
+/// reports no distance loss for it, and the wind 10 m off loses 20 dB.
+#[test]
+fn any_sound_can_be_ambient_or_a_point() {
+    let yaml = SMALL_ATRIUM_SCENE
+        .replace(
+            "sounds: {}",
+            "sounds:
+  frogs:
+    sound: { preset: sources/frog.yaml }
+    shape: { ambient: true }
+    place: [10.0, 0.0, 1.2]
+  wind:
+    sound: { preset: sources/field-wind.yaml }
+    shape: { ambient: false }
+    place: [10.5, -0.25, 1.2]
+",
+        )
+        .replace("model: exponential", "model: inverse")
+        .replace("ref_distance: 2.0", "ref_distance: 1.0")
+        .replace("rolloff: 1.5", "rolloff: 1.0");
+    let result = build_inline_scene(&yaml);
+    use atrium_core::source::EmitterKind;
+    assert_eq!(result.scene.sources[0].emitter_kind(), EmitterKind::Field);
+    assert_eq!(result.scene.sources[1].emitter_kind(), EmitterKind::Object);
+    assert_eq!(
+        result.description.sources[0].emitter_kind,
+        EmitterKind::Field
+    );
+    assert_eq!(result.description.sources[0].beam_half_angle, None);
+
+    let frame = crate::engine::telemetry::compute_telemetry(
+        &result.scene.sources,
+        &result.scene.listener,
+        &result.scene.distance_model,
+    );
+    assert!(
+        frame.sources[0].gain_db.abs() < 1e-3,
+        "a field loses nothing"
+    );
+    assert!(
+        (frame.sources[1].gain_db + 20.0).abs() < 0.1,
+        "a point 10 m off loses 20 dB, got {}",
+        frame.sources[1].gain_db
+    );
+}

@@ -80,6 +80,12 @@ pub trait SoundSource: Send {
         EmitterKind::Object
     }
 
+    /// Render this source as `kind` from now on, whatever it is by itself:
+    /// a recording of rain as a field, a wind as a point. Default: no-op,
+    /// for sources that are only ever what they are; ask `emitter_kind`
+    /// afterwards to know whether it took.
+    fn set_emitter_kind(&mut self, _kind: EmitterKind) {}
+
     /// Whether this source is still producing audio.
     fn is_active(&self) -> bool {
         true

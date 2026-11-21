@@ -32,10 +32,11 @@ pub struct SceneConfig {
     /// The sounds of the scene, each under its id, in the order they take
     /// the engine's voices.
     pub sounds: Entities,
-    /// Path to atmosphere definition file (e.g. "atmospheres/default.yaml").
-    /// Omit for standard conditions.
+    /// The air of the place: a path to an atmosphere file (e.g.
+    /// "atmospheres/default.yaml"), or the values themselves. Omit for
+    /// standard conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub atmosphere: Option<String>,
+    pub atmosphere: Option<Atmosphere>,
     /// Path to SOFA HRTF file for HRTF rendering (e.g. "assets/hrtf/default.sofa").
     /// Defaults to "assets/hrtf/default.sofa" if omitted.
     #[serde(default = "default_hrtf_path")]
@@ -250,8 +251,53 @@ pub(super) struct AtriumConfig {
     pub height: f32,
 }
 
-#[derive(Deserialize)]
-pub(super) struct AtmosphereConfig {
+/// Where a scene's air comes from: a file shared between scenes, or values
+/// of its own, which is what an editor writes once the air is changed.
+///
+/// ```yaml
+/// atmosphere: atmospheres/default.yaml
+/// atmosphere: { temperature_c: 8, humidity_pct: 85 }
+/// ```
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Atmosphere {
+    File(String),
+    Air(AtmosphereConfig),
+}
+
+impl SceneConfig {
+    /// The air this scene names: its own values, its file's, or standard
+    /// conditions.
+    pub(super) fn air(&self) -> Result<AtmosphereConfig, Box<dyn std::error::Error>> {
+        match &self.atmosphere {
+            Some(Atmosphere::File(path)) => super::build::load_yaml(path),
+            Some(Atmosphere::Air(air)) => Ok(air.clone()),
+            None => Ok(AtmosphereConfig::default()),
+        }
+    }
+
+    /// Give the scene air of its own at `temperature_c` and `humidity_pct`,
+    /// at the pressure it had. A scene that named an atmosphere file stops
+    /// following it.
+    pub fn set_air(
+        &mut self,
+        temperature_c: f32,
+        humidity_pct: f32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pressure_kpa = self.air()?.pressure_kpa;
+        self.atmosphere = Some(Atmosphere::Air(AtmosphereConfig {
+            temperature_c,
+            humidity_pct,
+            pressure_kpa,
+        }));
+        Ok(())
+    }
+}
+
+/// The air sound travels through.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AtmosphereConfig {
     #[serde(default = "default_temperature")]
     pub temperature_c: f32,
     #[serde(default = "default_humidity")]

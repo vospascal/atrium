@@ -29,7 +29,7 @@ pub use description::{
     TakeDescription,
 };
 pub use presets::{list_presets, read_preset, PresetSummary};
-pub use scene::{Band, ListenerConfig, SceneConfig, WeatherConfig};
+pub use scene::{Atmosphere, AtmosphereConfig, Band, ListenerConfig, SceneConfig, WeatherConfig};
 pub use scene_file::{saved_by_editor, EDITOR_MARK};
 pub use sound_builder::{
     bearing_for_heading, name_and_color, radiation_of, yaw_for_bearing, BuiltSound, SoundBuilder,

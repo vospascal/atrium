@@ -39,6 +39,9 @@ pub(super) struct ResolvedSource {
     /// preset's.
     pub(super) follows: Vec<Follow>,
     pub(super) spread: f32,
+    /// Whether the scene makes it ambient or a point, in place of what it is
+    /// by itself.
+    pub(super) ambient: Option<bool>,
 }
 
 /// Resolve an entity's sound: load the preset it names (if any) and apply
@@ -112,6 +115,7 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
             .or(def_beam.and_then(|(_, behind)| behind))
             .unwrap_or(SILENT_BEHIND_DB),
         spread: entity.shape.size.or(def_spread).unwrap_or(0.0),
+        ambient: entity.shape.ambient,
     })
 }
 
