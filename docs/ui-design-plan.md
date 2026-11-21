@@ -651,7 +651,8 @@ The base for pause, sharing between devices, pieces and the storybook.
 
 26. **Rain, waves and the wisp accept changes while playing.** Today only the four winds and
     the river do. **M**
-27. **Generator panels** at three depths. **M**, needs 26
+27. **Generator panels** at three depths, as the first part of the generator lab in
+    `generator-workflow.md`. **M**, needs 26
 28. **Wander**: a setting drifts inside a range. **M**, needs 26
 29. **Conditions**: wind, rain, storm and daylight, and sounds that follow them. **L**,
     needs 22
