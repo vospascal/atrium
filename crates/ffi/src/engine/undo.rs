@@ -226,8 +226,34 @@ mod tests {
         });
         step("Add", &|engine| {
             engine
-                .add_sound("sources/cricket.yaml".into())
+                .add_sound("sources/cricket.yaml".into(), None)
                 .expect("add");
+        });
+        step("Rename", &|engine| {
+            engine
+                .set_source_identity(frogs, "Pond".into(), Some("#336699".into()), None)
+                .expect("identity")
+        });
+        step("Duplicate", &|engine| {
+            let copy = engine.duplicate_sound(frogs).expect("duplicate");
+            assert_eq!(copy.name, "Pond copy");
+            assert_eq!(copy.color, "#336699");
+            assert_eq!(copy.spl, 71.5);
+            let original = engine.scene().sources[0].clone();
+            assert!((copy.position.x - original.position.x - 1.0).abs() < 1e-3);
+        });
+        step("Drop", &|engine| {
+            let dropped = engine
+                .add_sound(
+                    "sources/frog.yaml".into(),
+                    Some(Position {
+                        x: -5.0,
+                        y: 6.0,
+                        z: 1.2,
+                    }),
+                )
+                .expect("drop");
+            assert_eq!((dropped.position.x, dropped.position.y), (-5.0, 6.0));
         });
         step("Remove", &|engine| {
             engine.remove_sound(frogs).expect("remove")

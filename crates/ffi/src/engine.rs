@@ -39,6 +39,8 @@ const EDIT_CAPACITY: usize = 8;
 /// audio callbacks.
 const EDIT_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
 const EDIT_WAITS: usize = 40;
+/// How far east of its original a copy stands (m).
+const COPY_OFFSET: f32 = 1.0;
 /// How far ahead of the listener an auditioned or newly added sound stands (m).
 const AHEAD_OF_LISTENER: f32 = 2.0;
 /// The loudest a preview of a kind plays (dB SPL at 1 m), however loud the
@@ -430,14 +432,9 @@ impl Engine {
     pub fn set_source_position(&self, slot: u16, position: Position) -> Result<(), EngineError> {
         let mut scene = lock(&self.scene);
         self.play_position(&mut scene, slot, position)?;
-        let place = self.sounds.place_at(position.into());
+        let place = self.place_rounded(position);
         if let Some(entity) = scene.entity_in(slot) {
-            // Centimetres are plenty for a place, and keep a saved file short.
-            entity.place = Place {
-                x: rounded(place.x, 100.0),
-                y: rounded(place.y, 100.0),
-                z: rounded(place.z, 100.0),
-            };
+            entity.place = place;
         }
         Ok(())
     }
@@ -615,33 +612,87 @@ impl Engine {
         Ok(())
     }
 
-    /// Add a sound made from `preset` to the scene, just ahead of the
-    /// listener, and report it. It takes the lowest free voice and an id made
-    /// from the preset's name. An audition in progress is stopped. Like
-    /// `audition`, this takes a moment.
-    pub fn add_sound(&self, preset: String) -> Result<SourceDescription, EngineError> {
-        let mut edits = lock(&self.edits);
-        edits.stop_audition()?;
-        self.planner.remove_voice(AUDITION_SLOT);
-        let mut scene = lock(&self.scene);
+    /// Add a sound made from `preset` to the scene and report it: at
+    /// `position`, where it was dropped, or else just ahead of the listener.
+    /// It takes the lowest free voice and an id made from the preset's name.
+    /// An audition in progress is stopped. Like `audition`, this takes a
+    /// moment.
+    pub fn add_sound(
+        &self,
+        preset: String,
+        position: Option<Position>,
+    ) -> Result<SourceDescription, EngineError> {
         let summary =
             read_preset(&preset).map_err(|error| EngineError::Scene(error.to_string()))?;
-        let id = EntityId::unused(
-            &summary.name,
-            scene
-                .description
-                .sources
-                .iter()
-                .map(|source| source.id.as_str()),
-        );
-        let entity = self.sound_ahead(preset, Some(summary.name), summary.group);
-        let added = self.play_added(&mut edits, &mut scene, &id, &entity)?;
-        scene
-            .document
-            .sounds
-            .push(id, entity)
-            .map_err(|error| EngineError::Scene(error.to_string()))?;
-        Ok(added)
+        let mut entity = self.sound_ahead(preset, Some(summary.name.clone()), summary.group);
+        if let Some(position) = position.filter(|position| finite(*position)) {
+            entity.place = self.place_rounded(position);
+        }
+        self.add_entity(&summary.name, entity)
+    }
+
+    /// Add a copy of the sound in `slot`, a metre east of it, named as a
+    /// copy, and report it. Everything else about it is the same: its kind,
+    /// level, shape, rests and weather. Like `add_sound`, this takes a moment.
+    pub fn duplicate_sound(&self, slot: u16) -> Result<SourceDescription, EngineError> {
+        let (id, mut entity) = {
+            let mut scene = lock(&self.scene);
+            let id = sound_in(&mut scene.description, slot)
+                .map(|source| (source.id.clone(), source.name.clone()));
+            let entity = scene.entity_in(slot).cloned();
+            match (id, entity) {
+                (Some(id), Some(entity)) => (id, entity),
+                _ => {
+                    return Err(EngineError::Scene(format!(
+                        "no sound plays from voice {slot}"
+                    )))
+                }
+            }
+        };
+        let (id, name) = id;
+        entity.name = Some(format!("{name} copy"));
+        entity.place.x += COPY_OFFSET;
+        self.add_entity(&id, entity)
+    }
+
+    /// Show the sound in `slot` as `name`, in `color` (`#rrggbb`) and under
+    /// `group` in a list. An empty name goes back to its id, no colour to its
+    /// voice's own, and no group to none. Nothing heard changes. A colour
+    /// that is not `#rrggbb` changes nothing.
+    pub fn set_source_identity(
+        &self,
+        slot: u16,
+        name: String,
+        color: Option<String>,
+        group: Option<String>,
+    ) -> Result<(), EngineError> {
+        if color.as_deref().is_some_and(|color| !is_color(color)) {
+            return Ok(());
+        }
+        let wanted = |text: Option<String>| {
+            text.map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+        };
+        let mut scene = lock(&self.scene);
+        let Some(id) = sound_in(&mut scene.description, slot).map(|source| source.id.clone())
+        else {
+            return Ok(());
+        };
+        let Some(entity) = scene.entity_in(slot) else {
+            return Ok(());
+        };
+        entity.name = wanted(Some(name));
+        entity.color = wanted(color);
+        entity.group = wanted(group);
+        let entity = entity.clone();
+        let id = EntityId::new(&id).map_err(|error| EngineError::Scene(error.to_string()))?;
+        let (name, color) = atrium::config::name_and_color(&id, &entity, slot as usize);
+        if let Some(source) = sound_in(&mut scene.description, slot) {
+            source.name = name;
+            source.color = color;
+            source.group = entity.group;
+        }
+        Ok(())
     }
 
     /// Take the sound in `slot` out of the scene. Its voice falls silent and
@@ -747,9 +798,44 @@ impl Engine {
         Ok(())
     }
 
-    /// Each `play_` call below changes what is heard and what `scene()`
-    /// reports, and leaves the scene file to its caller: an edit records what
-    /// was asked, and undo puts back a whole earlier version at once.
+    /// Add `entity` to the scene under an id like `wanted`, in the lowest
+    /// free voice, stopping any audition first.
+    fn add_entity(&self, wanted: &str, entity: Entity) -> Result<SourceDescription, EngineError> {
+        let mut edits = lock(&self.edits);
+        edits.stop_audition()?;
+        self.planner.remove_voice(AUDITION_SLOT);
+        let mut scene = lock(&self.scene);
+        let id = EntityId::unused(
+            wanted,
+            scene
+                .description
+                .sources
+                .iter()
+                .map(|source| source.id.as_str()),
+        );
+        let added = self.play_added(&mut edits, &mut scene, &id, &entity)?;
+        scene
+            .document
+            .sounds
+            .push(id, entity)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        Ok(added)
+    }
+
+    /// Where `position` is in the scene file, to the centimetre: plenty for
+    /// a place, and it keeps a saved file short.
+    fn place_rounded(&self, position: Position) -> Place {
+        let place = self.sounds.place_at(position.into());
+        Place {
+            x: rounded(place.x, 100.0),
+            y: rounded(place.y, 100.0),
+            z: rounded(place.z, 100.0),
+        }
+    }
+
+    // Each `play_` call below changes what is heard and what `scene()`
+    // reports, and leaves the scene file to its caller: an edit records what
+    // was asked, and undo puts back a whole earlier version at once.
 
     /// Set the level of the sound in `slot`.
     fn play_level(&self, scene: &mut Live, slot: u16, level: f32) -> Result<(), EngineError> {
@@ -950,6 +1036,18 @@ impl Live {
             .clone();
         self.document.sounds.get_mut(&EntityId::new(&id).ok()?)
     }
+}
+
+/// Whether every coordinate of `position` is a number.
+fn finite(position: Position) -> bool {
+    position.x.is_finite() && position.y.is_finite() && position.z.is_finite()
+}
+
+/// Whether `color` is written `#rrggbb`.
+fn is_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color[1..].chars().all(|digit| digit.is_ascii_hexdigit())
 }
 
 /// `value` rounded to steps of `1 / per_unit`.
@@ -1249,14 +1347,14 @@ mod tests {
         // Adding one: the next voice, an id from the preset's name, its group,
         // and a place 2 m ahead of a listener who faces north.
         let added = engine
-            .add_sound("sources/frog.yaml".into())
+            .add_sound("sources/frog.yaml".into(), None)
             .expect("the frog builds");
         assert_eq!((added.id.as_str(), added.name.as_str()), ("frog", "Frog"));
         assert_eq!(added.group.as_deref(), Some("Creatures"));
         assert!((added.position.y - scene.listener.y - 2.0).abs() < 1e-3);
         assert!((added.position.x - scene.listener.x).abs() < 1e-3);
         let second = engine
-            .add_sound("sources/frog.yaml".into())
+            .add_sound("sources/frog.yaml".into(), None)
             .expect("a second frog builds");
         assert_eq!(second.id, "frog-2", "ids stay unique");
         assert_eq!(engine.scene().sources.len(), 3);
@@ -1298,7 +1396,7 @@ mod tests {
             .remove_sound(1)
             .expect("an empty voice is left alone");
         let again = engine
-            .add_sound("sources/frog.yaml".into())
+            .add_sound("sources/frog.yaml".into(), None)
             .expect("a frog builds again");
         assert_eq!((again.id.as_str(), again.slot), ("frog", 1));
         telemetry_when(&engine, |telemetry| playing(telemetry, 1));
@@ -1424,7 +1522,7 @@ mod tests {
         assert_eq!(gap_of(0).map(|gap| gap.longest), Some(2.0));
 
         let cricket = engine
-            .add_sound("sources/cricket.yaml".into())
+            .add_sound("sources/cricket.yaml".into(), None)
             .expect("a cricket builds");
         assert!(cricket.takes.len() > 1);
         for take in 0..cricket.takes.len() as u16 {
