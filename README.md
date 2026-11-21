@@ -68,6 +68,32 @@ each step depends on the render mode.
 in the room gets the same speaker feed. `vbap` and `ambisonics` are rendered for
 one listening position.
 
+## Listening to one part
+
+A rendered scene is a sum: direct sound, first reflections, late reverb and
+ambient fields, each shaped by the air and the ground. To judge one of them by
+ear, a probe (`atrium_core::probe::Probe`, `Command::SetProbe`) lets only some
+of them reach the output, switches single effects off (air absorption, moving
+air, ground effect, wall colour), or leaves one loudspeaker or one ear alone.
+
+Nothing else about the scene changes, which a test holds every render mode
+to: the four parts heard alone add up, sample for sample, to the whole.
+
+Decisions that look wrong and are right:
+
+- **The reverb is still fed while the direct sound is hidden.** A probe scales
+  what a path sends to the output and leaves what it sends to the reverb. Were
+  the path itself silenced, the reverb heard alone would be silence.
+- **A hidden part fades over one callback.** A cut would click, and a click is
+  the last thing wanted while listening closely.
+- **The delay cannot be switched off.** Without it a reflection is no longer
+  one; the other four path effects can.
+- **It is the listener's, not the scene's.** Like a mute it is never saved and
+  undo does not touch it.
+
+For a comparison that can be repeated: a scene with a `seed:` plays the same
+way every time, pause holds it, and the timeline returns to any moment.
+
 ## Moving air
 
 Outdoors a far sound does not arrive steadily. Wind shear and the sun on the
