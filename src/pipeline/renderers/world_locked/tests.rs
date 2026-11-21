@@ -115,6 +115,7 @@ fn render_over_floor(
             distance_model: &distance_model,
             layout,
             reverb_send: 0.0,
+            probe: atrium_core::probe::Probe::WHOLE,
         };
         let mut block = vec![0.0f32; frames * CHANNELS];
         let mut out = OutputBuffer {

@@ -19,9 +19,10 @@ use atrium_core::speaker::SpeakerLayout;
 use atrium_core::types::Vec3;
 
 use super::environment::Environment;
-use super::path::{PathEffectChain, PathSet};
+use super::path::{PathEffectChain, PathKind, PathSet};
 use super::renderers::field::FieldEncoding;
 use crate::audio::distance::DistanceModel;
+use atrium_core::probe::Probe;
 
 /// Per-source context for rendering. Borrowed from AudioScene per render call.
 pub struct SourceContext<'a> {
@@ -40,6 +41,26 @@ pub struct SourceContext<'a> {
     pub layout: &'a SpeakerLayout,
     /// Reverb send level (0.0–1.0), computed from critical distance.
     pub reverb_send: f32,
+    /// Which parts of the render reach the output.
+    pub probe: Probe,
+}
+
+impl SourceContext<'_> {
+    /// How much of a path of `kind` reaches the output: all of it, or none
+    /// while a probe hides that part. Renderers scale a path's output gains
+    /// by this and leave its reverb send alone, so the reverb is still fed
+    /// while the direct sound is hidden.
+    pub fn heard(&self, kind: PathKind) -> f32 {
+        let let_through = match kind {
+            PathKind::Direct => self.probe.direct,
+            _ => self.probe.reflections,
+        };
+        if let_through {
+            1.0
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Interleaved output buffer with format metadata.

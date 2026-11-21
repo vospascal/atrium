@@ -109,6 +109,7 @@ impl Scene {
             distance_model: &self.distance_model,
             layout: &self.layout,
             reverb_send: reverb_send_level,
+            probe: atrium_core::probe::Probe::WHOLE,
         };
         let mut chains: Vec<PathEffectChain> = (0..MAX_PATHS)
             .map(|_| PathEffectChain::new(Vec::new()))

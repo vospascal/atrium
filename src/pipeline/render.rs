@@ -4,6 +4,7 @@
 //! stages); `render_pipeline` runs one buffer through it. The per-mode
 //! definitions that fill a `RenderPipeline` live in `builders`.
 
+use atrium_core::probe::Probe;
 use atrium_core::speaker::SpeakerLayout;
 
 use super::environment::Environment;
@@ -50,6 +51,12 @@ pub struct RenderPipeline {
     /// Explicit decay time of this pipeline's late reverb, if the environment
     /// sets one. The reverb send uses the same decay as the reverb itself.
     pub reverb_rt60_override: Option<f32>,
+    /// Which parts of the render reach the output: all of them, unless
+    /// someone is listening to one alone.
+    pub probe: Probe,
+    /// How much of the ambient fields the last buffer let through, so a
+    /// probe fades them and never cuts.
+    ambient_heard: f32,
 }
 
 impl RenderPipeline {
@@ -73,6 +80,8 @@ impl RenderPipeline {
             render_channels,
             reverb_send_buffer: Vec::new(),
             reverb_rt60_override,
+            probe: Probe::WHOLE,
+            ambient_heard: 1.0,
         }
     }
 
@@ -171,7 +180,12 @@ pub fn render_pipeline(
         render_channels,
         reverb_send_buffer,
         reverb_rt60_override,
+        probe,
+        ambient_heard: ambient_was_heard,
     } = pipeline;
+    let probe = *probe;
+    let ambient_heard = if probe.ambient { 1.0 } else { 0.0 };
+    let ambient_was_heard = std::mem::replace(ambient_was_heard, ambient_heard);
 
     // Ensure topology
     renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
@@ -228,6 +242,7 @@ pub fn render_pipeline(
                 params.channels,
                 field_channels,
                 num_frames,
+                (ambient_was_heard, ambient_heard),
                 output,
             );
             continue;
@@ -262,6 +277,7 @@ pub fn render_pipeline(
             distance_model: params.distance_model,
             layout: params.layout,
             reverb_send,
+            probe,
         };
 
         // Resolve propagation paths for this source
@@ -285,6 +301,7 @@ pub fn render_pipeline(
                     source_pos: pos,
                     target_pos: path_target,
                 };
+                chains[pi].listen(&probe);
                 chains[pi].update(&effect_ctx);
             }
         }
@@ -306,6 +323,12 @@ pub fn render_pipeline(
             };
             renderer.render_source(i, source.as_mut(), &ctx, &paths, effect_chains, &mut out);
         }
+    }
+
+    // A probe that hides the late reverb starves it: what it already holds
+    // rings out, and nothing new goes in.
+    if !probe.reverb {
+        reverb_send_buffer.fill(0.0);
     }
 
     // Post-mix chain

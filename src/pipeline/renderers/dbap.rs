@@ -70,7 +70,7 @@ impl Renderer for DbapRenderer {
                 &self.params,
             );
             ctx.layout.apply_mask(&mut gains);
-            target_gains[pi] = gains.gains;
+            target_gains[pi] = gains.gains.map(|gain| gain * ctx.heard(path.kind));
         }
 
         let inv_frames = 1.0 / out.num_frames as f32;
@@ -219,6 +219,7 @@ mod tests {
             distance_model: &distance_model,
             layout: &layout,
             reverb_send: reverb_send_level,
+            probe: atrium_core::probe::Probe::WHOLE,
         };
         let mut renderer = DbapRenderer::new(DbapParams::default());
         renderer.ensure_topology(1, &layout, SAMPLE_RATE);

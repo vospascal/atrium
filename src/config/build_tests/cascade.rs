@@ -287,3 +287,75 @@ fn an_unknown_name_in_a_scene_file_is_refused() {
         "speakers.layout `surround` is not one of 5.1, quad, stereo"
     );
 }
+
+/// A probe on one output channel silences every other, after everything
+/// else, and letting everything through again brings them back. The command
+/// reaches every pipeline, so it holds across a change of render mode.
+#[test]
+fn one_channel_can_be_heard_alone() {
+    use atrium_core::commands::Command;
+    use atrium_core::probe::Probe;
+
+    let yaml = SMALL_ATRIUM_SCENE.replace(
+        "sounds: {}",
+        "sounds:
+  frogs:
+    sound: { preset: sources/frog.yaml }
+    when: { gap: [0, 0] }
+    place: [1.0, 1.0, 1.2]
+",
+    );
+    let mut scene = build_inline_scene(&yaml).scene;
+    scene.sample_rate = 48_000.0;
+    scene.init_pipelines();
+    let channels = scene.speaker_layout.total_channels();
+    let (mut commands, mut inbox) = rtrb::RingBuffer::<Command>::new(8);
+    let mut energies = |scene: &mut crate::engine::scene::AudioScene| {
+        let mut buffer = vec![0.0f32; 512 * channels];
+        let mut energy = vec![0.0f64; channels];
+        for _ in 0..40 {
+            scene.process_commands(&mut inbox);
+            scene.render(&mut buffer, channels);
+            for frame in buffer.chunks_exact(channels) {
+                for (channel, sample) in frame.iter().enumerate() {
+                    energy[channel] += (*sample as f64).powi(2);
+                }
+            }
+        }
+        energy
+    };
+
+    let whole = energies(&mut scene);
+    let sounding: Vec<usize> = (0..channels)
+        .filter(|channel| whole[*channel] > 0.0)
+        .collect();
+    assert!(sounding.len() >= 3, "the frogs reach {sounding:?} only");
+
+    let only = sounding[1] as u8;
+    commands
+        .push(Command::SetProbe {
+            probe: Probe {
+                only_channel: Some(only),
+                ..Probe::WHOLE
+            },
+        })
+        .expect("sent");
+    let alone = energies(&mut scene);
+    for (channel, energy) in alone.iter().enumerate() {
+        assert_eq!(*energy > 0.0, channel == only as usize, "channel {channel}");
+    }
+    assert!(scene
+        .pipelines
+        .iter()
+        .all(|pipeline| pipeline.probe.only_channel == Some(only)));
+
+    commands
+        .push(Command::SetProbe {
+            probe: Probe::WHOLE,
+        })
+        .expect("sent");
+    let again = energies(&mut scene);
+    for channel in &sounding {
+        assert!(again[*channel] > 0.0, "channel {channel} did not come back");
+    }
+}

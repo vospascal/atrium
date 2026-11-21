@@ -8,6 +8,7 @@
 //! The renderer uses these to pan each path independently — reflections arrive
 //! from their image-source direction instead of sharing the direct signal's pan.
 
+use atrium_core::probe::Probe;
 use atrium_core::types::Vec3;
 
 use crate::pipeline::environment::Environment;
@@ -164,11 +165,28 @@ pub trait PathEffect: Send {
 /// in sequence.
 pub struct PathEffectChain {
     effects: Vec<Box<dyn PathEffect>>,
+    /// Which effects a probe lets act, one for one with `effects`.
+    acting: Vec<bool>,
 }
 
 impl PathEffectChain {
     pub fn new(effects: Vec<Box<dyn PathEffect>>) -> Self {
-        Self { effects }
+        let acting = vec![true; effects.len()];
+        Self { effects, acting }
+    }
+
+    /// Let only the effects `probe` allows act on the path. The delay always
+    /// does: without it a reflection would no longer be one.
+    pub fn listen(&mut self, probe: &Probe) {
+        for (effect, acting) in self.effects.iter().zip(&mut self.acting) {
+            *acting = match effect.name() {
+                "air_absorption" => probe.air_absorption,
+                "turbulence" => probe.moving_air,
+                "ground_effect" => probe.ground_effect,
+                "wall_absorption" => probe.wall_colouring,
+                _ => true,
+            };
+        }
     }
 
     pub fn update(&mut self, ctx: &PathEffectContext) {
@@ -180,8 +198,10 @@ impl PathEffectChain {
     #[inline]
     pub fn process_sample(&mut self, sample: f32) -> f32 {
         let mut s = sample;
-        for effect in &mut self.effects {
-            s = effect.process_sample(s);
+        for (effect, acting) in self.effects.iter_mut().zip(&self.acting) {
+            if *acting {
+                s = effect.process_sample(s);
+            }
         }
         s
     }

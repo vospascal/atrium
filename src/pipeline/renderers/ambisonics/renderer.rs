@@ -121,7 +121,8 @@ impl Renderer for AmbisonicsRenderer {
                 for (pi, path) in path_slice.iter().enumerate() {
                     let bf =
                         encode_path(path.kind, path.direction, path.distance, ctx, cos_y, sin_y);
-                    target_bf[pi] = [bf.w, bf.y, bf.z, bf.x];
+                    target_bf[pi] =
+                        [bf.w, bf.y, bf.z, bf.x].map(|gain| gain * ctx.heard(path.kind));
                 }
 
                 let inv_frames = 1.0 / out.num_frames as f32;
@@ -167,7 +168,7 @@ impl Renderer for AmbisonicsRenderer {
                     let bformat =
                         encode_path(path.kind, path.direction, path.distance, ctx, cos_y, sin_y);
                     let (l, r) = bilateral.decode_stereo(&bformat);
-                    target_stereo[pi] = [l, r];
+                    target_stereo[pi] = [l, r].map(|gain| gain * ctx.heard(path.kind));
                 }
 
                 let inv_frames = 1.0 / out.num_frames as f32;

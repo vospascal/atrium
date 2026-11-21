@@ -107,6 +107,9 @@ impl FieldRenderer {
         }
     }
 
+    /// `heard` is how much of the field the last buffer let through and how
+    /// much this one does, each 0 to 1: 1 and 1 unless a probe hides ambient
+    /// sound.
     #[allow(clippy::too_many_arguments)]
     pub fn render_source(
         &mut self,
@@ -118,6 +121,7 @@ impl FieldRenderer {
         channels: usize,
         render_channels: usize,
         num_frames: usize,
+        heard: (f32, f32),
         output: &mut [f32],
     ) {
         let Some(state) = self.sources.get_mut(source_index) else {
@@ -168,13 +172,18 @@ impl FieldRenderer {
             return;
         }
         let gain = 1.0 / (target_count as f32).sqrt();
+        // How much of the field reaches the output glides from the last
+        // buffer's share to this one's, so a probe fades it and never cuts.
+        let (was_heard, now_heard) = heard;
+        let glide = (now_heard - was_heard) / num_frames.max(1) as f32;
         for frame in 0..num_frames {
             let mono = source.next_sample(sample_rate);
             let base = frame * channels;
+            let level = gain * (was_heard + glide * frame as f32);
             for voice_index in 0..target_count {
                 let channel = target_channels[voice_index];
                 let decorrelated = state.voices[voice_index].process(mono);
-                output[base + channel] += decorrelated * gain;
+                output[base + channel] += decorrelated * level;
             }
         }
     }
@@ -253,6 +262,7 @@ mod tests {
             channels,
             channels,
             frames,
+            (1.0, 1.0),
             &mut output,
         );
         output

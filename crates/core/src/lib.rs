@@ -4,6 +4,7 @@ pub mod dbap;
 pub mod directivity;
 pub mod listener;
 pub mod panner;
+pub mod probe;
 pub mod source;
 pub mod speaker;
 pub mod telemetry;

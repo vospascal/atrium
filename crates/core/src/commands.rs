@@ -15,6 +15,9 @@ pub enum Command {
     /// Set master output gain (0.0 to 1.0).
     SetMasterGain { gain: f32 },
 
+    /// Let only some parts of the render through, to listen to them alone.
+    SetProbe { probe: crate::probe::Probe },
+
     /// Pause or resume the whole scene. Paused, the session's clock stops,
     /// so every sound, the plan and the weather hold where they are; the
     /// sound fades out and back in so nothing clicks.

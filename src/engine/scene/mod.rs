@@ -26,6 +26,7 @@ use crate::pipeline::mix_stage::MixContext;
 use crate::pipeline::perceptual::{PerceptualLayer, SourcePerceptualState};
 use crate::pipeline::RenderPipeline;
 use atrium_core::listener::Listener;
+use atrium_core::probe::Probe;
 use atrium_core::source::SoundSource;
 use atrium_core::speaker::{ChannelMode, RenderMode, SpeakerLayout};
 use atrium_core::telemetry::TelemetryFrame;
@@ -102,6 +103,9 @@ pub struct AudioScene {
     pub output_channels: Option<usize>,
     /// Bypass soft clipping and gain clamping for acoustic measurement.
     pub measurement_mode: bool,
+    /// Which parts of the render reach the output: everything, unless
+    /// someone is listening to one alone.
+    pub probe: Probe,
     // ── Perceptual masking layer ──
     /// Per-source spectral profiles (24 Bark bands, dB relative to RMS).
     pub spectral_profiles: Vec<[f32; BARK_BANDS]>,

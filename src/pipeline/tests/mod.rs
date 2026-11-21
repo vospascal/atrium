@@ -21,6 +21,7 @@ mod field_emitters;
 mod levels_and_timing;
 mod mode_layout_matrix;
 mod mode_switching;
+mod probe;
 mod reflections;
 mod reverb;
 mod world_locked;

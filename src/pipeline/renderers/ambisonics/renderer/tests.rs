@@ -48,6 +48,7 @@ fn encode_for(
         distance_model: &distance_model,
         layout: &layout,
         reverb_send: 0.0,
+        probe: atrium_core::probe::Probe::WHOLE,
     };
     encode_path(kind, direction, distance, &ctx, yaw.cos(), yaw.sin())
 }

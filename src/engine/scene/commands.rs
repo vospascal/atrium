@@ -20,6 +20,12 @@ impl AudioScene {
                 Command::SetMasterGain { gain } => {
                     self.master_gain = gain;
                 }
+                Command::SetProbe { probe } => {
+                    self.probe = probe;
+                    for pipeline in &mut self.pipelines {
+                        pipeline.probe = probe;
+                    }
+                }
                 Command::SetPaused { paused } => {
                     self.paused = paused;
                 }

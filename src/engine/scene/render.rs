@@ -162,6 +162,17 @@ impl AudioScene {
             };
             render_pipeline(pipeline, &mut self.sources, &params, output);
         }
+        // One loudspeaker or one ear alone: the others are silenced after
+        // everything else, so what is heard from it is what it plays.
+        if let Some(only) = self.probe.only_channel {
+            for frame in output.chunks_exact_mut(channels) {
+                for (channel, sample) in frame.iter_mut().enumerate() {
+                    if channel != only as usize {
+                        *sample = 0.0;
+                    }
+                }
+            }
+        }
         self.clock.advance(num_frames as u64, self.sample_rate);
         self.fade_for_pause(output, channels);
         #[cfg(feature = "memprof")]

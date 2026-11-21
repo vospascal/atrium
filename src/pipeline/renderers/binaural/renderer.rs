@@ -138,7 +138,7 @@ impl Renderer for HrtfRenderer {
                     );
                     path.gain * dist_gain
                 }
-            };
+            } * ctx.heard(path.kind);
         }
 
         // Update HRTF filter for the direct path only — reflections use cheap

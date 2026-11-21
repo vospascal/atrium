@@ -25,7 +25,7 @@ use atrium_core::types::Vec3;
 use crate::audio::filters::AirAbsorptionFilter;
 use crate::audio::propagation::ground_effect_gain;
 use crate::audio::turbulence::{AirPath, AirWaver, Wavering};
-use crate::pipeline::path::{PathEffectChain, PathSet};
+use crate::pipeline::path::{PathEffectChain, PathKind, PathSet};
 use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
 use crate::pipeline::room_acoustics;
@@ -155,6 +155,9 @@ pub struct WorldLockedRenderer {
     delay_lines: Vec<SourceDelayLine>,
     /// Previous per-channel gains per source (for gain ramping).
     prev_gains: Vec<[f32; MAX_CHANNELS]>,
+    /// How much of the direct sound and of the reflections the last buffer
+    /// let through, so a probe fades them and never cuts.
+    prev_heard: Vec<(f32, f32)>,
     /// Cached speaker count for topology changes.
     speaker_count: usize,
     sample_rate: f32,
@@ -167,6 +170,7 @@ impl WorldLockedRenderer {
             propagation: Vec::new(),
             delay_lines: Vec::new(),
             prev_gains: Vec::new(),
+            prev_heard: Vec::new(),
             speaker_count: 0,
             // Unknown until the output device is opened; set by `ensure_topology`.
             sample_rate: 0.0,
@@ -227,15 +231,17 @@ impl Renderer for WorldLockedRenderer {
                 delay_end[spk_idx] = target_delay;
                 prop.delay_samples = Some(target_delay);
 
-                // Air absorption filter update
+                // Air absorption filter update. With the probe's air
+                // absorption off the path is as long as no path at all.
+                let absorbing = if ctx.probe.air_absorption { dist } else { 0.0 };
                 prop.air_absorption
-                    .update(dist, &ctx.environment.atmosphere);
+                    .update(absorbing, &ctx.environment.atmosphere);
 
                 // The air's wavering along this speaker's own path.
                 prop.air_waver.set(
                     Wavering::along(&AirPath {
                         air: &ctx.environment.air,
-                        open_air: ctx.environment.is_open_air(),
+                        open_air: ctx.environment.is_open_air() && ctx.probe.moving_air,
                         from: ctx.source_pos,
                         to: speaker.position,
                         ground: ctx.environment.min.z,
@@ -263,7 +269,7 @@ impl Renderer for WorldLockedRenderer {
                 // The term still acts where there is no floor tap: outdoors
                 // (nothing reflects) and for a speaker standing on the floor
                 // (the bounce arrives with the direct sound).
-                let ground_gain = if prop.reflections.has_floor_tap() {
+                let ground_gain = if prop.reflections.has_floor_tap() || !ctx.probe.ground_effect {
                     1.0
                 } else {
                     let dx = ctx.source_pos.x - speaker.position.x;
@@ -302,6 +308,8 @@ impl Renderer for WorldLockedRenderer {
         // 2. Per-sample rendering
         let inv_frames = 1.0 / out.num_frames as f32;
         let prev = &self.prev_gains[source_idx];
+        let heard = (ctx.heard(PathKind::Direct), ctx.heard(PathKind::Reflection));
+        let was_heard = self.prev_heard[source_idx];
 
         for frame in 0..out.num_frames {
             let t = frame as f32 * inv_frames;
@@ -318,7 +326,12 @@ impl Renderer for WorldLockedRenderer {
                 let delay = delay_start[spk_idx] + (delay_end[spk_idx] - delay_start[spk_idx]) * t;
                 let arrived = delay_line.read(delay);
                 let filtered = prop.air_waver.process(prop.air_absorption.process(arrived));
-                let with_reflections = filtered + prop.reflections.process_sample(filtered);
+                // The direct sound and its reflections, each as far as the
+                // probe lets it through; the taps are always fed.
+                let direct = was_heard.0 + (heard.0 - was_heard.0) * t;
+                let reflected = was_heard.1 + (heard.1 - was_heard.1) * t;
+                let with_reflections =
+                    filtered * direct + prop.reflections.process_sample(filtered) * reflected;
 
                 // Broadband gain (cached) × gain ramp
                 let gain = prev[ch] + (path_gains[ch] - prev[ch]) * t;
@@ -327,6 +340,7 @@ impl Renderer for WorldLockedRenderer {
         }
 
         self.prev_gains[source_idx] = path_gains;
+        self.prev_heard[source_idx] = heard;
     }
 
     fn name(&self) -> &str {
@@ -382,6 +396,9 @@ impl Renderer for WorldLockedRenderer {
 
         while self.prev_gains.len() < source_count {
             self.prev_gains.push([0.0; MAX_CHANNELS]);
+        }
+        while self.prev_heard.len() < source_count {
+            self.prev_heard.push((1.0, 1.0));
         }
     }
 

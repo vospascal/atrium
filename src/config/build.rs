@@ -286,6 +286,7 @@ impl SceneConfig {
             startup_channels: None,
             output_channels: None,
             measurement_mode: false,
+            probe: atrium_core::probe::Probe::WHOLE,
             perceptual_layer: crate::pipeline::perceptual::PerceptualLayer::new(source_count),
             spectral_profiles,
             source_amplitudes,
