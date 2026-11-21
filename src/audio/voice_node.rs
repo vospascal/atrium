@@ -58,6 +58,8 @@ pub struct VoiceNode {
     /// The take uttered last, so the next one differs from it.
     last_take: Option<usize>,
     random: u64,
+    /// The output rate last seen, to count a changed rest in samples.
+    sample_rate: f32,
     position: Vec3,
     pub amplitude: f32,
     /// Base amplitude at 0 dB SPL: `amplitude = unit_amplitude · 10^(spl/20)`.
@@ -85,6 +87,7 @@ impl VoiceNode {
             last_take: None,
             // A zero state would stay zero in the generator below.
             random: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+            sample_rate: 0.0,
             position,
             amplitude: 0.5,
             unit_amplitude: 0.0,
@@ -179,6 +182,7 @@ impl SoundSource for VoiceNode {
         if self.takes.is_empty() {
             return 0.0;
         }
+        self.sample_rate = sample_rate;
         let sample = match &mut self.state {
             State::Resting { samples_left } => {
                 // A negative count is the opening rest, still in seconds.
@@ -293,6 +297,29 @@ impl SoundSource for VoiceNode {
         self.facing = Some(yaw);
     }
 
+    /// A rest already longer than the new longest is cut to a fresh one, so
+    /// a shorter gap is heard at once instead of after a long silence.
+    fn set_gap(&mut self, shortest: f32, longest: f32) {
+        if !(shortest >= 0.0 && longest >= shortest) {
+            return;
+        }
+        self.rests.gap_seconds = (shortest, longest);
+        if let State::Resting { samples_left } = self.state {
+            let longest_samples = (longest * self.sample_rate) as f64;
+            if self.sample_rate > 0.0 && samples_left > longest_samples {
+                self.start_rest(self.sample_rate);
+            }
+        }
+    }
+
+    fn set_take_chance(&mut self, take: u8, chance: f32) {
+        if let Some(take) = self.takes.get_mut(take as usize) {
+            if chance >= 0.0 {
+                take.chance = chance;
+            }
+        }
+    }
+
     fn ref_distance(&self) -> f32 {
         self.ref_dist
     }
@@ -370,6 +397,37 @@ mod tests {
         for wanted in 0..3u8 {
             assert!(uttered.contains(&wanted), "take {wanted} was never uttered");
         }
+    }
+
+    /// Edited while it plays: a take given chance 0 is no longer chosen, and
+    /// a long rest is cut short when the gap is made shorter.
+    #[test]
+    fn its_rests_and_chances_change_while_it_plays() {
+        let mut node = voice(
+            vec![take(0.1, 50, 1.0), take(0.2, 50, 1.0), take(0.3, 50, 1.0)],
+            steady((100.0, 100.0)),
+            5,
+        );
+        node.set_take_chance(1, 0.0);
+        // Its opening rest is up to 100 s; a gap of at most 0.1 s ends it now.
+        node.next_sample(RATE as f32);
+        node.set_gap(0.05, 0.1);
+        let uttered = takes_uttered(&mut node, 20);
+        assert!(
+            uttered.len() > 50,
+            "only {} takes after the gap was shortened",
+            uttered.len()
+        );
+        assert!(
+            !uttered.contains(&1),
+            "a take with chance 0 is never chosen"
+        );
+        node.set_gap(5.0, 1.0);
+        assert_eq!(
+            node.rests.gap_seconds,
+            (0.05, 0.1),
+            "a gap from long to short is ignored"
+        );
     }
 
     /// It is silent between takes, and every rest lies inside the gap it was

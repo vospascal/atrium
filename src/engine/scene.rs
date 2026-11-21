@@ -149,6 +149,24 @@ impl AudioScene {
                         source.set_facing(yaw);
                     }
                 }
+                Command::SetSourceGap {
+                    index,
+                    shortest,
+                    longest,
+                } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_gap(shortest, longest);
+                    }
+                }
+                Command::SetTakeChance {
+                    index,
+                    take,
+                    chance,
+                } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_take_chance(take, chance);
+                    }
+                }
                 Command::SetSourceOrbitSpeed { index, speed } => {
                     if let Some(source) = self.sources.get_mut(index as usize) {
                         source.set_orbit_speed(speed);

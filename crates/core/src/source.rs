@@ -119,6 +119,14 @@ pub trait SoundSource: Send {
     /// no-op, for sources that have no facing to turn.
     fn set_facing(&mut self, _yaw: f32) {}
 
+    /// Rest between `shortest` and `longest` seconds between two takes.
+    /// Default: no-op, for sources that have no takes.
+    fn set_gap(&mut self, _shortest: f32, _longest: f32) {}
+
+    /// Choose take `take` with `chance` next to the others. Default: no-op,
+    /// for sources that have no takes.
+    fn set_take_chance(&mut self, _take: u8, _chance: f32) {}
+
     /// Set a procedural-synth parameter live. Sources that don't model the
     /// given parameter ignore it. Default: no-op (sample players etc.).
     fn set_synth_param(&mut self, _param: crate::commands::SynthParam, _value: f32) {}
