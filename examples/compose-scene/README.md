@@ -71,6 +71,12 @@ panel or list gets them by using it.
   muted one is faint. Right of the "now" line are the takes the plan has already decided, drawn
   open. Above the voices, wind, rain, storm and daylight are lanes, the past and what the weather
   story will do next. Click a track to select its sound. It zooms to 30 s, 2 min or 10 min.
+- **The timeline** is the top of the tracks panel: three hours of the scene with its weather drawn
+  in. Press or drag anywhere on it to move the whole scene there: every sound and the weather are
+  as they would be at that moment, a take under way starts partway, and it plays on from there.
+  Dragging the ruler above the tracks scrubs more finely. 1×, 10× and 60× run the weather faster
+  while the sounds keep their own pace. **Pause** in the top bar, or the space bar, stops the
+  scene's clock: sounds, plan and weather hold where they are.
 - **Weather** is in the inspector when nothing is selected: the story (Held, Drifting or Passing
   storm) and the band each condition keeps to, with where it is now. A selected sound's
   **Follows** says how it answers them, such as "Activity 100 % → 0 % as rain rises".

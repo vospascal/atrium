@@ -72,6 +72,47 @@ internal class Session(private val store: SettingsStore) {
     var chosenOutput by mutableStateOf(outputSaved(store.read(OutputKey)))
         private set
 
+    /** Whether the playing scene is paused: its clock, its plan and its weather stand still. */
+    var paused by mutableStateOf(false)
+        internal set
+
+    /** Pause the playing scene, or play it on from where it stood: its clock, plan and weather stand still meanwhile. */
+    fun togglePause() {
+        engine ?: return
+        val next = !paused
+        command { setPaused(next) }
+        paused = next
+    }
+
+    /** Seconds into the playing scene, as its timeline shows them; 0 with nothing playing. */
+    fun sceneTime(): Double = engine?.sceneTime()?.toDouble() ?: 0.0
+
+    /**
+     * Move the playing scene to [seconds], as a playhead is dragged: every sound and the weather are
+     * as they would be there. What the tracks heard belongs to the old moment, so they start again.
+     */
+    fun seek(seconds: Double) {
+        val running = engine ?: return
+        running.seek(seconds.coerceAtLeast(0.0).toFloat())
+        tracks.clear()
+    }
+
+    /** How fast the weather runs, 1 being as fast as the scene. */
+    var weatherSpeed by mutableStateOf(1f)
+        private set
+
+    /** Let the weather run [speed] times as fast as the scene; the sounds keep their own pace. */
+    fun runWeatherAt(speed: Float) {
+        engine?.setWeatherSpeed(speed) ?: return
+        weatherSpeed = speed
+    }
+
+    /** A new scene starts at the weather's own pace, playing. */
+    internal fun resetTransport() {
+        paused = false
+        weatherSpeed = 1f
+    }
+
     /** The scene's weather story and bands, as the engine has them. */
     var weather by mutableStateOf<Weather?>(null)
         internal set
@@ -377,6 +418,7 @@ internal fun RunSession(session: Session) {
             session.tracks.clear()
             session.unsaved = false
             session.weather = running.weather()
+            session.resetTransport()
             session.description = running.scene()
             session.outputs = running.outputs()
             session.engine = running
@@ -394,7 +436,7 @@ internal fun RunSession(session: Session) {
                 }
                 running.latestTelemetry()?.let {
                     session.telemetry = it
-                    session.tracks.record(trackSeconds(), it.sources)
+                    if (!session.paused) session.tracks.record(running.sceneTime().toDouble(), it.sources)
                 }
             }
         } finally {

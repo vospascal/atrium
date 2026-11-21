@@ -2,6 +2,8 @@ package atrium.app
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -145,8 +148,8 @@ internal fun TracksPanel(
 ) {
     val sounds = session.description?.sources.orEmpty()
     val history = session.tracks
-    val now by produceState(trackSeconds()) {
-        while (true) withFrameMillis { value = trackSeconds() }
+    val now by produceState(session.sceneTime()) {
+        while (true) withFrameMillis { value = session.sceneTime() }
     }
     val text = rememberTextMeasurer()
     val ink = Foreground
@@ -178,9 +181,21 @@ internal fun TracksPanel(
                 )
             }
         }
+        Overview(session, now, Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 6.dp))
         Row(Modifier.fillMaxWidth().padding(end = 14.dp, bottom = 2.dp)) {
             Spacer(Modifier.width(HeaderWidth))
-            Ruler(shown, ahead, Modifier.weight(1f).height(14.dp))
+            // Dragging the ruler scrubs: the scene moves as far as the drag goes along it.
+            Ruler(
+                shown, ahead,
+                Modifier.weight(1f).height(16.dp)
+                    .pointerHoverIcon(resizePointer(acrossWidth = true))
+                    .pointerInput(span) {
+                        detectHorizontalDragGestures { change, amount ->
+                            change.consume()
+                            session.seek(session.sceneTime() + amount / size.width * span)
+                        }
+                    },
+            )
         }
         // The lanes and the voices scroll together under the fixed ruler when the panel is short.
         ScrollArea(Modifier.weight(1f)) {

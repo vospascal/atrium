@@ -112,6 +112,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                         when {
                             command && event.key == Key.S -> if (event.isShiftPressed) naming = true else save()
                             !command && event.key == Key.Tab -> workspace.toggleAll()
+                            !command && event.key == Key.Spacebar -> session.togglePause()
                             else -> return@onPreviewKeyEvent false
                         }
                         true
@@ -226,6 +227,11 @@ private fun TopBar(
         if (note != null && session.saves > 0) {
             PaperText(note, 14, if (session.saveFailure != null) Foreground else Muted)
             Spacer(Modifier.width(14.dp))
+        }
+        if (scene != null && session.engine != null) {
+            // Play and pause, as in a video editor; the space bar does the same.
+            ToolButton(if (session.paused) "▶  Play" else "❚❚  Pause", strong = session.paused, onClick = session::togglePause)
+            Spacer(Modifier.width(16.dp))
         }
         ToolButton("Open…", onClick = onOpen)
         if (scene != null && session.engine != null) {

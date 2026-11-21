@@ -175,7 +175,8 @@ Built 2026-11-21 for voices with takes (`src/plan/`): a scene seed (`seed:`, or 
 each play), a clock the audio thread counts in samples, and a plan per voice decided from the
 seed and the entity's id. A planner thread hands the audio thread only the next 0.4 s, so an
 edit is heard almost at once. Not yet: generators are not planned (each still has its own
-seed), there is no pause, a session cannot be kept, and there is no link between devices.
+seed), a session cannot be kept, and there is no link between devices. Pause (24) and moving the
+scene to any moment are built: the plan replays each voice from its seed up to that moment.
 
 ### A place or a piece
 
