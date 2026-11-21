@@ -41,6 +41,7 @@ internal fun Layers(
 ) {
     val sounds = session.description?.sources.orEmpty()
     val mix = session.mix
+    var row = 0
     groupedInSceneOrder(sounds.withIndex().toList()) { it.value.group }.forEach { (group, members) ->
         val ids = members.map { it.value.id }
         Row(
@@ -53,6 +54,7 @@ internal fun Layers(
         }
         members.forEach { (index, sound) ->
             LayerRow(
+                row++,
                 sound,
                 strength = if (mix.silences(sound.id)) 0f else strengths.getOrElse(index) { 0f },
                 hearing = !mix.silences(sound.id),
@@ -66,6 +68,7 @@ internal fun Layers(
 
 @Composable
 private fun LayerRow(
+    row: Int,
     sound: SourceDescription,
     strength: Float,
     hearing: Boolean,
@@ -76,7 +79,7 @@ private fun LayerRow(
     val ink = LocalInkTint.current ?: parseColor(sound.color)
     Row(
         Modifier.fillMaxWidth()
-            .background(if (selected) Highlight else Backdrop)
+            .listRow(row, selected)
             .clickable(role = Role.Button, onClick = onSelect)
             .padding(start = 16.dp, end = 22.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,

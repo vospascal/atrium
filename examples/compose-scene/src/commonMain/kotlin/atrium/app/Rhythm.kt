@@ -100,7 +100,7 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
             val now = live?.take?.toInt() == index
             val heard = session.isHearing(sound.slot, index)
             Row(
-                Modifier.fillMaxWidth().background(if (now) Highlight else Backdrop).padding(top = 2.dp, bottom = 2.dp),
+                Modifier.fillMaxWidth().listRow(index, selected = now).padding(top = 2.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(

@@ -44,6 +44,13 @@ depth from tone instead of hue.
 **The editor** is opened from Settings while a scene plays. It is in the player's paper style,
 and on desktop the window widens for it. It has three panels; in a narrow window they are tabs.
 
+The editor works like other editors. The layers and library on the left, the inspector on the
+right and the tracks underneath can each be resized by dragging their border and hidden with
+the toggles at the top right; Tab hides or shows them all, leaving the map. The layout is kept
+between launches. Lists scroll with a thin bar, have every other row shaded, light up under the
+pointer, and mark the selected row with a bar on its left. These come from `Chrome.kt`, so a new
+panel or list gets them by using it.
+
 - **Layers** are the sounds of the scene in their groups. The ear in front of a layer silences
   it and brings it back, like the eye in a picture editor's layer list; a group's ear does it
   for the whole group. The line shows how strongly each layer reaches you. The bar underneath

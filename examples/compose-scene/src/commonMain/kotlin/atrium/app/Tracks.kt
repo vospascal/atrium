@@ -182,6 +182,8 @@ internal fun TracksPanel(
             Spacer(Modifier.width(HeaderWidth))
             Ruler(shown, ahead, Modifier.weight(1f).height(14.dp))
         }
+        // The lanes and the voices scroll together under the fixed ruler when the panel is short.
+        ScrollArea(Modifier.weight(1f)) {
         for (condition in Condition.entries) {
             Row(Modifier.fillMaxWidth().height(LaneHeight), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.width(HeaderWidth).padding(start = 36.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -210,7 +212,7 @@ internal fun TracksPanel(
             val chosen = sound != null && sound.id == selected
             Row(
                 Modifier.fillMaxWidth().height(TrackHeight)
-                    .background(if (chosen) Highlight else Backdrop)
+                    .listRow(slot, chosen)
                     .clickable(enabled = sound != null, role = Role.Button) { onSelect(sound?.id?.takeIf { it != selected }) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -260,6 +262,7 @@ internal fun TracksPanel(
                     drawLine(ink.copy(alpha = .5f), Offset(size.width * nowAt, 0f), Offset(size.width * nowAt, size.height), 1.dp.toPx())
                 }
             }
+        }
         }
     }
 }
@@ -335,6 +338,3 @@ private val HeaderWidth = 150.dp
 
 /** The voice a preset or a take is heard from on its own; shown as Preview when no sound holds it. */
 private const val AuditionTrack = VoiceCount - 1
-
-/** A strip as high as all its tracks. */
-internal val TracksPanelHeight = TrackHeight * VoiceCount + LaneHeight * Condition.entries.size + 46.dp

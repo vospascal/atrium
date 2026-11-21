@@ -57,8 +57,9 @@ internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
             spacing = 2f,
             modifier = Modifier.padding(start = 22.dp, top = 22.dp, bottom = 6.dp),
         )
-        presets.forEach { preset ->
+        presets.forEachIndexed { row, preset ->
             PresetRow(
+                row,
                 preset,
                 heard = heard == preset.path,
                 onHear = {
@@ -76,9 +77,9 @@ internal fun Library(session: Session, onAdded: (id: String) -> Unit) {
 }
 
 @Composable
-private fun PresetRow(preset: Preset, heard: Boolean, onHear: () -> Unit, onAdd: () -> Unit) {
+private fun PresetRow(row: Int, preset: Preset, heard: Boolean, onHear: () -> Unit, onAdd: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().background(if (heard) Highlight else Backdrop).padding(start = 14.dp, end = 22.dp, top = 6.dp, bottom = 6.dp),
+        Modifier.fillMaxWidth().listRow(row, selected = heard).padding(start = 14.dp, end = 22.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         HearButton(heard, onHear)

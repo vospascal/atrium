@@ -43,12 +43,14 @@ import atrium.engine.SceneFile
 
 /**
  * The editor for the playing scene, in the player's paper style. In a wide
- * window it is three panels: the layers and the library on the left, the map
- * of every sound in the middle, the inspector for what is selected on the
- * right. In a narrow one the same three are tabs.
+ * window the map is in the middle, with the layers and the library on the
+ * left, the inspector on the right and the tracks underneath. Each of those
+ * three can be hidden and resized by dragging its border, and the layout is
+ * kept between launches; Tab hides or shows them all. In a narrow window the
+ * same parts are tabs.
  */
 @Composable
-internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -> Unit) {
+internal fun Editor(scene: SceneFile, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit) {
     var selected by remember(session.engine) { mutableStateOf<String?>(null) }
     var panel by remember { mutableStateOf(Panel.Layers) }
     var naming by remember { mutableStateOf(false) }
@@ -74,49 +76,58 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
                     .focusRequester(keys)
                     .focusable()
                     .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown || naming) return@onPreviewKeyEvent false
                         val command = event.isMetaPressed || event.isCtrlPressed
-                        if (event.type != KeyEventType.KeyDown || !command || event.key != Key.S) return@onPreviewKeyEvent false
-                        if (event.isShiftPressed) naming = true else save()
+                        when {
+                            command && event.key == Key.S -> if (event.isShiftPressed) naming = true else save()
+                            !command && event.key == Key.Tab -> workspace.toggleAll()
+                            else -> return@onPreviewKeyEvent false
+                        }
                         true
                     },
             ) {
                 val wide = maxWidth >= WideFrom
                 Column(Modifier.fillMaxSize()) {
-                    TopBar(scene, session, onBack, onSave = save, onSaveAs = { naming = true })
+                    TopBar(scene, session, if (wide) workspace else null, onBack, onSave = save, onSaveAs = { naming = true })
                     Rule()
                     if (wide) {
                         // The map is always there, so the left panel only switches between its two lists.
                         val list = if (panel == Panel.Map) Panel.Layers else panel
                         Row(Modifier.weight(1f)) {
-                            Column(Modifier.width(SidePanel).fillMaxHeight()) {
-                                PanelTabs(listOf(Panel.Layers, Panel.Library), list) { panel = it }
-                                Rule()
-                                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                    when (list) {
-                                        Panel.Library -> Library(session, onAdded = { id ->
-                                            selected = id
-                                            panel = Panel.Layers
-                                        })
-                                        else -> Layers(session, strengths, selected, onSelect = { selected = it })
-                                    }
-                                    Spacer(Modifier.height(24.dp))
-                                }
-                                if (list == Panel.Layers) {
+                            if (workspace.leftShown) {
+                                Column(Modifier.width(workspace.leftWidth).fillMaxHeight()) {
+                                    PanelTabs(listOf(Panel.Layers, Panel.Library), list) { panel = it }
                                     Rule()
-                                    LayerActions(canDelete = chosen != null, onAdd = { panel = Panel.Library }, onDelete = deleteChosen)
+                                    ScrollArea(Modifier.weight(1f)) {
+                                        when (list) {
+                                            Panel.Library -> Library(session, onAdded = { id ->
+                                                selected = id
+                                                panel = Panel.Layers
+                                            })
+                                            else -> Layers(session, strengths, selected, onSelect = { selected = it })
+                                        }
+                                        Spacer(Modifier.height(24.dp))
+                                    }
+                                    if (list == Panel.Layers) {
+                                        Rule()
+                                        LayerActions(canDelete = chosen != null, onAdd = { panel = Panel.Library }, onDelete = deleteChosen)
+                                    }
                                 }
+                                Splitter(acrossWidth = true) { workspace.leftWidth += it }
                             }
-                            Upright()
                             Column(Modifier.weight(1f).fillMaxHeight()) {
                                 EditorMap(session, strengths, selected, onSelect = { selected = it }, Modifier.weight(1f).fillMaxWidth())
-                                Rule()
-                                TracksPanel(session, selected, onSelect = { selected = it }, Modifier.fillMaxWidth().height(TracksPanelHeight))
+                                if (workspace.bottomShown) {
+                                    Splitter(acrossWidth = false) { workspace.bottomHeight -= it }
+                                    TracksPanel(session, selected, onSelect = { selected = it }, Modifier.fillMaxWidth().height(workspace.bottomHeight))
+                                }
                             }
-                            Upright()
-                            Inspector(
-                                session, scene, selected,
-                                Modifier.width(SidePanel).fillMaxHeight().verticalScroll(rememberScrollState()),
-                            )
+                            if (workspace.rightShown) {
+                                Splitter(acrossWidth = true) { workspace.rightWidth -= it }
+                                ScrollArea(Modifier.width(workspace.rightWidth).fillMaxHeight()) {
+                                    Inspector(session, scene, selected, Modifier.fillMaxWidth())
+                                }
+                            }
                         }
                     } else {
                         PanelTabs(Panel.entries, panel) { panel = it }
@@ -161,10 +172,11 @@ internal fun Editor(scene: SceneFile, session: Session, look: Look, onBack: () -
 
 /**
  * The document bar: back to the player, the scene and its file with a dot
- * while it has changes that are not saved, and the file actions.
+ * while it has changes that are not saved, the file actions, and in a wide
+ * window the toggles for the three panels.
  */
 @Composable
-private fun TopBar(scene: SceneFile, session: Session, onBack: () -> Unit, onSave: () -> Unit, onSaveAs: () -> Unit) {
+private fun TopBar(scene: SceneFile, session: Session, workspace: Workspace?, onBack: () -> Unit, onSave: () -> Unit, onSaveAs: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         PaperText("‹ Player", 16, Muted, modifier = Modifier.clickable(role = Role.Button, onClick = onBack))
         Spacer(Modifier.width(22.dp))
@@ -181,6 +193,12 @@ private fun TopBar(scene: SceneFile, session: Session, onBack: () -> Unit, onSav
         ToolButton("Save as…", onClick = onSaveAs)
         Spacer(Modifier.width(20.dp))
         PaperText("${session.description?.sources?.size ?: 0} / $VoiceCount voices", 14, Muted)
+        if (workspace != null) {
+            Spacer(Modifier.width(16.dp))
+            PanelToggle(PanelSide.Left, workspace.leftShown) { workspace.leftShown = !workspace.leftShown }
+            PanelToggle(PanelSide.Bottom, workspace.bottomShown) { workspace.bottomShown = !workspace.bottomShown }
+            PanelToggle(PanelSide.Right, workspace.rightShown) { workspace.rightShown = !workspace.rightShown }
+        }
     }
 }
 
@@ -205,18 +223,11 @@ private fun Rule() {
     Box(Modifier.fillMaxWidth().height(1.dp).background(Hairline))
 }
 
-/** A hairline between two panels. */
-@Composable
-private fun Upright() {
-    Box(Modifier.fillMaxHeight().width(1.dp).background(Hairline))
-}
-
 /** The three parts of the editor. Map is a tab only where the window is too narrow to show it beside the lists. */
 private enum class Panel { Layers, Library, Map }
 
 /** From this width the three panels stand side by side. */
 private val WideFrom = 900.dp
-private val SidePanel = 300.dp
 
 /** How much of a narrow window the inspector may take under the map. */
 private val CompactInspector = 300.dp

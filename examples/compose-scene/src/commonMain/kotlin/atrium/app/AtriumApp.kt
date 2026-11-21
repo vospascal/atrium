@@ -20,6 +20,7 @@ internal fun AtriumApp(sceneDirectory: String, onEditing: (Boolean) -> Unit = {}
     val session = remember { Session(settings) }
     val scenes = remember(sceneDirectory, session.saves) { runCatching { listScenes(sceneDirectory) } }
     val look = remember { Look(settings) }
+    val workspace = remember { Workspace(settings) }
     var editing by remember { mutableStateOf(false) }
 
     RunSession(session)
@@ -28,7 +29,7 @@ internal fun AtriumApp(sceneDirectory: String, onEditing: (Boolean) -> Unit = {}
     val playing = session.request?.scene.takeIf { editing && session.engine != null }
     LaunchedEffect(playing != null) { onEditing(playing != null) }
     if (playing != null) {
-        Editor(playing, session, look, onBack = { editing = false })
+        Editor(playing, session, look, workspace, onBack = { editing = false })
     } else {
         Player(scenes, session, look, onEdit = { editing = true })
     }
