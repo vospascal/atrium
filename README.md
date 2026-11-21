@@ -158,6 +158,77 @@ Known gaps:
 - **Each speaker's path wavers by itself in world-locked.** Paths to speakers
   a few metres apart share some of their eddies in reality.
 
+## Ambient sound
+
+An ambient sound (`shape.ambient`) has no position. Every speaker, or each
+ear, gets its own copy of it through its own filter, so the copies sound the
+same and carry the same power but are different waveforms, and the ear hears
+width instead of a point in the middle.
+
+Any sound can be ambient: a frog chorus, a robin, rain with single drops. So
+the filter must leave an attack heard once. It is four Schroeder all-passes in
+series per channel (Schroeder and Logan, "Colorless artificial
+reverberation", 1961), each with gain 0.5 and a delay between 0.5 and 2 ms
+drawn from a fixed seed per channel (`src/pipeline/renderers/field/`). It
+replaced one all-pass per channel with a delay of 7 to 31 ms, which answered
+every click with a train of echoes. Worst channel or pair, at 44.1, 48 and
+96 kHz:
+
+| | Before | Now |
+|---|---|---|
+| Energy of a click within 10 ms | 32 % | 92 % |
+| Strongest tap after 15 ms, against the strongest | 0 dB (it was the strongest) | −22.5 dB |
+| Correlation of two channels, white noise, at zero lag | 0.37 | 0.11 |
+| Largest correlation within ±30 ms | 0.46 | 0.32 |
+| Colouring, third octaves 100 Hz to 16 kHz | 0 dB | 0 dB |
+| Coherence below 200 Hz, mean over 28 pairs | 0.32 | 0.64 |
+
+Each channel keeps all of the source's energy, so N channels at 1/√N add up
+to it. `AMBIENT_OUT=target/listening/ambient cargo test --release --lib
+write_ambient_listening_samples` writes clicks, frogs, a robin and noise
+through it, as headphones play them.
+
+Decisions that look wrong and are right:
+
+- **Not the velvet-noise decorrelator.** The published state of the art
+  (Alary, Politis and Välimäki, DAFx 2017; Schlecht et al., DAFx 2018) was
+  built first, as the 2018 paper gives it: 30 ms of signed impulses, one per
+  millisecond, decaying 60 dB, then optimised for a flat third-octave
+  response. It puts 99 % of a click in 10 ms, but so few impulses carry the
+  energy that two channels stay alike: the best eight of 2,400 optimised
+  sequences reach 0.38 within ±30 ms (the paper's own best pair 0.40), their
+  bass coherence is 0.94, and only one sequence in twenty stays within 3 dB.
+  The all-pass is flat by construction and decorrelates better on every
+  measure.
+- **Its four numbers are measured, not published.** No paper gives a short
+  cascade for this. Four stages, gain 0.5 and 0.5 to 2 ms is the one point of
+  a coarse grid (two to six stages, gain 0.5, 0.618 or 0.7, shortest delay
+  0.5 ms, longest 1 to 3 ms) where a typical draw of delays meets every
+  criterion: shorter delays leave channels alike, longer ones smear the
+  attack. The seeds are the first set that passes at all three
+  rates, because with filters this short a single rounded delay can make one
+  pair too alike.
+- **The old filter decorrelated the bass better.** Its delays were ten times
+  longer. That is the price of hearing an attack once.
+
+Known gaps:
+
+- **The deep bass stays together.** Below 200 Hz two channels have a
+  coherence of 0.64 on average, from −0.53 to 0.99 by pair: a filter a few
+  milliseconds long cannot move a 10 ms wave far. At the ears that is close
+  to real; a diffuse field is coherent between two points 18 cm apart up to a
+  few hundred hertz (sin kd / kd, Cook et al. 1955). Between speakers 3 m apart
+  a real field is coherent only below about 30 Hz.
+- **A pair can be alike at one pitch.** An all-pass gives each pair a phase
+  difference that changes with frequency, so a tonal sound can land where a
+  pair is nearly in phase. The frog sample's two channels correlate 0.51 now,
+  −0.20 before.
+- **An ambient recording is not a diffuse field.** Decorrelating one mono
+  recording makes copies of the same sound; a real chorus is many frogs in
+  many places, each with its own direction and arrival. One loud frog in the
+  recording is everywhere at once. Many sources, or a multichannel recording,
+  would be the real thing.
+
 ## Project structure
 
 ```text
