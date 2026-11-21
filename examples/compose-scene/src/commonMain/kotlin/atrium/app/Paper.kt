@@ -22,6 +22,8 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.withFrameMillis
@@ -179,17 +181,30 @@ internal fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** A thin 0–1 level on paper: tap or drag to set it. */
+/**
+ * A thin 0–1 level on paper: tap or drag to set it. Once pressed it takes the
+ * arrow keys, moving by [step] a press and ten times that with Shift.
+ */
 @Composable
-internal fun PaperLevel(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier) {
+internal fun PaperLevel(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier, step: Float = .01f) {
     val change = rememberUpdatedState(onChange)
+    val now = rememberUpdatedState(value)
+    val focus = remember { FocusRequester() }
     val track = Hairline
     val fill = Foreground
     Box(
         modifier.height(28.dp)
-            .pointerInput(Unit) { detectTapGestures { change.value((it.x / size.width).coerceIn(0f, 1f)) } }
+            .keyboardSlider(focus) { steps -> change.value((now.value + steps * step).coerceIn(0f, 1f)) }
             .pointerInput(Unit) {
-                detectDragGestures { pointer, _ -> change.value((pointer.position.x / size.width).coerceIn(0f, 1f)) }
+                detectTapGestures {
+                    focus.requestFocus()
+                    change.value((it.x / size.width).coerceIn(0f, 1f))
+                }
+            }
+            .pointerInput(Unit) {
+                detectDragGestures(onDragStart = { focus.requestFocus() }) { pointer, _ ->
+                    change.value((pointer.position.x / size.width).coerceIn(0f, 1f))
+                }
             },
     ) {
         Canvas(Modifier.fillMaxWidth().fillMaxHeight()) {

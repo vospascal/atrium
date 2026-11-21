@@ -23,7 +23,20 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.focusable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -193,4 +206,44 @@ internal fun PanelToggle(side: PanelSide, shown: Boolean, onClick: () -> Unit) {
             drawRoundRect(ink.copy(alpha = .3f), part.first, part.second, CornerRadius(2.dp.toPx()), style = Stroke(stroke))
         }
     }
+}
+
+/**
+ * How many steps an arrow key asks a slider to move: right and up one more,
+ * left and down one less, ten at a time with Shift. Null for any other key.
+ */
+internal fun arrowSteps(event: KeyEvent): Int? {
+    if (event.type != KeyEventType.KeyDown) return null
+    val direction = when (event.key) {
+        Key.DirectionRight, Key.DirectionUp -> 1
+        Key.DirectionLeft, Key.DirectionDown -> -1
+        else -> return null
+    }
+    return if (event.isShiftPressed) direction * 10 else direction
+}
+
+/**
+ * A slider that takes the keyboard: it is focused when pressed, shows a ring
+ * while it has the keys, and [onSteps] gets the steps of every arrow press.
+ * Give it the same [focus] the slider requests when it is pressed.
+ */
+@Composable
+internal fun Modifier.keyboardSlider(focus: FocusRequester, onSteps: (Int) -> Unit): Modifier {
+    var focused by remember { mutableStateOf(false) }
+    val steps by rememberUpdatedState(onSteps)
+    val ring = Foreground.copy(alpha = .35f)
+    return this
+        .focusRequester(focus)
+        .onFocusChanged { focused = it.isFocused }
+        .focusable()
+        .onKeyEvent { event ->
+            val asked = arrowSteps(event) ?: return@onKeyEvent false
+            steps(asked)
+            true
+        }
+        .drawBehind {
+            if (focused) {
+                drawRoundRect(ring, cornerRadius = CornerRadius(6.dp.toPx()), style = Stroke(1.5.dp.toPx()))
+            }
+        }
 }

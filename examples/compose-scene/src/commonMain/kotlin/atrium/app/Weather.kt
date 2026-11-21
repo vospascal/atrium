@@ -102,6 +102,7 @@ internal fun WeatherPart(session: Session) {
             toTrack = { it },
             fromTrack = { (it * 100f).roundToInt() / 100f },
             marks = ConditionMarks,
+            step = .01f,
             onChange = { low, high -> session.setWeather(condition.with(weather, Band(low, high))) },
         )
     }

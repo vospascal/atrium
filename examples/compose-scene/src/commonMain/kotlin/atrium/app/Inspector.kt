@@ -45,7 +45,9 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     PaperLevel(
         ((sound.spl - QuietestLayerLevel) / (LoudestLayerLevel - QuietestLayerLevel)).coerceIn(0f, 1f),
         onChange = { session.level(sound.slot, QuietestLayerLevel + it * (LoudestLayerLevel - QuietestLayerLevel)) },
-        Modifier.fillMaxWidth(),
+        // Half a dB an arrow press.
+        step = .5f / (LoudestLayerLevel - QuietestLayerLevel),
+        modifier = Modifier.fillMaxWidth(),
     )
 
     Part("Shape")

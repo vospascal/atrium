@@ -53,14 +53,18 @@ internal fun ShapePart(session: Session, sound: SourceDescription, live: SourceT
             PaperLevel(
                 (sound.width - NarrowestBeam) / (AllRound - NarrowestBeam),
                 onChange = { session.beam(sound.slot, NarrowestBeam + it * (AllRound - NarrowestBeam), sound.behind) },
-                Modifier.fillMaxWidth(),
+                // A degree an arrow press.
+                step = 1f / (AllRound - NarrowestBeam),
+                modifier = Modifier.fillMaxWidth(),
             )
             if (sound.width < AllRound) {
                 PaperText("Behind ${behindLabel(sound.behind)}", 15)
                 PaperLevel(
                     (sound.behind - SilentBehind) / -SilentBehind,
                     onChange = { session.beam(sound.slot, sound.width, SilentBehind + it * -SilentBehind) },
-                    Modifier.fillMaxWidth(),
+                    // A dB an arrow press.
+                    step = 1f / -SilentBehind,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }

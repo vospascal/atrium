@@ -24,6 +24,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -69,6 +70,7 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
             toTrack = { sqrt((it / LongestRest).coerceIn(0f, 1f)) },
             fromTrack = { it * it * LongestRest },
             marks = RestMarks,
+            step = .1f,
             onChange = { shortest, longest -> session.gap(sound.slot, shortest, longest) },
         )
         if (sound.takes.size > 1) {
@@ -80,6 +82,7 @@ internal fun WhenPart(session: Session, sound: SourceDescription, live: SourceTe
                 toTrack = { (it - 1f) / (LongestBout - 1f) },
                 fromTrack = { (1f + it * (LongestBout - 1f)).roundToInt().toFloat() },
                 marks = BoutMarks,
+                step = 1f,
                 onChange = { fewest, most -> session.bout(sound.slot, fewest.roundToInt(), most.roundToInt()) },
             )
         }
@@ -133,6 +136,31 @@ private const val LongestRest = 120f
 /** The longest bout the range reaches. */
 private const val LongestBout = 8f
 
+internal const val LowHandle = 0
+internal const val HighHandle = 1
+internal const val Undecided = -1
+
+/**
+ * Which handle a press at [fraction] of the track takes, with the handles at
+ * [lowAt] and [highAt]: the nearer one. Where both sit on one spot, as a band
+ * from 0 to 0 does, the side the press is on decides, and a press right on
+ * them is [Undecided] until the drag shows which way it goes; otherwise the
+ * low handle could never pass the high one and the range would be stuck.
+ */
+internal fun handleAt(fraction: Float, lowAt: Float, highAt: Float): Int {
+    if (abs(lowAt - highAt) < 1e-4f) {
+        return when {
+            fraction > highAt + PressSlack -> HighHandle
+            fraction < lowAt - PressSlack -> LowHandle
+            else -> Undecided
+        }
+    }
+    return if (abs(fraction - lowAt) <= abs(fraction - highAt)) LowHandle else HighHandle
+}
+
+/** How far from a pair of handles on one spot a press still counts as on them (share of the track). */
+private const val PressSlack = .01f
+
 /** Seconds as a range shows them: tenths below ten, whole seconds above. */
 private fun seconds(value: Float): String =
     if (value < 10f) "${(value * 10).roundToInt() / 10f} s".replace(".0 s", " s") else "${value.roundToInt()} s"
@@ -159,40 +187,64 @@ internal fun TwoHandleRange(
     toTrack: (Float) -> Float,
     fromTrack: (Float) -> Float,
     marks: List<Pair<Float, String>>,
+    step: Float,
     onChange: (Float, Float) -> Unit,
 ) {
     val change by rememberUpdatedState(onChange)
     val now by rememberUpdatedState(low to high)
     val place by rememberUpdatedState(toTrack)
     val value by rememberUpdatedState(fromTrack)
+    // The handle being dragged; Undecided while both sit on one spot and the drag has not yet said which way.
     var dragging by remember { mutableStateOf<Int?>(null) }
+    // The handle the arrow keys move: the one last touched, the high one to begin with.
+    var active by remember { mutableStateOf(HighHandle) }
+    val focus = remember { FocusRequester() }
     val track = Hairline
     val ink = Foreground
     val paper = Backdrop
-    fun moveTo(handle: Int, fraction: Float) {
-        val wanted = value(fraction.coerceIn(0f, 1f))
+    fun set(handle: Int, asked: Float) {
         val (lowNow, highNow) = now
-        if (handle == 0) change(wanted.coerceAtMost(highNow), highNow) else change(lowNow, wanted.coerceAtLeast(lowNow))
+        // Never past the ends of the track, whichever way it was moved.
+        val wanted = asked.coerceIn(value(0f), value(1f))
+        if (handle == LowHandle) change(wanted.coerceAtMost(highNow), highNow) else change(lowNow, wanted.coerceAtLeast(lowNow))
     }
+    fun moveTo(handle: Int, fraction: Float) = set(handle, value(fraction.coerceIn(0f, 1f)))
     fun nearest(fraction: Float): Int {
         val (lowNow, highNow) = now
-        return if (abs(fraction - place(lowNow)) <= abs(fraction - place(highNow))) 0 else 1
+        return handleAt(fraction, place(lowNow), place(highNow))
     }
 
     Box(
         Modifier.fillMaxWidth().height(34.dp)
+            .keyboardSlider(focus) { steps ->
+                val (lowNow, highNow) = now
+                set(active, (if (active == LowHandle) lowNow else highNow) + steps * step)
+            }
             .pointerInput(Unit) {
                 detectTapGestures { point ->
+                    focus.requestFocus()
                     val fraction = point.x / size.width
-                    moveTo(nearest(fraction), fraction)
+                    val handle = nearest(fraction).takeIf { it != Undecided } ?: HighHandle
+                    active = handle
+                    moveTo(handle, fraction)
                 }
             }
             .pointerInput(Unit) {
                 detectDragGestures(
-                    onDragStart = { point -> dragging = nearest(point.x / size.width) },
+                    onDragStart = { point ->
+                        focus.requestFocus()
+                        dragging = nearest(point.x / size.width)
+                    },
                     onDragEnd = { dragging = null },
                     onDragCancel = { dragging = null },
-                ) { pointer, _ -> dragging?.let { moveTo(it, pointer.position.x / size.width) } }
+                ) { pointer, amount ->
+                    // Both on one spot: the first move says which one is pulled.
+                    if (dragging == Undecided && amount.x != 0f) dragging = if (amount.x > 0f) HighHandle else LowHandle
+                    dragging?.takeIf { it != Undecided }?.let {
+                        active = it
+                        moveTo(it, pointer.position.x / size.width)
+                    }
+                }
             },
     ) {
         Canvas(Modifier.fillMaxWidth().height(34.dp)) {
@@ -201,8 +253,9 @@ internal fun TwoHandleRange(
             val to = size.width * toTrack(high)
             drawLine(track, Offset(0f, middle), Offset(size.width, middle), strokeWidth = 2.dp.toPx())
             drawLine(ink, Offset(from, middle), Offset(to, middle), strokeWidth = 4.dp.toPx())
-            for (x in listOf(from, to)) {
-                drawCircle(paper, 7.dp.toPx(), Offset(x, middle))
+            for ((handle, x) in listOf(LowHandle to from, HighHandle to to)) {
+                // The handle the keys move is filled.
+                drawCircle(if (handle == active) ink else paper, 7.dp.toPx(), Offset(x, middle))
                 drawCircle(ink, 7.dp.toPx(), Offset(x, middle), style = Stroke(2.dp.toPx()))
             }
         }
