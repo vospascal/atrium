@@ -144,6 +144,6 @@ internal fun ToolButton(label: String, strong: Boolean = false, enabled: Boolean
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
-        PaperText(label, 14, if (strong && enabled) Backdrop else ink, FontWeight.SemiBold)
+        PaperText(label, 14, if (strong && enabled) Backdrop else ink, FontWeight.SemiBold, singleLine = true)
     }
 }

@@ -211,6 +211,24 @@ internal fun PanelToggle(side: PanelSide, shown: Boolean, onClick: () -> Unit) {
 }
 
 /**
+ * Which labels along a ruler to draw so none overlaps another: each is the span it takes
+ * (left to right, in pixels), tried in [priority] order (indices), and kept only if it stays
+ * [gap] clear of every one kept before it. A narrow ruler shows fewer labels instead of a smear.
+ */
+internal fun labelsThatFit(spans: List<ClosedFloatingPointRange<Float>>, gap: Float, priority: List<Int> = spans.indices.toList()): Set<Int> {
+    val kept = mutableListOf<Int>()
+    for (index in priority) {
+        val span = spans.getOrNull(index) ?: continue
+        val clear = kept.all { other ->
+            val taken = spans[other]
+            span.endInclusive + gap <= taken.start || taken.endInclusive + gap <= span.start
+        }
+        if (clear) kept += index
+    }
+    return kept.toSet()
+}
+
+/**
  * How many steps an arrow key asks a slider to move: right and up one more,
  * left and down one less, ten at a time with Shift. Null for any other key.
  */

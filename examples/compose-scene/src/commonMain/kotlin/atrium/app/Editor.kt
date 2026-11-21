@@ -232,12 +232,27 @@ private fun TopBar(
     onSaveAs: () -> Unit,
     onOpen: () -> Unit,
 ) {
+    // In a narrow window the scene's name gives way first, cut short, and the file name and voice
+    // count are left out, so the buttons always fit on one line.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    val roomy = maxWidth >= RoomyTopBar
     Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        PaperText("‹ Player", 16, Muted, modifier = Modifier.clickable(role = Role.Button, onClick = onBack))
+        PaperText("‹ Player", 16, Muted, singleLine = true, modifier = Modifier.clickable(role = Role.Button, onClick = onBack))
         Spacer(Modifier.width(22.dp))
-        PaperText((scene?.title ?: "No scene open") + if (session.unsaved) "  •" else "", 22, weight = FontWeight.Bold)
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            PaperText(
+                (scene?.title ?: "No scene open") + if (session.unsaved) "  •" else "",
+                22,
+                weight = FontWeight.Bold,
+                singleLine = true,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (roomy) {
+                Spacer(Modifier.width(12.dp))
+                PaperText(scene?.path?.substringAfterLast('/').orEmpty(), 14, Muted, singleLine = true, modifier = Modifier.weight(1f, fill = false))
+            }
+        }
         Spacer(Modifier.width(12.dp))
-        PaperText(scene?.path?.substringAfterLast('/').orEmpty(), 14, Muted, modifier = Modifier.weight(1f))
         val note = session.saveFailure ?: if (session.unsaved) null else "Saved"
         if (note != null && session.saves > 0) {
             PaperText(note, 14, if (session.saveFailure != null) Foreground else Muted)
@@ -261,8 +276,10 @@ private fun TopBar(
             ToolButton("Save", strong = session.unsaved, onClick = onSave)
             Spacer(Modifier.width(8.dp))
             ToolButton("Save as…", onClick = onSaveAs)
-            Spacer(Modifier.width(20.dp))
-            PaperText("${session.description?.sources?.size ?: 0} / $VoiceCount voices", 14, Muted)
+            if (roomy) {
+                Spacer(Modifier.width(20.dp))
+                PaperText("${session.description?.sources?.size ?: 0} / $VoiceCount voices", 14, Muted, singleLine = true)
+            }
         }
         if (workspace != null) {
             Spacer(Modifier.width(16.dp))
@@ -271,18 +288,24 @@ private fun TopBar(
             PanelToggle(PanelSide.Right, workspace.rightShown) { workspace.rightShown = !workspace.rightShown }
         }
     }
+    }
 }
+
+/** From this width the top bar also shows the file name and the voice count. */
+private val RoomyTopBar = 1180.dp
 
 @Composable
 private fun PanelTabs(shown: List<Panel>, selected: Panel, onSelect: (Panel) -> Unit) {
-    Row(Modifier.padding(start = 10.dp, top = 12.dp, bottom = 8.dp)) {
+    // Three tabs fit the narrowest panel; past that they share the width and are cut short.
+    Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 12.dp, bottom = 8.dp)) {
         shown.forEach { entry ->
             PaperText(
                 entry.name,
-                18,
+                17,
                 if (entry == selected) Foreground else Muted,
                 if (entry == selected) FontWeight.Bold else FontWeight.Normal,
-                modifier = Modifier.clickable(role = Role.Tab) { onSelect(entry) }.padding(horizontal = 12.dp, vertical = 4.dp),
+                singleLine = true,
+                modifier = Modifier.weight(1f, fill = false).clickable(role = Role.Tab) { onSelect(entry) }.padding(horizontal = 9.dp, vertical = 4.dp),
             )
         }
     }

@@ -156,11 +156,16 @@ internal fun PaperText(
     spacing: Float = 0f,
     modifier: Modifier = Modifier,
     align: TextAlign = TextAlign.Unspecified,
+    /** Kept to one line, cut short with an ellipsis where it does not fit. */
+    singleLine: Boolean = false,
 ) {
     BasicText(
         value,
         modifier,
         style = TextStyle(color = color, fontSize = size.sp, fontWeight = weight, letterSpacing = spacing.sp, textAlign = align),
+        maxLines = if (singleLine) 1 else Int.MAX_VALUE,
+        softWrap = !singleLine,
+        overflow = if (singleLine) androidx.compose.ui.text.style.TextOverflow.Ellipsis else androidx.compose.ui.text.style.TextOverflow.Clip,
     )
 }
 

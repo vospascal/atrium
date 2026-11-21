@@ -217,11 +217,15 @@ internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifi
                 drawPath(curve({ it.storm }, true), ink.copy(alpha = .35f))
                 drawPath(curve({ it.wind }, false), ink.copy(alpha = .6f), style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()))
             }
-            for (hour in 0..3) {
+            val hours = (0..3).map { hour ->
                 val x = size.width * hour / 3f
                 val label = text.measure("${(windowStart / 3600).toInt() + hour}:00", androidx.compose.ui.text.TextStyle(fontSize = 10.sp, color = muted))
-                val at = (x - label.size.width / 2f).coerceIn(0f, size.width - label.size.width)
-                drawText(label, topLeft = Offset(at, lane + 1.dp.toPx()))
+                label to (x - label.size.width / 2f).coerceIn(0f, size.width - label.size.width)
+            }
+            // The first and last hour first: in a narrow panel the ones between give way.
+            val kept = labelsThatFit(hours.map { (label, at) -> at..(at + label.size.width) }, 6.dp.toPx(), listOf(0, 3, 1, 2))
+            hours.forEachIndexed { index, (label, at) ->
+                if (index in kept) drawText(label, topLeft = Offset(at, lane + 1.dp.toPx()))
             }
             val x = size.width * ((now - windowStart) / OverviewWindow).toFloat().coerceIn(0f, 1f)
             drawLine(ink, Offset(x, 0f), Offset(x, lane), 2.dp.toPx())

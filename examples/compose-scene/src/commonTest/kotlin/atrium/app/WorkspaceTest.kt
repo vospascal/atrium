@@ -42,3 +42,18 @@ class WorkspaceTest {
         assertTrue(workspace.leftShown && workspace.rightShown && workspace.bottomShown)
     }
 }
+
+class LabelsThatFitTest {
+    /** Four labels crowded into a narrow ruler: the first by priority stays, those it would touch go. */
+    @Test
+    fun crowdedLabelsGiveWay() {
+        val spans = listOf(0f..30f, 25f..55f, 60f..90f, 85f..115f)
+        assertEquals(setOf(0, 2), labelsThatFit(spans, gap = 4f))
+        assertEquals(setOf(3, 1), labelsThatFit(spans, gap = 4f, priority = listOf(3, 1, 0, 2)))
+    }
+
+    @Test
+    fun roomyLabelsAllStay() {
+        assertEquals(setOf(0, 1, 2), labelsThatFit(listOf(0f..20f, 40f..60f, 80f..100f), gap = 6f))
+    }
+}

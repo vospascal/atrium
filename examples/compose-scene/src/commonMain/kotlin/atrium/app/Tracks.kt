@@ -330,8 +330,9 @@ private fun Ruler(shown: Double, ahead: Double, modifier: Modifier) {
     val span = shown + ahead
     val step = (shown / 4).toInt()
     Canvas(modifier) {
-        val marks = (0..4).map { -it * step } + if (ahead >= step) listOf(step) else emptyList()
-        for (secondsFromNow in marks) {
+        // Now first, then outward from it: in a narrow panel the ones farthest back give way.
+        val marks = listOf(0) + (if (ahead >= step) listOf(step) else emptyList()) + (1..4).map { -it * step }
+        val labels = marks.map { secondsFromNow ->
             val x = size.width * ((secondsFromNow + shown) / span).toFloat()
             val magnitude = kotlin.math.abs(secondsFromNow)
             val clock = "${magnitude / 60}:${(magnitude % 60).toString().padStart(2, '0')}"
@@ -341,8 +342,11 @@ private fun Ruler(shown: Double, ahead: Double, modifier: Modifier) {
                 else -> "+$clock"
             }
             val measured = text.measure(label, TextStyle(fontSize = 10.sp, color = muted))
-            val at = (x - measured.size.width / 2f).coerceIn(0f, size.width - measured.size.width)
-            drawText(measured, topLeft = Offset(at, 0f))
+            measured to (x - measured.size.width / 2f).coerceIn(0f, size.width - measured.size.width)
+        }
+        val kept = labelsThatFit(labels.map { (measured, at) -> at..(at + measured.size.width) }, 6.dp.toPx())
+        labels.forEachIndexed { index, (measured, at) ->
+            if (index in kept) drawText(measured, topLeft = Offset(at, 0f))
         }
     }
 }
