@@ -46,6 +46,19 @@ memprof = []
 [profile.dev.package."*"]
 opt-level = 3
 
+# The engine's own audio code too. The desktop app builds the engine with the
+# dev profile (its binding plugin has no release switch), and unoptimized it
+# could not keep up: a 512-frame callback at 44.1 kHz has 11.6 ms, and the
+# meadow on headphones took 10.8 ms at the median and 12.5 ms at the 99th
+# percentile, heard as the sound cutting up. Optimized it takes 0.6 ms.
+# Debug assertions and overflow checks stay on. The price is a slower rebuild
+# of these two crates after a change.
+[profile.dev.package.atrium]
+opt-level = 3
+
+[profile.dev.package.atrium-core]
+opt-level = 3
+
 [profile.profiling]
 inherits = "release"
 debug = true
