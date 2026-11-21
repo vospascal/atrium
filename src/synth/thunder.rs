@@ -42,21 +42,31 @@ const SPEED_OF_SOUND: f32 = 343.0;
 const CLAPS: usize = 2;
 const APPOINTMENTS: usize = 8;
 /// The most pulses one clap is made of: segments of channel and branches.
-const MAX_PULSES: usize = 3_200;
+const MAX_PULSES: usize = 16_000;
 /// The most pulses sounding at one moment of a clap; more are dropped, quietest first being likeliest.
-const MAX_SOUNDING: usize = 384;
+const MAX_SOUNDING: usize = 1_024;
 /// How long a clap fades when a newer one takes its place (s).
 const STEAL_SECONDS: f32 = 0.010;
 /// Mean turn from one segment of channel to the next (radians): about 16°,
 /// the tortuosity measured on real lightning.
 const MEAN_TURN: f32 = 0.28;
 /// A pulse's length 1 km from its segment (s); it lengthens a little with distance.
-const PULSE_SECONDS_AT_A_KILOMETRE: f32 = 0.0035;
+const PULSE_SECONDS_AT_A_KILOMETRE: f32 = 0.0025;
+/// Pulses each segment sounds as, for its crookedness below a segment's length.
+const MICRO_PULSES: usize = 10;
+/// How far those pulses spread in time beyond the segment's own length (s).
+const MICRO_JITTER_SECONDS: f32 = 0.004;
+/// The most the ground takes off sound that grazes it the whole way (dB).
+const GROUND_LOSS_DB: f32 = 14.0;
+/// Sound arriving at this elevation or steeper loses nothing to the ground (radians, about 15°).
+const GROUND_LOSS_BELOW: f32 = 0.26;
+/// From this far the ground's loss is full; nearer, it is less (m).
+const GROUND_LOSS_FULL_FROM: f32 = 2_000.0;
 /// Air absorption at 1 kHz (dB per metre); it grows with the square of the frequency.
 const ABSORPTION_AT_A_KILOHERTZ: f32 = 0.005;
 /// How much louder a segment side-on to the listener is than one end-on: the
 /// claps in a rumble.
-const SIDE_ON: f32 = 0.88;
+const SIDE_ON: f32 = 0.6;
 /// Each of a pulse's three filter stages sits this far above where the air
 /// takes 3 dB off, so the three together lose 3 dB there: 1 / √(2^(1/3) − 1).
 const STAGE_CUTOFF_FACTOR: f32 = 1.961;
@@ -64,13 +74,14 @@ const STAGE_CUTOFF_FACTOR: f32 = 1.961;
 /// clap's loudest moment (s).
 const LOUDEST_WINDOW_SECONDS: f32 = 0.015;
 /// Share of a clap's own span over which its last arrivals fade.
-const FADE_SHARE: f32 = 0.35;
+const FADE_SHARE: f32 = 0.15;
 /// How far a cloud flash's course turns from running straight away from the
 /// listener (radians): up to 60° either way.
 const MAX_FLASH_ANGLE: f32 = 1.05;
-/// How loud the run inside the cloud is next to the channel to the ground,
-/// which carries the return stroke's full current.
-const IN_CLOUD_STRENGTH: f32 = 0.6;
+/// How loud the run inside the cloud is next to the channel to the ground:
+/// as loud, since a flash keeps its energy along its whole run, which is
+/// what holds a rumble up for seconds instead of letting it sag at once.
+const IN_CLOUD_STRENGTH: f32 = 1.0;
 /// How loud a branch is next to the main channel: it carries less current.
 const BRANCH_STRENGTH: f32 = 0.5;
 /// Output trim, so every kind peaks under full scale at every rate.
@@ -114,7 +125,7 @@ const KINDS: [Kind; 4] = [
         branches: 4,
         step: 3.0,
         level: 1.0,
-        infra: 0.02,
+        infra: 0.01,
         infra_seconds: (0.10, 0.20),
         seconds: 9.0,
     },
@@ -124,11 +135,11 @@ const KINDS: [Kind; 4] = [
         distance: (1_500.0, 3_000.0),
         length: (2_500.0, 4_000.0),
         height: (2_000.0, 3_000.0),
-        in_cloud: (2_000.0, 4_500.0),
+        in_cloud: (1_000.0, 2_500.0),
         branches: 5,
         step: 4.0,
         level: 0.7,
-        infra: 0.04,
+        infra: 0.02,
         infra_seconds: (0.15, 0.30),
         seconds: 12.0,
     },
@@ -142,7 +153,7 @@ const KINDS: [Kind; 4] = [
         branches: 3,
         step: 5.0,
         level: 0.6,
-        infra: 0.05,
+        infra: 0.025,
         infra_seconds: (0.20, 0.40),
         seconds: 22.0,
     },
@@ -156,7 +167,7 @@ const KINDS: [Kind; 4] = [
         branches: 4,
         step: 6.0,
         level: 0.35,
-        infra: 0.06,
+        infra: 0.03,
         infra_seconds: (0.25, 0.45),
         seconds: 16.0,
     },
@@ -170,6 +181,18 @@ fn kind(take: u8) -> &'static Kind {
 /// with it.
 pub fn clap_seconds(kind_number: u8) -> f32 {
     kind(kind_number).seconds
+}
+
+/// What the ground and the air just above it leave of sound that comes in
+/// low, as a share: sound from low on a channel grazes the ground the whole
+/// way and loses up to [`GROUND_LOSS_DB`] over kilometres, while sound from
+/// high up comes down steeply and keeps it all. That is why a strike a few
+/// kilometres off opens without a bang, and its rumble holds.
+fn ground_effect(from: Vec3, distance: f32) -> f32 {
+    let elevation = (from.z / distance).clamp(0.0, 1.0).asin();
+    let grazing = 1.0 - (elevation / GROUND_LOSS_BELOW).min(1.0);
+    let far = (distance / GROUND_LOSS_FULL_FROM).min(1.0);
+    10f32.powf(-GROUND_LOSS_DB * grazing * far / 20.0)
 }
 
 /// The frequency at which air on `distance` metres takes 3 dB off (Hz).
@@ -330,8 +353,9 @@ impl Clap {
             self.active = false;
             self.steal_gain = 0.0;
         }
-        // Where pulses do line up, a gentle limit, as a microphone near a
-        // strike gives; below about half scale it changes nothing.
+        // Where pulses do line up, a gentle limit rounds the peak, as the air
+        // near a strike and any microphone do; quieter than a fifth of full
+        // scale it changes nothing.
         soft_limit(sum * self.gain) * self.steal_gain.max(0.0)
     }
 }
@@ -364,7 +388,7 @@ fn walk(
 ) -> (Vec3, Vec3) {
     let mut point = start;
     let mut walked = 0.0;
-    while walked < length && pulses.len() < MAX_PULSES - 1 {
+    while walked < length && pulses.len() + MICRO_PULSES < MAX_PULSES - 1 {
         direction = turned(direction, pull, pull_strength, random);
         let next = point + direction * step;
         let next = Vec3::new(next.x, next.y, next.z.max(0.0));
@@ -374,26 +398,33 @@ fn walk(
         let towards_listener = middle * (-1.0 / distance);
         let along = direction.dot(towards_listener).clamp(-1.0, 1.0);
         let side_on = 1.0 - along * along;
-        let loudness = strength * step * ((1.0 - SIDE_ON) + SIDE_ON * side_on * side_on) / distance;
+        let loudness = strength * step * ((1.0 - SIDE_ON) + SIDE_ON * side_on * side_on) / distance
+            * ground_effect(middle, distance);
         // Pulses lengthen with distance, and vary with the segment's energy.
         let seconds = PULSE_SECONDS_AT_A_KILOMETRE
             * (distance / 1_000.0).powf(0.25)
             * (0.6 + 0.8 * random.next_f32());
-        pulses.push(Pulse {
-            at: distance / SPEED_OF_SOUND,
-            amplitude: loudness,
-            seconds,
-            cutoff: absorbed_above(distance),
-        });
+        // A channel is crooked at every scale, down to centimetres: each
+        // segment sounds as several pulses spread over the time its own
+        // length takes to pass, which together make a roar, not a click.
+        let spread = step * along.abs() / SPEED_OF_SOUND + MICRO_JITTER_SECONDS;
+        for _ in 0..MICRO_PULSES {
+            pulses.push(Pulse {
+                at: distance / SPEED_OF_SOUND + spread * random.next_bipolar(),
+                amplitude: loudness * (0.5 + random.next_f32()) / (MICRO_PULSES as f32).sqrt(),
+                seconds: seconds * (0.7 + 0.6 * random.next_f32()),
+                cutoff: absorbed_above(distance),
+            });
+        }
         point = next;
         walked += step;
     }
     (point, direction)
 }
 
-/// Unchanged below half scale, then bending smoothly toward 1.
+/// Unchanged below a fifth of full scale, then bending smoothly toward 1.
 fn soft_limit(value: f32) -> f32 {
-    const KNEE: f32 = 0.5;
+    const KNEE: f32 = 0.2;
     let size = value.abs();
     if size <= KNEE {
         return value;
@@ -575,11 +606,11 @@ fn build_channel(kind: &Kind, random: &mut Rng, pulses: &mut Vec<Pulse>) {
 /// so their echoes never line up.
 const SCATTER_LINES_SECONDS: [f32; 4] = [0.043_7, 0.059_3, 0.078_1, 0.097_1];
 /// How long the scattered sound takes to die away by 60 dB (s).
-const SCATTER_DECAY_SECONDS: f32 = 2.5;
+const SCATTER_DECAY_SECONDS: f32 = 3.0;
 /// Above this the scattered sound is absorbed on each pass (Hz).
-const SCATTER_DARKNESS_HZ: f32 = 600.0;
+const SCATTER_DARKNESS_HZ: f32 = 1_200.0;
 /// How much of the scattered sound is heard next to the direct pulses.
-const SCATTER_MIX: f32 = 0.45;
+const SCATTER_MIX: f32 = 1.0;
 /// The highest output rate the network keeps room for.
 const SCATTER_MOST_SAMPLES_PER_SECOND: f32 = 192_000.0;
 
@@ -1108,7 +1139,15 @@ mod listening_samples {
                     .iter()
                     .fold(0f32, |peak, sample| peak.max(sample.abs()))
                     .max(1e-6);
-                let scaled: Vec<f32> = samples.iter().map(|sample| sample * 0.8 / peak).collect();
+                // Up to where it has died away to 50 dB under its peak.
+                let end = samples
+                    .iter()
+                    .rposition(|sample| sample.abs() > peak * 0.003)
+                    .map_or(samples.len(), |last| last + 4_800);
+                let scaled: Vec<f32> = samples[..end.min(samples.len())]
+                    .iter()
+                    .map(|sample| sample * 0.8 / peak)
+                    .collect();
                 write_wav(
                     &format!("{directory}/{}-{seed}.wav", names[take as usize]),
                     &scaled,

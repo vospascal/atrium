@@ -60,6 +60,28 @@ Fineberg, Walters and Reiss:
 4. **Arrivals in time.** Every pulse is placed at its travel time. The rumble, its claps, its
    swells and its darkening all come from that, not from envelopes drawn by hand.
 5. **The infrasonic swell.** One slow pressure pulse under the whole clap, for the LFE channel.
+6. **Fine crookedness.** A channel is crooked down to centimetres, so each segment sounds as
+   ten pulses spread over a few milliseconds. Without it a rumble is a train of clicks.
+7. **The ground.** Sound from low on the channel grazes the ground all the way and loses up to
+   14 dB over kilometres; sound from high up comes down steeply and keeps it. That is why a
+   strike a few kilometres off opens without a bang and its rumble holds.
+8. **Scattering.** Sound coming back from the ground, terrain and turbulent air: a dark
+   decaying network that fills between the pulses and lets the rumble die away.
+
+## Tuned against the reference
+
+The first version of this model was heard and judged bad: crackly, sagging, too long. Measured
+against the reference it was spiky (crest 22–28 dB against 15.5) and lost its body after the
+first second. Fine crookedness, the ground's loss and more scattering brought a clap to:
+
+| | Reference | Clap |
+|---|---|---|
+| Spectral centroid | 199 Hz | 193–217 Hz |
+| Crest | 15.5 dB | 17–19 dB |
+| Shape | rises, holds about 2.5 s, falls | rises, holds 4–5 s, falls |
+
+`THUNDER_OUT=target/thunder-samples cargo test --release --lib write_listening_samples` writes
+three claps of every kind to listen to.
 
 The four kinds are the generator's takes: **crack** (a ground strike a few hundred metres
 away), **clap** (one 1.5–3 km away, like the reference), **rolling** (a long cloud flash) and
