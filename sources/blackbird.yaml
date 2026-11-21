@@ -20,3 +20,8 @@ rule:
   rests:
     gap: [3, 8]             # seconds of rest between two phrases
     vary: { level: 2, pitch: 15 }   # each phrase up to 2 dB and 15 cents different
+
+# Sings by day and falls silent in the rain.
+follows:
+  - { condition: rain, setting: activity, from: 1, to: 0 }
+  - { condition: daylight, setting: activity, from: 0.15, to: 1 }

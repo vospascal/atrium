@@ -7,3 +7,7 @@ crash_prob: 0.25    # breaker events per second
 reference_spl: 60.0 # dB at 1 m — surf carries
 width: 360
 spread: 0.9
+
+# Breaks more often as the wind rises.
+follows:
+  - { condition: wind, setting: crash_chance, from: 0.1, to: 0.8 }

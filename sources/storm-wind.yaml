@@ -36,3 +36,7 @@ master_gain: 0.85
 
 reference_spl: 60.0         # forceful environmental bed, still below point events
 spread: 1.0                 # descriptive only; Field rendering is diffuse
+
+# Blows harder as the wind rises.
+follows:
+  - { condition: wind, setting: max_speed, from: 10, to: 22 }

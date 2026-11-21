@@ -34,3 +34,7 @@ master_gain: 1.0
 reference_spl: 42.0
 width: 360
 spread: 1.0
+
+# Blows harder as the wind rises.
+follows:
+  - { condition: wind, setting: max_speed, from: 2, to: 9 }

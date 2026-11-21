@@ -14,3 +14,8 @@ rule:
 reference_spl: 68.0        # ~65-70 dB SPL at 1m (collective drone)
 width: 360                  # diffuse, from all around the canopy
 spread: 0.6                 # broad MDAP spread — not a point source
+
+# Sing in the heat of the day, never in the rain.
+follows:
+  - { condition: daylight, setting: activity, from: 0, to: 1 }
+  - { condition: rain, setting: activity, from: 1, to: 0 }

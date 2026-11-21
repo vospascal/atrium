@@ -35,3 +35,7 @@ master_gain: 1.0
 
 reference_spl: 48.0        # nominal field level; gust dynamics rise within this bed
 spread: 1.0                # UI description only; Field does not use MDAP spread
+
+# Blows harder as the wind rises.
+follows:
+  - { condition: wind, setting: max_speed, from: 3, to: 14 }

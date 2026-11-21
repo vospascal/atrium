@@ -73,3 +73,10 @@ sounds:
     place: [-5.0, 8.0, 4.0]
 
 atmosphere: atmospheres/default.yaml
+
+# A fair day: the breeze wanders between still and light, the light between
+# bright and a passing cloud. The birds follow the light; the wind its speed.
+weather:
+  story: drifting
+  wind: [0.05, 0.35]
+  daylight: [0.75, 1.0]

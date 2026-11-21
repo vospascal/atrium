@@ -11,3 +11,8 @@ rule:
     vary: { level: 2, pitch: 10 }
 reference_spl: 65.0        # ~60-70 dB SPL at 1m (chorus of croaks)
 width: 360                  # croaks radiate in all directions
+
+# Croaks more in the rain and at night.
+follows:
+  - { condition: rain, setting: activity, from: 0.6, to: 1 }
+  - { condition: daylight, setting: activity, from: 1, to: 0.5 }

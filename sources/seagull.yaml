@@ -12,3 +12,8 @@ rule:
     vary: { level: 2, pitch: 10 }
 reference_spl: 70.0        # ~70 dB SPL at 1m (loud, carrying call)
 width: 360                  # calls scatter in all directions
+
+# Calls less in the rain and not at all in a storm.
+follows:
+  - { condition: rain, setting: activity, from: 1, to: 0.3 }
+  - { condition: storm, setting: activity, from: 1, to: 0 }
