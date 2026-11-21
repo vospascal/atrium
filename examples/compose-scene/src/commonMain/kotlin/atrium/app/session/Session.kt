@@ -12,6 +12,7 @@ import atrium.engine.LoudnessMap
 import atrium.engine.Output
 import atrium.engine.Position
 import atrium.engine.Preset
+import atrium.engine.Probe
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
 import atrium.engine.SourceDescription
@@ -107,6 +108,16 @@ internal class Session(private val store: SettingsStore) {
     internal fun resetTransport() {
         paused = false
         weatherSpeed = 1f
+    }
+
+    /** Which parts of the render are heard: all of them, unless one is being listened to alone. */
+    var probe by mutableStateOf<Probe?>(null)
+        internal set
+
+    /** Let only what [next] names reach the output. It is the listener's own, like a mute: not saved, not undone. */
+    fun listenTo(next: Probe) {
+        command { setProbe(next) }
+        probe = next
     }
 
     /** The scene's weather story and bands, as the engine has them. */

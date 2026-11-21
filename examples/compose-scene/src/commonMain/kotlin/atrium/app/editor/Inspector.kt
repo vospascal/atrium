@@ -155,6 +155,9 @@ private fun SceneInspector(session: Session, scene: SceneFile, voices: Int) {
         PaperText("How fast sound travels, and how much treble the air takes from a distant sound.", 14, Muted)
     }
 
+    Part("Listen")
+    ListenPart(session)
+
     Part("Output")
     PaperText(telemetry?.output?.let { "${it.renderMode.label} · ${it.channelMode.label}" } ?: "—", 15)
     PaperText("Volume ${((telemetry?.volume ?: 0f) * 100).roundToInt()} %", 14, Muted)

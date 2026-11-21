@@ -38,6 +38,7 @@ internal fun RunSession(session: Session) {
             session.tracks.clear()
             session.unsaved = false
             session.weather = running.weather()
+            session.probe = running.probe()
             session.history = running.history()
             session.resetTransport()
             session.description = running.scene()
@@ -64,6 +65,7 @@ internal fun RunSession(session: Session) {
             session.engine = null
             session.description = null
             session.planned = emptyList()
+            session.probe = null
             session.history = null
             session.outputs = emptyList()
             session.telemetry = null

@@ -63,6 +63,12 @@ internal fun TopBar(
             PaperText(note, 14, if (session.saveFailure != null) Foreground else Muted)
             Spacer(Modifier.width(14.dp))
         }
+        // A reminder while only part of the scene is heard; pressing it brings the whole back.
+        session.probe?.let { probeLine(it, outputNames(session)) }?.let { hearing ->
+            // In a narrow bar the short form, so the other buttons keep their place.
+            ToolButton(if (roomy) "$hearing  ✕" else "Hearing a part  ✕", strong = true) { session.listenTo(WholeRender) }
+            Spacer(Modifier.width(16.dp))
+        }
         session.history?.let { history ->
             // Undo and redo, named by the step they take back or again.
             ToolButton("Undo", enabled = history.undoable.isNotEmpty(), onClick = session::undo)

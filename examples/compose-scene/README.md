@@ -82,6 +82,12 @@ panel or list gets them by using it.
   point to all around, drawn as a soft disc on the map.
 - **Channel meters** sit in the header of the tracks: one per output channel, named as the room
   names its loudspeakers, bold when a channel clips.
+- **Listen** is in the inspector when nothing is selected. *Hear only* plays one part of the
+  scene alone: the direct sound, the reflections, the late reverb or the ambient sounds. *With*
+  switches single effects off and on: air absorption, moving air, the ground, wall colour.
+  *From* plays one loudspeaker or one ear alone. While anything is hidden the top bar says
+  what is heard, and pressing that brings the whole scene back. It is yours, like a mute: not
+  saved, not undone.
 - **Wind from** is under the wind's band in Weather: the compass bearing the wind comes from. An
   arrow in the map's top-left corner points where it blows. It decides how fast far sounds waver
   in the moving air (the engine's README, "Moving air").
