@@ -11,7 +11,7 @@ Kotlin can reach is declared here:
 - `head_trackers()`: the head trackers that can work on this platform.
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_beam`,
-  `set_source_muted`, `set_source_level`, `set_source_gap`, `set_take_chance`, `audition`,
+  `set_source_muted`, `set_source_level`, `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition`, `audition_take`,
   `add_sound`, `remove_sound`, `save_scene`, `set_head_tracker` and `latest_telemetry()`.
 - The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
   editor wrote it), `Output`, `Telemetry`. Telemetry

@@ -16,7 +16,7 @@ use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place, Shape, Sound, When};
 
 use crate::api::{
-    EmitterKind, EngineError, Gap, Position, SceneDescription, SourceDescription, Telemetry,
+    Bout, EmitterKind, EngineError, Gap, Position, SceneDescription, SourceDescription, Telemetry,
 };
 use crate::head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 use crate::output::{playable_outputs, Output};
@@ -199,6 +199,34 @@ impl Engine {
             .map_err(|_| EngineError::CommandQueueFull)?;
         if let Some(source) = sound_in(&mut scene.description, slot) {
             source.gap = Some(Gap { shortest, longest });
+        }
+        Ok(())
+    }
+
+    /// Let the sound in `slot` utter one take `fewest` to `most` times
+    /// running before it chooses another: 1 and 1 changes every time.
+    /// Immediate; a sound that loops or has no takes is left alone.
+    pub fn set_source_bout(&self, slot: u16, fewest: u32, most: u32) -> Result<(), EngineError> {
+        if fewest < 1 || most < fewest {
+            return Ok(());
+        }
+        let mut scene = lock(&self.scene);
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        if source.gap.is_none() {
+            return Ok(());
+        }
+        lock(&self.commands)
+            .push(Command::SetSourceBout {
+                index: slot,
+                fewest,
+                most,
+            })
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        source.bout = Bout { fewest, most };
+        if let Some(entity) = scene.entity_in(slot) {
+            entity.when.bout = Some([fewest, most]);
         }
         Ok(())
     }
@@ -417,6 +445,61 @@ impl Engine {
         let built = self
             .sounds
             .build(&id, &self.sound_ahead(preset, None, None), AUDITION_SLOT)
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        edits.send(SceneEdit::AddSource {
+            slot: AUDITION_SLOT as u16,
+            source: built.source,
+            bands: built.bands,
+            amplitude: built.amplitude,
+        })?;
+        edits.auditioned = true;
+        Ok(())
+    }
+
+    /// Play take `take` of the sound in `slot` once, just ahead of the
+    /// listener and all round, to hear it on its own; or stop with `None`.
+    /// It plays from the audition voice, like `audition`, and stops any
+    /// audition in progress. Telemetry reports the audition voice's take while
+    /// it sounds and nothing once it has ended.
+    ///
+    /// Building it decodes the recording, so this takes a moment. Keep it off
+    /// a UI thread.
+    pub fn audition_take(&self, slot: u16, take: Option<u16>) -> Result<(), EngineError> {
+        let mut edits = lock(&self.edits);
+        edits.stop_audition()?;
+        let Some(take) = take else {
+            return Ok(());
+        };
+        let scene = lock(&self.scene);
+        let Some(source) = scene
+            .description
+            .sources
+            .iter()
+            .find(|source| source.slot == slot)
+        else {
+            return Ok(());
+        };
+        let id =
+            EntityId::new(&source.id).map_err(|error| EngineError::Scene(error.to_string()))?;
+        let Some(mut entity) = scene
+            .document
+            .sounds
+            .iter()
+            .find(|(own, _)| **own == id)
+            .map(|(_, entity)| entity.clone())
+        else {
+            return Ok(());
+        };
+        drop(scene);
+        let ahead = Vec3::new(self.listener_yaw.cos(), self.listener_yaw.sin(), 0.0);
+        entity.place = self
+            .sounds
+            .place_at(self.listener_position + ahead * AHEAD_OF_LISTENER);
+        entity.shape.width = Some(ALL_ROUND);
+        entity.moves = Moves::Still;
+        let built = self
+            .sounds
+            .build_take(&id, &entity, take as usize, AUDITION_SLOT)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         edits.send(SceneEdit::AddSource {
             slot: AUDITION_SLOT as u16,
@@ -1124,6 +1207,35 @@ mod tests {
             "the last take that can be chosen keeps its chance: {chances:?}"
         );
 
+        // Bouts, and one take heard on its own from the audition voice.
+        engine.set_source_bout(cricket.slot, 2, 3).expect("bout");
+        engine
+            .set_source_bout(cricket.slot, 3, 1)
+            .expect("a backwards bout is ignored");
+        let bout = engine
+            .scene()
+            .sources
+            .iter()
+            .find(|source| source.slot == cricket.slot)
+            .expect("cricket")
+            .bout;
+        assert_eq!(bout, Bout { fewest: 2, most: 3 });
+        engine
+            .audition_take(cricket.slot, Some(0))
+            .expect("one take on its own");
+        telemetry_when(&engine, |telemetry| {
+            telemetry
+                .sources
+                .iter()
+                .any(|source| source.slot as usize == AUDITION_SLOT && source.take == Some(0))
+        });
+        assert_eq!(
+            engine.scene().sources.len(),
+            2,
+            "an audition is not a layer"
+        );
+        engine.audition_take(cricket.slot, None).expect("stops");
+
         let saved = std::env::temp_dir().join(format!("atrium-rests-{}.yaml", std::process::id()));
         let saved = saved.to_str().expect("utf-8").to_owned();
         let _ = std::fs::remove_file(&saved);
@@ -1143,6 +1255,7 @@ mod tests {
                 .count(),
             chances.len() - 1
         );
+        assert_eq!(cricket.when.bout, Some([2, 3]));
         written.build().expect("the saved scene builds");
         let _ = std::fs::remove_file(&saved);
     }

@@ -86,6 +86,16 @@ pub struct SourceDescription {
     /// How long it rests between two takes, or `None` when it plays all the
     /// time.
     pub gap: Option<Gap>,
+    /// How many times running one take is uttered before another is chosen.
+    pub bout: Bout,
+}
+
+/// The fewest and most times running one take is uttered before another is
+/// chosen: 1 and 1 changes every time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct Bout {
+    pub fewest: u32,
+    pub most: u32,
 }
 
 /// One thing a sound can utter, and how often it is chosen next to the
@@ -159,6 +169,10 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
             gap: source
                 .gap
                 .map(|[shortest, longest]| Gap { shortest, longest }),
+            bout: Bout {
+                fewest: source.bout[0],
+                most: source.bout[1],
+            },
         }
     }
 }
