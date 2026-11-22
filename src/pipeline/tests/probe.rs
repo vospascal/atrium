@@ -94,9 +94,8 @@ const NOTHING: Probe = Probe {
 /// in every render mode: a probe takes parts away and changes nothing else.
 /// The reverb heard alone is still fed by the direct sound it hides.
 ///
-/// Compared from a quarter of a second on. A part hidden from the start
-/// fades out over the first callback, and the delays after the renderer
-/// (speaker alignment, the ambisonic bus) carry that fade a little further.
+/// Compared from the first sample: a part hidden before the pipeline first
+/// renders has never been heard, so there is nothing to fade out.
 #[test]
 fn the_parts_heard_alone_add_up_to_the_whole() {
     let rig = glass_room(48_000.0);
@@ -123,13 +122,11 @@ fn the_parts_heard_alone_add_up_to_the_whole() {
         ]
         .map(|probe| render_with(&rig, mode, probe, frames));
 
-        let settled = 12_000;
-        let skipped = settled * rig.channels;
         let peak = whole
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
         assert!(peak > 0.01, "{mode:?}: the whole is silent");
-        for index in skipped..whole.len() {
+        for index in 0..whole.len() {
             let sum: f32 = parts.iter().map(|part| part[index]).sum();
             assert!(
                 (sum - whole[index]).abs() < 2e-4 * peak.max(1.0),
@@ -139,7 +136,7 @@ fn the_parts_heard_alone_add_up_to_the_whole() {
         }
 
         let all: Vec<usize> = (0..rig.channels).collect();
-        let heard = |part: &[f32]| energy(part, rig.channels, &all, settled);
+        let heard = |part: &[f32]| energy(part, rig.channels, &all, 0);
         assert!(heard(&parts[0]) > 0.0, "{mode:?}: no direct sound");
         assert!(heard(&parts[1]) > 0.0, "{mode:?}: no reflections");
         assert!(heard(&parts[3]) > 0.0, "{mode:?}: no ambient sound");

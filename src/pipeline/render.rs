@@ -55,8 +55,10 @@ pub struct RenderPipeline {
     /// someone is listening to one alone.
     pub probe: Probe,
     /// How much of the ambient fields the last buffer let through, so a
-    /// probe fades them and never cuts.
-    ambient_heard: f32,
+    /// probe fades them and never cuts. `None` before the first buffer:
+    /// nothing has been heard to fade from, so a probe set before the
+    /// pipeline first renders holds from its first sample.
+    ambient_heard: Option<f32>,
     /// The mono bus ambient sound joins when the renderer hears fields
     /// through two ears (`FieldEncoding::Ears`).
     ambient_bus: Vec<f32>,
@@ -86,7 +88,7 @@ impl RenderPipeline {
             reverb_send_buffer: Vec::new(),
             reverb_rt60_override,
             probe: Probe::WHOLE,
-            ambient_heard: 1.0,
+            ambient_heard: None,
             ambient_bus: Vec::new(),
             ambient_signal: Vec::new(),
         }
@@ -204,7 +206,9 @@ pub fn render_pipeline(
     } = pipeline;
     let probe = *probe;
     let ambient_heard = if probe.ambient { 1.0 } else { 0.0 };
-    let ambient_was_heard = std::mem::replace(ambient_was_heard, ambient_heard);
+    let ambient_was_heard = ambient_was_heard
+        .replace(ambient_heard)
+        .unwrap_or(ambient_heard);
 
     // Ensure topology
     renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);

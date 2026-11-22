@@ -156,8 +156,10 @@ pub struct WorldLockedRenderer {
     /// Previous per-channel gains per source (for gain ramping).
     prev_gains: Vec<[f32; MAX_CHANNELS]>,
     /// How much of the direct sound and of the reflections the last buffer
-    /// let through, so a probe fades them and never cuts.
-    prev_heard: Vec<(f32, f32)>,
+    /// let through, so a probe fades them and never cuts. `None` before a
+    /// source's first buffer: nothing has been heard to fade from, so a
+    /// probe set before the first render holds from its first sample.
+    prev_heard: Vec<Option<(f32, f32)>>,
     /// Cached speaker count for topology changes.
     speaker_count: usize,
     sample_rate: f32,
@@ -309,7 +311,7 @@ impl Renderer for WorldLockedRenderer {
         let inv_frames = 1.0 / out.num_frames as f32;
         let prev = &self.prev_gains[source_idx];
         let heard = (ctx.heard(PathKind::Direct), ctx.heard(PathKind::Reflection));
-        let was_heard = self.prev_heard[source_idx];
+        let was_heard = self.prev_heard[source_idx].unwrap_or(heard);
 
         for frame in 0..out.num_frames {
             let t = frame as f32 * inv_frames;
@@ -340,7 +342,7 @@ impl Renderer for WorldLockedRenderer {
         }
 
         self.prev_gains[source_idx] = path_gains;
-        self.prev_heard[source_idx] = heard;
+        self.prev_heard[source_idx] = Some(heard);
     }
 
     fn name(&self) -> &str {
@@ -409,7 +411,7 @@ impl Renderer for WorldLockedRenderer {
             self.prev_gains.push([0.0; MAX_CHANNELS]);
         }
         while self.prev_heard.len() < source_count {
-            self.prev_heard.push((1.0, 1.0));
+            self.prev_heard.push(None);
         }
     }
 
