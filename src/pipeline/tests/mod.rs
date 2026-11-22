@@ -15,6 +15,9 @@ use atrium_core::source::SoundSource;
 use atrium_core::speaker::{RenderMode, SpeakerLayout};
 use atrium_core::types::Vec3;
 
+mod ambient_arc_headphones;
+mod ambient_arc_listening;
+mod ambient_arc_speakers;
 mod ambient_cost;
 mod ambient_headphones;
 mod ambient_listening;

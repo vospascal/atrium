@@ -85,15 +85,15 @@ const LONGEST_ECHO_DELAY_SECONDS: f64 = 0.03;
 /// frequency, so the shares of sound and echo do, and a share that changes
 /// with frequency spreads a little in time to both sides; without this the
 /// part before time zero would be cut off.
-const LEAD_IN_SECONDS: f64 = 0.001;
+pub(super) const LEAD_IN_SECONDS: f64 = 0.001;
 
 /// How long each filter is: twice the longest echo, room for the echo and
 /// the minimum-phase colour it carries.
-const FILTER_SECONDS: f64 = 0.06;
+pub(super) const FILTER_SECONDS: f64 = 0.06;
 
 /// The last part of each filter fades out over this, so it ends without a
 /// step.
-const FADE_OUT_SECONDS: f64 = 0.005;
+pub(super) const FADE_OUT_SECONDS: f64 = 0.005;
 
 /// The frequency grid the filters are designed on spans this long in time,
 /// far beyond the filters, so nothing wraps round.
@@ -133,9 +133,35 @@ pub(in crate::pipeline::renderers::binaural) fn sound_and_echo_for_coherence(
 }
 
 /// How long the echo delay is at `frequency`, in seconds.
+#[cfg(test)]
 pub(in crate::pipeline::renderers::binaural) fn echo_delay_seconds(frequency: f64) -> f64 {
+    echo_delay_turning(
+        frequency,
+        TURNS_PER_THIRD_OCTAVE,
+        LONGEST_ECHO_DELAY_SECONDS,
+    )
+}
+
+/// How long an echo delay is at `frequency` whose phase turns `turns` times
+/// across a third octave, and that is never longer than `longest`, in
+/// seconds.
+fn echo_delay_turning(frequency: f64, turns: f64, longest: f64) -> f64 {
     let width = THIRD_OCTAVE_RELATIVE_WIDTH * frequency.max(1.0);
-    (INTERAURAL_LAG_MARGIN_SECONDS + TURNS_PER_THIRD_OCTAVE / width).min(LONGEST_ECHO_DELAY_SECONDS)
+    (INTERAURAL_LAG_MARGIN_SECONDS + turns / width).min(longest)
+}
+
+/// The phase of an echo delay that turns `turns` times across a third
+/// octave and is never longer than `longest` seconds, on a grid of `bins` bins `bin_hz` apart: the integral of its
+/// delay over frequency.
+pub(super) fn echo_delay_phase(bins: usize, bin_hz: f64, turns: f64, longest: f64) -> Vec<f64> {
+    let mut delay_phase = vec![0.0f64; bins];
+    for bin in 1..bins {
+        let previous = echo_delay_turning((bin - 1) as f64 * bin_hz, turns, longest);
+        let current = echo_delay_turning(bin as f64 * bin_hz, turns, longest);
+        delay_phase[bin] =
+            delay_phase[bin - 1] - std::f64::consts::TAU * 0.5 * (previous + current) * bin_hz;
+    }
+    delay_phase
 }
 
 /// The two ears' filters at `sample_rate` from the diffuse-field
@@ -156,14 +182,12 @@ pub(in crate::pipeline::renderers::binaural) fn design_ear_filters(
 
     let coherence = smoothed_coherence(statistics, bin_hz);
 
-    // The echo delay's phase: the integral of its delay over frequency.
-    let mut delay_phase = vec![0.0f64; bins];
-    for bin in 1..bins {
-        let previous = echo_delay_seconds((bin - 1) as f64 * bin_hz);
-        let current = echo_delay_seconds(bin as f64 * bin_hz);
-        delay_phase[bin] =
-            delay_phase[bin - 1] - std::f64::consts::TAU * 0.5 * (previous + current) * bin_hz;
-    }
+    let delay_phase = echo_delay_phase(
+        bins,
+        bin_hz,
+        TURNS_PER_THIRD_OCTAVE,
+        LONGEST_ECHO_DELAY_SECONDS,
+    );
 
     let filter_length = (FILTER_SECONDS * sample_rate as f64).round() as usize;
     let fade_length = (FADE_OUT_SECONDS * sample_rate as f64).round() as usize;

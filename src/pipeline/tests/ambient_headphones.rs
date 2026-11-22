@@ -125,7 +125,7 @@ pub(super) fn measured_diffuse_field() -> &'static (EarSpectra, EarSpectra) {
 }
 
 /// Fine enough for a third octave at 100 Hz (23 Hz wide) to hold 31 bins.
-const ANALYSIS_SIZE: usize = 1 << 16;
+pub(super) const ANALYSIS_SIZE: usize = 1 << 16;
 
 fn work_out_measured_diffuse_field() -> (EarSpectra, EarSpectra) {
     let sofa = OpenOptions::new()
@@ -237,7 +237,7 @@ fn work_out_measured_diffuse_field() -> (EarSpectra, EarSpectra) {
 /// A spectrum of a correlation shorter than its grid, on the analysis grid:
 /// back to the correlation, zero-padded between its positive and negative
 /// lags, and forward again.
-fn on_fine_grid(short: &[Complex<f64>]) -> Vec<Complex<f64>> {
+pub(super) fn on_fine_grid(short: &[Complex<f64>]) -> Vec<Complex<f64>> {
     let short_size = 2 * (short.len() - 1);
     let mut planner = RealFftPlanner::<f64>::new();
     let inverse = planner.plan_fft_inverse(short_size);

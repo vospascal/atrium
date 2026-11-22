@@ -3,7 +3,8 @@
 //!
 //! `cargo test --release --lib ambient_sound_cost -- --ignored --nocapture`
 //! and `... headphone_scene_cost ...` print the time one 512-frame callback
-//! at 48 kHz takes. They assert nothing: timings depend on the machine, so
+//! at 48 kHz takes, and `... ambient_arc_cost ...` the meadow with four
+//! winds all round and from arcs. They assert nothing: timings depend on the machine, so
 //! they are read, not tested.
 
 use std::time::Instant;
@@ -123,4 +124,66 @@ fn headphone_scene_cost() {
             scene_microseconds_per_callback(probe)
         );
     }
+}
+
+/// `scenes/nature.yaml` with the four winds added as ambient sounds at the
+/// four points of the compass, 20 m out, each from an arc `arc` degrees
+/// wide, or all round.
+fn nature_with_winds(arc: Option<f32>) -> crate::config::SceneConfig {
+    let shape = arc
+        .map(|degrees| format!("\n    shape: {{ arc: {degrees} }}"))
+        .unwrap_or_default();
+    let winds: String = [
+        ("field-wind", [0.0, 20.0]),
+        ("soft-wind", [20.0, 0.0]),
+        ("canopy-wind", [0.0, -20.0]),
+        ("storm-wind", [-20.0, 0.0]),
+    ]
+    .iter()
+    .map(|(name, [x, y])| {
+        format!("\n  {name}:\n    sound: {{ preset: sources/{name}.yaml }}{shape}\n    place: [{x}, {y}, 0.0]")
+    })
+    .collect();
+    let nature = std::fs::read_to_string("scenes/nature.yaml").expect("scene");
+    let text = nature.replacen("\natmosphere:", &format!("{winds}\n\natmosphere:"), 1);
+    serde_yaml::from_str(&text).expect("scene with winds")
+}
+
+/// The time of one callback of the meadow with four winds on headphones,
+/// offline: the best of three runs of 2,000 callbacks.
+fn winds_microseconds_per_callback(arc: Option<f32>) -> f64 {
+    let mut config = nature_with_winds(arc).for_headphones();
+    config.seed = Some(7);
+    let mut scene = config.build().expect("build").scene;
+    scene.sample_rate = 48_000.0;
+    scene.init_pipelines();
+    let channels = scene.speaker_layout.total_channels();
+    let mut buffer = vec![0.0f32; BLOCK_FRAMES * channels];
+    for _ in 0..200 {
+        scene.render(&mut buffer, channels);
+    }
+    (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            for _ in 0..CALLBACKS {
+                scene.render(&mut buffer, channels);
+            }
+            start.elapsed().as_secs_f64() * 1e6 / CALLBACKS as f64
+        })
+        .fold(f64::MAX, f64::min)
+}
+
+#[test]
+#[ignore = "a timing, read by hand: --ignored --nocapture"]
+fn ambient_arc_cost() {
+    for (name, arc) in [("all round", None), ("from arcs of 90°", Some(90.0))] {
+        eprintln!(
+            "scenes/nature.yaml with four winds on headphones, {name}: {:.1} µs per 512-frame callback at 48 kHz",
+            winds_microseconds_per_callback(arc)
+        );
+    }
+    eprintln!(
+        "scenes/nature.yaml on headphones: {:.1} µs per 512-frame callback at 48 kHz",
+        scene_microseconds_per_callback(Probe::WHOLE)
+    );
 }

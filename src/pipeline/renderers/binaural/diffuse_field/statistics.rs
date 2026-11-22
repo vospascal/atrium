@@ -47,13 +47,101 @@ pub(in crate::pipeline::renderers::binaural) struct DiffuseStatistics {
     pub(in crate::pipeline::renderers::binaural) cross_power: Vec<f64>,
 }
 
-/// One measured direction and how many lattice points it is nearest to.
-struct MeasuredDirection {
+/// One measured direction: its two responses and the set's own per-ear
+/// delays, which the responses leave out.
+pub(super) struct MeasuredDirection {
     left: Vec<f32>,
     right: Vec<f32>,
     left_delay_seconds: f32,
     right_delay_seconds: f32,
-    nearest_to: usize,
+}
+
+/// Measured directions on the short grid their spectra are summed on: a
+/// power or cross spectrum of a response L samples long is the transform of
+/// a correlation 2L − 1 samples long (and as much again as the ears' delays
+/// differ). Sampled on a grid at least that long it is known exactly between
+/// the bins, so it is summed on a short grid and carried to a long one
+/// exactly (`on_long_grid`).
+pub(super) struct ShortGrid {
+    pub(super) size: usize,
+    sample_rate: f32,
+    forward: std::sync::Arc<dyn realfft::RealToComplex<f64>>,
+    time: Vec<f64>,
+    left_spectrum: Vec<Complex<f64>>,
+    right_spectrum: Vec<Complex<f64>>,
+}
+
+impl ShortGrid {
+    /// The grid for `directions`, responses `filter_length` long at
+    /// `sample_rate`.
+    pub(super) fn for_directions(
+        directions: &[MeasuredDirection],
+        filter_length: usize,
+        sample_rate: f32,
+    ) -> Self {
+        let largest_interaural_delay = directions
+            .iter()
+            .map(|direction| {
+                ((direction.left_delay_seconds - direction.right_delay_seconds).abs() * sample_rate)
+                    .ceil() as usize
+            })
+            .max()
+            .unwrap_or(0);
+        let size = (2 * (filter_length + largest_interaural_delay)).next_power_of_two();
+        let mut planner = RealFftPlanner::<f64>::new();
+        let forward = planner.plan_fft_forward(size);
+        Self {
+            size,
+            sample_rate,
+            time: forward.make_input_vec(),
+            left_spectrum: forward.make_output_vec(),
+            right_spectrum: forward.make_output_vec(),
+            forward,
+        }
+    }
+
+    pub(super) fn bins(&self) -> usize {
+        self.size / 2 + 1
+    }
+
+    /// Add `weight` times `direction`'s two ear powers and their
+    /// cross-spectrum to the three sums, bin by bin.
+    pub(super) fn add(
+        &mut self,
+        direction: &MeasuredDirection,
+        weight: f64,
+        left_power: &mut [f64],
+        right_power: &mut [f64],
+        cross: &mut [Complex<f64>],
+    ) {
+        for (response, spectrum) in [
+            (&direction.left, &mut self.left_spectrum),
+            (&direction.right, &mut self.right_spectrum),
+        ] {
+            self.time.fill(0.0);
+            for (slot, &sample) in self.time.iter_mut().zip(response.iter()) {
+                *slot = sample as f64;
+            }
+            self.forward
+                .process(&mut self.time, spectrum)
+                .expect("forward transform of an HRIR");
+        }
+        // The set's own per-ear delays, which the responses leave out
+        // (the shipped set has none: they are in its responses).
+        let interaural_delay =
+            (direction.left_delay_seconds - direction.right_delay_seconds) as f64;
+        for bin in 0..self.bins() {
+            let mut product = self.left_spectrum[bin] * self.right_spectrum[bin].conj();
+            if interaural_delay != 0.0 {
+                let frequency = bin as f64 * self.sample_rate as f64 / self.size as f64;
+                product *=
+                    Complex::from_polar(1.0, -std::f64::consts::TAU * frequency * interaural_delay);
+            }
+            left_power[bin] += weight * self.left_spectrum[bin].norm_sqr();
+            right_power[bin] += weight * self.right_spectrum[bin].norm_sqr();
+            cross[bin] += weight * product;
+        }
+    }
 }
 
 impl DiffuseStatistics {
@@ -65,62 +153,33 @@ impl DiffuseStatistics {
         sample_rate: f32,
         fft_size: usize,
     ) -> Self {
-        let directions = measured_directions(sofa);
-        let filter_length = sofa.filter_len();
-        // A power or cross spectrum of a response L samples long is the
-        // transform of a correlation 2L − 1 samples long (and as much again
-        // as the ears' delays differ). Sampled on a grid at least that long
-        // it is known exactly between the bins, so it is summed on a short
-        // grid and carried to the long one exactly.
-        let largest_interaural_delay = directions
-            .iter()
-            .map(|direction| {
-                ((direction.left_delay_seconds - direction.right_delay_seconds).abs() * sample_rate)
-                    .ceil() as usize
-            })
-            .max()
-            .unwrap_or(0);
-        let short_size = (2 * (filter_length + largest_interaural_delay)).next_power_of_two();
-        let short_bins = short_size / 2 + 1;
-        let mut planner = RealFftPlanner::<f64>::new();
-        let forward = planner.plan_fft_forward(short_size);
+        let golden_angle = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+        let lattice = (0..LATTICE_DIRECTIONS).map(|point| {
+            let up = 1.0 - (2.0 * point as f64 + 1.0) / LATTICE_DIRECTIONS as f64;
+            let across = (1.0 - up * up).sqrt();
+            let azimuth = point as f64 * golden_angle;
+            [across * azimuth.cos(), across * azimuth.sin(), up]
+        });
+        let (directions, nearest) = nearest_measured(sofa, lattice);
+        let mut nearest_to = vec![0usize; directions.len()];
+        for index in nearest {
+            nearest_to[index] += 1;
+        }
+        let mut grid = ShortGrid::for_directions(&directions, sofa.filter_len(), sample_rate);
+        let short_size = grid.size;
+        let short_bins = grid.bins();
         let mut left_power = vec![0.0f64; short_bins];
         let mut right_power = vec![0.0f64; short_bins];
         let mut cross = vec![Complex::new(0.0f64, 0.0); short_bins];
-        let mut time = forward.make_input_vec();
-        let mut left_spectrum = forward.make_output_vec();
-        let mut right_spectrum = forward.make_output_vec();
-        for direction in &directions {
-            let weight = direction.nearest_to as f64 / LATTICE_DIRECTIONS as f64;
-            for (response, spectrum) in [
-                (&direction.left, &mut left_spectrum),
-                (&direction.right, &mut right_spectrum),
-            ] {
-                time.fill(0.0);
-                for (slot, &sample) in time.iter_mut().zip(response.iter()) {
-                    *slot = sample as f64;
-                }
-                forward
-                    .process(&mut time, spectrum)
-                    .expect("forward transform of an HRIR");
-            }
-            // The set's own per-ear delays, which the responses leave out
-            // (the shipped set has none: they are in its responses).
-            let interaural_delay =
-                (direction.left_delay_seconds - direction.right_delay_seconds) as f64;
-            for bin in 0..short_bins {
-                let mut product = left_spectrum[bin] * right_spectrum[bin].conj();
-                if interaural_delay != 0.0 {
-                    let frequency = bin as f64 * sample_rate as f64 / short_size as f64;
-                    product *= Complex::from_polar(
-                        1.0,
-                        -std::f64::consts::TAU * frequency * interaural_delay,
-                    );
-                }
-                left_power[bin] += weight * left_spectrum[bin].norm_sqr();
-                right_power[bin] += weight * right_spectrum[bin].norm_sqr();
-                cross[bin] += weight * product;
-            }
+        for (direction, count) in directions.iter().zip(nearest_to) {
+            let weight = count as f64 / LATTICE_DIRECTIONS as f64;
+            grid.add(
+                direction,
+                weight,
+                &mut left_power,
+                &mut right_power,
+                &mut cross,
+            );
         }
         Self {
             left_power: on_long_grid(&real_spectrum(&left_power), short_size, fft_size)
@@ -139,7 +198,7 @@ impl DiffuseStatistics {
     }
 }
 
-fn real_spectrum(values: &[f64]) -> Vec<Complex<f64>> {
+pub(super) fn real_spectrum(values: &[f64]) -> Vec<Complex<f64>> {
     values
         .iter()
         .map(|&value| Complex::new(value, 0.0))
@@ -149,7 +208,11 @@ fn real_spectrum(values: &[f64]) -> Vec<Complex<f64>> {
 /// The spectrum `short` (of a real sequence `short_size` long) on a grid of
 /// `long_size` bins: back to the correlation, zero-padded between its
 /// positive and negative lags, and forward again.
-fn on_long_grid(short: &[Complex<f64>], short_size: usize, long_size: usize) -> Vec<Complex<f64>> {
+pub(super) fn on_long_grid(
+    short: &[Complex<f64>],
+    short_size: usize,
+    long_size: usize,
+) -> Vec<Complex<f64>> {
     let mut planner = RealFftPlanner::<f64>::new();
     let inverse = planner.plan_fft_inverse(short_size);
     let forward = planner.plan_fft_forward(long_size);
@@ -177,27 +240,23 @@ fn on_long_grid(short: &[Complex<f64>], short_size: usize, long_size: usize) -> 
     long
 }
 
-/// Every measured direction nearest to at least one lattice point, with the
-/// number of points it is nearest to. Two lookups name the same measured
-/// direction exactly when they return the same response, bit for bit; a
-/// few samples spread over the response find the candidates, and the whole
-/// response decides.
-fn measured_directions(sofa: &Sofar) -> Vec<MeasuredDirection> {
+/// The measured directions nearest to `points` (unit vectors in SOFA
+/// coordinates: x ahead, y to the left, z up), each once, and for every
+/// point the index of the one nearest to it. Two lookups name the same
+/// measured direction exactly when they return the same response, bit for
+/// bit; a few samples spread over the response find the candidates, and the
+/// whole response decides.
+pub(super) fn nearest_measured(
+    sofa: &Sofar,
+    points: impl Iterator<Item = [f64; 3]>,
+) -> (Vec<MeasuredDirection>, Vec<usize>) {
     let mut filter = Filter::new(sofa.filter_len());
     let mut found: Vec<MeasuredDirection> = Vec::new();
+    let mut nearest = Vec::new();
     let mut candidates: HashMap<u64, Vec<usize>> = HashMap::new();
     let probe_step = (sofa.filter_len() / 16).max(1);
-    let golden_angle = std::f64::consts::PI * (3.0 - 5f64.sqrt());
-    for point in 0..LATTICE_DIRECTIONS {
-        let up = 1.0 - (2.0 * point as f64 + 1.0) / LATTICE_DIRECTIONS as f64;
-        let across = (1.0 - up * up).sqrt();
-        let azimuth = point as f64 * golden_angle;
-        sofa.filter_nointerp(
-            (across * azimuth.cos()) as f32,
-            (across * azimuth.sin()) as f32,
-            up as f32,
-            &mut filter,
-        );
+    for [x, y, z] in points {
+        sofa.filter_nointerp(x as f32, y as f32, z as f32, &mut filter);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for response in [&filter.left, &filter.right] {
             for sample in response.iter().step_by(probe_step) {
@@ -213,18 +272,18 @@ fn measured_directions(sofa: &Sofar) -> Vec<MeasuredDirection> {
                 && direction.right_delay_seconds == filter.rdelay
         });
         match same {
-            Some(index) => found[index].nearest_to += 1,
+            Some(index) => nearest.push(index),
             None => {
                 bucket.push(found.len());
+                nearest.push(found.len());
                 found.push(MeasuredDirection {
                     left: filter.left.to_vec(),
                     right: filter.right.to_vec(),
                     left_delay_seconds: filter.ldelay,
                     right_delay_seconds: filter.rdelay,
-                    nearest_to: 1,
                 });
             }
         }
     }
-    found
+    (found, nearest)
 }

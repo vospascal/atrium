@@ -347,6 +347,17 @@ impl Renderer for WorldLockedRenderer {
         "world_locked"
     }
 
+    /// The middle of the speaker ring, which every microphone faces away
+    /// from: an ambient arc is shared out as seen from there, so everyone in
+    /// the room hears it from the same side wherever they stand.
+    fn ambient_receiver(
+        &self,
+        _listener: &atrium_core::listener::Listener,
+        layout: &SpeakerLayout,
+    ) -> Vec3 {
+        layout.bounding_box_centre()
+    }
+
     fn ensure_topology(&mut self, source_count: usize, layout: &SpeakerLayout, sample_rate: f32) {
         if sample_rate != self.sample_rate {
             // Delay lines and filters are sized and tuned for one sample rate.

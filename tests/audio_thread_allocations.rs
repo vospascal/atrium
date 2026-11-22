@@ -80,12 +80,20 @@ const RENDER_MODES: [RenderMode; 5] = [
     RenderMode::Ambisonics,
 ];
 
-/// Build a scene from its YAML and prepare it the way the output device does.
-fn open_scene(path: &str) -> (AudioScene, usize) {
+/// Build a scene from its YAML and prepare it the way the output device does,
+/// every ambient sound from an arc `arc_degrees` wide when one is given.
+fn open_scene(path: &str, arc_degrees: Option<f32>) -> (AudioScene, usize) {
     let mut scene = SceneConfig::load(path)
         .and_then(SceneConfig::build)
         .unwrap_or_else(|error| panic!("{path}: {error}"))
         .scene;
+    if let Some(degrees) = arc_degrees {
+        for source in &mut scene.sources {
+            if source.emitter_kind() == atrium_core::source::EmitterKind::Field {
+                source.set_arc_degrees(degrees);
+            }
+        }
+    }
     scene.sample_rate = SAMPLE_RATE;
     scene.init_pipelines();
     let channels = scene.speaker_layout.total_channels();
@@ -116,7 +124,9 @@ fn heap_operations_during(
 
 /// The commands a control surface sends while audio runs: the listener walks
 /// and turns (head tracking does this 25 times a second), sources move and
-/// change level, and now and then the output or the weather changes.
+/// change level, an ambient sound's arc is dragged wider and narrower (its
+/// filters are designed beside the audio thread and handed over), and now
+/// and then the output or the weather changes.
 fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
     let phase = callback as f32 * 0.05;
     let mut commands = vec![
@@ -133,6 +143,10 @@ fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
             spread: 0.5 + 0.5 * phase.sin(),
         },
         Command::SetMasterGain { gain: 0.8 },
+        Command::SetSourceArc {
+            index: 0,
+            degrees: (90.0 + 60.0 * (phase * 0.5).sin()).round(),
+        },
     ];
     match callback % 40 {
         5 => commands.push(Command::SetChannelMode {
@@ -161,8 +175,8 @@ fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
 }
 
 /// Run every render mode of one scene; return a description of each violation.
-fn violations_in(path: &str) -> Vec<String> {
-    let (mut scene, channels) = open_scene(path);
+fn violations_in(path: &str, arc_degrees: Option<f32>) -> Vec<String> {
+    let (mut scene, channels) = open_scene(path, arc_degrees);
     let (mut producer, mut consumer) = rtrb::RingBuffer::<Command>::new(16);
     // Telemetry is pushed from the callback; keep its queue attached and drained.
     let (telemetry_producer, mut telemetry_consumer) = rtrb::RingBuffer::<TelemetryFrame>::new(8);
@@ -195,6 +209,9 @@ fn violations_in(path: &str) -> Vec<String> {
                 live_origins = origins;
             }
             while telemetry_consumer.pop().is_ok() {}
+            // Real time passes between callbacks: an arc's new width is
+            // designed meanwhile and handed over in a later one.
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         if live > 0 {
             violations.push(format!(
@@ -222,15 +239,18 @@ fn violations_in(path: &str) -> Vec<String> {
 #[test]
 fn audio_callback_never_touches_the_heap() {
     let mut violations = Vec::new();
-    for path in [
-        "scenes/default.yaml",
-        "scenes/nature.yaml",
+    for (path, arc_degrees) in [
+        ("scenes/default.yaml", None),
+        ("scenes/nature.yaml", None),
         // Its field wind is ambient, so on headphones the ears' diffuse
         // field is measured too.
-        "scenes/synth-test.yaml",
-        "scenes/wisp.yaml",
+        ("scenes/synth-test.yaml", None),
+        // And here from an arc, on headphones and on speakers, its width
+        // changed while it plays.
+        ("scenes/synth-test.yaml", Some(90.0)),
+        ("scenes/wisp.yaml", None),
     ] {
-        violations.extend(violations_in(path));
+        violations.extend(violations_in(path, arc_degrees));
     }
     assert!(
         violations.is_empty(),

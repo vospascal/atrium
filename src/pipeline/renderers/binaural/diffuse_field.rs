@@ -14,6 +14,9 @@
 //! where the listener faces: turning the head changes nothing, as it changes
 //! nothing in a real one.
 //!
+//! An ambient sound from an arc of directions instead (`arc`) is the same
+//! computation restricted to the arc: its own filters, which follow the head.
+//!
 //! The same diffuse-field response is what headphones must not hear twice:
 //! it holds the measurement loudspeaker and the dummy head's ear canal. The
 //! headphone equaliser (`inverse`, at work in `equaliser`) divides it out of
@@ -21,6 +24,7 @@
 //! colour out altogether, so a diffuse field reaches each ear flat. With the
 //! probe's equalisation off both are heard as measured.
 
+mod arc;
 mod ear_filters;
 mod equaliser;
 mod inverse;
@@ -37,6 +41,8 @@ use super::equalised_share::EqualisedShare;
 use crate::audio::convolver::Convolver;
 use crate::pipeline::renderer::OutputBuffer;
 
+pub(super) use arc::AmbientArcs;
+use arc::ArcHead;
 use ear_filters::{design_ear_filters, design_grid_size, AmbientEarFilters};
 pub(super) use equaliser::HeadphoneEqualiser;
 use inverse::{design_equaliser, EqualiserFilters};
@@ -198,11 +204,25 @@ impl HeadphoneEqualiser {
     }
 }
 
+impl AmbientArcs {
+    /// The arcs of the head in `sofa`, read from `hrtf_path`, at
+    /// `sample_rate`. Called when the HRIRs are loaded, never on the audio
+    /// thread.
+    pub(super) fn for_head(hrtf_path: &str, sofa: &Sofar, sample_rate: f32) -> Self {
+        Self::new(
+            shared_head_filters(hrtf_path, sofa, sample_rate).arcs,
+            sample_rate,
+        )
+    }
+}
+
 /// Everything designed from one head's diffuse field.
 #[derive(Clone)]
 struct HeadFilters {
     ambient: Arc<AmbientEarFilters>,
     equaliser: Arc<EqualiserFilters>,
+    /// What every arc's filters are designed from.
+    arcs: Arc<ArcHead>,
 }
 
 /// The filters for one HRIR file at one rate, designed the first time they
@@ -225,9 +245,17 @@ fn shared_head_filters(hrtf_path: &str, sofa: &Sofar, sample_rate: f32) -> HeadF
     }
     let grid_size = design_grid_size(sample_rate);
     let statistics = DiffuseStatistics::measure(sofa, sample_rate, grid_size);
+    let equaliser = design_equaliser(&statistics, sample_rate, grid_size);
     let filters = HeadFilters {
         ambient: Arc::new(design_ear_filters(&statistics, sample_rate)),
-        equaliser: Arc::new(design_equaliser(&statistics, sample_rate, grid_size)),
+        arcs: Arc::new(ArcHead::measure(
+            sofa,
+            sample_rate,
+            grid_size,
+            &statistics,
+            &equaliser,
+        )),
+        equaliser: Arc::new(equaliser),
     };
     designed.push((hrtf_path.to_owned(), rate, filters.clone()));
     filters

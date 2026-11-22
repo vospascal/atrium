@@ -13,7 +13,7 @@ use super::path::{
     PathEffect, PathEffectChain, PathEffectContext, PathEffectFactory, PathResolver, MAX_PATHS,
 };
 use super::renderer::{OutputBuffer, Renderer, SourceContext};
-use super::renderers::field::{FieldEncoding, FieldRenderer};
+use super::renderers::field::{AmbientArc, FieldEncoding, FieldPlacement, FieldRenderer};
 use super::room_acoustics;
 use crate::audio::distance::DistanceModel;
 
@@ -60,6 +60,8 @@ pub struct RenderPipeline {
     /// The mono bus ambient sound joins when the renderer hears fields
     /// through two ears (`FieldEncoding::Ears`).
     ambient_bus: Vec<f32>,
+    /// One ambient sound's callback, handed to the renderer to place.
+    ambient_signal: Vec<f32>,
 }
 
 impl RenderPipeline {
@@ -86,6 +88,7 @@ impl RenderPipeline {
             probe: Probe::WHOLE,
             ambient_heard: 1.0,
             ambient_bus: Vec::new(),
+            ambient_signal: Vec::new(),
         }
     }
 
@@ -100,6 +103,15 @@ impl RenderPipeline {
         self.reverb_send_buffer
             .reserve(LARGEST_EXPECTED_CALLBACK_FRAMES * ctx.channels);
         self.ambient_bus.reserve(LARGEST_EXPECTED_CALLBACK_FRAMES);
+        self.ambient_signal
+            .reserve(LARGEST_EXPECTED_CALLBACK_FRAMES);
+    }
+
+    /// Make ready what `sources` need before audio runs
+    /// (`Renderer::prepare_sources`). Called after `ensure_topology`, never
+    /// on the audio thread.
+    pub fn prepare_sources(&mut self, sources: &[Box<dyn atrium_core::source::SoundSource>]) {
+        self.renderer.prepare_sources(sources);
     }
 
     /// Reset all state (called on mode switch).
@@ -188,6 +200,7 @@ pub fn render_pipeline(
         probe,
         ambient_heard: ambient_was_heard,
         ambient_bus,
+        ambient_signal,
     } = pipeline;
     let probe = *probe;
     let ambient_heard = if probe.ambient { 1.0 } else { 0.0 };
@@ -248,13 +261,20 @@ pub fn render_pipeline(
         // filters, or room send. Speakers get decorrelated channels; on
         // headphones they join the bus the ears hear as a diffuse field.
         if source.emitter_kind() == atrium_core::source::EmitterKind::Field {
+            // All round, or an arc centred on the side its place lies on.
+            let receiver = renderer.ambient_receiver(params.listener, params.layout);
+            let placement = FieldPlacement {
+                arc: AmbientArc::toward(source.arc_degrees(), receiver, source.position()),
+                receiver,
+                listener_yaw: params.listener.yaw,
+            };
             let (target, target_channels) = match field_encoding {
                 FieldEncoding::Speaker | FieldEncoding::Ambisonics => {
                     (&mut output[..], params.channels)
                 }
                 FieldEncoding::Ears => {
-                    ambient_bus_fed = true;
-                    (&mut ambient_bus[..], 1)
+                    ambient_signal.resize(num_frames, 0.0);
+                    (&mut ambient_signal[..], 1)
                 }
             };
             field_renderer.render_source(
@@ -267,8 +287,27 @@ pub fn render_pipeline(
                 field_channels,
                 num_frames,
                 (ambient_was_heard, ambient_heard),
+                placement,
                 target,
             );
+            if field_encoding == FieldEncoding::Ears {
+                let mut out = OutputBuffer {
+                    buffer: output,
+                    reverb_send: None,
+                    channels: params.channels,
+                    num_frames,
+                    sample_rate: params.sample_rate,
+                };
+                ambient_bus_fed |= renderer.hear_ambient(
+                    i,
+                    ambient_signal,
+                    placement.arc,
+                    params.listener,
+                    &probe,
+                    ambient_bus,
+                    &mut out,
+                );
+            }
             continue;
         }
 

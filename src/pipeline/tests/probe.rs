@@ -31,8 +31,30 @@ fn glass_room(sample_rate: f32) -> Rig {
     rig
 }
 
-/// A tone burst in a corner of the room and an ambient texture: something in
-/// every part of the render.
+/// An ambient texture from a 90° arc towards `place`.
+struct ArcTexture {
+    rng: crate::synth::noise::Rng,
+    place: Vec3,
+}
+
+impl SoundSource for ArcTexture {
+    fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+        self.rng.next_bipolar() * 0.25
+    }
+    fn position(&self) -> Vec3 {
+        self.place
+    }
+    fn emitter_kind(&self) -> atrium_core::source::EmitterKind {
+        atrium_core::source::EmitterKind::Field
+    }
+    fn arc_degrees(&self) -> f32 {
+        90.0
+    }
+    fn tick(&mut self, _dt: f32) {}
+}
+
+/// A tone burst in a corner of the room, an ambient texture all round and
+/// another from an arc: something in every part of the render.
 fn a_point_and_a_field() -> Vec<Box<dyn SoundSource>> {
     vec![
         Box::new(BurstSource {
@@ -44,13 +66,20 @@ fn a_point_and_a_field() -> Vec<Box<dyn SoundSource>> {
             pos: Vec3::ZERO,
             rng: crate::synth::noise::Rng::new(5),
         }),
+        Box::new(ArcTexture {
+            rng: crate::synth::noise::Rng::new(6),
+            place: Vec3::new(-10.0, 3.0, 0.0),
+        }),
     ]
 }
 
 fn render_with(rig: &Rig, mode: RenderMode, probe: Probe, frames: usize) -> Vec<f32> {
     let mut pipeline = rig.build(mode);
     pipeline.probe = probe;
-    rig.render(&mut pipeline, &mut a_point_and_a_field(), frames)
+    let mut sources = a_point_and_a_field();
+    pipeline.ensure_topology(sources.len(), &rig.layout, rig.sample_rate);
+    pipeline.prepare_sources(&sources);
+    rig.render(&mut pipeline, &mut sources, frames)
 }
 
 const NOTHING: Probe = Probe {

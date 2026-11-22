@@ -10,7 +10,7 @@ use atrium_core::panner::distance_gain_at_model;
 use atrium_core::probe::Probe;
 use atrium_core::speaker::SpeakerLayout;
 
-use super::diffuse_field::{DiffuseField, HeadphoneEqualiser};
+use super::diffuse_field::{AmbientArcs, DiffuseField, HeadphoneEqualiser};
 use super::direction::{equal_power_pan, to_sofa_coords};
 use super::equalised_share::EqualisedShare;
 use super::itd_delay::DELAY_BUF_SIZE;
@@ -20,7 +20,7 @@ use crate::audio::near_field::NearFieldTable;
 use crate::pipeline::path::{PathEffectChain, PathKind, PathSet, MAX_PATHS};
 use crate::pipeline::renderer::SourceContext;
 use crate::pipeline::renderer::{OutputBuffer, Renderer};
-use crate::pipeline::renderers::field::FieldEncoding;
+use crate::pipeline::renderers::field::{AmbientArc, FieldEncoding};
 
 pub struct HrtfRenderer {
     sofa: Option<Sofar>,
@@ -35,6 +35,9 @@ pub struct HrtfRenderer {
     /// The headphone equaliser for the direct sound of every source, from
     /// the same HRIRs; `None` while there are none.
     equaliser: Option<HeadphoneEqualiser>,
+    /// Ambient sounds heard from an arc, from the same HRIRs; `None` while
+    /// there are none.
+    arcs: Option<AmbientArcs>,
     /// How much of the equalised render the last callback ended on, so the
     /// probe's switch glides; `None` after a reset, when there is nothing to
     /// glide from.
@@ -69,6 +72,7 @@ impl HrtfRenderer {
             near_field: None,
             diffuse_field: None,
             equaliser: None,
+            arcs: None,
             equalisation_heard: None,
             base_buf: vec![0.0; BLOCK_SIZE],
             mono_buf: vec![0.0; BLOCK_SIZE],
@@ -103,6 +107,7 @@ impl HrtfRenderer {
                     &sofa,
                     sample_rate,
                 ));
+                self.arcs = Some(AmbientArcs::for_head(&self.hrtf_path, &sofa, sample_rate));
                 self.equalisation_heard = None;
                 self.sofa = Some(sofa);
                 self.near_field = Some(shared_table());
@@ -114,6 +119,7 @@ impl HrtfRenderer {
                 self.near_field = None;
                 self.diffuse_field = None;
                 self.equaliser = None;
+                self.arcs = None;
             }
         }
     }
@@ -464,6 +470,54 @@ impl Renderer for HrtfRenderer {
         }
     }
 
+    /// An ambient sound from an arc through its own filters, which follow
+    /// the head, into the equaliser's bus with the direct sound; all round,
+    /// to the bus the head hears as a diffuse field.
+    fn hear_ambient(
+        &mut self,
+        source_index: usize,
+        signal: &[f32],
+        arc: Option<AmbientArc>,
+        listener: &atrium_core::listener::Listener,
+        probe: &Probe,
+        ambient_bus: &mut [f32],
+        out: &mut OutputBuffer,
+    ) -> bool {
+        let (Some(arcs), Some(equaliser)) = (self.arcs.as_mut(), self.equaliser.as_mut()) else {
+            for (bus, sample) in ambient_bus.iter_mut().zip(signal) {
+                *bus += *sample;
+            }
+            return true;
+        };
+        let equalised =
+            EqualisedShare::between(self.equalisation_heard, probe.headphone_equalisation);
+        arcs.hear(
+            source_index,
+            signal,
+            arc,
+            listener.yaw,
+            equalised,
+            equaliser,
+            ambient_bus,
+            out,
+        )
+    }
+
+    /// Design the filters of every ambient sound's arc now, before audio
+    /// runs, so none starts all round.
+    fn prepare_sources(&mut self, sources: &[Box<dyn atrium_core::source::SoundSource>]) {
+        let Some(arcs) = self.arcs.as_mut() else {
+            return;
+        };
+        for (source_index, source) in sources.iter().enumerate() {
+            if source.emitter_kind() == atrium_core::source::EmitterKind::Field
+                && source.arc_degrees() < atrium_core::source::ALL_ROUND_DEGREES
+            {
+                arcs.prepare(source_index, source.arc_degrees());
+            }
+        }
+    }
+
     /// The direct sound of every source through the headphone equaliser,
     /// then the ambient bus through the head's diffuse field.
     fn finish_ears(
@@ -487,6 +541,9 @@ impl Renderer for HrtfRenderer {
         if sample_rate != self.sample_rate {
             self.load(sample_rate);
         }
+        if let Some(arcs) = self.arcs.as_mut() {
+            arcs.ensure_sources(source_count);
+        }
         if let Some(ref sofa) = self.sofa {
             while self.sources.len() < source_count {
                 let source_idx = self.sources.len();
@@ -501,6 +558,9 @@ impl Renderer for HrtfRenderer {
         }
         if let Some(equaliser) = &mut self.equaliser {
             equaliser.reset();
+        }
+        if let Some(arcs) = &mut self.arcs {
+            arcs.reset();
         }
         self.equalisation_heard = None;
         for (source_idx, src) in self.sources.iter_mut().enumerate() {

@@ -38,7 +38,7 @@ const AS_MEASURED: Probe = Probe {
 };
 
 /// A mono recording at 48 kHz, by linear interpolation, peaking at 0.5.
-fn recording(path: &Path) -> Vec<f32> {
+pub(super) fn recording(path: &Path) -> Vec<f32> {
     let decoded = decode_file(path).expect("decode");
     let step = decoded.sample_rate as f64 / SAMPLE_RATE as f64;
     let resampled: Vec<f32> = (0..((decoded.samples.len() - 1) as f64 / step) as usize)

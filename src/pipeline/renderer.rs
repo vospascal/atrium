@@ -21,7 +21,7 @@ use atrium_core::types::Vec3;
 
 use super::environment::Environment;
 use super::path::{PathEffectChain, PathKind, PathSet};
-use super::renderers::field::FieldEncoding;
+use super::renderers::field::{AmbientArc, FieldEncoding};
 use crate::audio::distance::DistanceModel;
 use atrium_core::probe::Probe;
 
@@ -109,6 +109,43 @@ pub trait Renderer: Send {
     fn field_encoding(&self, _layout: &SpeakerLayout, _device_channels: usize) -> FieldEncoding {
         FieldEncoding::Speaker
     }
+
+    /// Where an ambient sound's arc is centred from: the receiver whose
+    /// bearing to the sound's place is the arc's middle. The point paths are
+    /// resolved towards, unless the renderer feeds speakers from a point of
+    /// its own.
+    fn ambient_receiver(&self, listener: &Listener, layout: &SpeakerLayout) -> Vec3 {
+        self.path_target(listener, layout)
+    }
+
+    /// Hear one ambient sound through the two ears, for a renderer whose
+    /// `field_encoding` is `FieldEncoding::Ears`: `signal` is one callback of
+    /// it, `arc` where it arrives from (`None` all round). What is all round
+    /// is added to `ambient_bus`, which `finish_ears` then hears; what the
+    /// renderer places itself goes to `out`. Returns whether the bus was
+    /// added to. By default all of it is all round.
+    #[allow(clippy::too_many_arguments)]
+    fn hear_ambient(
+        &mut self,
+        _source_index: usize,
+        signal: &[f32],
+        _arc: Option<AmbientArc>,
+        _listener: &Listener,
+        _probe: &Probe,
+        ambient_bus: &mut [f32],
+        _out: &mut OutputBuffer,
+    ) -> bool {
+        for (bus, sample) in ambient_bus.iter_mut().zip(signal) {
+            *bus += *sample;
+        }
+        true
+    }
+
+    /// Make ready what `sources` need before audio runs: on headphones, the
+    /// filters of every ambient sound's arc, so each is heard from its
+    /// first callback. Called when the pipelines are initialised, never on
+    /// the audio thread.
+    fn prepare_sources(&mut self, _sources: &[Box<dyn atrium_core::source::SoundSource>]) {}
 
     /// Add what reaches the two ears once every source has rendered: the
     /// mono ambient bus as the listener hears it, and whatever the renderer
