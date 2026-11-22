@@ -10,6 +10,14 @@ let text = atrium_analysis::summary("heading", &report);      // one screen, eve
 let png = atrium_analysis::picture("heading", &signal, &report); // 1600 px, panels on one time axis
 ```
 
+And the same measures on a stream, for the app's Analysis lanes while a scene plays:
+
+```rust
+let mut live = atrium_analysis::Live::new(sample_rate, channels, full_scale_db_spl);
+live.push(&block, clock_sample);       // what the output played, from that clock sample on
+let columns = live.take_columns();     // 50 ms each: spectrum, LAeq and LAF, onset, width, ILD
+```
+
 `report` serialises to JSON (`report_version: 1`) for the comparison tool. The binary that
 decodes files, reads a render's sidecar and writes all three is `src/bin/analyse.rs`; see
 run.md, "Analyse a file". `power_while_sounding` is the gated level the engine calibrates
@@ -54,6 +62,8 @@ src/
   over_time.rs     the series the strip and the picture draw
   summary.rs       the one-screen text
   picture/         mod.rs (layout), spectrogram.rs, curves.rs, canvas.rs, font.rs
+  frequency_rows.rs  the spectrogram's axis (20 Hz to 20 kHz, log) and window, picture and live
+  live/            the stream: mod.rs (Live, Column), a_weighting.rs, spectrum.rs, onsets.rs
   statistics.rs    decibels, quantiles, correlation
   test_signals.rs  noise, pink noise, sines (tests only)
 ```
@@ -124,6 +134,52 @@ src/
 - **The picture draws text with a 5×7 bitmap font in the crate**, not a font crate or file: no
   dependency, the same pixels everywhere, and readable at twice its size in a 1600 px image.
 
+## Live
+
+`Live` measures what the engine plays, a column every 50 ms, from the same pieces as the
+report, so a live number and an `analyse` number of the same sound cannot disagree beyond what
+a stream cannot know. `src/offline/tests/live_analysis.rs` (in the engine) renders the meadow and
+reads it both ways: every 100 ms width and ILD identical, every 3 s LAeq identical to 0.0001 dB,
+43 onsets live against 44 whole in the minute; the wind alone 40.82 dB SPL live against 40.82.
+
+| Lane | Per column | Shared with the report |
+|---|---|---|
+| Spectrum | Band level (dB SPL), 96 rows a tenth of an octave, 20 Hz to 20 kHz | The picture's window and axis (`frequency_rows`) |
+| Level | A-weighted, per channel and overall (as the report's overall level): LAeq over the column, the largest LAF in it | `a_weighting`, `Fast`, `Combination` |
+| Onsets | Whether one fell in the column | `MelFrames`, `rise`, `is_peak`, `stands_clear` |
+| Width, ILD | Over the 100 ms that end with the column | `PairFrames::width_and_ild` |
+
+### Decisions that look wrong and are right, live
+
+- **The A-weighting is a 4101-tap FIR, not an IIR filter.** The curve's own zero-phase impulse
+  response, cut at ±43 ms, applied by overlap-save and read 43 ms late so it is zero-phase again.
+  A bilinear IIR is a decibel low at 10 kHz (above); the FIR holds the analytic curve within
+  0.05 dB from 31.5 Hz to 10 kHz, and a column's LAeq is the whole-file weighting's to 0.0001 dB.
+  The cost is the delay: a column waits 43 ms for the samples after it.
+- **Width and ILD are read by the report's own frame code**, split so live reads only the
+  three width bands and the broadband ILD (three correlations of the eight per frame). Every
+  other column ends where a report frame ends, and there they agree exactly. The same frame
+  bias as the report's frames applies: the wind reads about 0.87, not the long-term 0.94.
+- **The onset median is of the past second, not of the second around the frame.** A stream has
+  no future second. The peak picker's moving mean does look 100 ms ahead, as librosa's; the
+  detector waits for it. Two more things are "so far": decibels relative to the loudest mel cell
+  heard so far, and the 0.07 of the flux scaled to the largest flux so far. On the meadow's
+  minute this costs one onset in 44.
+- **A spectrum row is the power of the bins it overlaps, in proportion to the overlap**, not the
+  picture's mean of the bins whose centres it holds. The picture's cells are relative to the
+  loudest; as absolute band levels the mean would be off by the row's width over its whole bins,
+  3 dB where rows are one or two bins wide and up to 0.7 dB for a sine at 1 kHz. Shared by
+  overlap, the rows add up to the power from 20 Hz to 20 kHz, and a sine's lobe to its level.
+- **Spectrum rows combine channels as the overall level does** (ears averaged, speakers summed),
+  not as a plain mean of the channels, so a row and a level of the same sound agree on 5.1 too.
+- **FAST starts from the first column's level.** The report starts from the first 125 ms; a
+  stream would have to hold its first column back for it.
+- **A column is finished only when everything in it is**, about 0.15 s after it sounded (the
+  onset picker's 100 ms ahead and its frame), so a column never changes once taken.
+- **A push that does not follow on from the last starts afresh.** The tap drops whole blocks
+  when nobody reads it; the gap shows on the clock, and joining across it would put silence or a
+  splice into FAST and the flux. The columns still waiting are lost with it.
+
 ## Known gaps
 
 - **The onset threshold is ours, set from four bird takes and one wind.** 0.75 dB above the
@@ -137,5 +193,8 @@ src/
 - **The whole file is in memory**, several copies per channel. Minutes are fine; hours are not.
 - **Below 20 kHz sample rate** the cochlear bank's top bands lie above Nyquist and read as
   zeros.
+- **Live onsets in the first seconds of a stream** are held to a lower bar (the largest flux
+  so far is small) and have no full second of median behind them.
+- **Live 5.1 is tested on synthetic noise only**, as the report's is.
 - **The spectrogram's window is 85 ms**: an edge is smeared by ±43 ms, and the lowest octaves'
   rows interpolate between 12 Hz bins.

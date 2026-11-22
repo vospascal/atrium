@@ -18,8 +18,10 @@
 //!   (where hearing uses timing), over the frames where that peak exceeds
 //!   0.5, refined by a parabola through the peak.
 
+use std::sync::Arc;
+
 use realfft::num_complex::Complex;
-use realfft::RealFftPlanner;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::bands::{octaves, Band};
 use crate::envelope::band_envelope;
@@ -56,11 +58,241 @@ pub(crate) struct PairOverTime {
 
 /// Energies and cross-spectrum of one band, summed over what was added.
 struct BandSums {
-    band: Band,
-    bins: std::ops::Range<usize>,
     cross: Vec<Complex<f64>>,
     left: f64,
     right: f64,
+}
+
+/// One octave band of a frame.
+pub(crate) struct BandReading {
+    pub(crate) left_energy: f64,
+    pub(crate) right_energy: f64,
+    /// IACC and ILD (R − L, dB), when both ears sound in the band.
+    pub(crate) iacc: Option<f64>,
+    pub(crate) ild_decibels: Option<f64>,
+}
+
+/// What one frame of the pair says.
+pub(crate) struct FrameReading {
+    pub(crate) bands: Vec<BandReading>,
+    /// 1 − IACC over [`WIDTH_BANDS`], when all three sound.
+    pub(crate) width: Option<f64>,
+    /// ILD over every octave band at once (R − L, dB), when both sound.
+    pub(crate) ild_decibels: Option<f64>,
+    /// The lag of the timing band's largest positive correlation (samples,
+    /// fractional), when that correlation exceeds [`TIMING_CORRELATION`].
+    pub(crate) timing_lag: Option<f64>,
+}
+
+/// The pair read [`FRAME_SECONDS`] at a time: each frame transformed once,
+/// zero-padded so the correlation is linear. The whole-file measures and the
+/// live analyser read their frames through this one type, so a width or an
+/// ILD cannot differ between them.
+pub(crate) struct PairFrames {
+    sample_rate: f64,
+    frame_length: usize,
+    size: usize,
+    bands: Vec<(Band, std::ops::Range<usize>)>,
+    timing_bins: std::ops::Range<usize>,
+    broadband_bins: std::ops::Range<usize>,
+    forward: Arc<dyn RealToComplex<f64>>,
+    input: Vec<f64>,
+    left: Vec<Complex<f64>>,
+    right: Vec<Complex<f64>>,
+    correlator: Correlator,
+}
+
+impl PairFrames {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        let rate = sample_rate as f64;
+        let frame_length = ((FRAME_SECONDS * rate).round() as usize).max(1);
+        let maximum_lag = (LAG_SECONDS * rate).round() as usize;
+        let size = (frame_length + maximum_lag + 1).next_power_of_two();
+        let bin_hertz = rate / size as f64;
+        let bins_of = |low: f64, high: f64| {
+            ((low / bin_hertz).ceil() as usize).max(1)
+                ..((high / bin_hertz).ceil() as usize).min(size / 2)
+        };
+        let band_list = octaves(rate / 2.0);
+        let broadband_bins = bins_of(
+            band_list.first().map_or(0.0, |band| band.low),
+            band_list.last().map_or(0.0, |band| band.high),
+        );
+        let mut planner = RealFftPlanner::<f64>::new();
+        let forward = planner.plan_fft_forward(size);
+        let inverse = planner.plan_fft_inverse(size);
+        Self {
+            sample_rate: rate,
+            frame_length,
+            size,
+            bands: band_list
+                .iter()
+                .map(|band| (*band, bins_of(band.low, band.high)))
+                .collect(),
+            timing_bins: bins_of(TIMING_LOW, TIMING_HIGH),
+            broadband_bins,
+            input: forward.make_input_vec(),
+            left: forward.make_output_vec(),
+            right: forward.make_output_vec(),
+            forward,
+            correlator: Correlator {
+                buffer: inverse.make_input_vec(),
+                output: inverse.make_output_vec(),
+                inverse,
+                maximum_lag,
+            },
+        }
+    }
+
+    /// Samples in a frame.
+    pub(crate) fn frame_length(&self) -> usize {
+        self.frame_length
+    }
+
+    /// Read one frame: `left` and `right` are a frame long.
+    pub(crate) fn read(&mut self, left: &[f32], right: &[f32]) -> FrameReading {
+        self.transform(left, right);
+        let bands: Vec<BandReading> = (0..self.bands.len())
+            .map(|index| self.band(index))
+            .collect();
+        let width = self.width_of(&bands);
+        FrameReading {
+            width,
+            ild_decibels: self.broadband_ild(),
+            timing_lag: self.timing_lag(),
+            bands,
+        }
+    }
+
+    /// Only the width and the ILD of one frame, as `read` gives them, for
+    /// the live analyser: the bands width does not use and the timing are
+    /// left out, five correlations of the eight.
+    pub(crate) fn width_and_ild(
+        &mut self,
+        left: &[f32],
+        right: &[f32],
+    ) -> (Option<f64>, Option<f64>) {
+        self.transform(left, right);
+        let bands: Vec<BandReading> = (0..self.bands.len())
+            .map(|index| {
+                if WIDTH_BANDS.contains(&self.bands[index].0.nominal) {
+                    self.band(index)
+                } else {
+                    BandReading {
+                        left_energy: 0.0,
+                        right_energy: 0.0,
+                        iacc: None,
+                        ild_decibels: None,
+                    }
+                }
+            })
+            .collect();
+        (self.width_of(&bands), self.broadband_ild())
+    }
+
+    fn transform(&mut self, left: &[f32], right: &[f32]) {
+        transform(self.forward.as_ref(), &mut self.input, left, &mut self.left);
+        transform(
+            self.forward.as_ref(),
+            &mut self.input,
+            right,
+            &mut self.right,
+        );
+    }
+
+    /// 2·Σ|X|²/N over `bins`: the frame's energy there.
+    fn energy(&self, spectrum: &[Complex<f64>], bins: std::ops::Range<usize>) -> f64 {
+        2.0 * spectrum[bins].iter().map(Complex::norm_sqr).sum::<f64>() / self.size as f64
+    }
+
+    fn sounding(&self, energy: f64) -> bool {
+        energy / self.frame_length as f64 > crate::statistics::SILENCE_POWER
+    }
+
+    /// Octave band `index` of the transformed frame.
+    fn band(&mut self, index: usize) -> BandReading {
+        let bins = self.bands[index].1.clone();
+        let left_energy = self.energy(&self.left, bins.clone());
+        let right_energy = self.energy(&self.right, bins.clone());
+        let mut reading = BandReading {
+            left_energy,
+            right_energy,
+            iacc: None,
+            ild_decibels: None,
+        };
+        if self.sounding(left_energy) && self.sounding(right_energy) {
+            let cross = cross_spectrum(&self.left, &self.right, bins.clone());
+            let peak = self
+                .correlator
+                .peak(bins.start, &cross, left_energy, right_energy);
+            reading.iacc = Some(peak.absolute);
+            reading.ild_decibels = Some(power_decibels(right_energy) - power_decibels(left_energy));
+        }
+        reading
+    }
+
+    /// 1 − the mean IACC of [`WIDTH_BANDS`], when all three sound.
+    fn width_of(&self, bands: &[BandReading]) -> Option<f64> {
+        let width_bands: Vec<f64> = self
+            .bands
+            .iter()
+            .zip(bands)
+            .filter(|((band, _), _)| WIDTH_BANDS.contains(&band.nominal))
+            .filter_map(|(_, reading)| reading.iacc)
+            .collect();
+        (width_bands.len() == WIDTH_BANDS.len()).then(|| 1.0 - mean(&width_bands))
+    }
+
+    fn broadband_ild(&self) -> Option<f64> {
+        let left_energy = self.energy(&self.left, self.broadband_bins.clone());
+        let right_energy = self.energy(&self.right, self.broadband_bins.clone());
+        (self.sounding(left_energy) && self.sounding(right_energy))
+            .then(|| power_decibels(right_energy) - power_decibels(left_energy))
+    }
+
+    fn timing_lag(&mut self) -> Option<f64> {
+        let left_energy = self.energy(&self.left, self.timing_bins.clone());
+        let right_energy = self.energy(&self.right, self.timing_bins.clone());
+        if !(self.sounding(left_energy) && self.sounding(right_energy)) {
+            return None;
+        }
+        let cross = cross_spectrum(&self.left, &self.right, self.timing_bins.clone());
+        let peak = self
+            .correlator
+            .peak(self.timing_bins.start, &cross, left_energy, right_energy);
+        (peak.positive > TIMING_CORRELATION).then_some(peak.positive_lag)
+    }
+}
+
+/// `samples`, zero-padded to the transform's length, transformed into
+/// `output`. The input is refilled every time: the transform uses it as
+/// scratch.
+fn transform(
+    forward: &dyn RealToComplex<f64>,
+    input: &mut [f64],
+    samples: &[f32],
+    output: &mut [Complex<f64>],
+) {
+    input.fill(0.0);
+    for (slot, sample) in input.iter_mut().zip(samples) {
+        *slot = *sample as f64;
+    }
+    forward
+        .process(input, output)
+        .expect("buffers are the planner's own");
+}
+
+/// conj(L)·R over `bins`.
+fn cross_spectrum(
+    left: &[Complex<f64>],
+    right: &[Complex<f64>],
+    bins: std::ops::Range<usize>,
+) -> Vec<Complex<f64>> {
+    left[bins.clone()]
+        .iter()
+        .zip(&right[bins])
+        .map(|(l, r)| l.conj() * r)
+        .collect()
 }
 
 /// The interaural measures of `left` and `right`.
@@ -71,59 +303,21 @@ pub(crate) fn binaural(
     sample_rate: u32,
     envelopes: (&[Vec<f64>], &[Vec<f64>]),
 ) -> (Binaural, PairOverTime) {
-    let rate = sample_rate as f64;
-    let frame_length = ((FRAME_SECONDS * rate).round() as usize).max(1);
-    let maximum_lag = (LAG_SECONDS * rate).round() as usize;
-    let size = (frame_length + maximum_lag + 1).next_power_of_two();
-    let bin_hertz = rate / size as f64;
-    let bins_of = |low: f64, high: f64| {
-        ((low / bin_hertz).ceil() as usize).max(1)
-            ..((high / bin_hertz).ceil() as usize).min(size / 2)
-    };
-    let band_list = octaves(rate / 2.0);
-    let mut long_term: Vec<BandSums> = band_list
+    let mut frames = PairFrames::new(sample_rate);
+    let frame_length = frames.frame_length;
+    let mut long_term: Vec<BandSums> = frames
+        .bands
         .iter()
-        .map(|band| {
-            let bins = bins_of(band.low, band.high);
-            BandSums {
-                band: *band,
-                cross: vec![Complex::new(0.0, 0.0); bins.len()],
-                bins,
-                left: 0.0,
-                right: 0.0,
-            }
+        .map(|(_, bins)| BandSums {
+            cross: vec![Complex::new(0.0, 0.0); bins.len()],
+            left: 0.0,
+            right: 0.0,
         })
         .collect();
-    let timing_bins = bins_of(TIMING_LOW, TIMING_HIGH);
-    let broadband_bins = bins_of(
-        band_list.first().map_or(0.0, |band| band.low),
-        band_list.last().map_or(0.0, |band| band.high),
-    );
-
-    let mut planner = RealFftPlanner::<f64>::new();
-    let forward = planner.plan_fft_forward(size);
-    let inverse = planner.plan_fft_inverse(size);
-    let mut correlator = Correlator {
-        inverse: inverse.as_ref(),
-        buffer: inverse.make_input_vec(),
-        output: inverse.make_output_vec(),
-        maximum_lag,
-    };
-    let transform = |samples: &[f32]| {
-        let mut input = forward.make_input_vec();
-        for (slot, sample) in input.iter_mut().zip(samples) {
-            *slot = *sample as f64;
-        }
-        let mut output = forward.make_output_vec();
-        forward
-            .process(&mut input, &mut output)
-            .expect("buffers are the planner's own");
-        output
-    };
 
     let frame_count = left.len().min(right.len()) / frame_length;
-    let mut frame_iacc: Vec<Vec<f64>> = vec![Vec::new(); band_list.len()];
-    let mut frame_ild: Vec<Vec<f64>> = vec![Vec::new(); band_list.len()];
+    let mut frame_iacc: Vec<Vec<f64>> = vec![Vec::new(); frames.bands.len()];
+    let mut frame_ild: Vec<Vec<f64>> = vec![Vec::new(); frames.bands.len()];
     let mut itd_milliseconds = Vec::new();
     let mut over_time = PairOverTime {
         width: Vec::with_capacity(frame_count),
@@ -131,65 +325,28 @@ pub(crate) fn binaural(
     };
     for frame in 0..frame_count {
         let span = frame * frame_length..(frame + 1) * frame_length;
-        let left_spectrum = transform(&left[span.clone()]);
-        let right_spectrum = transform(&right[span]);
-        let energy = |spectrum: &[Complex<f64>], bins: std::ops::Range<usize>| {
-            2.0 * spectrum[bins].iter().map(Complex::norm_sqr).sum::<f64>() / size as f64
-        };
-        let sounding =
-            |energy: f64| energy / frame_length as f64 > crate::statistics::SILENCE_POWER;
-
-        let mut width_bands = Vec::new();
-        for (index, sums) in long_term.iter_mut().enumerate() {
-            let left_energy = energy(&left_spectrum, sums.bins.clone());
-            let right_energy = energy(&right_spectrum, sums.bins.clone());
+        let reading = frames.read(&left[span.clone()], &right[span]);
+        for (index, (sums, band)) in long_term.iter_mut().zip(&reading.bands).enumerate() {
+            let bins = frames.bands[index].1.clone();
             for ((slot, l), r) in sums
                 .cross
                 .iter_mut()
-                .zip(&left_spectrum[sums.bins.clone()])
-                .zip(&right_spectrum[sums.bins.clone()])
+                .zip(&frames.left[bins.clone()])
+                .zip(&frames.right[bins])
             {
                 *slot += l.conj() * r;
             }
-            sums.left += left_energy;
-            sums.right += right_energy;
-            if sounding(left_energy) && sounding(right_energy) {
-                let cross: Vec<Complex<f64>> = left_spectrum[sums.bins.clone()]
-                    .iter()
-                    .zip(&right_spectrum[sums.bins.clone()])
-                    .map(|(l, r)| l.conj() * r)
-                    .collect();
-                let peak = correlator.peak(sums.bins.start, &cross, left_energy, right_energy);
-                frame_iacc[index].push(peak.absolute);
-                frame_ild[index].push(power_decibels(right_energy) - power_decibels(left_energy));
-                if WIDTH_BANDS.contains(&sums.band.nominal) {
-                    width_bands.push(peak.absolute);
-                }
+            sums.left += band.left_energy;
+            sums.right += band.right_energy;
+            if let (Some(iacc), Some(ild)) = (band.iacc, band.ild_decibels) {
+                frame_iacc[index].push(iacc);
+                frame_ild[index].push(ild);
             }
         }
-        over_time
-            .width
-            .push((width_bands.len() == WIDTH_BANDS.len()).then(|| 1.0 - mean(&width_bands)));
-
-        let left_energy = energy(&left_spectrum, broadband_bins.clone());
-        let right_energy = energy(&right_spectrum, broadband_bins.clone());
-        over_time.ild_decibels.push(
-            (sounding(left_energy) && sounding(right_energy))
-                .then(|| power_decibels(right_energy) - power_decibels(left_energy)),
-        );
-
-        let left_energy = energy(&left_spectrum, timing_bins.clone());
-        let right_energy = energy(&right_spectrum, timing_bins.clone());
-        if sounding(left_energy) && sounding(right_energy) {
-            let cross: Vec<Complex<f64>> = left_spectrum[timing_bins.clone()]
-                .iter()
-                .zip(&right_spectrum[timing_bins.clone()])
-                .map(|(l, r)| l.conj() * r)
-                .collect();
-            let peak = correlator.peak(timing_bins.start, &cross, left_energy, right_energy);
-            if peak.positive > TIMING_CORRELATION {
-                itd_milliseconds.push(peak.positive_lag * 1000.0 / rate);
-            }
+        over_time.width.push(reading.width);
+        over_time.ild_decibels.push(reading.ild_decibels);
+        if let Some(lag) = reading.timing_lag {
+            itd_milliseconds.push(lag * 1000.0 / frames.sample_rate);
         }
     }
 
@@ -197,12 +354,14 @@ pub(crate) fn binaural(
         .iter()
         .enumerate()
         .map(|(index, sums)| {
+            let (band, bins) = &frames.bands[index];
             let sounding = sums.left > 0.0 && sums.right > 0.0;
             BinauralBand {
-                centre_hertz: sums.band.nominal,
+                centre_hertz: band.nominal,
                 iacc: sounding.then(|| {
-                    correlator
-                        .peak(sums.bins.start, &sums.cross, sums.left, sums.right)
+                    frames
+                        .correlator
+                        .peak(bins.start, &sums.cross, sums.left, sums.right)
                         .absolute
                 }),
                 iacc_median_of_frames: quantile(&frame_iacc[index], 0.5),
@@ -254,14 +413,14 @@ struct Peak {
     positive_lag: f64,
 }
 
-struct Correlator<'a> {
-    inverse: &'a dyn realfft::ComplexToReal<f64>,
+struct Correlator {
+    inverse: Arc<dyn ComplexToReal<f64>>,
     buffer: Vec<Complex<f64>>,
     output: Vec<f64>,
     maximum_lag: usize,
 }
 
-impl Correlator<'_> {
+impl Correlator {
     /// c(τ) = (1/N)·irfft(conj(L)·R) restricted to the band, from bin
     /// `first` on; normalised by √(E_L·E_R) of the same band.
     fn peak(&mut self, first: usize, cross: &[Complex<f64>], left: f64, right: f64) -> Peak {

@@ -29,15 +29,17 @@
 //! bird's syllable starting stands 2 to 8 dB above it. The threshold is ours,
 //! set from those measurements, not from a publication.
 
-use realfft::RealFftPlanner;
+use std::sync::Arc;
 
-const FFT_SIZE: usize = 2048;
-const HOP: usize = 512;
-const MEL_BANDS: usize = 128;
+use realfft::{RealFftPlanner, RealToComplex};
+
+pub(crate) const FFT_SIZE: usize = 2048;
+pub(crate) const HOP: usize = 512;
+pub(crate) const MEL_BANDS: usize = 128;
 const TOP_DECIBELS: f64 = 80.0;
 /// librosa's `lag + n_fft // (2·hop)`.
-const FLUX_DELAY_FRAMES: usize = 1 + FFT_SIZE / (2 * HOP);
-const DELTA: f64 = 0.07;
+pub(crate) const FLUX_DELAY_FRAMES: usize = 1 + FFT_SIZE / (2 * HOP);
+pub(crate) const DELTA: f64 = 0.07;
 /// How far above the median rise of the surrounding second a peak's rise
 /// (mean over bands, dB a frame) must stand to count as something starting.
 const MINIMUM_RISE_DECIBELS: f64 = 0.75;
@@ -45,7 +47,7 @@ const MINIMUM_RISE_DECIBELS: f64 = 0.75;
 const MEDIAN_SPAN_SECONDS: f64 = 1.0;
 /// The first frame whose flux compares two frames that hold no padding from
 /// before the file's start: frame t covers samples from t·hop − n_fft/2.
-const FIRST_WHOLE_FLUX_FRAME: usize = FLUX_DELAY_FRAMES + FFT_SIZE / (2 * HOP);
+pub(crate) const FIRST_WHOLE_FLUX_FRAME: usize = FLUX_DELAY_FRAMES + FFT_SIZE / (2 * HOP);
 
 /// The onset times (s) in `channels`, their mel powers averaged.
 pub(crate) fn onsets(channels: &[Vec<f32>], sample_rate: u32) -> Vec<f64> {
@@ -53,42 +55,23 @@ pub(crate) fn onsets(channels: &[Vec<f32>], sample_rate: u32) -> Vec<f64> {
         return Vec::new();
     };
     let frames = 1 + length / HOP;
-    let filters = mel_filters(sample_rate);
+    let mut analyser = MelFrames::new(sample_rate);
     let mut mel = vec![vec![0.0f64; MEL_BANDS]; frames];
-    let window: Vec<f64> = (0..FFT_SIZE)
-        .map(|index| 0.5 - 0.5 * (std::f64::consts::TAU * index as f64 / FFT_SIZE as f64).cos())
-        .collect();
-    let mut planner = RealFftPlanner::<f64>::new();
-    let forward = planner.plan_fft_forward(FFT_SIZE);
-    let mut input = forward.make_input_vec();
-    let mut spectrum = forward.make_output_vec();
-    let mut power = vec![0.0f64; spectrum.len()];
     for channel in channels {
         for (frame, bands) in mel.iter_mut().enumerate() {
             // Centred: frame t covers samples t·hop − 1024 to t·hop + 1023.
-            for (offset, value) in input.iter_mut().enumerate() {
-                let position = (frame * HOP + offset) as isize - (FFT_SIZE / 2) as isize;
-                let sample = if position >= 0 && (position as usize) < length {
-                    channel[position as usize] as f64
-                } else {
-                    0.0
-                };
-                *value = sample * window[offset];
-            }
-            forward
-                .process(&mut input, &mut spectrum)
-                .expect("buffers are the planner's own");
-            for (slot, bin) in power.iter_mut().zip(&spectrum) {
-                *slot = bin.norm_sqr();
-            }
-            for (band, (start, weights)) in bands.iter_mut().zip(&filters) {
-                *band += weights
-                    .iter()
-                    .zip(&power[*start..])
-                    .map(|(weight, value)| weight * value)
-                    .sum::<f64>()
-                    / channels.len() as f64;
-            }
+            analyser.add(
+                |offset| {
+                    let position = (frame * HOP + offset) as isize - (FFT_SIZE / 2) as isize;
+                    if position >= 0 && (position as usize) < length {
+                        channel[position as usize]
+                    } else {
+                        0.0
+                    }
+                },
+                channels.len(),
+                bands,
+            );
         }
     }
 
@@ -101,27 +84,20 @@ pub(crate) fn onsets(channels: &[Vec<f32>], sample_rate: u32) -> Vec<f64> {
         .map(|bands| {
             bands
                 .iter()
-                .map(|value| (10.0 * (value / loudest).log10()).max(-TOP_DECIBELS))
+                .map(|value| decibels(*value, loudest))
                 .collect()
         })
         .collect();
     let mut envelope = vec![0.0f64; frames];
     for frame in FLUX_DELAY_FRAMES..frames {
-        let (before, after) = (
+        envelope[frame] = rise(
             &decibels[frame - FLUX_DELAY_FRAMES],
             &decibels[frame - FLUX_DELAY_FRAMES + 1],
         );
-        envelope[frame] = before
-            .iter()
-            .zip(after)
-            .map(|(earlier, later)| (later - earlier).max(0.0))
-            .sum::<f64>()
-            / MEL_BANDS as f64;
     }
     // Rises standing clear of the steady wobble, in decibels, before the
     // envelope is scaled.
-    let frames_per = |seconds: f64| (seconds * sample_rate as f64 / HOP as f64).floor() as usize;
-    let clear = standing_clear(&envelope, frames_per(MEDIAN_SPAN_SECONDS) / 2);
+    let clear = standing_clear(&envelope, frames_in(MEDIAN_SPAN_SECONDS, sample_rate) / 2);
     // librosa's last flux value is cut; the envelope keeps one per frame.
     let lowest = envelope.iter().copied().fold(f64::INFINITY, f64::min);
     envelope.iter_mut().for_each(|value| *value -= lowest);
@@ -131,18 +107,104 @@ pub(crate) fn onsets(channels: &[Vec<f32>], sample_rate: u32) -> Vec<f64> {
     }
     envelope.iter_mut().for_each(|value| *value /= highest);
 
+    let windows = PeakWindows::new(sample_rate);
     pick_peaks(
         &envelope,
-        frames_per(0.03),
-        1,
-        frames_per(0.10),
-        frames_per(0.10) + 1,
-        frames_per(0.03),
+        windows.before_maximum,
+        windows.after_maximum,
+        windows.before_mean,
+        windows.after_mean,
+        windows.wait,
     )
     .into_iter()
     .filter(|frame| clear[*frame])
     .map(|frame| frame as f64 * HOP as f64 / sample_rate as f64)
     .collect()
+}
+
+/// Whole frames of `seconds` at `sample_rate`, as librosa rounds them.
+pub(crate) fn frames_in(seconds: f64, sample_rate: u32) -> usize {
+    (seconds * sample_rate as f64 / HOP as f64).floor() as usize
+}
+
+/// The frames the live median rise looks back over: the past second.
+pub(crate) fn median_span_frames(sample_rate: u32) -> usize {
+    frames_in(MEDIAN_SPAN_SECONDS, sample_rate)
+}
+
+/// The mel spectrogram one frame at a time: each channel's 2048-point Hann
+/// frame transformed and its mel powers added, `1 / channels` of each.
+pub(crate) struct MelFrames {
+    filters: Vec<(usize, Vec<f64>)>,
+    window: Vec<f64>,
+    forward: Arc<dyn RealToComplex<f64>>,
+    input: Vec<f64>,
+    spectrum: Vec<realfft::num_complex::Complex<f64>>,
+    power: Vec<f64>,
+}
+
+impl MelFrames {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        let mut planner = RealFftPlanner::<f64>::new();
+        let forward = planner.plan_fft_forward(FFT_SIZE);
+        let spectrum = forward.make_output_vec();
+        Self {
+            filters: mel_filters(sample_rate),
+            window: (0..FFT_SIZE)
+                .map(|index| {
+                    0.5 - 0.5 * (std::f64::consts::TAU * index as f64 / FFT_SIZE as f64).cos()
+                })
+                .collect(),
+            input: forward.make_input_vec(),
+            power: vec![0.0f64; spectrum.len()],
+            spectrum,
+            forward,
+        }
+    }
+
+    /// Add one channel's frame to `bands`: `sample(offset)` is the frame's
+    /// sample at `offset` (0 to 2047), zero outside the signal.
+    pub(crate) fn add(
+        &mut self,
+        sample: impl Fn(usize) -> f32,
+        channels: usize,
+        bands: &mut [f64],
+    ) {
+        for (offset, value) in self.input.iter_mut().enumerate() {
+            *value = sample(offset) as f64 * self.window[offset];
+        }
+        self.forward
+            .process(&mut self.input, &mut self.spectrum)
+            .expect("buffers are the planner's own");
+        for (slot, bin) in self.power.iter_mut().zip(&self.spectrum) {
+            *slot = bin.norm_sqr();
+        }
+        for (band, (start, weights)) in bands.iter_mut().zip(&self.filters) {
+            *band += weights
+                .iter()
+                .zip(&self.power[*start..])
+                .map(|(weight, value)| weight * value)
+                .sum::<f64>()
+                / channels as f64;
+        }
+    }
+}
+
+/// A mel power in decibels relative to the loudest cell, floored
+/// [`TOP_DECIBELS`] below it.
+pub(crate) fn decibels(value: f64, loudest: f64) -> f64 {
+    (10.0 * (value / loudest).log10()).max(-TOP_DECIBELS)
+}
+
+/// The flux from one frame of mel decibels to the next: the mean over bands
+/// of the rises, rises only.
+pub(crate) fn rise(earlier: &[f64], later: &[f64]) -> f64 {
+    earlier
+        .iter()
+        .zip(later)
+        .map(|(earlier, later)| (later - earlier).max(0.0))
+        .sum::<f64>()
+        / MEL_BANDS as f64
 }
 
 /// Whether each frame's rise stands at least [`MINIMUM_RISE_DECIBELS`] above
@@ -152,23 +214,51 @@ fn standing_clear(rises: &[f64], half_span: usize) -> Vec<bool> {
     let mut window = Vec::with_capacity(2 * half_span + 1);
     (0..rises.len())
         .map(|frame| {
-            if frame < FIRST_WHOLE_FLUX_FRAME {
-                return false;
-            }
-            window.clear();
-            window.extend_from_slice(
-                &rises[frame.saturating_sub(half_span)..(frame + half_span + 1).min(rises.len())],
-            );
-            window.sort_by(f64::total_cmp);
-            rises[frame] - window[window.len() / 2] >= MINIMUM_RISE_DECIBELS
+            frame >= FIRST_WHOLE_FLUX_FRAME
+                && stands_clear(
+                    rises[frame],
+                    &rises
+                        [frame.saturating_sub(half_span)..(frame + half_span + 1).min(rises.len())],
+                    &mut window,
+                )
         })
         .collect()
 }
 
-/// librosa's greedy `peak_pick`: n is a peak when x[n] is the largest of
-/// x[n − before_maximum ..= n + after_maximum − 1], at least [`DELTA`] above
-/// the mean of x[n − before_mean ..= n + after_mean − 1] (both clipped to
-/// the series), and the next candidate after a peak is `wait` + 1 later.
+/// Whether `rise` stands at least [`MINIMUM_RISE_DECIBELS`] above the median
+/// of `neighbourhood`; `scratch` holds the sorted copy.
+pub(crate) fn stands_clear(rise: f64, neighbourhood: &[f64], scratch: &mut Vec<f64>) -> bool {
+    scratch.clear();
+    scratch.extend_from_slice(neighbourhood);
+    scratch.sort_by(f64::total_cmp);
+    rise - scratch[scratch.len() / 2] >= MINIMUM_RISE_DECIBELS
+}
+
+/// librosa's `peak_pick` windows (frames) at a sample rate: the moving
+/// maximum over 30 ms before, the moving mean over 100 ms either side, and a
+/// 30 ms wait after a peak.
+pub(crate) struct PeakWindows {
+    pub(crate) before_maximum: usize,
+    pub(crate) after_maximum: usize,
+    pub(crate) before_mean: usize,
+    pub(crate) after_mean: usize,
+    pub(crate) wait: usize,
+}
+
+impl PeakWindows {
+    pub(crate) fn new(sample_rate: u32) -> Self {
+        Self {
+            before_maximum: frames_in(0.03, sample_rate),
+            after_maximum: 1,
+            before_mean: frames_in(0.10, sample_rate),
+            after_mean: frames_in(0.10, sample_rate) + 1,
+            wait: frames_in(0.03, sample_rate),
+        }
+    }
+}
+
+/// librosa's greedy `peak_pick`: n is a peak when it passes [`is_peak`], and
+/// the next candidate after a peak is `wait` + 1 later.
 fn pick_peaks(
     values: &[f64],
     before_maximum: usize,
@@ -177,28 +267,42 @@ fn pick_peaks(
     after_mean: usize,
     wait: usize,
 ) -> Vec<usize> {
+    let windows = PeakWindows {
+        before_maximum,
+        after_maximum,
+        before_mean,
+        after_mean,
+        wait,
+    };
     let mut peaks = Vec::new();
     let mut index = 0;
     while index < values.len() {
-        let window = |before: usize, after: usize| {
-            let start = index.saturating_sub(before);
-            let end = (index + after).min(values.len());
-            &values[start..end]
-        };
-        let largest = window(before_maximum, after_maximum)
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let around = window(before_mean, after_mean);
-        let mean = around.iter().sum::<f64>() / around.len() as f64;
-        if values[index] == largest && values[index] >= mean + DELTA {
+        if is_peak(values, index, &windows, DELTA) {
             peaks.push(index);
-            index += wait + 1;
+            index += windows.wait + 1;
         } else {
             index += 1;
         }
     }
     peaks
+}
+
+/// Whether x[n] is the largest of x[n − before_maximum ..= n + after_maximum
+/// − 1] and at least `delta` above the mean of x[n − before_mean ..= n +
+/// after_mean − 1], both clipped to the series.
+pub(crate) fn is_peak(values: &[f64], index: usize, windows: &PeakWindows, delta: f64) -> bool {
+    let window = |before: usize, after: usize| {
+        let start = index.saturating_sub(before);
+        let end = (index + after).min(values.len());
+        &values[start..end]
+    };
+    let largest = window(windows.before_maximum, windows.after_maximum)
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let around = window(windows.before_mean, windows.after_mean);
+    let mean = around.iter().sum::<f64>() / around.len() as f64;
+    values[index] == largest && values[index] >= mean + delta
 }
 
 /// Slaney's mel scale (librosa's default, `htk=False`): linear below 1 kHz,

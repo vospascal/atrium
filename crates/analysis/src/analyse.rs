@@ -10,7 +10,7 @@ use crate::report::{
     BandLevel, Colour, Distribution, Events, Level, LevelUnit, Report, SignalFacts, Space,
     REPORT_VERSION,
 };
-use crate::signal::{Calibration, Combination, Settings, Signal};
+use crate::signal::{pair_of, Calibration, Combination, Settings, Signal};
 use crate::space::{binaural, octave_envelopes};
 use crate::spectrum::Spectrum;
 use crate::statistics::{mean_square, quantile};
@@ -222,15 +222,6 @@ pub fn analyse(signal: &Signal, settings: &Settings) -> Report {
         space,
         over_time,
     }
-}
-
-/// The ears, or the L/R pair of a speaker layout.
-fn pair_of(names: &[String]) -> Option<(usize, usize)> {
-    if names.len() == 2 {
-        return Some((0, 1));
-    }
-    let find = |wanted: &str| names.iter().position(|name| name == wanted);
-    Some((find("L")?, find("R")?))
 }
 
 /// Front (L, C, R) against surround (Ls, Rs), for a layout that has both.

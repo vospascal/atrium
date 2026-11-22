@@ -16,8 +16,9 @@ mod font;
 mod spectrogram;
 
 use canvas::{Canvas, BLACK, CHARACTER_WIDTH, LINE_HEIGHT, MUTED, WHITE};
-use spectrogram::{colour, frequency_fraction, grid, RANGE_DECIBELS};
+use spectrogram::{colour, grid, RANGE_DECIBELS};
 
+use crate::frequency_rows::frequency_fraction;
 use crate::report::Report;
 use crate::signal::{Combination, Signal};
 

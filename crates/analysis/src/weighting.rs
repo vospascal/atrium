@@ -57,6 +57,30 @@ pub(crate) struct TimeWeighted {
     pub(crate) step_maxima: Vec<f64>,
 }
 
+/// FAST one power sample at a time: y[n] = a·y[n−1] + (1 − a)·x[n],
+/// a = e^(−1/(τ·rate)). Shared by the whole-file series and the live
+/// analyser, so the two weight time identically.
+pub(crate) struct Fast {
+    decay: f64,
+    value: f64,
+}
+
+impl Fast {
+    /// Starting from the power `initial`.
+    pub(crate) fn new(sample_rate: u32, initial: f64) -> Self {
+        Self {
+            decay: (-1.0 / (FAST_SECONDS * sample_rate as f64)).exp(),
+            value: initial,
+        }
+    }
+
+    /// The weighted power after one more sample of `power`.
+    pub(crate) fn step(&mut self, power: f64) -> f64 {
+        self.value = self.decay * self.value + (1.0 - self.decay) * power;
+        self.value
+    }
+}
+
 /// `power` (squared samples) through FAST: y[n] = a·y[n−1] + (1 − a)·x[n],
 /// a = e^(−1/(τ·rate)), the discrete form of IEC 61672-1's
 /// (1/τ)∫p²(ξ)e^(−(t−ξ)/τ)dξ.
@@ -66,9 +90,11 @@ pub(crate) struct TimeWeighted {
 /// that pulls L90 down.
 pub(crate) fn fast(power: &[f64], sample_rate: u32) -> TimeWeighted {
     let rate = sample_rate as f64;
-    let decay = (-1.0 / (FAST_SECONDS * rate)).exp();
     let opening = ((FAST_SECONDS * rate) as usize).clamp(1, power.len().max(1));
-    let mut value = crate::statistics::mean(&power[..opening.min(power.len())]);
+    let mut averager = Fast::new(
+        sample_rate,
+        crate::statistics::mean(&power[..opening.min(power.len())]),
+    );
     let reading_step = ((PERCENTILE_STEP_SECONDS * rate).round() as usize).max(1);
     let maxima_step = ((LAF_STEP_SECONDS * rate).round() as usize).max(1);
     let mut maximum = 0.0f64;
@@ -76,7 +102,7 @@ pub(crate) fn fast(power: &[f64], sample_rate: u32) -> TimeWeighted {
     let mut step_maxima = Vec::with_capacity(power.len() / maxima_step + 1);
     let mut step_maximum = 0.0f64;
     for (index, sample) in power.iter().enumerate() {
-        value = decay * value + (1.0 - decay) * sample;
+        let value = averager.step(*sample);
         maximum = maximum.max(value);
         step_maximum = step_maximum.max(value);
         if index % reading_step == reading_step - 1 {

@@ -53,9 +53,18 @@ impl Signal<'_> {
     }
 }
 
+/// The ears, or the L/R pair of a speaker layout.
+pub(crate) fn pair_of(names: &[String]) -> Option<(usize, usize)> {
+    if names.len() == 2 {
+        return Some((0, 1));
+    }
+    let find = |wanted: &str| names.iter().position(|name| name == wanted);
+    Some((find("L")?, find("R")?))
+}
+
 /// The names the engine gives its outputs: M for mono, L R for two, L R C
 /// LFE Ls Rs for six; otherwise the channel's number from 1.
-fn usual_name(channels: usize, index: usize) -> String {
+pub(crate) fn usual_name(channels: usize, index: usize) -> String {
     let names: &[&str] = match channels {
         1 => &["M"],
         2 => &["L", "R"],

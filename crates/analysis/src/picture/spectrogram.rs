@@ -9,21 +9,9 @@
 use realfft::RealFftPlanner;
 
 use super::canvas::Colour;
+use crate::frequency_rows::{fraction_frequency, hann, window_length};
 
 pub(crate) const RANGE_DECIBELS: f64 = 70.0;
-pub(crate) const LOWEST_HERTZ: f64 = 20.0;
-pub(crate) const HIGHEST_HERTZ: f64 = 20_000.0;
-/// The analysis window (s): 4096 points at 48 kHz, 12 Hz bins.
-const WINDOW_SECONDS: f64 = 0.085;
-
-/// Where `frequency` sits between 20 Hz (0) and 20 kHz (1).
-pub(crate) fn frequency_fraction(frequency: f64) -> f64 {
-    (frequency / LOWEST_HERTZ).ln() / (HIGHEST_HERTZ / LOWEST_HERTZ).ln()
-}
-
-fn fraction_frequency(fraction: f64) -> f64 {
-    LOWEST_HERTZ * (HIGHEST_HERTZ / LOWEST_HERTZ).powf(fraction)
-}
 
 /// Levels per pixel, the top row the highest frequency, in dB re the
 /// loudest cell (0 at the loudest).
@@ -43,14 +31,8 @@ pub(crate) fn grid(
     rows: usize,
 ) -> Grid {
     let length = channels.first().map_or(0, Vec::len);
-    let window_length = ((WINDOW_SECONDS * sample_rate as f64) as usize)
-        .next_power_of_two()
-        .max(256);
-    let window: Vec<f32> = (0..window_length)
-        .map(|index| {
-            (0.5 - 0.5 * (std::f64::consts::TAU * index as f64 / window_length as f64).cos()) as f32
-        })
-        .collect();
+    let window_length = window_length(sample_rate);
+    let window = hann(window_length);
     let column_samples = (length as f64 / columns as f64).max(1.0);
     let hop = ((window_length / 4) as f64).min(column_samples).max(1.0) as usize;
     let bins = window_length / 2 + 1;
