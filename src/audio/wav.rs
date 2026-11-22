@@ -45,7 +45,7 @@ const SUBFORMAT_TAIL: [u8; 14] = [
 /// Write `interleaved` frames of `channels` channels at `sample_rate` to
 /// `path` as `format`. Returns how many samples clipped: always 0 for
 /// [`SampleFormat::Float32`], which stores every value as it is.
-pub(crate) fn write_wav(
+pub fn write_wav(
     path: &Path,
     interleaved: &[f32],
     channels: u16,

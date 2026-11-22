@@ -2,6 +2,7 @@ pub mod atmosphere;
 pub mod convolver;
 pub mod decode;
 pub mod distance;
+pub mod file_stretch;
 pub mod filters;
 pub mod loudness;
 pub mod masking;

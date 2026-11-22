@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use atrium::audio::decode::{decode_channels, DecodedChannels};
+use atrium::audio::file_stretch::{frame_range, FileStretch};
 use atrium_analysis::{
     analyse, compare, comparison_picture, comparison_summary, picture, summary, Compared, Report,
     Settings, Signal, REPORT_VERSION,
@@ -40,18 +41,10 @@ A render's sidecar (<file>.json beside it) gives the channel names and the
 calibration, so levels are in dB SPL; without one they are in dBFS.
 ";
 
-/// A file and the stretch of it asked for.
-#[derive(Debug, PartialEq)]
-struct Input {
-    path: PathBuf,
-    /// From `@from-to`, in seconds.
-    range: Option<(f64, f64)>,
-}
-
 /// What the command line asked for.
 #[derive(Debug, PartialEq)]
 struct Arguments {
-    files: Vec<Input>,
+    files: Vec<FileStretch>,
     compare: bool,
     from: Option<f64>,
     to: Option<f64>,
@@ -99,26 +92,21 @@ struct Audio {
 }
 
 impl Audio {
-    fn load(input: &Input, arguments: &Arguments) -> Result<Self, Box<dyn std::error::Error>> {
+    fn load(
+        input: &FileStretch,
+        arguments: &Arguments,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let file = &input.path;
         let decoded =
             decode_channels(file).map_err(|error| format!("{}: {error}", file.display()))?;
         let sidecar = read_sidecar(file)?;
-        let rate = decoded.sample_rate as f64;
         let total_frames = decoded.interleaved.len() / decoded.channels;
         let (from, to) = match input.range {
             Some((from, to)) => (Some(from), Some(to)),
             None => (arguments.from, arguments.to),
         };
-        let first = from
-            .map_or(0, |seconds| (seconds * rate).round() as usize)
-            .min(total_frames);
-        let end = to
-            .map_or(total_frames, |seconds| (seconds * rate).round() as usize)
-            .min(total_frames);
-        if end <= first {
-            return Err(format!("{}: nothing in the stretch asked for", file.display()).into());
-        }
+        let (first, end) = frame_range(from, to, decoded.sample_rate, total_frames)
+            .ok_or_else(|| format!("{}: nothing in the stretch asked for", file.display()))?;
         Ok(Self {
             path: file.clone(),
             decoded,
@@ -284,7 +272,7 @@ impl Loaded {
 }
 
 fn load(
-    input: &Input,
+    input: &FileStretch,
     arguments: &Arguments,
     with_halves: bool,
 ) -> Result<Loaded, Box<dyn std::error::Error>> {
@@ -547,30 +535,6 @@ fn heading(file: &Path, sidecar: Option<&Value>, from: f64, to: f64, whole: f64)
     )
 }
 
-/// `file@from-to` as a file and a stretch; any other argument as a file. A
-/// file whose own name ends in such a suffix is read as the file only when
-/// the suffix is not a stretch.
-fn input(argument: &str) -> Result<Input, String> {
-    if let Some((path, stretch)) = argument.rsplit_once('@') {
-        if let Some((from, to)) = stretch.split_once('-') {
-            let seconds = |value: &str| value.parse::<f64>().ok().filter(|s| s.is_finite());
-            if let (Some(from), Some(to)) = (seconds(from), seconds(to)) {
-                if from < 0.0 || to <= from {
-                    return Err(format!("{argument}: the stretch must run forwards from 0"));
-                }
-                return Ok(Input {
-                    path: PathBuf::from(path),
-                    range: Some((from, to)),
-                });
-            }
-        }
-    }
-    Ok(Input {
-        path: PathBuf::from(argument),
-        range: None,
-    })
-}
-
 fn parse(arguments: &[String]) -> Result<Arguments, String> {
     let mut parsed = Arguments {
         files: Vec::new(),
@@ -584,7 +548,7 @@ fn parse(arguments: &[String]) -> Result<Arguments, String> {
     let mut remaining = arguments.iter();
     while let Some(argument) = remaining.next() {
         if !argument.starts_with("--") {
-            parsed.files.push(input(argument)?);
+            parsed.files.push(FileStretch::parse(argument)?);
             continue;
         }
         let (flag, inline) = match argument.split_once('=') {
@@ -666,11 +630,8 @@ mod tests {
         )
     }
 
-    fn whole(path: &str) -> Input {
-        Input {
-            path: PathBuf::from(path),
-            range: None,
-        }
+    fn whole(path: &str) -> FileStretch {
+        FileStretch::whole(path)
     }
 
     #[test]
@@ -701,12 +662,12 @@ mod tests {
         assert_eq!(
             read.files,
             [
-                Input {
+                FileStretch {
                     path: PathBuf::from("ref.mp3"),
                     range: Some((0.0, 28.0)),
                 },
                 whole("a.json"),
-                Input {
+                FileStretch {
                     path: PathBuf::from("b.wav"),
                     range: Some((1.5, 3.0)),
                 },

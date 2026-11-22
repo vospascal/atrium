@@ -112,7 +112,15 @@ The lab is built from tools, each needing the one before:
    overlays, made to be read by someone who cannot listen. It says where a version differs
    from a reference or from the version before; listening says whether that is better. See
    [run.md](../run.md#compare-files) and `crates/analysis/README.md`, "The comparison".
-4. An event cutter, and the lab in the app.
+4. **The event cutter** (`cut`, built 2026-11-22): a long field recording cut into its
+   takes, each with its attack and decay and 5 ms fades, the rests between them (the gap the
+   engine's rule draws, end to start), the bout criterion that tells a pause inside a take from
+   a rest (Sibly, Nott & Fletcher 1990), the takes' types by spectrogram cross-correlation and
+   the runs of one type. It writes the takes, a JSON of every decision, a summary and a draft
+   preset that does not load until its `reference_spl` is filled in. See
+   [run.md](../run.md#cut-a-recording), [cutter-plan.md](cutter-plan.md) and
+   `crates/analysis/README.md`, "The cutter".
+5. The lab in the app, still to come.
 
 ## Where things are
 

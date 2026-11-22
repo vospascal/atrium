@@ -2,6 +2,7 @@
 //! through the whole engine, so they take some seconds.
 
 mod comparison;
+mod cut;
 mod engine;
 mod files;
 mod live_analysis;

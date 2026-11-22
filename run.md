@@ -206,6 +206,44 @@ layout, mode or probe may differ); for those the comparison also gives where the
 width differ most and when. Anything else is compared by distribution only. About 3 s for a
 28 s recording against a minute of stereo.
 
+## Cut a recording
+
+`cut` takes a long field recording and finds its takes: each call or song with its attack and
+its decay, the rests between them, their types by shape and the runs of one type, all measured
+from the recording. It writes only `target/cut/<kind>/`, and refuses a folder that is already
+there:
+
+- `take-01.wav` …, each take as 32-bit float at the recording's rate and channels, with 5 ms
+  fades in and out;
+- `cut.json` (`cut_version` 1): every decision with the values behind it, and where each take
+  lies in the recording;
+- `summary.txt`, the one-screen summary it also prints;
+- `preset.yaml`, a draft source with the takes, the measured gap and bout;
+- with `--picture`, `cut.png`: the spectrogram a strip a minute with the takes boxed, the band
+  level under it with its bed and thresholds, the gaps with the fitted bout criterion, and the
+  takes' similarity matrix.
+
+```sh
+cargo run --release --bin cut -- assets/frog.mp3 --name frog --picture
+cargo run --release --bin cut -- recording.wav@120-300 --name robin --band 2000-8000
+```
+
+| Option | Default | |
+|---|---|---|
+| `<recording>@<from>-<to>` | the whole file | Only this stretch, in seconds, as `analyse` reads it |
+| `--name <kind>` | the file's stem | The folder's name. If `sources/<kind>.yaml` exists, the draft takes its `name`, `group`, `width`, `vary.pitch` and `follows` |
+| `--band <low>-<high>` | chosen | Find the events between these frequencies (Hz) instead of in the third octaves where they stand furthest above the bed |
+| `--picture` | off | Draw `cut.png` too |
+
+The draft does not load until its `reference_spl` is filled in, on purpose: a recording's
+level in dBFS says nothing of the sound's level in the world. Listen to the takes, fill it in
+from the literature, then copy the takes to `assets/` and the preset to `sources/` with the take
+paths changed to match. Flagged takes (under 20 dB above their bed, whose bed will gate in and
+out with them) are written but left out of the draft. The summary says why nothing was joined
+when the gaps do not show two kinds. The rules and what looks wrong and is right are in
+`docs/cutter-plan.md` and `crates/analysis/README.md`, "The cutter". About half a second for
+the frog's 78 s.
+
 ## Analysis tools
 
 ```sh
