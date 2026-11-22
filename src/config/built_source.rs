@@ -119,22 +119,16 @@ pub(super) fn build_one_source(
                 .map_err(|error| format!("{}: {}", take.file, error))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    // One level for the whole voice: the RMS over all its takes end to end,
-    // so a quiet phrase stays quieter than a loud one.
-    let (energy, length) = buffers
-        .iter()
-        .fold((0.0f64, 0usize), |(energy, length), take| {
-            let samples = take.samples.len();
-            (
-                energy + (take.rms as f64).powi(2) * samples as f64,
-                length + samples,
-            )
-        });
-    let rms = if length > 0 {
-        (energy / length as f64).sqrt() as f32
-    } else {
-        0.0
-    };
+    // One level for the whole voice, measured over all its takes together
+    // while they sound (`level`), so a quiet phrase stays quieter than a loud
+    // one and the quiet between calls does not make the calls louder.
+    let rms = super::level::power_while_sounding(
+        &buffers
+            .iter()
+            .map(|take| (take.samples.as_slice(), take.sample_rate))
+            .collect::<Vec<_>>(),
+    )
+    .sqrt() as f32;
     let longest = buffers
         .iter()
         .max_by_key(|take| take.samples.len())
@@ -164,7 +158,7 @@ pub(super) fn build_one_source(
             node.ref_dist = ref_dist;
             node.pattern = pattern;
             node.spread = spread;
-            node.meter_signal();
+            node.meter_signal(rms);
             Box::new(node)
         }
         Some(rests) => {

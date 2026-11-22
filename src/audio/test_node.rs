@@ -60,8 +60,10 @@ impl TestNode {
         }
     }
 
-    pub(crate) fn meter_signal(&mut self) {
-        self.signal_meter = Some(SignalMeter::new(self.buffer.rms * self.amplitude));
+    /// Measure what it plays against `rms`, the recording's level while it
+    /// sounds, as the build calibrated it.
+    pub(crate) fn meter_signal(&mut self, rms: f32) {
+        self.signal_meter = Some(SignalMeter::new(rms * self.amplitude));
     }
 }
 

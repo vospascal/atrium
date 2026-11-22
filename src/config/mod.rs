@@ -13,6 +13,7 @@ mod build;
 mod built_source;
 mod description;
 mod environment;
+mod level;
 mod parse;
 mod presets;
 mod scene;
