@@ -1,4 +1,5 @@
-//! Audio engine internals: scene graph, command queue, telemetry, and profiling.
+//! Audio engine internals: scene graph, command queue, telemetry, the output
+//! tap, and profiling.
 
 pub mod edit;
 /// Audio-thread allocation tracking. Only available with `--features memprof`.
@@ -7,4 +8,5 @@ pub mod memprof;
 /// Zero-cost profiling spans (`profile_span!` macro). See module docs for usage.
 pub mod profiler;
 pub mod scene;
+pub mod tap;
 pub mod telemetry;

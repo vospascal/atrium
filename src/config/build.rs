@@ -313,6 +313,7 @@ impl SceneConfig {
             distance_model,
             speaker_layout,
             telemetry_out: None,
+            output_tap: None,
             clock,
             plan_in: Some(plan_in),
             scene_edits: None,

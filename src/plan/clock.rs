@@ -27,8 +27,14 @@ impl Clock {
 
     /// Seconds since the scene started, or 0 before the device is open.
     pub fn seconds(&self) -> f64 {
+        self.seconds_at(self.samples())
+    }
+
+    /// Seconds since the scene started at its sample `samples`, or 0 before
+    /// the device is open.
+    pub fn seconds_at(&self, samples: u64) -> f64 {
         match self.sample_rate() {
-            Some(rate) => self.samples() as f64 / rate as f64,
+            Some(rate) => samples as f64 / rate as f64,
             None => 0.0,
         }
     }

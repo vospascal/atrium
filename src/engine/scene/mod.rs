@@ -21,6 +21,7 @@ use crate::audio::spectral_profile::BARK_BANDS;
 use crate::engine::edit::{Retired, SceneEdit};
 #[cfg(feature = "memprof")]
 use crate::engine::memprof::MemProfiler;
+use crate::engine::tap::OutputTap;
 use crate::pipeline::environment::Environment;
 use crate::pipeline::mix_stage::MixContext;
 use crate::pipeline::perceptual::{PerceptualLayer, SourcePerceptualState};
@@ -62,6 +63,9 @@ pub struct AudioScene {
     pub speaker_layout: SpeakerLayout,
     /// Ring buffer producer for sending telemetry to the main thread.
     pub telemetry_out: Option<rtrb::Producer<TelemetryFrame>>,
+    /// A copy of every finished block, for measuring what is heard while it
+    /// plays (`crate::engine::tap`).
+    pub output_tap: Option<OutputTap>,
     /// The session's clock, counted here in output samples and read by the
     /// planner.
     pub clock: std::sync::Arc<crate::plan::Clock>,

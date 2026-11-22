@@ -67,7 +67,14 @@ impl Planner {
     /// Seconds into the scene: the audio clock, moved by any seek. It stands
     /// still while the scene is paused.
     pub fn now(&self) -> f64 {
-        self.clock.seconds() + f64::from_bits(self.offset.load(Ordering::Acquire))
+        self.scene_seconds_at(self.clock.samples())
+    }
+
+    /// The scene time of the audio clock's sample `clock_samples`, as the
+    /// scene is moved now: what is measured of a block is placed where it
+    /// sounded on the timeline.
+    pub fn scene_seconds_at(&self, clock_samples: u64) -> f64 {
+        self.clock.seconds_at(clock_samples) + f64::from_bits(self.offset.load(Ordering::Acquire))
     }
 
     /// The seed every choice follows from.

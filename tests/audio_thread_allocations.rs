@@ -3,13 +3,15 @@
 //! An allocation (or a free) on the audio thread can block on the allocator's
 //! lock for an unbounded time, which is heard as a dropout. This test builds
 //! the shipped scenes exactly as the application does, then counts every heap
-//! operation made inside `process_commands` + `render`, in every render mode.
+//! operation made inside `process_commands` + `render`, in every render mode,
+//! with telemetry and the output tap attached.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 
 use atrium::config::SceneConfig;
 use atrium::engine::scene::AudioScene;
+use atrium::engine::tap::output_tap;
 use atrium_core::commands::Command;
 use atrium_core::speaker::{ChannelMode, RenderMode};
 use atrium_core::telemetry::TelemetryFrame;
@@ -181,6 +183,12 @@ fn violations_in(path: &str, arc_degrees: Option<f32>) -> Vec<String> {
     // Telemetry is pushed from the callback; keep its queue attached and drained.
     let (telemetry_producer, mut telemetry_consumer) = rtrb::RingBuffer::<TelemetryFrame>::new(8);
     scene.telemetry_out = Some(telemetry_producer);
+    // So is the output tap. It holds eight callbacks: the steady stretch,
+    // never read, fills it and drops blocks; the live stretch reads it after
+    // every callback, so blocks are written.
+    let (tap, mut tap_reader) = output_tap(channels, 8 * FRAMES_PER_CALLBACK);
+    scene.output_tap = Some(tap);
+    let mut tapped = Vec::new();
     let mut output = vec![0.0f32; FRAMES_PER_CALLBACK * channels];
     let mut violations = Vec::new();
 
@@ -199,6 +207,7 @@ fn violations_in(path: &str, arc_degrees: Option<f32>) -> Vec<String> {
 
         // A control surface in use: commands arrive before every callback.
         let mut live = 0;
+        let mut blocks_tapped = 0;
         let mut live_origins = Vec::new();
         for callback in 0..160 {
             push_live_commands(&mut producer, callback);
@@ -209,9 +218,15 @@ fn violations_in(path: &str, arc_degrees: Option<f32>) -> Vec<String> {
                 live_origins = origins;
             }
             while telemetry_consumer.pop().is_ok() {}
+            while tap_reader.next_block(&mut tapped).is_some() {
+                blocks_tapped += 1;
+            }
             // Real time passes between callbacks: an arc's new width is
             // designed meanwhile and handed over in a later one.
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if blocks_tapped == 0 {
+            violations.push(format!("{path} {mode:?}: the tap received nothing"));
         }
         if live > 0 {
             violations.push(format!(

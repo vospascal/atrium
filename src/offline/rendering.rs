@@ -51,10 +51,7 @@ impl Rendering {
         }
         let seed = settings.seed.or(scene.seed).unwrap_or(DEFAULT_SEED);
         scene.seed = Some(seed);
-        let full_scale_db_spl = full_scale_db_spl(
-            scene.normalization.spl_reference as f64,
-            scene.normalization.target_rms as f64,
-        );
+        let full_scale_db_spl = scene.normalization.full_scale_db_spl();
         let layout = scene.speakers.layout.clone();
 
         let built = scene.build_unstarted()?;
@@ -266,13 +263,6 @@ impl Rendered {
     }
 }
 
-/// dB SPL of an RMS of 1.0: a source calibrated to `spl_reference` dB SPL
-/// plays at RMS `target_rms` (`config::built_source`), so RMS 1.0 is
-/// `spl_reference − 20·log10(target_rms)`.
-fn full_scale_db_spl(spl_reference: f64, target_rms: f64) -> f64 {
-    spl_reference - 20.0 * target_rms.log10()
-}
-
 /// The gain that brings the loudest of `channels` to `peak_decibels` dBFS,
 /// or `None` when every channel is silent.
 fn gain_to_peak(channels: &[ChannelStatistics], peak_decibels: f64) -> Option<f64> {
@@ -288,14 +278,6 @@ mod tests {
 
     fn channel(peak: f32) -> ChannelStatistics {
         ChannelStatistics { peak, rms: 0.0 }
-    }
-
-    /// 94 dB SPL at RMS 0.1 puts RMS 1.0 at 94 + 20 = 114 dB SPL; at the
-    /// default RMS 0.5, 94 + 6.02.
-    #[test]
-    fn full_scale_follows_the_normalisation() {
-        assert!((full_scale_db_spl(94.0, 0.1) - 114.0).abs() < 1e-12);
-        assert!((full_scale_db_spl(94.0, 0.5) - 100.0206).abs() < 1e-4);
     }
 
     #[test]

@@ -267,6 +267,17 @@ pub struct NormalizationConfig {
     pub spl_threshold: f32,
 }
 
+impl NormalizationConfig {
+    /// dB SPL of an RMS of 1.0: a source calibrated to `spl_reference` dB
+    /// SPL plays at RMS `target_rms` (`config::built_source`), so RMS 1.0 is
+    /// `spl_reference − 20·log10(target_rms)`. The analyser reads levels in
+    /// dB SPL from it, offline from a render's sidecar and live from the
+    /// playing scene.
+    pub fn full_scale_db_spl(&self) -> f64 {
+        self.spl_reference as f64 - 20.0 * (self.target_rms as f64).log10()
+    }
+}
+
 impl Default for NormalizationConfig {
     fn default() -> Self {
         Self {
@@ -384,5 +395,18 @@ mod tests {
         let scene: SceneConfig =
             load_yaml("scenes/default.yaml").expect("default.yaml should load");
         assert_eq!(scene.environment, "environments/atrium.yaml");
+    }
+
+    /// 94 dB SPL at RMS 0.1 puts RMS 1.0 at 94 + 20 = 114 dB SPL; at the
+    /// default RMS 0.5, 94 + 6.02.
+    #[test]
+    fn full_scale_follows_the_normalisation() {
+        let at = |target_rms: f32| NormalizationConfig {
+            target_rms,
+            spl_reference: 94.0,
+            ..NormalizationConfig::default()
+        };
+        assert!((at(0.1).full_scale_db_spl() - 114.0).abs() < 1e-5);
+        assert!((at(0.5).full_scale_db_spl() - 100.0206).abs() < 1e-4);
     }
 }

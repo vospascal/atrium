@@ -3,6 +3,7 @@
 
 mod engine;
 mod files;
+mod live_analysis;
 mod probe;
 mod reproducible;
 mod start;

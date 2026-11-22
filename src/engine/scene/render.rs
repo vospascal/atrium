@@ -1,6 +1,6 @@
 //! One buffer of audio: hand on what the plan made due, tick the sources,
-//! score what masks what, render the active pipeline, fade for pause and
-//! push telemetry.
+//! score what masks what, render the active pipeline, fade for pause, copy
+//! the result to the output tap and push telemetry.
 
 use crate::audio::spectral_profile::BARK_BANDS;
 use crate::audio::turbulence::AirMotion;
@@ -175,6 +175,11 @@ impl AudioScene {
         }
         self.clock.advance(num_frames as u64, self.sample_rate);
         self.fade_for_pause(output, channels);
+        // What is heard, as it is heard: after the probe and the fade, stamped
+        // with the clock at the block's start.
+        if let Some(tap) = &mut self.output_tap {
+            tap.push(output, channels, now);
+        }
         #[cfg(feature = "memprof")]
         self.memprof.record_stage(MemStage::Mix);
 
