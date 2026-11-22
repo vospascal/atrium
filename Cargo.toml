@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/analysis",
     "crates/core",
     "crates/ffi",
     "crates/tui",
@@ -15,6 +16,7 @@ description = "Spatial audio engine with acoustic zone simulation"
 default-run = "atrium"
 
 [dependencies]
+atrium-analysis = { path = "crates/analysis" }
 atrium-core = { path = "crates/core" }
 atrium-world = { path = "crates/world" }
 cpal = "0.15"
@@ -57,6 +59,10 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.atrium-core]
+opt-level = 3
+
+# The analyser's tests measure minutes of noise; unoptimized they take minutes.
+[profile.dev.package.atrium-analysis]
 opt-level = 3
 
 [profile.profiling]

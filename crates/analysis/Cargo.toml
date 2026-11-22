@@ -1,0 +1,15 @@
+[package]
+name = "atrium-analysis"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "One report for a recording or a render: level, colour, texture, events and space, as numbers, text and a picture"
+
+[dependencies]
+png = "0.18"
+realfft = "3.5"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

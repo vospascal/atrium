@@ -120,9 +120,10 @@ pub(super) fn build_one_source(
         })
         .collect::<Result<Vec<_>, _>>()?;
     // One level for the whole voice, measured over all its takes together
-    // while they sound (`level`), so a quiet phrase stays quieter than a loud
-    // one and the quiet between calls does not make the calls louder.
-    let rms = super::level::power_while_sounding(
+    // while they sound (`atrium_analysis::power_while_sounding`), so a quiet
+    // phrase stays quieter than a loud one and the quiet between calls does
+    // not make the calls louder.
+    let rms = atrium_analysis::power_while_sounding(
         &buffers
             .iter()
             .map(|take| (take.samples.as_slice(), take.sample_rate))
