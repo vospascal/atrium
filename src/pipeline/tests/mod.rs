@@ -21,6 +21,8 @@ mod ambient_listening;
 mod channel_routing;
 mod dbap;
 mod field_emitters;
+mod headphone_equalisation;
+mod headphone_equalisation_listening;
 mod levels_and_timing;
 mod mode_layout_matrix;
 mod mode_switching;

@@ -34,7 +34,7 @@ pub enum FieldEncoding {
     /// (`AmbisonicBus::BFormat`), which guarantees at least four channels.
     Ambisonics,
     /// Add the mono signal, undecorrelated, to the ambient bus that the
-    /// renderer then hears through two ears (`Renderer::render_ambient_bus`).
+    /// renderer then hears through two ears (`Renderer::finish_ears`).
     Ears,
 }
 

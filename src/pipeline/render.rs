@@ -349,8 +349,8 @@ pub fn render_pipeline(
         }
     }
 
-    // What the listener hears of the ambient bus, after every source has
-    // joined it.
+    // What the listener hears of the ambient bus, and of the direct sound
+    // the renderer gathered for its ears, after every source has joined them.
     if field_encoding == FieldEncoding::Ears {
         let mut out = OutputBuffer {
             buffer: output,
@@ -359,7 +359,7 @@ pub fn render_pipeline(
             num_frames,
             sample_rate: params.sample_rate,
         };
-        renderer.render_ambient_bus(ambient_bus, ambient_bus_fed, &mut out);
+        renderer.finish_ears(ambient_bus, ambient_bus_fed, &probe, &mut out);
     }
 
     // A probe that hides the late reverb starves it: what it already holds

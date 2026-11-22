@@ -32,6 +32,11 @@ pub struct Probe {
     /// it louder than far-off measurements say, most of all in the bass.
     /// Headphones only; no other render mode has ears.
     pub near_field: bool,
+    /// The headphone equalisation: the measured head's diffuse-field response
+    /// divided out of what reaches the ears, so its loudspeaker and its ear
+    /// canal are not heard on top of the listener's own. Off, the ears hear
+    /// the measured responses as they are. Headphones only.
+    pub headphone_equalisation: bool,
     /// One output channel heard alone: a loudspeaker, or an ear.
     pub only_channel: Option<u8>,
 }
@@ -48,6 +53,7 @@ impl Probe {
         ground_effect: true,
         wall_colouring: true,
         near_field: true,
+        headphone_equalisation: true,
         only_channel: None,
     };
 

@@ -278,6 +278,9 @@ pub struct Probe {
     /// What a head does to a sound inside about a metre: the near ear hears
     /// it louder, most of all in the bass. Headphones only.
     pub near_field: bool,
+    /// The headphone equalisation: the measured head's own loudspeaker and
+    /// ear canal divided out of what reaches the ears. Headphones only.
+    pub headphone_equalisation: bool,
     /// One output channel heard alone, as `Telemetry::peaks_db` counts them:
     /// a loudspeaker, or an ear.
     pub only_channel: Option<u8>,
@@ -295,6 +298,7 @@ impl From<atrium_core::probe::Probe> for Probe {
             ground_effect: probe.ground_effect,
             wall_colouring: probe.wall_colouring,
             near_field: probe.near_field,
+            headphone_equalisation: probe.headphone_equalisation,
             only_channel: probe.only_channel,
         }
     }
@@ -312,6 +316,7 @@ impl From<Probe> for atrium_core::probe::Probe {
             ground_effect: probe.ground_effect,
             wall_colouring: probe.wall_colouring,
             near_field: probe.near_field,
+            headphone_equalisation: probe.headphone_equalisation,
             only_channel: probe.only_channel,
         }
     }

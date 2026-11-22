@@ -18,9 +18,17 @@
 //! **Ambient sound** has no direction to look up. It joins one bus, and two
 //! fixed filters derived from all the measured directions together give
 //! each ear what this head hears of a diffuse field (`diffuse_field`).
+//!
+//! **Equalised for headphones**, the head's diffuse-field response is
+//! divided out of every source's convolved direct sound, once, on their sum
+//! (`diffuse_field`'s equaliser): it holds the measurement loudspeaker and
+//! the dummy head's ear canal, which the listener's own ear canal would
+//! otherwise hear on top of its own. A diffuse field then reaches the ears
+//! flat. The probe can switch it off (`equalised_share`).
 
 mod diffuse_field;
 mod direction;
+mod equalised_share;
 mod itd_delay;
 mod near_field;
 mod renderer;

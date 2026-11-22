@@ -1,6 +1,10 @@
 //! Ambient sound on headphones: what two ears hear of a diffuse field, held
 //! to the measured head itself.
 //!
+//! The colour is the measured head's with the headphone equalisation off;
+//! with it on (`headphone_equalisation.rs`) the same field reaches the ears
+//! flat. The coherence, the attack and the turning head hold either way.
+//!
 //! The ground truth is computed here, independently of the renderer, from
 //! every measured direction of the shipped MIT KEMAR set: 710 directions on
 //! 14 rings of elevation, −40° to +90° in steps of 10°. Each direction is
@@ -27,7 +31,7 @@ const SAMPLE_RATE: f32 = 48_000.0;
 
 /// The MIT KEMAR measurement grid (Gardner and Martin 1995): each ring's
 /// elevation and how many directions, evenly spaced in azimuth, it holds.
-const MEASURED_RINGS: [(i32, usize); 14] = [
+pub(super) const MEASURED_RINGS: [(i32, usize); 14] = [
     (-40, 56),
     (-30, 60),
     (-20, 72),
@@ -46,35 +50,42 @@ const MEASURED_RINGS: [(i32, usize); 14] = [
 
 /// Third octaves `1000 · 2^(k/3)` Hz: k = −10 is 99 Hz, 9 is 7.9 kHz, 11 is
 /// 12.7 kHz.
-const LOWEST_BAND: i32 = -10;
-const HIGHEST_COHERENCE_BAND: i32 = 9;
-const HIGHEST_COLOUR_BAND: i32 = 11;
+pub(super) const LOWEST_BAND: i32 = -10;
+pub(super) const HIGHEST_COHERENCE_BAND: i32 = 9;
+pub(super) const HIGHEST_COLOUR_BAND: i32 = 11;
+
+/// The render as the measured responses give it, before the headphone
+/// equalisation.
+pub(super) const AS_MEASURED: Probe = Probe {
+    headphone_equalisation: false,
+    ..Probe::WHOLE
+};
 
 /// Two ears' spectra on one grid: each ear's power, their cross-spectrum,
 /// and the power of the input that made them (all ones for the diffuse
 /// field itself, whose input is white by definition).
-struct EarSpectra {
-    bin_hz: f64,
-    left: Vec<f64>,
-    right: Vec<f64>,
-    cross: Vec<Complex<f64>>,
-    input: Vec<f64>,
+pub(super) struct EarSpectra {
+    pub(super) bin_hz: f64,
+    pub(super) left: Vec<f64>,
+    pub(super) right: Vec<f64>,
+    pub(super) cross: Vec<Complex<f64>>,
+    pub(super) input: Vec<f64>,
 }
 
 /// One third octave as two ears hear it.
-struct Band {
-    centre: f64,
+pub(super) struct Band {
+    pub(super) centre: f64,
     /// The largest normalised cross-correlation within ±1 ms of shift, as
     /// the ear compares its two inputs (the IACC of ISO 3382-1, per band).
-    coherence: f64,
+    pub(super) coherence: f64,
     /// Its real part without shift: negative where the ears are opposed.
-    signed_coherence: f64,
-    left_db: f64,
-    right_db: f64,
+    pub(super) signed_coherence: f64,
+    pub(super) left_db: f64,
+    pub(super) right_db: f64,
 }
 
 impl EarSpectra {
-    fn band(&self, index: i32) -> Band {
+    pub(super) fn band(&self, index: i32) -> Band {
         let centre = 1000.0 * 2f64.powf(index as f64 / 3.0);
         let lowest = (centre * 2f64.powf(-1.0 / 6.0) / self.bin_hz).ceil() as usize;
         let highest = (centre * 2f64.powf(1.0 / 6.0) / self.bin_hz).floor() as usize;
@@ -108,7 +119,7 @@ impl EarSpectra {
 
 /// The diffuse field of the measured head, from its 710 measured responses,
 /// and its response straight ahead; worked out once and shared by the tests.
-fn measured_diffuse_field() -> &'static (EarSpectra, EarSpectra) {
+pub(super) fn measured_diffuse_field() -> &'static (EarSpectra, EarSpectra) {
     static MEASURED: std::sync::OnceLock<(EarSpectra, EarSpectra)> = std::sync::OnceLock::new();
     MEASURED.get_or_init(work_out_measured_diffuse_field)
 }
@@ -252,7 +263,7 @@ fn on_fine_grid(short: &[Complex<f64>]) -> Vec<Complex<f64>> {
 
 /// The solid angle of the band ±5° of elevation around a ring, over 2π;
 /// the top ring covers only 85° to 90°.
-fn ring_solid_angle(elevation: i32) -> f64 {
+pub(super) fn ring_solid_angle(elevation: i32) -> f64 {
     let lowest = (elevation as f64 - 5.0).to_radians();
     let highest = (elevation as f64 + 5.0).min(90.0).to_radians();
     highest.sin() - lowest.sin()
@@ -260,16 +271,16 @@ fn ring_solid_angle(elevation: i32) -> f64 {
 
 /// A recorded or generated signal played once, as an ambient sound or a
 /// point, then silence. Its level is its own at 2 m.
-struct OneShot {
-    samples: Vec<f32>,
-    index: usize,
-    kind: EmitterKind,
-    position: Vec3,
+pub(super) struct OneShot {
+    pub(super) samples: Vec<f32>,
+    pub(super) index: usize,
+    pub(super) kind: EmitterKind,
+    pub(super) position: Vec3,
 }
 
 /// Where a point source of the comparison has its own level: far enough
 /// that the near-field correction leaves it alone.
-const REFERENCE_DISTANCE_METRES: f32 = 2.0;
+pub(super) const REFERENCE_DISTANCE_METRES: f32 = 2.0;
 
 impl SoundSource for OneShot {
     fn next_sample(&mut self, _sample_rate: f32) -> f32 {
@@ -291,10 +302,10 @@ impl SoundSource for OneShot {
 
 /// Five seconds of white noise, then room for the filters to ring out: the
 /// whole fits one transform of 2^18 samples, so the spectra are exact.
-const NOISE_FRAMES: usize = 240_000;
-const RENDER_FRAMES: usize = 1 << 18;
+pub(super) const NOISE_FRAMES: usize = 240_000;
+pub(super) const RENDER_FRAMES: usize = 1 << 18;
 
-fn white_noise() -> Vec<f32> {
+pub(super) fn white_noise() -> Vec<f32> {
     let mut generator = Rng::new(17);
     (0..NOISE_FRAMES)
         .map(|_| 0.25 * generator.next_bipolar())
@@ -303,7 +314,7 @@ fn white_noise() -> Vec<f32> {
 
 /// `input` played as `kind` at `position` through the headphone pipeline,
 /// the listener turned by `yaw_at(frame)` before each callback.
-fn render(
+pub(super) fn render(
     rig: &mut Rig,
     input: &[f32],
     kind: EmitterKind,
@@ -330,19 +341,27 @@ fn render(
     output
 }
 
-fn render_ambient(input: &[f32], yaw_at: impl Fn(usize) -> f32) -> Vec<f32> {
+pub(super) fn render_ambient(input: &[f32], yaw_at: impl Fn(usize) -> f32) -> Vec<f32> {
+    render_ambient_through(Probe::WHOLE, input, yaw_at)
+}
+
+pub(super) fn render_ambient_through(
+    probe: Probe,
+    input: &[f32],
+    yaw_at: impl Fn(usize) -> f32,
+) -> Vec<f32> {
     render(
         &mut Rig::headphones(SAMPLE_RATE),
         input,
         EmitterKind::Field,
         Vec3::ZERO,
-        Probe::WHOLE,
+        probe,
         yaw_at,
     )
 }
 
 /// The spectra of a stereo render `output` of `input`.
-fn spectra_of(output: &[f32], input: &[f32]) -> EarSpectra {
+pub(super) fn spectra_of(output: &[f32], input: &[f32]) -> EarSpectra {
     let mut planner = RealFftPlanner::<f64>::new();
     let forward = planner.plan_fft_forward(RENDER_FRAMES);
     let transform = |samples: &mut dyn Iterator<Item = f32>| {
@@ -405,7 +424,7 @@ fn assert_heard_as_the_measured_diffuse_field(rendered: &EarSpectra, measured: &
     assert!(worst_colour <= 1.5, "{report}");
 }
 
-fn facing_ahead(_frame: usize) -> f32 {
+pub(super) fn facing_ahead(_frame: usize) -> f32 {
     std::f32::consts::FRAC_PI_2
 }
 
@@ -415,13 +434,13 @@ fn facing_ahead(_frame: usize) -> f32 {
 /// 0.911 at 125 Hz, 0.047 at 500 Hz, 0.073 at 1 kHz, 0.026 at 2 kHz and
 /// 0.004 at 4 kHz (signed: +0.911, +0.046, −0.073, −0.026, −0.004). Ambient
 /// white noise must be heard within 0.15 of it in every third octave from
-/// 100 Hz to 8 kHz, and each ear within 1.5 dB of the head's diffuse-field
-/// response from 100 Hz to 12.5 kHz.
+/// 100 Hz to 8 kHz, and, before the headphone equalisation, each ear within
+/// 1.5 dB of the head's diffuse-field response from 100 Hz to 12.5 kHz.
 #[test]
 fn two_ears_hear_ambient_noise_as_the_measured_diffuse_field() {
     let (measured, _) = measured_diffuse_field();
     let noise = white_noise();
-    let output = render_ambient(&noise, facing_ahead);
+    let output = render_ambient_through(AS_MEASURED, &noise, facing_ahead);
     assert_heard_as_the_measured_diffuse_field(&spectra_of(&output, &noise), measured);
 }
 
@@ -551,9 +570,11 @@ fn an_attack_through_ambient_sound_is_heard_once() {
 }
 
 /// How loud an ambient sound is at the ear, against a point source of the
-/// same level at its reference distance straight ahead: the head's diffuse
-/// response over its response from ahead, both from the measured responses.
-/// For white noise that is +0.05 dB at each ear: as loud. By third octave
+/// same level at its reference distance straight ahead, before the
+/// headphone equalisation: the head's diffuse response over its response
+/// from ahead, both from the measured responses. (Equalised, both are
+/// divided by nearly the same, and `headphone_equalisation.rs` reports what
+/// that leaves.) For white noise that is +0.05 dB at each ear: as loud. By third octave
 /// it is −0.1 dB at 125 Hz, +0.2 dB at 500 Hz, +1.5 dB at 1 kHz, −0.3 dB at
 /// 2.5 kHz, −1.5 dB at 4 kHz and +12.9 dB at 8 kHz, where the response from
 /// straight ahead has a deep notch that sound from all round fills in.
@@ -561,7 +582,7 @@ fn an_attack_through_ambient_sound_is_heard_once() {
 fn ambient_sound_is_as_loud_as_the_measured_head_hears_it() {
     let (measured, ahead) = measured_diffuse_field();
     let noise = white_noise();
-    let ambient = render_ambient(&noise, facing_ahead);
+    let ambient = render_ambient_through(AS_MEASURED, &noise, facing_ahead);
     // At 2 m the near field leaves the sound alone; the air and the ground
     // are switched off, so the head is all that is compared.
     let point = render(
@@ -572,7 +593,7 @@ fn ambient_sound_is_as_loud_as_the_measured_head_hears_it() {
         Probe {
             air_absorption: false,
             ground_effect: false,
-            ..Probe::WHOLE
+            ..AS_MEASURED
         },
         facing_ahead,
     );

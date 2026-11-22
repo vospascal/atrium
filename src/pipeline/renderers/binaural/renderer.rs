@@ -1,15 +1,18 @@
-//! The HRTF renderer: SOFA loading, the per-source render loop, and the
-//! ambient bus heard through the head's diffuse field.
+//! The HRTF renderer: SOFA loading, the per-source render loop, the
+//! headphone equalisation of the direct sound, and the ambient bus heard
+//! through the head's diffuse field.
 
 use realfft::num_complex::Complex;
 use sofar::reader::{Filter, OpenOptions, Sofar};
 
 use atrium_core::directivity::directivity_gain;
 use atrium_core::panner::distance_gain_at_model;
+use atrium_core::probe::Probe;
 use atrium_core::speaker::SpeakerLayout;
 
-use super::diffuse_field::DiffuseField;
+use super::diffuse_field::{DiffuseField, HeadphoneEqualiser};
 use super::direction::{equal_power_pan, to_sofa_coords};
+use super::equalised_share::EqualisedShare;
 use super::itd_delay::DELAY_BUF_SIZE;
 use super::near_field::{near_field_corrections, shared_table};
 use super::source_state::{HrtfSource, BLOCK_SIZE, FILTER_UPDATE_INTERVAL};
@@ -29,6 +32,13 @@ pub struct HrtfRenderer {
     /// What the two ears hear of the ambient bus, from the same HRIRs;
     /// `None` while there are none.
     diffuse_field: Option<DiffuseField>,
+    /// The headphone equaliser for the direct sound of every source, from
+    /// the same HRIRs; `None` while there are none.
+    equaliser: Option<HeadphoneEqualiser>,
+    /// How much of the equalised render the last callback ended on, so the
+    /// probe's switch glides; `None` after a reset, when there is nothing to
+    /// glide from.
+    equalisation_heard: Option<f32>,
     base_buf: Vec<f32>,
     mono_buf: Vec<f32>,
     left_buf: Vec<f32>,
@@ -58,6 +68,8 @@ impl HrtfRenderer {
             filter: None,
             near_field: None,
             diffuse_field: None,
+            equaliser: None,
+            equalisation_heard: None,
             base_buf: vec![0.0; BLOCK_SIZE],
             mono_buf: vec![0.0; BLOCK_SIZE],
             left_buf: vec![0.0; BLOCK_SIZE],
@@ -86,6 +98,12 @@ impl HrtfRenderer {
                 self.input_spectrum = vec![Complex::new(0.0, 0.0); fft_size / 2 + 1];
                 self.filter = Some(Filter::new(filter_length));
                 self.diffuse_field = Some(DiffuseField::new(&self.hrtf_path, &sofa, sample_rate));
+                self.equaliser = Some(HeadphoneEqualiser::for_head(
+                    &self.hrtf_path,
+                    &sofa,
+                    sample_rate,
+                ));
+                self.equalisation_heard = None;
                 self.sofa = Some(sofa);
                 self.near_field = Some(shared_table());
             }
@@ -95,6 +113,7 @@ impl HrtfRenderer {
                 self.filter = None;
                 self.near_field = None;
                 self.diffuse_field = None;
+                self.equaliser = None;
             }
         }
     }
@@ -229,6 +248,13 @@ impl Renderer for HrtfRenderer {
 
         let inv_frames = 1.0 / out.num_frames as f32;
 
+        // How much of this source's direct sound is heard through the
+        // equaliser, which every source's direct sound joins (`equaliser`),
+        // and how much as the measured responses give it, straight into the
+        // output as before there was one.
+        let equalised_share =
+            EqualisedShare::between(self.equalisation_heard, ctx.probe.headphone_equalisation);
+
         // Process in blocks of BLOCK_SIZE for FFT convolution
         let mut frame = 0;
         while frame < out.num_frames {
@@ -336,17 +362,45 @@ impl Renderer for HrtfRenderer {
                             xfade_rem.saturating_sub(block_len);
                     }
 
-                    // Near-field correction, ITD delay, accumulate into
-                    // stereo output.
+                    // Near-field correction, ITD delay, then into the
+                    // equaliser's bus, and as much as is heard unequalised
+                    // into the stereo output.
                     let source_state = &mut self.sources[source_idx];
                     let itd = &mut source_state.paths[pi];
+                    // Loaded with the HRIRs: there whenever a source is
+                    // convolved at all.
+                    let Some(equaliser) = self.equaliser.as_mut() else {
+                        continue;
+                    };
+                    let (bus_left, bus_right) = equaliser.bus(out.num_frames);
                     for i in 0..block_len {
                         let base = (frame + i) * out.channels;
-                        let left = source_state.near_field_left.process(self.left_buf[i]);
-                        let right = source_state.near_field_right.process(self.right_buf[i]);
-                        out.buffer[base] += itd.itd_left.process(left);
+                        let left = itd
+                            .itd_left
+                            .process(source_state.near_field_left.process(self.left_buf[i]));
+                        let right = itd
+                            .itd_right
+                            .process(source_state.near_field_right.process(self.right_buf[i]));
+                        bus_left[frame + i] += left;
+                        bus_right[frame + i] += right;
+                        let unequalised = match equalised_share {
+                            EqualisedShare::None => {
+                                // Exactly as before the equaliser: added,
+                                // not weighed.
+                                out.buffer[base] += left;
+                                if out.channels > 1 {
+                                    out.buffer[base + 1] += right;
+                                }
+                                continue;
+                            }
+                            EqualisedShare::All => continue,
+                            EqualisedShare::Gliding { .. } => {
+                                1.0 - equalised_share.at((frame + i) as f32 * inv_frames)
+                            }
+                        };
+                        out.buffer[base] += left * unequalised;
                         if out.channels > 1 {
-                            out.buffer[base + 1] += itd.itd_right.process(right);
+                            out.buffer[base + 1] += right * unequalised;
                         }
                     }
                 } else {
@@ -410,10 +464,23 @@ impl Renderer for HrtfRenderer {
         }
     }
 
-    fn render_ambient_bus(&mut self, bus: &[f32], fed: bool, out: &mut OutputBuffer) {
-        if let Some(diffuse_field) = &mut self.diffuse_field {
-            diffuse_field.render(bus, fed, out);
+    /// The direct sound of every source through the headphone equaliser,
+    /// then the ambient bus through the head's diffuse field.
+    fn finish_ears(
+        &mut self,
+        ambient_bus: &[f32],
+        ambient_fed: bool,
+        probe: &Probe,
+        out: &mut OutputBuffer,
+    ) {
+        let share = EqualisedShare::between(self.equalisation_heard, probe.headphone_equalisation);
+        if let Some(equaliser) = &mut self.equaliser {
+            equaliser.render(share, out);
         }
+        if let Some(diffuse_field) = &mut self.diffuse_field {
+            diffuse_field.render(ambient_bus, ambient_fed, share, out);
+        }
+        self.equalisation_heard = Some(share.end());
     }
 
     fn ensure_topology(&mut self, source_count: usize, _layout: &SpeakerLayout, sample_rate: f32) {
@@ -432,6 +499,10 @@ impl Renderer for HrtfRenderer {
         if let Some(diffuse_field) = &mut self.diffuse_field {
             diffuse_field.reset();
         }
+        if let Some(equaliser) = &mut self.equaliser {
+            equaliser.reset();
+        }
+        self.equalisation_heard = None;
         for (source_idx, src) in self.sources.iter_mut().enumerate() {
             src.update_counter = source_idx % FILTER_UPDATE_INTERVAL;
             src.near_field_left.reset();

@@ -1,12 +1,16 @@
-//! What ambient sound costs on headphones, against point sources.
+//! What headphone rendering costs: ambient sound against point sources,
+//! and a whole scene with the headphone equalisation and without.
 //!
 //! `cargo test --release --lib ambient_sound_cost -- --ignored --nocapture`
-//! prints the time one 512-frame callback at 48 kHz takes. It asserts
-//! nothing: timings depend on the machine, so they are read, not tested.
+//! and `... headphone_scene_cost ...` print the time one 512-frame callback
+//! at 48 kHz takes. They assert nothing: timings depend on the machine, so
+//! they are read, not tested.
 
 use std::time::Instant;
 
 use super::{FieldTextureSource, Rig, ToneSource, BLOCK_FRAMES};
+use atrium_core::commands::Command;
+use atrium_core::probe::Probe;
 use atrium_core::source::SoundSource;
 use atrium_core::speaker::RenderMode;
 use atrium_core::types::Vec3;
@@ -66,6 +70,57 @@ fn ambient_sound_cost() {
         eprintln!(
             "headphones, {name}: {:.1} µs per 512-frame callback at 48 kHz",
             microseconds_per_callback(sources)
+        );
+    }
+}
+
+/// The time of one callback of `scenes/nature.yaml` on headphones, offline,
+/// with `probe`: the best of three runs of 2,000 callbacks.
+fn scene_microseconds_per_callback(probe: Probe) -> f64 {
+    let mut config = crate::config::SceneConfig::load("scenes/nature.yaml")
+        .expect("scene")
+        .for_headphones();
+    config.seed = Some(7);
+    let mut scene = config.build().expect("build").scene;
+    scene.sample_rate = 48_000.0;
+    scene.init_pipelines();
+    let (mut producer, mut consumer) = rtrb::RingBuffer::<Command>::new(4);
+    producer
+        .push(Command::SetProbe { probe })
+        .expect("room for the probe");
+    scene.process_commands(&mut consumer);
+    let channels = scene.speaker_layout.total_channels();
+    let mut buffer = vec![0.0f32; BLOCK_FRAMES * channels];
+    for _ in 0..200 {
+        scene.render(&mut buffer, channels);
+    }
+    (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            for _ in 0..CALLBACKS {
+                scene.render(&mut buffer, channels);
+            }
+            start.elapsed().as_secs_f64() * 1e6 / CALLBACKS as f64
+        })
+        .fold(f64::MAX, f64::min)
+}
+
+#[test]
+#[ignore = "a timing, read by hand: --ignored --nocapture"]
+fn headphone_scene_cost() {
+    for (name, probe) in [
+        ("equalised", Probe::WHOLE),
+        (
+            "as measured",
+            Probe {
+                headphone_equalisation: false,
+                ..Probe::WHOLE
+            },
+        ),
+    ] {
+        eprintln!(
+            "scenes/nature.yaml on headphones, {name}: {:.1} µs per 512-frame callback at 48 kHz",
+            scene_microseconds_per_callback(probe)
         );
     }
 }

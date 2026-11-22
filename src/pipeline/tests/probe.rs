@@ -230,6 +230,30 @@ fn the_near_field_is_the_headphones_alone() {
     }
 }
 
+/// The headphone equalisation is the headphone renderer's too: switched
+/// off, the headphones change (a point source and an ambient sound alike)
+/// and no other mode does.
+#[test]
+fn the_headphone_equalisation_is_the_headphones_alone() {
+    let rig = glass_room(48_000.0);
+    for mode in MODES {
+        let off = render_with(
+            &rig,
+            mode,
+            Probe {
+                headphone_equalisation: false,
+                ..Probe::WHOLE
+            },
+            24_000,
+        );
+        assert_eq!(
+            render_with(&rig, mode, Probe::WHOLE, 24_000) != off,
+            mode == RenderMode::Hrtf,
+            "{mode:?}: the headphone equalisation switch"
+        );
+    }
+}
+
 /// Every effect a path can have is one the probe knows how to switch, or the
 /// delay, which it never does. A new effect has to be decided here.
 #[test]

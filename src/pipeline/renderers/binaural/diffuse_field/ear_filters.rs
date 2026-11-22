@@ -2,8 +2,17 @@
 //! a diffuse field: this head's diffuse-field colour at each ear, and the
 //! diffuse-field coherence between them.
 //!
-//! Each ear's filter is a minimum-phase filter of that ear's diffuse-field
-//! magnitude, then the sound itself and one echo of it:
+//! They come in two pairs. As measured, each ear's filter is a minimum-phase
+//! filter of that ear's diffuse-field magnitude, then the sound itself and
+//! one echo of it. Equalised for headphones, the colour is gone: the
+//! headphone equaliser (`inverse`) divides every response by that magnitude,
+//! so what a diffuse field leaves at each ear is the sound and its echo
+//! alone, flat. Only the coherence is left, and it does not depend on the
+//! colour. Leaving the colour out is exact where dividing it out of a
+//! measured response is not: below the measurement's trusted bass, where
+//! the equaliser stops following it, the ambient sound is still flat.
+//!
+//! Either way the sound and its echo are
 //!
 //! ```text
 //! left  = a + b · D(f)        right = a − b · D(f)
@@ -44,9 +53,10 @@
 //! "Ambient sound", records it).
 
 use realfft::num_complex::Complex;
-use realfft::RealFftPlanner;
 
+use super::minimum_phase::{minimum_phase_spectrum, to_time, truncated_with_fade_out};
 use super::statistics::DiffuseStatistics;
+use super::third_octave::{third_octave_bins, RunningSum};
 
 /// Below this the set's own coherence is not taken. The MIT KEMAR
 /// measurement loudspeaker gave little bass (the diffuse response is 13 dB
@@ -96,6 +106,14 @@ pub(in crate::pipeline::renderers::binaural) struct EarFilters {
     pub(in crate::pipeline::renderers::binaural) right: Vec<f32>,
 }
 
+/// Both pairs: with the head's diffuse-field colour, as the measured
+/// responses hear a diffuse field, and without it, as the same responses
+/// hear it once equalised for headphones.
+pub(in crate::pipeline::renderers::binaural) struct AmbientEarFilters {
+    pub(in crate::pipeline::renderers::binaural) as_measured: EarFilters,
+    pub(in crate::pipeline::renderers::binaural) equalised: EarFilters,
+}
+
 /// The length of the frequency grid the statistics must be measured on for
 /// `design_ear_filters` at `sample_rate`.
 pub(in crate::pipeline::renderers::binaural) fn design_grid_size(sample_rate: f32) -> usize {
@@ -121,11 +139,12 @@ pub(in crate::pipeline::renderers::binaural) fn echo_delay_seconds(frequency: f6
 }
 
 /// The two ears' filters at `sample_rate` from the diffuse-field
-/// `statistics`, measured on a grid of `design_grid_size(sample_rate)` bins.
+/// `statistics`, measured on a grid of `design_grid_size(sample_rate)` bins:
+/// both pairs, which differ only in the colour.
 pub(in crate::pipeline::renderers::binaural) fn design_ear_filters(
     statistics: &DiffuseStatistics,
     sample_rate: f32,
-) -> EarFilters {
+) -> AmbientEarFilters {
     let grid_size = design_grid_size(sample_rate);
     let bins = grid_size / 2 + 1;
     assert_eq!(
@@ -148,121 +167,56 @@ pub(in crate::pipeline::renderers::binaural) fn design_ear_filters(
 
     let filter_length = (FILTER_SECONDS * sample_rate as f64).round() as usize;
     let fade_length = (FADE_OUT_SECONDS * sample_rate as f64).round() as usize;
-    let mut ears = [&statistics.left_power, &statistics.right_power]
-        .into_iter()
-        .zip([1.0f64, -1.0])
-        .map(|(power, sign)| {
-            let minimum_phase = minimum_phase_spectrum(power, grid_size);
-            let spectrum: Vec<Complex<f64>> = (0..bins)
-                .map(|bin| {
-                    let (sound, echo) = sound_and_echo_for_coherence(coherence[bin]);
-                    let delay = Complex::from_polar(sign * echo, delay_phase[bin]);
-                    let sound_and_echo = delay + sound;
-                    let lead_in = Complex::from_polar(
-                        1.0,
-                        -std::f64::consts::TAU * bin as f64 * bin_hz * LEAD_IN_SECONDS,
-                    );
-                    minimum_phase[bin] * sound_and_echo * lead_in
-                })
-                .collect();
-            let mut response = to_time(spectrum, grid_size);
-            response.truncate(filter_length);
-            for (index, sample) in response[filter_length - fade_length..]
-                .iter_mut()
-                .enumerate()
-            {
-                let progress = (index as f64 + 0.5) / fade_length as f64;
-                *sample *= 0.5 * (1.0 + (std::f64::consts::PI * progress).cos());
-            }
-            response
-                .iter()
-                .map(|&sample| sample as f32)
-                .collect::<Vec<f32>>()
-        });
-    let left = ears.next().expect("left ear");
-    let right = ears.next().expect("right ear");
-    EarFilters { left, right }
+    // The sound, its echo of opposite sign in the two ears, and the lead-in,
+    // per bin; then, as measured, the ear's colour as well.
+    let ear = |sign: f64, colour: Option<&[f64]>| {
+        let colour = colour.map(|power| minimum_phase_spectrum(power, grid_size));
+        let spectrum: Vec<Complex<f64>> = (0..bins)
+            .map(|bin| {
+                let (sound, echo) = sound_and_echo_for_coherence(coherence[bin]);
+                let delay = Complex::from_polar(sign * echo, delay_phase[bin]);
+                let sound_and_echo = delay + sound;
+                let lead_in = Complex::from_polar(
+                    1.0,
+                    -std::f64::consts::TAU * bin as f64 * bin_hz * LEAD_IN_SECONDS,
+                );
+                match &colour {
+                    Some(minimum_phase) => minimum_phase[bin] * sound_and_echo * lead_in,
+                    None => sound_and_echo * lead_in,
+                }
+            })
+            .collect();
+        truncated_with_fade_out(to_time(spectrum, grid_size), filter_length, fade_length)
+    };
+    AmbientEarFilters {
+        as_measured: EarFilters {
+            left: ear(1.0, Some(&statistics.left_power)),
+            right: ear(-1.0, Some(&statistics.right_power)),
+        },
+        equalised: EarFilters {
+            left: ear(1.0, None),
+            right: ear(-1.0, None),
+        },
+    }
 }
 
 /// The head's diffuse-field coherence per bin, each spectrum averaged over
 /// the third octave around the bin as the ear averages it, and held below
 /// `COHERENCE_HELD_BELOW_HZ`.
 fn smoothed_coherence(statistics: &DiffuseStatistics, bin_hz: f64) -> Vec<f64> {
-    let running_sum = |values: &[f64]| {
-        let mut sums = Vec::with_capacity(values.len() + 1);
-        sums.push(0.0);
-        for value in values {
-            sums.push(sums.last().copied().unwrap_or(0.0) + value);
-        }
-        sums
-    };
-    let left = running_sum(&statistics.left_power);
-    let right = running_sum(&statistics.right_power);
-    let cross = running_sum(&statistics.cross_power);
+    let left = RunningSum::new(&statistics.left_power);
+    let right = RunningSum::new(&statistics.right_power);
+    let cross = RunningSum::new(&statistics.cross_power);
     let bins = statistics.left_power.len();
-    let half_band = 2f64.powf(1.0 / 6.0);
     let mut coherence: Vec<f64> = (0..bins)
         .map(|bin| {
             let centre = (bin as f64 * bin_hz).max(COHERENCE_HELD_BELOW_HZ);
-            let lowest = ((centre / half_band / bin_hz).ceil() as usize).min(bins - 1);
-            let highest =
-                ((centre * half_band / bin_hz).floor() as usize).clamp(lowest, bins - 1) + 1;
-            let band = |sums: &[f64]| sums[highest] - sums[lowest];
-            (band(&cross) / (band(&left) * band(&right)).sqrt()).clamp(-1.0, 1.0)
+            let band = third_octave_bins(centre, bin_hz, bins);
+            (cross.over(band) / (left.over(band) * right.over(band)).sqrt()).clamp(-1.0, 1.0)
         })
         .collect();
     let held_from = ((COHERENCE_HELD_BELOW_HZ / bin_hz).ceil() as usize).min(bins - 1);
     let held = coherence[held_from];
     coherence[..held_from].fill(held);
     coherence
-}
-
-/// The minimum-phase spectrum whose power is `power`, by the real cepstrum
-/// (Oppenheim and Schafer, "Discrete-Time Signal Processing", ch. 12): the
-/// most compact response in time of all with that magnitude.
-fn minimum_phase_spectrum(power: &[f64], grid_size: usize) -> Vec<Complex<f64>> {
-    let mut planner = RealFftPlanner::<f64>::new();
-    let inverse = planner.plan_fft_inverse(grid_size);
-    let forward = planner.plan_fft_forward(grid_size);
-    let floor = power.iter().fold(0f64, |peak, &value| peak.max(value)) * 1e-10;
-    let mut log_magnitude: Vec<Complex<f64>> = power
-        .iter()
-        .map(|&value| Complex::new(0.5 * value.max(floor).ln(), 0.0))
-        .collect();
-    let mut cepstrum = inverse.make_output_vec();
-    inverse
-        .process(&mut log_magnitude, &mut cepstrum)
-        .expect("inverse transform of a log magnitude");
-    let half = grid_size / 2;
-    for (index, value) in cepstrum.iter_mut().enumerate() {
-        let fold = match index {
-            0 => 1.0,
-            index if index < half => 2.0,
-            index if index == half => 1.0,
-            _ => 0.0,
-        };
-        *value *= fold / grid_size as f64;
-    }
-    let mut folded = forward.make_output_vec();
-    forward
-        .process(&mut cepstrum, &mut folded)
-        .expect("forward transform of a folded cepstrum");
-    folded.iter().map(|bin| bin.exp()).collect()
-}
-
-/// The real response whose spectrum is `spectrum`, on a grid `grid_size`.
-fn to_time(mut spectrum: Vec<Complex<f64>>, grid_size: usize) -> Vec<f64> {
-    let mut planner = RealFftPlanner::<f64>::new();
-    let inverse = planner.plan_fft_inverse(grid_size);
-    spectrum[0].im = 0.0;
-    let last = spectrum.len() - 1;
-    spectrum[last].im = 0.0;
-    let mut response = inverse.make_output_vec();
-    inverse
-        .process(&mut spectrum, &mut response)
-        .expect("inverse transform of an ear filter");
-    for sample in &mut response {
-        *sample /= grid_size as f64;
-    }
-    response
 }

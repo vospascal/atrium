@@ -110,12 +110,21 @@ pub trait Renderer: Send {
         FieldEncoding::Speaker
     }
 
-    /// Add what the listener hears of the mono ambient bus to `out`, once per
-    /// callback after every source. Asked only of a renderer whose
-    /// `field_encoding` is `FieldEncoding::Ears`; `fed` says whether any
-    /// ambient sound wrote to the bus this callback, so a renderer can stop
-    /// working once its filters have rung out.
-    fn render_ambient_bus(&mut self, _bus: &[f32], _fed: bool, _out: &mut OutputBuffer) {}
+    /// Add what reaches the two ears once every source has rendered: the
+    /// mono ambient bus as the listener hears it, and whatever the renderer
+    /// does to the sum of its sources' direct sound (on headphones, the
+    /// equalisation). Called once per callback, only of a renderer whose
+    /// `field_encoding` is `FieldEncoding::Ears`; `ambient_fed` says whether
+    /// any ambient sound wrote to the bus this callback, so a renderer can
+    /// stop working once its filters have rung out.
+    fn finish_ears(
+        &mut self,
+        _ambient_bus: &[f32],
+        _ambient_fed: bool,
+        _probe: &Probe,
+        _out: &mut OutputBuffer,
+    ) {
+    }
 
     /// The receiver position this renderer's propagation paths are resolved
     /// towards. Listener-relative renderers hear the room from the listener;
