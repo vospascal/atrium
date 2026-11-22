@@ -295,7 +295,7 @@ written in its layout. Its design record is `crates/world/README.md`.
 |---|---|---|
 | Identity | A stable id, a name, a colour, a group | the key of the entry, `name`, `color`, `group` |
 | Sound | The preset it starts from, what it overrides, its level | `sound: { preset, audio, level }` |
-| Shape | Ambient or a beam of any width with some sound behind it, and a size | `shape: { width, behind, size, facing }`. Ambient is fixed per generator |
+| Shape | Ambient or a beam of any width with some sound behind it, and a size | `shape: { width, behind, size, facing, ambient, arc }`; `arc` is the side an ambient sound comes from |
 | Place | Position and height | `place: [x, y, z]` |
 | When | A behaviour: always, now and then, in bouts | **nothing** |
 | Moves | A behaviour: still, orbit, path, wanders, perches | `moves: { orbit: { radius, speed } }` |
@@ -559,6 +559,7 @@ one binding method away. Bold marks what is missing.
 | Move a speaker | `SetSpeakerPosition` | **no call** | new |
 | Generator settings while playing | `SetSynthParam` reaches every generator: the winds and the river, rain intensity, drop and drip rate, the waves' period and crash chance, the wisp's speed and hovering, and every master gain | **no call, and no list of a generator's settings** | new (27) |
 | Ambient or point | a scene's `shape.ambient` makes any sound a field or a point, at build | `set_source_ambient`, which builds the sound again | exists: Point or Ambient in the inspector's Shape |
+| Ambient from one side | `SetSourceArc`; a scene's `shape.arc` (degrees, 360 all round) | `set_source_arc`; `scene()` reports `arc` | exists: an Arc slider in the inspector's Shape; the map's bands are as wide as the arc |
 | Add a sound, hear a preset first | `SceneEdit` add, and a builder kept from the scene build | `list_presets`, `audition`, `add_sound` | exists: the editor's library |
 | Remove a sound | `SceneEdit` remove | `remove_sound`; each sound in `scene()` carries its voice | exists: the inspector |
 | Turn a sound | `SetSourceFacing`; a scene file's `shape.facing` | `set_source_facing` | exists: a handle on the map for a focused sound |

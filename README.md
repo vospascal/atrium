@@ -60,7 +60,7 @@ each step depends on the render mode.
 |---|---|---|---|---|
 | `world_locked` | speakers | direct only | each speaker is a microphone in the world: its own delay, air absorption, reflection taps | bass management, static delay compensation, master gain |
 | `vbap` | 3 or more speakers | direct + reflections | amplitude panning relative to the listener | reverb, bass management, listener-relative delay compensation, master gain |
-| `hrtf` | headphones | direct + reflections | HRTF convolution to two ears, equalised for headphones; ambient sound through the head's diffuse field | reverb, master gain |
+| `hrtf` | headphones | direct + reflections | HRTF convolution to two ears, equalised for headphones; ambient sound through the head's diffuse field, or the part of it its arc covers | reverb, master gain |
 | `dbap` | speakers | direct + reflections | distance-based panning from source to speaker positions | reverb, bass management, static delay compensation, master gain |
 | `ambisonics` | speakers or stereo | direct + reflections | first-order B-format encode | B-format delays, decode, reverb, bass management, listener-relative delay compensation, master gain |
 
@@ -161,9 +161,12 @@ Known gaps:
 
 ## Ambient sound
 
-An ambient sound (`shape.ambient`) has no position: it is the sound around
-the listener. Any sound can be ambient: a frog chorus, a robin, rain with
-single drops. So whatever spreads it around must leave an attack heard once.
+An ambient sound (`shape.ambient`) has no distance: it is the sound around
+the listener, at its level wherever the listener stands. Any sound can be
+ambient: a frog chorus, a robin, rain with single drops. So whatever spreads
+it around must leave an attack heard once. Left as it is, it is heard from
+all round, as described here; `shape.arc` narrows it to the side its place
+lies on (see [An arc of ambient sound](#an-arc-of-ambient-sound)).
 
 ### On speakers
 
@@ -605,6 +608,180 @@ Known gaps:
   inverse of so steep a fall leaves the diffuse field 1.07 dB down; above
   16 kHz it is not followed at all.
 
+## An arc of ambient sound
+
+Many ambient sounds are not around the listener but on one side: a
+shoreline, a tree line, a river bank, traffic beyond a hill. Such a sound is
+many unrelated contributions from the directions of an arc, each as strong
+as the next. `shape.arc` gives the arc's width in degrees, from 10 to 360;
+left out it is 360, all round, and everything is rendered exactly as before
+there were arcs, sample for sample, in every mode. The arc is centred on the
+bearing over the ground from the receiver (what the mode measures paths to:
+the listener; for world-locked the middle of the speaker ring it faces out
+from) to the sound's place, and lies along the horizon. Moving the place
+moves the arc; the level stays the sound's level wherever the place is. A
+point ignores its arc, as an ambient sound ignores its width.
+
+**On headphones** it is the diffuse-field computation of the measured head
+restricted to the arc (`src/pipeline/renderers/binaural/diffuse_field/arc/`):
+each ear's power and the two ears' complex cross-spectrum, the mean over the
+arc's directions, each counted for the solid angle it stands for. The band is
+the three measured rings nearest the horizon, −10°, 0° and +10°, each for its
+±5°: the sounds an arc is for lie along the horizon at a distance (water's
+edge 7 m or more from ears 1.7 m up is within 15° below it, a tree line 10 m
+high 30 m off within 15° above, and the ground's reflection of either in the
+band too). Unlike all round, the cross-spectrum is complex: its phase is the
+time by which the near ear hears the arc first. Two filters per sound give
+the ears exactly these three spectra: the all-round pair's sound and echo
+(Lauridsen's complementary comb), with the right ear's mix of the two turned
+by the complex coherence, `left = a + b·D`, `right = γ*·(a + b·D) + s·(b − a·D)`;
+the coherence averaged over each third octave after the arc's time
+difference is turned back, and given back half to each ear; each ear's
+colour the arc's power over the head's diffuse field, divided by what the
+headphone equaliser does to it, so that the arc joins the direct sound on the
+equaliser's bus and comes out of it with exactly its share of the diffuse
+field. All round that share is one and the filters are the all-round pair.
+
+The arc is fixed in the world and the head turns, so each width is designed
+once for every bearing relative to the head, 5° apart, 72 pairs of 60 ms
+(40 ms to design all of them on a laptop's cores), and the audio thread picks
+the nearest and crossfades to it over a callback, with two pairs of
+convolvers as a point source does. Widths are designed in whole degrees: the
+widths a scene starts with before audio runs, a width set while it plays on
+a thread of its own, the sound meanwhile heard as it was. A sound going from
+all round to an arc, or back, glides between the all-round bus and its
+filters over a callback.
+
+Against the head (`src/pipeline/tests/ambient_arc_headphones.rs`; ambient
+white noise; arcs 30°, 90°, 180° wide centred ahead, at 60°, to the left and
+behind; worst third octave from 100 Hz to 8 kHz, after the equaliser):
+
+| Arc | Each ear's level | Level difference, from 500 Hz / below | Coherence | Time difference |
+|---|---|---|---|---|
+| 30° | 0.95 dB | 0.95 / 0.28 dB | 0.050 | 3 µs |
+| 90° | 0.77 dB | 0.97 / 0.97 dB | 0.046 | 19 µs |
+| 180° | 0.82 dB | 0.59 / 1.43 dB | 0.056 | 42 µs |
+
+The head itself, for a 30° arc to the left: the ears differ by 4.5 dB at
+500 Hz and 11.2 dB at 4 kHz, their coherence is 0.995 and 0.57, and the left
+ear hears it 700 µs first. Straight ahead the ears are within 0.04 dB of
+each other and the time difference is under 19 µs. A click keeps 94 % or
+more of its energy within 13 ms at each ear. Turning the head at 180°/s
+through a 60° arc, no step between two samples is larger than with the head
+held at any bearing it passes, and the level difference follows the turn
+within 0.1 dB of the held one.
+
+**On speakers** each speaker keeps its own decorrelated copy, at the share of
+the arc's power that panning over the arc would give it: the integral over
+the arc of its squared panning gain, the layout's own two-dimensional VBAP
+(Pulkki 1997) seen from the receiver, normalised so the shares add up to the
+sound's power (`src/pipeline/renderers/field/speaker_shares.rs`). On the
+ambisonic bus the arc is a covariance, not a direction: the mean over the arc
+of each direction's encoding times itself (Epain and Jin, IEEE/ACM TASLP 24,
+2016), in closed form, with a plane wave's trace, so the energy-preserving
+decoder plays it as loud as a point; three decorrelated copies mixed by its
+Cholesky factor give the bus exactly that covariance
+(`src/pipeline/renderers/field/bformat_arc.rs`). Its intensity points at the
+arc's middle with length sin α / α for an arc 2α wide, the arc's energy
+vector in Gerzon's sense ("General metatheory of auditory localisation", AES
+92nd Convention, 1992).
+
+The energy vector at the speakers of `scenes/nature.yaml`'s 5.1 layout,
+through the whole pipeline (direction off the arc's middle, worst of centres
+ahead, left, behind and right; length ahead):
+
+| Mode | 60° | 120° | All round, length |
+|---|---|---|---|
+| VBAP | 0.0°, 0.90 | 0.5°, 0.74 | 0.16 |
+| DBAP, world-locked | 5.1°, 0.92 | 6.0°, 0.77 | 0.26 |
+| Ambisonics | 4.0°, 0.67 | 6.2°, 0.58 | 0.08 |
+
+The speakers carry the source's power within 0.1 dB at every width; on the
+ambisonic bus an arc decodes as loud as a point within 0.1 dB.
+
+It costs one forward transform and two convolutions of 60 ms per arc and
+callback, four in a callback where the head crosses to the next bearing, and
+nothing for a sound all round: `scenes/nature.yaml` on headphones with four
+winds added at the compass points took 645 µs per 512-frame callback at
+48 kHz before arcs, takes 647 to 656 µs with them all round, and 686 to
+698 µs with each from a 90° arc (the all-round filters then fall silent).
+Each width's filters take 1.7 MB at 48 kHz; the designer keeps the last four
+(`cargo test --release --lib ambient_arc_cost -- --ignored --nocapture`).
+
+`AMBIENT_ARC_OUT=target/listening/ambient-arc cargo test --release --lib
+write_ambient_arc_listening_samples` writes the field wind as a 90° arc on
+the left and all round, the frogs ahead and to the right, white noise ahead
+while the head turns a full circle, running water behind, and the wind on
+the left in VBAP to 5.1.
+
+Decisions that look wrong and are right:
+
+- **The arc's filters go through the equaliser.** Ambient sound all round
+  leaves the head's colour out of its filters instead; an arc is the head
+  from some directions, which is what the equaliser divides by the diffuse
+  field, so it is on the same footing as a point source. Its filters are
+  designed with the equaliser's own response divided out of the colour, so
+  through it each ear gets the arc's share of the diffuse field exactly,
+  below 100 Hz too, where the equaliser stops following the set; all round
+  that is flat, as the all-round filters give it, so an arc widened to 359°
+  sounds as the 360° it is next to. One pair of filters per arc, not two:
+  the equaliser on the sum serves both renders the probe switches between.
+- **Five turns of the echo per third octave, not two.** All round, the ears
+  only need to be alike or not; an arc asks for a level and a time
+  difference between them, and within a third octave the echo adds a little
+  to one ear and takes from the other. Measured on a grid of two to six
+  turns and a longest echo of 25 to 40 ms, five turns and 30 ms keep the
+  level difference within 1 dB from 500 Hz up and the time difference
+  straight ahead under 20 µs, while 94 % of a click still arrives within
+  13 ms (six turns: 92.6 %). The longest echo stays the all-round 30 ms;
+  40 ms made the bass worse, not better.
+- **The time difference is read from the phase to the nearest half turn.**
+  A half circle ahead is alike between the ears in the bass and opposed
+  around 500 Hz: its cross-spectrum changes sign, which a phase followed to
+  the nearest whole turn, or the strongest shift of the cross-correlation,
+  takes for a time difference of 800 µs.
+- **One band of elevation for every arc.** The ears' level difference and
+  coherence hardly depend on it: for a 30° arc to the left, the ring at the
+  horizon alone gives 4.3 dB and 9.8 dB (500 Hz, 4 kHz) and a coherence of
+  0.58 at 4 kHz; ±15° gives 4.5 dB, 11.2 dB and 0.57; ±25° gives 4.7 dB,
+  11.6 dB and 0.44. The time difference is 706, 700 and 693 µs.
+- **On speakers the arc lies on the horizon,** and on the ambisonic bus it
+  has no height: a 5.1 layout has nothing above or below it.
+- **The world-locked arc is seen from the middle of the speaker ring,** not
+  from the point its paths are measured to, which is the listener: world-locked
+  is meant to be the same for everyone in the room, and its microphones
+  already face out from that middle (`Renderer::ambient_receiver`).
+
+Known gaps:
+
+- **Below 500 Hz the level difference reaches 1.4 dB.** There 30 ms of echo
+  turns fewer than three and a half times across a third octave, too few to
+  average out; a half circle ahead or behind, whose ears are only partly
+  alike there, is 1.43 dB off at 200 Hz and 1.28 dB at 400 Hz. Longer echoes
+  would be heard as echoes.
+- **Behind a 5.1 layout a narrow arc and a wider one sound the same.** The
+  rear speakers of `scenes/nature.yaml` are 112° apart, and any arc between
+  them is shared by those two equally: 60° and 120° behind both have an
+  energy vector 0.554 long in VBAP. That is panning; only more speakers
+  behind can tell them apart.
+- **A real tree line also has a distance and a near part.** The arc is
+  directions only: no part of it is nearer, louder or earlier than another,
+  and no part of it is a point the listener can walk up to.
+- **The arc's level does not change with how far its place is.** Only its
+  direction follows the place. How loud a shore is at the listener is the
+  scene's level, as for every ambient sound.
+- **One elevation band for all arcs.** A tree line close by rises higher than
+  ±15°, and a sea seen from a cliff lies below it.
+- **On ambisonics the all-round field is quieter than an arc.** All round it
+  puts a quarter of its power in Z, which a horizontal layout never plays:
+  1.25 dB below a point or an arc of the same level, so an arc widened to
+  all round there gets 1.25 dB quieter. It was so before arcs, and all round
+  is left exactly as it was.
+- **The arc's filters are KEMAR's,** as all of the headphone render is.
+- **A new width on headphones arrives a moment late.** Designed beside the
+  audio thread, it takes some tens of milliseconds; until then the sound is
+  heard with the width it had.
+
 ## Project structure
 
 ```text
@@ -676,6 +853,11 @@ Control thread                          Audio thread (cpal callback)
 ```
 
 All five pipelines are built at startup, so switching mode allocates nothing.
+
+One more thread runs beside the audio thread on headphones: it designs the
+filters of an ambient sound's arc when its width changes while the scene
+plays, and frees the ones no sound uses any more. It talks to the audio
+thread through three rings of its own (see "An arc of ambient sound").
 
 **The audio callback must not allocate, lock or do I/O.** Commands arrive over
 a wait-free ring buffer and all state is owned by `AudioScene` on the audio
