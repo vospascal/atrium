@@ -78,6 +78,60 @@ sh scripts/sony-head-tracker.sh           # bridge on its own (rarely needed)
 
 The bridge log is `$TMPDIR/atrium-sony-bridge.log`.
 
+## Render a scene to a file
+
+`render` plays a scene into a WAV file instead of the speakers, through the real
+engine, about twenty times faster than real time. The same arguments give the same
+file, bit for bit. Files go to `target/renders/` unless `--output` says otherwise,
+each with a `.json` sidecar beside it: the scene and a hash of it, the commit and
+whether the tree was dirty, the seed and every setting, the channels in order, and
+each channel's peak and RMS.
+
+```sh
+cargo run --release --bin render -- scenes/meadow-birds.yaml --headphones --seconds 20
+cargo run --release --bin render -- scenes/passing-storm.yaml --seconds 20     # the scene's 5.1, in VBAP
+cargo run --release --bin render -- scenes/passing-storm.yaml --mode dbap --weather-speed 60
+cargo run --release --bin render -- scenes/nature.yaml --start 120 --seconds 10 # from 2 minutes in
+cargo run --release --bin render -- scenes/frog.yaml --headphones --turn 45     # the head turning left
+cargo run --release --bin render -- scenes/meadow-birds.yaml --headphones \
+    --probe direct,no-air-absorption --format s16 --output target/renders/dry-birds.wav
+```
+
+| Option | Default | |
+|---|---|---|
+| `--seconds <n>` | 30 | How long to render |
+| `--start <s>` | 0 | Start this far into the scene, as the editor's timeline seeks |
+| `--sample-rate <hz>` | 48000 | |
+| `--block <frames>` | 512 | Frames per engine call, as the audio callback's buffer (1 to 8192) |
+| `--headphones` | | Binaural on two channels, as the engine's `--headphones` |
+| `--mode <name>` | the scene's | `world_locked`, `vbap`, `hrtf`, `dbap` or `ambisonics` on the scene's speakers |
+| `--seed <n>` | the scene's `seed:`, else 1 | The session seed |
+| `--probe <list>` | everything | Parts alone and effects off; see below |
+| `--turn <deg/s>` | 0 | The listener's head turning steadily, positive to the left |
+| `--weather-speed <n>` | 1 | The weather this many times as fast, from the scene's beginning |
+| `--format <f32\|s16>` | `f32` | 32-bit float for analysis; 16-bit for listening, and it says how many samples clipped |
+| `--output <path>` | `target/renders/<scene>-<output>-seed<seed>….wav` | |
+
+The channels are the layout's, in the order the app names them: L, R, C, LFE, Ls, Rs
+on 5.1 and quad (quad's C and LFE are silent), L, R on headphones and stereo.
+
+`--probe` takes a comma-separated list, as the microscope (see "Listening to one
+part" in the README):
+
+| Word | |
+|---|---|
+| `direct`, `reflections`, `reverb`, `ambient` | Only the parts named reach the file |
+| `none` | No part at all: digital silence |
+| `no-air-absorption`, `no-moving-air`, `no-ground-effect`, `no-wall-colour`, `no-near-field`, `no-headphone-equalisation` | That effect off |
+| `channel=<L\|R\|C\|LFE\|Ls\|Rs\|index>` | One channel alone |
+
+The probe holds from the first sample, so the four parts rendered alone add up to the
+whole render.
+
+Levels are the world's, not a mix's: the meadow's birds, a dozen metres off, peak
+around −55 dBFS. That is one reason float is the default; a 16-bit file of a quiet
+scene keeps few bits of it.
+
 ## Analysis tools
 
 ```sh

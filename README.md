@@ -86,7 +86,9 @@ Decisions that look wrong and are right:
   what a path sends to the output and leaves what it sends to the reverb. Were
   the path itself silenced, the reverb heard alone would be silence.
 - **A hidden part fades over one callback.** A cut would click, and a click is
-  the last thing wanted while listening closely.
+  the last thing wanted while listening closely. A probe set before the scene
+  first renders (a render to a file, `--probe`) does not fade: nothing was heard
+  yet to fade from, so it holds from the first sample.
 - **The delay cannot be switched off.** Without it a reflection is no longer
   one; the other four path effects can.
 - **It is the listener's, not the scene's.** Like a mute it is never saved and
@@ -817,9 +819,14 @@ src/
 │   ├── builders/           # which pieces each render mode is made of
 │   ├── render.rs           # RenderPipeline and the per-buffer render loop
 │   └── tests/              # end-to-end pipeline tests, grouped by subject
+├── plan/                   # the session: which take each voice utters when,
+│                           #   and the weather story, decided ahead from the seed
+├── offline/                # a scene rendered to a file: settings, the render,
+│                           #   levels, provenance, the WAV and its sidecar
 ├── head_tracking/          # OpenTrack UDP, Sony headphone bridge
 ├── server/                 # WebSocket telemetry and control (port 3333)
-└── bin/                    # analysis tools for recordings and synths
+└── bin/                    # `render` (a scene to a file), and analysis tools
+                            #   for recordings and synths
 
 crates/
 ├── core/                   # atrium-core: math and panning with no I/O
@@ -836,6 +843,38 @@ tests/
 
 Crate conventions (private modules behind a small facade, one implementation
 per file) are in [AGENTS.md](AGENTS.md).
+
+## Rendering to a file
+
+`cargo run --release --bin render -- <scene.yaml>` plays a scene into a WAV file
+(see [run.md](run.md#render-a-scene-to-a-file)), for analysing and comparing what
+the engine plays. `src/offline/` drives the scene exactly as the audio callback
+does, block by block through `AudioScene::process_commands` and `render`, prepared
+as the output device prepares it, so a file cannot drift from what is heard; a test
+holds it to a scene driven by hand.
+
+Decisions that look wrong and are right:
+
+- **The plan is driven in step, not on its thread.** Playing, the plan runs on its
+  own thread, waking every 50 ms of the wall clock and handing over what is due
+  0.4 s ahead of the audio clock. Rendered twenty times faster than real time, that
+  thread would fall behind: takes would arrive late or not at all, differently on
+  every run. Offline the same plan is driven between blocks instead
+  (`plan::SteppedPlanner`): before each one, everything due to its end plus the same
+  lead is taken and converted exactly as the live planner converts it. What a voice
+  utters and when depends only on the seed, so the takes are the live planner's,
+  which a test shows against the live planner stepped by a hand-moved clock. Only
+  the air and the settings of generators that follow the weather are taken at every
+  block instead of every wake, as they stand at that moment.
+- **A render without a seed is not a new session.** A scene without `seed:` plays
+  differently every time; rendered, it takes seed 1, so the same arguments give the
+  same file.
+- **`--start` moves the plan, not the generators.** As the timeline does: the takes
+  are where they would be and a take under way starts partway, but a wind or a river
+  plays on from its own beginning and the reverb starts empty. The birds of a render
+  from 20 s are the last part of a render from 0; its wind is not.
+- **The 16-bit format truncates as the 16-bit output does**, `x * 32767` towards
+  zero, so a 16-bit file is what a 16-bit device would have been sent.
 
 ## Threads
 

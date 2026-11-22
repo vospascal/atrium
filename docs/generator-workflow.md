@@ -85,9 +85,26 @@ three-round detours.
 3. Run thunder and rain through it, deciding route first.
 4. Then the others, starting with whichever Pascal finds weakest.
 
+## The tools, in order
+
+The lab is built from tools, each needing the one before:
+
+1. **The offline renderer** (`render`, built 2026-11-22): a scene to a WAV file
+   through the real render path, faster than real time and the same file for the
+   same seed, with a sidecar saying how it was made. A version of a generator is
+   heard and measured in place (step 4) from these files, and two versions are
+   compared from two files of the same seed. `--probe` keeps one part of the render
+   alone (the ambient field a wind makes, say), `--weather-speed` runs a storm past in a minute. See
+   [run.md](../run.md#render-a-scene-to-a-file).
+2. An analyser that reports the same measures for a reference recording and for a
+   render, reading the sidecar to know what it is reading.
+3. A comparison of two such reports, an event cutter, and the lab in the app.
+
 ## Where things are
 
 - Thunder's research, history and current model: `docs/thunder-research.md`.
 - Listening samples of thunder:
   `THUNDER_OUT=target/thunder-samples cargo test --release --lib write_listening_samples`.
 - The generators: `src/synth/`. Their presets: `sources/`.
+- A scene to a file: `cargo run --release --bin render -- <scene.yaml>`; the code is
+  `src/offline/`.
