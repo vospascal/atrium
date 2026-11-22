@@ -30,7 +30,7 @@ mod vbap_lookup;
 mod test_support;
 
 pub use channel_gains::{ChannelGains, MAX_CHANNELS};
-pub use layout::{Speaker, SpeakerLayout};
+pub use layout::{channel_name, Speaker, SpeakerLayout};
 pub use modes::{ChannelMode, RenderMode};
 pub use source::{DistanceParams, SourceSpatial};
 pub use vbap_lookup::VbapLookup;

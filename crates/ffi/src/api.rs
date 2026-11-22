@@ -195,7 +195,7 @@ impl From<atrium::config::SceneDescription> for SceneDescription {
                 .into_iter()
                 .map(|speaker| Speaker {
                     channel: speaker.channel,
-                    name: channel_name(speaker.channel).to_owned(),
+                    name: atrium_core::speaker::channel_name(speaker.channel as usize).to_owned(),
                     position: speaker.position.into(),
                 })
                 .collect(),
@@ -454,20 +454,6 @@ impl From<&TelemetryFrame> for Telemetry {
             },
             head_tracking: HeadTrackingStatus::Off,
         }
-    }
-}
-
-/// The name of output `channel` in the 5.1 order every layout here uses:
-/// stereo is its first two, quad its first two and last two.
-fn channel_name(channel: u16) -> &'static str {
-    match channel {
-        0 => "L",
-        1 => "R",
-        2 => "C",
-        3 => "LFE",
-        4 => "Ls",
-        5 => "Rs",
-        _ => "?",
     }
 }
 

@@ -3,6 +3,21 @@
 use super::channel_gains::{ChannelGains, MAX_CHANNELS};
 use crate::types::Vec3;
 
+/// The name of output `channel` in the 5.1 order every layout here uses
+/// (L, R, C, LFE, Ls, Rs): stereo is its first two channels, quad its first
+/// two and last two. Two channels on headphones are the left and right ear.
+pub fn channel_name(channel: usize) -> &'static str {
+    match channel {
+        0 => "L",
+        1 => "R",
+        2 => "C",
+        3 => "LFE",
+        4 => "Ls",
+        5 => "Rs",
+        _ => "?",
+    }
+}
+
 /// A physical speaker with a position in the virtual atrium.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Speaker {
