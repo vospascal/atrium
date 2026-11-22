@@ -3,7 +3,7 @@
 //! Every choice comes from one seeded generator, so the same voice with the
 //! same seed decides the same way again, and two seeds never fall into step.
 
-use super::rhythm::Rhythm;
+use super::rhythm::{LevelSpread, Rhythm};
 
 /// An utterance decided for one voice, in seconds on the session's clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +43,12 @@ pub(super) struct VoicePlan {
     /// What its choices follow from, and when it began deciding (s).
     seed: u64,
     born: f64,
+    /// How much louder or softer this one is than its kind's mean (dB),
+    /// decided once from its seed.
+    individual_db: f32,
+    /// A generator of its own for the level spread, so a kind given a spread
+    /// keeps every other choice it made without one.
+    spread_random: u64,
 }
 
 impl VoicePlan {
@@ -50,6 +56,12 @@ impl VoicePlan {
     /// of a random part of its longest gap, so several voices started
     /// together do not open with a chord.
     pub(super) fn new(rhythm: Rhythm, seed: u64, from: f64) -> Self {
+        let mut spread_random =
+            (seed ^ 0xD1B5_4A32_D192_ED03).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let individual_db = match rhythm.rests.level_spread.individual_db {
+            deviation if deviation > 0.0 => normal_random(&mut spread_random) * deviation,
+            _ => 0.0,
+        };
         let mut voice = Self {
             rhythm,
             // A zero state would stay zero in the generator below.
@@ -60,6 +72,8 @@ impl VoicePlan {
             last_end: from,
             seed,
             born: from,
+            individual_db,
+            spread_random,
         };
         voice.next_at = from + (voice.unit_random() * voice.rhythm.rests.gap_seconds.1) as f64;
         voice
@@ -106,6 +120,7 @@ impl VoicePlan {
         let rests = self.rhythm.rests;
         let gain = 10f32.powf(self.signed_random() * rests.level_variation_db / 20.0);
         let rate = 2f32.powf(self.signed_random() * rests.pitch_variation_cents / 1200.0);
+        let gain = gain * 10f32.powf(self.spread_level(rests.level_spread) / 20.0);
         let seconds = self.rhythm.takes[take].seconds as f64 / rate as f64;
         let at = self.next_at;
         self.last_end = at + seconds;
@@ -204,20 +219,47 @@ impl VoicePlan {
         chosen
     }
 
+    /// This utterance's level from its kind's mean (dB): this one's own
+    /// level and the utterance's, kept inside the measured range.
+    fn spread_level(&mut self, spread: LevelSpread) -> f32 {
+        if spread.is_none() {
+            return 0.0;
+        }
+        let utterance_db = if spread.utterance_db > 0.0 {
+            normal_random(&mut self.spread_random) * spread.utterance_db
+        } else {
+            0.0
+        };
+        let (softest, loudest) = spread.range_db;
+        (self.individual_db + utterance_db).clamp(softest, loudest)
+    }
+
     /// A number from 0 up to, not including, 1.
     fn unit_random(&mut self) -> f32 {
-        // xorshift64*: small, fast, and good enough to choose a take.
-        self.random ^= self.random >> 12;
-        self.random ^= self.random << 25;
-        self.random ^= self.random >> 27;
-        let bits = self.random.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
-        bits as f32 / (1u64 << 24) as f32
+        unit_random(&mut self.random)
     }
 
     /// A number from −1 to 1.
     fn signed_random(&mut self) -> f32 {
         self.unit_random() * 2.0 - 1.0
     }
+}
+
+/// A number from 0 up to, not including, 1, from the generator `state`.
+fn unit_random(state: &mut u64) -> f32 {
+    // xorshift64*: small, fast, and good enough to choose a take.
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    let bits = state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
+    bits as f32 / (1u64 << 24) as f32
+}
+
+/// A number from the standard normal distribution (Box–Muller).
+fn normal_random(state: &mut u64) -> f32 {
+    // 1 − u lies in (0, 1], so the logarithm is finite.
+    let radius = (-2.0 * (1.0 - unit_random(state)).ln()).sqrt();
+    radius * (std::f32::consts::TAU * unit_random(state)).cos()
 }
 
 #[cfg(test)]
@@ -376,5 +418,127 @@ mod tests {
         assert!(decide(&mut voice, 20)
             .iter()
             .all(|planned| planned.take == 1));
+    }
+
+    const BLACKBIRD: LevelSpread = LevelSpread {
+        individual_db: 3.8,
+        utterance_db: 2.5,
+        range_db: (-15.4, 12.3),
+    };
+
+    fn with_spread(spread: LevelSpread) -> Rhythm {
+        rhythm(
+            &[1.0, 1.0, 1.0],
+            Rests {
+                level_spread: spread,
+                ..Rests::plain(0.5, 3.0)
+            },
+        )
+    }
+
+    fn decibels(gain: f32) -> f64 {
+        20.0 * (gain as f64).log10()
+    }
+
+    fn standard_deviation(values: &[f64]) -> f64 {
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        (values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64)
+            .sqrt()
+    }
+
+    /// A spread changes how loud, and nothing else: the takes, the moments
+    /// and the pitch are those of the same voice without one.
+    #[test]
+    fn a_spread_changes_the_level_and_no_other_choice() {
+        let plain = decide(
+            &mut VoicePlan::new(with_spread(LevelSpread::NONE), 21, 0.0),
+            200,
+        );
+        let spread = decide(&mut VoicePlan::new(with_spread(BLACKBIRD), 21, 0.0), 200);
+        for (plain, spread) in plain.iter().zip(&spread) {
+            assert_eq!(
+                (plain.take, plain.at, plain.rate),
+                (spread.take, spread.at, spread.rate)
+            );
+        }
+        assert!(plain.iter().all(|planned| planned.gain == 1.0));
+        assert!(spread.iter().any(|planned| planned.gain != 1.0));
+    }
+
+    /// Across many birds of a kind, their own levels spread by the measured
+    /// deviation between birds; across one bird's songs, by the deviation
+    /// between songs. 4000 draws put a sample deviation within about 3 % of
+    /// the true one (1.96 / sqrt(2 · 4000) ≈ 2.2 %).
+    #[test]
+    fn birds_and_songs_spread_by_their_measured_deviations() {
+        let birds: Vec<f64> = (0..4000u64)
+            .map(|seed| {
+                let spread = LevelSpread {
+                    utterance_db: 0.0,
+                    range_db: (-100.0, 100.0),
+                    ..BLACKBIRD
+                };
+                let gain = VoicePlan::new(with_spread(spread), seed * 7919 + 1, 0.0)
+                    .next()
+                    .gain;
+                decibels(gain)
+            })
+            .collect();
+        let between = standard_deviation(&birds);
+        assert!(
+            (between / 3.8 - 1.0).abs() < 0.03,
+            "between birds {between:.3} dB"
+        );
+
+        let mut one_bird = VoicePlan::new(
+            with_spread(LevelSpread {
+                range_db: (-100.0, 100.0),
+                ..BLACKBIRD
+            }),
+            5,
+            0.0,
+        );
+        let songs: Vec<f64> = decide(&mut one_bird, 4000)
+            .iter()
+            .map(|planned| decibels(planned.gain))
+            .collect();
+        let within = standard_deviation(&songs);
+        assert!(
+            (within / 2.5 - 1.0).abs() < 0.03,
+            "between songs {within:.3} dB"
+        );
+    }
+
+    /// No song is softer or louder than the softest and loudest measured,
+    /// however far a bird's own level lies out.
+    #[test]
+    fn no_song_leaves_the_measured_range() {
+        let narrow = LevelSpread {
+            individual_db: 10.0,
+            utterance_db: 10.0,
+            range_db: (-4.0, 3.1),
+        };
+        let levels: Vec<f64> = (0..200u64)
+            .flat_map(|seed| decide(&mut VoicePlan::new(with_spread(narrow), seed, 0.0), 20))
+            .map(|planned| decibels(planned.gain))
+            .collect();
+        assert!(levels
+            .iter()
+            .all(|level| (-4.0 - 1e-4..=3.1 + 1e-4).contains(level)));
+        assert!(levels.iter().any(|level| *level < -3.99));
+        assert!(levels.iter().any(|level| *level > 3.09));
+    }
+
+    /// Moved to another moment, a bird is the same bird: the same level of
+    /// its own and the same songs.
+    #[test]
+    fn a_restarted_voice_is_the_same_bird() {
+        let mut voice = VoicePlan::new(with_spread(BLACKBIRD), 13, 0.0);
+        let first = decide(&mut voice, 30);
+        assert_eq!(decide(&mut voice.restarted(), 30), first);
     }
 }

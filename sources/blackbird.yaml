@@ -23,7 +23,12 @@ takes:
 rule:
   rests:
     gap: [3, 8]             # seconds of rest between two phrases
-    vary: { level: 2, pitch: 15 }   # each phrase up to 2 dB and 15 cents different
+    vary: { pitch: 15 }       # each phrase up to 15 cents different
+    # How loud, measured (Brumm et al. 2025): songs spread by SD 4.5 dB, from
+    # 69.7–97.4 dB(A) at 1 m. About 70 % of that variance is one bird against
+    # another and 30 % one song against the next (Deoniziak et al. 2026, Ecol.
+    # Evol. 16: e74693: SD 2.07 dB between birds of a species, about 2.5 in all).
+    level_spread: { individual: 3.8, utterance: 2.5, range: [-15.4, 12.3] }
 
 # Sings by day, stops as soon as it really rains, and in a storm or strong wind.
 follows:

@@ -168,3 +168,36 @@ fn a_kind_that_cannot_work_is_refused() {
     }
     assert!(kind("path: assets/campfire.mp3\nreference_spl: 68.0\n").is_err());
 }
+
+/// A measured level spread is read with the rests, and one that cannot be
+/// right is refused.
+#[test]
+fn a_resting_kind_reads_its_level_spread() {
+    let yaml = |spread: &str| {
+        format!("reference_spl: 78\ntakes:\n  - {{ file: a.mp3 }}\n  - {{ file: b.mp3 }}\nrule:\n  rests:\n    gap: [3, 8]\n    level_spread: {spread}\n")
+    };
+    match kind(&yaml(
+        "{ individual: 3.8, utterance: 2.5, range: [-15.4, 12.3] }",
+    ))
+    .expect("a spread reads")
+    {
+        ResolvedSound::Sample { rests, .. } => assert_eq!(
+            rests.expect("rests").level_spread,
+            LevelSpread {
+                individual_db: 3.8,
+                utterance_db: 2.5,
+                range_db: (-15.4, 12.3),
+            }
+        ),
+        ResolvedSound::Synth { .. } => panic!("a recording, not a generator"),
+    }
+    for wrong in [
+        "{ individual: -1, utterance: 2, range: [-5, 5] }",
+        "{ individual: 1, utterance: 2, range: [1, 5] }",
+        "{ individual: 1, utterance: 2, range: [-5, -1] }",
+        "{ individual: 1, utterance: 2 }",
+        "{ individual: 1, utterance: 2, range: [-5, 5], loud: 3 }",
+    ] {
+        assert!(kind(&yaml(wrong)).is_err(), "{wrong} should be refused");
+    }
+}

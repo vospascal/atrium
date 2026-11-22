@@ -30,7 +30,7 @@ pub use conditions::{Condition, Conditions, Follow, Target};
 #[cfg(test)]
 pub(crate) use due::LEAD_SECONDS;
 pub use due::{Due, Scheduled};
-pub use rhythm::{Rests, Rhythm, TakeRhythm};
+pub use rhythm::{LevelSpread, Rests, Rhythm, TakeRhythm};
 pub use runner::Planner;
 pub use session::Plan;
 pub(crate) use stepped::SteppedPlanner;

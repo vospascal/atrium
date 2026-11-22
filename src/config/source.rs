@@ -5,7 +5,7 @@ use atrium_world::{Entity, EntityId, Follow, When};
 use serde::Deserialize;
 
 use super::description::title_from_path;
-use crate::plan::Rests;
+use crate::plan::{LevelSpread, Rests};
 use atrium_core::directivity::SILENT_BEHIND_DB;
 
 /// The width of a sound that goes out all round (degrees).
@@ -277,6 +277,49 @@ pub(super) struct RestsDef {
     /// another is chosen. Left out, a new take every time.
     #[serde(default)]
     pub bout: Option<[u32; 2]>,
+    /// How loud one of the kind is against another, and one utterance
+    /// against the next, as measured. Left out, all are as loud.
+    #[serde(default)]
+    pub level_spread: Option<LevelSpreadDef>,
+}
+
+/// A measured spread of level, as written:
+/// `level_spread: { individual: 3.8, utterance: 2.5, range: [-15.4, 12.3] }`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LevelSpreadDef {
+    /// Standard deviation of one of the kind against another (dB).
+    pub individual: f32,
+    /// Standard deviation of one utterance against the same one's others (dB).
+    pub utterance: f32,
+    /// Softest and loudest utterance measured, from the kind's mean (dB).
+    pub range: [f32; 2],
+}
+
+impl LevelSpreadDef {
+    /// The spread as written, checked: no negative deviation, and a range
+    /// that holds the mean.
+    fn checked(self) -> Result<LevelSpread, Box<dyn std::error::Error>> {
+        let [softest, loudest] = self.range;
+        if !(self.individual >= 0.0 && self.utterance >= 0.0) {
+            return Err(format!(
+                "`level_spread`'s `individual: {}` and `utterance: {}` must be 0 or more",
+                self.individual, self.utterance
+            )
+            .into());
+        }
+        if !(softest <= 0.0 && loudest >= 0.0) {
+            return Err(format!(
+                "`level_spread`'s `range: [{softest}, {loudest}]` must run from at most 0 to at least 0 dB"
+            )
+            .into());
+        }
+        Ok(LevelSpread {
+            individual_db: self.individual,
+            utterance_db: self.utterance,
+            range_db: (softest, loudest),
+        })
+    }
 }
 
 /// A bout as written, checked: at least once, and from few to many.
@@ -356,6 +399,11 @@ impl SampleSourceDef {
                     level_variation_db: rests.vary.level,
                     pitch_variation_cents: rests.vary.pitch,
                     bout: rests.bout.map(checked_bout).transpose()?.unwrap_or((1, 1)),
+                    level_spread: rests
+                        .level_spread
+                        .map(LevelSpreadDef::checked)
+                        .transpose()?
+                        .unwrap_or(LevelSpread::NONE),
                 })
             }
         };
