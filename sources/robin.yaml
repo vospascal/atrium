@@ -2,12 +2,16 @@
 # Thin, wistful phrases, each a little different.
 #
 # A kind that rests between takes: it utters one of its takes, rests, and utters another,
-# never the same one twice running. The level and the gaps are a first guess
-# by ear, not measured.
+# never the same one twice running. The gaps are a first guess by ear, not measured.
+#
+# The level is measured: song peaks at 83.0 ± 3.7 dB(A) at 1 m (loudest 125 ms of each
+# song, Brumm et al. 2025, Proc. R. Soc. B 292: 20251088). reference_spl is the level
+# while it sounds, so the peak minus how far this kind's own takes peak above
+# their level while sounding (6.2 dB on average, A-weighted peak over unweighted level).
 
 name: Robin
 group: Creatures
-reference_spl: 58.0        # dB SPL at 1 m
+reference_spl: 77.0        # dB SPL at 1 m, while it sounds
 width: 360
 spread: 0.0                 # a point
 
