@@ -14,6 +14,7 @@ mod analysis;
 mod audition;
 mod device;
 mod edits;
+mod lab;
 mod listener;
 mod loudness;
 mod rhythm;
@@ -87,6 +88,8 @@ pub struct Engine {
     /// Whether the scene was last paused; the audio thread keeps its own.
     paused: std::sync::atomic::AtomicBool,
     edits: Mutex<Edits>,
+    /// The generator lab's session.
+    lab: Mutex<lab::Lab>,
     /// Earlier and later versions of the scene, for undo and redo.
     history: Mutex<History<undo::Version>>,
     /// Dropped last; dropping it stops the audio.
@@ -151,6 +154,7 @@ impl Engine {
             planner: built.planner,
             paused: std::sync::atomic::AtomicBool::new(false),
             edits: Mutex::new(Edits::new(to_audio, retired)),
+            lab: Mutex::new(lab::Lab::new(output.sample_rate)),
             history: Mutex::new(History::default()),
             _output: output,
         }))

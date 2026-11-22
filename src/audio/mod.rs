@@ -6,6 +6,7 @@ pub mod file_stretch;
 pub mod filters;
 pub mod loudness;
 pub mod masking;
+mod mute_fade;
 pub(crate) mod near_field;
 pub mod output;
 pub mod propagation;

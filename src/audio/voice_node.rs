@@ -16,6 +16,7 @@ use atrium_core::telemetry::SourceSignal;
 use atrium_core::types::Vec3;
 
 use crate::audio::decode::AudioBuffer;
+use crate::audio::mute_fade::MuteFade;
 use crate::audio::signal_meter::SignalMeter;
 
 /// Seconds over which a take fades in and out, so its edges never click.
@@ -55,7 +56,7 @@ pub struct VoiceNode {
     arc_degrees: f32,
     pub ref_dist: f32,
     facing: Option<f32>,
-    muted: bool,
+    muted: MuteFade,
     emitter_kind: EmitterKind,
     signal_meter: Option<SignalMeter>,
 }
@@ -76,7 +77,7 @@ impl VoiceNode {
             arc_degrees: atrium_core::source::ALL_ROUND_DEGREES,
             ref_dist: 1.0,
             facing: None,
-            muted: false,
+            muted: MuteFade::new(),
             emitter_kind: EmitterKind::Object,
             signal_meter: None,
         }
@@ -148,11 +149,12 @@ impl SoundSource for VoiceNode {
             }
         };
 
-        if self.muted {
+        let unmuted = self.muted.next_gain(sample_rate);
+        if unmuted == 0.0 {
             // It keeps going while muted, so it comes back where it would be.
             return 0.0;
         }
-        let output = sample * self.amplitude;
+        let output = sample * self.amplitude * unmuted;
         if let Some(meter) = &mut self.signal_meter {
             meter.push(output, sample_rate);
         }
@@ -218,11 +220,11 @@ impl SoundSource for VoiceNode {
     }
 
     fn is_muted(&self) -> bool {
-        self.muted
+        self.muted.is_muted()
     }
 
     fn set_muted(&mut self, muted: bool) {
-        self.muted = muted;
+        self.muted.set(muted);
     }
 
     fn set_position(&mut self, position: Vec3) {

@@ -126,7 +126,7 @@ impl Engine {
     }
 
     /// Whether one of the scene's own sounds plays from the audition voice.
-    fn audition_voice_taken(&self) -> bool {
+    pub(super) fn audition_voice_taken(&self) -> bool {
         lock(&self.scene)
             .description
             .sources

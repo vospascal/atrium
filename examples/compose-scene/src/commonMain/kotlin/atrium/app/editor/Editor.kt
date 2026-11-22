@@ -153,7 +153,8 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                         when {
                             command && event.key == Key.S -> if (event.isShiftPressed) naming = true else save()
                             !command && event.key == Key.Tab -> workspace.toggleAll()
-                            !command && event.key == Key.Spacebar -> session.togglePause()
+                            // With the Lab focused, space plays and pauses the Lab instead.
+                            !command && event.key == Key.Spacebar && !session.lab.focused -> session.togglePause()
                             command && event.key == Key.Z -> if (event.isShiftPressed) session.redo() else session.undo()
                             command && event.key == Key.Y -> session.redo()
                             command && event.key == Key.D -> duplicateChosen()

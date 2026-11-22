@@ -170,6 +170,9 @@ internal class Session(private val store: SettingsStore) {
     /** Building a sound decodes or measures it, which takes a moment: one at a time, off the UI thread. */
     private val building = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
 
+    /** The generator lab, under the map; it builds in turn with every other build. */
+    val lab = LabBench(building, { engine }) { if (paused) togglePause() }
+
     private var requests = 0
 
     fun play(scene: SceneFile) {

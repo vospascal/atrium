@@ -280,3 +280,116 @@ fn audio_callback_never_touches_the_heap() {
         violations.join("\n\n")
     );
 }
+
+/// The generator lab's voice: three candidates in step, switched with a
+/// fade, every wrap and replay putting back the soft wind's state at the
+/// cue. A loop of half a second wraps every 47 callbacks; between callbacks
+/// the candidate, the trims, the working wind's live settings, the loop and
+/// play change, and the passage is replayed. None of it touches the heap.
+#[test]
+fn the_labs_voice_never_touches_the_heap() {
+    use std::sync::Arc;
+
+    use atrium::audio::decode::AudioBuffer;
+    use atrium::audio::spectral_profile::SpectralProfile;
+    use atrium::config::soft_wind_of;
+    use atrium::lab::{
+        placed_like, state_at, Candidate, CandidateSettings, LabControls, LabVoice, VoiceParts,
+    };
+    use atrium_world::{Entity, EntityId, Moves, Place, Shape, Sound, When};
+
+    let entity = Entity {
+        name: None,
+        color: None,
+        group: None,
+        sound: Sound {
+            preset: Some("sources/soft-wind.yaml".into()),
+            audio: None,
+            level: None,
+        },
+        shape: Shape::default(),
+        place: Place {
+            x: 0.0,
+            y: 2.0,
+            z: 1.2,
+        },
+        when: When::default(),
+        follows: None,
+        moves: Moves::Still,
+    };
+    let built = SceneConfig::load("scenes/default.yaml")
+        .and_then(SceneConfig::build)
+        .expect("the default scene builds");
+    let (mut scene, sounds) = (built.scene, built.sounds);
+    scene.sample_rate = SAMPLE_RATE;
+    scene.init_pipelines();
+    let channels = scene.speaker_layout.total_channels();
+    let (tap, mut tap_reader) = output_tap(channels, 8 * FRAMES_PER_CALLBACK);
+    scene.output_tap = Some(tap);
+
+    let preset = soft_wind_of(&entity, 1).expect("the soft wind builds");
+    let untouched = CandidateSettings::default().live_values(&preset);
+    let mut brighter = CandidateSettings::default();
+    brighter.values.insert("gust_brightness".into(), 0.4);
+    let brighter = brighter.live_values(&preset);
+    let controls = Arc::new(LabControls::new(Candidate::Reference, untouched));
+    controls.set_playing(true);
+    let kept = state_at(preset, 5.0, SAMPLE_RATE);
+    let reference = Arc::new(AudioBuffer {
+        samples: (0..48_000)
+            .map(|index| ((index as f32) * 0.07).sin() * 0.1)
+            .collect(),
+        sample_rate: 44_100,
+        rms: 0.0,
+        spectral_profile: SpectralProfile::default(),
+    });
+    let voice = LabVoice::new(VoiceParts {
+        controls: controls.clone(),
+        sample_rate: SAMPLE_RATE,
+        reference,
+        reference_gain: 1.0,
+        reference_from_seconds: 0.2,
+        loop_seconds: 0.5,
+        previous: kept.clone(),
+        working: kept,
+    });
+    let slot = scene.sources.len() - 1;
+    let lab = sounds
+        .build(&EntityId::new("lab").expect("an id"), &entity, slot)
+        .expect("builds");
+    scene.sources[slot] = placed_like(voice, &lab);
+
+    let (_producer, mut consumer) = rtrb::RingBuffer::<Command>::new(4);
+    let mut output = vec![0.0f32; FRAMES_PER_CALLBACK * channels];
+    let mut tapped = Vec::new();
+    let mut violations = Vec::new();
+    for callback in 0..600 {
+        match callback % 60 {
+            7 | 37 => controls.hear(Candidate::Working),
+            14 => controls.hear(Candidate::Previous),
+            21 | 51 => controls.hear(Candidate::Reference),
+            25 => controls.set_trim(Candidate::Working, -3.0 + (callback % 7) as f32),
+            30 => controls.set_working(if callback % 120 == 30 {
+                brighter
+            } else {
+                untouched
+            }),
+            33 => controls.replay(),
+            40 => controls.set_looping(callback % 120 != 40),
+            45 => controls.set_playing(false),
+            48 => controls.set_playing(true),
+            _ => {}
+        }
+        let (operations, origins) =
+            heap_operations_during(&mut scene, &mut consumer, &mut output, channels, 1);
+        if operations > 0 && violations.is_empty() {
+            violations.push(format!(
+                "callback {callback}: {operations} heap operations\n{}",
+                origins.join("\n")
+            ));
+        }
+        while tap_reader.next_block(&mut tapped).is_some() {}
+    }
+    assert!(controls.position_frames() > 0, "the voice played");
+    assert!(violations.is_empty(), "{}", violations.join("\n\n"));
+}

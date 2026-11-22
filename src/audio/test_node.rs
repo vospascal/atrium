@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::audio::decode::AudioBuffer;
+use crate::audio::mute_fade::MuteFade;
 use crate::audio::signal_meter::SignalMeter;
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::source::{EmitterKind, SoundSource};
@@ -47,7 +48,7 @@ pub struct TestNode {
     /// The heading it was turned to (radians). Until it is turned, it faces
     /// its orbit centre.
     facing: Option<f32>,
-    muted: bool,
+    muted: MuteFade,
     emitter_kind: EmitterKind,
     signal_meter: Option<SignalMeter>,
 }
@@ -75,7 +76,7 @@ impl TestNode {
             arc_degrees: atrium_core::source::ALL_ROUND_DEGREES,
             ref_dist: 1.0,
             facing: None,
-            muted: false,
+            muted: MuteFade::new(),
             emitter_kind: EmitterKind::Object,
             signal_meter: None,
         }
@@ -155,11 +156,12 @@ impl SoundSource for TestNode {
         self.playback_pos = advanced(self.playback_pos, step, length);
         let gain = self.dip_gain(step, length, sample_rate);
 
-        if self.muted {
+        let unmuted = self.muted.next_gain(sample_rate);
+        if unmuted == 0.0 {
             // Still advance playback so it stays in sync when unmuted
             return 0.0;
         }
-        let output = sample * self.amplitude * gain;
+        let output = sample * self.amplitude * gain * unmuted;
         if let Some(meter) = &mut self.signal_meter {
             meter.push(output, sample_rate);
         }
@@ -243,16 +245,16 @@ impl SoundSource for TestNode {
     }
 
     fn is_muted(&self) -> bool {
-        self.muted
+        self.muted.is_muted()
     }
 
     fn set_muted(&mut self, muted: bool) {
-        if muted && !self.muted {
+        if muted && !self.muted.is_muted() {
             if let Some(meter) = &mut self.signal_meter {
                 meter.reset();
             }
         }
-        self.muted = muted;
+        self.muted.set(muted);
     }
 
     fn set_position(&mut self, position: Vec3) {
@@ -405,7 +407,7 @@ mod tests {
     }
 
     /// Muted nodes return silence but keep their playhead moving, so unmuting
-    /// resumes in sync.
+    /// resumes in sync, fading back in over 10 ms (480 samples at 48 kHz).
     #[test]
     fn muting_keeps_the_playhead_running() {
         let mut node = ramp_node(48_000);
@@ -413,7 +415,14 @@ mod tests {
         assert!(node.is_muted());
         assert_eq!(render(&mut node, 3, 48_000.0), vec![0.0; 3]);
         node.set_muted(false);
-        assert_eq!(render(&mut node, 3, 48_000.0), vec![3.0, 4.0, 5.0]);
+        let heard = render(&mut node, 3, 48_000.0);
+        for (index, sample) in heard.iter().enumerate() {
+            let expected = (3 + index) as f32 * (index + 1) as f32 / 480.0;
+            assert!(
+                (sample - expected).abs() < 1e-5,
+                "{sample} against {expected}"
+            );
+        }
     }
 
     #[test]

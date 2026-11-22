@@ -14,6 +14,7 @@ mod built_source;
 mod description;
 mod draft;
 mod environment;
+mod lab;
 mod parse;
 mod presets;
 mod scene;
@@ -32,6 +33,7 @@ pub use description::{
     TakeDescription,
 };
 pub use draft::{draft_preset, Draft};
+pub use lab::soft_wind_of;
 pub use presets::{list_presets, read_preset, PresetSummary};
 pub use scene::{Atmosphere, AtmosphereConfig, Band, ListenerConfig, SceneConfig, WeatherConfig};
 pub use scene_file::{saved_by_editor, EDITOR_MARK};

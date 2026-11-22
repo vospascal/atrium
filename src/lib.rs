@@ -2,6 +2,7 @@ pub mod audio;
 pub mod config;
 pub mod engine;
 pub mod head_tracking;
+pub mod lab;
 pub mod offline;
 pub mod pipeline;
 pub mod plan;

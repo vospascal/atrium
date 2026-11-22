@@ -820,6 +820,9 @@ src/
 │   ├── builders/           # which pieces each render mode is made of
 │   ├── render.rs           # RenderPipeline and the per-buffer render loop
 │   └── tests/              # end-to-end pipeline tests, grouped by subject
+├── lab/                    # the generator lab: candidates in step in one voice,
+│                           #   a seeded run's state kept at its cue, level
+│                           #   matching, the session file (docs/generator-lab-plan.md)
 ├── plan/                   # the session: which take each voice utters when,
 │                           #   and the weather story, decided ahead from the seed
 ├── offline/                # a scene rendered to a file: settings, the render,

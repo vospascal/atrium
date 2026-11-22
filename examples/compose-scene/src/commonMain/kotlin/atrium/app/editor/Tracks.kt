@@ -61,7 +61,7 @@ private const val AheadShare = .25
 private const val LaneSteps = 160
 
 /** What the bottom panel shows under its timeline. */
-internal enum class BottomTab { Tracks, Analysis }
+internal enum class BottomTab { Tracks, Analysis, Lab }
 
 /** Seconds into the playing scene, read every frame, as the ruler's "now". */
 @Composable
@@ -74,9 +74,9 @@ private fun playhead(session: Session): Double {
 
 /**
  * The panel under the map, as a video editor's: on top the timeline, the meters and the zoom,
- * and the ruler; under them two tabs on the ruler's time axis. Tracks shows the voices and the
- * place's conditions; Analysis shows what was heard, measured as it played. The tab chosen is
- * kept in [workspace]. [now] is the scene's time at the ruler's "now" line.
+ * and the ruler; under them three tabs. Tracks shows the voices and the place's conditions and
+ * Analysis what was heard, measured as it played, both on the ruler's time axis; the Lab tunes a
+ * generator against a recording, on its own playhead. The tab chosen is kept in [workspace]. [now] is the scene's time at the ruler's "now" line.
  */
 @Composable
 internal fun BottomPanel(
@@ -124,6 +124,7 @@ internal fun BottomPanel(
         when (workspace.bottomTab) {
             BottomTab.Tracks -> TrackLanes(session, now, shown, ahead, selection, onSelection, Modifier.weight(1f))
             BottomTab.Analysis -> AnalysisLanes(session.analysis, now, shown, ahead, Modifier.weight(1f))
+            BottomTab.Lab -> LabPanel(session.lab, Modifier.weight(1f))
         }
     }
 }

@@ -25,6 +25,10 @@ const SPECTRUM_TOP_DB: f64 = 90.0;
 /// every display frame.
 const TAP_SECONDS: f64 = 2.0;
 const TAP_HIGHEST_RATE: f64 = 96_000.0;
+/// Columns held for `analysis` when it is not called (30 s of them); older
+/// ones are dropped. The lab reads the tap too, and the app may not be
+/// drawing the analysis meanwhile.
+const MOST_COLUMNS_WAITING: usize = 600;
 
 #[uniffi::export]
 impl Engine {
@@ -65,6 +69,10 @@ pub(super) struct Analysis {
     /// Blocks that start before this clock sample were played before the
     /// last seek, and are not read.
     from_clock_sample: u64,
+    /// Columns finished and not yet taken by `analysis`.
+    waiting: Vec<Column>,
+    /// A copy of each column for the lab while it matches levels.
+    for_lab: Option<Vec<Column>>,
 }
 
 impl Analysis {
@@ -89,12 +97,14 @@ impl Analysis {
             full_scale_db_spl,
             block: Vec::new(),
             from_clock_sample: 0,
+            waiting: Vec::new(),
+            for_lab: None,
         }
     }
 
-    /// Feed every block waiting in the tap to the analyser, and take the
-    /// columns it finished, placed on the scene's time by `planner`.
-    fn columns(&mut self, planner: &Planner) -> Vec<AnalysisColumn> {
+    /// Feed every block waiting in the tap to the analyser, and keep the
+    /// columns it finished for `analysis` and, while it listens, the lab.
+    fn drain(&mut self) {
         while let Some(block) = self.reader.next_block(&mut self.block) {
             // A block of another shape is not this stream's; the device's
             // channels are fixed while it plays, so none comes.
@@ -102,14 +112,40 @@ impl Analysis {
                 self.live.push(&self.block, block.clock_sample);
             }
         }
-        self.live
-            .take_columns()
+        let finished = self.live.take_columns();
+        if let Some(lab) = &mut self.for_lab {
+            lab.extend(finished.iter().cloned());
+        }
+        self.waiting.extend(finished);
+        let excess = self.waiting.len().saturating_sub(MOST_COLUMNS_WAITING);
+        self.waiting.drain(..excess);
+    }
+
+    /// The columns finished since the last call, placed on the scene's time
+    /// by `planner`.
+    fn columns(&mut self, planner: &Planner) -> Vec<AnalysisColumn> {
+        self.drain();
+        std::mem::take(&mut self.waiting)
             .into_iter()
             .map(|column| {
                 let scene_seconds = planner.scene_seconds_at(column.clock_sample);
                 column_record(column, scene_seconds)
             })
             .collect()
+    }
+
+    /// Copy every column for the lab from now on, or stop.
+    pub(super) fn listen_for_lab(&mut self, listening: bool) {
+        self.for_lab = listening.then(Vec::new);
+    }
+
+    /// The columns finished for the lab since it last asked.
+    pub(super) fn lab_columns(&mut self) -> Vec<Column> {
+        self.drain();
+        self.for_lab
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// The scene has just moved: what was played before is not of the new

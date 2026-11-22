@@ -5,6 +5,7 @@
 //! muting. `SynthNode` wraps one and gives it the same scene-facing surface
 //! as the sample-playing `TestNode`, so the pipeline treats both identically.
 
+use crate::audio::mute_fade::MuteFade;
 use crate::audio::signal_meter::SignalMeter;
 use atrium_core::directivity::DirectivityPattern;
 use atrium_core::source::SoundSource;
@@ -29,7 +30,7 @@ pub struct SynthNode {
     position: Vec3,
     /// The heading it was turned to (radians); +X until it is turned.
     facing: Option<f32>,
-    muted: bool,
+    muted: MuteFade,
     /// What the scene made of it, in place of the generator's own kind.
     emitter_kind: Option<atrium_core::source::EmitterKind>,
     signal_meter: Option<SignalMeter>,
@@ -47,7 +48,7 @@ impl SynthNode {
             ref_dist: 1.0,
             position,
             facing: None,
-            muted: false,
+            muted: MuteFade::new(),
             emitter_kind: None,
             signal_meter: None,
         }
@@ -63,10 +64,11 @@ impl SoundSource for SynthNode {
         // Always advance the generator so envelopes/gust cycles keep evolving
         // while muted — unmuting resumes mid-weather instead of restarting.
         let sample = self.generator.next_sample(sample_rate);
-        if self.muted {
+        let unmuted = self.muted.next_gain(sample_rate);
+        if unmuted == 0.0 {
             return 0.0;
         }
-        let output = sample * self.amplitude;
+        let output = sample * self.amplitude * unmuted;
         if let Some(meter) = &mut self.signal_meter {
             meter.push(output, sample_rate);
         }
@@ -126,16 +128,16 @@ impl SoundSource for SynthNode {
     }
 
     fn is_muted(&self) -> bool {
-        self.muted
+        self.muted.is_muted()
     }
 
     fn set_muted(&mut self, muted: bool) {
-        if muted && !self.muted {
+        if muted && !self.muted.is_muted() {
             if let Some(meter) = &mut self.signal_meter {
                 meter.reset();
             }
         }
-        self.muted = muted;
+        self.muted.set(muted);
     }
 
     fn set_position(&mut self, position: Vec3) {
@@ -258,8 +260,11 @@ mod tests {
         }
         node.set_muted(false);
         assert!(!node.is_muted());
-        for _ in 0..100 {
-            assert_eq!(node.next_sample(48_000.0), raw.next_sample(48_000.0));
+        // It fades back in over 10 ms, 480 samples.
+        for step in 1..=600 {
+            let fade = (step as f32 / 480.0).min(1.0);
+            let expected = raw.next_sample(48_000.0) * fade;
+            assert!((node.next_sample(48_000.0) - expected).abs() <= 1e-5);
         }
     }
 

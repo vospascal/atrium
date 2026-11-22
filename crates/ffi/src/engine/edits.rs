@@ -20,6 +20,8 @@ pub(super) struct Edits {
     retired: rtrb::Consumer<Retired>,
     /// Whether a preset is playing from the audition voice.
     pub(super) auditioned: bool,
+    /// Whether the lab's voice is the one in the audition voice.
+    pub(super) lab_voice: bool,
 }
 
 impl Edits {
@@ -32,6 +34,7 @@ impl Edits {
             to_audio,
             retired,
             auditioned: false,
+            lab_voice: false,
         }
     }
 
@@ -58,6 +61,7 @@ impl Edits {
                 filler: SoundBuilder::silence(),
             })?;
             self.auditioned = false;
+            self.lab_voice = false;
         }
         Ok(())
     }

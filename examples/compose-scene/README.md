@@ -66,8 +66,8 @@ panel or list gets them by using it.
   name and writes a copy beside it. That copy is the editor's own, and later saves replace it.
   Mutes, volume, output and head tracking are yours and are not saved with the scene.
 - **The bottom panel** under the map has the timeline, the meters and the zoom on top, then the
-  ruler, then two tabs on the ruler's time axis: **Tracks** and **Analysis**. The tab chosen is
-  kept between launches.
+  ruler, then three tabs: **Tracks** and **Analysis** on the ruler's time axis, and the **Lab**
+  on its own playhead. The tab chosen is kept between launches.
 - **Tracks** are the engine's 16 voices, as in a multitrack editor. Each shows the
   sound in it, or Empty, and the last minutes as clips: where it sounded, which take, and how
   loud the take itself was. A sound that rests leaves gaps; one that loops is one long clip; a
@@ -82,6 +82,21 @@ panel or list gets them by using it.
   (right minus left). Right of now stays empty: only what has sounded can be measured. Hover
   for the time and the values under the pointer. It keeps ten minutes, is read whichever tab
   shows, and starts again on a seek.
+- **Lab** tunes the soft wind against a real recording (`docs/generator-lab-plan.md`, stage 1).
+  **Open recording…** draws the recording; drag its two markers round a gust with some lead-in
+  and tail. Under it is a seeded five-minute run of the wind, with a tick where each of its
+  gusts, swells and lulls begins; drag the run's passage onto one (it snaps), name the passage
+  and **Mark passage**. **Reference**, **Previous** (the wind as it was) and **Working** (with
+  this round's changes) play in step, one heard at a time, switched with a 10 ms fade; the bar
+  says which is heard. **Play/Pause**, **Loop** and **Replay gust** have their own playhead, apart
+  from the ruler; while the Lab plays, every other sound is muted. **Match levels** measures each
+  alone at the output for 10 s of sound and trims the two winds to the recording; with **Hold
+  level match** on, an edit keeps the trims and marks them "rematch needed". Under them, scrolling:
+  the working wind's five layers (low, body, mid, presence, air), each with a level where 0 dB is
+  the wind as it was, solo and mute, and **Undo mix**; **Behaviour**, closed at first, with gust
+  brightness and **Run freely**; notes pinned to the moment heard, the verdict, and **Save
+  session** (`lab/soft-wind/session.json`), which **Reopen last session** brings back. With the
+  Lab focused, space plays and pauses it and R, P and W switch.
 - **The timeline** is the top of the bottom panel: three hours of the scene with its weather drawn
   in. Press or drag anywhere on it to move the whole scene there: every sound and the weather are
   as they would be at that moment, a take under way starts partway, and it plays on from there.

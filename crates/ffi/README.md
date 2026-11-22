@@ -12,7 +12,12 @@ Kotlin can reach is declared here:
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_beam`,
   `set_source_muted`, `set_source_level`, `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition`, `audition_take`,
-  `add_sound`, `remove_sound`, `save_scene`, `weather`, `set_weather`, `conditions`, `planned`, `set_head_tracker`, `latest_telemetry()`, `analysis()` and `analysis_scale()`.
+  `add_sound`, `remove_sound`, `save_scene`, `weather`, `set_weather`, `conditions`, `planned`, `set_head_tracker`, `latest_telemetry()`, `analysis()` and `analysis_scale()`;
+  and the generator lab's (`engine/lab.rs`): `lab_state()`, `lab_open_recording`,
+  `lab_generator_run`, `lab_mark_passage`, `lab_play`, `lab_set_looping`, `lab_replay`,
+  `lab_hear`, `lab_set_fader`, `lab_undo_mix`, `lab_set_setting`, `lab_set_run_freely`,
+  `lab_match_levels`, `lab_set_hold_level_match`, `lab_pin_note`, `lab_set_question`,
+  `lab_set_verdict`, `lab_save` and `lab_reopen`, with their `Lab…` records.
 - The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
   editor wrote it), `Output`, `Telemetry`, `AnalysisColumn`, `AnalysisScale`. Telemetry
   includes where the listener faces and whether a head tracker is sending; an analysis column
@@ -25,6 +30,15 @@ JVM (a `cdylib` loaded by JNA) and iOS (a `staticlib` linked through cinterop). 
 runs Cargo itself. There is nothing to build here by hand.
 
 ## Decisions that look wrong and are right
+
+- **The generator lab plays its three candidates from one voice, the audition voice.** The
+  reference recording and the two soft winds advance together in `atrium::lab::LabVoice`, so a
+  switch is a fade inside one voice and the match goes through one render path; the lab mutes
+  the rest of the scene while it plays and gives the listener's mutes back after. Building the
+  voice runs the winds from their seed to the cue, so it happens before the edit ring is
+  locked: `lab_state()` asks that ring every frame. A level match moves along in `lab_state()`,
+  which reads the analysis's columns; `analysis()` keeps its own copy of each, so the two never
+  take columns from each other (`docs/generator-lab-plan.md`, "As built").
 
 - **Only the commands a screen uses are exported:** moving a source (the editor's map), the output,
   volume and head tracker (the player's Settings), and mute, level, width, facing, audition,
