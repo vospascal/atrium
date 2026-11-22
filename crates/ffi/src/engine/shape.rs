@@ -1,9 +1,11 @@
 //! How one sound is heard: its level, where it stands, which way it faces,
-//! its beam, its size, and whether it is a point or ambient.
+//! its beam, its size, whether it is a point or ambient, and the arc an
+//! ambient sound arrives from.
 
 use atrium::config::{bearing_for_heading, radiation_of};
 use atrium_core::commands::Command;
 use atrium_core::directivity::SILENT_BEHIND_DB;
+use atrium_core::source::{ALL_ROUND_DEGREES, NARROWEST_ARC_DEGREES};
 
 use super::{lock, rounded, sound_in, Engine, Live};
 use crate::api::{EmitterKind, EngineError, Position};
@@ -76,6 +78,28 @@ impl Engine {
             entity.shape.size = Some(size);
         }
         self.play_size(&mut scene, slot, size)
+    }
+
+    /// Make the ambient source in `slot` arrive from an arc `degrees` wide,
+    /// centred on the side its place lies on: from 10 (narrow) to 360 (all
+    /// round), in whole degrees. A shoreline or a tree line is heard from
+    /// one side; moving the sound's place moves the arc, and its level stays
+    /// its level. `scene()` reports it from then on, and the scene file
+    /// keeps it (all round is left out). A point ignores it. On headphones a
+    /// new width is heard once its filters are designed, a fraction of a
+    /// second later.
+    pub fn set_source_arc(&self, slot: u16, degrees: f32) -> Result<(), EngineError> {
+        if !degrees.is_finite() {
+            return Ok(());
+        }
+        let degrees = degrees
+            .clamp(NARROWEST_ARC_DEGREES, ALL_ROUND_DEGREES)
+            .round();
+        let mut scene = lock(&self.scene);
+        if let Some(entity) = scene.entity_in(slot) {
+            entity.shape.arc = (degrees < ALL_ROUND_DEGREES).then_some(degrees);
+        }
+        self.play_arc(&mut scene, slot, degrees)
     }
 
     /// Make the source in `slot` ambient, heard everywhere as the air of the
@@ -196,6 +220,24 @@ impl Engine {
             spread: size,
         })?;
         source.size = size;
+        Ok(())
+    }
+
+    /// Make the sound in `slot` arrive from an arc `degrees` wide.
+    pub(super) fn play_arc(
+        &self,
+        scene: &mut Live,
+        slot: u16,
+        degrees: f32,
+    ) -> Result<(), EngineError> {
+        let Some(source) = sound_in(&mut scene.description, slot) else {
+            return Ok(());
+        };
+        self.command(Command::SetSourceArc {
+            index: slot,
+            degrees,
+        })?;
+        source.arc = degrees;
         Ok(())
     }
 

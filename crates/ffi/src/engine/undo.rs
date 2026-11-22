@@ -182,6 +182,11 @@ impl Engine {
                     self.play_size(scene, slot, size)?;
                 }
             }
+            Change::Arc { id, degrees } => {
+                if let Some(slot) = slot_of(scene, &id) {
+                    self.play_arc(scene, slot, degrees)?;
+                }
+            }
             Change::Facing { id, facing } => {
                 if let Some(slot) = slot_of(scene, &id) {
                     self.play_facing(scene, slot, yaw_for_bearing(facing))?;
@@ -272,6 +277,11 @@ mod tests {
             assert_eq!(frog.emitter_kind, crate::api::EmitterKind::Field);
             assert_eq!(frog.beam_half_angle, None);
             assert_eq!(frog.size, 0.4, "it keeps what was set before");
+            assert_eq!(frog.arc, 360.0, "all round until narrowed");
+        });
+        step("Arc", &|engine| {
+            engine.set_source_arc(frogs, 89.6).expect("arc");
+            assert_eq!(engine.scene().sources[0].arc, 90.0, "whole degrees");
         });
         step("Add", &|engine| {
             engine

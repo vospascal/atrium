@@ -63,6 +63,12 @@ runs Cargo itself. There is nothing to build here by hand.
   voice (gain ramps, delay lines, decorrelation filters); switching a playing voice from one to
   the other would leave the old one's state to click or ring on. A new build costs a restart of
   the recording, once, on a choice that is made rarely.
+- **An arc is a command, not a new build, and returns at once.** `set_source_arc` sends the
+  width to the audio thread like a size. On headphones each width needs its own filters, some
+  tenths of a second of transforms; the headphone renderer designs them on a thread of its own
+  and keeps playing the old width (or all round) until they arrive, so a dragged slider never
+  waits on the call and the audio thread never on the design. Widths are whole degrees, and
+  all round is left out of the file.
 - **A scene's air is a file or its own values.** `atmosphere:` in a scene names a file shared
   between scenes, or holds the values. `set_atmosphere` writes the values, so an edited scene
   stops following the file; it never writes into `atmospheres/`, which other scenes read.

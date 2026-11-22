@@ -109,6 +109,9 @@ pub struct SourceDescription {
     /// How wide it sounds, from 0 (a point) to 1 (all around). A field
     /// ignores it.
     pub size: f32,
+    /// The arc an ambient sound arrives from, in degrees, centred on the
+    /// side its place lies on: 360 all round. A point ignores it.
+    pub arc: f32,
     /// Initial forward vector in world coordinates.
     pub facing: Position,
     /// What it can utter, in the order `SourceTelemetry::take` counts them.
@@ -216,6 +219,7 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
             emitter_kind: source.emitter_kind.into(),
             beam_half_angle: source.beam_half_angle,
             size: source.size,
+            arc: source.arc,
             facing: source.facing.into(),
             takes: source
                 .takes
