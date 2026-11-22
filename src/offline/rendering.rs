@@ -33,6 +33,7 @@ pub struct Rendering {
     /// turn turns from here.
     listener_position: Vec3,
     listener_yaw: f32,
+    full_scale_db_spl: f64,
 }
 
 impl Rendering {
@@ -50,6 +51,10 @@ impl Rendering {
         }
         let seed = settings.seed.or(scene.seed).unwrap_or(DEFAULT_SEED);
         scene.seed = Some(seed);
+        let full_scale_db_spl = full_scale_db_spl(
+            scene.normalization.spl_reference as f64,
+            scene.normalization.target_rms as f64,
+        );
         let layout = scene.speakers.layout.clone();
 
         let built = scene.build_unstarted()?;
@@ -87,6 +92,7 @@ impl Rendering {
             channels,
             seed,
             layout,
+            full_scale_db_spl,
         })
     }
 
@@ -156,6 +162,7 @@ impl Rendering {
             render_mode: self.render_mode,
             settings: self.settings,
             gain_decibels: 0.0,
+            full_scale_db_spl: self.full_scale_db_spl,
         }
     }
 
@@ -180,6 +187,8 @@ pub struct Rendered {
     /// What [`Rendered::normalise`] raised the frames by (dB); 0 as the
     /// engine rendered them.
     gain_decibels: f64,
+    /// The engine's calibration: see [`Rendered::full_scale_db_spl`].
+    full_scale_db_spl: f64,
 }
 
 impl Rendered {
@@ -206,6 +215,14 @@ impl Rendered {
     /// The gain [`Rendered::normalise`] applied (dB); 0 if it was not.
     pub fn gain_decibels(&self) -> f64 {
         self.gain_decibels
+    }
+
+    /// The sound pressure level (dB SPL) the engine renders an RMS of 1.0
+    /// at, before any gain [`Rendered::normalise`] applied: a sound at the
+    /// scene's `spl_reference` is rendered at RMS `target_rms`. The analyser
+    /// reads levels in dB SPL from it.
+    pub fn full_scale_db_spl(&self) -> f64 {
+        self.full_scale_db_spl
     }
 
     /// Interleaved frames, every channel of the layout.
@@ -249,6 +266,13 @@ impl Rendered {
     }
 }
 
+/// dB SPL of an RMS of 1.0: a source calibrated to `spl_reference` dB SPL
+/// plays at RMS `target_rms` (`config::built_source`), so RMS 1.0 is
+/// `spl_reference − 20·log10(target_rms)`.
+fn full_scale_db_spl(spl_reference: f64, target_rms: f64) -> f64 {
+    spl_reference - 20.0 * target_rms.log10()
+}
+
 /// The gain that brings the loudest of `channels` to `peak_decibels` dBFS,
 /// or `None` when every channel is silent.
 fn gain_to_peak(channels: &[ChannelStatistics], peak_decibels: f64) -> Option<f64> {
@@ -264,6 +288,14 @@ mod tests {
 
     fn channel(peak: f32) -> ChannelStatistics {
         ChannelStatistics { peak, rms: 0.0 }
+    }
+
+    /// 94 dB SPL at RMS 0.1 puts RMS 1.0 at 94 + 20 = 114 dB SPL; at the
+    /// default RMS 0.5, 94 + 6.02.
+    #[test]
+    fn full_scale_follows_the_normalisation() {
+        assert!((full_scale_db_spl(94.0, 0.1) - 114.0).abs() < 1e-12);
+        assert!((full_scale_db_spl(94.0, 0.5) - 100.0206).abs() < 1e-4);
     }
 
     #[test]

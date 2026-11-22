@@ -133,5 +133,11 @@ fn normalising_raises_every_channel_by_one_recorded_gain() {
         serde_json::from_str(&std::fs::read_to_string(&written.sidecar).expect("read"))
             .expect("parses");
     assert_eq!(sidecar["gain_decibels"], normalised.gain_decibels());
+    // The meadow names 94 dB SPL at RMS 0.1: RMS 1.0 is 114 dB SPL, written
+    // as the engine rendered it, before the gain.
+    let full_scale = sidecar["calibration"]["full_scale_db_spl"]
+        .as_f64()
+        .expect("a calibration");
+    assert!((full_scale - 114.0).abs() < 1e-4, "{full_scale}");
     let _ = std::fs::remove_dir_all(&directory);
 }

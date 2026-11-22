@@ -87,6 +87,11 @@ fn sidecar_json(
         // What the frames were raised by after rendering; the levels below
         // are the file's, the engine's own are these minus this gain.
         "gain_decibels": rendered.gain_decibels(),
+        // dB SPL of an RMS of 1.0 as the engine rendered it, before the
+        // gain: a level in the file is dBFS + this − gain_decibels.
+        "calibration": {
+            "full_scale_db_spl": rendered.full_scale_db_spl(),
+        },
         "levels": names
             .iter()
             .zip(rendered.statistics())
