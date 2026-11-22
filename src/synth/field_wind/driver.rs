@@ -4,11 +4,12 @@
 use std::f32::consts::PI;
 
 use crate::synth::noise::Rng;
-use crate::synth::wind_behaviour::{WindBehaviour, WindMoves};
+use crate::synth::wind_behaviour::{WindBehaviour, WindMove, WindMoves};
 
 /// Smooth random trajectory with segment durations specified in seconds.
 /// Cosine interpolation gives zero slope at target changes and avoids audible
 /// control discontinuities.
+#[derive(Clone)]
 pub(super) struct SmoothRandom {
     rng: Rng,
     pub(super) from: f32,
@@ -89,6 +90,7 @@ impl SmoothRandom {
 
 /// Hierarchical weather state: slow air-mass changes, individual gusts, and
 /// small turbulent eddies. This replaces a repeating ADSR-like gust cycle.
+#[derive(Clone)]
 pub(crate) struct WindDriver {
     weather: SmoothRandom,
     gust: SmoothRandom,
@@ -130,6 +132,12 @@ impl WindDriver {
         if let Some(moves) = &mut self.moves {
             moves.set_strength_share(share);
         }
+    }
+
+    /// The repertoire's move that began with the sample just played, if one
+    /// did: where its own gusts, swells and lulls start.
+    pub(crate) fn move_began(&self) -> Option<WindMove> {
+        self.moves.as_ref().and_then(WindMoves::move_began)
     }
 
     pub(crate) fn set_change_time_range(&mut self, min_seconds: f32, max_seconds: f32) {

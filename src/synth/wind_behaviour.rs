@@ -8,6 +8,7 @@
 //! session plays the same wind again.
 
 use std::f32::consts::PI;
+use std::sync::Arc;
 
 use super::noise::Rng;
 
@@ -44,8 +45,13 @@ pub struct WindBehaviour {
 }
 
 /// Plays a behaviour: rests, then a move, then a rest again.
+///
+/// A copy shares the repertoire with what it was copied from, so copying one
+/// (the generator lab keeps the state at its cue and puts it back at every
+/// wrap, on the audio thread) never allocates.
+#[derive(Clone)]
 pub(crate) struct WindMoves {
-    behaviour: WindBehaviour,
+    behaviour: Arc<WindBehaviour>,
     rng: Rng,
     /// The move under way, or none while resting.
     playing: Option<(WindEvent, f32)>,
@@ -62,7 +68,7 @@ pub(crate) struct WindMoves {
 impl WindMoves {
     pub(crate) fn new(behaviour: WindBehaviour, seed: u64) -> Self {
         Self {
-            behaviour,
+            behaviour: Arc::new(behaviour),
             rng: Rng::new(seed),
             playing: None,
             position: 0,
@@ -88,6 +94,14 @@ impl WindMoves {
     /// Make moves `share` as strong as written, at once.
     pub(crate) fn set_strength_share(&mut self, share: f32) {
         self.strength_share = share.clamp(0.0, MAX_STRENGTH_SHARE);
+    }
+
+    /// The move that began with the sample just played, if one did.
+    pub(crate) fn move_began(&self) -> Option<WindMove> {
+        match self.playing {
+            Some((event, _)) if self.position == 1 => Some(event.kind),
+            _ => None,
+        }
     }
 
     /// The push of the wind now, per sample: above 0 adds to the steady wind

@@ -4,6 +4,7 @@
 
 mod canopy_wind;
 mod field_wind;
+mod focus_tone;
 mod rain;
 mod rain_v2;
 mod river;
@@ -23,6 +24,7 @@ use serde::Deserialize;
 
 use canopy_wind::CanopyWindSynthParams;
 use field_wind::FieldWindSynthParams;
+use focus_tone::FocusToneSynthParams;
 use rain::RainSynthParams;
 use rain_v2::RainV2SynthParams;
 use river::RiverSynthParams;
@@ -48,6 +50,7 @@ pub(in crate::config) enum SynthSpec {
     Thunder(ThunderSynthParams),
     Waves(WaveSynthParams),
     Wisp(WispSynthParams),
+    FocusTone(FocusToneSynthParams),
 }
 
 impl SynthSpec {
@@ -63,6 +66,7 @@ impl SynthSpec {
             SynthSpec::Thunder(_) => "thunder",
             SynthSpec::Waves(_) => "waves",
             SynthSpec::Wisp(_) => "wisp",
+            SynthSpec::FocusTone(_) => "focus_tone",
         }
     }
 
@@ -94,6 +98,7 @@ impl SynthSpec {
             SynthSpec::Thunder(params) => params.build_generator(position, default_seed),
             SynthSpec::Waves(params) => params.build_generator(position, default_seed),
             SynthSpec::Wisp(params) => params.build_generator(position, default_seed),
+            SynthSpec::FocusTone(params) => params.build_generator(position, default_seed),
         }
     }
 }

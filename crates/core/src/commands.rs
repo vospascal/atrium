@@ -145,11 +145,26 @@ pub enum SynthParam {
     /// How strong a wind's moves are, as a share of its preset's: 1 as
     /// written, 2 twice as strong.
     MoveStrength,
+    /// The pitch of a tone, in Hz.
+    Pitch,
+    /// How fast a tone's overtones fall: each harmonic is this share of the
+    /// one below it, 0 to 0.9.
+    Brightness,
+    /// Level of a tone's fundamental layer, linear.
+    FundamentalLevel,
+    /// Level of a tone's overtone layer, linear.
+    OvertoneLevel,
+    /// Slowest and fastest a tone's shimmer beats (Hz).
+    ShimmerRateMin,
+    ShimmerRateMax,
+    /// How deep a tone's shimmer beats: the detuned partial's level as a
+    /// share of the fundamental's, 0 to 1.
+    ShimmerDepth,
 }
 
 impl SynthParam {
     /// Every setting, in the order they are declared.
-    pub const ALL: [SynthParam; 36] = [
+    pub const ALL: [SynthParam; 43] = [
         SynthParam::FlowSpeedMin,
         SynthParam::FlowSpeedMax,
         SynthParam::RiverSplashRate,
@@ -186,6 +201,13 @@ impl SynthParam {
         SynthParam::HoverTimeMax,
         SynthParam::MoveRest,
         SynthParam::MoveStrength,
+        SynthParam::Pitch,
+        SynthParam::Brightness,
+        SynthParam::FundamentalLevel,
+        SynthParam::OvertoneLevel,
+        SynthParam::ShimmerRateMin,
+        SynthParam::ShimmerRateMax,
+        SynthParam::ShimmerDepth,
     ];
 
     /// The name a file uses for this setting, in snake case.
@@ -227,6 +249,13 @@ impl SynthParam {
             SynthParam::HoverTimeMax => "hover_time_max",
             SynthParam::MoveRest => "move_rest",
             SynthParam::MoveStrength => "move_strength",
+            SynthParam::Pitch => "pitch",
+            SynthParam::Brightness => "brightness",
+            SynthParam::FundamentalLevel => "fundamental_level",
+            SynthParam::OvertoneLevel => "overtone_level",
+            SynthParam::ShimmerRateMin => "shimmer_rate_min",
+            SynthParam::ShimmerRateMax => "shimmer_rate_max",
+            SynthParam::ShimmerDepth => "shimmer_depth",
         }
     }
 

@@ -18,6 +18,10 @@ use super::field_wind::WindDriver;
 use super::noise::{white_noise_density_scale, OnePoleHP, OnePoleLP, PinkNoiseFull, Rng};
 
 /// A diffuse, bright soft-wind field with restrained level modulation.
+///
+/// A clone is its whole state at that moment: played on, it makes the same
+/// samples the original would have. Cloning never allocates.
+#[derive(Clone)]
 pub struct SoftWindSource {
     driver: WindDriver,
 
@@ -131,6 +135,13 @@ impl SoftWindSource {
     /// now and then, instead of gusting about half the time.
     pub fn set_behaviour(&mut self, behaviour: crate::synth::wind_behaviour::WindBehaviour) {
         self.driver.set_behaviour(behaviour);
+    }
+
+    /// The move of the wind's repertoire (a gust, swell or lull) that began
+    /// with the sample just played, if one did. Without a repertoire there
+    /// are no moves, only the gust trajectory.
+    pub fn move_began(&self) -> Option<crate::synth::wind_behaviour::WindMove> {
+        self.driver.move_began()
     }
 
     pub fn set_change_time_range(&mut self, min_seconds: f32, max_seconds: f32) {
@@ -274,14 +285,21 @@ impl SoundSource for SoftWindSource {
             return;
         }
         match param {
-            // Settings of rain, waves and flying sources; not this one's.
+            // Settings of rain, waves, flying sources and tones; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
             | SynthParam::WavePeriod
             | SynthParam::CrashChance
             | SynthParam::HoverTimeMin
-            | SynthParam::HoverTimeMax => {}
+            | SynthParam::HoverTimeMax
+            | SynthParam::Pitch
+            | SynthParam::Brightness
+            | SynthParam::FundamentalLevel
+            | SynthParam::OvertoneLevel
+            | SynthParam::ShimmerRateMin
+            | SynthParam::ShimmerRateMax
+            | SynthParam::ShimmerDepth => {}
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => self.min_speed = value.clamp(0.0, self.max_speed),
             SynthParam::MaxSpeed => self.max_speed = value.clamp(self.min_speed, 25.0),

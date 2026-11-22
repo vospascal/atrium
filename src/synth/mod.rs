@@ -1,4 +1,4 @@
-// Procedural audio synthesis — environmental sound sources.
+// Procedural audio synthesis — environmental sound sources and tones.
 //
 // Ported from the TypeScript spatial-audio-garden AudioWorklet processors.
 // All generators are allocation-free in the hot path and suitable for
@@ -10,6 +10,7 @@
 
 pub mod canopy_wind;
 pub mod field_wind;
+pub mod focus_tone;
 pub mod noise;
 pub mod rain;
 pub mod rain_v2;

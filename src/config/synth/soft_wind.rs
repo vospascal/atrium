@@ -43,6 +43,11 @@ impl SoftWindSynthParams {
         position: Vec3,
         default_seed: u64,
     ) -> Box<dyn SoundSource> {
+        Box::new(self.build(position, default_seed))
+    }
+
+    /// The generator itself, as `build_generator` boxes it.
+    pub(in crate::config) fn build(&self, position: Vec3, default_seed: u64) -> SoftWindSource {
         let mut generator = SoftWindSource::new(
             position,
             self.min_speed.unwrap_or(1.0),
@@ -100,6 +105,6 @@ impl SoftWindSynthParams {
         if let Some(value) = self.master_gain {
             generator.master_gain = value.clamp(0.0, 2.0);
         }
-        Box::new(generator)
+        generator
     }
 }

@@ -268,14 +268,21 @@ impl SoundSource for RiverSource {
             return;
         }
         match param {
-            // Settings of rain, waves and flying sources; not this one's.
+            // Settings of rain, waves, flying sources and tones; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
             | SynthParam::WavePeriod
             | SynthParam::CrashChance
             | SynthParam::HoverTimeMin
-            | SynthParam::HoverTimeMax => {}
+            | SynthParam::HoverTimeMax
+            | SynthParam::Pitch
+            | SynthParam::Brightness
+            | SynthParam::FundamentalLevel
+            | SynthParam::OvertoneLevel
+            | SynthParam::ShimmerRateMin
+            | SynthParam::ShimmerRateMax
+            | SynthParam::ShimmerDepth => {}
             SynthParam::FlowSpeedMin => self.min_flow_speed = value.clamp(0.0, self.max_flow_speed),
             SynthParam::FlowSpeedMax => self.max_flow_speed = value.clamp(self.min_flow_speed, 5.0),
             SynthParam::RiverSplashRate => self.splash_rate = value.max(0.0),

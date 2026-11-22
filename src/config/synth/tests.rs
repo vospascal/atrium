@@ -46,6 +46,10 @@ fn synth_source_defs_parse_with_integer_values() {
                 "synth: thunder\nmaster_gain: 1\nseed: 3\nreference_spl: 75\n",
                 "thunder",
             ),
+            (
+                "synth: focus_tone\npitch: 333\nshimmer_rate_max: 1\nreference_spl: 55\n",
+                "focus_tone",
+            ),
         ];
     for (yaml, expected_kind) in cases {
         match serde_yaml::from_str::<SourceDef>(yaml)
@@ -430,5 +434,62 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
         built.source.sounding_take(),
         Some(KIND_CRACK),
         "the plan's strike"
+    );
+}
+
+/// The focus tone preset is calibrated like every other generator: the built
+/// source's output RMS sits at `target_rms · 10^((spl − spl_reference) / 20)`,
+/// so its level in the engine's full scale differs from the soft wind's by
+/// exactly their reference SPLs (52 against 42 dB). The steady tone after
+/// the preview plays within a quarter of a decibel of the calibrated level:
+/// the half-second fade-in lowers the preview by 0.05 dB (0.25 s of power
+/// lost of 20), and 20 s holds a fractional number of shimmer beats (0.09 dB
+/// apart in all, measured).
+#[test]
+fn focus_tone_is_calibrated_like_the_other_generators() {
+    use crate::synth::test_support::root_mean_square;
+
+    let normalization = NormalizationConfig::default();
+    let calibrated_db = |path: &str| {
+        let source: SynthSourceDef =
+            serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            DirectivityPattern::Omni,
+            source.spread,
+            Vec3::ZERO,
+            11,
+            &normalization,
+            1.0,
+            40.0,
+        )
+        .unwrap_or_else(|error| panic!("{path} should build: {error}"));
+        let samples: Vec<f32> = (0..48_000 * 40)
+            .map(|_| built.source.next_sample(48_000.0))
+            .collect();
+        let preview_db = 20.0 * root_mean_square(&samples[..48_000 * 20]).log10();
+        let later_db = 20.0 * root_mean_square(&samples[48_000 * 20..]).log10();
+        (source.reference_spl as f64, preview_db, later_db)
+    };
+    let expected_db = |spl: f64| {
+        20.0 * (normalization.target_rms as f64).log10() + spl - normalization.spl_reference as f64
+    };
+
+    let (tone_spl, tone_db, tone_later_db) = calibrated_db("sources/focus-tone-333.yaml");
+    let (wind_spl, wind_db, _) = calibrated_db("sources/soft-wind.yaml");
+    assert_eq!((tone_spl, wind_spl), (52.0, 42.0));
+    assert!(
+        (tone_db - expected_db(tone_spl)).abs() < 0.01,
+        "tone {tone_db:.3} dB"
+    );
+    assert!(
+        (wind_db - expected_db(wind_spl)).abs() < 0.01,
+        "wind {wind_db:.3} dB"
+    );
+    assert!(((tone_db - wind_db) - 10.0).abs() < 0.02);
+    assert!(
+        (tone_later_db - tone_db).abs() < 0.25,
+        "steady tone {tone_later_db:.3} dB against the calibrated {tone_db:.3} dB"
     );
 }

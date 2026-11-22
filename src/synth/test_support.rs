@@ -152,6 +152,7 @@ mod conformance {
     use super::*;
     use crate::synth::canopy_wind::CanopyWindSource;
     use crate::synth::field_wind::FieldWindSource;
+    use crate::synth::focus_tone::{FocusToneSettings, FocusToneSource};
     use crate::synth::rain::RainSource;
     use crate::synth::rain_v2::RainSourceV2;
     use crate::synth::river::RiverSource;
@@ -202,6 +203,16 @@ mod conformance {
             (
                 "canopy_wind",
                 Box::new(|| Box::new(CanopyWindSource::new(Vec3::ZERO, 8.0, 8.0, 42))),
+            ),
+            (
+                "focus_tone",
+                Box::new(|| {
+                    Box::new(FocusToneSource::new(
+                        Vec3::ZERO,
+                        FocusToneSettings::default(),
+                        42,
+                    ))
+                }),
             ),
             (
                 // Silent until told to strike: one mid clap from the start.
@@ -269,6 +280,13 @@ mod conformance {
             SynthParam::DebrisLevel,
             SynthParam::StructureLevel,
             SynthParam::MasterGain,
+            SynthParam::Pitch,
+            SynthParam::Brightness,
+            SynthParam::FundamentalLevel,
+            SynthParam::OvertoneLevel,
+            SynthParam::ShimmerRateMin,
+            SynthParam::ShimmerRateMax,
+            SynthParam::ShimmerDepth,
         ];
         for (name, make) in generators() {
             let mut reference = make();
@@ -333,6 +351,11 @@ mod conformance {
             // steeper at 48 kHz than at 96 kHz, which is the filter, not the
             // noise scaling this checks, and far below hearing.
             if name == "thunder" {
+                continue;
+            }
+            // The focus tone has no noise layer: at 333 Hz nothing of it
+            // reaches 6-10 kHz but rounding, so there is no density to scale.
+            if name == "focus_tone" {
                 continue;
             }
             let delta = density_6_to_10_khz(&make, 96_000.0) - density_6_to_10_khz(&make, 48_000.0);

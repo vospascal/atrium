@@ -42,6 +42,7 @@ fn xorshift64_step(state: u64) -> u64 {
 /// (a few low bits set) needs several steps to reach the upper bits that
 /// [`Rng::next_f32`] reads: unmixed, every seed below about 2^17 drew exactly
 /// 0.0 first, and seeds 0 and 1 gave the same stream.
+#[derive(Clone)]
 pub struct Rng {
     state: u64,
 }
@@ -195,6 +196,7 @@ impl PinkNoise {
 /// above a few hundred Hz and sounds dark). Use this where a natural broadband
 /// "airy" tail matters — e.g. matching a field-recorded wind, whose brilliance
 /// band sits only ~16 dB below its low-mid peak.
+#[derive(Clone)]
 pub struct PinkNoiseFull {
     b: [f32; 7],
     rng: Rng,
@@ -272,6 +274,7 @@ impl BrownNoise {
 // ---------------------------------------------------------------------------
 
 /// One-pole lowpass filter.  H(z) = (1-a) / (1 - a·z⁻¹)
+#[derive(Clone)]
 pub struct OnePoleLP {
     a: f32,
     y: f32,
@@ -307,6 +310,7 @@ impl OnePoleLP {
 /// passband gain the cutoff has at that rate: the response in Hz then matches
 /// the 48 kHz response within 0.15 dB at 44.1 and 96 kHz for cutoffs up to
 /// 4 kHz, and the scale is exactly 1 at 48 kHz.
+#[derive(Clone)]
 pub struct OnePoleHP {
     a: f32,
     reference_gain: f32,
