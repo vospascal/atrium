@@ -88,6 +88,12 @@ pub struct Shape {
     /// what is heard wherever the listener stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ambient: Option<bool>,
+    /// The arc of directions an ambient sound arrives from, in degrees,
+    /// centred on the side its place lies on: 90 for a shore or a tree line
+    /// on one side, 360 (or left out) all round. From 10 to 360. A point
+    /// ignores it, as an ambient sound ignores `width`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arc: Option<f32>,
 }
 
 impl Shape {

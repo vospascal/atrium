@@ -58,6 +58,11 @@ impl AudioScene {
                         source.set_spread(spread);
                     }
                 }
+                Command::SetSourceArc { index, degrees } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_arc_degrees(degrees);
+                    }
+                }
                 Command::SetSourceSpl { index, spl } => {
                     if let Some(source) = self.sources.get_mut(index as usize) {
                         let amplitude = source.set_reference_spl(spl);

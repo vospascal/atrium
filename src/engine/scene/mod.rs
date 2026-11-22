@@ -144,6 +144,7 @@ impl AudioScene {
             };
             pipeline.init(&mix_ctx);
             pipeline.ensure_topology(self.sources.len(), &self.speaker_layout, self.sample_rate);
+            pipeline.prepare_sources(&self.sources);
         }
     }
 

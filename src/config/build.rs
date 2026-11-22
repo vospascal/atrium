@@ -204,6 +204,7 @@ impl SceneConfig {
                     emitter_kind: meta.emitter_kind,
                     beam_half_angle: beam_half_angle(meta.emitter_kind, node.directivity()),
                     size: meta.spread,
+                    arc: meta.arc,
                     facing: node.orientation(),
                 })
                 .collect(),

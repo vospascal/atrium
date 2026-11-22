@@ -55,6 +55,8 @@ pub(super) struct SourceMeta {
     pub(super) behind: f32,
     pub(super) directivity_alpha: f32,
     pub(super) spread: f32,
+    /// The arc it arrives from when ambient (degrees, 360 all round).
+    pub(super) arc: f32,
     pub(super) position: [f32; 3],
     pub(super) orbit_radius: f32,
     pub(super) orbit_speed: f32,

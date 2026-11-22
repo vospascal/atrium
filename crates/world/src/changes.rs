@@ -3,11 +3,14 @@
 //! Undo restores an earlier version of a scene, and the engine has to turn
 //! the version playing into that one without stopping. This says, sound by
 //! sound, the smallest thing that does it: a sound to add or take out, a
-//! move, a new level, beam or size, a new name, or, when nothing smaller fits,
+//! move, a new level, beam, size or arc, a new name, or, when nothing smaller fits,
 //! building the sound again. Working it out needs no engine, so it is tested
 //! on its own.
 
 use crate::{Entities, Entity, EntityId, Place};
+
+/// An ambient sound's arc when the scene leaves it out: all round.
+const ALL_ROUND_DEGREES: f32 = 360.0;
 
 /// One thing to do to the playing scene.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +35,9 @@ pub enum Change {
     /// How wide it sounds differs, and the scene sets it (0 a point, 1 all
     /// around).
     Size { id: EntityId, size: f32 },
+    /// The arc an ambient sound arrives from differs (degrees); left out it
+    /// is all round, 360, so it never needs a new build.
+    Arc { id: EntityId, degrees: f32 },
     /// What a list shows for it: its name, colour or group. Nothing heard.
     Identity {
         id: EntityId,
@@ -130,6 +136,12 @@ fn changes_of_one(id: &EntityId, now: &Entity, wanted: &Entity) -> Vec<Change> {
             size,
         });
     }
+    if now.shape.arc != wanted.shape.arc {
+        found.push(Change::Arc {
+            id: id.clone(),
+            degrees: wanted.shape.arc.unwrap_or(ALL_ROUND_DEGREES),
+        });
+    }
     if now.place != wanted.place {
         found.push(Change::Moved {
             id: id.clone(),
@@ -213,8 +225,8 @@ mod tests {
         );
     }
 
-    /// A drag, a level, a beam, a turn, a size and a new name are each done
-    /// as they are, without building the sound again.
+    /// A drag, a level, a beam, a turn, a size, an arc and a new name are
+    /// each done as they are, without building the sound again.
     #[test]
     fn small_changes_stay_small() {
         let before = scene(vec![("robin", sound("sources/robin.yaml", 1.0))]);
@@ -224,6 +236,7 @@ mod tests {
         changed.shape.behind = Some(-12.0);
         changed.shape.facing = Some(90.0);
         changed.shape.size = Some(0.4);
+        changed.shape.arc = Some(90.0);
         changed.name = Some("Robin in the hedge".into());
         let after = scene(vec![("robin", changed)]);
         assert_eq!(
@@ -246,6 +259,10 @@ mod tests {
                     id: id("robin"),
                     size: 0.4
                 },
+                Change::Arc {
+                    id: id("robin"),
+                    degrees: 90.0
+                },
                 Change::Moved {
                     id: id("robin"),
                     place: Place {
@@ -261,6 +278,27 @@ mod tests {
                     group: None
                 },
             ]
+        );
+    }
+
+    /// An arc left out is all round, so taking it out sets 360 and builds
+    /// nothing: an ambient sound has no preset arc to go back to.
+    #[test]
+    fn an_arc_taken_out_goes_back_to_all_round() {
+        let mut narrowed = sound("sources/field-wind.yaml", 1.0);
+        narrowed.shape.ambient = Some(true);
+        narrowed.shape.arc = Some(60.0);
+        let mut all_round = narrowed.clone();
+        all_round.shape.arc = None;
+        assert_eq!(
+            changes(
+                &scene(vec![("wind", narrowed)]),
+                &scene(vec![("wind", all_round)])
+            ),
+            vec![Change::Arc {
+                id: id("wind"),
+                degrees: 360.0
+            }]
         );
     }
 

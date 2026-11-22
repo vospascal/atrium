@@ -23,6 +23,8 @@ pub struct SynthNode {
     pub unit_amplitude: f32,
     pub pattern: DirectivityPattern,
     pub spread: f32,
+    /// The arc it arrives from when ambient, in degrees (360 all round).
+    arc_degrees: f32,
     pub ref_dist: f32,
     position: Vec3,
     /// The heading it was turned to (radians); +X until it is turned.
@@ -41,6 +43,7 @@ impl SynthNode {
             unit_amplitude: 0.0,
             pattern: DirectivityPattern::OMNI,
             spread: 0.0,
+            arc_degrees: atrium_core::source::ALL_ROUND_DEGREES,
             ref_dist: 1.0,
             position,
             facing: None,
@@ -145,6 +148,14 @@ impl SoundSource for SynthNode {
 
     fn set_spread(&mut self, spread: f32) {
         self.spread = spread;
+    }
+
+    fn arc_degrees(&self) -> f32 {
+        self.arc_degrees
+    }
+
+    fn set_arc_degrees(&mut self, degrees: f32) {
+        self.arc_degrees = degrees;
     }
 
     fn set_reference_spl(&mut self, spl: f32) -> f32 {
@@ -306,6 +317,9 @@ mod tests {
         assert_eq!(node.spread(), 0.0);
         node.set_spread(0.4);
         assert_eq!(node.spread(), 0.4);
+        assert_eq!(node.arc_degrees(), 360.0);
+        node.set_arc_degrees(90.0);
+        assert_eq!(node.arc_degrees(), 90.0);
         assert_eq!(node.ref_distance(), 1.0);
         node.ref_dist = 2.5;
         assert_eq!(node.ref_distance(), 2.5);

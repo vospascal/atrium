@@ -19,6 +19,14 @@ pub enum EmitterKind {
     Field,
 }
 
+/// An ambient sound from all around: the arc of directions it arrives from
+/// when nothing narrows it, in degrees.
+pub const ALL_ROUND_DEGREES: f32 = 360.0;
+
+/// The narrowest arc an ambient sound can arrive from, in degrees. Narrower
+/// than this it is a point, and a point source says that better.
+pub const NARROWEST_ARC_DEGREES: f32 = 10.0;
+
 impl EmitterKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -126,6 +134,19 @@ pub trait SoundSource: Send {
     /// Set the source spread for MDAP.
     fn set_spread(&mut self, _spread: f32) {}
 
+    /// How wide an arc of directions an ambient sound arrives from, in
+    /// degrees, centred on the side its place lies on: from
+    /// [`NARROWEST_ARC_DEGREES`] to [`ALL_ROUND_DEGREES`], all round. A
+    /// shoreline or a tree line is heard from one side, the air of the place
+    /// from all round. Only an ambient sound has one; a point ignores it.
+    fn arc_degrees(&self) -> f32 {
+        ALL_ROUND_DEGREES
+    }
+
+    /// Set the arc an ambient sound arrives from, in degrees. Default:
+    /// no-op, for sources that are only ever heard all round.
+    fn set_arc_degrees(&mut self, _degrees: f32) {}
+
     /// Set the source's reference SPL (dB at 1 m), recomputing its base
     /// amplitude in place, and return the new base amplitude. Lets loudness
     /// change live without a scene rebuild (the amplitude is `k · 10^(spl/20)`
@@ -207,7 +228,8 @@ mod tests {
 
     /// The defaults every source inherits are physically neutral: a point
     /// object with a unit-length facing, omni radiation (Q = 1), the 1 m
-    /// IEC 61672 reference distance, no spread, and no self-motion.
+    /// IEC 61672 reference distance, no spread, heard all round when ambient,
+    /// and no self-motion.
     #[test]
     fn default_source_is_neutral_point_object() {
         let source = StillSource;
@@ -219,6 +241,7 @@ mod tests {
         );
         assert_eq!(source.ref_distance(), 1.0);
         assert_eq!(source.spread(), 0.0);
+        assert_eq!(source.arc_degrees(), ALL_ROUND_DEGREES);
         assert_eq!(source.motion_offset().length(), 0.0);
         assert_eq!(source.orbit_center().distance_to(source.position()), 0.0);
     }

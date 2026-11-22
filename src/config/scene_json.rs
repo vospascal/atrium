@@ -58,6 +58,7 @@ impl SceneConfig {
                     "behind": s.behind,
                     "directivity_alpha": s.directivity_alpha,
                     "spread": s.spread,
+                    "arc": s.arc,
                     "position": [world_pos.x, world_pos.y, world_pos.z],
                     "orbit_radius": s.orbit_radius,
                     "orbit_speed": s.orbit_speed,

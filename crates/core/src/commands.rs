@@ -38,6 +38,10 @@ pub enum Command {
     /// Set MDAP spread for a source (0.0 = point, 1.0 = full hemisphere).
     SetSourceSpread { index: u16, spread: f32 },
 
+    /// Set the arc of directions an ambient source arrives from, in degrees
+    /// (360 all round). A point source ignores it.
+    SetSourceArc { index: u16, degrees: f32 },
+
     /// Set a source's reference SPL (dB at 1 m). The audio thread recomputes the
     /// source's base amplitude in place, so loudness changes live without a
     /// scene rebuild.

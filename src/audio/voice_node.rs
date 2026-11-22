@@ -51,6 +51,8 @@ pub struct VoiceNode {
     pub unit_amplitude: f32,
     pub pattern: DirectivityPattern,
     pub spread: f32,
+    /// The arc it arrives from when ambient, in degrees (360 all round).
+    arc_degrees: f32,
     pub ref_dist: f32,
     facing: Option<f32>,
     muted: bool,
@@ -71,6 +73,7 @@ impl VoiceNode {
             unit_amplitude: 0.0,
             pattern: DirectivityPattern::OMNI,
             spread: 0.0,
+            arc_degrees: atrium_core::source::ALL_ROUND_DEGREES,
             ref_dist: 1.0,
             facing: None,
             muted: false,
@@ -232,6 +235,14 @@ impl SoundSource for VoiceNode {
 
     fn set_spread(&mut self, spread: f32) {
         self.spread = spread;
+    }
+
+    fn arc_degrees(&self) -> f32 {
+        self.arc_degrees
+    }
+
+    fn set_arc_degrees(&mut self, degrees: f32) {
+        self.arc_degrees = degrees;
     }
 
     fn set_reference_spl(&mut self, spl: f32) -> f32 {

@@ -22,6 +22,8 @@ pub struct TestNode {
     orbit_angle: f32,
     pub pattern: DirectivityPattern,
     pub spread: f32,
+    /// The arc it arrives from when ambient, in degrees (360 all round).
+    arc_degrees: f32,
     pub ref_dist: f32,
     /// The heading it was turned to (radians). Until it is turned, it faces
     /// its orbit centre.
@@ -49,6 +51,7 @@ impl TestNode {
             orbit_angle: 0.0,
             pattern: DirectivityPattern::OMNI,
             spread: 0.0,
+            arc_degrees: atrium_core::source::ALL_ROUND_DEGREES,
             ref_dist: 1.0,
             facing: None,
             muted: false,
@@ -165,6 +168,14 @@ impl SoundSource for TestNode {
 
     fn set_spread(&mut self, spread: f32) {
         self.spread = spread;
+    }
+
+    fn arc_degrees(&self) -> f32 {
+        self.arc_degrees
+    }
+
+    fn set_arc_degrees(&mut self, degrees: f32) {
+        self.arc_degrees = degrees;
     }
 
     fn set_reference_spl(&mut self, spl: f32) -> f32 {
@@ -412,6 +423,8 @@ mod tests {
         node.set_orbit_radius(4.0);
         node.set_position(Vec3::new(9.0, 8.0, 7.0));
         node.set_spread(0.6);
+        node.set_arc_degrees(120.0);
+        assert_eq!(node.arc_degrees(), 120.0);
         assert_eq!(node.orbit_radius(), 4.0);
         assert_eq!(node.orbit_center(), Vec3::new(9.0, 8.0, 7.0));
         assert_eq!(node.spread(), 0.6);

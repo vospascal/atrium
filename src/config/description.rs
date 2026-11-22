@@ -86,6 +86,9 @@ pub struct SourceDescription {
     pub beam_half_angle: Option<f32>,
     /// How wide it sounds, from 0 (a point) to 1 (all around).
     pub size: f32,
+    /// The arc it arrives from when ambient, in degrees, centred on the side
+    /// its place lies on: 360 all round.
+    pub arc: f32,
     /// The node's initial forward vector in world coordinates.
     pub facing: Vec3,
 }

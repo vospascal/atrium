@@ -13,11 +13,19 @@ sounds:
     group: Creatures
     sound: { preset: sources/frog.yaml, level: 68 }
     shape: { width: 180, behind: -12, size: 0.2, facing: 225, ambient: false }
+  shore:
+    sound: { audio: assets/running_water.ogg }
+    shape: { ambient: true, arc: 120 }
+    place: [0.0, -20.0, 0.0]
     place: [10.1, 10.1, 0.0]
     when: { gap: [20, 45], bout: [2, 4], chance: { "Call 2": 3 } }
     moves:
       orbit: { radius: 1.5, speed: 1.0 }
 ```
+
+`shape.arc` is for an ambient sound: the arc of directions it arrives from, in degrees, centred
+on the side its `place` lies on, from 10 to 360 (all round, the same as leaving it out). A
+shoreline is `{ ambient: true, arc: 120 }` with its place out on the water; a point ignores it.
 
 Only `sound` and `place` are required. A part left out is the plain case: the preset's own
 level and shape, standing still, and the id shown as the name.

@@ -260,6 +260,37 @@ fn any_sound_can_be_ambient_or_a_point() {
     );
 }
 
+/// `shape.arc` reaches the playing sound and the scene description; left
+/// out it is all round, and an arc narrower than 10° or wider than all
+/// round is refused rather than bent into range.
+#[test]
+fn an_ambient_sound_takes_its_arc_from_the_scene() {
+    let scene_with = |shape: &str| {
+        SMALL_ATRIUM_SCENE.replace(
+            "sounds: {}",
+            &format!(
+                "sounds:
+  shore:
+    sound: {{ preset: sources/field-wind.yaml }}
+    shape: {shape}
+    place: [0.0, 10.0, 1.2]
+"
+            ),
+        )
+    };
+    let narrowed = build_inline_scene(&scene_with("{ arc: 90 }"));
+    assert_eq!(narrowed.scene.sources[0].arc_degrees(), 90.0);
+    assert_eq!(narrowed.description.sources[0].arc, 90.0);
+    let all_round = build_inline_scene(&scene_with("{ size: 0.5 }"));
+    assert_eq!(all_round.scene.sources[0].arc_degrees(), 360.0);
+    assert_eq!(all_round.description.sources[0].arc, 360.0);
+    for refused in ["{ arc: 5 }", "{ arc: 361 }"] {
+        let config: SceneConfig = serde_yaml::from_str(&scene_with(refused)).expect("parses");
+        let error = config.build().err().expect("refused").to_string();
+        assert!(error.contains("`shape.arc`"), "{refused} gave {error}");
+    }
+}
+
 /// A name the scene file gets wrong is said, not played as something else:
 /// before, an unknown render mode became VBAP, an unknown distance law the
 /// inverse one, and an unknown speaker layout a stereo pair, all silently.

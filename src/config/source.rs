@@ -11,6 +11,8 @@ use atrium_core::directivity::SILENT_BEHIND_DB;
 /// The width of a sound that goes out all round (degrees).
 pub(super) const ALL_ROUND: f32 = 360.0;
 
+use atrium_core::source::{ALL_ROUND_DEGREES, NARROWEST_ARC_DEGREES};
+
 use super::synth::SynthSpec;
 use crate::audio::sound_profile::SoundProfile;
 
@@ -42,6 +44,8 @@ pub(super) struct ResolvedSource {
     /// Whether the scene makes it ambient or a point, in place of what it is
     /// by itself.
     pub(super) ambient: Option<bool>,
+    /// The arc it arrives from when ambient (degrees, 360 all round).
+    pub(super) arc: f32,
 }
 
 /// Resolve an entity's sound: load the preset it names (if any) and apply
@@ -100,6 +104,14 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
         (None, None) => return Err("a sound needs either `preset` or `audio`".into()),
     };
 
+    let arc = entity.shape.arc.unwrap_or(ALL_ROUND_DEGREES);
+    if !(NARROWEST_ARC_DEGREES..=ALL_ROUND_DEGREES).contains(&arc) {
+        return Err(format!(
+            "`shape.arc` is {arc}: an ambient sound arrives from {NARROWEST_ARC_DEGREES} to {ALL_ROUND_DEGREES} degrees"
+        )
+        .into());
+    }
+
     Ok(ResolvedSource {
         sound: with_when(sound, &entity.when)?,
         reference_spl: entity.sound.level.or(def_spl).unwrap_or(70.0),
@@ -116,6 +128,7 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
             .unwrap_or(SILENT_BEHIND_DB),
         spread: entity.shape.size.or(def_spread).unwrap_or(0.0),
         ambient: entity.shape.ambient,
+        arc,
     })
 }
 

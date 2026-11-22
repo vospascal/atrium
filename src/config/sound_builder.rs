@@ -130,6 +130,7 @@ impl SoundBuilder {
             emitter_kind: meta.emitter_kind,
             beam_half_angle: beam_half_angle(meta.emitter_kind, built.source.directivity()),
             size: meta.spread,
+            arc: meta.arc,
             facing: built.source.orientation(),
         };
         Ok(BuiltSound {
@@ -249,6 +250,7 @@ impl SoundBuilder {
         if let Some(bearing) = entity.shape.facing {
             built.source.set_facing(yaw_for_bearing(bearing));
         }
+        built.source.set_arc_degrees(resolved.arc);
         if let Some(ambient) = resolved.ambient {
             let wanted = if ambient {
                 EmitterKind::Field
@@ -303,6 +305,7 @@ impl SoundBuilder {
             behind: resolved.behind,
             directivity_alpha: built.directivity_alpha,
             spread: resolved.spread,
+            arc: resolved.arc,
             position: place,
             orbit_radius,
             orbit_speed,
