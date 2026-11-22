@@ -96,8 +96,13 @@ The lab is built from tools, each needing the one before:
    compared from two files of the same seed. `--probe` keeps one part of the render
    alone (the ambient field a wind makes, say), `--weather-speed` runs a storm past in a minute. See
    [run.md](../run.md#render-a-scene-to-a-file).
-2. An analyser that reports the same measures for a reference recording and for a
-   render, reading the sidecar to know what it is reading.
+2. **The analyser** (`analyse`, built 2026-11-22): the same measures for a reference
+   recording and for a render, reading the render's sidecar to give levels in dB SPL. A
+   JSON report for the comparison, a one-screen summary and a picture, made to be read
+   by someone who cannot listen. Level (LAeq, LCeq, the gated level, LAFmax, L10-L90),
+   colour (third octaves), texture (McDermott and Simoncelli's statistics), onsets and
+   space (IACC, width, envelope coherence, ILD, ITD). See
+   [run.md](../run.md#analyse-a-file) and `crates/analysis/README.md`.
 3. A comparison of two such reports, an event cutter, and the lab in the app.
 
 ## Where things are
@@ -108,3 +113,5 @@ The lab is built from tools, each needing the one before:
 - The generators: `src/synth/`. Their presets: `sources/`.
 - A scene to a file: `cargo run --release --bin render -- <scene.yaml>`; the code is
   `src/offline/`.
+- A file measured: `cargo run --release --bin analyse -- <file> --picture`; the code is
+  `crates/analysis/`.

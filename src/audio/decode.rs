@@ -21,10 +21,10 @@ pub struct AudioBuffer {
 }
 
 /// A file's samples as they are in it: every channel kept, interleaved.
-pub(crate) struct DecodedChannels {
-    pub(crate) interleaved: Vec<f32>,
-    pub(crate) channels: usize,
-    pub(crate) sample_rate: u32,
+pub struct DecodedChannels {
+    pub interleaved: Vec<f32>,
+    pub channels: usize,
+    pub sample_rate: u32,
 }
 
 /// Decode an audio file (MP3, WAV, FLAC, etc.) into a mono f32 AudioBuffer.
@@ -72,7 +72,7 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
 
 /// Decode an audio file with every channel it has, as it is: a WAV of
 /// floats comes back sample for sample.
-pub(crate) fn decode_channels(path: &Path) -> Result<DecodedChannels, Box<dyn std::error::Error>> {
+pub fn decode_channels(path: &Path) -> Result<DecodedChannels, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 

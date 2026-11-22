@@ -130,11 +130,42 @@ The probe holds from the first sample, so the four parts rendered alone add up t
 whole render.
 
 Levels are the world's, not a mix's: the meadow's birds, a dozen metres off, peak
-around −55 dBFS. That is one reason float is the default; a 16-bit file of a quiet
+around −55 dBFS. The sidecar's `calibration.full_scale_db_spl` is the SPL of an RMS of
+1.0 as the engine renders it (the scene's `spl_reference` − 20·log10(`target_rms`), 114 dB
+SPL for the meadow), so `analyse` can read the file in dB SPL. That is one reason float is the default; a 16-bit file of a quiet
 scene keeps few bits of it. To listen, add `--normalise`: the file is raised to peak
 at −1 dBFS, one gain for all channels so nothing moves, and `-normalised` is added to
 the default name. The levels in its sidecar are the file's; the engine's own are those
 minus `gain_decibels`. Leave it off for files you will measure against each other.
+
+## Analyse a file
+
+`analyse` measures recordings and renders the same way: level, colour, texture, events
+and, for two or more channels, space. For each file it writes a JSON report
+(`target/analysis/<stem>.json`, `report_version` 1, for the comparison tool), prints a
+one-screen summary, and with `--picture` draws a 1600 px PNG: spectrogram, LAF with L10,
+L50 and L90, onsets, and for two channels width and ILD, on one time axis. A render's
+sidecar beside it gives the channel names and the calibration, so levels are in dB SPL
+(the gain `--normalise` applied is undone); a recording without one is in dBFS, where
+an RMS of 1.0 is 0 dBFS.
+
+```sh
+cargo run --release --bin analyse -- target/renders/meadow-birds-headphones-seed1.wav --picture
+cargo run --release --bin analyse -- assets/birds/merel/*.mp3 --summary target/analysis/merel.txt
+cargo run --release --bin analyse -- recording.wav --from 10 --to 40 --picture=target/rain.png
+```
+
+| Option | Default | |
+|---|---|---|
+| `--from <s>`, `--to <s>` | the whole file | Analyse only this stretch |
+| `--output <path>` | `target/analysis/<stem>.json` | The report; one file only |
+| `--picture[=<path>]` | off; `target/analysis/<stem>.png` | Draw the picture too |
+| `--summary <path>` | printed only | Also write the summaries of every file given to this file |
+
+Several files in one call give their summaries one after another in the same layout, so
+they line up row for row. The measures and their definitions are in
+`crates/analysis/README.md`. About 1.6 s for a minute of stereo at 48 kHz, picture
+included.
 
 ## Analysis tools
 
