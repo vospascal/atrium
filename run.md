@@ -157,7 +157,8 @@ cargo run --release --bin analyse -- recording.wav --from 10 --to 40 --picture=t
 
 | Option | Default | |
 |---|---|---|
-| `--from <s>`, `--to <s>` | the whole file | Analyse only this stretch |
+| `<file>@<from>-<to>` | the whole file | Only this stretch of this file, in seconds: `take.mp3@30-60` |
+| `--from <s>`, `--to <s>` | the whole file | Analyse only this stretch, for every file without its own `@` |
 | `--output <path>` | `target/analysis/<stem>.json` | The report; one file only |
 | `--picture[=<path>]` | off; `target/analysis/<stem>.png` | Draw the picture too |
 | `--summary <path>` | printed only | Also write the summaries of every file given to this file |
@@ -166,6 +167,44 @@ Several files in one call give their summaries one after another in the same lay
 they line up row for row. The measures and their definitions are in
 `crates/analysis/README.md`. About 1.6 s for a minute of stereo at 48 kHz, picture
 included.
+
+## Compare files
+
+`analyse --compare` puts a reference and one or more other files side by side and says where
+the others differ: level shape (and absolute level when both are calibrated), colour, texture,
+events, space and the distributions over time. The first file is the reference; each file is
+audio (analysed as above, its sidecar read) or a report JSON `analyse` wrote. It prints a
+one-screen comparison (the reference's value, each file's value and its difference), writes a
+comparison JSON (`comparison_version` 1) and with `--picture` a 1600 px PNG of overlays, the
+reference black and thick, each other file in its colour, each named in the legend. It reports
+differences; only listening judges which version is better.
+
+```sh
+cargo run --release --bin analyse -- --compare "research papers/soft wind.mp3@0-28" \
+    target/renders/wind-seed1.wav --picture --summary "target/analysis/soft wind-against-wind-seed1.txt"
+cargo run --release --bin analyse -- --compare target/renders/wind-seed1.wav target/renders/wind-seed2.wav --picture
+cargo run --release --bin analyse -- --compare target/renders/wind-seed1.wav target/analysis/wind-seed1-old.json
+```
+
+| Option | Default | |
+|---|---|---|
+| `<file>@<from>-<to>` | the whole file | A stretch of an audio file, so a part of a long field recording is compared with a render |
+| `--output <path>` | `target/analysis/<reference>-against-<others>.json` | The comparison JSON |
+| `--picture[=<path>]` | off; beside the JSON, `.png` | Draw the picture too |
+| `--summary <path>` | printed only | Also write the comparison to this file |
+
+Reading the texture rows: each statistic class of McDermott and Simoncelli gets the paper's
+SNR, the reference's statistics as the signal; the paper took 20 dB as converged. Two takes of
+one sound do not reach 20 dB in every class by chance alone (envelope correlations near zero
+scatter), so each class also shows, in brackets, the SNR two takes of the reference's sound
+would reach, from its two halves analysed apart. `!` marks a class below 20 dB and below that
+floor, a difference; `~` one below 20 dB but within it, chance. Why, and what else looks wrong
+and is right, is in `crates/analysis/README.md`, "The comparison".
+
+Two renders of the same scene, seed, start, weather speed and stretch line up in time (their
+layout, mode or probe may differ); for those the comparison also gives where the LAF and the
+width differ most and when. Anything else is compared by distribution only. About 3 s for a
+28 s recording against a minute of stereo.
 
 ## Analysis tools
 

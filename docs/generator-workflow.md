@@ -103,7 +103,16 @@ The lab is built from tools, each needing the one before:
    colour (third octaves), texture (McDermott and Simoncelli's statistics), onsets and
    space (IACC, width, envelope coherence, ILD, ITD). See
    [run.md](../run.md#analyse-a-file) and `crates/analysis/README.md`.
-3. A comparison of two such reports, an event cutter, and the lab in the app.
+3. **The comparison** (`analyse --compare`, built 2026-11-22): a reference against one or
+   more other files, audio or report JSON, a stretch of each with `file@from-to`. Level
+   shape, colour relative to Leq (band differences, tilt, centroid), texture per statistic
+   class by McDermott and Simoncelli's own SNR with a floor for what chance alone gives,
+   events, space, and the level and width distributions; for two renders of one scene and
+   seed, where they differ most in time. A one-screen text, a JSON and a picture of
+   overlays, made to be read by someone who cannot listen. It says where a version differs
+   from a reference or from the version before; listening says whether that is better. See
+   [run.md](../run.md#compare-files) and `crates/analysis/README.md`, "The comparison".
+4. An event cutter, and the lab in the app.
 
 ## Where things are
 
@@ -115,3 +124,5 @@ The lab is built from tools, each needing the one before:
   `src/offline/`.
 - A file measured: `cargo run --release --bin analyse -- <file> --picture`; the code is
   `crates/analysis/`.
+- Files compared: `cargo run --release --bin analyse -- --compare <reference> <other>... --picture`;
+  the code is `crates/analysis/src/compare/`.

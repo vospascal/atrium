@@ -1,6 +1,7 @@
 //! Rendering scenes to files, by subject. Each renders shipped scenes
 //! through the whole engine, so they take some seconds.
 
+mod comparison;
 mod engine;
 mod files;
 mod live_analysis;
