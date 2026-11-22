@@ -338,7 +338,7 @@ fn write_strip(text: &mut String, report: &Report) {
 }
 
 /// 25, 1k, 1k25, 12k5: a nominal frequency in four characters.
-fn frequency_label(hertz: f64) -> String {
+pub(crate) fn frequency_label(hertz: f64) -> String {
     if hertz < 1000.0 {
         return format!("{hertz:.0}");
     }
@@ -353,7 +353,7 @@ fn frequency_label(hertz: f64) -> String {
 }
 
 /// 0.5, 4.5, 12, 200: a modulation rate in at most four characters.
-fn rate_label(hertz: f64) -> String {
+pub(crate) fn rate_label(hertz: f64) -> String {
     if hertz < 10.0 {
         format!("{hertz:.1}")
     } else {

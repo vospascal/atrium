@@ -23,7 +23,9 @@ cpal = "0.15"
 rtrb = "0.3"
 tungstenite = "0.24"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: `analyse --compare` reads reports back from their JSON, and
+# they must compare exactly as the reports they were written from.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 
 # Symphonia: only enable the codecs/formats we need

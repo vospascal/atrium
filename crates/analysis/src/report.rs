@@ -8,8 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The layout of [`Report`] this crate writes.
-pub(crate) const REPORT_VERSION: u32 = 1;
+/// The layout of [`Report`] this crate writes. A report JSON with another
+/// `report_version` is not this layout, and `analyse --compare` refuses it.
+pub const REPORT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Report {

@@ -9,11 +9,16 @@
 //! - `canvas`: the raster and the drawing it needs; `font`: the letters
 //! - `spectrogram`: the spectrogram's cells and colours
 //! - `curves`: the other panels
+//! - `comparison`: the comparison's picture, its overlays on `axes`
 
+mod axes;
 mod canvas;
+mod comparison;
 mod curves;
 mod font;
 mod spectrogram;
+
+pub use comparison::comparison_picture;
 
 use canvas::{Canvas, BLACK, CHARACTER_WIDTH, LINE_HEIGHT, MUTED, WHITE};
 use spectrogram::{colour, grid, RANGE_DECIBELS};

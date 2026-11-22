@@ -24,8 +24,8 @@ use statistics::{
 };
 
 /// The compression of the envelopes, as the paper's: basilar-membrane
-/// compression.
-const COMPRESSION: f64 = 0.3;
+/// compression. The comparison undoes a level difference through it.
+pub(crate) const COMPRESSION: f64 = 0.3;
 
 /// The subband offsets C is reported at (the paper's).
 const CORRELATION_OFFSETS: [usize; 8] = [1, 2, 3, 5, 8, 11, 16, 21];

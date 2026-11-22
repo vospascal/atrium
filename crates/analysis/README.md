@@ -10,6 +10,14 @@ let text = atrium_analysis::summary("heading", &report);      // one screen, eve
 let png = atrium_analysis::picture("heading", &signal, &report); // 1600 px, panels on one time axis
 ```
 
+And reports side by side, where other files differ from a reference:
+
+```rust
+let comparison = atrium_analysis::compare(&reference, &others);   // each a Compared: report, name, halves, timeline
+let text = atrium_analysis::comparison_summary(&comparison);      // one screen: reference, each file, each difference
+let png = atrium_analysis::comparison_picture(&reference, &others); // 1600 px of overlays, the reference black
+```
+
 And the same measures on a stream, for the app's Analysis lanes while a scene plays:
 
 ```rust
@@ -18,7 +26,8 @@ live.push(&block, clock_sample);       // what the output played, from that cloc
 let columns = live.take_columns();     // 50 ms each: spectrum, LAeq and LAF, onset, width, ILD
 ```
 
-`report` serialises to JSON (`report_version: 1`) for the comparison tool. The binary that
+`report` serialises to JSON (`report_version: 1`), which the comparison reads back as it is;
+`Comparison` serialises to JSON too (`comparison_version: 1`). The binary that
 decodes files, reads a render's sidecar and writes all three is `src/bin/analyse.rs`; see
 run.md, "Analyse a file". `power_while_sounding` is the gated level the engine calibrates
 presets with; it lives here so there is one.
@@ -61,7 +70,11 @@ src/
   space.rs         IACC, width, envelope coherence, ILD, ITD
   over_time.rs     the series the strip and the picture draw
   summary.rs       the one-screen text
-  picture/         mod.rs (layout), spectrogram.rs, curves.rs, canvas.rs, font.rs
+  compare/         the comparison: mod.rs (Compared, compare), comparison.rs (the serde types),
+                   one file per group (level, colour, texture, events, space, over_time),
+                   summary.rs (its one-screen text), tests.rs (the acceptance checks)
+  picture/         mod.rs (layout), spectrogram.rs, curves.rs, canvas.rs, font.rs;
+                   comparison.rs (the comparison's picture) on axes.rs (overlay panels)
   frequency_rows.rs  the spectrogram's axis (20 Hz to 20 kHz, log) and window, picture and live
   live/            the stream: mod.rs (Live, Column), a_weighting.rs, spectrum.rs, onsets.rs
   statistics.rs    decibels, quantiles, correlation
@@ -134,6 +147,74 @@ src/
 - **The picture draws text with a 5×7 bitmap font in the crate**, not a font crate or file: no
   dependency, the same pixels everywhere, and readable at twice its size in a 1600 px image.
 
+## The comparison
+
+`compare` takes a reference and any number of other files, each a `Compared`: its report, a
+short name, how it was made, its two halves analysed apart (read for the reference), what fixes
+its timing (a render's scene, seed and stretch) and, for the picture, its samples. Every
+difference is the other's value minus the reference's. It reports where files differ; only
+listening says which is better.
+
+| Group | Compared | As |
+|---|---|---|
+| Level shape | L10 − L90, LAFmax over the level while sounding, crest, LCeq − LAeq | Differences (dB) |
+| Absolute level | LAeq, Leq, only when both files carry a calibration | Differences; marked beyond 1 dB, the JND ISO 3382-1 gives |
+| Colour | Third octaves relative to each file's own Leq | The difference per band; its RMS over 50 Hz–16 kHz; the tilt (a least-squares line over octaves, 100 Hz–10 kHz) of each; the centroid ratio |
+| Texture | M1, M2, M3, M4, C, modulation power, C1 | Per class the paper's SNR, 10·log10(Σ s² / Σ (s − s′)²), s the reference's; whether ≥ 20 dB (the paper's "converged"); a scatter floor (below); the three places (subbands, pairs, modulation rates) holding most of the error |
+| Events | Onsets per minute, interval median, 10 % and 90 % | Differences and the rate's ratio |
+| Space | Two two-channel files: IACC, envelope coherence, ILD spread per octave; width | Differences; width marked beyond 0.075, the JND of IACC (Cox, Davies & Lam 1993) |
+| Over time | The 25 ms LAF series and the width per 100 ms frame | Distributions (L95 … L5; width exceeded 90, 50, 10 %), and for two files on one timeline the largest difference and when |
+
+The picture overlays, on one set of axes per panel: the third-octave colour and the difference
+from the reference; the modulation spectrum; the LAF distribution; the texture SNR per class
+with its scatter floor; M2 and M4 per subband and C between neighbours; IACC and envelope
+coherence per octave; and each file's spectrogram as a strip.
+
+### Decisions that look wrong and are right, comparing
+
+- **Each texture class carries a scatter floor, beyond the paper's 20 dB.** McDermott and
+  Simoncelli imposed statistics on a synthetic sound until they matched; their SNR measured
+  the imposing, not chance. Two independent takes of one sound differ by chance, and in
+  statistics near zero that chance is most of Σ s²: two 30 s takes of the same white noise
+  reach C 7.8 dB and C1 4.3 dB, M3 17.1 (the other classes 27 to 53 dB). By the paper's 20 dB
+  alone every pair of noise recordings "differs in comodulation". The floor is the SNR two takes
+  of the reference's sound would reach: the reference's halves are analysed apart, their squared
+  error is 4c/T for a statistic whose estimate scatters with variance c/T, and two whole takes
+  of T and T′ seconds would differ by c/T + c/T′, the halves' error times (1 + T/T′)/4. Between
+  those two noise takes every class's SNR lay from 1.2 dB below its floor to 3.4 above, so a
+  class counts as within the floor down to 3 dB below it. A class below 20 dB and below its
+  floor is marked as a difference (`!`); below 20 dB and within it, as chance (`~`).
+- **The floor comes from the reference's halves only.** The other file is taken to scatter as
+  the reference does. The reference says what the sound is; and a file read from its report
+  JSON has no halves, so needing the other's would make a report compare differently from the
+  render it was written from (checked: through `analyse`, the same comparison to the bit, apart
+  from the file's name).
+- **M1 is compared after the overall level difference is taken out.** The envelope means follow
+  the level: a gain g scales every compressed envelope, and so its mean, by g^0.3. The other's
+  means are multiplied by 10^(−0.3·ΔL/20), ΔL the difference of the unweighted Leq in dBFS
+  (the samples' level, whatever the calibration), as the colour is compared relative to Leq. The
+  same noise 10 dB louder then has every class beyond 60 dB. What remains of M1 is the spectrum
+  across subbands, so white against pink noise is 10.8 dB in M1 while their M2 and M4 converge.
+- **The tilt is fitted on the bands' exact centres, 1000·10^(n/10) Hz, not the nominal ones.**
+  White noise's third octaves rise 3.01 dB per octave only on the exact centres; on the
+  nominal ones (125 for 125.9) the fit is off by a few hundredths.
+- **A band more than 100 dB below its file's Leq counts as −100 dB.** An empty band (an MP3
+  above its lowpass, a silent channel's) would otherwise put a hundred-odd dB into the RMS. No
+  difference below that is one of colour.
+- **The LAF distribution is relative to each file's L50 unless both are calibrated**, as all
+  level is compared as shapes when either is not: a recording's dBFS says nothing of its SPL.
+  It is taken from the report's 25 ms LAF series (the largest in each step), so its L10 can
+  stand a tenth of a decibel above the report's own.
+- **Two files line up only when both say so, alike.** The binary gives a render's timeline as its
+  scene, seed, start, weather speed and the stretch cut from it; layout, mode, probe and a head
+  turn change what is heard, not when. A recording has none and lines up with nothing, not even
+  itself in another file. Only then is the over-time difference sample by sample.
+- **Space is compared only between two two-channel files.** A 5.1 file's L/R pair is two
+  loudspeakers, not two ears; its IACC against a pair of ears compares different things.
+- **The spectrogram strips share one time scale, the longest file spanning the width, and each is
+  relative to its own loudest cell.** A 3 s blackbird take is then a short strip beside a minute
+  of wind, which is what they are; and an uncalibrated recording's cells have no level to share.
+
 ## Live
 
 `Live` measures what the engine plays, a column every 50 ms, from the same pieces as the
@@ -181,6 +262,18 @@ reads it both ways: every 100 ms width and ILD identical, every 3 s LAeq identic
   splice into FAST and the flux. The columns still waiting are lost with it.
 
 ## Known gaps
+
+- **The scatter floor's margin was set on one pair of white-noise takes** (SNR within 1.2 dB
+  below to 3.4 dB above the floor, so 3 dB of margin). Takes of a recorded wind or rain whose
+  statistics drift over the file scatter more than halves of a stationary noise show; a floor from
+  halves then reads too high, and a real difference too often. More pairs of real takes would
+  set it properly.
+- **The floor assumes the other file scatters as the reference does.** Against a sound of
+  another kind (a blackbird against wind) the floor is the wind's; that comparison is far below
+  any floor anyway.
+- **The comparison's texture compares subbands by index**, which is right for any two sample
+  rates of 20 kHz and above (the cochlear bank is the same up to 10 kHz; only the highpass's top
+  differs).
 
 - **The onset threshold is ours, set from four bird takes and one wind.** 0.75 dB above the
   local median rise keeps no onset in the meadow's wind and keeps the birds' syllables. Labelled
