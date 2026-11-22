@@ -46,6 +46,15 @@ class SelectionTest {
         assertEquals(of(ListenerId), of(ListenerId).among(emptyList()))
     }
 
+    /** Sounds keep the order they were picked in, through adding, taking out and forgetting. */
+    @Test
+    fun theOrderOfPickingIsKept() {
+        val three = Selection().clicked("wind", adding = true).clicked("robin", adding = true).clicked("frog", adding = true)
+        assertEquals(listOf("wind", "robin", "frog"), three.ids.toList())
+        assertEquals(listOf("wind", "frog"), three.clicked("robin", adding = true).ids.toList())
+        assertEquals(listOf("robin", "frog"), three.among(listOf("frog", "robin")).ids.toList())
+    }
+
     @Test
     fun onlyOneThingSelectedIsSingle() {
         assertEquals("robin", of("robin").single)

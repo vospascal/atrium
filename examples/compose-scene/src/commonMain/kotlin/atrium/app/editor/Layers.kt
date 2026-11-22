@@ -112,10 +112,11 @@ private val CompactEar = 22.dp
 
 /**
  * The bar under the layers, where a layer list keeps its actions: add a sound
- * from the library, and duplicate or delete the selected layer.
+ * from the library, duplicate the selected layers, play the selected loops in
+ * step when [onPlayInStep] is given (two or more of them loop), and delete them.
  */
 @Composable
-internal fun LayerActions(canChange: Boolean, onAdd: () -> Unit, onDuplicate: () -> Unit, onDelete: () -> Unit) {
+internal fun LayerActions(canChange: Boolean, onAdd: () -> Unit, onDuplicate: () -> Unit, onPlayInStep: (() -> Unit)?, onDelete: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -124,6 +125,8 @@ internal fun LayerActions(canChange: Boolean, onAdd: () -> Unit, onDuplicate: ()
         ActionIcon(Foreground, onAdd) { color -> plus(color) }
         Spacer(Modifier.width(6.dp))
         ActionIcon(if (canChange) Foreground else Hairline, onClick = { if (canChange) onDuplicate() }) { color -> copies(color) }
+        Spacer(Modifier.width(6.dp))
+        ActionIcon(if (onPlayInStep != null) Foreground else Hairline, onClick = { onPlayInStep?.invoke() }) { color -> inStep(color) }
         Spacer(Modifier.width(6.dp))
         ActionIcon(if (canChange) Foreground else Hairline, onClick = { if (canChange) onDelete() }) { color -> bin(color) }
     }
@@ -147,6 +150,16 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.copies(color: Color
     val sheet = androidx.compose.ui.geometry.Size(size.width * .62f, size.height * .62f)
     drawRoundRect(color, Offset(size.width * .08f, size.height * .08f), sheet, corner, style = stroke)
     drawRoundRect(color, Offset(size.width * .30f, size.height * .30f), sheet, corner, style = stroke)
+}
+
+/** Two tracks, one shorter than the other, under one playhead: loops in step. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.inStep(color: Color) {
+    val stroke = 1.6.dp.toPx()
+    val w = size.width
+    val h = size.height
+    drawLine(color, Offset(w * .08f, h * .34f), Offset(w * .92f, h * .34f), stroke, StrokeCap.Round)
+    drawLine(color, Offset(w * .08f, h * .66f), Offset(w * .72f, h * .66f), stroke, StrokeCap.Round)
+    drawLine(color, Offset(w * .5f, h * .08f), Offset(w * .5f, h * .92f), stroke, StrokeCap.Round)
 }
 
 /** A waste bin: a lid with a handle, and a tapering body with two ribs. */

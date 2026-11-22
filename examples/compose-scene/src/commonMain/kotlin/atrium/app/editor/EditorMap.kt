@@ -138,10 +138,14 @@ internal fun EditorMap(
     // The loudness layer: off until asked for, then the whole scene, or the one selected sound alone.
     var loud by remember { mutableStateOf(false) }
 
-    // Seconds since the map appeared: what the travelling rings and drifting bands move by.
+    // Seconds the scene has played since the map appeared: what the travelling rings and drifting bands
+    // move by. It stands still while the scene is paused, so nothing on the map moves in silence.
     val beat by produceState(0f) {
-        val start = withFrameMillis { it }
-        while (true) withFrameMillis { value = (it - start) / 1000f }
+        var last = withFrameMillis { it }
+        while (true) withFrameMillis { now ->
+            if (!session.paused) value += (now - last) / 1000f
+            last = now
+        }
     }
 
     var size by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }

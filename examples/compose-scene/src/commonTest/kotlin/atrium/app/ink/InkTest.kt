@@ -44,7 +44,7 @@ class InkTest {
         temperatureC = 20f,
         humidityPct = 50f,
         listener = listener,
-        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), 360f, -60f, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, 0f, 360f, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null, Bout(1u, 1u), emptyList()) },
+        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), 360f, -60f, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, 0f, 360f, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null, true, Bout(1u, 1u), emptyList()) },
         speakers = emptyList(),
     )
 

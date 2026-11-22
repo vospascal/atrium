@@ -17,6 +17,10 @@ import androidx.compose.ui.input.pointer.pointerInput
  * A plain click selects one thing. A click with Shift or ⌘ held adds a sound to the others or
  * takes it out again. The listener is only ever selected alone: it is moved and turned by
  * itself, and nothing done to several sounds at once applies to it.
+ *
+ * [ids] keep the order the sounds were selected in, as Kotlin's sets do (`setOf`, `+`, `-` and
+ * `filterTo` keep insertion order): playing several in step lines them up to the first.
+ * Equality ignores the order.
  */
 internal data class Selection(val ids: Set<String> = emptySet()) {
     /** The one thing selected, or null when nothing or several are. */

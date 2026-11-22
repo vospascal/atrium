@@ -132,8 +132,8 @@ internal fun DrawScope.drawAmbient(marker: Marker, listenerAt: Point, view: TopD
     val halfArc = ambientHalfArc(marker.arc)
     val surround = halfArc == null || !fromListener.hasGroundBearing() || hypot(fromListener.x, fromListener.y) < SurroundWithin
     repeat(AmbientBands) { band ->
-        // The bands drift toward the listener while the wind is heard.
-        val drift = if (marker.silent) 0f else (beat * BandDrift) % 1f
+        // The bands drift toward the listener while the wind is heard, and hold still when it is not.
+        val drift = if (marker.silent || marker.strength <= 0f) 0f else (beat * BandDrift) % 1f
         val radius = (AmbientNearest + (band + 1f - drift) * AmbientBandGap) * view.pixelsPerMetre
         val fade = alpha * (1f - (band + 1f - drift) / (AmbientBands + 1f))
         if (surround) {

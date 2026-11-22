@@ -321,6 +321,21 @@ internal class Session(private val store: SettingsStore) {
         }
     }
 
+    /**
+     * Bring the loops [joining] onto the playhead of the loop [anchor], to the sample; each dips out
+     * and back in for a few milliseconds so nothing clicks. It is where the sounds play, not what the
+     * scene is: no step to undo and nothing to save, as loops loaded together start in step anyway.
+     */
+    fun playInStep(anchor: SourceDescription, joining: List<SourceDescription>) {
+        val running = engine ?: return
+        try {
+            running.playInStep(anchor.slot, joining.map { it.slot })
+        } catch (_: EngineException) {
+            // Only a full command queue, or a description a moment out of date (the anchor just
+            // removed or made to rest): the sounds play on as they were, and a second press tries again.
+        }
+    }
+
     /** Show [sound] as [name], in [color] (`#rrggbb`, or null for its voice's own) and under [group]. */
     fun identify(sound: SourceDescription, name: String, color: String?, group: String?) {
         val running = engine ?: return

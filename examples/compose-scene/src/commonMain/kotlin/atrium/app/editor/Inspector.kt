@@ -36,7 +36,7 @@ internal fun Inspector(session: Session, scene: SceneFile, selection: Selection,
     val chosen = sounds.filter { it.id in selection }
     Column(modifier.padding(horizontal = 22.dp)) {
         when {
-            chosen.size > 1 -> SeveralInspector(chosen)
+            chosen.size > 1 -> SeveralInspector(session, chosen, inStep(selection, sounds))
             chosen.size == 1 -> SoundInspector(session, chosen.single())
             selection.single == ListenerId -> ListenerInspector(session)
             else -> SceneInspector(session, scene, sounds.size)
@@ -44,9 +44,9 @@ internal fun Inspector(session: Session, scene: SceneFile, selection: Selection,
     }
 }
 
-/** Several sounds selected: which, and what applies to all of them at once. */
+/** Several sounds selected: which, and what applies to all of them at once; [inStep] when two or more loop. */
 @Composable
-private fun SeveralInspector(sounds: List<SourceDescription>) {
+private fun SeveralInspector(session: Session, sounds: List<SourceDescription>, inStep: InStep?) {
     PaperText("${sounds.size} sounds", 26, weight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
     PaperText("Select one of them alone to change its sound, shape or rhythm.", 14, Muted)
 
@@ -57,6 +57,12 @@ private fun SeveralInspector(sounds: List<SourceDescription>) {
     PaperText("Drag one on the map and they all move; the arrow keys nudge them.", 14, Muted)
     PaperText("Hold Alt while dragging to leave copies where you let go.", 14, Muted)
     PaperText("Hold S to hear only these. ⌘D duplicates them; the bin under the layers removes them.", 14, Muted)
+    if (inStep != null) {
+        Spacer(Modifier.height(14.dp))
+        PaperText("A loop added or copied later starts at its own beginning. This puts the others on ${inStep.anchor.name}'s playhead.", 14, Muted)
+        Spacer(Modifier.height(8.dp))
+        ToolButton("Play in step with ${inStep.anchor.name}") { session.playInStep(inStep.anchor, inStep.joining) }
+    }
 
     Spacer(Modifier.height(22.dp))
 }

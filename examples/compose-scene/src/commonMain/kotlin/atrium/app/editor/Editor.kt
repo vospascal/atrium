@@ -108,10 +108,16 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
     PlayerTheme(look.appearance) {
         val tint = if (look.monochrome) LocalPlayerColors.current.monochromeInk else null
         CompositionLocalProvider(LocalInkTint provides tint) {
-            // How strongly each sound reaches the listener, and nothing while a voice rests between takes.
+            // How strongly each sound is heard now: its measured signal where the engine reports one, so a
+            // loop's quiet stretches and a voice resting between takes draw nothing; and nothing while paused,
+            // when the last report would otherwise keep showing what sounded before the pause.
             val resting = session.telemetry?.sources.orEmpty().filter { it.take == null }.map { it.slot }.toSet()
             val strengths = plumesFor(scene, session.description, session.telemetry).mapIndexed { index, plume ->
-                if (session.description?.sources?.getOrNull(index)?.slot in resting) 0f else plume.strength
+                when {
+                    session.paused -> 0f
+                    session.description?.sources?.getOrNull(index)?.slot in resting -> 0f
+                    else -> plume.signal?.strength ?: plume.strength
+                }
             }
             val sounds = session.description?.sources.orEmpty()
             // A sound taken out, by hand or by undo, is no longer selected.
@@ -123,6 +129,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                 picked = Selection()
             }
             val duplicateChosen: () -> Unit = { session.duplicate(chosen) { ids -> picked = Selection(ids) } }
+            val playInStepChosen: (() -> Unit)? = inStep(selection, sounds)?.let { step -> { session.playInStep(step.anchor, step.joining) } }
             val heardAlone = rememberUpdatedState(chosen.map { it.id }.toSet())
             BoxWithConstraints(
                 Modifier.fillMaxSize().background(Backdrop)
@@ -180,7 +187,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     }
                                     if (list == Panel.Layers) {
                                         Rule()
-                                        LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
+                                        LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onPlayInStep = playInStepChosen, onDelete = deleteChosen)
                                     }
                                 }
                                 Splitter(acrossWidth = true) { workspace.leftWidth += it }
@@ -209,7 +216,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     Spacer(Modifier.height(24.dp))
                                 }
                                 Rule()
-                                LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onDelete = deleteChosen)
+                                LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onPlayInStep = playInStepChosen, onDelete = deleteChosen)
                             }
                             Panel.Library -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
                                 Library(session, carry, onAdded = { id ->
