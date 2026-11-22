@@ -156,6 +156,7 @@ name = "atrium-ffi"
 version = "0.1.0"
 dependencies = [
  "atrium",
+ "atrium-analysis",
  "atrium-core",
  "atrium-world",
  "rtrb",

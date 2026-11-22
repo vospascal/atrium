@@ -12,10 +12,11 @@ Kotlin can reach is declared here:
 - `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_beam`,
   `set_source_muted`, `set_source_level`, `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition`, `audition_take`,
-  `add_sound`, `remove_sound`, `save_scene`, `weather`, `set_weather`, `conditions`, `planned`, `set_head_tracker` and `latest_telemetry()`.
+  `add_sound`, `remove_sound`, `save_scene`, `weather`, `set_weather`, `conditions`, `planned`, `set_head_tracker`, `latest_telemetry()`, `analysis()` and `analysis_scale()`.
 - The records it returns: `Position`, `SceneDescription`, `SceneFile` (which says whether the
-  editor wrote it), `Output`, `Telemetry`. Telemetry
-  includes where the listener faces and whether a head tracker is sending.
+  editor wrote it), `Output`, `Telemetry`, `AnalysisColumn`, `AnalysisScale`. Telemetry
+  includes where the listener faces and whether a head tracker is sending; an analysis column
+  is 50 ms of what the output played, measured by `crates/analysis` (`docs/live-analysis-plan.md`).
 - `EngineError`.
 
 [UniFFI](https://github.com/mozilla/uniffi-rs) proc-macros describe the surface.
@@ -175,6 +176,29 @@ runs Cargo itself. There is nothing to build here by hand.
   before spatialization so each source can drive its own ink. Two broad crossovers and smoothed
   RMS windows keep the audio callback allocation-free and let the Kotlin player weight a broad
   and a fine layer independently. The level is relative to the source's build-time calibration.
+- **`analysis()` measures on the calling thread, from a copy of the output.** The audio thread
+  only copies each finished block into the output tap (`atrium::engine::tap`), wait-free and
+  allocation-free; the app's poll drains it into `atrium_analysis::Live`, as it pulls telemetry.
+  The measures are the offline analyser's own, so a live number and an `analyse` number of the
+  same sound cannot disagree (`src/offline/tests/live_analysis.rs` checks a render both ways).
+  A poll of 1/60 s of 5.1 costs 0.2 ms on average and under 0.7 ms at the 99th percentile
+  (`analysis_costs_under_a_millisecond_a_display_frame`, release, 2026-11-22).
+- **Columns are stamped by the planner, at the time they sounded.** A block carries the audio
+  clock's sample at its start; `Planner::scene_seconds_at` adds the seek offset, so a column
+  lands under the playhead that played it. Each column carries its overall level too
+  (`leq_overall_db`, `laf_overall_db`), combined as the report's overall level, so the app
+  copies no rule for adding channels. A column comes about 0.15 s after it sounded: the
+  A-weighting and the onset picker look ahead. On a seek, blocks played before it are dropped
+  unread and the analyser starts afresh, so nothing heard before the seek is drawn at the new
+  time; FAST and the onsets' past second begin again there.
+- **The tap is sized for 96 kHz.** The device's rate is known only once the stream is open, by
+  which time the scene, and the tap's writing end with it, is on the audio thread. 2 s at 96 kHz
+  of the layout's channels (the device opens with as many or fewer) is 4 s at 48 kHz, and about
+  4.6 MB for 5.1. A tap that fills, because nothing polled, drops whole blocks; the analyser sees
+  the gap on the clock and starts again after it.
+- **The spectrum is bytes on a fixed dB SPL scale, 0 to 90.** A colour then means the same level
+  all session, and 96 rows a column at 20 columns a second stay small. `analysis_scale()` gives
+  the range, the row edges and the column's length, so the app labels its axes from the engine.
 - **A thread exists only to hold the audio stream.** `cpal::Stream` is not `Send` on Apple
   platforms. A UniFFI object must be `Send + Sync`, so the engine cannot hold the stream. The
   stream is created, kept and dropped on `atrium-output`, which waits until the engine is
@@ -209,9 +233,9 @@ runs Cargo itself. There is nothing to build here by hand.
   plays without stream errors. Heavier scenes have not been tried in a debug build. Run Gradle with
   `-PreleaseBuild=true` for an optimised build. That flag also builds the other desktop
   platforms, which needs their cross toolchains.
-- **Four tests are ignored by default.** Run them with
+- **Nine tests are ignored by default.** Run them with
   `cargo test -p atrium-ffi -- --ignored --test-threads=1`. One at a time, because two of them
-  bind the tracker's port.
+  bind the tracker's port, and all but one open the output device.
   `output_and_volume_change_while_playing` needs an output device and plays under a second of
   sound. On 2026-11-19 it passed on a 2-channel headphone device.
   `layers_and_library_change_the_playing_scene` auditions, adds, mutes and sets a level at zero
@@ -219,6 +243,14 @@ runs Cargo itself. There is nothing to build here by hand.
   `head_tracking_holds_its_port_only_while_it_is_on` and
   `telemetry_shows_whether_a_tracker_is_sending_and_where_the_head_points` open the device at
   zero volume and bind port 4242, so no other tracker may be running. Both passed on 2026-11-20.
+  `planned_takes_are_heard_and_a_shorter_rest_at_once` (the plan's takes, pause and seek),
+  `rests_and_chances_change_while_playing` and `a_kind_and_a_take_are_heard_at_once_on_their_own`
+  (auditions) open the device at zero volume.
+  `columns_while_playing` plays the meadow at zero volume and checks the analysis columns'
+  times and a seek to 120 s through the device (passed 2026-11-22: the first column after the
+  seek at 120.000 s). `analysis_costs_under_a_millisecond_a_display_frame` is a timing with no
+  device, run alone in release:
+  `cargo test -p atrium-ffi --release -- --ignored analysis_costs --nocapture`.
 - **The Sony path works in the app, checked by hand only.** On 2026-11-20, after the headphones
   were paired again and listed their sensor service, the wedge on the 3D map turned with the
   head in the running app. Before that, a one-off test drove the Settings screen with a running

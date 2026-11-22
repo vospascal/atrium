@@ -98,6 +98,8 @@ impl Engine {
 pub(super) struct OutputThread {
     /// Channels the stream opened with.
     pub(super) device_channels: usize,
+    /// The rate the stream opened at (Hz).
+    pub(super) sample_rate: u32,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -108,12 +110,12 @@ impl OutputThread {
         commands: rtrb::Consumer<Command>,
     ) -> Result<Self, EngineError> {
         let (stop, stopped) = mpsc::channel::<()>();
-        let (started, start_result) = mpsc::channel::<Result<usize, String>>();
+        let (started, start_result) = mpsc::channel::<Result<(usize, u32), String>>();
         let thread = std::thread::Builder::new()
             .name("atrium-output".into())
             .spawn(move || match CpalOutput.start(scene, commands) {
                 Ok(stream) => {
-                    let _ = started.send(Ok(stream.channels() as usize));
+                    let _ = started.send(Ok((stream.channels() as usize, stream.sample_rate())));
                     // Returns when the engine drops `stop`.
                     let _ = stopped.recv();
                     drop(stream);
@@ -125,8 +127,9 @@ impl OutputThread {
             .map_err(|error| EngineError::Audio(error.to_string()))?;
 
         match start_result.recv() {
-            Ok(Ok(device_channels)) => Ok(Self {
+            Ok(Ok((device_channels, sample_rate))) => Ok(Self {
                 device_channels,
+                sample_rate,
                 stop: Some(stop),
                 thread: Some(thread),
             }),

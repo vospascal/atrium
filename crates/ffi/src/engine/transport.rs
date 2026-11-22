@@ -40,6 +40,7 @@ impl Engine {
     /// take under way starts partway, and it plays on from that moment.
     pub fn seek(&self, seconds: f32) {
         self.planner.seek(seconds as f64);
+        lock(&self.analysis).seek();
     }
 
     /// The takes the plan has decided for the next `seconds`, at most a

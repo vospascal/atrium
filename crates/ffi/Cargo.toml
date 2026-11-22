@@ -12,6 +12,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 atrium = { path = "../..", default-features = false }
+atrium-analysis = { path = "../analysis" }
 atrium-core = { path = "../core" }
 atrium-world = { path = "../world" }
 rtrb = "0.3"

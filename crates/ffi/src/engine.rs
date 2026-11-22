@@ -10,6 +10,7 @@
 //! Undo puts back a whole earlier version of the file at once and calls the
 //! same helpers.
 
+mod analysis;
 mod audition;
 mod device;
 mod edits;
@@ -40,6 +41,7 @@ use crate::api::{EngineError, Position, SceneDescription, SourceDescription};
 use crate::history::History;
 use crate::output::{playable_outputs, Output};
 
+use analysis::Analysis;
 use device::OutputThread;
 use edits::Edits;
 
@@ -69,6 +71,8 @@ pub struct Engine {
     /// thread.
     commands: Arc<Mutex<rtrb::Producer<Command>>>,
     telemetry: Mutex<rtrb::Consumer<TelemetryFrame>>,
+    /// What the output plays, measured as it plays.
+    analysis: Mutex<Analysis>,
     /// Where the scene puts the listener and which way it faces. Head
     /// tracking turns from it, and it moves when the listener is moved.
     placement: Placement,
@@ -110,12 +114,24 @@ impl Engine {
         built.scene.scene_edits = Some(edit_consumer);
         built.scene.retired_out = Some(retired_producer);
         let layout_channels = built.scene.speaker_layout.total_channels();
+        // The device opens with the layout's channels or fewer.
+        let (tap, tap_reader) =
+            atrium::engine::tap::output_tap(layout_channels, Analysis::tap_frames());
+        built.scene.output_tap = Some(tap);
+        let clock = built.scene.clock.clone();
         let distance = built.scene.distance_model;
         let placement = Placement::new(Pose {
             position: built.scene.listener.position,
             yaw: built.scene.listener.yaw,
         });
         let output = OutputThread::start(built.scene, command_consumer)?;
+        let analysis = Analysis::new(
+            tap_reader,
+            clock,
+            output.sample_rate,
+            output.device_channels,
+            document.normalization.full_scale_db_spl(),
+        );
 
         Ok(Arc::new(Self {
             scene: Mutex::new(Live {
@@ -127,6 +143,7 @@ impl Engine {
             outputs: playable_outputs(layout_channels, output.device_channels),
             commands: Arc::new(Mutex::new(commands)),
             telemetry: Mutex::new(telemetry),
+            analysis: Mutex::new(analysis),
             placement,
             head_tracking: Mutex::new(None),
             sounds: built.sounds,

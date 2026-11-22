@@ -671,3 +671,51 @@ pub struct PlannedTake {
     /// How long it lasts (s).
     pub seconds: f32,
 }
+
+/// 50 ms of what was heard, measured as the scene played: the analyser's
+/// definitions (`crates/analysis`), the same as a render's report.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AnalysisColumn {
+    /// When the column's first sample sounded, in the time
+    /// `Engine::scene_time` reports: it lands under the playhead that played
+    /// it. After a seek, columns carry the new times.
+    pub scene_seconds: f64,
+    /// The band level of each of `AnalysisScale::row_edges_hertz`'s rows,
+    /// lowest first, from 0 at `spectrum_floor_db` to 255 at
+    /// `spectrum_top_db` (dB SPL). The channels combine as the report's
+    /// overall level: two ears averaged, speakers summed.
+    pub spectrum: Vec<u8>,
+    /// Per output channel, counted as `Telemetry::peaks_db`, A-weighted (dB
+    /// SPL): the level over the column (LAeq), and the largest FAST level in
+    /// it (LAF).
+    pub leq_db: Vec<f32>,
+    pub laf_db: Vec<f32>,
+    /// The same for every channel together, as an `analyse` report's
+    /// overall level: two ears' powers averaged, speakers' powers summed.
+    pub leq_overall_db: f32,
+    pub laf_overall_db: f32,
+    /// Whether something started in the column.
+    pub onset: bool,
+    /// 1 − IACC over 500 Hz to 2 kHz (0 one source, 1 diffuse) and the ILD,
+    /// right minus left (dB), of the 100 ms that end with the column, for
+    /// the ears or the speakers' L and R; nothing on other outputs or while
+    /// either is silent.
+    pub width: Option<f32>,
+    pub ild_db: Option<f32>,
+}
+
+/// How to read `AnalysisColumn`s, from the engine, so an axis is not
+/// labelled from a copy.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AnalysisScale {
+    /// The dB SPL a spectrum value of 0 and of 255 stand for; between them
+    /// the scale is linear in dB.
+    pub spectrum_floor_db: f32,
+    pub spectrum_top_db: f32,
+    /// The spectrum rows' edges (Hz), lowest first: one more than there are
+    /// rows, row r from edge r to edge r + 1, log-spaced 20 Hz to 20 kHz.
+    pub row_edges_hertz: Vec<f32>,
+    /// The time a column covers (s); columns follow each other this far
+    /// apart.
+    pub column_seconds: f32,
+}

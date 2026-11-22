@@ -803,6 +803,7 @@ src/
 │                           #   commands, render, channels, edits, reset
 │   ├── edit.rs             # live add/remove of sources
 │   ├── telemetry.rs        # levels and positions sent back to the control side
+│   ├── tap.rs              # a copy of every finished block, for the live analyser
 │   ├── profiler.rs         # profile_span! (feature `profiler`)
 │   └── memprof.rs          # allocation tracking (feature `memprof`)
 ├── pipeline/
@@ -886,6 +887,7 @@ Control thread                          Audio thread (cpal callback)
      │                                        │  AudioScene::render
      │                                        │    tick sources
      │                                        │    render_pipeline (active mode)
+     │ ◀──── output blocks (rtrb, the tap) ───│    copy the output to the tap
      │ ◀──────── TelemetryFrame (rtrb) ───────│    push telemetry
      │                                        │
      │                                   cpal → device
