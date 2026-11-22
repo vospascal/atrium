@@ -84,6 +84,9 @@ fn sidecar_json(
             SampleFormat::Pcm16 => "s16",
         },
         "clipped_samples": clipped,
+        // What the frames were raised by after rendering; the levels below
+        // are the file's, the engine's own are these minus this gain.
+        "gain_decibels": rendered.gain_decibels(),
         "levels": names
             .iter()
             .zip(rendered.statistics())

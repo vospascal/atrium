@@ -35,8 +35,16 @@ usage: render <scene.yaml> [options]
   --turn <deg/s>         the head turning steadily, positive to the left
   --weather-speed <n>    the weather this many times as fast (default 1)
   --format <f32|s16>     32-bit float (default) or 16-bit
+  --normalise[=<dBFS>]   one gain on every channel so the loudest sample peaks
+                         at -1 dBFS (or the level given); the gain is in the
+                         sidecar. Without it the file is at the engine's own
+                         level, often -50 dBFS or lower
   --output <path>        default target/renders/<scene>-<output>-seed<seed>….wav
 ";
+
+/// Where `--normalise` puts the loudest sample when it names no level: just
+/// under full scale, so a 16-bit file does not clip.
+const NORMALISED_PEAK_DECIBELS: f64 = -1.0;
 
 /// What the command line asked for.
 struct Arguments {
@@ -45,6 +53,8 @@ struct Arguments {
     probe_text: Option<String>,
     format: SampleFormat,
     output: Option<PathBuf>,
+    /// The peak (dBFS) `--normalise` brings the render to, if asked.
+    normalise: Option<f64>,
 }
 
 fn main() {
@@ -76,6 +86,7 @@ fn render(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
         probe_text,
         format,
         output,
+        normalise,
     } = arguments;
     let provenance = Provenance::of(&scene).map_err(|error| format!("{scene}: {error}"))?;
     println!("Loading scene: {scene}");
@@ -95,6 +106,7 @@ fn render(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
             rendering.seed(),
             &settings,
             probe_text.as_deref(),
+            normalise.is_some(),
         )
     });
     println!(
@@ -107,7 +119,10 @@ fn render(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let rendered_at = Instant::now();
-    let rendered = rendering.run();
+    let mut rendered = rendering.run();
+    if let Some(peak_decibels) = normalise {
+        rendered.normalise(peak_decibels);
+    }
     let rendered_in = rendered_at.elapsed().as_secs_f64();
     println!(
         "Built the scene in {built_in:.2} s; rendered {} s in {rendered_in:.2} s, {:.1}× real time",
@@ -120,6 +135,12 @@ fn render(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     println!("      {}", written.sidecar.display());
     if format == SampleFormat::Pcm16 {
         println!("{} samples clipped", written.clipped);
+    }
+    if normalise.is_some() {
+        println!(
+            "Normalised: raised {:+.1} dB; the engine's level is the file's minus that",
+            rendered.gain_decibels()
+        );
     }
     let decibels = |level: f64| {
         if level > 0.0 {
@@ -147,6 +168,7 @@ fn default_output(
     seed: u64,
     settings: &RenderSettings,
     probe_text: Option<&str>,
+    normalised: bool,
 ) -> PathBuf {
     let stem = Path::new(scene)
         .file_stem()
@@ -162,6 +184,9 @@ fn default_output(
     if settings.turn_degrees_per_second != 0.0 {
         name += &format!("-turn{}", settings.turn_degrees_per_second);
     }
+    if normalised {
+        name += "-normalised";
+    }
     Path::new("target/renders").join(format!("{name}.wav"))
 }
 
@@ -171,6 +196,7 @@ fn parse(arguments: &[String]) -> Result<Arguments, String> {
     let mut probe_text = None;
     let mut format = SampleFormat::Float32;
     let mut output = None;
+    let mut normalise = None;
     let mut headphones = false;
     let mut mode = None;
 
@@ -188,6 +214,20 @@ fn parse(arguments: &[String]) -> Result<Arguments, String> {
         };
         if flag == "--headphones" {
             headphones = true;
+            continue;
+        }
+        // Its level only with `=`, so `--normalise -3` is never misread.
+        if flag == "--normalise" {
+            let peak: f64 = match inline {
+                Some(value) => number(flag, &value)?,
+                None => NORMALISED_PEAK_DECIBELS,
+            };
+            if !peak.is_finite() || peak > 0.0 {
+                return Err(format!(
+                    "--normalise={peak} is not a peak at or below full scale; give 0 dBFS or less"
+                ));
+            }
+            normalise = Some(peak);
             continue;
         }
         let value = match inline {
@@ -244,6 +284,7 @@ fn parse(arguments: &[String]) -> Result<Arguments, String> {
         probe_text,
         format,
         output,
+        normalise,
     })
 }
 
@@ -345,6 +386,20 @@ mod tests {
         assert!(arguments("a.yaml --headphones --mode vbap").is_err());
         assert!(arguments("--seconds 3").is_err(), "no scene");
         assert!(arguments("a.yaml --seconds").is_err(), "no value");
+    }
+
+    #[test]
+    fn normalise_takes_its_level_only_after_an_equals_sign() {
+        assert_eq!(arguments("a.yaml").expect("reads").normalise, None);
+        let plain = arguments("a.yaml --normalise --seconds 3").expect("reads");
+        assert_eq!(plain.normalise, Some(NORMALISED_PEAK_DECIBELS));
+        assert_eq!(plain.settings.seconds, 3.0);
+        assert_eq!(
+            arguments("a.yaml --normalise=-6").expect("reads").normalise,
+            Some(-6.0)
+        );
+        assert!(arguments("a.yaml --normalise=2").is_err(), "above 0 dBFS");
+        assert!(arguments("a.yaml --normalise=loud").is_err());
     }
 
     #[test]

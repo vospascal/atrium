@@ -110,6 +110,7 @@ cargo run --release --bin render -- scenes/meadow-birds.yaml --headphones \
 | `--turn <deg/s>` | 0 | The listener's head turning steadily, positive to the left |
 | `--weather-speed <n>` | 1 | The weather this many times as fast, from the scene's beginning |
 | `--format <f32\|s16>` | `f32` | 32-bit float for analysis; 16-bit for listening, and it says how many samples clipped |
+| `--normalise[=<dBFS>]` | off | One gain on every channel so the loudest sample peaks at −1 dBFS, or the level given (`--normalise=-6`); the sidecar's `gain_decibels` says how much |
 | `--output <path>` | `target/renders/<scene>-<output>-seed<seed>….wav` | |
 
 The channels are the layout's, in the order the app names them: L, R, C, LFE, Ls, Rs
@@ -130,7 +131,10 @@ whole render.
 
 Levels are the world's, not a mix's: the meadow's birds, a dozen metres off, peak
 around −55 dBFS. That is one reason float is the default; a 16-bit file of a quiet
-scene keeps few bits of it.
+scene keeps few bits of it. To listen, add `--normalise`: the file is raised to peak
+at −1 dBFS, one gain for all channels so nothing moves, and `-normalised` is added to
+the default name. The levels in its sidecar are the file's; the engine's own are those
+minus `gain_decibels`. Leave it off for files you will measure against each other.
 
 ## Analysis tools
 

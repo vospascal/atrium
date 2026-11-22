@@ -155,6 +155,7 @@ impl Rendering {
             layout: self.layout,
             render_mode: self.render_mode,
             settings: self.settings,
+            gain_decibels: 0.0,
         }
     }
 
@@ -176,9 +177,37 @@ pub struct Rendered {
     render_mode: RenderMode,
     settings: RenderSettings,
     statistics: Vec<ChannelStatistics>,
+    /// What [`Rendered::normalise`] raised the frames by (dB); 0 as the
+    /// engine rendered them.
+    gain_decibels: f64,
 }
 
 impl Rendered {
+    /// Raise (or lower) every channel by one gain so the loudest sample of
+    /// the whole render peaks at `peak_decibels` dBFS. One gain for all
+    /// channels keeps the balance between them, so where a sound sits is
+    /// unchanged. A silent render is left as it is.
+    ///
+    /// The engine renders at its calibration, where a bird at 60 dB SPL peaks
+    /// far below full scale; this makes a file that can be played as it is.
+    /// The gain is recorded, so the engine's own level is the file's level
+    /// minus [`Rendered::gain_decibels`].
+    pub fn normalise(&mut self, peak_decibels: f64) {
+        let Some(gain) = gain_to_peak(&self.statistics, peak_decibels) else {
+            return;
+        };
+        for sample in &mut self.frames {
+            *sample = (*sample as f64 * gain) as f32;
+        }
+        self.statistics = ChannelStatistics::of(&self.frames, self.channels);
+        self.gain_decibels += 20.0 * gain.log10();
+    }
+
+    /// The gain [`Rendered::normalise`] applied (dB); 0 if it was not.
+    pub fn gain_decibels(&self) -> f64 {
+        self.gain_decibels
+    }
+
     /// Interleaved frames, every channel of the layout.
     pub fn frames(&self) -> &[f32] {
         &self.frames
@@ -217,5 +246,34 @@ impl Rendered {
     /// Peak and RMS of each channel, in channel order.
     pub fn statistics(&self) -> &[ChannelStatistics] {
         &self.statistics
+    }
+}
+
+/// The gain that brings the loudest of `channels` to `peak_decibels` dBFS,
+/// or `None` when every channel is silent.
+fn gain_to_peak(channels: &[ChannelStatistics], peak_decibels: f64) -> Option<f64> {
+    let peak = channels
+        .iter()
+        .fold(0f32, |peak, channel| peak.max(channel.peak));
+    (peak > 0.0).then(|| 10f64.powf(peak_decibels / 20.0) / peak as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(peak: f32) -> ChannelStatistics {
+        ChannelStatistics { peak, rms: 0.0 }
+    }
+
+    #[test]
+    fn the_loudest_channel_sets_the_gain() {
+        // −1 dBFS is 0.891 25; the louder channel, 0.01, sets it (0.01 as
+        // an f32 is 2e-10 short, hence the tolerance).
+        let gain = gain_to_peak(&[channel(0.002), channel(0.01)], -1.0).expect("not silent");
+        assert!((gain - 89.125_094).abs() < 1e-4, "{gain}");
+        assert_eq!(gain_to_peak(&[channel(0.0), channel(0.0)], -1.0), None);
+        let unchanged = gain_to_peak(&[channel(0.5)], 20.0 * 0.5f64.log10()).expect("not silent");
+        assert!((unchanged - 1.0).abs() < 1e-12, "{unchanged}");
     }
 }

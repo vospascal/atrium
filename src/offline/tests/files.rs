@@ -95,3 +95,43 @@ fn the_engine_reads_back_what_was_written_and_the_sidecar_describes_it() {
     }
     std::fs::remove_dir_all(&directory).ok();
 }
+
+/// Normalised, the loudest sample of any channel is at the level asked, every
+/// sample is the rendered one times the same gain, and the sidecar says that
+/// gain.
+#[test]
+fn normalising_raises_every_channel_by_one_recorded_gain() {
+    let rendered = render(MEADOW, &on_headphones(2.0));
+    let mut normalised = rendered.clone();
+    normalised.normalise(-1.0);
+
+    let gain = 10f64.powf(normalised.gain_decibels() / 20.0);
+    assert!(normalised.gain_decibels() > 20.0, "the meadow is quiet");
+    let loudest = normalised
+        .statistics()
+        .iter()
+        .fold(0f32, |peak, channel| peak.max(channel.peak));
+    assert!(
+        (20.0 * (loudest as f64).log10() + 1.0).abs() < 1e-4,
+        "peaks at {loudest}"
+    );
+    for (before, after) in rendered.frames().iter().zip(normalised.frames()) {
+        assert_eq!(*after, (*before as f64 * gain) as f32);
+    }
+
+    let directory = std::env::temp_dir().join(format!("atrium-normalise-{}", std::process::id()));
+    let provenance = Provenance::of(MEADOW).expect("the scene file is there");
+    let written = write_files(
+        &normalised,
+        &provenance,
+        &directory.join("normalised.wav"),
+        SampleFormat::Pcm16,
+    )
+    .expect("written");
+    assert_eq!(written.clipped, 0, "-1 dBFS does not clip");
+    let sidecar: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&written.sidecar).expect("read"))
+            .expect("parses");
+    assert_eq!(sidecar["gain_decibels"], normalised.gain_decibels());
+    let _ = std::fs::remove_dir_all(&directory);
+}
