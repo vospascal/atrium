@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use atrium_core::commands::Command;
 
 use super::{lock, Engine};
-use crate::api::{EngineError, PlannedTake};
+use crate::api::{EngineError, PlannedTake, SceneDescription};
 
 /// How far ahead `planned` looks at most (s).
 const MAX_PLANNED_SECONDS: f32 = 60.0;
@@ -43,6 +43,26 @@ impl Engine {
         lock(&self.analysis).seek();
     }
 
+    /// Bring the loops in `slots` onto the playhead of the loop in `anchor`,
+    /// to the sample: a song's stems added one by one, or a copy, start at
+    /// their own beginning and play out of step until then. Each dips out
+    /// for 5 ms, jumps and dips back in, so nothing clicks; the anchor plays
+    /// on untouched. A loop shorter or longer than the anchor lands at the
+    /// anchor's time wrapped round its own length.
+    ///
+    /// It errs, naming the sound, when `anchor` is not a loop: a voice that
+    /// rests between takes is timed by the plan, and a generator has no
+    /// playhead. Slots in `slots` that are not loops, or hold no sound, are
+    /// skipped. Nothing is saved: it is where the sounds play, not what the
+    /// scene is, and loops loaded together start in step anyway.
+    pub fn play_in_step(&self, anchor: u16, slots: Vec<u16>) -> Result<(), EngineError> {
+        let command = {
+            let scene = lock(&self.scene);
+            in_step_with(&scene.description, anchor, &slots)?
+        };
+        self.command(command)
+    }
+
     /// The takes the plan has decided for the next `seconds`, at most a
     /// minute ahead.
     pub fn planned(&self, seconds: f32) -> Vec<PlannedTake> {
@@ -59,12 +79,124 @@ impl Engine {
     }
 }
 
+/// The command that brings the loops of `slots` onto `anchor`'s playhead,
+/// or why it cannot: `anchor` holds no loop. Of `slots`, only the loops other
+/// than the anchor are kept.
+fn in_step_with(
+    scene: &SceneDescription,
+    anchor: u16,
+    slots: &[u16],
+) -> Result<Command, EngineError> {
+    let sound = |slot: u16| scene.sources.iter().find(|source| source.slot == slot);
+    match sound(anchor) {
+        None => {
+            return Err(EngineError::Scene(format!(
+                "no sound plays from voice {anchor}"
+            )))
+        }
+        Some(source) if !source.loops => {
+            return Err(EngineError::Scene(format!(
+                "{} does not loop, so it has no playhead to bring others onto",
+                source.name
+            )))
+        }
+        Some(_) => {}
+    }
+    let slots = slots
+        .iter()
+        .filter(|&&slot| slot != anchor && sound(slot).is_some_and(|source| source.loops))
+        .fold(0u16, |mask, &slot| mask | 1 << slot);
+    Ok(Command::PlayInStep { anchor, slots })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{Band, Story, Weather};
     use atrium::config::SceneConfig;
     use std::time::{Duration, Instant};
+
+    fn description_of(path: &str) -> SceneDescription {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        SceneConfig::load(path)
+            .and_then(SceneConfig::build)
+            .expect("builds")
+            .description
+            .into()
+    }
+
+    fn slot_of(scene: &SceneDescription, id: &str) -> u16 {
+        scene
+            .sources
+            .iter()
+            .find(|source| source.id == id)
+            .unwrap_or_else(|| panic!("no {id}"))
+            .slot
+    }
+
+    /// The default scene's three recordings all loop, so any one of them
+    /// can lead and the others join it; the anchor and a voice with no
+    /// sound are left out of the mask. The birds of the meadow rest between
+    /// takes and the wind is generated: none of them loops, so none can
+    /// lead.
+    #[test]
+    fn only_loops_lead_and_join() {
+        let default = description_of("scenes/default.yaml");
+        assert!(default.sources.iter().all(|source| source.loops));
+        let (djembe, campfire, purring) = (
+            slot_of(&default, "djembe"),
+            slot_of(&default, "campfire"),
+            slot_of(&default, "purring"),
+        );
+        assert_eq!((djembe, campfire, purring), (0, 1, 2));
+        match in_step_with(&default, campfire, &[djembe, campfire, purring, 9]) {
+            Ok(Command::PlayInStep { anchor, slots }) => {
+                assert_eq!((anchor, slots), (1, 0b101))
+            }
+            other => panic!("expected the djembe and the purring to join, got {other:?}"),
+        }
+
+        let meadow = description_of("scenes/meadow-birds.yaml");
+        assert!(meadow.sources.iter().all(|source| !source.loops));
+        let blackbird = slot_of(&meadow, "blackbird");
+        match in_step_with(&meadow, blackbird, &[0, 1, 2]) {
+            Err(EngineError::Scene(reason)) => assert_eq!(
+                reason,
+                "Blackbird does not loop, so it has no playhead to bring others onto"
+            ),
+            other => panic!("a resting bird cannot lead, got {other:?}"),
+        }
+        assert!(matches!(
+            in_step_with(&default, 7, &[0]),
+            Err(EngineError::Scene(reason)) if reason == "no sound plays from voice 7"
+        ));
+    }
+
+    /// On a playing scene: loops are brought into step, a frog added from
+    /// the library rests between its calls and so cannot lead. At zero
+    /// volume.
+    #[test]
+    fn play_in_step_needs_a_loop_to_lead() {
+        std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .expect("repository root");
+        let engine = Engine::new("scenes/default.yaml".into()).expect("scene should play");
+        engine.set_volume(0.0).expect("volume");
+        engine
+            .play_in_step(1, vec![0, 2])
+            .expect("the campfire leads the djembe and the purring");
+        let frog = engine
+            .add_sound("sources/frog.yaml".into(), None)
+            .expect("the frog builds");
+        assert!(!frog.loops);
+        match engine.play_in_step(frog.slot, vec![0, 1]) {
+            Err(EngineError::Scene(reason)) => assert!(reason.starts_with("Frog does not loop")),
+            other => panic!("a resting frog cannot lead, got {other:?}"),
+        }
+        engine
+            .play_in_step(0, vec![1, frog.slot])
+            .expect("the frog is skipped");
+    }
 
     /// The session's plan reaches the audio thread: birds whose takes are
     /// decided ahead are heard uttering them, and a rest made short is heard

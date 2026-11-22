@@ -120,6 +120,11 @@ pub struct SourceDescription {
     /// How long it rests between two takes, or `None` when it plays all the
     /// time.
     pub gap: Option<Gap>,
+    /// Whether it is a recording that loops, round and round with no rest:
+    /// what `Engine::play_in_step` can bring into step. Not the same as
+    /// having no gap: a generator has none either, and a sound with a rest
+    /// of 0 is uttered take by take as the plan says.
+    pub loops: bool,
     /// How many times running one take is uttered before another is chosen.
     pub bout: Bout,
     /// How it follows the place's conditions.
@@ -205,6 +210,9 @@ impl From<atrium::config::SceneDescription> for SceneDescription {
 
 impl From<atrium::config::SourceDescription> for SourceDescription {
     fn from(source: atrium::config::SourceDescription) -> Self {
+        // A recording is built as a loop exactly when it has no rests, and
+        // then reports no gap; a generator has no takes.
+        let loops = !source.takes.is_empty() && source.gap.is_none();
         Self {
             id: source.id,
             slot: source.slot,
@@ -232,6 +240,7 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
             gap: source
                 .gap
                 .map(|[shortest, longest]| Gap { shortest, longest }),
+            loops,
             bout: Bout {
                 fewest: source.bout[0],
                 most: source.bout[1],
