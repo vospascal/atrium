@@ -109,13 +109,16 @@ panel or list gets them by using it.
   and the sounds stay put while copies land where you let go. Hold **S** to hear only what is
   selected, for as long as the key is down. **Loudness**, bottom left, colours the ground by how
   loud the place is there: everything that is heard, or the one selected sound alone. Each band
-  is 6 dB, a doubling of distance, and it shows direct sound only. A wind is grabbed near its anchor; moving it changes where it is drawn to come from,
-  not how it sounds, since an ambient sound is heard everywhere. The selected sound shows its
+  is 6 dB, a doubling of distance, and it shows direct sound only. A wind is grabbed near its anchor. An ambient sound from all round is drawn as whole rings
+  round the listener; one from an arc as bands as wide as its arc, on the side its anchor lies
+  on, and moving the anchor moves the arc, which is heard as well as drawn. The selected sound shows its
   distance and bearing on a dashed line, and a focused one has a handle at the end of its facing
   line: drag it to turn the sound.
 - **The inspector** shows the selected sound in a fixed order: its level, which can be set; its
   shape, first whether it is a **Point** or **Ambient** (heard everywhere at its level, with no
-  distance, direction or echo; any sound can be either, and switching starts it over), then for
+  distance or echo; any sound can be either, and switching starts it over), then for an ambient
+  sound an **Arc** slider from a narrow arc to all round (a shore or a tree line is heard from
+  one side; on headphones a new width is heard a moment after it is set), and for
   a point a width from a narrow beam to all round and how much is heard behind it, with Omni,
   Focused and Narrow as starting points and a drawing of the beam turned the way it faces; then its place, when it plays and whether it
   moves. **When** is All the time or Now and then; Now and then has a range with two handles for

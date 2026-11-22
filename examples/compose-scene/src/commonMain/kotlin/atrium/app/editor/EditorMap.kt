@@ -119,6 +119,7 @@ internal fun EditorMap(
             beamHalfAngle = sound.beamHalfAngle,
             facing = turned?.takeIf { it.slot == sound.slot }?.heading ?: atan2(facing.y, facing.x),
             size = sound.size,
+            arc = sound.arc,
             strength = strengths.getOrElse(index) { 0f },
             silent = session.mix.silences(sound.id),
             sounding = live == null || live.take != null,

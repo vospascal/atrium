@@ -53,7 +53,20 @@ internal fun ShapePart(session: Session, sound: SourceDescription, live: SourceT
     Spacer(Modifier.height(10.dp))
     if (ambient) {
         PaperText(shapeLine(sound), 15)
-        PaperText("It has no distance, direction or echo: its level is what is heard wherever the listener stands.", 14, Muted)
+        PaperText(if (sound.arc >= AllRound) "Arc: all round" else "Arc ${sound.arc.roundToInt()}°", 15)
+        PaperLevel(
+            (sound.arc - NarrowestArc) / (AllRound - NarrowestArc),
+            onChange = { session.arc(sound.slot, NarrowestArc + it * (AllRound - NarrowestArc)) },
+            // A degree an arrow press.
+            step = 1f / (AllRound - NarrowestArc),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        PaperText(
+            "It has no distance or echo: its level is what is heard wherever the listener stands. " +
+                "Narrower than all round, it comes from the side its place lies on, as a shore or a tree line does.",
+            14,
+            Muted,
+        )
         return
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -113,6 +126,9 @@ internal enum class StartingShape(val label: String, val width: Float, val behin
 internal const val AllRound = 360f
 private const val NarrowestBeam = 10f
 
+/** The narrowest arc an ambient sound can come from (degrees): the engine's limit. */
+internal const val NarrowestArc = 10f
+
 /** At this level behind, or lower, nothing is heard behind (dB). The engine's limit. */
 internal const val SilentBehind = -60f
 
@@ -121,7 +137,8 @@ private fun behindLabel(behind: Float) =
 
 /** How a sound fills the air, in a line. */
 internal fun shapeLine(sound: SourceDescription): String = when {
-    sound.emitterKind == EmitterKind.FIELD -> "Ambient: heard everywhere"
+    sound.emitterKind == EmitterKind.FIELD && sound.arc >= AllRound -> "Ambient: heard everywhere"
+    sound.emitterKind == EmitterKind.FIELD -> "Ambient: heard everywhere, from an arc ${sound.arc.roundToInt()}° wide"
     sound.width >= AllRound -> "All round: equal in every direction"
     else -> "A beam ${sound.width.roundToInt()}° wide, ${behindLabel(sound.behind)} behind"
 }

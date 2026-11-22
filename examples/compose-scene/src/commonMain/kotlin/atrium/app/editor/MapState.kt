@@ -19,6 +19,8 @@ internal data class Marker(
     val facing: Float,
     /** How wide it sounds, 0 a point to 1 all around. */
     val size: Float,
+    /** The arc an ambient sound comes from (degrees): 360 all round. */
+    val arc: Float,
     val strength: Float,
     val silent: Boolean,
     /** Whether it is uttering something now; a voice with takes rests between them. */

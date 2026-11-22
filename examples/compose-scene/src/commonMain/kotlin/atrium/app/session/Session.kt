@@ -392,6 +392,18 @@ internal class Session(private val store: SettingsStore) {
     }
 
     /**
+     * Make the ambient sound in [slot] come from an arc [degrees] wide, on the side its place lies
+     * on: from narrow to 360, all round.
+     */
+    fun arc(slot: UShort, degrees: Float) {
+        val running = engine ?: return
+        step("Arc · ${nameOf(slot)}", "arc:$slot")
+        command { setSourceArc(slot, degrees) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /**
      * Make [sound] ambient, heard everywhere, or a point again. The engine builds it again, which
      * takes a moment, so this runs off the UI thread in turn with every other build.
      */

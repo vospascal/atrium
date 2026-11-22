@@ -129,7 +129,8 @@ internal fun DrawScope.drawAmbient(marker: Marker, listenerAt: Point, view: TopD
     val alpha = if (marker.silent) .10f else .22f + .30f * marker.strength
     val stroke = Stroke(width = density * 7f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
     val from = atan2(fromListener.y, fromListener.x)
-    val surround = !fromListener.hasGroundBearing() || hypot(fromListener.x, fromListener.y) < SurroundWithin
+    val halfArc = ambientHalfArc(marker.arc)
+    val surround = halfArc == null || !fromListener.hasGroundBearing() || hypot(fromListener.x, fromListener.y) < SurroundWithin
     repeat(AmbientBands) { band ->
         // The bands drift toward the listener while the wind is heard.
         val drift = if (marker.silent) 0f else (beat * BandDrift) % 1f
@@ -141,8 +142,8 @@ internal fun DrawScope.drawAmbient(marker: Marker, listenerAt: Point, view: TopD
             // Compose measures angles clockwise from east; the map's north is up.
             drawArc(
                 marker.color.copy(alpha = fade),
-                startAngle = -(from + AmbientSpread) * 180f / PI.toFloat(),
-                sweepAngle = 2 * AmbientSpread * 180f / PI.toFloat(),
+                startAngle = -(from + halfArc) * 180f / PI.toFloat(),
+                sweepAngle = 2 * halfArc * 180f / PI.toFloat(),
                 useCenter = false,
                 topLeft = Offset(centre.x - radius, centre.y - radius),
                 size = androidx.compose.ui.geometry.Size(radius * 2, radius * 2),
@@ -263,11 +264,17 @@ private const val ListenerWedge = 40f
 private const val ListenerSpread = (35.0 * PI / 180.0).toFloat()
 private const val WedgeSteps = 12
 
-/** An ambient sound's bands: how many, how far from the listener the nearest is and how far apart (m), and how wide (rad). */
+/** An ambient sound's bands: how many, and how far from the listener the nearest is and how far apart (m). */
 private const val AmbientBands = 4
 private const val AmbientNearest = 3f
 private const val AmbientBandGap = 3f
-private const val AmbientSpread = (50.0 * PI / 180.0).toFloat()
+
+/**
+ * Half the angle an ambient sound's bands span (rad): half its arc, as the engine hears it, or
+ * `null` when it comes from all round and its bands are whole rings.
+ */
+internal fun ambientHalfArc(arcDegrees: Float): Float? =
+    if (arcDegrees >= AllRound) null else (arcDegrees.coerceAtLeast(NarrowestArc) / 2f) * PI.toFloat() / 180f
 
 /** An anchor this close to the listener means the sound comes from all round (m). */
 private const val SurroundWithin = 1f
