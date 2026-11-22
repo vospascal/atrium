@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use super::ambient_arc_headphones::place_towards;
 use super::headphone_equalisation_listening::recording;
 use super::Rig;
+use crate::audio::wav::{write_wav, SampleFormat};
 use crate::config::SceneConfig;
 use crate::synth::field_wind::FieldWindSource;
 use crate::synth::noise::Rng;
@@ -106,28 +107,6 @@ fn facing_north(_frame: usize) -> f32 {
     std::f32::consts::FRAC_PI_2
 }
 
-fn write_wav(path: &Path, interleaved: &[f32], channels: u16, scale: f32) {
-    let data_length = (interleaved.len() * 2) as u32;
-    let mut bytes = Vec::with_capacity(44 + data_length as usize);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&channels.to_le_bytes());
-    bytes.extend_from_slice(&48_000u32.to_le_bytes());
-    bytes.extend_from_slice(&(48_000u32 * 2 * channels as u32).to_le_bytes());
-    bytes.extend_from_slice(&(2 * channels).to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_length.to_le_bytes());
-    for sample in interleaved {
-        let scaled = (sample * scale).clamp(-1.0, 1.0);
-        bytes.extend_from_slice(&((scaled * 32_767.0) as i16).to_le_bytes());
-    }
-    std::fs::write(path, bytes).expect("write wav");
-}
-
 fn peak(samples: &[f32]) -> f32 {
     samples
         .iter()
@@ -146,7 +125,8 @@ fn write_ambient_arc_listening_samples() {
     let headphones = || Rig::headphones(SAMPLE_RATE);
     let write = |name: &str, output: &[f32], channels: u16, scale: f32| {
         let path = directory.join(format!("{name}.wav"));
-        write_wav(&path, output, channels, scale);
+        let scaled: Vec<f32> = output.iter().map(|sample| sample * scale).collect();
+        write_wav(&path, &scaled, channels, 48_000, SampleFormat::Pcm16).expect("write wav");
         eprintln!("{}", path.display());
     };
 

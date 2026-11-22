@@ -20,8 +20,59 @@ pub struct AudioBuffer {
     pub spectral_profile: SpectralProfile,
 }
 
+/// A file's samples as they are in it: every channel kept, interleaved.
+pub(crate) struct DecodedChannels {
+    pub(crate) interleaved: Vec<f32>,
+    pub(crate) channels: usize,
+    pub(crate) sample_rate: u32,
+}
+
 /// Decode an audio file (MP3, WAV, FLAC, etc.) into a mono f32 AudioBuffer.
 pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error>> {
+    let DecodedChannels {
+        interleaved,
+        channels,
+        sample_rate,
+    } = decode_channels(path)?;
+
+    // Downmix to mono if needed
+    let all_samples: Vec<f32> = if channels > 1 {
+        interleaved
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        interleaved
+    };
+
+    let rms = if all_samples.is_empty() {
+        0.0
+    } else {
+        (all_samples.iter().map(|s| s * s).sum::<f32>() / all_samples.len() as f32).sqrt()
+    };
+
+    let spectral_profile = spectral_profile::compute_profile(&all_samples, sample_rate);
+
+    println!(
+        "Decoded {}: {} samples, {}Hz, {}ch → mono (RMS: {:.4})",
+        path.display(),
+        all_samples.len(),
+        sample_rate,
+        channels,
+        rms,
+    );
+
+    Ok(AudioBuffer {
+        samples: all_samples,
+        sample_rate,
+        rms,
+        spectral_profile,
+    })
+}
+
+/// Decode an audio file with every channel it has, as it is: a WAV of
+/// floats comes back sample for sample.
+pub(crate) fn decode_channels(path: &Path) -> Result<DecodedChannels, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -86,41 +137,13 @@ pub fn decode_file(path: &Path) -> Result<AudioBuffer, Box<dyn std::error::Error
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
 
-        let interleaved = sample_buf.samples();
-
-        // Downmix to mono if needed
-        if channels > 1 {
-            for frame in interleaved.chunks(channels) {
-                let mono: f32 = frame.iter().sum::<f32>() / channels as f32;
-                all_samples.push(mono);
-            }
-        } else {
-            all_samples.extend_from_slice(interleaved);
-        }
+        all_samples.extend_from_slice(sample_buf.samples());
     }
 
-    let rms = if all_samples.is_empty() {
-        0.0
-    } else {
-        (all_samples.iter().map(|s| s * s).sum::<f32>() / all_samples.len() as f32).sqrt()
-    };
-
-    let spectral_profile = spectral_profile::compute_profile(&all_samples, sample_rate);
-
-    println!(
-        "Decoded {}: {} samples, {}Hz, {}ch → mono (RMS: {:.4})",
-        path.display(),
-        all_samples.len(),
-        sample_rate,
+    Ok(DecodedChannels {
+        interleaved: all_samples,
         channels,
-        rms,
-    );
-
-    Ok(AudioBuffer {
-        samples: all_samples,
         sample_rate,
-        rms,
-        spectral_profile,
     })
 }
 

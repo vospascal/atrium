@@ -107,29 +107,6 @@ impl atrium_core::source::SoundSource for Moving {
     fn tick(&mut self, _dt: f32) {}
 }
 
-fn write_stereo_wav(path: &std::path::Path, left: &[f32], right: &[f32]) {
-    let data_length = (left.len() * 4) as u32;
-    let mut bytes = Vec::with_capacity(44 + data_length as usize);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&48_000u32.to_le_bytes());
-    bytes.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
-    bytes.extend_from_slice(&4u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_length.to_le_bytes());
-    for (left, right) in left.iter().zip(right) {
-        for sample in [left, right] {
-            bytes.extend_from_slice(&((sample.clamp(-1.0, 1.0) * 32_767.0) as i16).to_le_bytes());
-        }
-    }
-    std::fs::write(path, bytes).expect("write");
-}
-
 /// Listening samples, for judging the near field by ear: nothing happens
 /// unless `NEAR_FIELD_OUT` names a directory. Each is rendered through the
 /// whole headphone pipeline twice, into `on/` and `off/` under the same
@@ -262,13 +239,19 @@ fn write_listening_samples() {
             .fold(0f32, |peak, sample| peak.max(sample.abs()))
             .max(1e-9);
         for ((left, right), side) in rendered.iter().zip(["on", "off"]) {
-            let scale =
-                |channel: &[f32]| channel.iter().map(|s| s * 0.8 / peak).collect::<Vec<_>>();
-            write_stereo_wav(
+            let interleaved: Vec<f32> = left
+                .iter()
+                .zip(right)
+                .flat_map(|(left, right)| [left * 0.8 / peak, right * 0.8 / peak])
+                .collect();
+            crate::audio::wav::write_wav(
                 &directory.join(side).join(format!("{name}.wav")),
-                &scale(left),
-                &scale(right),
-            );
+                &interleaved,
+                2,
+                48_000,
+                crate::audio::wav::SampleFormat::Pcm16,
+            )
+            .expect("write");
         }
     }
 }

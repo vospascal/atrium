@@ -16,3 +16,4 @@ pub mod synth_node;
 pub mod test_node;
 pub mod turbulence;
 pub mod voice_node;
+pub mod wav;

@@ -1,24 +1,4 @@
 use super::*;
-fn write_wav(path: &str, samples: &[f32], sample_rate: u32) {
-    let mut bytes = Vec::new();
-    let data_length = (samples.len() * 2) as u32;
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&sample_rate.to_le_bytes());
-    bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_length.to_le_bytes());
-    for sample in samples {
-        bytes.extend_from_slice(&((sample.clamp(-1.0, 1.0) * 32_767.0) as i16).to_le_bytes());
-    }
-    std::fs::write(path, bytes).expect("write");
-}
 #[test]
 fn write_listening_samples() {
     let Ok(directory) = std::env::var("THUNDER_OUT") else {
@@ -53,11 +33,14 @@ fn write_listening_samples() {
                 .iter()
                 .map(|sample| sample * 0.8 / peak)
                 .collect();
-            write_wav(
-                &format!("{directory}/{}-{seed}.wav", names[take as usize]),
+            crate::audio::wav::write_wav(
+                std::path::Path::new(&format!("{directory}/{}-{seed}.wav", names[take as usize])),
                 &scaled,
+                1,
                 48_000,
-            );
+                crate::audio::wav::SampleFormat::Pcm16,
+            )
+            .expect("write");
         }
     }
 }

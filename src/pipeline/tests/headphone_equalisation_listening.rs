@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use super::Rig;
 use crate::audio::decode::decode_file;
+use crate::audio::wav::{write_wav, SampleFormat};
 use crate::config::SceneConfig;
 use crate::synth::field_wind::FieldWindSource;
 use atrium_core::commands::Command;
@@ -120,28 +121,6 @@ fn render_nature(probe: Probe, frames: usize) -> Vec<f32> {
     output
 }
 
-fn write_stereo_wav(path: &Path, interleaved: &[f32], scale: f32) {
-    let data_length = (interleaved.len() * 2) as u32;
-    let mut bytes = Vec::with_capacity(44 + data_length as usize);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&48_000u32.to_le_bytes());
-    bytes.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
-    bytes.extend_from_slice(&4u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_length.to_le_bytes());
-    for sample in interleaved {
-        let scaled = (sample * scale).clamp(-1.0, 1.0);
-        bytes.extend_from_slice(&((scaled * 32_767.0) as i16).to_le_bytes());
-    }
-    std::fs::write(path, bytes).expect("write wav");
-}
-
 #[test]
 fn write_headphone_equalisation_listening_samples() {
     let Ok(directory) = std::env::var("HEADPHONE_EQ_OUT") else {
@@ -228,7 +207,8 @@ fn write_headphone_equalisation_listening_samples() {
         let scale = 0.8 / peak;
         for (output, side) in rendered.iter().zip(["on", "off"]) {
             let path = directory.join(side).join(format!("{name}.wav"));
-            write_stereo_wav(&path, output, scale);
+            let scaled: Vec<f32> = output.iter().map(|sample| sample * scale).collect();
+            write_wav(&path, &scaled, 2, 48_000, SampleFormat::Pcm16).expect("write wav");
             let side_peak = output.iter().fold(0f32, |peak, s| peak.max(s.abs()));
             let rms = (output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
                 / output.len() as f64)

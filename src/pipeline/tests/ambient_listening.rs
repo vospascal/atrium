@@ -111,33 +111,21 @@ fn facing_ahead(_frame: usize) -> f32 {
 }
 
 fn write_stereo_wav(path: &Path, interleaved: &[f32]) {
-    let channels = 2u16;
-    let sample_rate = SAMPLE_RATE as u32;
-    let data_length = (interleaved.len() * 2) as u32;
-    let mut bytes = Vec::with_capacity(44 + interleaved.len() * 2);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_length).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&channels.to_le_bytes());
-    bytes.extend_from_slice(&sample_rate.to_le_bytes());
-    bytes.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes());
-    bytes.extend_from_slice(&(channels * 2).to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_length.to_le_bytes());
-    let mut clipped = 0;
-    let mut peak = 0f32;
-    for sample in interleaved {
-        let scaled = sample * OUTPUT_SCALE;
-        peak = peak.max(scaled.abs());
-        if scaled.abs() > 1.0 {
-            clipped += 1;
-        }
-        bytes.extend_from_slice(&((scaled.clamp(-1.0, 1.0) * 32_767.0) as i16).to_le_bytes());
-    }
-    std::fs::write(path, bytes).expect("write wav");
+    let scaled: Vec<f32> = interleaved
+        .iter()
+        .map(|sample| sample * OUTPUT_SCALE)
+        .collect();
+    let peak = scaled
+        .iter()
+        .fold(0f32, |peak, sample| peak.max(sample.abs()));
+    let clipped = crate::audio::wav::write_wav(
+        path,
+        &scaled,
+        2,
+        SAMPLE_RATE as u32,
+        crate::audio::wav::SampleFormat::Pcm16,
+    )
+    .expect("write wav");
     eprintln!(
         "{}: peak {:.3}, {clipped} samples clipped",
         path.display(),
