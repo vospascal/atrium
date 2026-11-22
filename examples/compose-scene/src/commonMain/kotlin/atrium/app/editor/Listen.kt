@@ -31,6 +31,7 @@ internal val WholeRender = Probe(
     groundEffect = true,
     wallColouring = true,
     nearField = true,
+    headphoneEqualisation = true,
     onlyChannel = null,
 )
 
@@ -76,7 +77,10 @@ internal val Probe.hearsEveryPart: Boolean get() = direct && reflections && reve
 /**
  * An effect that can be switched off, to hear what it does: of the air, the ground, the walls, or
  * the head. The near field is the head's: how much louder the near ear hears a sound inside about
- * a metre, most of all in the bass. Only headphones render it; with speakers it changes nothing.
+ * a metre, most of all in the bass. The headphone equalisation takes the measured dummy head's
+ * loudspeaker and ear canal out of what reaches the ears, so they are not heard on top of the
+ * listener's own; off, the ears hear the measured responses as they are. Only headphones render
+ * these two; with speakers they change nothing.
  */
 internal enum class RenderEffect(val label: String, val said: String) {
     AirAbsorption("Air absorption", "air absorption"),
@@ -84,6 +88,7 @@ internal enum class RenderEffect(val label: String, val said: String) {
     Ground("Ground", "ground effect"),
     Walls("Wall colour", "wall colour"),
     NearField("Near field", "near field"),
+    HeadphoneEqualisation("Headphone EQ", "headphone equalisation"),
     ;
 
     fun isOn(probe: Probe): Boolean = when (this) {
@@ -92,6 +97,7 @@ internal enum class RenderEffect(val label: String, val said: String) {
         Ground -> probe.groundEffect
         Walls -> probe.wallColouring
         NearField -> probe.nearField
+        HeadphoneEqualisation -> probe.headphoneEqualisation
     }
 
     fun toggled(probe: Probe): Probe = when (this) {
@@ -100,6 +106,7 @@ internal enum class RenderEffect(val label: String, val said: String) {
         Ground -> probe.copy(groundEffect = !probe.groundEffect)
         Walls -> probe.copy(wallColouring = !probe.wallColouring)
         NearField -> probe.copy(nearField = !probe.nearField)
+        HeadphoneEqualisation -> probe.copy(headphoneEqualisation = !probe.headphoneEqualisation)
     }
 }
 

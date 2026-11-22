@@ -86,7 +86,9 @@ panel or list gets them by using it.
   scene alone: the direct sound, the reflections, the late reverb or the ambient sounds. *With*
   switches single effects off and on: air absorption, moving air, the ground, wall colour, and
   the near field (on headphones, the near ear's extra level for a sound inside about a metre; the
-  engine's README, "A sound beside the ear").
+  engine's README, "A sound beside the ear"), and the headphone EQ (on headphones, the dummy
+  head's own loudspeaker and ear canal taken out of what reaches the ears; off, they are heard as
+  measured; the engine's README, "Two ear canals").
   *From* plays one loudspeaker or one ear alone. While anything is hidden the top bar says
   what is heard, and pressing that brings the whole scene back. It is yours, like a mute: not
   saved, not undone.

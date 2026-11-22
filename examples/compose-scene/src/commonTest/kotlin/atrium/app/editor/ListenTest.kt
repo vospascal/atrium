@@ -65,6 +65,10 @@ class ListenTest {
             "Hearing without near field · R only",
             probeLine(RenderEffect.NearField.toggled(WholeRender).copy(onlyChannel = 1u), room),
         )
+        assertEquals(
+            "Hearing without headphone equalisation",
+            probeLine(RenderEffect.HeadphoneEqualisation.toggled(WholeRender), room),
+        )
     }
 
     /** The near field is an effect like the others: on in the whole scene, switched by itself. */
@@ -76,5 +80,17 @@ class ListenTest {
         assertFalse(without.isWhole)
         assertTrue(without.hearsEveryPart)
         assertEquals(listOf(RenderEffect.NearField), RenderEffect.entries.filterNot { it.isOn(without) })
+    }
+
+    /** The headphone equalisation is an effect like the others: on in the whole scene, switched by itself. */
+    @Test
+    fun theHeadphoneEqualisationIsSwitchedLikeTheOtherEffects() {
+        assertTrue(WholeRender.headphoneEqualisation)
+        val without = RenderEffect.HeadphoneEqualisation.toggled(WholeRender)
+        assertFalse(without.headphoneEqualisation)
+        assertFalse(without.isWhole)
+        assertTrue(without.hearsEveryPart)
+        assertEquals(listOf(RenderEffect.HeadphoneEqualisation), RenderEffect.entries.filterNot { it.isOn(without) })
+        assertEquals(WholeRender, RenderEffect.HeadphoneEqualisation.toggled(without))
     }
 }
