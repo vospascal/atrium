@@ -18,6 +18,15 @@ let text = atrium_analysis::comparison_summary(&comparison);      // one screen:
 let png = atrium_analysis::comparison_picture(&reference, &others); // 1600 px of overlays, the reference black
 ```
 
+And a long recording cut into its takes, the rests between them, their types and bouts:
+
+```rust
+let cut = atrium_analysis::cut(&signal, &CutSettings { band: None });  // every decision with its values
+let text = atrium_analysis::cut_summary("heading", &cut);              // one screen: band, criterion, takes, gaps, types
+let png = atrium_analysis::cut_picture("heading", &signal, &cut);      // takes boxed on the spectrogram, gaps, similarity
+let audio = cut.takes[0].samples(&signal);                             // a take's samples, faded in and out
+```
+
 And the same measures on a stream, for the app's Analysis lanes while a scene plays:
 
 ```rust
@@ -27,9 +36,11 @@ let columns = live.take_columns();     // 50 ms each: spectrum, LAeq and LAF, on
 ```
 
 `report` serialises to JSON (`report_version: 1`), which the comparison reads back as it is;
-`Comparison` serialises to JSON too (`comparison_version: 1`). The binary that
-decodes files, reads a render's sidecar and writes all three is `src/bin/analyse.rs`; see
-run.md, "Analyse a file". `power_while_sounding` is the gated level the engine calibrates
+`Comparison` serialises to JSON too (`comparison_version: 1`), and `Cut` (`cut_version: 1`). The
+binary that decodes files, reads a render's sidecar and writes all three is `src/bin/analyse.rs`;
+see run.md, "Analyse a file". The cutter's is `src/bin/cut.rs` ("Cut a recording"), and the
+draft preset it writes is the engine's (`atrium::config::draft_preset`): this crate knows no
+preset. `power_while_sounding` is the gated level the engine calibrates
 presets with; it lives here so there is one.
 
 Pure functions on samples: no engine type, no file, no I/O. The measures cannot depend on the
@@ -73,8 +84,12 @@ src/
   compare/         the comparison: mod.rs (Compared, compare), comparison.rs (the serde types),
                    one file per group (level, colour, texture, events, space, over_time),
                    summary.rs (its one-screen text), tests.rs (the acceptance checks)
+  cut/             the cutter: mod.rs (cut, the steps in order), record.rs (the serde types),
+                   one file per step: band.rs, bed.rs, events.rs, criterion.rs, edges.rs,
+                   drops.rs, measures.rs, types.rs, bouts.rs; summary.rs, tests.rs
   picture/         mod.rs (layout), spectrogram.rs, curves.rs, canvas.rs, font.rs;
-                   comparison.rs (the comparison's picture) on axes.rs (overlay panels)
+                   comparison.rs (the comparison's picture) on axes.rs (overlay panels);
+                   cut.rs (the cut's picture)
   frequency_rows.rs  the spectrogram's axis (20 Hz to 20 kHz, log) and window, picture and live
   live/            the stream: mod.rs (Live, Column), a_weighting.rs, spectrum.rs, onsets.rs
   statistics.rs    decibels, quantiles, correlation
@@ -215,6 +230,65 @@ coherence per octave; and each file's spectrogram as a strip.
   relative to its own loudest cell.** A 3 s blackbird take is then a short strip beside a minute
   of wind, which is what they are; and an uncalibrated recording's cells have no level to share.
 
+## The cutter
+
+`cut` takes a long field recording and finds its takes: the calls or songs, each with its
+attack and its decay, the rests between them, their types by shape and the runs of one type.
+Every rule is a step of its own (docs/cutter-plan.md has the table and its sources); `Cut`
+records each decision with the values behind it.
+
+| Step | Rule | From |
+|---|---|---|
+| Band | The third octaves whose L1 − L90 lies within 6 dB of the largest; or `--band` | Raven's band-limited energy detector |
+| Level | The channels' mean in the band, a reading every 1 ms over a frame of B·T = 5 | Ten degrees of freedom: noise never reaches the start threshold |
+| Bed | 10th percentile over the 10 s behind and the 10 s ahead; the one the level around reaches | Raven's block percentile; the frog's 11 dB step |
+| Events | Start 15 dB over the bed, end under 6 dB over it | Measured on the frog, not published |
+| Takes | Events joined across gaps shorter than the bout criterion: two Poisson processes fitted to the gaps by maximum likelihood, if they fit better by BIC and give two peaks in log gap | Sibly, Nott & Fletcher 1990; Langton, Collett & Sibly 1995 |
+| Edges | Back down the attack while above bed + 3 dB (0.3 s at most), on through the decay to bed + 3 dB (2 s at most); 5 ms raised-cosine fades outside | The plan; clicks tested |
+| Dropped | Under 50 ms; cut off by the recording's ends; three samples running at full scale | |
+| Measures | Duration, `power_while_sounding` of the channels' mean, re the loudest, SNR in the band, centroid; flagged under 20 dB SNR | |
+| Types | Largest normalised cross-correlation of log-mel spectrograms over a shift, average linkage at 0.40 (provisional) | Raven, warbleR `cross_correlation` |
+
+### Decisions that look wrong and are right, cutting
+
+- **The band is picked by L1 − L90, not L10 − L90.** L10 is the level exceeded a tenth of the
+  time: a bird calling for 150 ms every 4 s sounds 4 % of the time, and its band's L10 is the bed.
+  By L10 every band was equally eventful, and the whole spectrum was detected in.
+- **A reading averages B·T = 5, so its frame is longer in a narrower band** (2 ms wide, 22 ms in
+  one third octave at 1 kHz). Readings of one length let the narrow low bands scatter most by
+  chance, and noise alone looked eventful there. At ten degrees of freedom noise reaches the
+  start threshold with a chance under 10⁻¹⁰ a reading.
+- **The bed is not a window centred on the moment.** A centred 10th percentile drops as soon as
+  a tenth of its window lies past a step down: 4 s of the loud side were measured against the
+  quiet bed, 11 dB too low, and noise became a take. The bed behind and the bed ahead are both
+  taken; where the level around the moment stands above the larger, the larger is the bed, else
+  the smaller. That is the right side of a step whichever way it goes.
+- **The edges use bed + 3 dB, which a reading of the bed alone exceeds nearly half the time**
+  (the bed is its 10th percentile, 3 dB under its mean). Walking back to the first reading under
+  it wandered into the bed, so the start walks back only while the level is falling: down the
+  attack and no further. The end moves on through the decay's wobble to bed + 3 dB: a take ends
+  a little late rather than cut its reverb.
+- **An edge is the outer end of its reading's frame**, not the reading's centre: the sound
+  started somewhere inside that frame, so the take starts at its beginning. In a narrow band the
+  attack is kept with up to a frame of bed before it (25 ms for a burst at 1 kHz).
+- **The fades lie outside the edges**, so the 5 ms fade in and out is over the bed, not the
+  attack or the decay.
+- **Two processes need two peaks, not only a better fit.** A mixture of two exponentials fits
+  any gaps that are not exponential better than one does; rests spread evenly over 1–4 s are
+  one kind, and the information criterion alone split them and joined calls across the short
+  ones.
+- **A take is not split where the level dips inside an event.** Splitting where it falls 15 dB
+  and rises 15 dB again was tried for the frog chorus, whose calls follow within 0.1 s with
+  their reverb between: it split every pulse of every call (about 30 a second), and the
+  criterion joined the same takes back. One frog take holds four chorus calls.
+- **Short takes are dropped before the gaps are measured; cut-off and clipping ones after.** A
+  click is not the animal and must not split a rest; a clipped call is, and the animal rested
+  around it.
+- **A take's level is of its channels' mean**, as the engine mixes a recording to one channel and
+  calibrates a kind's takes together; the draft leaves `level_spread` out for that reason.
+- **The similarity covers the detection band only**, so the bed outside it does not make two
+  takes look alike or apart.
+
 ## Live
 
 `Live` measures what the engine plays, a column every 50 ms, from the same pieces as the
@@ -274,6 +348,18 @@ reads it both ways: every 100 ms width and ILD identical, every 3 s LAeq identic
 - **The comparison's texture compares subbands by index**, which is right for any two sample
   rates of 20 kHz and above (the cochlear bank is the same up to 10 kHz; only the highpass's top
   differs).
+
+- **The cutter's type threshold (0.40) is provisional**, set from two synthetic song shapes
+  (one shape at least 0.68 alike, two at most 0.12). The plan sets it on a field recording with
+  every call's start and end marked by ear, which needs a download not yet made.
+- **The cutter's event thresholds (15 and 6 dB over the bed) were set on one recording**, the
+  frog, by the count of its calls on its A-weighted FAST level.
+- **Timing cannot split a chorus whose calls follow within 0.1 s**: their reverb fills the gaps,
+  the gaps left are as short as the drops inside a call, and the bout criterion joins them. The
+  frog has one such 4.3 s take of four calls.
+- **A cut take carries its bed while it sounds and nothing between**: a scene playing the takes
+  is silent where the recording had its bed (the frog's round trip: its level distribution
+  below L50 is one level). A bed under them is the scene's, or a separation's residual.
 
 - **The onset threshold is ours, set from four bird takes and one wind.** 0.75 dB above the
   local median rise keeps no onset in the meadow's wind and keeps the birds' syllables. Labelled

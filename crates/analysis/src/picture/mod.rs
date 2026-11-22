@@ -10,15 +10,18 @@
 //! - `spectrogram`: the spectrogram's cells and colours
 //! - `curves`: the other panels
 //! - `comparison`: the comparison's picture, its overlays on `axes`
+//! - `cut`: the cut's picture
 
 mod axes;
 mod canvas;
 mod comparison;
 mod curves;
+mod cut;
 mod font;
 mod spectrogram;
 
 pub use comparison::comparison_picture;
+pub use cut::cut_picture;
 
 use canvas::{Canvas, BLACK, CHARACTER_WIDTH, LINE_HEIGHT, MUTED, WHITE};
 use spectrogram::{colour, grid, RANGE_DECIBELS};

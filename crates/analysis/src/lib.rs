@@ -2,9 +2,10 @@
 //! and space, each from a published definition, as numbers (`Report`, JSON
 //! for the comparison tool), as a one-screen text (`summary`) and as a
 //! picture (`picture`). Reports side by side, where the others differ from a
-//! reference (`compare`, `comparison_summary`, `comparison_picture`). The
-//! same measures on a stream, a column every 50 ms while a scene plays
-//! (`Live`).
+//! reference (`compare`, `comparison_summary`, `comparison_picture`). A long
+//! recording cut into its takes, rests, types and bouts (`cut`,
+//! `cut_summary`, `cut_picture`). The same measures on a stream, a column
+//! every 50 ms while a scene plays (`Live`).
 //!
 //! Pure functions on samples: no engine type, no file. The measures cannot
 //! depend on the engine they measure, and each is tested against a signal
@@ -13,6 +14,7 @@
 mod analyse;
 mod bands;
 mod compare;
+mod cut;
 mod envelope;
 mod frequency_rows;
 mod level;
@@ -40,9 +42,14 @@ pub use compare::{
     PercentileDifference, Place, RateDifference, Ratio, SpaceDifferences, TextureClass,
     TextureDifferences,
 };
+pub use cut::{
+    cut, cut_summary, BandSpread, BoutCriterion, Bouts, CriterionDecision, Cut, CutSettings,
+    DetectionBand, DropReason, Dropped, Event, Gaps, LevelSeries, OneProcess, Process, Run, Take,
+    Thresholds, TwoProcesses, TypeGroup, Types,
+};
 pub use level::power_while_sounding;
 pub use live::{Column, Live};
-pub use picture::{comparison_picture, picture};
+pub use picture::{comparison_picture, cut_picture, picture};
 pub use report::{
     BandLevel, Binaural, BinauralBand, Colour, Distribution, Events, Level, LevelUnit, Levels,
     ModulationCorrelation, OverTime, Report, Segment, SignalFacts, Space, Subband,

@@ -307,7 +307,7 @@ pub(crate) fn is_peak(values: &[f64], index: usize, windows: &PeakWindows, delta
 
 /// Slaney's mel scale (librosa's default, `htk=False`): linear below 1 kHz,
 /// logarithmic above.
-fn hertz_to_mel(frequency: f64) -> f64 {
+pub(crate) fn hertz_to_mel(frequency: f64) -> f64 {
     let linear_step = 200.0 / 3.0;
     let log_step = 6.4f64.ln() / 27.0;
     if frequency >= 1000.0 {
@@ -317,7 +317,7 @@ fn hertz_to_mel(frequency: f64) -> f64 {
     }
 }
 
-fn mel_to_hertz(mel: f64) -> f64 {
+pub(crate) fn mel_to_hertz(mel: f64) -> f64 {
     let linear_step = 200.0 / 3.0;
     let log_step = 6.4f64.ln() / 27.0;
     let break_mel = 1000.0 / linear_step;
