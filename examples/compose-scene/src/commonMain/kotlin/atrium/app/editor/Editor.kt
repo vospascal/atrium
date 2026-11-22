@@ -189,7 +189,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                 EditorMap(session, strengths, selection, onSelection, carry, Modifier.weight(1f).fillMaxWidth())
                                 if (workspace.bottomShown) {
                                     Splitter(acrossWidth = false) { workspace.bottomHeight -= it }
-                                    TracksPanel(session, selection, onSelection, Modifier.fillMaxWidth().height(workspace.bottomHeight))
+                                    BottomPanel(session, workspace, selection, onSelection, Modifier.fillMaxWidth().height(workspace.bottomHeight))
                                 }
                             }
                             if (workspace.rightShown) {

@@ -36,6 +36,7 @@ internal fun RunSession(session: Session) {
         try {
             session.forgetMix()
             session.tracks.clear()
+            session.analysis.restart(running.analysisScale())
             session.unsaved = false
             session.weather = running.weather()
             session.probe = running.probe()
@@ -60,6 +61,10 @@ internal fun RunSession(session: Session) {
                     session.telemetry = it
                     if (!session.paused) session.tracks.record(running.sceneTime().toDouble(), it.sources)
                 }
+                // Read whichever tab shows, so the analysis has the past when it is opened; the
+                // engine drops what is not read within a few seconds. While paused the columns
+                // carry the time the clock stopped at, and the history leaves them out.
+                session.analysis.record(running.analysis())
             }
         } finally {
             session.engine = null

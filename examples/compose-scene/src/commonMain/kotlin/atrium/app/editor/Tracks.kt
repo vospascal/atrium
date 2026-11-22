@@ -1,7 +1,7 @@
 package atrium.app.editor
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.foundation.clickable
@@ -60,50 +60,41 @@ private const val AheadShare = .25
 /** How many moments a condition lane is drawn from. */
 private const val LaneSteps = 160
 
-/**
- * Every voice of the engine as a track, the way a multitrack editor shows
- * them: a header with the voice's number and the sound in it, the past as
- * clips, each named after its take and outlined by its level, and right of
- * the "now" line the takes the plan has already decided, drawn open. Above
- * the voices, the place's conditions as lanes, past and future alike. An
- * empty voice is a free track a sound can be added to.
- */
+/** What the bottom panel shows under its timeline. */
+internal enum class BottomTab { Tracks, Analysis }
+
+/** Seconds into the playing scene, read every frame, as the ruler's "now". */
 @Composable
-internal fun TracksPanel(
-    session: Session,
-    selection: Selection,
-    onSelection: (Selection) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val sounds = session.description?.sources.orEmpty()
-    val keys = remember { HeldKeys() }
-    val history = session.tracks
+private fun playhead(session: Session): Double {
     val now by produceState(session.sceneTime()) {
         while (true) withFrameMillis { value = session.sceneTime() }
     }
-    val text = rememberTextMeasurer()
-    val ink = Foreground
-    val faint = Hairline
-    val muted = Muted
-    val tint = LocalInkTint.current
+    return now
+}
+
+/**
+ * The panel under the map, as a video editor's: on top the timeline, the meters and the zoom,
+ * and the ruler; under them two tabs on the ruler's time axis. Tracks shows the voices and the
+ * place's conditions; Analysis shows what was heard, measured as it played. The tab chosen is
+ * kept in [workspace]. [now] is the scene's time at the ruler's "now" line.
+ */
+@Composable
+internal fun BottomPanel(
+    session: Session,
+    workspace: Workspace,
+    selection: Selection,
+    onSelection: (Selection) -> Unit,
+    modifier: Modifier = Modifier,
+    now: Double = playhead(session),
+) {
     var shown by remember { mutableStateOf(TrackZooms[1].first) }
     val ahead = (shown * AheadShare).coerceAtMost(PlannedAhead.toDouble())
     val span = shown + ahead
-    val lanes by produceState(emptyList<atrium.engine.Conditions>(), shown, session.engine) {
-        while (true) {
-            value = session.conditionsAround(-shown.toFloat(), ahead.toFloat(), LaneSteps)
-            kotlinx.coroutines.delay(500)
-        }
-    }
-    // Where a moment on the session's clock lies across the strip, 0 to 1.
-    fun along(seconds: Double) = ((seconds - (now - shown)) / span).toFloat()
-    val nowAt = (shown / span).toFloat()
     Column(modifier) {
-        Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            PaperText("TRACKS", 12, Muted, FontWeight.SemiBold, spacing = 2f)
-            Spacer(Modifier.weight(1f))
-            ChannelMeters(session)
+        Overview(session, now, Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 4.dp)) {
             Spacer(Modifier.width(14.dp))
+            ChannelMeters(session)
+            Spacer(Modifier.width(4.dp))
             TrackZooms.forEach { (seconds, label) ->
                 PaperText(
                     label,
@@ -114,7 +105,6 @@ internal fun TracksPanel(
                 )
             }
         }
-        Overview(session, now, Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 6.dp))
         Row(Modifier.fillMaxWidth().padding(end = 14.dp, bottom = 2.dp)) {
             Spacer(Modifier.width(HeaderWidth))
             // Dragging the ruler scrubs: the scene moves as far as the drag goes along it.
@@ -130,8 +120,73 @@ internal fun TracksPanel(
                     },
             )
         }
-        // The lanes and the voices scroll together under the fixed ruler when the panel is short.
-        ScrollArea(Modifier.weight(1f)) {
+        BottomTabs(workspace.bottomTab) { workspace.bottomTab = it }
+        when (workspace.bottomTab) {
+            BottomTab.Tracks -> TrackLanes(session, now, shown, ahead, selection, onSelection, Modifier.weight(1f))
+            BottomTab.Analysis -> AnalysisLanes(session.analysis, now, shown, ahead, Modifier.weight(1f))
+        }
+    }
+}
+
+/** The bottom panel's tabs, in the look of the side panel's: the chosen one bold, a hairline under them. */
+@Composable
+private fun BottomTabs(selected: BottomTab, onSelect: (BottomTab) -> Unit) {
+    val line = Hairline
+    Row(
+        Modifier.fillMaxWidth().padding(start = 8.dp, end = 14.dp, top = 2.dp)
+            .drawBehind { drawLine(line, Offset(0f, size.height - .5f), Offset(size.width, size.height - .5f), 1f) },
+    ) {
+        BottomTab.entries.forEach { tab ->
+            PaperText(
+                tab.name,
+                13,
+                if (tab == selected) Foreground else Muted,
+                if (tab == selected) FontWeight.Bold else FontWeight.Normal,
+                singleLine = true,
+                modifier = Modifier.clickable(role = Role.Tab) { onSelect(tab) }.padding(horizontal = 6.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Every voice of the engine as a track, the way a multitrack editor shows
+ * them: a header with the voice's number and the sound in it, the past as
+ * clips, each named after its take and outlined by its level, and right of
+ * the "now" line the takes the plan has already decided, drawn open. Above
+ * the voices, the place's conditions as lanes, past and future alike. An
+ * empty voice is a free track a sound can be added to.
+ */
+@Composable
+private fun TrackLanes(
+    session: Session,
+    now: Double,
+    shown: Double,
+    ahead: Double,
+    selection: Selection,
+    onSelection: (Selection) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val sounds = session.description?.sources.orEmpty()
+    val keys = remember { HeldKeys() }
+    val history = session.tracks
+    val text = rememberTextMeasurer()
+    val ink = Foreground
+    val faint = Hairline
+    val muted = Muted
+    val tint = LocalInkTint.current
+    val span = shown + ahead
+    val lanes by produceState(emptyList<atrium.engine.Conditions>(), shown, session.engine) {
+        while (true) {
+            value = session.conditionsAround(-shown.toFloat(), ahead.toFloat(), LaneSteps)
+            kotlinx.coroutines.delay(500)
+        }
+    }
+    // Where a moment on the session's clock lies across the strip, 0 to 1.
+    fun along(seconds: Double) = ((seconds - (now - shown)) / span).toFloat()
+    val nowAt = (shown / span).toFloat()
+    // The lanes and the voices scroll together under the fixed ruler when the panel is short.
+    ScrollArea(modifier) {
         for (condition in Condition.entries) {
             Row(Modifier.fillMaxWidth().height(LaneHeight), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.width(HeaderWidth).padding(start = 36.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -211,7 +266,6 @@ internal fun TracksPanel(
                 }
             }
         }
-        }
     }
 }
 
@@ -286,7 +340,8 @@ private fun Ruler(shown: Double, ahead: Double, modifier: Modifier) {
 
 private val TrackHeight = 17.dp
 private val LaneHeight = 14.dp
-private val HeaderWidth = 150.dp
+/** The width of the lanes' names, left of the strip that lines up with the ruler. */
+internal val HeaderWidth = 150.dp
 
 /** The voice a preset or a take is heard from on its own; shown as Preview when no sound holds it. */
 private const val AuditionTrack = VoiceCount - 1

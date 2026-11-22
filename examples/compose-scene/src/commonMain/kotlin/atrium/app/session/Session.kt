@@ -92,6 +92,7 @@ internal class Session(private val store: SettingsStore) {
         val running = engine ?: return
         running.seek(seconds.coerceAtLeast(0.0).toFloat())
         tracks.clear()
+        analysis.clear()
     }
 
     /** How fast the weather runs, 1 being as fast as the scene. */
@@ -140,8 +141,11 @@ internal class Session(private val store: SettingsStore) {
     fun conditionsAround(from: Float, to: Float, steps: Int): List<Conditions> =
         engine?.conditions(from, to, steps.toUInt()).orEmpty()
 
-    /** What every voice did over the last two minutes, for the tracks under the map. */
+    /** What every voice did over the last ten minutes, for the tracks under the map. */
     val tracks = TrackHistory()
+
+    /** What the output sounded like over the last ten minutes, for the analysis under the map. */
+    val analysis = AnalysisHistory()
 
     /** What the listener silenced or asked to hear alone; forgotten when the scene changes. */
     var mix by mutableStateOf(LayerMix())

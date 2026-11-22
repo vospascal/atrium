@@ -33,6 +33,18 @@ class WorkspaceTest {
         assertFalse(restarted.leftShown)
     }
 
+    /** The bottom panel opens on Tracks, and on whichever tab was chosen last after a restart. */
+    @Test
+    fun theBottomTabIsKept() {
+        val store = Memory()
+        assertEquals(BottomTab.Tracks, Workspace(store).bottomTab)
+        Workspace(store).bottomTab = BottomTab.Analysis
+        assertEquals("Analysis", store.values["editor.bottom.tab"])
+        assertEquals(BottomTab.Analysis, Workspace(store).bottomTab)
+        store.values["editor.bottom.tab"] = "Nonsense"
+        assertEquals(BottomTab.Tracks, Workspace(store).bottomTab, "an unknown tab falls back to Tracks")
+    }
+
     /** Tab hides every panel while any shows, and shows them all when none does. */
     @Test
     fun tabHidesAllOrShowsAll() {

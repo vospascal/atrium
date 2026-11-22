@@ -24,6 +24,9 @@ internal class Workspace(private val store: SettingsStore) {
     var rightWidth by remembered("right.width", 320.dp, SideLimits)
     var bottomHeight by remembered("bottom.height", 360.dp, BottomLimits)
 
+    /** What the bottom panel shows under its timeline. */
+    var bottomTab by remembered("bottom.tab", BottomTab.Tracks)
+
     /** Whether any panel shows. */
     val anyShown: Boolean get() = leftShown || rightShown || bottomShown
 
@@ -39,6 +42,12 @@ internal class Workspace(private val store: SettingsStore) {
         "$Prefix$key",
         store.read("$Prefix$key")?.toBooleanStrictOrNull() ?: default,
         write = { store.write("$Prefix$key", it.toString()) },
+    )
+
+    private fun remembered(key: String, default: BottomTab) = Stored(
+        "$Prefix$key",
+        store.read("$Prefix$key")?.let { saved -> BottomTab.entries.firstOrNull { it.name == saved } } ?: default,
+        write = { store.write("$Prefix$key", it.name) },
     )
 
     private fun remembered(key: String, default: Dp, limits: ClosedFloatingPointRange<Float>) = Stored(

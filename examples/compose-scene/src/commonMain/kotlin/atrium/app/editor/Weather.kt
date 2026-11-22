@@ -3,6 +3,7 @@ package atrium.app.editor
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -193,10 +194,10 @@ private val WeatherSpeeds = listOf(1f to "1×", 10f to "10×", 60f to "60×")
  * it and the wind as a line, and the playhead where the scene is [now]. Press
  * or drag anywhere to move the whole scene there, every sound and the
  * weather. The speed runs the weather faster while the sounds keep their own
- * pace.
+ * pace. [trailing] follows on the same line.
  */
 @Composable
-internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifier) {
+internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifier, trailing: @Composable RowScope.() -> Unit = {}) {
     // The three hours the playhead is in.
     val windowStart = ((now / OverviewWindow).toInt() * OverviewWindow).toDouble()
     val weather by produceState(emptyList<Conditions>(), session.engine, session.weather, session.weatherSpeed, windowStart) {
@@ -265,5 +266,6 @@ internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifi
                     .padding(horizontal = 5.dp, vertical = 2.dp),
             )
         }
+        trailing()
     }
 }

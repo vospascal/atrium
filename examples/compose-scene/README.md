@@ -65,13 +65,24 @@ panel or list gets them by using it.
   from the repository is written by hand and keeps its comments, so its first save asks for a
   name and writes a copy beside it. That copy is the editor's own, and later saves replace it.
   Mutes, volume, output and head tracking are yours and are not saved with the scene.
-- **Tracks** under the map are the engine's 16 voices, as in a multitrack editor. Each shows the
+- **The bottom panel** under the map has the timeline, the meters and the zoom on top, then the
+  ruler, then two tabs on the ruler's time axis: **Tracks** and **Analysis**. The tab chosen is
+  kept between launches.
+- **Tracks** are the engine's 16 voices, as in a multitrack editor. Each shows the
   sound in it, or Empty, and the last minutes as clips: where it sounded, which take, and how
   loud the take itself was. A sound that rests leaves gaps; one that loops is one long clip; a
   muted one is faint. Right of the "now" line are the takes the plan has already decided, drawn
   open. Above the voices, wind, rain, storm and daylight are lanes, the past and what the weather
   story will do next. Click a track to select its sound. It zooms to 30 s, 2 min or 10 min.
-- **The timeline** is the top of the tracks panel: three hours of the scene with its weather drawn
+- **Analysis** is what the output sounded like, measured as it played by the same analyser as
+  `analyse` (`crates/analysis`), so a live number and a report's agree: a column every 50 ms.
+  The header gives LAeq, L90, L10, width and onsets a minute over the span shown. Under it the
+  spectrum on a fixed dB SPL scale in the offline picture's colours (scale on the right), the
+  A-weighted FAST level with L90 dashed, onsets, width (0 one source, 1 diffuse) and the ear
+  (right minus left). Right of now stays empty: only what has sounded can be measured. Hover
+  for the time and the values under the pointer. It keeps ten minutes, is read whichever tab
+  shows, and starts again on a seek.
+- **The timeline** is the top of the bottom panel: three hours of the scene with its weather drawn
   in. Press or drag anywhere on it to move the whole scene there: every sound and the weather are
   as they would be at that moment, a take under way starts partway, and it plays on from there.
   Dragging the ruler above the tracks scrubs more finely. 1×, 10× and 60× run the weather faster
@@ -80,7 +91,7 @@ panel or list gets them by using it.
 - **Air** is under Weather: the temperature and humidity, which decide how fast sound travels
   and how much treble the air takes from a distant sound. A point also has a **Size**, from a
   point to all around, drawn as a soft disc on the map.
-- **Channel meters** sit in the header of the tracks: one per output channel, named as the room
+- **Channel meters** sit on the timeline's line, before the zoom: one per output channel, named as the room
   names its loudspeakers, bold when a channel clips.
 - **Listen** is in the inspector when nothing is selected. *Hear only* plays one part of the
   scene alone: the direct sound, the reflections, the late reverb or the ambient sounds. *With*
