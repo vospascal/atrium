@@ -11,7 +11,9 @@
 //! hears the same take at the same moment, each from its own position.
 //!
 //! What is decided is a pure function of the rhythms, the seed and the time
-//! window, so it is tested without a sound device.
+//! window, so it is tested without a sound device. For the same reason a
+//! scene rendered to a file drives the same plan in step with its blocks
+//! (`stepped`) instead of on a thread, and hears the same takes.
 
 mod clock;
 mod conditions;
@@ -19,14 +21,18 @@ mod due;
 mod rhythm;
 mod runner;
 mod session;
+mod stepped;
 mod story;
 mod voice;
 
 pub use clock::Clock;
 pub use conditions::{Condition, Conditions, Follow, Target};
+#[cfg(test)]
+pub(crate) use due::LEAD_SECONDS;
 pub use due::{Due, Scheduled};
 pub use rhythm::{Rests, Rhythm, TakeRhythm};
 pub use runner::Planner;
 pub use session::Plan;
+pub(crate) use stepped::SteppedPlanner;
 pub use story::{Story, Weather, PREVAILING_WIND_FROM};
 pub use voice::Planned;

@@ -21,7 +21,7 @@ use crate::audio::propagation::GroundProperties;
 use crate::engine::scene::{AudioScene, InitialSourceState};
 use crate::pipeline::environment::Environment;
 use crate::pipeline::{build_all_pipelines, PipelineParams};
-use crate::plan::{Clock, Follow, Plan, Planner, Rhythm};
+use crate::plan::{Clock, Follow, Plan, Planner, Rhythm, Scheduled};
 
 pub struct BuildResult {
     pub scene: AudioScene,
@@ -41,6 +41,42 @@ pub struct BuildResult {
     pub pipeline_post: Vec<String>,
     /// Channel labels for TUI display (e.g. ["FL", "FR", "C", "LFE", "RL", "RR"]).
     pub channel_labels: Vec<String>,
+}
+
+/// A built scene whose plan has not started: what [`BuildResult`] holds,
+/// with the plan itself and the ring to the audio thread in place of the
+/// planner's thread. A scene that plays starts the plan beside the audio
+/// ([`UnstartedBuild::start`]); a scene rendered to a file drives it in step
+/// with its blocks instead.
+pub(crate) struct UnstartedBuild {
+    pub(crate) scene: AudioScene,
+    pub(crate) plan: Plan,
+    /// Where the plan hands over what is due; the scene's `plan_in` reads it.
+    pub(crate) plan_out: rtrb::Producer<Scheduled>,
+    sounds: SoundBuilder,
+    description: SceneDescription,
+    scene_json: String,
+    source_names: Vec<String>,
+    pipeline_post: Vec<String>,
+    channel_labels: Vec<String>,
+}
+
+impl UnstartedBuild {
+    /// Start the plan on its own thread beside the audio, as a playing scene
+    /// does.
+    fn start(self) -> BuildResult {
+        let planner = Planner::start(self.plan, self.scene.clock.clone(), self.plan_out);
+        BuildResult {
+            scene: self.scene,
+            planner,
+            sounds: self.sounds,
+            description: self.description,
+            scene_json: self.scene_json,
+            source_names: self.source_names,
+            pipeline_post: self.pipeline_post,
+            channel_labels: self.channel_labels,
+        }
+    }
 }
 
 /// Result of building sources.
@@ -63,6 +99,11 @@ impl SceneConfig {
     }
 
     pub fn build(self) -> Result<BuildResult, Box<dyn std::error::Error>> {
+        Ok(self.build_unstarted()?.start())
+    }
+
+    /// Build the scene without starting its plan.
+    pub(crate) fn build_unstarted(self) -> Result<UnstartedBuild, Box<dyn std::error::Error>> {
         // Load environment (virtual acoustic space) from file
         let environment_cfg: EnvironmentConfig = load_yaml(&self.environment)?;
         let environment_min = Vec3::ZERO;
@@ -126,8 +167,7 @@ impl SceneConfig {
             plan.add_voice(slot, id.as_str(), rhythm, follows, 0.0);
         }
         let clock = std::sync::Arc::new(Clock::default());
-        let (to_audio, plan_in) = rtrb::RingBuffer::new(PLAN_CAPACITY);
-        let planner = Planner::start(plan, clock.clone(), to_audio);
+        let (plan_out, plan_in) = rtrb::RingBuffer::new(PLAN_CAPACITY);
 
         // Pre-warm the source pool to a fixed 16 slots with silent placeholders.
         // Live add/remove only swaps a Box into/out of an existing slot, so the
@@ -307,9 +347,10 @@ impl SceneConfig {
         .map(|s| s.to_string())
         .collect();
 
-        Ok(BuildResult {
+        Ok(UnstartedBuild {
             scene,
-            planner,
+            plan,
+            plan_out,
             sounds: sound_builder,
             description,
             scene_json,

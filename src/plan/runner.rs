@@ -5,14 +5,9 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use atrium_core::source::Utterance;
+use super::due::LEAD_SECONDS;
+use super::{Clock, Conditions, Follow, Plan, Planned, Rhythm, Scheduled, Weather};
 
-use super::{Clock, Conditions, Due, Follow, Plan, Planned, Rhythm, Scheduled, Weather};
-
-/// How far ahead of the clock utterances are handed to the audio thread (s).
-/// Longer than a wake-up and an audio buffer together, so nothing is late;
-/// short, so a change is heard within half a second.
-const LEAD_SECONDS: f64 = 0.4;
 /// How often the planner looks at the clock.
 const WAKE_EVERY: Duration = Duration::from_millis(50);
 
@@ -54,7 +49,7 @@ impl Planner {
                         for due in due {
                             // A full ring only happens when the audio thread has
                             // stopped; that change is then not heard.
-                            let _ = audio.push(scheduled(due, rate, moved_by));
+                            let _ = audio.push(due.scheduled(rate, moved_by));
                         }
                     }
                 })
@@ -178,40 +173,6 @@ impl Drop for Planner {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-    }
-}
-
-/// What the audio thread is told for `due`, with its moment turned from
-/// scene time into the audio clock's samples.
-fn scheduled(due: Due, sample_rate: f32, moved_by: f64) -> Scheduled {
-    match due {
-        Due::Utter(slot, planned) => Scheduled::Utter {
-            slot: slot as u16,
-            utterance: Utterance {
-                take: planned.take,
-                at_sample: ((planned.at - moved_by) * sample_rate as f64)
-                    .round()
-                    .max(0.0) as u64,
-                gain: planned.gain,
-                rate: planned.rate,
-                skip_seconds: planned.skip as f32,
-            },
-        },
-        Due::Cancel(slot) => Scheduled::Cancel { slot: slot as u16 },
-        Due::Set(slot, param, value) => Scheduled::Set {
-            slot: slot as u16,
-            param,
-            value,
-        },
-        Due::Air {
-            wind,
-            daylight,
-            wind_from,
-        } => Scheduled::Air {
-            wind,
-            daylight,
-            wind_from,
-        },
     }
 }
 

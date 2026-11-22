@@ -6,6 +6,12 @@ use atrium_core::source::Utterance;
 
 use super::voice::Planned;
 
+/// How far ahead of the audio clock what is due is handed to the audio
+/// thread (s). Longer than a planner's wake-up and an audio buffer together,
+/// so nothing is late; short, so a change is heard within half a second.
+/// The live planner and the one driven in step for a file use the same.
+pub(crate) const LEAD_SECONDS: f64 = 0.4;
+
 /// What the plan hands the audio thread for the voice in a slot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scheduled {
@@ -43,4 +49,41 @@ pub enum Due {
         daylight: f32,
         wind_from: f32,
     },
+}
+
+impl Due {
+    /// What the audio thread is told for this, with its moment turned from
+    /// scene time into the audio clock's samples. `moved_by` is scene time
+    /// minus the audio clock: 0 until the scene is moved.
+    pub(crate) fn scheduled(self, sample_rate: f32, moved_by: f64) -> Scheduled {
+        match self {
+            Due::Utter(slot, planned) => Scheduled::Utter {
+                slot: slot as u16,
+                utterance: Utterance {
+                    take: planned.take,
+                    at_sample: ((planned.at - moved_by) * sample_rate as f64)
+                        .round()
+                        .max(0.0) as u64,
+                    gain: planned.gain,
+                    rate: planned.rate,
+                    skip_seconds: planned.skip as f32,
+                },
+            },
+            Due::Cancel(slot) => Scheduled::Cancel { slot: slot as u16 },
+            Due::Set(slot, param, value) => Scheduled::Set {
+                slot: slot as u16,
+                param,
+                value,
+            },
+            Due::Air {
+                wind,
+                daylight,
+                wind_from,
+            } => Scheduled::Air {
+                wind,
+                daylight,
+                wind_from,
+            },
+        }
+    }
 }
