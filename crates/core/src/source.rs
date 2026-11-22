@@ -174,6 +174,20 @@ pub trait SoundSource: Send {
     /// appointment. Default: no-op, for sources that have no takes.
     fn schedule(&mut self, _utterance: Utterance) {}
 
+    /// Where a loop is in its recording, in seconds of the recording's own
+    /// time, or `None` for a source that keeps no playhead of its own.
+    /// Only a loop has one: a voice that rests between takes is timed by
+    /// the plan, and a generator is made fresh as it plays.
+    fn playhead_seconds(&self) -> Option<f64> {
+        None
+    }
+
+    /// Move a loop's playhead to `seconds` into its recording, wrapped round
+    /// its own length, so a shorter loop lands where it would be had it
+    /// played from the same start. Default: no-op, for sources with no
+    /// playhead.
+    fn set_playhead_seconds(&mut self, _seconds: f64) {}
+
     /// Forget every appointment and stop what is uttered now: the scene was
     /// moved to another moment, and what was planned for this one no longer
     /// holds. Default: no-op, for sources that keep no appointments.
@@ -243,6 +257,11 @@ mod tests {
         assert_eq!(source.spread(), 0.0);
         assert_eq!(source.arc_degrees(), ALL_ROUND_DEGREES);
         assert_eq!(source.motion_offset().length(), 0.0);
+        assert_eq!(
+            source.playhead_seconds(),
+            None,
+            "only a loop has a playhead"
+        );
         assert_eq!(source.orbit_center().distance_to(source.position()), 0.0);
     }
 }

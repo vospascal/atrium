@@ -114,6 +114,7 @@ impl AudioScene {
                         source.set_synth_param(param, value);
                     }
                 }
+                Command::PlayInStep { anchor, slots } => self.play_in_step(anchor, slots),
                 Command::ResetScene => self.reset_to_initial_state(),
             }
         }

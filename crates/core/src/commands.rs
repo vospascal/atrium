@@ -84,6 +84,13 @@ pub enum Command {
         value: f32,
     },
 
+    /// Bring loops onto one playhead: every voice in `slots` (bit `n` is
+    /// voice `n`) that has a playhead jumps to where the `anchor` voice's is,
+    /// dipping out and back in so it does not click. All are moved in the
+    /// same block, so they land in step to the sample. The anchor itself
+    /// never moves, and a voice without a playhead is left as it is.
+    PlayInStep { anchor: u16, slots: u16 },
+
     /// Reset the scene to its initial state (positions, orbits, gains, etc.).
     ResetScene,
 }
@@ -226,5 +233,19 @@ impl SynthParam {
     /// The setting a file names, if there is one.
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|param| param.name() == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command is copied through a ring the audio thread reads, so it
+    /// stays as small as the listener's pose, its largest: 4 floats and a
+    /// tag. A command that grew past it would make every slot of the ring
+    /// bigger.
+    #[test]
+    fn a_command_stays_as_small_as_a_pose() {
+        assert_eq!(std::mem::size_of::<Command>(), 20);
     }
 }

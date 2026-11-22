@@ -7,10 +7,29 @@ use atrium_core::source::{EmitterKind, SoundSource};
 use atrium_core::telemetry::SourceSignal;
 use atrium_core::types::Vec3;
 
+/// How long a loop dips out before it jumps to join another, and back in
+/// after (s). A jump mid-waveform is a step, heard as a click; 5 ms is far
+/// too short to hear as a gap and long enough to smooth the step away.
+const JOIN_FADE_SECONDS: f32 = 0.005;
+
+/// A jump target this close to a whole sample (in samples) is that sample.
+/// Seconds and back can be a rounding error off (`n / rate * rate` is not
+/// always `n`), and landing on the very sample lets two copies of one
+/// recording read the same samples, not neighbours a billionth apart.
+const WHOLE_SAMPLE_WITHIN: f64 = 1e-6;
+
 /// A looping buffer player that orbits a center point.
 pub struct TestNode {
     buffer: Arc<AudioBuffer>,
     playback_pos: f64, // f64 for sub-sample precision over long durations
+    /// Where it is going to join another loop, in the buffer's samples: the
+    /// playhead it must be at, moving on as it plays while the sound dips
+    /// out, so the jump lands where the other loop is at that moment.
+    /// `None` while it is not joining.
+    joining: Option<f64>,
+    /// How far the sound is dipped for a jump, in output samples: 0 at full
+    /// level, the fade's length at silence.
+    dip: u32,
     pub amplitude: f32,
     /// Base amplitude at 0 dB SPL: `amplitude = unit_amplitude · 10^(spl/20)`.
     /// Set by the scene builder so a live SPL edit can rescale amplitude without
@@ -43,6 +62,8 @@ impl TestNode {
         Self {
             buffer,
             playback_pos: 0.0,
+            joining: None,
+            dip: 0,
             amplitude: 0.5,
             unit_amplitude: 0.0,
             orbit_radius,
@@ -65,6 +86,51 @@ impl TestNode {
     pub(crate) fn meter_signal(&mut self, rms: f32) {
         self.signal_meter = Some(SignalMeter::new(rms * self.amplitude));
     }
+
+    /// The level of the sample just read, then on to the next: dipping
+    /// while it joins another loop, jumping once silent, and rising again.
+    ///
+    /// The ramps are linear, not equal-power. Equal-power keeps the sum of
+    /// two overlapping signals level, and here nothing overlaps: one sound
+    /// dips to silence and comes back. A linear ramp of `fade` steps changes
+    /// the level by exactly `1 / fade` a sample, which bounds the step it
+    /// can add to the waveform at `peak / fade`, and the jump itself falls
+    /// on silence.
+    fn dip_gain(&mut self, step: f64, length: f64, sample_rate: f32) -> f32 {
+        if self.dip == 0 && self.joining.is_none() {
+            return 1.0;
+        }
+        let fade = join_fade_samples(sample_rate);
+        let gain = 1.0 - self.dip.min(fade) as f32 / fade as f32;
+        match &mut self.joining {
+            Some(target) => {
+                *target = advanced(*target, step, length);
+                self.dip = (self.dip + 1).min(fade);
+                if self.dip == fade {
+                    self.playback_pos = *target;
+                    self.joining = None;
+                }
+            }
+            None => self.dip -= 1,
+        }
+        gain
+    }
+}
+
+/// How many output samples a dip takes each way; at least one.
+fn join_fade_samples(sample_rate: f32) -> u32 {
+    ((JOIN_FADE_SECONDS * sample_rate).round() as u32).max(1)
+}
+
+/// `position` moved on by `step`, wrapped once round `length`, as a playhead
+/// moves: a jump target moves exactly as the loop it is joining.
+fn advanced(position: f64, step: f64, length: f64) -> f64 {
+    let next = position + step;
+    if next >= length {
+        next - length
+    } else {
+        next
+    }
 }
 
 impl SoundSource for TestNode {
@@ -84,16 +150,16 @@ impl SoundSource for TestNode {
         let sample = s0 + (s1 - s0) * frac;
 
         // Advance playback position (use buffer's native sample rate)
-        self.playback_pos += self.buffer.sample_rate as f64 / sample_rate as f64;
-        if self.playback_pos >= samples.len() as f64 {
-            self.playback_pos -= samples.len() as f64;
-        }
+        let step = self.buffer.sample_rate as f64 / sample_rate as f64;
+        let length = samples.len() as f64;
+        self.playback_pos = advanced(self.playback_pos, step, length);
+        let gain = self.dip_gain(step, length, sample_rate);
 
         if self.muted {
             // Still advance playback so it stays in sync when unmuted
             return 0.0;
         }
-        let output = sample * self.amplitude;
+        let output = sample * self.amplitude * gain;
         if let Some(meter) = &mut self.signal_meter {
             meter.push(output, sample_rate);
         }
@@ -102,6 +168,35 @@ impl SoundSource for TestNode {
 
     fn signal(&self) -> Option<SourceSignal> {
         self.signal_meter.as_ref().map(SignalMeter::signal)
+    }
+
+    /// While it dips to join another loop, where it is joining: the
+    /// playhead it plays from once the dip is over.
+    fn playhead_seconds(&self) -> Option<f64> {
+        if self.buffer.samples.is_empty() {
+            return None;
+        }
+        let position = self.joining.unwrap_or(self.playback_pos);
+        Some(position / self.buffer.sample_rate as f64)
+    }
+
+    /// Dip out, jump to `seconds` (wrapped round this recording's length)
+    /// plus the time the dip took, and dip back in: the jump lands where a
+    /// loop at `seconds` now is by then.
+    fn set_playhead_seconds(&mut self, seconds: f64) {
+        let length = self.buffer.samples.len() as f64;
+        if length == 0.0 || !seconds.is_finite() {
+            return;
+        }
+        let position = (seconds * self.buffer.sample_rate as f64).rem_euclid(length);
+        let whole = position.round();
+        let position = if (position - whole).abs() < WHOLE_SAMPLE_WITHIN {
+            whole
+        } else {
+            position
+        };
+        // `rem_euclid` and the rounding can both land on the length itself.
+        self.joining = Some(if position >= length { 0.0 } else { position });
     }
 
     fn emitter_kind(&self) -> EmitterKind {
@@ -416,6 +511,113 @@ mod tests {
         assert!(node.orientation().distance_to(Vec3::new(0.0, 1.0, 0.0)) < 1e-6);
         node.set_facing(std::f32::consts::PI);
         assert!(node.orientation().distance_to(Vec3::new(-1.0, 0.0, 0.0)) < 1e-6);
+    }
+
+    /// A loop of 1000 samples at 1 kHz is 1 s long. Its playhead is read
+    /// in its own seconds and set the same way, wrapped round its length:
+    /// 2.25 s is 0.25 s in, and −0.25 s is 0.75 s in.
+    #[test]
+    fn the_playhead_round_trips_and_wraps_round_the_loop() {
+        let mut node = TestNode::new(buffer(vec![0.0; 1_000], 1_000), Vec3::ZERO, 0.0, 0.0);
+        assert_eq!(node.playhead_seconds(), Some(0.0));
+        node.set_playhead_seconds(0.25);
+        assert_eq!(node.playhead_seconds(), Some(0.25));
+        node.set_playhead_seconds(2.25);
+        assert_eq!(node.playhead_seconds(), Some(0.25));
+        node.set_playhead_seconds(-0.25);
+        assert_eq!(node.playhead_seconds(), Some(0.75));
+        node.set_playhead_seconds(f64::NAN);
+        assert_eq!(
+            node.playhead_seconds(),
+            Some(0.75),
+            "not a time, so no jump"
+        );
+        let empty = TestNode::new(buffer(Vec::new(), 1_000), Vec3::ZERO, 0.0, 0.0);
+        assert_eq!(empty.playhead_seconds(), None, "nothing to loop");
+    }
+
+    /// A 44.1 kHz recording on a 48 kHz scene: after 48 000 output samples
+    /// (1 s) it has read 44 100 of its own, and reports 1 s of its own time;
+    /// after 24 000 more, 1.5 s.
+    #[test]
+    fn a_resampled_loop_reports_its_own_time() {
+        let mut node = TestNode::new(buffer(vec![0.0; 100_000], 44_100), Vec3::ZERO, 0.0, 0.0);
+        render(&mut node, 48_000, 48_000.0);
+        let seconds = node.playhead_seconds().expect("a loop");
+        assert!((seconds - 1.0).abs() < 1e-9, "{seconds}");
+        render(&mut node, 24_000, 48_000.0);
+        let seconds = node.playhead_seconds().expect("a loop");
+        assert!((seconds - 1.5).abs() < 1e-9, "{seconds}");
+    }
+
+    /// A second of a 440 Hz sine at 48 kHz: 440 whole periods, so it loops
+    /// without a seam.
+    fn sine_node() -> TestNode {
+        let samples = (0..48_000)
+            .map(|index| (TAU * 440.0 * index as f32 / 48_000.0).sin())
+            .collect();
+        let mut node = TestNode::new(buffer(samples, 48_000), Vec3::ZERO, 0.0, 0.0);
+        node.amplitude = 1.0;
+        node
+    }
+
+    fn largest_step(output: &[f32]) -> f32 {
+        output
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// Joining another loop half a period away would be a step of nearly
+    /// 2 in a sine of peak 1: a click. Dipped out over 240 samples, jumped
+    /// on silence and dipped back in, no step is larger than the sine's own
+    /// largest (2π · 440 / 48 000 = 0.0576) plus 1/240 of its peak, the most
+    /// a linear ramp of 240 steps adds.
+    #[test]
+    fn joining_does_not_click() {
+        let mut steady = sine_node();
+        let plain = largest_step(&render(&mut steady, 4_000, 48_000.0));
+        assert!((plain - TAU * 440.0 / 48_000.0).abs() < 1e-3, "{plain}");
+
+        let mut joining = sine_node();
+        render(&mut joining, 1_000, 48_000.0);
+        // Half a period on (109.09 samples / 2), where the sine is the negative.
+        let target = (1_000.0 + 54.5) / 48_000.0;
+        let mut unfaded = sine_node();
+        render(&mut unfaded, 1_000, 48_000.0);
+        let here = unfaded.next_sample(48_000.0);
+        unfaded.playback_pos = target * 48_000.0;
+        let there = unfaded.next_sample(48_000.0);
+        assert!(
+            (there - here).abs() > 1.5,
+            "a hard jump would step {}",
+            there - here
+        );
+
+        joining.set_playhead_seconds(target);
+        let output = render(&mut joining, 1_000, 48_000.0);
+        let bound = plain + 1.0 / 240.0;
+        assert!(
+            largest_step(&output) <= bound + 1e-6,
+            "{} > {bound}",
+            largest_step(&output)
+        );
+    }
+
+    /// Joining takes the time of the dip into account: after it, the loop is
+    /// exactly where one that never jumped, started at the target, is.
+    #[test]
+    fn after_the_dip_it_plays_from_the_target_plus_the_dip() {
+        let mut joining = sine_node();
+        let mut reference = sine_node();
+        render(&mut joining, 300, 48_000.0);
+        render(&mut reference, 5_000, 48_000.0);
+        joining.set_playhead_seconds(reference.playhead_seconds().expect("a loop"));
+        let joined = render(&mut joining, 1_000, 48_000.0);
+        let expected = render(&mut reference, 1_000, 48_000.0);
+        assert_eq!(joined[480..], expected[480..]);
+        assert_eq!(joined[240], 0.0, "silent at the jump");
+        assert_eq!(joining.playhead_seconds(), reference.playhead_seconds());
     }
 
     #[test]

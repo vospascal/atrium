@@ -4,6 +4,7 @@
 //! - `commands`: the one `match` over `Command`, drained at the top of a callback
 //! - `channels`: channel modes and the fit to the output device
 //! - `reset`: back to the state the scene was built with
+//! - `step`: loops brought onto one playhead
 //! - `edits`: sounds swapped into and out of the fixed pool
 //! - `render`: one buffer of audio
 //!
@@ -14,6 +15,7 @@ mod commands;
 mod edits;
 mod render;
 mod reset;
+mod step;
 
 use crate::audio::atmosphere::AtmosphericParams;
 use crate::audio::distance::DistanceModel;

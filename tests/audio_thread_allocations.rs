@@ -127,8 +127,8 @@ fn heap_operations_during(
 /// The commands a control surface sends while audio runs: the listener walks
 /// and turns (head tracking does this 25 times a second), sources move and
 /// change level, an ambient sound's arc is dragged wider and narrower (its
-/// filters are designed beside the audio thread and handed over), and now
-/// and then the output or the weather changes.
+/// filters are designed beside the audio thread and handed over), loops are
+/// brought into step, and now and then the output or the weather changes.
 fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
     let phase = callback as f32 * 0.05;
     let mut commands = vec![
@@ -156,6 +156,12 @@ fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
         }),
         15 => commands.push(Command::SetChannelMode {
             mode: ChannelMode::Quad,
+        }),
+        // Loops brought into step: the default scene's first three voices
+        // loop, so the second and third dip out, jump and dip back in.
+        20 => commands.push(Command::PlayInStep {
+            anchor: 0,
+            slots: 0b110,
         }),
         25 => commands.push(Command::SetChannelMode {
             mode: ChannelMode::Surround51,
