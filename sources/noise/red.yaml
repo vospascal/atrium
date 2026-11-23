@@ -1,0 +1,24 @@
+# Noise colours: red noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: Red noise
+group: Noise colours
+about: >-
+  Red noise is what physics calls Brownian noise: the power per hertz falls
+  with the square of the frequency, 6 dB an octave, the spectrum of a random
+  walk. "Red" follows the light analogy, red being the low end of the
+  visible spectrum. It is deep and rumbling but keeps some air at the top,
+  often likened to a strong wind or a distant waterfall. It starts at 20 Hz:
+  a filter takes out what lies below, which would be infrasound and a
+  drifting offset. The Brown noise next to it is darker, after the brown
+  noise that sleep apps play. No effect on sleep, focus or health is
+  established for it.
+synth: noise_colour
+
+colour: red
+master_gain: 1.0
+
+reference_spl: 62.1       # dB SPL at 1 m, unweighted: 50 dB(A)

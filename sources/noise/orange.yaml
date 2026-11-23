@@ -1,0 +1,25 @@
+# Noise colours: orange noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: Orange noise
+group: Noise colours
+about: >-
+  Orange noise has no agreed definition. The description Atrium had calls
+  it a blend of red noise, a little yellow noise and brown noise, deep and
+  soothing, and yellow noise has no definition either. This is Atrium's
+  reading of an example recording of it, not a defined spectrum: two
+  layers fitted to that recording, a deep one, a brown noise darker still
+  than the Brown noise preset, and a bright one, red (Brownian) noise with
+  its top softened, which takes over above about 500 Hz. Both start near
+  40 Hz, so it peaks around 50 Hz. Deep and dark, with a little air above.
+  The two layers, deep and bright, can be rebalanced. No effect on sleep,
+  focus or health is claimed for it.
+synth: noise_colour
+
+colour: orange
+master_gain: 1.0
+
+reference_spl: 71.0       # dB SPL at 1 m, unweighted: 50 dB(A)

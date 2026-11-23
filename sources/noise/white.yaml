@@ -1,0 +1,22 @@
+# Noise colours: white noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: White noise
+group: Noise colours
+about: >-
+  The same power in every hertz, from the lowest frequencies to the highest:
+  a flat spectrum, named after white light, which holds every colour. Each
+  octave up holds twice as many hertz as the one below, so it sounds bright
+  and hissy; it is often likened to a fan, an untuned radio or rustling
+  leaves. Steady noise like this is used to mask other sounds. Studies of
+  noise as a sleep aid are few and small and do not agree, so no effect on
+  sleep, focus or health is claimed for it.
+synth: noise_colour
+
+colour: white
+master_gain: 1.0
+
+reference_spl: 52.7       # dB SPL at 1 m, unweighted: 50 dB(A)

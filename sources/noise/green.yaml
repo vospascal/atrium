@@ -1,0 +1,23 @@
+# Noise colours: green noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: Green noise
+group: Noise colours
+about: >-
+  Green noise has no agreed definition; the name is used for different
+  sounds. This one follows an example recording of the kind sleep and noise
+  apps play: a soft, dark noise with the treble taken away and no bump
+  anywhere, its power per hertz falling about 4.4 dB an octave and then
+  steeply above 1.6 kHz. It is often described as the sound of nature, or
+  as the middle of the spectrum; here it is fitted to that recording, not
+  taken from a definition. No effect on sleep, focus or health is claimed
+  for it.
+synth: noise_colour
+
+colour: green
+master_gain: 1.0
+
+reference_spl: 58.7       # dB SPL at 1 m, unweighted: 50 dB(A)

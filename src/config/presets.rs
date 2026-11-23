@@ -213,6 +213,48 @@ mod tests {
         assert!(session.about.unwrap().contains("115 Hz moving to 113 Hz"));
     }
 
+    /// The noise colours: one preset per colour, grouped together, each with
+    /// a note; the colours without an agreed definition say so and that
+    /// theirs follows an example recording, and red and brown say how they
+    /// differ.
+    #[test]
+    fn every_noise_colour_is_grouped_and_has_a_note() {
+        let presets = list_presets("sources").expect("the presets read");
+        let colours: Vec<&PresetSummary> = presets
+            .iter()
+            .filter(|preset| preset.path.starts_with("sources/noise/"))
+            .collect();
+        assert_eq!(colours.len(), 9);
+        for colour in &colours {
+            assert_eq!(
+                colour.group.as_deref(),
+                Some("Noise colours"),
+                "{}",
+                colour.path
+            );
+            assert!(colour.generated, "{} is a generator", colour.path);
+            let about = colour.about.as_deref().unwrap_or("");
+            assert!(about.len() > 200, "{} has no note", colour.path);
+        }
+        let about = |name: &str| {
+            read_preset(&format!("sources/noise/{name}.yaml"))
+                .unwrap()
+                .about
+                .unwrap()
+        };
+        assert!(about("green").contains("no agreed definition"));
+        assert!(about("green").contains("example recording"));
+        assert!(about("orange").contains("no agreed definition"));
+        assert!(about("orange").contains("not a defined spectrum"));
+        assert!(about("orange").contains("example recording"));
+        assert!(about("red").contains("what physics calls Brownian noise"));
+        assert!(about("brown").contains("Darker than the physicist's Brownian noise"));
+        assert!(about("grey").contains("does not cure it"));
+        for bright in ["blue", "violet"] {
+            assert!(about(bright).contains("best kept quiet"), "{bright}");
+        }
+    }
+
     /// Presets in folders, and folders inside those, are listed with the
     /// rest, sorted by path; a file that is not YAML is not.
     #[test]

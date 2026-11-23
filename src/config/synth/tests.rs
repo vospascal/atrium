@@ -8,7 +8,7 @@ use crate::config::scene::NormalizationConfig;
 use crate::config::source::{SourceDef, SynthSourceDef};
 
 /// Every synth kind, as its smallest file.
-const EVERY_SYNTH: [(&str, &str); 12] = [
+const EVERY_SYNTH: [(&str, &str); 13] = [
             (
                 "synth: canopy_wind\nmin_speed: 2\nmax_speed: 8\nfoliage_density: 1\nreference_spl: 48\n",
                 "canopy_wind",
@@ -50,6 +50,10 @@ const EVERY_SYNTH: [(&str, &str); 12] = [
             (
                 "synth: binaural_beat\npitch: 108\nbeat: 7\nend_beat: 5\nduration: 32400\nreference_spl: 55\n",
                 "binaural_beat",
+            ),
+            (
+                "synth: noise_colour\ncolour: orange\nmaster_gain: 1\nseed: 3\nreference_spl: 55\n",
+                "noise_colour",
             ),
 ];
 
@@ -648,6 +652,7 @@ fn every_synth_names_the_layers_it_hands_over() {
             "focus_tone" => assert_eq!(shown, ["528 Hz", "264 Hz", "132 Hz"]),
             "binaural_beat" => assert_eq!(shown, ["left ear 108 Hz", "right ear 115 Hz"]),
             "soft_wind" => assert_eq!(shown, ["low", "body", "mid", "presence", "air"]),
+            "noise_colour" => assert_eq!(shown, ["deep", "bright"]),
             _ => {}
         }
     }
@@ -661,4 +666,82 @@ fn every_synth_names_the_layers_it_hands_over() {
             ("right".to_string(), "right ear 109.618 Hz".to_string()),
         ]
     );
+}
+
+/// The noise colours, in `sources/noise/`.
+const NOISE_COLOURS: [&str; 9] = [
+    "white", "pink", "red", "brown", "blue", "violet", "grey", "green", "orange",
+];
+
+/// Every noise colour preset is heard at the same A-weighted level, 50 dB(A)
+/// within 0.3 dB, measured by the analyser on 30 s of the built source at
+/// the engine's calibration; its `reference_spl` is the unweighted level
+/// that takes, its Leq. The noise is all around (a field), only orange has
+/// layers, and no sample comes near full scale. Returns each preset's LAeq,
+/// Leq and LCeq.
+#[test]
+fn every_noise_colour_is_heard_at_fifty_decibels_a() {
+    use crate::synth::test_support::peak;
+    use atrium_core::source::EmitterKind;
+
+    let normalization = NormalizationConfig::default();
+    let sample_rate = 48_000.0;
+    for colour in NOISE_COLOURS {
+        let path = format!("sources/noise/{colour}.yaml");
+        let source: SynthSourceDef =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let SynthSpec::NoiseColour(_) = &source.spec else {
+            panic!("{path} is not a noise colour");
+        };
+        let mut built = build_one_synth_source(
+            &source.spec,
+            source.reference_spl,
+            DirectivityPattern::Omni,
+            source.spread,
+            Vec3::ZERO,
+            11,
+            &[],
+            &normalization,
+            1.0,
+            40.0,
+        )
+        .unwrap_or_else(|error| panic!("{path} should build: {error}"));
+        assert_eq!(built.source.emitter_kind(), EmitterKind::Field, "{path}");
+        assert_eq!(
+            built.source.layer_count(),
+            if colour == "orange" { 2 } else { 1 },
+            "{path}"
+        );
+        let samples: Vec<f32> = (0..(31.0 * sample_rate) as usize)
+            .map(|_| built.source.next_sample(sample_rate))
+            .collect();
+        let samples = &samples[sample_rate as usize..];
+        let report = atrium_analysis::analyse(
+            &atrium_analysis::Signal {
+                interleaved: samples,
+                channels: 1,
+                sample_rate: sample_rate as u32,
+                channel_names: Vec::new(),
+            },
+            &atrium_analysis::Settings {
+                full_scale_db_spl: Some(normalization.full_scale_db_spl()),
+            },
+        );
+        let levels = &report.level.overall;
+        println!(
+            "{colour}: reference_spl {:.1}, LAeq {:.2} dB(A), Leq {:.2} dB, LCeq {:.2} dB, Leq − LAeq {:.2} dB, peak {:.4}",
+            source.reference_spl,
+            levels.laeq,
+            levels.leq,
+            levels.lceq,
+            levels.leq - levels.laeq,
+            peak(samples)
+        );
+        assert!(
+            (levels.laeq - 50.0).abs() < 0.3,
+            "{path}: {:.2} dB(A)",
+            levels.laeq
+        );
+        assert!(peak(samples) < 1.0, "{path}");
+    }
 }

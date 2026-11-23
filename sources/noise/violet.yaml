@@ -1,0 +1,22 @@
+# Noise colours: violet noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: Violet noise
+group: Noise colours
+about: >-
+  The power per hertz rises with the square of the frequency, 6 dB an
+  octave: white noise differentiated, also called purple noise. Nearly all
+  of it is in the highest frequencies, a thin, sharp hiss, often likened to
+  a spray of water or a hissing faucet. It is the brightest of the colours
+  and best kept quiet, as it is here: it is set to the same A-weighted level
+  as the others, which is the fair way to compare them. No effect on sleep,
+  focus or health is claimed for it.
+synth: noise_colour
+
+colour: violet
+master_gain: 1.0
+
+reference_spl: 55.8       # dB SPL at 1 m, unweighted: 50 dB(A)

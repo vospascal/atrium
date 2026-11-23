@@ -1,0 +1,26 @@
+# Noise colours: grey noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: Grey noise
+group: Noise colours
+about: >-
+  White noise shaped so that low and high frequencies sound closer to
+  equally loud. This one follows an example recording of the grey noise
+  that sleep and tinnitus apps play: broadly shaped like an equal-loudness
+  curve, with much more bass (about 25 dB more at 31.5 Hz than at 1 kHz)
+  and a shallow dip near 2 to 3 kHz, where the ear is most sensitive, but
+  flat at the top. The textbook definition is the inverse of the ISO 226
+  equal-loudness contour, which also rises again by 12 to 14 dB at 8 to
+  12 kHz; this one is gentler and has no such treble rise. Grey noise is
+  used in sound therapy for tinnitus, where steady broadband sound is an
+  accepted way to make it less noticeable; it manages tinnitus, it does not
+  cure it.
+synth: noise_colour
+
+colour: grey
+master_gain: 1.0
+
+reference_spl: 57.2       # dB SPL at 1 m, unweighted: 50 dB(A)

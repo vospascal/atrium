@@ -1,0 +1,22 @@
+# Noise colours: pink noise.
+# A noise colour: steady noise with a named spectrum, see
+# src/synth/noise_colour.rs. Heard all around, not from a point. Every
+# noise colour is set to the same A-weighted level, about 50 dB(A): a quiet
+# listening level, a choice. `reference_spl` is the unweighted level that
+# takes for this spectrum (measured, src/config/synth/tests.rs).
+name: Pink noise
+group: Noise colours
+about: >-
+  The same power in every octave: the power per hertz halves with every
+  doubling of frequency, falling 3 dB an octave (1/f). It sounds more even
+  and softer at the top than white noise, and is often likened to steady
+  rain or a breeze. Small studies have played pink noise to sleepers, some
+  in short bursts timed to deep sleep, and reported deeper sleep or better
+  memory the next day; others found no such effect, and the evidence is
+  mixed and not settled.
+synth: noise_colour
+
+colour: pink
+master_gain: 1.0
+
+reference_spl: 54.0       # dB SPL at 1 m, unweighted: 50 dB(A)

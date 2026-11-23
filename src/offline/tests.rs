@@ -9,6 +9,7 @@ mod files;
 mod layers;
 mod listening;
 mod live_analysis;
+mod noise_colours;
 mod probe;
 mod reproducible;
 mod start;
