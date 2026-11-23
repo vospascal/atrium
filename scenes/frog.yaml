@@ -42,7 +42,7 @@ sounds:
     name: Frogs
     color: "#6db33f"
     group: Creatures
-    sound: { preset: sources/frog.yaml }
+    sound: { preset: sources/creatures/frog.yaml }
     place: [10.1, 10.1, 0.0]     # 14.3 m @ 45 deg
 
 atmosphere: atmospheres/default.yaml

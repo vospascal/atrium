@@ -1,0 +1,25 @@
+# Planetary set: 210.42 Hz, “Moon”.
+# A focus tone: an octave stack, see src/synth/focus_tone.rs and
+# docs/focus-tones.md. The number and its label are the source's; no effect
+# of any frequency is claimed.
+name: The Moon · 210.42 Hz
+group: Planetary
+about: >-
+  harmonance.com calls 210.42 Hz “Moon”. It is Hans Cousto's 1978 “cosmic
+  octave”: the Moon's synodic month, new moon to new moon, 29.53 days, as a
+  frequency raised 29 octaves (2^29 / period = 210.42 Hz). It plays 210.42 and
+  105.21 Hz: the tone and up to three octaves below it, none under 60 Hz, with
+  the weight passing slowly from the tone down through them. In astrology the
+  Moon rules Cancer (Water · Cardinal). A symbolic association, not a
+  forecast. The arithmetic holds; no effect on focus, sleep or health has been
+  measured for it.
+synth: focus_tone
+
+pitch: 210.42             # Hz, the named pitch: the stack's top line
+floor: 60.0               # Hz: up to three octaves below the pitch, none under this
+rotation_period: 24.0     # s: the emphasis goes once round the lines
+rotation_depth: 8.0       # dB: each line swings this much, low to high
+master_gain: 1.0
+
+# A quiet listening level: a choice, not a measurement of anything.
+reference_spl: 50.0       # dB SPL at 1 m

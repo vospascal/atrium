@@ -36,5 +36,5 @@ sounds:
     name: Soft Wind
     color: "#a8c4c8"
     group: Weather
-    sound: { preset: sources/soft-wind.yaml }
+    sound: { preset: sources/weather/wind/soft-wind.yaml }
     place: [0.0, 0.0, 1.2]

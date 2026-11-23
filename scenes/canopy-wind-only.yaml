@@ -36,6 +36,6 @@ sounds:
     name: Canopy Wind
     color: "#6f8f68"
     group: Weather
-    sound: { preset: sources/canopy-wind.yaml }
+    sound: { preset: sources/weather/wind/canopy-wind.yaml }
     # Field emitters are volume-like; this position is only the editor anchor.
     place: [0.0, 0.0, 1.2]

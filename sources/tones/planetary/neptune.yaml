@@ -1,0 +1,25 @@
+# Planetary set: 211.44 Hz, “Neptune”.
+# A focus tone: an octave stack, see src/synth/focus_tone.rs and
+# docs/focus-tones.md. The number and its label are the source's; no effect
+# of any frequency is claimed.
+name: Neptune · 211.44 Hz
+group: Planetary
+about: >-
+  harmonance.com calls 211.44 Hz “Neptune”. It is Hans Cousto's 1978 “cosmic
+  octave”: Neptune's orbit, 164.79 years (60 186 days), as a frequency raised
+  40 octaves (2^40 / period = 211.44 Hz). It plays 211.44 and 105.72 Hz: the
+  tone and up to three octaves below it, none under 60 Hz, with the weight
+  passing slowly from the tone down through them. In modern astrology Neptune
+  is the co-ruler of Pisces (Water · Mutable), beside Jupiter. A symbolic
+  association, not a forecast. The arithmetic holds; no effect on focus, sleep
+  or health has been measured for it.
+synth: focus_tone
+
+pitch: 211.44             # Hz, the named pitch: the stack's top line
+floor: 60.0               # Hz: up to three octaves below the pitch, none under this
+rotation_period: 24.0     # s: the emphasis goes once round the lines
+rotation_depth: 8.0       # dB: each line swings this much, low to high
+master_gain: 1.0
+
+# A quiet listening level: a choice, not a measurement of anything.
+reference_spl: 50.0       # dB SPL at 1 m

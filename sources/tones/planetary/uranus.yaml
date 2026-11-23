@@ -1,0 +1,25 @@
+# Planetary set: 207.36 Hz, “Uranus”.
+# A focus tone: an octave stack, see src/synth/focus_tone.rs and
+# docs/focus-tones.md. The number and its label are the source's; no effect
+# of any frequency is claimed.
+name: Uranus · 207.36 Hz
+group: Planetary
+about: >-
+  harmonance.com calls 207.36 Hz “Uranus”. It is Hans Cousto's 1978 “cosmic
+  octave”: Uranus's orbit, 84.01 years (30 685 days), as a frequency raised 39
+  octaves (2^39 / period = 207.36 Hz). It plays 207.36 and 103.68 Hz: the tone
+  and up to three octaves below it, none under 60 Hz, with the weight passing
+  slowly from the tone down through them. In modern astrology Uranus is the
+  co-ruler of Aquarius (Air · Fixed), beside Saturn. A symbolic association,
+  not a forecast. The arithmetic holds; no effect on focus, sleep or health
+  has been measured for it.
+synth: focus_tone
+
+pitch: 207.36             # Hz, the named pitch: the stack's top line
+floor: 60.0               # Hz: up to three octaves below the pitch, none under this
+rotation_period: 24.0     # s: the emphasis goes once round the lines
+rotation_depth: 8.0       # dB: each line swings this much, low to high
+master_gain: 1.0
+
+# A quiet listening level: a choice, not a measurement of anything.
+reference_spl: 50.0       # dB SPL at 1 m

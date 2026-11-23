@@ -1,0 +1,34 @@
+# Binaural beats: “Falling Theta Session”, as harmonance.com names it.
+# 108 Hz left, 115 → 113 Hz right: a beat from 7 to 5 Hz over nine hours.
+# Two pure tones, one per ear, see src/synth/binaural_beat.rs and
+# docs/binaural-beats.md. The name and band are the source's labels; no
+# effect is claimed.
+name: Falling Theta Session · 7 → 5 Hz
+group: Binaural beats
+about: >-
+  Two pure tones, one for each ear: 108 Hz on the left and, on the right,
+  115 Hz moving to 113 Hz. Hearing makes a beat from the difference between
+  the ears, which falls in a straight line from 7 to 5 Hz; harmonance.com
+  files these rates under theta, a name for where the rate sits, not for
+  what it does. The beat moves once over nine hours, fading in at the start
+  and out at the end, and then the piece stops; it never loops. It needs
+  headphones. In this 3D version each tone is held just beside its ear, 12
+  cm from the centre of the head, but both ears still hear both: each ear
+  hears the other ear's tone about 21 dB below its own (measured on
+  headphones, for the 10 Hz piece), so its level also swells and fades by
+  about 1.4 dB at the beat rate: a small ordinary (monaural) beat on top of
+  the one between the ears. Reviews of binaural beats find small,
+  inconsistent effects on attention and memory and no settled effect on
+  brain activity; no effect of this piece has been measured.
+synth: binaural_beat
+
+pitch: 108.0              # Hz: the left ear's tone, the carrier
+beat: 7.0                 # Hz: the right ear's tone is this much higher, at the start
+end_beat: 5.0             # Hz: the beat at the end, reached in a straight line
+duration: 32400.0         # s: nine hours, fades included; then it stops
+master_gain: 1.0
+
+# A quiet listening level for each tone, a choice, not a measurement of
+# anything: held 12 cm from the centre of the head, a tone of 18 dB SPL at
+# 1 m is about 50 dB SPL at its own ear (measured, docs/binaural-beats.md).
+reference_spl: 18.0       # dB SPL at 1 m

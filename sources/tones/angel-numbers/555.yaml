@@ -1,0 +1,23 @@
+# Angel numbers: 555 Hz, “Transformation”.
+# A focus tone: an octave stack, see src/synth/focus_tone.rs and
+# docs/focus-tones.md. The number and its label are the source's; no effect
+# of any frequency is claimed.
+name: 555 Hz · Transformation
+group: Angel numbers
+about: >-
+  harmonance.com calls 555 Hz “Transformation”. Angel numbers are repeating
+  digits, read as messages in numerology; the number is chosen for its
+  digits, not for anything in sound. It plays 555, 277.5, 138.75 and 69.375
+  Hz: the tone and up to three octaves below it, none under 60 Hz, with the
+  weight passing slowly from the tone down through them. No effect on focus,
+  sleep or health has been measured for it.
+synth: focus_tone
+
+pitch: 555.0              # Hz, the named pitch: the stack's top line
+floor: 60.0               # Hz: up to three octaves below the pitch, none under this
+rotation_period: 24.0     # s: the emphasis goes once round the lines
+rotation_depth: 8.0       # dB: each line swings this much, low to high
+master_gain: 1.0
+
+# A quiet listening level: a choice, not a measurement of anything.
+reference_spl: 50.0       # dB SPL at 1 m

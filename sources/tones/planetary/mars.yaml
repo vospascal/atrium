@@ -1,0 +1,25 @@
+# Planetary set: 144.72 Hz, “Mars”.
+# A focus tone: an octave stack, see src/synth/focus_tone.rs and
+# docs/focus-tones.md. The number and its label are the source's; no effect
+# of any frequency is claimed.
+name: Mars · 144.72 Hz
+group: Planetary
+about: >-
+  harmonance.com calls 144.72 Hz “Mars”. It is Hans Cousto's 1978 “cosmic
+  octave”: Mars's orbit, 686.98 days, as a frequency raised 33 octaves (2^33 /
+  period = 144.72 Hz). It plays 144.72 and 72.36 Hz: the tone and up to three
+  octaves below it, none under 60 Hz, with the weight passing slowly from the
+  tone down through them. In astrology Mars rules Aries (Fire · Cardinal) and,
+  traditionally, Scorpio (Water · Fixed). A symbolic association, not a
+  forecast. The arithmetic holds; no effect on focus, sleep or health has been
+  measured for it.
+synth: focus_tone
+
+pitch: 144.72             # Hz, the named pitch: the stack's top line
+floor: 60.0               # Hz: up to three octaves below the pitch, none under this
+rotation_period: 24.0     # s: the emphasis goes once round the lines
+rotation_depth: 8.0       # dB: each line swings this much, low to high
+master_gain: 1.0
+
+# A quiet listening level: a choice, not a measurement of anything.
+reference_spl: 50.0       # dB SPL at 1 m

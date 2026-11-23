@@ -36,6 +36,6 @@ sounds:
     name: Storm Wind
     color: "#5f6878"
     group: Weather
-    sound: { preset: sources/storm-wind.yaml }
+    sound: { preset: sources/weather/wind/storm-wind.yaml }
     # Field emitters are volume-like; this position is only the editor anchor.
     place: [0.0, 0.0, 1.2]

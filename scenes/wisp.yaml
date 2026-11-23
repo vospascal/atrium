@@ -44,7 +44,7 @@ sounds:
     name: Wisp
     color: "#f2c94c"
     group: Creatures
-    sound: { preset: sources/wisp.yaml }
+    sound: { preset: sources/creatures/wisp.yaml }
     place: [0.0, 0.0, 0.0]   # centre of its territory (the room centre)
 
 atmosphere: atmospheres/default.yaml

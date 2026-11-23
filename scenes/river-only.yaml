@@ -36,5 +36,5 @@ sounds:
     name: River
     color: "#4b9ab8"
     group: Water
-    sound: { preset: sources/river.yaml }
+    sound: { preset: sources/water/river.yaml }
     place: [4.0, 1.0, 0.2]

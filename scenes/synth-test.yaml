@@ -49,26 +49,26 @@ sounds:
     name: Field Wind
     color: "#8ca9ad"
     group: Weather
-    sound: { preset: sources/field-wind.yaml }
+    sound: { preset: sources/weather/wind/field-wind.yaml }
     place: [-8.0, 0.0, 3.0]
 
   waves:  # Waves — due south, at ground level
     name: Waves
     color: "#26c6da"
     group: Water
-    sound: { preset: sources/synth-waves.yaml }
+    sound: { preset: sources/water/synth-waves.yaml }
     place: [0.0, -10.0, 0.5]
 
   rain-v2:  # Rain v2 — due north, overhead
     name: Rain v2
     color: "#6aa49e"
     group: Weather
-    sound: { preset: sources/synth-rain-v2.yaml }
+    sound: { preset: sources/weather/synth-rain-v2.yaml }
     place: [0.0, 8.0, 5.0]
 
   rain-v1:  # Rain v1 — due east, overhead
     name: Rain v1
     color: "#cfcb7f"
     group: Weather
-    sound: { preset: sources/synth-rain-v1.yaml }
+    sound: { preset: sources/weather/synth-rain-v1.yaml }
     place: [8.0, 0.0, 5.0]

@@ -40,13 +40,13 @@ sounds:
   breeze:  # blows up with the wind, but stays a breeze
     name: Breeze
     group: Weather
-    sound: { preset: sources/field-wind.yaml }
+    sound: { preset: sources/weather/wind/field-wind.yaml }
     place: [0.0, 0.0, 1.2]
 
   storm-wind:  # silent until a storm comes, then howls with it
     name: Storm wind
     group: Weather
-    sound: { preset: sources/storm-wind.yaml }
+    sound: { preset: sources/weather/wind/storm-wind.yaml }
     place: [-20.0, 10.0, 1.2]
     follows:
       - { condition: storm, setting: master_gain, from: 0, to: 0.85, over: [0.05, 0.6] }
@@ -55,33 +55,33 @@ sounds:
   rain:
     name: Rain
     group: Weather
-    sound: { preset: sources/synth-rain-v2.yaml }
+    sound: { preset: sources/weather/synth-rain-v2.yaml }
     place: [0.0, 4.0, 3.0]
 
   thunder:  # the storm comes in from the west
     name: Thunder
     group: Weather
-    sound: { preset: sources/thunder.yaml }
+    sound: { preset: sources/weather/thunder.yaml }
     place: [-45.0, 20.0, 25.0]
 
   blackbird:
     name: Blackbird
     color: "#3d3d3d"
     group: Creatures
-    sound: { preset: sources/blackbird.yaml }
+    sound: { preset: sources/creatures/birds/blackbird.yaml }
     place: [9.0, 11.0, 7.0]
 
   robin:
     name: Robin
     color: "#e0703a"
     group: Creatures
-    sound: { preset: sources/robin.yaml }
+    sound: { preset: sources/creatures/birds/robin.yaml }
     place: [-10.0, 3.0, 2.5]
 
   frog:  # frogs like the rain
     name: Frog
     group: Creatures
-    sound: { preset: sources/frog.yaml }
+    sound: { preset: sources/creatures/frog.yaml }
     place: [6.0, -9.0, 0.0]
 
 atmosphere: atmospheres/default.yaml

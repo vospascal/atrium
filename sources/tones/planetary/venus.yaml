@@ -1,0 +1,25 @@
+# Planetary set: 221.23 Hz, “Venus”.
+# A focus tone: an octave stack, see src/synth/focus_tone.rs and
+# docs/focus-tones.md. The number and its label are the source's; no effect
+# of any frequency is claimed.
+name: Venus · 221.23 Hz
+group: Planetary
+about: >-
+  harmonance.com calls 221.23 Hz “Venus”. It is Hans Cousto's 1978 “cosmic
+  octave”: Venus's orbit, 224.70 days, as a frequency raised 32 octaves (2^32
+  / period = 221.23 Hz). It plays 221.23 and 110.615 Hz: the tone and up to
+  three octaves below it, none under 60 Hz, with the weight passing slowly
+  from the tone down through them. In astrology Venus rules Taurus (Earth ·
+  Fixed) and Libra (Air · Cardinal). A symbolic association, not a forecast.
+  The arithmetic holds; no effect on focus, sleep or health has been measured
+  for it.
+synth: focus_tone
+
+pitch: 221.23             # Hz, the named pitch: the stack's top line
+floor: 60.0               # Hz: up to three octaves below the pitch, none under this
+rotation_period: 24.0     # s: the emphasis goes once round the lines
+rotation_depth: 8.0       # dB: each line swings this much, low to high
+master_gain: 1.0
+
+# A quiet listening level: a choice, not a measurement of anything.
+reference_spl: 50.0       # dB SPL at 1 m

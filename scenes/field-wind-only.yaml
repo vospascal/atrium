@@ -36,6 +36,6 @@ sounds:
     name: Field Wind
     color: "#8ca9ad"
     group: Weather
-    sound: { preset: sources/field-wind.yaml }
+    sound: { preset: sources/weather/wind/field-wind.yaml }
     # Field emitters are volume-like; this is only their editor anchor.
     place: [0.0, 0.0, 1.2]
