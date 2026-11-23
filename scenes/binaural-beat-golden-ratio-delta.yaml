@@ -1,0 +1,56 @@
+# Saved by the Atrium editor. Comments are not kept.
+
+title: binaural beat - golden ratio delta
+
+kind: listening
+
+
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: stereo
+  render_mode: hrtf
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c: [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+  dbap_rolloff_db: 6.0
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  golden-ratio-delta-beat-1-618-hz:
+    name: Golden Ratio Delta Beat · 1.618 Hz
+    group: Binaural beats
+    sound:
+      preset: sources/tones/binaural/golden-ratio-delta.yaml
+      level: 59.9
+    shape:
+      size: 1.0
+    place: [0.0, 2.0, 1.2]
+
+hrtf: assets/hrtf/default.sofa
+
+weather:
+  story: held
+  wind: 0.0
+  rain: 0.0
+  storm: 0.0
+  daylight: 1.0

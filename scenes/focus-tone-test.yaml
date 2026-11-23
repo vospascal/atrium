@@ -1,0 +1,67 @@
+# Saved by the Atrium editor. Comments are not kept.
+
+title: focus tone test
+
+kind: listening
+
+
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: '5.1'
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c: [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+  dbap_rolloff_db: 6.0
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  focus-tone-333-hz:
+    name: Focus tone 333 Hz
+    group: Tones
+    sound:
+      preset: sources/tones/angel-numbers/333.yaml
+    place: [-3.64, 2.18, 1.2]
+
+  432-hz-verdi-s-a:
+    name: 432 Hz · Verdi's A
+    group: Concert pitch
+    sound:
+      preset: sources/tones/concert-pitch/432.yaml
+    place: [3.31, 1.49, 1.2]
+
+  777-hz-insight:
+    name: 777 Hz · Insight
+    group: Angel numbers
+    sound:
+      preset: sources/tones/angel-numbers/777.yaml
+    place: [-0.69, 4.04, 1.2]
+
+hrtf: assets/hrtf/default.sofa
+
+weather:
+  story: held
+  wind: 0.0
+  rain: 0.0
+  storm: 0.0
+  daylight: 1.0

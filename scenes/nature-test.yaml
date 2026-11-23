@@ -1,0 +1,116 @@
+# Saved by the Atrium editor. Comments are not kept.
+
+title: nature test
+
+environment: environments/meadow.yaml
+
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [5.43, -6.9, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 60.0
+  rolloff: 1.0
+
+speakers:
+  layout: '5.1'
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c: [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+  dbap_rolloff_db: 6.0
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  blackbird:
+    name: Blackbird
+    color: '#3d3d3d'
+    group: Creatures
+    sound:
+      preset: sources/creatures/birds/blackbird.yaml
+      level: 82.0
+    place: [11.93, 0.6, 7.0]
+
+  robin:
+    name: Robin
+    color: '#e0703a'
+    group: Creatures
+    sound:
+      preset: sources/creatures/birds/robin.yaml
+      level: 82.0
+    place: [-2.37, 2.4, 2.5]
+
+  frog:
+    name: Frog
+    color: '#66bb6a'
+    group: Creatures
+    sound:
+      preset: sources/creatures/frog.yaml
+      level: 90.0
+    place: [33.84, -1.26, 0.0]
+
+  frog-2:
+    name: Froggie
+    color: '#9ccc65'
+    group: Creatures
+    sound:
+      preset: sources/creatures/frog.yaml
+      level: 89.7
+    place: [-21.01, 1.81, 0.0]
+
+  field-wind:
+    name: Field wind
+    color: '#4fc3f7'
+    group: Weather
+    sound:
+      preset: sources/weather/wind/field-wind.yaml
+      level: 54.8
+    place: [5.37, -6.9, 1.2]
+
+  blue-tit:
+    name: Blue tit
+    group: Creatures
+    sound:
+      preset: sources/creatures/birds/blue-tit.yaml
+      level: 84.6
+    place: [-36.4, -26.95, 1.2]
+
+  blue-tit-2:
+    name: Blue tit copy
+    group: Creatures
+    sound:
+      preset: sources/creatures/birds/blue-tit.yaml
+      level: 84.6
+    place: [52.15, -25.96, 1.2]
+
+  blue-tit-3:
+    name: Blue tit copy
+    group: Creatures
+    sound:
+      preset: sources/creatures/birds/blue-tit.yaml
+      level: 84.6
+    place: [6.36, -32.97, 1.2]
+
+atmosphere: atmospheres/default.yaml
+
+hrtf: assets/hrtf/default.sofa
+
+weather:
+  story: held
+  wind: [0.05, 0.25]
+  rain: 0.0
+  storm: 0.0
+  daylight: [0.8, 1.0]
