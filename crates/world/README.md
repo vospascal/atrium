@@ -11,7 +11,7 @@ sounds:
     name: Frogs
     color: "#6db33f"
     group: Creatures
-    sound: { preset: sources/frog.yaml, level: 68 }
+    sound: { preset: sources/creatures/frog.yaml, level: 68 }
     shape: { width: 180, behind: -12, size: 0.2, facing: 225, ambient: false }
   shore:
     sound: { audio: assets/running_water.ogg }
@@ -26,6 +26,12 @@ sounds:
 `shape.arc` is for an ambient sound: the arc of directions it arrives from, in degrees, centred
 on the side its `place` lies on, from 10 to 360 (all round, the same as leaving it out). A
 shoreline is `{ ambient: true, arc: 120 }` with its place out on the water; a point ignores it.
+
+`sound.layers` mixes a generator's layers, by the layer's key: `layers: { right: { mute: true },
+presence: { level: -6 } }`, each with a `level` in dB against the layer as made, `solo` and
+`mute`, and only what differs from as made is written. Which keys a sound has is the engine's
+to say (`docs/sessions-and-layers-plan.md`); a change of layers alone is `Change::Layers`, played
+without building the sound again.
 
 Only `sound` and `place` are required. A part left out is the plain case: the preset's own
 level and shape, standing still, and the id shown as the name.

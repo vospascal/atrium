@@ -2,6 +2,7 @@ pub mod ambisonics;
 pub mod commands;
 pub mod dbap;
 pub mod directivity;
+pub mod layers;
 pub mod listener;
 pub mod panner;
 pub mod probe;

@@ -163,7 +163,10 @@ fn the_passing_storm_strikes_thunder_only_in_its_storms() {
         .find(|source| source.id == "thunder")
         .expect("thunder")
         .slot as usize;
-    let weather = result.planner.weather();
+    let weather = result
+        .planner
+        .weather()
+        .expect("a nature scene has weather");
     let claps: Vec<_> = result
         .planner
         .upcoming(3.0 * 3600.0)
@@ -190,7 +193,10 @@ fn in_the_passing_storm_each_creature_keeps_to_its_weather() {
     let mut scene = SceneConfig::load("scenes/passing-storm.yaml").expect("scene should load");
     scene.seed = Some(3);
     let result = scene.build().expect("scene should build");
-    let weather = result.planner.weather();
+    let weather = result
+        .planner
+        .weather()
+        .expect("a nature scene has weather");
     let slot = |id: &str| {
         result
             .description

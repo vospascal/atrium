@@ -43,7 +43,7 @@ pub struct Entity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sound {
-    /// A file that defines the sound, such as `sources/frog.yaml`: a
+    /// A file that defines the sound, such as `sources/creatures/frog.yaml`: a
     /// recording or a generator, with its level and shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
@@ -55,6 +55,48 @@ pub struct Sound {
     /// Level in dB SPL at 1 m, in place of the preset's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<f32>,
+    /// How its layers are mixed, by the layer's key (`body`, `right`,
+    /// `octave-1`), for each layer set otherwise than as the generator makes
+    /// it. A layer left out is as made; a sound of one stream has none.
+    ///
+    /// ```yaml
+    /// layers:
+    ///   right: { mute: true }
+    ///   presence: { level: -6 }
+    /// ```
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layers: BTreeMap<String, Layer>,
+}
+
+/// How one layer of a sound is mixed, where it differs from the layer as
+/// the generator makes it.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+    /// dB against the layer as made; 0 leaves it as made.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub level: f32,
+    /// Heard alone, with any other soloed layer of the sound.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub solo: bool,
+    /// Not heard, unless soloed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mute: bool,
+}
+
+impl Layer {
+    /// Whether it leaves the layer as made, so a file need not mention it.
+    pub fn is_as_made(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// How an entity fills the air, where it differs from its preset.

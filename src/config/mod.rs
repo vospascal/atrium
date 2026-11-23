@@ -29,14 +29,18 @@ mod build_tests;
 
 pub use build::BuildResult;
 pub use description::{
-    SceneDescription, SceneSummary, SoundSummary, SourceDescription, SpeakerDescription,
-    TakeDescription,
+    LayerDescription, SceneDescription, SceneSummary, SoundSummary, SourceDescription,
+    SpeakerDescription, TakeDescription,
 };
 pub use draft::{draft_preset, Draft};
+pub use environment::EnvironmentSummary;
 pub use lab::soft_wind_of;
 pub use presets::{list_presets, read_preset, PresetSummary};
-pub use scene::{Atmosphere, AtmosphereConfig, Band, ListenerConfig, SceneConfig, WeatherConfig};
+pub use scene::{
+    Atmosphere, AtmosphereConfig, Band, ListenerConfig, SceneConfig, SceneKind, WeatherConfig,
+};
 pub use scene_file::{saved_by_editor, EDITOR_MARK};
 pub use sound_builder::{
-    bearing_for_heading, name_and_color, radiation_of, yaw_for_bearing, BuiltSound, SoundBuilder,
+    bearing_for_heading, layer_setting, name_and_color, radiation_of, yaw_for_bearing, BuiltSound,
+    SoundBuilder,
 };

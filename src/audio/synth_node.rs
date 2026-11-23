@@ -8,6 +8,7 @@
 use crate::audio::mute_fade::MuteFade;
 use crate::audio::signal_meter::SignalMeter;
 use atrium_core::directivity::DirectivityPattern;
+use atrium_core::layers::{LayerMix, LayerSetting, MOST_LAYERS};
 use atrium_core::source::SoundSource;
 use atrium_core::telemetry::SourceSignal;
 use atrium_core::types::Vec3;
@@ -34,6 +35,14 @@ pub struct SynthNode {
     /// What the scene made of it, in place of the generator's own kind.
     emitter_kind: Option<atrium_core::source::EmitterKind>,
     signal_meter: Option<SignalMeter>,
+    /// A second voice sounding at the same moment from another place: the
+    /// right ear's tone of a binaural beat. Whatever the scene sets on this
+    /// node is set on it too, so the two stay one sound.
+    second_voice: Option<Box<SynthNode>>,
+    /// The mix of its layers. With a second voice the two voices are its two
+    /// layers: this voice is layer 0 and the second layer 1, which is set to
+    /// what this mix leaves of it.
+    layer_mix: LayerMix,
 }
 
 impl SynthNode {
@@ -51,6 +60,38 @@ impl SynthNode {
             muted: MuteFade::new(),
             emitter_kind: None,
             signal_meter: None,
+            second_voice: None,
+            layer_mix: LayerMix::untouched(),
+        }
+    }
+
+    /// Give it `generator` as a second voice, calibrated, placed and shaped
+    /// as this node is now. Set it up first: what is set afterwards reaches
+    /// both voices.
+    pub(crate) fn add_second_voice(&mut self, generator: Box<dyn SoundSource>) {
+        let mut voice = SynthNode::new(generator, self.position);
+        voice.amplitude = self.amplitude;
+        voice.unit_amplitude = self.unit_amplitude;
+        voice.pattern = self.pattern;
+        voice.spread = self.spread;
+        voice.arc_degrees = self.arc_degrees;
+        voice.ref_dist = self.ref_dist;
+        voice.facing = self.facing;
+        voice.signal_meter = self.signal_meter.as_ref().map(SignalMeter::fresh);
+        self.second_voice = Some(Box::new(voice));
+    }
+
+    /// Put every layer's weight where its setting asks at once, as for a
+    /// sound built with its layers already set: no glide from 0 dB.
+    pub(crate) fn settle_layers(&mut self) {
+        self.layer_mix.settle();
+        self.also_second_voice(SynthNode::settle_layers);
+    }
+
+    /// Do `change` to the second voice, if it has one.
+    fn also_second_voice(&mut self, change: impl FnOnce(&mut SynthNode)) {
+        if let Some(voice) = &mut self.second_voice {
+            change(voice);
         }
     }
 
@@ -63,7 +104,8 @@ impl SoundSource for SynthNode {
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
         // Always advance the generator so envelopes/gust cycles keep evolving
         // while muted — unmuting resumes mid-weather instead of restarting.
-        let sample = self.generator.next_sample(sample_rate);
+        self.layer_mix.advance(sample_rate);
+        let sample = self.generator.next_mixed(sample_rate, &mut self.layer_mix);
         let unmuted = self.muted.next_gain(sample_rate);
         if unmuted == 0.0 {
             return 0.0;
@@ -75,8 +117,49 @@ impl SoundSource for SynthNode {
         output
     }
 
+    /// The meter's reading, with each layer's RMS: a second voice's from its
+    /// own meter, a generator's layers as their shares of the power the mix
+    /// summed.
     fn signal(&self) -> Option<SourceSignal> {
-        self.signal_meter.as_ref().map(SignalMeter::signal)
+        let mut signal = self.signal_meter.as_ref().map(SignalMeter::signal)?;
+        let count = self.layer_count().min(MOST_LAYERS);
+        signal.layer_count = count as u8;
+        signal.layer_rms = [0.0; MOST_LAYERS];
+        if let Some(voice) = &self.second_voice {
+            signal.layer_rms[0] = signal.relative_rms;
+            signal.layer_rms[1] = voice.signal().map_or(0.0, |voice| voice.relative_rms);
+        } else {
+            let powers = self.layer_mix.powers();
+            let total: f32 = powers[..count].iter().sum();
+            for (rms, power) in signal.layer_rms.iter_mut().zip(&powers[..count]) {
+                *rms = if total > 0.0 {
+                    signal.relative_rms * (power / total).sqrt()
+                } else {
+                    0.0
+                };
+            }
+        }
+        Some(signal)
+    }
+
+    /// The generator's layers, or with a second voice the two voices.
+    fn layer_count(&self) -> usize {
+        if self.second_voice.is_some() {
+            2
+        } else {
+            self.generator.layer_count()
+        }
+    }
+
+    fn set_layer(&mut self, layer: usize, setting: LayerSetting) {
+        if layer >= self.layer_count() {
+            return;
+        }
+        self.layer_mix.set(layer, setting);
+        let heard = self.layer_mix.heard(1);
+        if let Some(voice) = &mut self.second_voice {
+            voice.set_layer(0, heard);
+        }
     }
 
     /// The generator's own: a generator that keeps appointments (thunder)
@@ -87,14 +170,17 @@ impl SoundSource for SynthNode {
 
     fn set_clock(&mut self, sample: u64) {
         self.generator.set_clock(sample);
+        self.also_second_voice(|voice| voice.set_clock(sample));
     }
 
     fn schedule(&mut self, utterance: atrium_core::source::Utterance) {
         self.generator.schedule(utterance);
+        self.also_second_voice(|voice| voice.schedule(utterance));
     }
 
     fn cancel(&mut self) {
         self.generator.cancel();
+        self.also_second_voice(SynthNode::cancel);
     }
 
     fn position(&self) -> Vec3 {
@@ -103,17 +189,33 @@ impl SoundSource for SynthNode {
         self.position + self.generator.motion_offset()
     }
 
+    fn beside_head(&self) -> Option<Vec3> {
+        self.generator.beside_head()
+    }
+
+    fn second_voice(&mut self) -> Option<&mut dyn SoundSource> {
+        self.second_voice
+            .as_deref_mut()
+            .map(|voice| voice as &mut dyn SoundSource)
+    }
+
     fn emitter_kind(&self) -> atrium_core::source::EmitterKind {
         self.emitter_kind
             .unwrap_or_else(|| self.generator.emitter_kind())
     }
 
+    /// A sound held beside the head is a point there: it cannot be made
+    /// ambient, and stays what it is.
     fn set_emitter_kind(&mut self, kind: atrium_core::source::EmitterKind) {
+        if self.beside_head().is_some() {
+            return;
+        }
         self.emitter_kind = Some(kind);
     }
 
     fn tick(&mut self, dt: f32) {
         self.generator.tick(dt);
+        self.also_second_voice(|voice| voice.tick(dt));
     }
 
     fn directivity(&self) -> DirectivityPattern {
@@ -138,10 +240,12 @@ impl SoundSource for SynthNode {
             }
         }
         self.muted.set(muted);
+        self.also_second_voice(|voice| voice.set_muted(muted));
     }
 
     fn set_position(&mut self, position: Vec3) {
         self.position = position;
+        self.also_second_voice(|voice| voice.set_position(position));
     }
 
     fn spread(&self) -> f32 {
@@ -150,6 +254,7 @@ impl SoundSource for SynthNode {
 
     fn set_spread(&mut self, spread: f32) {
         self.spread = spread;
+        self.also_second_voice(|voice| voice.set_spread(spread));
     }
 
     fn arc_degrees(&self) -> f32 {
@@ -158,31 +263,41 @@ impl SoundSource for SynthNode {
 
     fn set_arc_degrees(&mut self, degrees: f32) {
         self.arc_degrees = degrees;
+        self.also_second_voice(|voice| voice.set_arc_degrees(degrees));
     }
 
     fn set_reference_spl(&mut self, spl: f32) -> f32 {
         if self.unit_amplitude > 0.0 {
             self.amplitude = self.unit_amplitude * 10.0_f32.powf(spl / 20.0);
         }
+        self.also_second_voice(|voice| {
+            voice.set_reference_spl(spl);
+        });
         self.amplitude
     }
 
     fn set_directivity(&mut self, pattern: DirectivityPattern) {
         self.pattern = pattern;
+        self.also_second_voice(|voice| voice.set_directivity(pattern));
     }
 
     fn set_facing(&mut self, yaw: f32) {
         self.facing = Some(yaw);
+        self.also_second_voice(|voice| voice.set_facing(yaw));
     }
 
     fn set_synth_param(&mut self, param: atrium_core::commands::SynthParam, value: f32) {
         self.generator.set_synth_param(param, value);
+        self.also_second_voice(|voice| voice.set_synth_param(param, value));
     }
 
     fn ref_distance(&self) -> f32 {
         self.ref_dist
     }
 }
+
+#[cfg(test)]
+mod layer_checks;
 
 #[cfg(test)]
 mod tests {
@@ -341,5 +456,56 @@ mod tests {
         node.set_synth_param(SynthParam::MasterGain, 0.0);
         let energy: f32 = (0..2_000).map(|_| node.next_sample(48_000.0).powi(2)).sum();
         assert_eq!(energy, 0.0, "master gain 0 should silence the river");
+    }
+
+    /// A node with a second voice: the right ear's tone of a binaural beat.
+    /// What the scene sets on the node (mute, level, settings) reaches both
+    /// voices; both are held beside the head; neither can be made ambient.
+    #[test]
+    fn a_second_voice_follows_everything_set_on_the_node() {
+        use crate::synth::binaural_beat::{BinauralBeatSettings, BinauralToneSource, Ear};
+        let settings = BinauralBeatSettings::default();
+        let mut node = SynthNode::new(
+            Box::new(BinauralToneSource::new(Ear::Left, settings)),
+            Vec3::ZERO,
+        );
+        node.unit_amplitude = 0.001;
+        node.set_reference_spl(40.0);
+        node.add_second_voice(Box::new(BinauralToneSource::new(Ear::Right, settings)));
+        let second_amplitude = |node: &SynthNode| node.second_voice.as_ref().unwrap().amplitude;
+        assert_eq!(second_amplitude(&node), node.amplitude);
+        node.set_reference_spl(60.0);
+        assert_eq!(second_amplitude(&node), node.amplitude);
+
+        let left_ear = node.beside_head().expect("beside the head");
+        let right_ear = node.second_voice().unwrap().beside_head().unwrap();
+        assert_eq!(right_ear, Vec3::new(0.0, -left_ear.y, 0.0));
+
+        node.set_emitter_kind(EmitterKind::Field);
+        assert_eq!(node.emitter_kind(), EmitterKind::Object);
+
+        // A setting reaches the second voice: it plays the right ear's tone
+        // with the new beat, at the node's amplitude.
+        node.set_synth_param(SynthParam::Beat, 30.0);
+        let amplitude = node.amplitude;
+        let mut reference = BinauralToneSource::new(Ear::Right, settings);
+        reference.set_synth_param(SynthParam::Beat, 30.0);
+        let voice = node.second_voice().unwrap();
+        for _ in 0..4_800 {
+            assert_eq!(
+                voice.next_sample(48_000.0),
+                reference.next_sample(48_000.0) * amplitude
+            );
+        }
+        // Muting the node mutes both voices.
+        node.set_muted(true);
+        let voice = node.second_voice().unwrap();
+        assert!(voice.is_muted());
+        for _ in 0..4_800 {
+            voice.next_sample(48_000.0);
+        }
+        assert_eq!(voice.next_sample(48_000.0), 0.0);
+        // A sound with one voice has no second.
+        assert!(river_node(1).second_voice().is_none());
     }
 }

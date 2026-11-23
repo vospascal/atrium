@@ -53,3 +53,6 @@ impl RainV2SynthParams {
         Box::new(generator)
     }
 }
+
+/// The keys of the layers the generator hands over, in its order.
+pub(super) const LAYERS: &[&str] = &["bed", "texture", "drops"];

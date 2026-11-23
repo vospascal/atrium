@@ -1,0 +1,55 @@
+# The alpha binaural beat (108 Hz left, 118 Hz right) on its own, in the open
+# meadow, for listening on headphones and for measuring how much of each ear's
+# tone reaches the other ear in the 3D render (docs/binaural-beats.md).
+# The tones are held beside the head, wherever the sound's place is.
+
+title: binaural beat test
+
+environment: environments/meadow.yaml
+
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: stereo            # headphones
+  render_mode: hrtf         # binaural: each tone over the two ears
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c: [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+  dbap_rolloff_db: 6.0
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  alpha-binaural-beat:
+    name: Alpha Binaural Beat · 10 Hz
+    group: Binaural beats
+    sound:
+      preset: sources/tones/binaural/alpha.yaml
+    place: [0.0, 0.0, 1.2]
+
+hrtf: assets/hrtf/default.sofa
+
+weather:
+  story: held
+  wind: 0.0
+  rain: 0.0
+  storm: 0.0
+  daylight: 1.0

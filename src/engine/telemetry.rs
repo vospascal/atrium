@@ -49,7 +49,8 @@ pub fn compute_telemetry(
         if source.is_active() {
             frame.active_mask |= 1 << i;
         }
-        let pos = source.position();
+        // Where it is heard from: a tone held beside the head is drawn there.
+        let pos = atrium_core::source::sounding_position(source.as_ref(), listener);
         let dist = listener.position.distance_to(pos);
         let src_ref_dist = source.ref_distance();
 

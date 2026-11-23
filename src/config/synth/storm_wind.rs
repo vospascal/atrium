@@ -107,3 +107,13 @@ impl StormWindSynthParams {
         Box::new(generator)
     }
 }
+
+/// The keys of the layers the generator hands over, in its order.
+pub(super) const LAYERS: &[&str] = &[
+    "pressure",
+    "roar",
+    "shear",
+    "tearing",
+    "debris",
+    "structure",
+];

@@ -1,5 +1,5 @@
 //! The lab's stage-1 checks (`docs/generator-lab-plan.md`, "How we know it
-//! is right"), on the soft wind as `sources/soft-wind.yaml` makes it.
+//! is right"), on the soft wind as `sources/weather/wind/soft-wind.yaml` makes it.
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use crate::synth::soft_wind::SoftWindSource;
 
 const SAMPLE_RATE: f32 = 48_000.0;
 const BLOCK: usize = 512;
-const PRESET: &str = "sources/soft-wind.yaml";
+const PRESET: &str = "sources/weather/wind/soft-wind.yaml";
 
 fn entity() -> Entity {
     Entity {
@@ -29,6 +29,7 @@ fn entity() -> Entity {
             preset: Some(PRESET.into()),
             audio: None,
             level: None,
+            layers: Default::default(),
         },
         shape: Shape::default(),
         place: Place {

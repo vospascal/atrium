@@ -84,6 +84,14 @@ pub enum Command {
         value: f32,
     },
 
+    /// Set one layer of a source's sound: its level, solo and mute
+    /// (`crate::layers`). A source of one layer ignores any but layer 0.
+    SetSourceLayer {
+        index: u16,
+        layer: u8,
+        setting: crate::layers::LayerSetting,
+    },
+
     /// Bring loops onto one playhead: every voice in `slots` (bit `n` is
     /// voice `n`) that has a playhead jumps to where the `anchor` voice's is,
     /// dipping out and back in so it does not click. All are moved in the
@@ -147,19 +155,20 @@ pub enum SynthParam {
     MoveStrength,
     /// The pitch of a tone, in Hz.
     Pitch,
-    /// How fast a tone's overtones fall: each harmonic is this share of the
-    /// one below it, 0 to 0.9.
-    Brightness,
-    /// Level of a tone's fundamental layer, linear.
-    FundamentalLevel,
-    /// Level of a tone's overtone layer, linear.
-    OvertoneLevel,
-    /// Slowest and fastest a tone's shimmer beats (Hz).
-    ShimmerRateMin,
-    ShimmerRateMax,
-    /// How deep a tone's shimmer beats: the detuned partial's level as a
-    /// share of the fundamental's, 0 to 1.
-    ShimmerDepth,
+    /// The lowest a tone's octave line may go, in Hz.
+    Floor,
+    /// How long a tone's emphasis takes to go once round its lines (s).
+    RotationPeriod,
+    /// How far each of a tone's lines swings in level, low to high (dB).
+    RotationDepth,
+    /// A binaural beat's rate (Hz): the right ear's tone is this much above
+    /// the left's. For a session, the rate it starts at.
+    Beat,
+    /// The rate a binaural beat session moves to by its end (Hz). Set, it
+    /// makes a fixed beat a session.
+    EndBeat,
+    /// How long a piece plays before it has faded out and stopped (s).
+    Duration,
 }
 
 impl SynthParam {
@@ -202,12 +211,12 @@ impl SynthParam {
         SynthParam::MoveRest,
         SynthParam::MoveStrength,
         SynthParam::Pitch,
-        SynthParam::Brightness,
-        SynthParam::FundamentalLevel,
-        SynthParam::OvertoneLevel,
-        SynthParam::ShimmerRateMin,
-        SynthParam::ShimmerRateMax,
-        SynthParam::ShimmerDepth,
+        SynthParam::Floor,
+        SynthParam::RotationPeriod,
+        SynthParam::RotationDepth,
+        SynthParam::Beat,
+        SynthParam::EndBeat,
+        SynthParam::Duration,
     ];
 
     /// The name a file uses for this setting, in snake case.
@@ -250,12 +259,12 @@ impl SynthParam {
             SynthParam::MoveRest => "move_rest",
             SynthParam::MoveStrength => "move_strength",
             SynthParam::Pitch => "pitch",
-            SynthParam::Brightness => "brightness",
-            SynthParam::FundamentalLevel => "fundamental_level",
-            SynthParam::OvertoneLevel => "overtone_level",
-            SynthParam::ShimmerRateMin => "shimmer_rate_min",
-            SynthParam::ShimmerRateMax => "shimmer_rate_max",
-            SynthParam::ShimmerDepth => "shimmer_depth",
+            SynthParam::Floor => "floor",
+            SynthParam::RotationPeriod => "rotation_period",
+            SynthParam::RotationDepth => "rotation_depth",
+            SynthParam::Beat => "beat",
+            SynthParam::EndBeat => "end_beat",
+            SynthParam::Duration => "duration",
         }
     }
 

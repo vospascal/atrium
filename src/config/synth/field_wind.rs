@@ -102,3 +102,6 @@ impl FieldWindSynthParams {
         Box::new(generator)
     }
 }
+
+/// The keys of the layers the generator hands over, in its order.
+pub(super) const LAYERS: &[&str] = &["low", "body", "mid", "presence", "air"];

@@ -16,6 +16,16 @@ impl Listener {
     pub fn forward(&self) -> Vec3 {
         Vec3::new(self.yaw.cos(), self.yaw.sin(), 0.0)
     }
+
+    /// The point `offset` from the centre of the head, in the head's own
+    /// frame: `offset.x` metres ahead, `offset.y` to the left and `offset.z`
+    /// up. It turns with the head: the same offset is always on the same
+    /// side of it.
+    pub fn point_beside_head(&self, offset: Vec3) -> Vec3 {
+        let forward = self.forward();
+        let left = Vec3::new(-forward.y, forward.x, 0.0);
+        self.position + forward * offset.x + left * offset.y + Vec3::new(0.0, 0.0, offset.z)
+    }
 }
 
 #[cfg(test)]
@@ -72,5 +82,35 @@ mod tests {
         let turned = Listener::new(listener.position, 0.6 + std::f32::consts::PI);
         let behind = directivity_gain(turned.position, turned.forward(), source, &cardioid);
         assert!(behind < 1e-5, "{behind}");
+    }
+
+    /// A point beside the head stays on its side as the head turns: facing
+    /// +Y (yaw 90°, as the scenes start), a metre to the left is −X and a
+    /// metre to the right +X; turned to face −X, the left is −Y. Ahead and up
+    /// are along the forward vector and +Z.
+    #[test]
+    fn a_point_beside_the_head_turns_with_it() {
+        let centre = Vec3::new(2.0, 3.0, 1.2);
+        let facing_north = Listener::new(centre, FRAC_PI_2);
+        let left = facing_north.point_beside_head(Vec3::new(0.0, 1.0, 0.0));
+        let right = facing_north.point_beside_head(Vec3::new(0.0, -1.0, 0.0));
+        assert!(
+            (left - Vec3::new(1.0, 3.0, 1.2)).length() < 1e-5,
+            "{left:?}"
+        );
+        assert!(
+            (right - Vec3::new(3.0, 3.0, 1.2)).length() < 1e-5,
+            "{right:?}"
+        );
+
+        let facing_west = Listener::new(centre, std::f32::consts::PI);
+        let left = facing_west.point_beside_head(Vec3::new(0.0, 1.0, 0.0));
+        assert!(
+            (left - Vec3::new(2.0, 2.0, 1.2)).length() < 1e-5,
+            "{left:?}"
+        );
+
+        let ahead_and_up = facing_west.point_beside_head(Vec3::new(2.0, 0.0, 0.5));
+        assert!((ahead_and_up - Vec3::new(0.0, 3.0, 1.7)).length() < 1e-5);
     }
 }

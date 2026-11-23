@@ -13,6 +13,9 @@ pub struct PresetSummary {
     pub name: String,
     /// The family a sound made from it joins, when the preset names one.
     pub group: Option<String>,
+    /// A few sentences on what it is and where it comes from, when the
+    /// preset has them.
+    pub about: Option<String>,
     /// Whether it is a generator; otherwise it plays a recording.
     pub generated: bool,
     /// Its level in dB SPL at 1 m.
@@ -21,22 +24,41 @@ pub struct PresetSummary {
     pub takes: usize,
 }
 
-/// Every preset in `directory`, by file name. A file that is not a preset is
-/// an error that names it, so a broken preset is noticed in the library and
-/// not when a scene that uses it fails to start.
+/// Every preset in `directory` and the folders inside it, sorted by path. A
+/// file that is not a preset is an error that names it, so a broken preset
+/// is noticed in the library and not when a scene that uses it fails to
+/// start.
 pub fn list_presets(directory: &str) -> Result<Vec<PresetSummary>, Box<dyn std::error::Error>> {
-    let mut paths: Vec<String> = std::fs::read_dir(directory)
-        .map_err(|error| format!("{directory}: {error}"))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "yaml")
-        })
-        .filter_map(|path| path.to_str().map(str::to_string))
-        .collect();
+    let mut paths = Vec::new();
+    collect_preset_paths(std::path::Path::new(directory), &mut paths)?;
     paths.sort();
 
     paths.iter().map(|path| read_preset(path)).collect()
+}
+
+/// The `.yaml` files in `directory` and every folder below it.
+fn collect_preset_paths(
+    directory: &std::path::Path,
+    paths: &mut Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("{}: {error}", directory.display()))?
+            .path();
+        if path.is_dir() {
+            collect_preset_paths(&path, paths)?;
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "yaml")
+        {
+            if let Some(path) = path.to_str() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The preset in the file at `path`, as a library lists it.
@@ -44,20 +66,29 @@ pub fn read_preset(path: &str) -> Result<PresetSummary, Box<dyn std::error::Erro
     let contents = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
     let preset: SourceDef =
         serde_yaml::from_str(&contents).map_err(|error| format!("{path}: {error}"))?;
-    let (name, group, generated, level, takes) = match preset {
+    let (name, group, about, generated, level, takes) = match preset {
         SourceDef::Sample(sample) => (
             sample.name,
             sample.group,
+            sample.about,
             false,
             sample.reference_spl,
             sample.takes.len(),
         ),
-        SourceDef::Synth(synth) => (synth.name, synth.group, true, synth.reference_spl, 0),
+        SourceDef::Synth(synth) => (
+            synth.name,
+            synth.group,
+            synth.about,
+            true,
+            synth.reference_spl,
+            0,
+        ),
     };
     Ok(PresetSummary {
         name: name.unwrap_or_else(|| title_from_path(path)),
         path: path.to_string(),
         group,
+        about,
         generated,
         level,
         takes,
@@ -82,7 +113,7 @@ mod tests {
 
         let frog = presets
             .iter()
-            .find(|preset| preset.path == "sources/frog.yaml")
+            .find(|preset| preset.path == "sources/creatures/frog.yaml")
             .expect("the frog is listed");
         assert_eq!(frog.name, "Frog");
         assert_eq!(frog.group.as_deref(), Some("Creatures"));
@@ -91,10 +122,126 @@ mod tests {
 
         let wind = presets
             .iter()
-            .find(|preset| preset.path == "sources/field-wind.yaml")
+            .find(|preset| preset.path == "sources/weather/wind/field-wind.yaml")
             .expect("the field wind is listed");
         assert!(wind.generated, "the field wind is a generator");
         assert_eq!(wind.group.as_deref(), Some("Weather"));
+    }
+
+    /// The focus tones: one preset per frequency in `docs/focus-tones.md`,
+    /// grouped by the set they come from, each with a note for the library.
+    #[test]
+    fn every_focus_tone_is_grouped_and_has_a_note() {
+        let presets = list_presets("sources").expect("the presets read");
+        let tones: Vec<&PresetSummary> = presets
+            .iter()
+            .filter(|preset| {
+                preset.path.starts_with("sources/tones/")
+                    && !preset.path.starts_with("sources/tones/binaural/")
+            })
+            .collect();
+        let in_group = |group: &str| {
+            tones
+                .iter()
+                .filter(|preset| preset.group.as_deref() == Some(group))
+                .count()
+        };
+        assert_eq!(in_group("Solfeggio"), 10);
+        assert_eq!(in_group("Angel numbers"), 10);
+        assert_eq!(in_group("Planetary"), 13);
+        assert_eq!(in_group("Concert pitch"), 1);
+        assert_eq!(tones.len(), 34);
+        for tone in &tones {
+            assert!(tone.generated, "{} is a generator", tone.path);
+            assert_eq!(tone.level, 50.0, "{}", tone.path);
+            let about = tone.about.as_deref().unwrap_or("");
+            assert!(about.len() > 100, "{} has no note", tone.path);
+        }
+
+        let earth_day = presets
+            .iter()
+            .find(|preset| preset.path == "sources/tones/planetary/earth-day.yaml")
+            .expect("a preset in a folder inside a folder is listed")
+            .clone();
+        assert_eq!(earth_day.name, "Earth's day · 194.18 Hz");
+        assert!(earth_day
+            .about
+            .expect("it has a note")
+            .contains("Earth's day, 24 hours (86 400 s)"));
+        // A preset without a note has none.
+        assert_eq!(
+            read_preset("sources/creatures/frog.yaml").unwrap().about,
+            None
+        );
+    }
+
+    /// The binaural beats: one preset per piece in `docs/binaural-beats.md`,
+    /// grouped together, quiet, each with a note that says it needs
+    /// headphones, what leaks between the ears here, and that no effect is
+    /// measured.
+    #[test]
+    fn every_binaural_beat_is_grouped_and_has_a_note() {
+        let presets = list_presets("sources").expect("the presets read");
+        let beats: Vec<&PresetSummary> = presets
+            .iter()
+            .filter(|preset| preset.path.starts_with("sources/tones/binaural/"))
+            .collect();
+        assert_eq!(beats.len(), 13);
+        for beat in &beats {
+            assert_eq!(
+                beat.group.as_deref(),
+                Some("Binaural beats"),
+                "{}",
+                beat.path
+            );
+            assert!(beat.generated, "{} is a generator", beat.path);
+            assert_eq!(beat.level, 18.0, "{}", beat.path);
+            let about = beat.about.as_deref().unwrap_or("");
+            for needed in [
+                "108 Hz on the left",
+                "needs headphones",
+                "21 dB",
+                "has been measured",
+            ] {
+                assert!(about.contains(needed), "{}: no “{needed}”", beat.path);
+            }
+        }
+        let alpha = read_preset("sources/tones/binaural/alpha.yaml").unwrap();
+        assert_eq!(alpha.name, "Alpha Binaural Beat · 10 Hz");
+        let session = read_preset("sources/tones/binaural/falling-theta.yaml").unwrap();
+        assert_eq!(session.name, "Falling Theta Session · 7 → 5 Hz");
+        assert!(session.about.unwrap().contains("115 Hz moving to 113 Hz"));
+    }
+
+    /// Presets in folders, and folders inside those, are listed with the
+    /// rest, sorted by path; a file that is not YAML is not.
+    #[test]
+    fn presets_in_folders_are_listed_sorted_by_path() {
+        let directory = std::env::temp_dir().join(format!("atrium-presets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let nested = directory.join("tones").join("solfeggio");
+        std::fs::create_dir_all(&nested).unwrap();
+        let preset = "synth: focus_tone\nreference_spl: 50\n";
+        std::fs::write(directory.join("wind.yaml"), preset).unwrap();
+        std::fs::write(directory.join("about.txt"), "not a preset").unwrap();
+        std::fs::write(nested.join("528.yaml"), preset).unwrap();
+        std::fs::write(directory.join("tones").join("432.yaml"), preset).unwrap();
+
+        let listed: Vec<String> = list_presets(directory.to_str().unwrap())
+            .expect("the presets read")
+            .into_iter()
+            .map(|preset| {
+                preset
+                    .path
+                    .strip_prefix(directory.to_str().unwrap())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            ["/tones/432.yaml", "/tones/solfeggio/528.yaml", "/wind.yaml"]
+        );
     }
 
     #[test]

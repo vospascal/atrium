@@ -35,6 +35,11 @@ impl SignalMeter {
         }
     }
 
+    /// A meter of its own on the same scale: for a second voice of the sound.
+    pub(super) fn fresh(&self) -> Self {
+        Self::new(self.reference_rms)
+    }
+
     pub(super) fn reset(&mut self) {
         self.low = 0.0;
         self.below_high = 0.0;
@@ -88,10 +93,15 @@ impl SignalMeter {
         if sum <= f32::MIN_POSITIVE || !sum.is_finite() || !full.is_finite() {
             return SourceSignal::default();
         }
+        let relative_rms = full.sqrt() / self.reference_rms;
+        let mut layer_rms = [0.0; atrium_core::layers::MOST_LAYERS];
+        layer_rms[0] = relative_rms;
         SourceSignal {
-            relative_rms: full.sqrt() / self.reference_rms,
+            relative_rms,
             low_share: low / sum,
             high_share: high / sum,
+            layer_count: 1,
+            layer_rms,
         }
     }
 }

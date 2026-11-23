@@ -114,6 +114,15 @@ impl AudioScene {
                         source.set_synth_param(param, value);
                     }
                 }
+                Command::SetSourceLayer {
+                    index,
+                    layer,
+                    setting,
+                } => {
+                    if let Some(source) = self.sources.get_mut(index as usize) {
+                        source.set_layer(layer as usize, setting);
+                    }
+                }
                 Command::PlayInStep { anchor, slots } => self.play_in_step(anchor, slots),
                 Command::ResetScene => self.reset_to_initial_state(),
             }

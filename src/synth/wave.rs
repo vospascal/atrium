@@ -10,6 +10,7 @@
 use std::f32::consts::TAU;
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 
@@ -125,6 +126,16 @@ impl SoundSource for WaveSource {
     }
 
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Three layers, in this order: roar, hiss and crash.
+    fn layer_count(&self) -> usize {
+        3
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.retune(sample_rate);
@@ -158,10 +169,14 @@ impl SoundSource for WaveSource {
         let hiss = self.pink.next_sample(sample_rate);
 
         // 4. Mix: noise bed modulated by swell + crash layer
-        let sample = (self.roar_level * roar * swell
-            + self.hiss_level * hiss * swell
-            + self.crash_gain * crash)
-            * self.master_gain;
+        let sample = mix.sum(
+            0,
+            &[
+                self.roar_level * roar * swell,
+                self.hiss_level * hiss * swell,
+                self.crash_gain * crash,
+            ],
+        ) * self.master_gain;
 
         self.t = self.t.wrapping_add(1);
         sample

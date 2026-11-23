@@ -2,6 +2,7 @@
 //! definition's `synth:` field selects; each variant's parameters and the code
 //! that configures its generator live in that synth's own file.
 
+mod binaural_beat;
 mod canopy_wind;
 mod field_wind;
 mod focus_tone;
@@ -22,6 +23,7 @@ use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 use serde::Deserialize;
 
+use binaural_beat::BinauralBeatSynthParams;
 use canopy_wind::CanopyWindSynthParams;
 use field_wind::FieldWindSynthParams;
 use focus_tone::FocusToneSynthParams;
@@ -51,6 +53,7 @@ pub(in crate::config) enum SynthSpec {
     Waves(WaveSynthParams),
     Wisp(WispSynthParams),
     FocusTone(FocusToneSynthParams),
+    BinauralBeat(BinauralBeatSynthParams),
 }
 
 impl SynthSpec {
@@ -67,6 +70,7 @@ impl SynthSpec {
             SynthSpec::Waves(_) => "waves",
             SynthSpec::Wisp(_) => "wisp",
             SynthSpec::FocusTone(_) => "focus_tone",
+            SynthSpec::BinauralBeat(_) => "binaural_beat",
         }
     }
 
@@ -99,6 +103,52 @@ impl SynthSpec {
             SynthSpec::Waves(params) => params.build_generator(position, default_seed),
             SynthSpec::Wisp(params) => params.build_generator(position, default_seed),
             SynthSpec::FocusTone(params) => params.build_generator(position, default_seed),
+            SynthSpec::BinauralBeat(params) => params.build_generator(),
         }
     }
+
+    /// Each layer the generator hands its sound over in, as the key a scene
+    /// file names it by and the name a UI shows, in the generator's order; a
+    /// binaural beat's two voices are its two layers. None for a generator
+    /// that is one stream: the thunder, whose roar and claps meet inside a
+    /// colouring and a soft limit that act on their sum.
+    pub(in crate::config) fn layers(&self) -> Vec<(String, String)> {
+        let plain = |keys: &[&str]| {
+            keys.iter()
+                .map(|key| (key.to_string(), key.replace('-', " ")))
+                .collect()
+        };
+        match self {
+            SynthSpec::CanopyWind(_) => plain(canopy_wind::LAYERS),
+            SynthSpec::FieldWind(_) => plain(field_wind::LAYERS),
+            SynthSpec::SoftWind(_) => plain(soft_wind::LAYERS),
+            SynthSpec::StormWind(_) => plain(storm_wind::LAYERS),
+            SynthSpec::Rain(_) => plain(rain::LAYERS),
+            SynthSpec::RainV2(_) => plain(rain_v2::LAYERS),
+            SynthSpec::River(_) => plain(river::LAYERS),
+            SynthSpec::Waves(_) => plain(waves::LAYERS),
+            SynthSpec::Wisp(_) => plain(wisp::LAYERS),
+            SynthSpec::Thunder(_) => Vec::new(),
+            SynthSpec::FocusTone(params) => params.layers(),
+            SynthSpec::BinauralBeat(params) => params.layers(),
+        }
+    }
+
+    /// The generator of a second voice that sounds with the first from
+    /// another place, for a synth that has one: the right ear's tone of a
+    /// binaural beat. `None` for every other synth.
+    pub(in crate::config) fn build_second_voice(&self) -> Option<Box<dyn SoundSource>> {
+        match self {
+            SynthSpec::BinauralBeat(params) => Some(params.build_second_voice()),
+            _ => None,
+        }
+    }
+}
+
+/// A frequency as a layer's name shows it: up to three decimals, without
+/// trailing zeros ("108 Hz", "109.618 Hz", "83.25 Hz").
+fn hertz(frequency: f64) -> String {
+    let written = format!("{frequency:.3}");
+    let written = written.trim_end_matches('0').trim_end_matches('.');
+    format!("{written} Hz")
 }

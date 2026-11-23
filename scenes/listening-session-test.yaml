@@ -1,0 +1,42 @@
+# A listening session for the tests (docs/sessions-and-layers-plan.md): a
+# focus tone and a rain bed that follows the rain, in the dry space. Its
+# weather section names a passing storm, which a listening session keeps in
+# its file and does not run: the rain stays at its default, none.
+
+title: listening session test
+
+kind: listening
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+distance_model:
+  max_distance: 40.0
+
+speakers:
+  layout: '5.1'
+  render_mode: vbap
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  focus-tone:
+    group: Tones
+    sound:
+      preset: sources/tones/angel-numbers/333.yaml
+    place: [0.0, 2.0, 1.2]
+
+  rain:
+    group: Weather
+    sound:
+      preset: sources/weather/synth-rain-v2.yaml
+    place: [2.0, 2.0, 1.2]
+
+weather:
+  story: passing storm
+  wind: [0.2, 0.8]
+  rain: [0.3, 1.0]

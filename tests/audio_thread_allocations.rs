@@ -6,6 +6,7 @@
 //! operation made inside `process_commands` + `render`, in every render mode,
 //! with telemetry and the output tap attached.
 
+use atrium_core::layers::LayerSetting;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 
@@ -128,7 +129,8 @@ fn heap_operations_during(
 /// and turns (head tracking does this 25 times a second), sources move and
 /// change level, an ambient sound's arc is dragged wider and narrower (its
 /// filters are designed beside the audio thread and handed over), loops are
-/// brought into step, and now and then the output or the weather changes.
+/// brought into step, a sound's layers are faded, soloed and muted, and now
+/// and then the output or the weather changes.
 fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
     let phase = callback as f32 * 0.05;
     let mut commands = vec![
@@ -154,8 +156,32 @@ fn push_live_commands(producer: &mut rtrb::Producer<Command>, callback: usize) {
         5 => commands.push(Command::SetChannelMode {
             mode: ChannelMode::Stereo,
         }),
+        10 => commands.push(Command::SetSourceLayer {
+            index: 0,
+            layer: 1,
+            setting: LayerSetting {
+                level_db: -12.0 + 6.0 * phase.sin(),
+                ..LayerSetting::UNTOUCHED
+            },
+        }),
+        12 => commands.push(Command::SetSourceLayer {
+            index: 0,
+            layer: 0,
+            setting: LayerSetting {
+                solo: callback % 80 == 12,
+                ..LayerSetting::UNTOUCHED
+            },
+        }),
         15 => commands.push(Command::SetChannelMode {
             mode: ChannelMode::Quad,
+        }),
+        17 => commands.push(Command::SetSourceLayer {
+            index: 0,
+            layer: 1,
+            setting: LayerSetting {
+                mute: callback % 80 == 17,
+                ..LayerSetting::UNTOUCHED
+            },
         }),
         // Loops brought into step: the default scene's first three voices
         // loop, so the second and third dip out, jump and dip back in.
@@ -270,6 +296,8 @@ fn audio_callback_never_touches_the_heap() {
         // changed while it plays.
         ("scenes/synth-test.yaml", Some(90.0)),
         ("scenes/wisp.yaml", None),
+        // Two voices that are one sound's two layers.
+        ("scenes/binaural-beat-test.yaml", None),
     ] {
         violations.extend(violations_in(path, arc_degrees));
     }
@@ -303,9 +331,10 @@ fn the_labs_voice_never_touches_the_heap() {
         color: None,
         group: None,
         sound: Sound {
-            preset: Some("sources/soft-wind.yaml".into()),
+            preset: Some("sources/weather/wind/soft-wind.yaml".into()),
             audio: None,
             level: None,
+            layers: Default::default(),
         },
         shape: Shape::default(),
         place: Place {

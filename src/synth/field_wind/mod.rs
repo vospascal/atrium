@@ -11,6 +11,7 @@
 mod driver;
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::{EmitterKind, SoundSource};
 
 use atrium_core::types::Vec3;
@@ -185,8 +186,17 @@ impl FieldWindSource {
 }
 
 impl SoundSource for FieldWindSource {
-    #[inline]
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Five layers, in this order: low, body, mid, presence and air.
+    fn layer_count(&self) -> usize {
+        5
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.retune(sample_rate);
@@ -240,11 +250,16 @@ impl SoundSource for FieldWindSource {
                 .process(self.air_rng.next_bipolar() * self.white_noise_scale),
         );
 
-        let texture = self.low_gain * low * (0.90 + 0.10 * state.activity)
-            + self.body_gain * body * (0.68 + 0.48 * state.activity)
-            + self.mid_gain * mid * (0.25 + 1.00 * brightness)
-            + self.presence_gain * presence * (0.10 + 1.35 * brightness.powf(1.4))
-            + self.air_gain * air * (0.03 + 1.55 * brightness * brightness);
+        let texture = mix.sum(
+            0,
+            &[
+                self.low_gain * low * (0.90 + 0.10 * state.activity),
+                self.body_gain * body * (0.68 + 0.48 * state.activity),
+                self.mid_gain * mid * (0.25 + 1.00 * brightness),
+                self.presence_gain * presence * (0.10 + 1.35 * brightness.powf(1.4)),
+                self.air_gain * air * (0.03 + 1.55 * brightness * brightness),
+            ],
+        );
 
         // Airflow is the central driver: it controls both spectral character
         // above and pressure here. A quadratic pressure curve gives useful
@@ -275,7 +290,7 @@ impl SoundSource for FieldWindSource {
             return;
         }
         match param {
-            // Settings of rain, waves, flying sources and tones; not this one's.
+            // Settings of rain, waves, flying sources and tones and binaural beats; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
@@ -284,12 +299,12 @@ impl SoundSource for FieldWindSource {
             | SynthParam::HoverTimeMin
             | SynthParam::HoverTimeMax
             | SynthParam::Pitch
-            | SynthParam::Brightness
-            | SynthParam::FundamentalLevel
-            | SynthParam::OvertoneLevel
-            | SynthParam::ShimmerRateMin
-            | SynthParam::ShimmerRateMax
-            | SynthParam::ShimmerDepth => {}
+            | SynthParam::Floor
+            | SynthParam::RotationPeriod
+            | SynthParam::RotationDepth
+            | SynthParam::Beat
+            | SynthParam::EndBeat
+            | SynthParam::Duration => {}
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => {
                 self.min_speed = value.clamp(0.0, self.max_speed);

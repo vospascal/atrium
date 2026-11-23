@@ -16,9 +16,9 @@ use crate::audio::wav::{write_wav, SampleFormat};
 use crate::config::{draft_preset, read_preset, Draft};
 
 const FROG: &str = "assets/frog.mp3";
-const FROG_PRESET: &str = "sources/frog.yaml";
+const FROG_PRESET: &str = "sources/creatures/frog.yaml";
 const FROG_SCENE: &str = "scenes/frog.yaml";
-/// The frog's level filled in for the round trip, as `sources/frog.yaml`
+/// The frog's level filled in for the round trip, as `sources/creatures/frog.yaml`
 /// has it (dB SPL at 1 m).
 const FILLED_REFERENCE_SPL: &str = "reference_spl: 65.0";
 

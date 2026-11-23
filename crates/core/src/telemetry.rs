@@ -18,6 +18,10 @@ pub struct SourceSignal {
     pub low_share: f32,
     /// Share of measured energy above roughly 2.4 kHz. The remainder is midrange.
     pub high_share: f32,
+    /// How many layers its sound has, and each one's RMS on the same scale as
+    /// `relative_rms`. One layer for a sound that is one stream.
+    pub layer_count: u8,
+    pub layer_rms: [f32; crate::layers::MOST_LAYERS],
 }
 
 /// Per-source telemetry snapshot.

@@ -89,13 +89,15 @@ impl Planner {
         lock(&self.plan).add_voice(slot, id, rhythm, follows, now);
     }
 
-    /// The weather story moving the conditions.
-    pub fn weather(&self) -> Weather {
-        lock(&self.plan).weather().clone()
+    /// The weather story moving the conditions; `None` for a session
+    /// without weather.
+    pub fn weather(&self) -> Option<Weather> {
+        lock(&self.plan).weather().cloned()
     }
 
-    /// Let `weather` move the conditions from now on.
-    pub fn set_weather(&self, weather: Weather) {
+    /// Let `weather` move the conditions from now on; `None` holds them at
+    /// their defaults and stills the air.
+    pub fn set_weather(&self, weather: Option<Weather>) {
         lock(&self.plan).set_weather(weather);
     }
 
@@ -121,6 +123,16 @@ impl Planner {
         self.offset
             .store((to - self.clock.seconds()).to_bits(), Ordering::Release);
         plan.seek(to);
+    }
+
+    /// Carry on where `earlier` stands, as a scene built again in another
+    /// place does: at the same moment of the scene, the weather at the same
+    /// point of its story and running as fast. With the same seed, every
+    /// voice and every condition is then what it would have been.
+    pub fn carry_on_from(&self, earlier: &Planner) {
+        let now = earlier.now();
+        lock(&self.plan).keep_weather_clock_of(&lock(&earlier.plan));
+        self.seek(now);
     }
 
     /// The conditions `ahead` seconds from now (0 for now).
@@ -187,4 +199,48 @@ impl Drop for Planner {
 /// usable.
 fn lock(plan: &Mutex<Plan>) -> MutexGuard<'_, Plan> {
     plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::Story;
+
+    const RATE: f32 = 48_000.0;
+
+    /// A planner for a passing storm from `seed`, on a clock of its own.
+    fn planner(seed: u64) -> Planner {
+        let mut plan = Plan::new(seed);
+        plan.set_weather(Some(Weather::new(
+            Story::PassingStorm,
+            [(0.1, 0.6), (0.0, 0.8), (0.0, 1.0), (0.3, 1.0)],
+            seed,
+        )));
+        let (audio, _) = rtrb::RingBuffer::new(16);
+        Planner::start(plan, Arc::new(Clock::default()), audio)
+    }
+
+    /// A scene built again in another place carries on where it stood: the
+    /// same moment, and the weather at the same point of its story, running
+    /// as fast. A seek alone would put a time-lapsed story elsewhere.
+    #[test]
+    fn a_planner_carries_on_where_the_earlier_one_stood() {
+        let earlier = planner(7);
+        earlier.clock.advance((90.0 * RATE) as u64, RATE);
+        earlier.set_weather_speed(60.0);
+        earlier.clock.advance((30.0 * RATE) as u64, RATE);
+        earlier.seek(150.0);
+
+        let later = planner(7);
+        later.carry_on_from(&earlier);
+        assert_eq!(later.now(), earlier.now());
+        assert_eq!(later.weather_speed(), 60.0);
+        for ahead in [0.0, 10.0, 600.0] {
+            assert_eq!(later.conditions(ahead), earlier.conditions(ahead));
+        }
+
+        let sought = planner(7);
+        sought.seek(earlier.now());
+        assert_ne!(sought.conditions(0.0), earlier.conditions(0.0));
+    }
 }

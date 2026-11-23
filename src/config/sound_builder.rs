@@ -2,6 +2,7 @@
 //! sound added while it plays both go through, so the two cannot differ.
 
 use atrium_core::directivity::DirectivityPattern;
+use atrium_core::layers::{LayerSetting, LAYER_LEVEL_RANGE_DB};
 use atrium_core::source::{EmitterKind, SoundSource, Utterance};
 use atrium_core::types::Vec3;
 use atrium_world::{Entity, EntityId, Moves, Place};
@@ -9,7 +10,7 @@ use atrium_world::{Entity, EntityId, Moves, Place};
 use super::built_source::{
     build_one_source, build_one_synth_source, source_color, BuiltSource, SourceMeta,
 };
-use super::description::{beam_half_angle, SourceDescription, TakeDescription};
+use super::description::{beam_half_angle, LayerDescription, SourceDescription, TakeDescription};
 use super::parse::arr_to_vec3;
 use super::scene::NormalizationConfig;
 use super::source::{display_name, resolve, ResolvedSound, ResolvedSource};
@@ -132,6 +133,7 @@ impl SoundBuilder {
             size: meta.spread,
             arc: meta.arc,
             facing: built.source.orientation(),
+            layers: meta.layers,
         };
         Ok(BuiltSound {
             source: built.source,
@@ -176,6 +178,29 @@ impl SoundBuilder {
         adjust(&mut resolved)?;
         let place: [f32; 3] = entity.place.into();
         let position = arr_to_vec3(place) + self.spawn;
+        // Its layers, and a layer the scene names that it does not have
+        // refused rather than ignored.
+        let layer_names = match &resolved.sound {
+            ResolvedSound::Synth { spec } => spec.layers(),
+            ResolvedSound::Sample { .. } => Vec::new(),
+        };
+        if let Some(unknown) = entity
+            .sound
+            .layers
+            .keys()
+            .find(|key| layer_names.iter().all(|(known, _)| known != *key))
+        {
+            let known: Vec<&str> = layer_names.iter().map(|(key, _)| key.as_str()).collect();
+            return Err(if known.is_empty() {
+                format!("sound `{id}` has no layer `{unknown}`: it is one stream")
+            } else {
+                format!(
+                    "sound `{id}` has no layer `{unknown}`; its layers are {}",
+                    known.join(", ")
+                )
+            }
+            .into());
+        }
         let (orbit_radius, orbit_speed) = match entity.moves {
             Moves::Still => (0.0, 0.0),
             Moves::Orbit { radius, speed } => (radius, speed),
@@ -206,6 +231,17 @@ impl SoundBuilder {
                 if entity.moves != Moves::Still {
                     return Err(format!("sound `{id}`: a generator cannot orbit yet").into());
                 }
+                let layer_settings = layer_names
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (key, _))| {
+                        entity
+                            .sound
+                            .layers
+                            .get(key)
+                            .map(|layer| (index, layer_setting(layer)))
+                    })
+                    .collect::<Vec<_>>();
                 build_one_synth_source(
                     spec,
                     resolved.reference_spl,
@@ -215,6 +251,7 @@ impl SoundBuilder {
                     // Slot-stable default seed: reloading the scene sounds
                     // statistically identical, multiple synths decorrelate.
                     1000 + slot as u64,
+                    &layer_settings,
                     &self.normalization,
                     self.reference_distance,
                     self.max_distance,
@@ -311,8 +348,32 @@ impl SoundBuilder {
             orbit_speed,
             synth_kind,
             emitter_kind: built.source.emitter_kind(),
+            layers: layer_names
+                .into_iter()
+                .map(|(key, name)| LayerDescription {
+                    setting: entity
+                        .sound
+                        .layers
+                        .get(&key)
+                        .map_or(LayerSetting::UNTOUCHED, layer_setting),
+                    key,
+                    name,
+                })
+                .collect(),
         };
         Ok((built, meta))
+    }
+}
+
+/// How the engine mixes a layer the scene file sets as `layer`: its level
+/// kept in the range the mix allows.
+pub fn layer_setting(layer: &atrium_world::Layer) -> LayerSetting {
+    LayerSetting {
+        level_db: layer
+            .level
+            .clamp(LAYER_LEVEL_RANGE_DB.0, LAYER_LEVEL_RANGE_DB.1),
+        solo: layer.solo,
+        mute: layer.mute,
     }
 }
 

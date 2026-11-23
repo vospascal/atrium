@@ -62,6 +62,8 @@ pub(super) struct SourceMeta {
     pub(super) orbit_speed: f32,
     pub(super) synth_kind: Option<String>,
     pub(super) emitter_kind: EmitterKind,
+    /// Its layers as mixed; none for a sound that is one stream.
+    pub(super) layers: Vec<super::description::LayerDescription>,
 }
 
 // ── Single-source builder (shared by scene build + live add) ────────────────
@@ -218,6 +220,7 @@ pub(super) fn build_one_synth_source(
     spread: f32,
     position: Vec3,
     default_seed: u64,
+    layers: &[(usize, atrium_core::layers::LayerSetting)],
     normalization: &NormalizationConfig,
     global_ref_dist: f32,
     max_distance: f32,
@@ -277,6 +280,18 @@ pub(super) fn build_one_synth_source(
     node.pattern = pattern;
     node.spread = spread;
     node.meter_signal(rms);
+    // Its second voice, if it has one, as loud as the first: the two tones
+    // of a binaural beat are equally loud.
+    if let Some(second_voice) = spec.build_second_voice() {
+        node.add_second_voice(second_voice);
+    }
+    // Its layers as the scene sets them, from the first sample. The preview
+    // above measured the generator as made, so a layer's level is heard
+    // against its calibrated level.
+    for &(layer, setting) in layers {
+        atrium_core::source::SoundSource::set_layer(&mut node, layer, setting);
+    }
+    node.settle_layers();
 
     Ok(BuiltSource {
         source: Box::new(node),

@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use atrium_core::directivity::DirectivityPattern;
+use atrium_core::layers::LayerSetting;
 use atrium_core::source::EmitterKind;
 use atrium_core::telemetry::MAX_SOURCES;
 use atrium_core::types::Vec3;
@@ -20,6 +21,10 @@ use super::source::display_name;
 /// The built scene as a UI sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneDescription {
+    /// What the scene is, which decides what a UI shows of it.
+    pub kind: super::scene::SceneKind,
+    /// The environment file it plays in; `None` for the dry space.
+    pub space: Option<String>,
     /// Environment floor size along x (m).
     pub width: f32,
     /// Environment floor size along y (m).
@@ -91,6 +96,18 @@ pub struct SourceDescription {
     pub arc: f32,
     /// The node's initial forward vector in world coordinates.
     pub facing: Vec3,
+    /// Its layers, in the order the generator hands them over, each as it
+    /// is mixed; none for a sound that is one stream.
+    pub layers: Vec<LayerDescription>,
+}
+
+/// One layer of a sound: the key a scene file names it by, the name a UI
+/// shows, and how it is mixed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerDescription {
+    pub key: String,
+    pub name: String,
+    pub setting: LayerSetting,
 }
 
 /// One take of a sound: its name, and how often it is chosen next to the
@@ -124,6 +141,7 @@ pub(super) fn beam_half_angle(kind: EmitterKind, pattern: DirectivityPattern) ->
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneSummary {
     pub title: String,
+    pub kind: super::scene::SceneKind,
     /// In slot order, as they will play.
     pub sounds: Vec<SoundSummary>,
 }
@@ -145,6 +163,7 @@ impl SceneConfig {
         let listener = arr_to_vec3(self.listener.position);
         SceneSummary {
             title: self.title.clone().unwrap_or_else(|| title_from_path(path)),
+            kind: self.kind,
             sounds: self
                 .sounds
                 .iter()

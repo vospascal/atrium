@@ -10,6 +10,7 @@
 //! callback size cannot affect the generated signal.
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::{EmitterKind, SoundSource};
 
 use atrium_core::types::Vec3;
@@ -197,8 +198,17 @@ impl SoftWindSource {
 }
 
 impl SoundSource for SoftWindSource {
-    #[inline]
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Five layers, in this order: low, body, mid, presence and air.
+    fn layer_count(&self) -> usize {
+        5
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.retune(sample_rate);
@@ -252,11 +262,16 @@ impl SoundSource for SoftWindSource {
             ),
         );
 
-        let texture = self.low_gain * low
-            + self.body_gain * body * (0.94 + 0.06 * state.weather)
-            + self.mid_gain * mid * (0.62 + 0.42 * brightness)
-            + self.presence_gain * presence * (0.24 + 1.00 * brightness.powf(1.20))
-            + self.air_gain * air * (0.16 + 0.90 * brightness.powf(1.45));
+        let texture = mix.sum(
+            0,
+            &[
+                self.low_gain * low,
+                self.body_gain * body * (0.94 + 0.06 * state.weather),
+                self.mid_gain * mid * (0.62 + 0.42 * brightness),
+                self.presence_gain * presence * (0.24 + 1.00 * brightness.powf(1.20)),
+                self.air_gain * air * (0.16 + 0.90 * brightness.powf(1.45)),
+            ],
+        );
 
         // The level floor stays high. These independent contributions are in
         // decibels so their depths remain perceptually meaningful.
@@ -285,7 +300,7 @@ impl SoundSource for SoftWindSource {
             return;
         }
         match param {
-            // Settings of rain, waves, flying sources and tones; not this one's.
+            // Settings of rain, waves, flying sources and tones and binaural beats; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
@@ -294,12 +309,12 @@ impl SoundSource for SoftWindSource {
             | SynthParam::HoverTimeMin
             | SynthParam::HoverTimeMax
             | SynthParam::Pitch
-            | SynthParam::Brightness
-            | SynthParam::FundamentalLevel
-            | SynthParam::OvertoneLevel
-            | SynthParam::ShimmerRateMin
-            | SynthParam::ShimmerRateMax
-            | SynthParam::ShimmerDepth => {}
+            | SynthParam::Floor
+            | SynthParam::RotationPeriod
+            | SynthParam::RotationDepth
+            | SynthParam::Beat
+            | SynthParam::EndBeat
+            | SynthParam::Duration => {}
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => self.min_speed = value.clamp(0.0, self.max_speed),
             SynthParam::MaxSpeed => self.max_speed = value.clamp(self.min_speed, 25.0),

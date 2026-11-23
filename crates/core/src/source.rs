@@ -1,4 +1,6 @@
 use crate::directivity::DirectivityPattern;
+use crate::layers::{LayerMix, LayerSetting};
+use crate::listener::Listener;
 use crate::telemetry::SourceSignal;
 use crate::types::Vec3;
 
@@ -53,11 +55,40 @@ pub struct Utterance {
     pub skip_seconds: f32,
 }
 
+/// Where `source` sounds from for `listener`: beside the head when it is
+/// held there ([`SoundSource::beside_head`]), else its place in the world.
+pub fn sounding_position(source: &dyn SoundSource, listener: &Listener) -> Vec3 {
+    match source.beside_head() {
+        Some(offset) => listener.point_beside_head(offset),
+        None => source.position(),
+    }
+}
+
 /// Trait for anything that generates audio samples and has a position.
 /// Implementations must be Send (moved to audio thread) and must not allocate.
 pub trait SoundSource: Send {
     /// Generate the next mono sample.
     fn next_sample(&mut self, sample_rate: f32) -> f32;
+
+    /// How many layers it hands its sound over in: a generator made of
+    /// distinct parts (a wind's bands, rain's hiss and drops) has one per
+    /// part; anything that is one stream has one.
+    fn layer_count(&self) -> usize {
+        1
+    }
+
+    /// The next sample with its layers summed by `mix` instead of by the
+    /// source itself: what [`Self::next_sample`] gives when every layer is at
+    /// 0 dB. A source of one stream is layer 0.
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
+        let sample = self.next_sample(sample_rate);
+        mix.sum(0, &[sample])
+    }
+
+    /// Set layer `layer` of the sound as it plays in the scene: its level,
+    /// solo and mute. Default: no-op, for sources the scene does not mix by
+    /// layer.
+    fn set_layer(&mut self, _layer: usize, _setting: LayerSetting) {}
 
     /// Latest short-time levels, if this source meters its rendered signal.
     fn signal(&self) -> Option<SourceSignal> {
@@ -81,6 +112,25 @@ pub trait SoundSource: Send {
     /// anchor position. Stationary sources stay at zero.
     fn motion_offset(&self) -> Vec3 {
         Vec3::ZERO
+    }
+
+    /// Where it sounds from when it is held beside the listener's head
+    /// instead of placed in the world: metres ahead of the head's centre, to
+    /// its left and up (see [`Listener::point_beside_head`]). It turns and
+    /// moves with the head, so head tracking leaves it where it is relative
+    /// to the ears. `None`, the default, for a sound placed in the world: all
+    /// but the two tones of a binaural beat.
+    fn beside_head(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// A second voice that sounds at the same moment from another place,
+    /// rendered as a point of its own: the right ear's tone of a binaural
+    /// beat, whose left ear's tone is this source. Everything the scene sets
+    /// on this source reaches it too. `None`, the default, for a source with
+    /// one voice.
+    fn second_voice(&mut self) -> Option<&mut dyn SoundSource> {
+        None
     }
     /// Spatial interpretation of this source. Existing sources remain point-like
     /// objects unless they explicitly opt into field rendering.
@@ -257,11 +307,40 @@ mod tests {
         assert_eq!(source.spread(), 0.0);
         assert_eq!(source.arc_degrees(), ALL_ROUND_DEGREES);
         assert_eq!(source.motion_offset().length(), 0.0);
+        assert_eq!(source.beside_head(), None, "placed in the world");
         assert_eq!(
             source.playhead_seconds(),
             None,
             "only a loop has a playhead"
         );
         assert_eq!(source.orbit_center().distance_to(source.position()), 0.0);
+    }
+
+    /// A source placed in the world sounds from its place wherever the
+    /// listener turns; one held beside the head sounds from beside it, and
+    /// has one voice unless it says otherwise.
+    #[test]
+    fn a_source_sounds_from_its_place_or_beside_the_head() {
+        struct AtTheLeftEar;
+        impl SoundSource for AtTheLeftEar {
+            fn next_sample(&mut self, _sample_rate: f32) -> f32 {
+                0.0
+            }
+            fn position(&self) -> Vec3 {
+                Vec3::new(9.0, 9.0, 9.0)
+            }
+            fn beside_head(&self) -> Option<Vec3> {
+                Some(Vec3::new(0.0, 1.0, 0.0))
+            }
+            fn tick(&mut self, _dt: f32) {}
+        }
+        let listener = Listener::new(Vec3::new(0.0, 0.0, 1.2), std::f32::consts::FRAC_PI_2);
+        assert_eq!(
+            sounding_position(&StillSource, &listener),
+            Vec3::new(1.0, 2.0, 0.5)
+        );
+        let at_the_ear = sounding_position(&AtTheLeftEar, &listener);
+        assert!((at_the_ear - Vec3::new(-1.0, 0.0, 1.2)).length() < 1e-5);
+        assert!(StillSource.second_voice().is_none());
     }
 }

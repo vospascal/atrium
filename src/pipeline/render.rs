@@ -130,7 +130,9 @@ impl RenderPipeline {
         }
     }
 
-    /// Ensure topology matches current source count and layout.
+    /// Ensure topology matches current source count and layout: room for
+    /// every source's own voice and a second voice of each
+    /// ([`voice_count`]).
     pub fn ensure_topology(
         &mut self,
         source_count: usize,
@@ -138,12 +140,12 @@ impl RenderPipeline {
         sample_rate: f32,
     ) {
         self.renderer
-            .ensure_topology(source_count, layout, sample_rate);
+            .ensure_topology(voice_count(source_count), layout, sample_rate);
         self.field_renderer
             .ensure_topology(source_count, sample_rate);
 
-        // Grow per-source path effect chains.
-        while self.path_effects.len() < source_count {
+        // Grow per-voice path effect chains.
+        while self.path_effects.len() < voice_count(source_count) {
             let chains: [PathEffectChain; MAX_PATHS] = std::array::from_fn(|_| {
                 let effects: Vec<Box<dyn PathEffect>> = self
                     .path_effect_factories
@@ -160,6 +162,14 @@ impl RenderPipeline {
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline render dispatch
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// How many voices `source_count` sources can sound with: each its own, and
+/// a second one each (`SoundSource::second_voice`). Source `i`'s own voice
+/// keeps the renderer's per-source state `i`, its second voice
+/// `source_count + i`, so a source swapped into a slot finds both ready.
+pub(super) fn voice_count(source_count: usize) -> usize {
+    2 * source_count
+}
 
 /// Scene-level parameters for rendering a single buffer.
 pub struct RenderParams<'a> {
@@ -211,11 +221,12 @@ pub fn render_pipeline(
         .unwrap_or(ambient_heard);
 
     // Ensure topology
-    renderer.ensure_topology(sources.len(), params.layout, params.sample_rate);
-    field_renderer.ensure_topology(sources.len(), params.sample_rate);
+    let source_count = sources.len();
+    renderer.ensure_topology(voice_count(source_count), params.layout, params.sample_rate);
+    field_renderer.ensure_topology(source_count, params.sample_rate);
 
-    // Grow per-source path effect chains if needed.
-    while path_effects.len() < sources.len() {
+    // Grow per-voice path effect chains if needed.
+    while path_effects.len() < voice_count(source_count) {
         let chains: [PathEffectChain; MAX_PATHS] = std::array::from_fn(|_| {
             let effects: Vec<Box<dyn PathEffect>> = path_effect_factories
                 .iter()
@@ -254,8 +265,17 @@ pub fn render_pipeline(
         ambient_bus.fill(0.0);
     }
 
-    // Per-source pipeline
-    for (i, source) in sources.iter_mut().enumerate() {
+    // Per-voice pipeline: every source's own voice, then the second voices
+    // of those that have one, each rendered as a source of its own.
+    for i in 0..voice_count(source_count) {
+        let source: &mut dyn atrium_core::source::SoundSource = if i < source_count {
+            sources[i].as_mut()
+        } else {
+            match sources[i - source_count].second_voice() {
+                Some(voice) => voice,
+                None => continue,
+            }
+        };
         if !source.is_active() {
             continue;
         }
@@ -264,7 +284,7 @@ pub fn render_pipeline(
         // no point position, distance law, image-source paths, propagation
         // filters, or room send. Speakers get decorrelated channels; on
         // headphones they join the bus the ears hear as a diffuse field.
-        if source.emitter_kind() == atrium_core::source::EmitterKind::Field {
+        if i < source_count && source.emitter_kind() == atrium_core::source::EmitterKind::Field {
             // All round, or an arc centred on the side its place lies on.
             let receiver = renderer.ambient_receiver(params.listener, params.layout);
             let placement = FieldPlacement {
@@ -283,7 +303,7 @@ pub fn render_pipeline(
             };
             field_renderer.render_source(
                 i,
-                source.as_mut(),
+                source,
                 field_encoding,
                 params.layout,
                 params.sample_rate,
@@ -315,7 +335,8 @@ pub fn render_pipeline(
             continue;
         }
 
-        let pos = source.position();
+        // Its place in the world, or beside the head when it is held there.
+        let pos = atrium_core::source::sounding_position(source, params.listener);
         // Where this pipeline measures propagation to. Everything below that
         // depends on a receiver position (paths, delays, air absorption, the
         // reverb send) uses this one point, never the listener directly.
@@ -388,7 +409,7 @@ pub fn render_pipeline(
             } else {
                 &mut []
             };
-            renderer.render_source(i, source.as_mut(), &ctx, &paths, effect_chains, &mut out);
+            renderer.render_source(i, source, &ctx, &paths, effect_chains, &mut out);
         }
     }
 

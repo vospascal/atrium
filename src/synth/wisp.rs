@@ -29,6 +29,7 @@
 use std::f32::consts::TAU;
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 
@@ -178,6 +179,16 @@ impl SoundSource for WispSource {
     }
 
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Two layers, in this order: wings and hum.
+    fn layer_count(&self) -> usize {
+        2
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             // The lowpasses follow the speed and are retuned every sample
             // below; the fixed low cut and the noise density follow the rate.
@@ -215,7 +226,13 @@ impl SoundSource for WispSource {
         }
 
         self.master_gain
-            * (self.wing_gain * wings + self.hum_gain * hum * (0.4 + 0.6 * speed_fraction))
+            * mix.sum(
+                0,
+                &[
+                    self.wing_gain * wings,
+                    self.hum_gain * hum * (0.4 + 0.6 * speed_fraction),
+                ],
+            )
     }
 
     fn position(&self) -> Vec3 {

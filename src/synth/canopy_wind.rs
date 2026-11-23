@@ -14,6 +14,7 @@
 use std::f32::consts::TAU;
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::{EmitterKind, SoundSource};
 
 use atrium_core::types::Vec3;
@@ -257,8 +258,17 @@ impl CanopyWindSource {
 }
 
 impl SoundSource for CanopyWindSource {
-    #[inline]
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Five layers, in this order: body, leaves, dry leaves, leaf contacts and branches.
+    fn layer_count(&self) -> usize {
+        5
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.retune(sample_rate);
@@ -313,11 +323,16 @@ impl SoundSource for CanopyWindSource {
             * (0.65 + 0.35 * speed_at_canopy.min(1.0))
             + spectral_response)
             .max(0.0);
-        let texture = self.body_gain * body * (0.30 + 0.70 * foliage)
-            + self.rustle_gain * foliage * leaf * leaf_motion
-            + self.rustle_gain * foliage * dryness * dry * (0.10 + 0.32 * leaf_motion)
-            + self.contact_gain * contact
-            + branch;
+        let texture = mix.sum(
+            0,
+            &[
+                self.body_gain * body * (0.30 + 0.70 * foliage),
+                self.rustle_gain * foliage * leaf * leaf_motion,
+                self.rustle_gain * foliage * dryness * dry * (0.10 + 0.32 * leaf_motion),
+                self.contact_gain * contact,
+                branch,
+            ],
+        );
 
         let speed_gain = if state.speed <= 0.0 {
             0.0
@@ -347,7 +362,7 @@ impl SoundSource for CanopyWindSource {
             return;
         }
         match param {
-            // Settings of rain, waves, flying sources and tones; not this one's.
+            // Settings of rain, waves, flying sources and tones and binaural beats; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
@@ -356,12 +371,12 @@ impl SoundSource for CanopyWindSource {
             | SynthParam::HoverTimeMin
             | SynthParam::HoverTimeMax
             | SynthParam::Pitch
-            | SynthParam::Brightness
-            | SynthParam::FundamentalLevel
-            | SynthParam::OvertoneLevel
-            | SynthParam::ShimmerRateMin
-            | SynthParam::ShimmerRateMax
-            | SynthParam::ShimmerDepth => {}
+            | SynthParam::Floor
+            | SynthParam::RotationPeriod
+            | SynthParam::RotationDepth
+            | SynthParam::Beat
+            | SynthParam::EndBeat
+            | SynthParam::Duration => {}
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => self.min_speed = value.clamp(0.0, self.max_speed),
             SynthParam::MaxSpeed => self.max_speed = value.clamp(self.min_speed, 25.0),

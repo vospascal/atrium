@@ -139,6 +139,64 @@ pub fn peak(samples: &[f32]) -> f32 {
         .fold(0.0_f32, |highest, value| highest.max(value.abs()))
 }
 
+/// Amplitude of the component at `frequency_hz`: a Hann-windowed single-bin
+/// DFT, scaled so a sine of amplitude A reads A. Exact when the stretch holds
+/// a whole number of cycles of it.
+pub fn amplitude_at(samples: &[f32], sample_rate: f32, frequency_hz: f64) -> f64 {
+    use std::f64::consts::TAU;
+    let length = samples.len();
+    let step = TAU * frequency_hz / sample_rate as f64;
+    let (mut real, mut imaginary, mut window_sum) = (0.0, 0.0, 0.0);
+    for (index, &sample) in samples.iter().enumerate() {
+        let window = 0.5 - 0.5 * (TAU * index as f64 / length as f64).cos();
+        let angle = step * index as f64;
+        real += window * sample as f64 * angle.cos();
+        imaginary -= window * sample as f64 * angle.sin();
+        window_sum += window;
+    }
+    2.0 * (real * real + imaginary * imaginary).sqrt() / window_sum
+}
+
+/// Frequency of the loudest component between `low_hz` and `high_hz`: one
+/// Hann-windowed FFT of the whole stretch, the peak bin refined by a parabola
+/// through the log magnitudes of it and its two neighbours.
+pub fn peak_frequency(samples: &[f32], sample_rate: f32, low_hz: f64, high_hz: f64) -> f64 {
+    use std::f64::consts::TAU;
+    let length = samples.len();
+    let mut planner = RealFftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(length);
+    let mut input: Vec<f64> = samples
+        .iter()
+        .enumerate()
+        .map(|(index, &sample)| {
+            sample as f64 * (0.5 - 0.5 * (TAU * index as f64 / length as f64).cos())
+        })
+        .collect();
+    let mut output = fft.make_output_vec();
+    fft.process(&mut input, &mut output).unwrap();
+    let bin_hz = sample_rate as f64 / length as f64;
+    let first = (low_hz / bin_hz) as usize;
+    let last = (high_hz / bin_hz) as usize;
+    let loudest = (first..=last)
+        .max_by(|&a, &b| output[a].norm().total_cmp(&output[b].norm()))
+        .unwrap();
+    let log_magnitude = |bin: usize| output[bin].norm().ln();
+    let (left, centre, right) = (
+        log_magnitude(loudest - 1),
+        log_magnitude(loudest),
+        log_magnitude(loudest + 1),
+    );
+    let offset = 0.5 * (left - right) / (left - 2.0 * centre + right);
+    (loudest as f64 + offset) * bin_hz
+}
+
+/// Largest difference between two neighbouring samples.
+pub fn largest_step(samples: &[f32]) -> f32 {
+    samples.windows(2).fold(0.0_f32, |largest, pair| {
+        largest.max((pair[1] - pair[0]).abs())
+    })
+}
+
 /// Render `seconds` of audio from `next_sample`.
 pub fn render(seconds: f32, sample_rate: f32, mut next_sample: impl FnMut(f32) -> f32) -> Vec<f32> {
     (0..(seconds * sample_rate) as usize)
@@ -150,6 +208,7 @@ pub fn render(seconds: f32, sample_rate: f32, mut next_sample: impl FnMut(f32) -
 #[cfg(test)]
 mod conformance {
     use super::*;
+    use crate::synth::binaural_beat::{BinauralBeatSettings, BinauralToneSource, Ear};
     use crate::synth::canopy_wind::CanopyWindSource;
     use crate::synth::field_wind::FieldWindSource;
     use crate::synth::focus_tone::{FocusToneSettings, FocusToneSource};
@@ -210,7 +269,16 @@ mod conformance {
                     Box::new(FocusToneSource::new(
                         Vec3::ZERO,
                         FocusToneSettings::default(),
-                        42,
+                    ))
+                }),
+            ),
+            (
+                // The right ear's tone: the higher of the two.
+                "binaural_beat",
+                Box::new(|| {
+                    Box::new(BinauralToneSource::new(
+                        Ear::Right,
+                        BinauralBeatSettings::default(),
                     ))
                 }),
             ),
@@ -281,12 +349,12 @@ mod conformance {
             SynthParam::StructureLevel,
             SynthParam::MasterGain,
             SynthParam::Pitch,
-            SynthParam::Brightness,
-            SynthParam::FundamentalLevel,
-            SynthParam::OvertoneLevel,
-            SynthParam::ShimmerRateMin,
-            SynthParam::ShimmerRateMax,
-            SynthParam::ShimmerDepth,
+            SynthParam::Floor,
+            SynthParam::RotationPeriod,
+            SynthParam::RotationDepth,
+            SynthParam::Beat,
+            SynthParam::EndBeat,
+            SynthParam::Duration,
         ];
         for (name, make) in generators() {
             let mut reference = make();
@@ -353,9 +421,10 @@ mod conformance {
             if name == "thunder" {
                 continue;
             }
-            // The focus tone has no noise layer: at 333 Hz nothing of it
-            // reaches 6-10 kHz but rounding, so there is no density to scale.
-            if name == "focus_tone" {
+            // The tones have no noise layer: at 333 Hz (the focus tone) and
+            // 118 Hz (the binaural beat) nothing of them reaches 6-10 kHz but
+            // rounding, so there is no density to scale.
+            if name == "focus_tone" || name == "binaural_beat" {
                 continue;
             }
             let delta = density_6_to_10_khz(&make, 96_000.0) - density_6_to_10_khz(&make, 48_000.0);

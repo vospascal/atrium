@@ -14,6 +14,7 @@ mod driver;
 mod events;
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::{EmitterKind, SoundSource};
 
 use crate::audio::filters::Biquad;
@@ -167,8 +168,17 @@ impl RiverSource {
 }
 
 impl SoundSource for RiverSource {
-    #[inline]
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Four layers, in this order: body, current, spray, and bubbles and splashes (which share one buffer). The first three share a gain after their sum; the output filters act on the whole.
+    fn layer_count(&self) -> usize {
+        4
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.retune(sample_rate);
@@ -208,10 +218,14 @@ impl SoundSource for RiverSource {
                 .process(self.spray_rng.next_bipolar() * self.white_noise_scale),
         );
 
-        let continuous = (self.body_gain * body * body_envelope
-            + self.current_gain * current * current_motion
-            + self.spray_gain * spray * spray_motion)
-            * shared
+        let continuous = mix.sum(
+            0,
+            &[
+                self.body_gain * body * body_envelope,
+                self.current_gain * current * current_motion,
+                self.spray_gain * spray * spray_motion,
+            ],
+        ) * shared
             * activity
             * (0.72 + 0.28 * flow_norm);
 
@@ -244,7 +258,7 @@ impl SoundSource for RiverSource {
         self.ring[self.ring_idx] = 0.0;
         self.ring_idx = (self.ring_idx + 1) & RING_MASK;
 
-        let output = self.output_hp.process(continuous + events);
+        let output = self.output_hp.process(continuous + mix.sum(3, &[events]));
         let output = self.body_ridge.process(output);
         let output = self.babble_ridge.process(output);
         let output = self.high_shelf.process(output);
@@ -268,7 +282,7 @@ impl SoundSource for RiverSource {
             return;
         }
         match param {
-            // Settings of rain, waves, flying sources and tones; not this one's.
+            // Settings of rain, waves, flying sources and tones and binaural beats; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
@@ -277,12 +291,12 @@ impl SoundSource for RiverSource {
             | SynthParam::HoverTimeMin
             | SynthParam::HoverTimeMax
             | SynthParam::Pitch
-            | SynthParam::Brightness
-            | SynthParam::FundamentalLevel
-            | SynthParam::OvertoneLevel
-            | SynthParam::ShimmerRateMin
-            | SynthParam::ShimmerRateMax
-            | SynthParam::ShimmerDepth => {}
+            | SynthParam::Floor
+            | SynthParam::RotationPeriod
+            | SynthParam::RotationDepth
+            | SynthParam::Beat
+            | SynthParam::EndBeat
+            | SynthParam::Duration => {}
             SynthParam::FlowSpeedMin => self.min_flow_speed = value.clamp(0.0, self.max_flow_speed),
             SynthParam::FlowSpeedMax => self.max_flow_speed = value.clamp(self.min_flow_speed, 5.0),
             SynthParam::RiverSplashRate => self.splash_rate = value.max(0.0),

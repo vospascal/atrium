@@ -33,7 +33,10 @@ struct Follower {
 #[derive(Clone, Debug)]
 pub struct Plan {
     seed: u64,
-    weather: Weather,
+    /// What moves the conditions; `None` for a session without weather (a
+    /// listening session), whose conditions stay at their defaults and whose
+    /// air is still.
+    weather: Option<Weather>,
     clock: WeatherClock,
     voices: Vec<Option<Voice>>,
     followers: Vec<Option<Follower>>,
@@ -50,7 +53,7 @@ impl Plan {
     pub fn new(seed: u64) -> Self {
         Self {
             seed,
-            weather: Weather::calm(seed),
+            weather: Some(Weather::calm(seed)),
             clock: WeatherClock::default(),
             voices: vec![None; MAX_SOURCES],
             followers: vec![None; MAX_SOURCES],
@@ -64,13 +67,15 @@ impl Plan {
         self.seed
     }
 
-    pub fn weather(&self) -> &Weather {
-        &self.weather
+    /// The weather story moving the conditions, if the session has one.
+    pub fn weather(&self) -> Option<&Weather> {
+        self.weather.as_ref()
     }
 
-    /// Let `weather` move the conditions from now on. What is already handed
-    /// over still plays; everything after follows the new story.
-    pub fn set_weather(&mut self, weather: Weather) {
+    /// Let `weather` move the conditions from now on, or with `None` hold
+    /// them at their defaults and still the air. What is already handed over
+    /// still plays; everything after follows the new story.
+    pub fn set_weather(&mut self, weather: Option<Weather>) {
         self.weather = weather;
         for follower in self.followers.iter_mut().flatten() {
             follower.sent.clear();
@@ -80,7 +85,7 @@ impl Plan {
 
     /// The conditions at `seconds` on the session's clock.
     pub fn conditions_at(&self, seconds: f64) -> Conditions {
-        self.weather.at(self.clock.story_at(seconds))
+        conditions_under(self.weather.as_ref(), self.clock.story_at(seconds))
     }
 
     /// Let the weather run `speed` times as fast as the session from `now`:
@@ -98,6 +103,12 @@ impl Plan {
     /// How fast the weather runs, 1 being as fast as the session.
     pub fn weather_speed(&self) -> f64 {
         self.clock.speed
+    }
+
+    /// Let the weather stand where it stands in `earlier`, and run as fast:
+    /// the same point of its story at the same moment of the session.
+    pub(super) fn keep_weather_clock_of(&mut self, earlier: &Plan) {
+        self.clock = earlier.clock;
     }
 
     /// Plan the voice in `slot` from `now` (s), for the entity `id`, following
@@ -199,7 +210,10 @@ impl Plan {
                 due.push(Due::Utter(slot, resumed));
             }
             while voice.plan.next_at() < until {
-                let conditions = self.weather.at(self.clock.story_at(voice.plan.next_at()));
+                let conditions = conditions_under(
+                    self.weather.as_ref(),
+                    self.clock.story_at(voice.plan.next_at()),
+                );
                 let activity = conditions::activity(&voice.follows, &conditions);
                 let level = conditions::level_db(&voice.follows, &conditions);
                 if let Some(planned) = voice.plan.next_under(activity, level) {
@@ -207,14 +221,17 @@ impl Plan {
                 }
             }
         }
-        let conditions = self.weather.at(self.clock.story_at(until));
+        let conditions = conditions_under(self.weather.as_ref(), self.clock.story_at(until));
         // The air every path crosses, sent when it has moved and not every
-        // time the plan looks.
-        let air = (
-            conditions.get(Condition::Wind),
-            conditions.get(Condition::Daylight),
-            self.weather.wind_from(),
-        );
+        // time the plan looks. Without weather nothing stirs it.
+        let air = match &self.weather {
+            Some(weather) => (
+                conditions.get(Condition::Wind),
+                conditions.get(Condition::Daylight),
+                weather.wind_from(),
+            ),
+            None => (0.0, 0.0, super::PREVAILING_WIND_FROM),
+        };
         let moved = |sent: (f32, f32, f32)| {
             (air.0 - sent.0).abs() > AIR_STEP
                 || (air.1 - sent.1).abs() > AIR_STEP
@@ -258,13 +275,13 @@ impl Plan {
     /// what it would have been. A take sounding at `to` starts partway; what
     /// the voices were told for the old moment is forgotten.
     pub fn seek(&mut self, to: f64) {
-        let weather = &self.weather;
+        let weather = self.weather.as_ref();
         let clock = self.clock;
         for voice in self.voices.iter_mut().flatten() {
             voice.plan = voice.plan.restarted();
             voice.resume = None;
             while voice.plan.next_at() < to {
-                let conditions = weather.at(clock.story_at(voice.plan.next_at()));
+                let conditions = conditions_under(weather, clock.story_at(voice.plan.next_at()));
                 let activity = conditions::activity(&voice.follows, &conditions);
                 let level = conditions::level_db(&voice.follows, &conditions);
                 if let Some(planned) = voice.plan.next_under(activity, level) {
@@ -297,6 +314,15 @@ impl Plan {
                 Due::Set(..) | Due::Cancel(_) | Due::Air { .. } => None,
             })
             .collect()
+    }
+}
+
+/// The conditions `story_seconds` into `weather`; without weather, every
+/// condition at its default, as a calm held day has them.
+fn conditions_under(weather: Option<&Weather>, story_seconds: f64) -> Conditions {
+    match weather {
+        Some(weather) => weather.at(story_seconds),
+        None => Weather::calm(0).at(0.0),
     }
 }
 
@@ -448,9 +474,9 @@ mod tests {
         let mut plan = Plan::new(9);
         let mut bands = [(0.05, 0.2), (0.0, 0.0), (0.0, 0.0), (1.0, 1.0)];
         bands[Condition::Daylight as usize] = (1.0, 1.0);
-        plan.set_weather(Weather::new(Story::PassingStorm, bands, 9));
+        plan.set_weather(Some(Weather::new(Story::PassingStorm, bands, 9)));
         plan.add_voice(0, "robin", Some(birdsong()), rainy_bird(), 0.0);
-        let weather = plan.weather().clone();
+        let weather = plan.weather().expect("a story").clone();
         let sung = plan.upcoming(3.0 * 3600.0);
         let rain_at = |planned: &Planned| weather.at(planned.at).get(Condition::Rain);
         let pouring = sung
@@ -505,25 +531,25 @@ mod tests {
         );
         assert!(air(plan.take_due(0.2)).is_empty(), "nothing moved");
 
-        plan.set_weather(
+        plan.set_weather(Some(
             Weather::new(
                 Story::Held,
                 [(0.4, 0.4), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5)],
                 2,
             )
             .with_wind_from(270.0),
-        );
+        ));
         assert_eq!(air(plan.take_due(0.3)), vec![(0.4, 0.5, 270.0)]);
         assert!(air(plan.take_due(0.4)).is_empty());
         plan.seek(600.0);
         assert_eq!(air(plan.take_due(600.1)), vec![(0.4, 0.5, 270.0)]);
 
         // Drifting wind is sent as it moves, in steps and not at every look.
-        plan.set_weather(Weather::new(
+        plan.set_weather(Some(Weather::new(
             Story::Drifting,
             [(0.0, 1.0), (0.0, 0.0), (0.0, 0.0), (1.0, 1.0)],
             2,
-        ));
+        )));
         let sent: usize = (1..36_000)
             .map(|tenth| air(plan.take_due(600.1 + tenth as f64 / 10.0)).len())
             .sum();
@@ -553,11 +579,11 @@ mod tests {
     #[test]
     fn a_generator_setting_follows_its_condition() {
         let mut plan = Plan::new(2);
-        plan.set_weather(Weather::new(
+        plan.set_weather(Some(Weather::new(
             Story::PassingStorm,
             [(0.1, 0.1), (0.0, 0.0), (0.0, 0.0), (1.0, 1.0)],
             2,
-        ));
+        )));
         let rain = vec![Follow::named("rain", "intensity", 0.0, 1.0, false, true).expect("rain")];
         plan.add_voice(4, "rain", None, rain, 0.0);
         let mut sent = Vec::new();
@@ -593,7 +619,7 @@ mod tests {
             )
         };
         let mut fast = Plan::new(9);
-        fast.set_weather(storm());
+        fast.set_weather(Some(storm()));
         fast.set_weather_speed(0.0, 60.0);
         assert_eq!(fast.weather_speed(), 60.0);
         assert!(

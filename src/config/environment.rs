@@ -3,6 +3,8 @@
 
 use serde::Deserialize;
 
+use super::parse::load_yaml;
+
 /// Environment geometry + acoustic properties (loaded from `environments/*.yaml`).
 /// Defines the virtual acoustic space where sources live — dimensions, wall
 /// materials, ground surface, and broadband reflectivity.
@@ -33,6 +35,65 @@ pub(super) struct EnvironmentConfig {
     /// mean-free-path pre-delay (e.g. 20 ms for clarity before the wash).
     #[serde(default)]
     pub pre_delay_ms: Option<f32>,
+}
+
+/// What a UI says of a place before a scene plays in it: how big it is, and
+/// whether the sky is open above it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnvironmentSummary {
+    /// Along x (m).
+    pub width: f32,
+    /// Along y (m).
+    pub depth: f32,
+    /// Along z (m).
+    pub height: f32,
+    /// Whether nothing is overhead: its ceiling is open, as a meadow's is.
+    /// Otherwise it is enclosed.
+    pub open_sky: bool,
+}
+
+impl EnvironmentSummary {
+    /// The environment file at `path`, or with none the dry space.
+    pub fn of(path: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+        let environment = match path {
+            Some(path) => load_yaml(path)?,
+            None => EnvironmentConfig::dry(),
+        };
+        let [.., ceiling] = build_wall_materials(&environment);
+        Ok(Self {
+            width: environment.width,
+            depth: environment.depth,
+            height: environment.height,
+            open_sky: ceiling.name == crate::pipeline::wall_material::WallMaterial::open().name,
+        })
+    }
+}
+
+/// How big the dry space is (m): room around the listener for sounds held
+/// close, as a listening session's are.
+const DRY_SIZE_METRES: [f32; 3] = [20.0, 20.0, 10.0];
+
+impl EnvironmentConfig {
+    /// The dry space, for a scene that names no environment: no face
+    /// reflects, so there are no reflections and no reverb, and the ground
+    /// is hard, which ISO 9613-2 makes a flat +3 dB within 30 times the
+    /// heights of source and listener: no colour and no delay.
+    pub(super) fn dry() -> Self {
+        let [width, depth, height] = DRY_SIZE_METRES;
+        Self {
+            width,
+            depth,
+            height,
+            spawn: None,
+            ground_factor: 0.0,
+            walls: WallsConfig {
+                default: "open".into(),
+                ..WallsConfig::default()
+            },
+            rt60_seconds: None,
+            pre_delay_ms: None,
+        }
+    }
 }
 
 /// Per-wall material configuration. Each wall can specify a material name
@@ -262,5 +323,41 @@ mod tests {
         assert_eq!(parse_wall_material("open").broadband_reflection_gain(), 0.0);
         // Unknown names fall back to hard_wall (with a warning on stderr).
         assert_eq!(parse_wall_material("marble").name, "hard_wall");
+    }
+
+    /// A place is summed up by its size and whether the sky is open above
+    /// it: the outdoor places have an open ceiling, the rooms a closed one,
+    /// and the dry space is open on every side.
+    #[test]
+    fn each_place_says_its_size_and_whether_the_sky_is_open() {
+        let summary = |path: Option<&str>| {
+            let summary = EnvironmentSummary::of(path).expect("it reads");
+            (
+                [summary.width, summary.depth, summary.height],
+                summary.open_sky,
+            )
+        };
+        assert_eq!(summary(None), ([20.0, 20.0, 10.0], true));
+        assert_eq!(
+            summary(Some("environments/meadow.yaml")),
+            ([60.0, 60.0, 30.0], true)
+        );
+        assert_eq!(
+            summary(Some("environments/riverside.yaml")),
+            ([100.0, 100.0, 50.0], true)
+        );
+        assert_eq!(
+            summary(Some("environments/atrium.yaml")),
+            ([14.0, 10.0, 9.0], false)
+        );
+        assert_eq!(
+            summary(Some("environments/cathedral.yaml")),
+            ([40.0, 25.0, 20.0], false)
+        );
+        assert_eq!(
+            summary(Some("environments/small_atrium.yaml")),
+            ([6.0, 4.0, 3.0], false)
+        );
+        assert!(EnvironmentSummary::of(Some("environments/nowhere.yaml")).is_err());
     }
 }

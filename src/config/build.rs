@@ -104,8 +104,12 @@ impl SceneConfig {
 
     /// Build the scene without starting its plan.
     pub(crate) fn build_unstarted(self) -> Result<UnstartedBuild, Box<dyn std::error::Error>> {
-        // Load environment (virtual acoustic space) from file
-        let environment_cfg: EnvironmentConfig = load_yaml(&self.environment)?;
+        // The virtual acoustic space: the scene's environment file, or the
+        // dry space when it names none.
+        let environment_cfg: EnvironmentConfig = match &self.environment {
+            Some(path) => load_yaml(path)?,
+            None => EnvironmentConfig::dry(),
+        };
         let environment_min = Vec3::ZERO;
         let environment_max = Vec3::new(
             environment_cfg.width,
@@ -154,10 +158,7 @@ impl SceneConfig {
         // The session: every choice follows from the seed, decided ahead.
         let seed = self.seed.unwrap_or_else(fresh_seed);
         let mut plan = Plan::new(seed);
-        plan.set_weather(match &self.weather {
-            Some(weather) => weather.story(seed)?,
-            None => crate::plan::Weather::calm(seed),
-        });
+        plan.set_weather(self.weather_story(seed)?);
         for (slot, ((id, _), (rhythm, follows))) in self
             .sounds
             .iter()
@@ -216,6 +217,8 @@ impl SceneConfig {
         );
 
         let description = SceneDescription {
+            kind: self.kind,
+            space: self.environment.clone(),
             width: environment_cfg.width,
             depth: environment_cfg.depth,
             temperature_c: atmosphere.temperature_c,
@@ -246,6 +249,7 @@ impl SceneConfig {
                     size: meta.spread,
                     arc: meta.arc,
                     facing: node.orientation(),
+                    layers: meta.layers.clone(),
                 })
                 .collect(),
             speakers: speaker_layout

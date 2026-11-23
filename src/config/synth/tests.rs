@@ -7,11 +7,8 @@ use crate::config::built_source::build_one_synth_source;
 use crate::config::scene::NormalizationConfig;
 use crate::config::source::{SourceDef, SynthSourceDef};
 
-/// Every synth kind must parse — with bare-integer YAML values, which
-/// exercise serde's flatten/Content numeric path (a known footgun).
-#[test]
-fn synth_source_defs_parse_with_integer_values() {
-    let cases = [
+/// Every synth kind, as its smallest file.
+const EVERY_SYNTH: [(&str, &str); 12] = [
             (
                 "synth: canopy_wind\nmin_speed: 2\nmax_speed: 8\nfoliage_density: 1\nreference_spl: 48\n",
                 "canopy_wind",
@@ -47,10 +44,20 @@ fn synth_source_defs_parse_with_integer_values() {
                 "thunder",
             ),
             (
-                "synth: focus_tone\npitch: 333\nshimmer_rate_max: 1\nreference_spl: 55\n",
+                "synth: focus_tone\npitch: 528\nfloor: 80\nrotation_period: 24\nrotation_depth: 8\nreference_spl: 55\n",
                 "focus_tone",
             ),
-        ];
+            (
+                "synth: binaural_beat\npitch: 108\nbeat: 7\nend_beat: 5\nduration: 32400\nreference_spl: 55\n",
+                "binaural_beat",
+            ),
+];
+
+/// Every synth kind must parse — with bare-integer YAML values, which
+/// exercise serde's flatten/Content numeric path (a known footgun).
+#[test]
+fn synth_source_defs_parse_with_integer_values() {
+    let cases = EVERY_SYNTH;
     for (yaml, expected_kind) in cases {
         match serde_yaml::from_str::<SourceDef>(yaml)
             .unwrap_or_else(|e| panic!("{expected_kind} def should parse: {e}"))
@@ -117,6 +124,7 @@ fn storm_wind_controls_parse_and_build_as_a_field() {
         1.0,
         Vec3::ZERO,
         45,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -160,6 +168,7 @@ fn canopy_wind_controls_parse_and_build_as_a_field() {
         1.0,
         Vec3::ZERO,
         42,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -241,6 +250,7 @@ fn soft_wind_controls_parse_and_build_as_a_field() {
         1.0,
         Vec3::ZERO,
         46,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -286,6 +296,7 @@ fn river_controls_parse_and_build_as_an_object() {
         1.0,
         Vec3::ZERO,
         47,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -310,6 +321,7 @@ fn field_wind_builds_as_a_field_emitter() {
         1.0,
         Vec3::ZERO,
         42,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -372,6 +384,7 @@ fn silent_synth_source_is_a_build_error() {
         0.9,
         Vec3::ZERO,
         1,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -388,7 +401,8 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
     use atrium_core::source::{EmitterKind, Utterance};
 
     let source: SynthSourceDef =
-        serde_yaml::from_str(&std::fs::read_to_string("sources/thunder.yaml").unwrap()).unwrap();
+        serde_yaml::from_str(&std::fs::read_to_string("sources/weather/thunder.yaml").unwrap())
+            .unwrap();
     assert_eq!(source.spec.kind_name(), "thunder");
     let mut built = build_one_synth_source(
         &source.spec,
@@ -397,6 +411,7 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
         source.spread,
         Vec3::ZERO,
         7,
+        &[],
         &NormalizationConfig::default(),
         1.0,
         40.0,
@@ -437,14 +452,15 @@ fn thunder_is_silent_until_the_plan_strikes_it() {
     );
 }
 
-/// The focus tone preset is calibrated like every other generator: the built
+/// A focus tone preset is calibrated like every other generator: the built
 /// source's output RMS sits at `target_rms · 10^((spl − spl_reference) / 20)`,
 /// so its level in the engine's full scale differs from the soft wind's by
-/// exactly their reference SPLs (52 against 42 dB). The steady tone after
-/// the preview plays within a quarter of a decibel of the calibrated level:
-/// the half-second fade-in lowers the preview by 0.05 dB (0.25 s of power
-/// lost of 20), and 20 s holds a fractional number of shimmer beats (0.09 dB
-/// apart in all, measured).
+/// exactly their reference SPLs (50 against 42 dB). The calibration hears a
+/// 20 s preview, five sixths of one 24 s rotation, and the rotation moves the
+/// whole tone's level (the 83.25 Hz line carries most of its power and swings
+/// 8 dB), so the preview is not quite the tone's level over a whole rotation:
+/// measured, the rotation after the preview plays 0.10 dB below it, so over
+/// time the tone sits about a tenth of a decibel under its `reference_spl`.
 #[test]
 fn focus_tone_is_calibrated_like_the_other_generators() {
     use crate::synth::test_support::root_mean_square;
@@ -460,15 +476,17 @@ fn focus_tone_is_calibrated_like_the_other_generators() {
             source.spread,
             Vec3::ZERO,
             11,
+            &[],
             &normalization,
             1.0,
             40.0,
         )
         .unwrap_or_else(|error| panic!("{path} should build: {error}"));
-        let samples: Vec<f32> = (0..48_000 * 40)
+        let samples: Vec<f32> = (0..48_000 * 44)
             .map(|_| built.source.next_sample(48_000.0))
             .collect();
         let preview_db = 20.0 * root_mean_square(&samples[..48_000 * 20]).log10();
+        // One whole rotation after the preview.
         let later_db = 20.0 * root_mean_square(&samples[48_000 * 20..]).log10();
         (source.reference_spl as f64, preview_db, later_db)
     };
@@ -476,9 +494,9 @@ fn focus_tone_is_calibrated_like_the_other_generators() {
         20.0 * (normalization.target_rms as f64).log10() + spl - normalization.spl_reference as f64
     };
 
-    let (tone_spl, tone_db, tone_later_db) = calibrated_db("sources/focus-tone-333.yaml");
-    let (wind_spl, wind_db, _) = calibrated_db("sources/soft-wind.yaml");
-    assert_eq!((tone_spl, wind_spl), (52.0, 42.0));
+    let (tone_spl, tone_db, tone_later_db) = calibrated_db("sources/tones/angel-numbers/333.yaml");
+    let (wind_spl, wind_db, _) = calibrated_db("sources/weather/wind/soft-wind.yaml");
+    assert_eq!((tone_spl, wind_spl), (50.0, 42.0));
     assert!(
         (tone_db - expected_db(tone_spl)).abs() < 0.01,
         "tone {tone_db:.3} dB"
@@ -487,9 +505,160 @@ fn focus_tone_is_calibrated_like_the_other_generators() {
         (wind_db - expected_db(wind_spl)).abs() < 0.01,
         "wind {wind_db:.3} dB"
     );
-    assert!(((tone_db - wind_db) - 10.0).abs() < 0.02);
+    assert!(((tone_db - wind_db) - 8.0).abs() < 0.02);
+    println!("focus tone: preview {tone_db:.3} dB, a whole rotation after {tone_later_db:.3} dB");
     assert!(
-        (tone_later_db - tone_db).abs() < 0.25,
+        (tone_later_db - tone_db).abs() < 0.2,
         "steady tone {tone_later_db:.3} dB against the calibrated {tone_db:.3} dB"
+    );
+}
+
+/// The thirteen binaural-beat presets play the pieces `docs/binaural-beats.md`
+/// lists: 108 Hz on the left, the beat on the right, fixed or moving to its
+/// end over nine hours.
+#[test]
+fn every_binaural_beat_preset_plays_its_piece() {
+    let pieces: [(&str, f32, Option<f32>); 13] = [
+        ("golden-ratio-delta", 1.618, None),
+        ("delta", 2.0, None),
+        ("falling-delta", 3.5, Some(1.5)),
+        ("low-theta", 4.0, None),
+        ("theta", 6.0, None),
+        ("falling-theta", 7.0, Some(5.0)),
+        ("schumann", 7.83, None),
+        ("alpha", 10.0, None),
+        ("falling-alpha", 12.0, Some(9.0)),
+        ("rising-beta", 16.0, Some(24.0)),
+        ("beta", 20.0, None),
+        ("rising-gamma", 32.0, Some(40.0)),
+        ("gamma", 40.0, None),
+    ];
+    for (file, beat, end_beat) in pieces {
+        let path = format!("sources/tones/binaural/{file}.yaml");
+        let source: SynthSourceDef =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let SynthSpec::BinauralBeat(params) = &source.spec else {
+            panic!("{path} is not a binaural beat");
+        };
+        assert_eq!(params.pitch, Some(108.0), "{path}");
+        assert_eq!(params.beat, Some(beat), "{path}");
+        assert_eq!(params.end_beat, end_beat, "{path}");
+        assert_eq!(params.duration, Some(32_400.0), "{path}");
+        assert_eq!(source.reference_spl, 18.0, "{path}");
+    }
+}
+
+/// A binaural beat builds as one sound with two voices: the left ear's tone
+/// and, as its second voice, the right ear's, each held beside its own ear,
+/// equally loud. What the scene sets on the sound reaches both, and it
+/// cannot be made ambient.
+#[test]
+fn a_binaural_beat_builds_as_one_sound_with_a_voice_for_each_ear() {
+    use crate::synth::test_support::{peak_frequency, root_mean_square};
+    use atrium_core::commands::SynthParam;
+    use atrium_core::source::EmitterKind;
+
+    let path = "sources/tones/binaural/alpha.yaml";
+    let source: SynthSourceDef =
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut built = build_one_synth_source(
+        &source.spec,
+        source.reference_spl,
+        DirectivityPattern::Omni,
+        source.spread,
+        Vec3::ZERO,
+        11,
+        &[],
+        &NormalizationConfig::default(),
+        1.0,
+        40.0,
+    )
+    .expect("it builds");
+    let sample_rate = 48_000.0;
+    let render = |source: &mut dyn atrium_core::source::SoundSource, seconds: usize| {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for _ in 0..48_000 * seconds {
+            left.push(source.next_sample(sample_rate));
+            right.push(
+                source
+                    .second_voice()
+                    .expect("a second voice")
+                    .next_sample(sample_rate),
+            );
+        }
+        (left, right)
+    };
+    let (left, right) = render(built.source.as_mut(), 12);
+    let (left, right) = (&left[48_000 * 2..], &right[48_000 * 2..]);
+    let left_hz = peak_frequency(left, sample_rate, 100.0, 160.0);
+    let right_hz = peak_frequency(right, sample_rate, 100.0, 160.0);
+    assert!((left_hz - 108.0).abs() < 0.01, "left {left_hz}");
+    assert!((right_hz - 118.0).abs() < 0.01, "right {right_hz}");
+    let level_difference = 20.0 * (root_mean_square(left) / root_mean_square(right)).log10();
+    assert!(level_difference.abs() < 0.01, "{level_difference} dB apart");
+
+    let left_ear = built.source.beside_head().expect("held beside the head");
+    let right_ear = built
+        .source
+        .second_voice()
+        .unwrap()
+        .beside_head()
+        .expect("held beside the head");
+    assert!(
+        left_ear.y > 0.0 && right_ear.y < 0.0,
+        "{left_ear:?}, {right_ear:?}"
+    );
+    assert_eq!(left_ear.x, 0.0);
+    assert_eq!(right_ear.x, 0.0);
+
+    built.source.set_synth_param(SynthParam::MasterGain, 0.0);
+    built.source.set_emitter_kind(EmitterKind::Field);
+    assert_eq!(built.source.emitter_kind(), EmitterKind::Object);
+    // Both voices glide down to nothing: 200 dB under full scale half a
+    // second later.
+    let (left, right) = render(built.source.as_mut(), 1);
+    assert!(root_mean_square(&left[24_000..]) < 1e-8);
+    assert!(root_mean_square(&right[24_000..]) < 1e-8);
+}
+
+/// Every generator names as many layers as it hands over, and a binaural
+/// beat names its two voices; one that is one stream names none. The names
+/// follow the settings: a 528 Hz tone over a floor of 80 Hz has three lines.
+#[test]
+fn every_synth_names_the_layers_it_hands_over() {
+    for (yaml, kind) in EVERY_SYNTH {
+        let SourceDef::Synth(synth) = serde_yaml::from_str::<SourceDef>(yaml).expect("parses")
+        else {
+            panic!("{kind} parsed as a recording");
+        };
+        let handed_over = if synth.spec.build_second_voice().is_some() {
+            2
+        } else {
+            synth.spec.build_generator(Vec3::ZERO, 1).layer_count()
+        };
+        let names = synth.spec.layers();
+        if handed_over == 1 {
+            assert!(names.is_empty(), "{kind}: one stream names no layer");
+        } else {
+            assert_eq!(names.len(), handed_over, "{kind}");
+        }
+        let shown: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
+        match kind {
+            "focus_tone" => assert_eq!(shown, ["528 Hz", "264 Hz", "132 Hz"]),
+            "binaural_beat" => assert_eq!(shown, ["left ear 108 Hz", "right ear 115 Hz"]),
+            "soft_wind" => assert_eq!(shown, ["low", "body", "mid", "presence", "air"]),
+            _ => {}
+        }
+    }
+    let golden =
+        SynthSpec::BinauralBeat(serde_yaml::from_str("pitch: 108\nbeat: 1.618\n").expect("parses"));
+    let keys: Vec<(String, String)> = golden.layers();
+    assert_eq!(
+        keys,
+        [
+            ("left".to_string(), "left ear 108 Hz".to_string()),
+            ("right".to_string(), "right ear 109.618 Hz".to_string()),
+        ]
     );
 }

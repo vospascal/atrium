@@ -8,6 +8,7 @@
 // reverb (Freeverb). Here, sources produce dry mono samples — the existing
 // FdnReverb processor in the audio pipeline handles reverberation.
 
+pub mod binaural_beat;
 pub mod canopy_wind;
 pub mod field_wind;
 pub mod focus_tone;

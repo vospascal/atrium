@@ -107,7 +107,7 @@ impl AudioScene {
             let _s = profile_span!("perceptual").entered();
             self.perceptual_states.clear();
             for (i, source) in self.sources.iter().enumerate() {
-                let pos = source.position();
+                let pos = atrium_core::source::sounding_position(source.as_ref(), &self.listener);
                 let active = source.is_active() && !source.is_muted();
                 let amp = if active && i < self.source_amplitudes.len() {
                     if source.emitter_kind() == EmitterKind::Field {

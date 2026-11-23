@@ -20,7 +20,7 @@ use crate::{Entity, EntityId, WorldError};
 /// sounds:
 ///   frogs:
 ///     name: Frogs
-///     sound: { preset: sources/frog.yaml }
+///     sound: { preset: sources/creatures/frog.yaml }
 ///     place: [10.1, 10.1, 0.0]
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -131,14 +131,17 @@ impl<'de> Deserialize<'de> for Entities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Moves, Place, Shape, Sound, When};
+    use crate::{Layer, Moves, Place, Shape, Sound, When};
 
     const MEADOW: &str = "\
 frogs:
   name: Frogs
   color: \"#6db33f\"
   group: Creatures
-  sound: { preset: sources/frog.yaml, level: 68 }
+  sound:
+    preset: sources/creatures/frog.yaml
+    level: 68
+    layers: { chorus: { level: -6 }, plop: { solo: true, mute: true } }
   shape: { width: 180, behind: -12, size: 0.2, facing: 225, ambient: true, arc: 90 }
   place: [10.1, 10.1, 0.0]
 drum:
@@ -166,9 +169,27 @@ drum:
                 color: Some("#6db33f".into()),
                 group: Some("Creatures".into()),
                 sound: Sound {
-                    preset: Some("sources/frog.yaml".into()),
+                    preset: Some("sources/creatures/frog.yaml".into()),
                     audio: None,
                     level: Some(68.0),
+                    layers: [
+                        (
+                            "chorus".to_string(),
+                            Layer {
+                                level: -6.0,
+                                ..Layer::default()
+                            }
+                        ),
+                        (
+                            "plop".to_string(),
+                            Layer {
+                                level: 0.0,
+                                solo: true,
+                                mute: true
+                            }
+                        ),
+                    ]
+                    .into(),
                 },
                 shape: Shape {
                     width: Some(180.0),
@@ -215,13 +236,23 @@ drum:
         let sounds = read(MEADOW).expect("the meadow reads");
         let written = serde_yaml::to_string(&sounds).expect("the meadow writes");
         assert_eq!(read(&written).expect("it reads again"), sounds);
+        let frogs = written
+            .split("drum:")
+            .next()
+            .expect("the frogs are written");
+        assert!(
+            frogs.contains("level: -6.0") && !frogs.contains("level: 0.0"),
+            "a layer keeps only what differs from as made:\n{written}"
+        );
         assert!(
             !written.contains('!'),
             "no YAML tags in a scene file:\n{written}"
         );
 
         let drum = written.split("drum:").nth(1).expect("the drum is written");
-        for absent in ["name", "color", "group", "shape", "level", "preset"] {
+        for absent in [
+            "name", "color", "group", "shape", "level", "preset", "layers",
+        ] {
             assert!(
                 !drum.contains(absent),
                 "`{absent}` was not in the file and must not appear:\n{written}"
@@ -233,10 +264,10 @@ drum:
     fn two_sounds_with_one_id_are_refused() {
         let twice = "\
 frogs:
-  sound: { preset: sources/frog.yaml }
+  sound: { preset: sources/creatures/frog.yaml }
   place: [0, 0, 0]
 frogs:
-  sound: { preset: sources/frog.yaml }
+  sound: { preset: sources/creatures/frog.yaml }
   place: [1, 0, 0]
 ";
         let refusal = read(twice).expect_err("a second `frogs` is refused");
@@ -265,7 +296,8 @@ frogs:
                     sound: Sound {
                         preset: None,
                         audio: None,
-                        level: Some(60.0)
+                        level: Some(60.0),
+                        layers: Default::default(),
                     },
                     shape: Shape::default(),
                     place: Place {
@@ -290,13 +322,13 @@ frogs:
     fn an_unknown_key_is_an_error_not_ignored() {
         for stray in ["position: [0, 0, 0]", "orbit_radius: 1.5", "colour: red"] {
             let yaml = format!(
-                "frogs:\n  sound: {{ preset: sources/frog.yaml }}\n  place: [0, 0, 0]\n  {stray}\n"
+                "frogs:\n  sound: {{ preset: sources/creatures/frog.yaml }}\n  place: [0, 0, 0]\n  {stray}\n"
             );
             assert!(read(&yaml).is_err(), "`{stray}` should be refused");
         }
         let two_ways = "\
 frogs:
-  sound: { preset: sources/frog.yaml }
+  sound: { preset: sources/creatures/frog.yaml }
   place: [0, 0, 0]
   moves: { path: [] }
 ";
@@ -305,7 +337,8 @@ frogs:
 
     #[test]
     fn an_id_that_is_not_a_plain_word_is_refused() {
-        let yaml = "Frog Pond:\n  sound: { preset: sources/frog.yaml }\n  place: [0, 0, 0]\n";
+        let yaml =
+            "Frog Pond:\n  sound: { preset: sources/creatures/frog.yaml }\n  place: [0, 0, 0]\n";
         let refusal = read(yaml).expect_err("a capitalised id with a space");
         assert!(refusal.contains("Frog Pond"), "{refusal}");
     }

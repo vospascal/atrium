@@ -219,6 +219,10 @@ pub(super) struct SampleSourceDef {
     /// The family a sound made from this preset joins in a list.
     #[serde(default)]
     pub group: Option<String>,
+    /// A few sentences a library shows with it: what it is and where it
+    /// comes from.
+    #[serde(default)]
+    pub about: Option<String>,
     /// What it can utter: each one a recording played from start to end.
     pub takes: Vec<TakeDef>,
     /// What plays when.
@@ -422,6 +426,10 @@ pub(super) struct SynthSourceDef {
     /// The family a sound made from this preset joins in a list.
     #[serde(default)]
     pub group: Option<String>,
+    /// A few sentences a library shows with it: what it is and where it
+    /// comes from.
+    #[serde(default)]
+    pub about: Option<String>,
     #[serde(flatten)]
     pub spec: SynthSpec,
     pub reference_spl: SplValue,

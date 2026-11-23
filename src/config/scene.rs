@@ -13,10 +13,15 @@ pub struct SceneConfig {
     /// the file name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// What the scene is: a place with weather (`nature`, the default, which
+    /// a file need not say) or a listening session (`kind: listening`).
+    #[serde(default, skip_serializing_if = "SceneKind::is_nature")]
+    pub kind: SceneKind,
     /// Path to environment definition file (e.g. "environments/riverside.yaml").
-    /// The virtual acoustic space where sources live.
-    #[serde(alias = "room")]
-    pub environment: String,
+    /// The virtual acoustic space where sources live. Left out, the space is
+    /// dry: nothing reflects and nothing rings.
+    #[serde(default, alias = "room", skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     /// Path to atrium definition file (e.g. "rooms/atrium_6x4.yaml").
     /// The physical speaker room dimensions. Optional — defaults to environment dims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,9 +52,34 @@ pub struct SceneConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
     /// What moves the place's conditions, and the bands it keeps them in.
-    /// Left out, a still, dry, bright day.
+    /// Left out, a still, dry, bright day. A listening session keeps it in
+    /// its file but runs none, so a scene switched to listening and back has
+    /// its weather again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weather: Option<WeatherConfig>,
+}
+
+/// The place a new nature scene starts in.
+const NATURE_STARTS_IN: &str = "environments/meadow.yaml";
+
+/// What a scene is, which decides what of it runs and what a UI shows.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SceneKind {
+    /// A place: its weather moves its sounds, and its air, daylight and
+    /// space are part of it.
+    #[default]
+    Nature,
+    /// Sounds to listen to, such as tones and binaural beats: no weather
+    /// story runs, every condition stays at its default, the air keeps
+    /// standard conditions and is still.
+    Listening,
+}
+
+impl SceneKind {
+    fn is_nature(&self) -> bool {
+        *self == SceneKind::Nature
+    }
 }
 
 /// The weather of a scene:
@@ -148,6 +178,64 @@ impl WeatherConfig {
 }
 
 impl SceneConfig {
+    /// An empty scene of `kind`: no sounds, the listener in the middle
+    /// facing north, the 5.1 room around them, levels calibrated as the
+    /// shipped scenes are. A nature scene starts in the meadow, a listening
+    /// session in the dry space; either can be given another place after.
+    pub fn empty(kind: SceneKind) -> Self {
+        Self {
+            title: None,
+            kind,
+            environment: match kind {
+                SceneKind::Nature => Some(NATURE_STARTS_IN.to_owned()),
+                SceneKind::Listening => None,
+            },
+            atrium: None,
+            listener: ListenerConfig {
+                position: [0.0, 0.0, 1.2],
+                yaw_degrees: 90.0,
+            },
+            master_gain: default_master_gain(),
+            distance_model: DistanceModelConfig {
+                max_distance: 40.0,
+                ..DistanceModelConfig::default()
+            },
+            speakers: SpeakerConfig {
+                layout: "5.1".into(),
+                render_mode: default_render_mode(),
+                positions: SpeakerPositions::default(),
+                dbap_rolloff_db: default_dbap_rolloff(),
+            },
+            normalization: NormalizationConfig {
+                target_rms: 0.1,
+                spl_reference: 94.0,
+                spl_threshold: 0.0,
+            },
+            sounds: Entities::default(),
+            atmosphere: None,
+            hrtf: default_hrtf_path(),
+            seed: None,
+            weather: None,
+        }
+    }
+
+    /// The weather story the scene runs from `seed`: none for a listening
+    /// session, whatever its file keeps; else its `weather:`, or a calm day.
+    /// A story the file names wrongly is refused whatever the kind.
+    pub fn weather_story(
+        &self,
+        seed: u64,
+    ) -> Result<Option<crate::plan::Weather>, Box<dyn std::error::Error>> {
+        let story = match &self.weather {
+            Some(weather) => weather.story(seed)?,
+            None => crate::plan::Weather::calm(seed),
+        };
+        Ok(match self.kind {
+            SceneKind::Nature => Some(story),
+            SceneKind::Listening => None,
+        })
+    }
+
     /// The same scene for headphones: two channels, rendered binaurally.
     ///
     /// What a scene is heard on is the listener's choice, made when the scene
@@ -322,9 +410,18 @@ pub enum Atmosphere {
 }
 
 impl SceneConfig {
-    /// The air this scene names: its own values, its file's, or standard
-    /// conditions.
-    pub(super) fn air(&self) -> Result<AtmosphereConfig, Box<dyn std::error::Error>> {
+    /// The air sound travels through in this scene: standard conditions in
+    /// a listening session, whatever its file keeps; else the air it names.
+    pub fn air(&self) -> Result<AtmosphereConfig, Box<dyn std::error::Error>> {
+        match self.kind {
+            SceneKind::Nature => self.air_in_file(),
+            SceneKind::Listening => Ok(AtmosphereConfig::default()),
+        }
+    }
+
+    /// The air this scene's file names: its own values, its file's, or
+    /// standard conditions.
+    fn air_in_file(&self) -> Result<AtmosphereConfig, Box<dyn std::error::Error>> {
         match &self.atmosphere {
             Some(Atmosphere::File(path)) => super::parse::load_yaml(path),
             Some(Atmosphere::Air(air)) => Ok(air.clone()),
@@ -340,7 +437,7 @@ impl SceneConfig {
         temperature_c: f32,
         humidity_pct: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let pressure_kpa = self.air()?.pressure_kpa;
+        let pressure_kpa = self.air_in_file()?.pressure_kpa;
         self.atmosphere = Some(Atmosphere::Air(AtmosphereConfig {
             temperature_c,
             humidity_pct,
@@ -394,7 +491,10 @@ mod tests {
     fn default_scene_uses_the_atrium_environment() {
         let scene: SceneConfig =
             load_yaml("scenes/default.yaml").expect("default.yaml should load");
-        assert_eq!(scene.environment, "environments/atrium.yaml");
+        assert_eq!(
+            scene.environment.as_deref(),
+            Some("environments/atrium.yaml")
+        );
     }
 
     /// 94 dB SPL at RMS 0.1 puts RMS 1.0 at 94 + 20 = 114 dB SPL; at the

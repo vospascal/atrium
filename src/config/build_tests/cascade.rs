@@ -222,11 +222,11 @@ fn any_sound_can_be_ambient_or_a_point() {
             "sounds: {}",
             "sounds:
   frogs:
-    sound: { preset: sources/frog.yaml }
+    sound: { preset: sources/creatures/frog.yaml }
     shape: { ambient: true }
     place: [10.0, 0.0, 1.2]
   wind:
-    sound: { preset: sources/field-wind.yaml }
+    sound: { preset: sources/weather/wind/field-wind.yaml }
     shape: { ambient: false }
     place: [10.5, -0.25, 1.2]
 ",
@@ -271,7 +271,7 @@ fn an_ambient_sound_takes_its_arc_from_the_scene() {
             &format!(
                 "sounds:
   shore:
-    sound: {{ preset: sources/field-wind.yaml }}
+    sound: {{ preset: sources/weather/wind/field-wind.yaml }}
     shape: {shape}
     place: [0.0, 10.0, 1.2]
 "
@@ -331,7 +331,7 @@ fn one_channel_can_be_heard_alone() {
         "sounds: {}",
         "sounds:
   frogs:
-    sound: { preset: sources/frog.yaml }
+    sound: { preset: sources/creatures/frog.yaml }
     when: { gap: [0, 0] }
     place: [1.0, 1.0, 1.2]
 ",

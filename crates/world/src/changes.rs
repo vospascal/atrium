@@ -7,7 +7,9 @@
 //! building the sound again. Working it out needs no engine, so it is tested
 //! on its own.
 
-use crate::{Entities, Entity, EntityId, Place};
+use std::collections::BTreeMap;
+
+use crate::{Entities, Entity, EntityId, Layer, Place};
 
 /// An ambient sound's arc when the scene leaves it out: all round.
 const ALL_ROUND_DEGREES: f32 = 360.0;
@@ -23,6 +25,12 @@ pub enum Change {
     Moved { id: EntityId, place: Place },
     /// Its level differs, and the scene sets one.
     Level { id: EntityId, level: f32 },
+    /// How its layers are mixed differs: every layer is set as `layers` has
+    /// it, and one left out as made.
+    Layers {
+        id: EntityId,
+        layers: BTreeMap<String, Layer>,
+    },
     /// Its beam differs, and the scene sets both its width and what is heard
     /// behind it.
     Beam {
@@ -108,6 +116,12 @@ fn changes_of_one(id: &EntityId, now: &Entity, wanted: &Entity) -> Vec<Change> {
             level,
         });
     }
+    if now.sound.layers != wanted.sound.layers {
+        found.push(Change::Layers {
+            id: id.clone(),
+            layers: wanted.sound.layers.clone(),
+        });
+    }
     if (now.shape.width, now.shape.behind) != (wanted.shape.width, wanted.shape.behind) {
         let (Some(width), Some(behind)) = (wanted.shape.width, wanted.shape.behind) else {
             return rebuilt();
@@ -173,6 +187,7 @@ mod tests {
                 preset: Some(preset.into()),
                 audio: None,
                 level: None,
+                layers: BTreeMap::new(),
             },
             shape: Shape::default(),
             place: Place { x, y: 0.0, z: 0.0 },
@@ -198,7 +213,10 @@ mod tests {
 
     #[test]
     fn the_same_scene_needs_nothing() {
-        let meadow = scene(vec![("robin", sound("sources/robin.yaml", 1.0))]);
+        let meadow = scene(vec![(
+            "robin",
+            sound("sources/creatures/birds/robin.yaml", 1.0),
+        )]);
         assert!(changes(&meadow, &meadow).is_empty());
     }
 
@@ -206,11 +224,11 @@ mod tests {
     #[test]
     fn sounds_come_and_go_with_removals_first() {
         let before = scene(vec![
-            ("robin", sound("sources/robin.yaml", 1.0)),
-            ("frog", sound("sources/frog.yaml", 2.0)),
+            ("robin", sound("sources/creatures/birds/robin.yaml", 1.0)),
+            ("frog", sound("sources/creatures/frog.yaml", 2.0)),
         ]);
         let after = scene(vec![
-            ("robin", sound("sources/robin.yaml", 1.0)),
+            ("robin", sound("sources/creatures/birds/robin.yaml", 1.0)),
             ("bell", sound("sources/bell.yaml", 3.0)),
         ]);
         assert_eq!(
@@ -225,12 +243,15 @@ mod tests {
         );
     }
 
-    /// A drag, a level, a beam, a turn, a size, an arc and a new name are
+    /// A drag, a level, a layer's mix, a beam, a turn, a size, an arc and a new name are
     /// each done as they are, without building the sound again.
     #[test]
     fn small_changes_stay_small() {
-        let before = scene(vec![("robin", sound("sources/robin.yaml", 1.0))]);
-        let mut changed = sound("sources/robin.yaml", 4.0);
+        let before = scene(vec![(
+            "robin",
+            sound("sources/creatures/birds/robin.yaml", 1.0),
+        )]);
+        let mut changed = sound("sources/creatures/birds/robin.yaml", 4.0);
         changed.sound.level = Some(60.0);
         changed.shape.width = Some(120.0);
         changed.shape.behind = Some(-12.0);
@@ -238,6 +259,14 @@ mod tests {
         changed.shape.size = Some(0.4);
         changed.shape.arc = Some(90.0);
         changed.name = Some("Robin in the hedge".into());
+        let muted_right = BTreeMap::from([(
+            "right".to_string(),
+            Layer {
+                mute: true,
+                ..Layer::default()
+            },
+        )]);
+        changed.sound.layers = muted_right.clone();
         let after = scene(vec![("robin", changed)]);
         assert_eq!(
             changes(&before, &after),
@@ -245,6 +274,10 @@ mod tests {
                 Change::Level {
                     id: id("robin"),
                     level: 60.0
+                },
+                Change::Layers {
+                    id: id("robin"),
+                    layers: muted_right
                 },
                 Change::Beam {
                     id: id("robin"),
@@ -285,7 +318,7 @@ mod tests {
     /// nothing: an ambient sound has no preset arc to go back to.
     #[test]
     fn an_arc_taken_out_goes_back_to_all_round() {
-        let mut narrowed = sound("sources/field-wind.yaml", 1.0);
+        let mut narrowed = sound("sources/weather/wind/field-wind.yaml", 1.0);
         narrowed.shape.ambient = Some(true);
         narrowed.shape.arc = Some(60.0);
         let mut all_round = narrowed.clone();
@@ -306,15 +339,15 @@ mod tests {
     /// own value, builds the sound again as wanted.
     #[test]
     fn the_rest_builds_the_sound_again() {
-        let mut leveled = sound("sources/robin.yaml", 1.0);
+        let mut leveled = sound("sources/creatures/birds/robin.yaml", 1.0);
         leveled.sound.level = Some(60.0);
-        let plain = sound("sources/robin.yaml", 1.0);
-        let mut resting = sound("sources/robin.yaml", 1.0);
+        let plain = sound("sources/creatures/birds/robin.yaml", 1.0);
+        let mut resting = sound("sources/creatures/birds/robin.yaml", 1.0);
         resting.when.gap = Some([2.0, 4.0]);
         for (before, after) in [
             (leveled.clone(), plain.clone()),
             (plain.clone(), resting.clone()),
-            (plain.clone(), sound("sources/frog.yaml", 1.0)),
+            (plain.clone(), sound("sources/creatures/frog.yaml", 1.0)),
         ] {
             let found = changes(
                 &scene(vec![("robin", before)]),

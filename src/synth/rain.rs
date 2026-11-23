@@ -11,6 +11,7 @@
 // scene's FdnReverb processor handles reverberation with proper room geometry.
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::SoundSource;
 use atrium_core::types::Vec3;
 
@@ -211,6 +212,16 @@ impl SoundSource for RainSource {
     }
 
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Three layers, in this order: hiss, rumble and drops (impacts, bubbles and drips share one buffer).
+    fn layer_count(&self) -> usize {
+        3
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.env_smooth = (-TAU * RING_SMOOTHING_CORNER_HZ / sample_rate).exp();
@@ -223,8 +234,8 @@ impl SoundSource for RainSource {
         let brown_gain = self.brown_gain * intensity;
 
         // 1. Background noise bed
-        let base = hiss_gain * self.pink.next_sample(sample_rate)
-            + brown_gain * self.brown.next_sample(sample_rate);
+        let hiss = hiss_gain * self.pink.next_sample(sample_rate);
+        let rumble = brown_gain * self.brown.next_sample(sample_rate);
 
         // 2. Read ring buffer with envelope smoothing
         let tail = self.ring[self.ring_idx];
@@ -234,7 +245,7 @@ impl SoundSource for RainSource {
             self.env_state = 0.0;
         }
 
-        let sample = base + self.env_state;
+        let sample = mix.sum(0, &[hiss, rumble, self.env_state]);
 
         // 3. Stochastic raindrop impacts
         if self.rng.next_f32() < drop_rate / sample_rate {

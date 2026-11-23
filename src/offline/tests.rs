@@ -1,10 +1,13 @@
 //! Rendering scenes to files, by subject. Each renders shipped scenes
 //! through the whole engine, so they take some seconds.
 
+mod binaural_beat;
 mod comparison;
 mod cut;
 mod engine;
 mod files;
+mod layers;
+mod listening;
 mod live_analysis;
 mod probe;
 mod reproducible;

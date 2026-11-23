@@ -12,6 +12,7 @@
 use std::f32::consts::TAU;
 
 use atrium_core::commands::SynthParam;
+use atrium_core::layers::LayerMix;
 use atrium_core::source::{EmitterKind, SoundSource};
 
 use atrium_core::types::Vec3;
@@ -272,8 +273,17 @@ impl StormWindSource {
 }
 
 impl SoundSource for StormWindSource {
-    #[inline]
     fn next_sample(&mut self, sample_rate: f32) -> f32 {
+        self.next_mixed(sample_rate, &mut LayerMix::untouched())
+    }
+
+    /// Six layers, in this order: pressure, roar, shear, tearing, debris and structure.
+    fn layer_count(&self) -> usize {
+        6
+    }
+
+    #[inline]
+    fn next_mixed(&mut self, sample_rate: f32, mix: &mut LayerMix) -> f32 {
         if self.sample_rate_cached != sample_rate {
             self.sample_rate_cached = sample_rate;
             self.retune(sample_rate);
@@ -329,12 +339,17 @@ impl SoundSource for StormWindSource {
         let shear_motion = (0.30 + 1.35 * storm_norm.powf(1.3) + spectral_response).max(0.0);
         let tearing_motion =
             (0.05 + 1.85 * storm_norm * storm_norm + 1.5 * spectral_response).max(0.0);
-        let texture = self.pressure_gain * pressure * pressure_motion
-            + self.roar_gain * roar * (0.62 + 0.68 * state.activity)
-            + self.shear_gain * shear * shear_motion
-            + self.tear_gain * tear * tearing_motion
-            + debris
-            + structure;
+        let texture = mix.sum(
+            0,
+            &[
+                self.pressure_gain * pressure * pressure_motion,
+                self.roar_gain * roar * (0.62 + 0.68 * state.activity),
+                self.shear_gain * shear * shear_motion,
+                self.tear_gain * tear * tearing_motion,
+                debris,
+                structure,
+            ],
+        );
 
         let speed_gain = if state.speed <= 0.0 {
             0.0
@@ -365,7 +380,7 @@ impl SoundSource for StormWindSource {
             return;
         }
         match param {
-            // Settings of rain, waves, flying sources and tones; not this one's.
+            // Settings of rain, waves, flying sources and tones and binaural beats; not this one's.
             SynthParam::Intensity
             | SynthParam::DropRate
             | SynthParam::DripRate
@@ -374,12 +389,12 @@ impl SoundSource for StormWindSource {
             | SynthParam::HoverTimeMin
             | SynthParam::HoverTimeMax
             | SynthParam::Pitch
-            | SynthParam::Brightness
-            | SynthParam::FundamentalLevel
-            | SynthParam::OvertoneLevel
-            | SynthParam::ShimmerRateMin
-            | SynthParam::ShimmerRateMax
-            | SynthParam::ShimmerDepth => {}
+            | SynthParam::Floor
+            | SynthParam::RotationPeriod
+            | SynthParam::RotationDepth
+            | SynthParam::Beat
+            | SynthParam::EndBeat
+            | SynthParam::Duration => {}
             SynthParam::FlowSpeedMin | SynthParam::FlowSpeedMax | SynthParam::RiverSplashRate => {}
             SynthParam::MinSpeed => self.min_speed = value.clamp(0.0, self.max_speed),
             SynthParam::MaxSpeed => self.max_speed = value.clamp(self.min_speed, 25.0),
