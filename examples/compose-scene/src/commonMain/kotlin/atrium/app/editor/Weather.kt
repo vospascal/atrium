@@ -194,7 +194,8 @@ private val WeatherSpeeds = listOf(1f to "1×", 10f to "10×", 60f to "60×")
  * it and the wind as a line, and the playhead where the scene is [now]. Press
  * or drag anywhere to move the whole scene there, every sound and the
  * weather. The speed runs the weather faster while the sounds keep their own
- * pace. [trailing] follows on the same line.
+ * pace. The weather and its speed are drawn only where the scene's kind shows
+ * them. [trailing] follows on the same line.
  */
 @Composable
 internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifier, trailing: @Composable RowScope.() -> Unit = {}) {
@@ -211,6 +212,7 @@ internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifi
     val faint = Hairline
     val text = androidx.compose.ui.text.rememberTextMeasurer()
     val muted = Muted
+    val weatherShown = session.shows(ScenePart.WeatherOnTimeline)
     val seek = androidx.compose.runtime.rememberUpdatedState { fraction: Float ->
         session.seek(windowStart + fraction.coerceIn(0f, 1f) * OverviewWindow)
     }
@@ -224,7 +226,7 @@ internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifi
         ) {
             val lane = size.height - 12.dp.toPx()
             drawRect(faint.copy(alpha = .35f), size = androidx.compose.ui.geometry.Size(size.width, lane))
-            if (weather.size > 1) {
+            if (weatherShown && weather.size > 1) {
                 fun curve(of: (Conditions) -> Float, close: Boolean) = androidx.compose.ui.graphics.Path().apply {
                     if (close) moveTo(0f, lane)
                     weather.forEachIndexed { index, conditions ->
@@ -256,7 +258,7 @@ internal fun Overview(session: Session, now: Double, modifier: Modifier = Modifi
             drawCircle(ink, 4.dp.toPx(), Offset(x, 0f))
         }
         Spacer(Modifier.width(10.dp))
-        WeatherSpeeds.forEach { (speed, label) ->
+        if (session.shows(ScenePart.WeatherSpeed)) WeatherSpeeds.forEach { (speed, label) ->
             PaperText(
                 label,
                 12,

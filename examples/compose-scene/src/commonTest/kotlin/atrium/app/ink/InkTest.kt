@@ -1,5 +1,6 @@
 package atrium.app.ink
 
+import atrium.engine.SceneKind
 import atrium.engine.ChannelMode
 import atrium.engine.Bout
 import atrium.engine.EmitterKind
@@ -29,6 +30,7 @@ class InkTest {
         name = "test",
         path = "scenes/test.yaml",
         title = "Test",
+        kind = SceneKind.NATURE,
         savedByEditor = false,
         sounds = offsets.mapIndexed { index, offset -> SoundSummary("Sound $index", "#26c6da", offset) },
     )
@@ -39,12 +41,14 @@ class InkTest {
         kind: EmitterKind = EmitterKind.OBJECT,
         beam: Float? = null,
     ) = SceneDescription(
+        kind = SceneKind.NATURE,
+        space = "environments/meadow.yaml",
         width = 60f,
         depth = 60f,
         temperatureC = 20f,
         humidityPct = 50f,
         listener = listener,
-        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), 360f, -60f, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, 0f, 360f, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null, true, Bout(1u, 1u), emptyList()) },
+        sources = List(count) { SourceDescription("sound-$it", it.toUShort(), 360f, -60f, "Sound $it", null, "#26c6da", listener, spl, 1f, kind, beam, 0f, 360f, Position(1f, 0f, 0f), listOf(Take("Take", 1f)), null, true, Bout(1u, 1u), emptyList(), emptyList()) },
         speakers = emptyList(),
     )
 
@@ -123,7 +127,7 @@ class InkTest {
         val sounds = scene(Position(10f, 0f, 0f))
         fun plume(level: Float, lowShare: Float, highShare: Float, gainDb: Float = 0f, muted: Boolean = false) = plumesFor(
             sounds, description(1, spl = 50f),
-            heard(listener, gainDb, muted, SourceSignal(level, lowShare, highShare)),
+            heard(listener, gainDb, muted, SourceSignal(level, lowShare, highShare, listOf(level))),
         ).single()
 
         val low = plume(1f, .95f, .02f)

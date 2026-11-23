@@ -12,15 +12,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import atrium.engine.EmitterKind
 import atrium.engine.HeadTrackingStatus
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
+import atrium.app.ui.Chip
 import atrium.engine.SceneFile
+import atrium.engine.SceneKind
 import atrium.engine.SourceDescription
 import kotlin.math.roundToInt
 import atrium.app.ui.Muted
 import atrium.app.ui.PaperLevel
 import atrium.app.ui.PaperText
 import atrium.app.Point
+import atrium.app.session.EnvironmentDirectory
 import atrium.app.session.Session
 import atrium.app.session.VoiceCount
+import atrium.engine.listPlaces
+import androidx.compose.runtime.remember
 import atrium.app.bearingLabel
 import atrium.app.player.label
 
@@ -85,6 +92,7 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
         step = .5f / (LoudestLayerLevel - QuietestLayerLevel),
         modifier = Modifier.fillMaxWidth(),
     )
+    LayersPart(session, sound)
 
     Part("Shape")
     ShapePart(session, sound, live)
@@ -96,8 +104,10 @@ private fun SoundInspector(session: Session, sound: SourceDescription) {
     Part("When")
     WhenPart(session, sound, live)
 
-    Part("Follows")
-    FollowsPart(sound.follows)
+    if (session.shows(ScenePart.Follows)) {
+        Part("Follows")
+        FollowsPart(sound.follows)
+    }
 
     Part("Moves")
     // The engine reports where a sound is, not why: one that is away from where it was placed is travelling.
@@ -134,13 +144,24 @@ private fun SceneInspector(session: Session, scene: SceneFile, voices: Int) {
     PaperText("Nothing selected. Pick a sound on the map or in the layers.", 14, Muted)
 
     Part("World")
-    if (description != null) PaperText("${description.width.roundToInt()} × ${description.depth.roundToInt()} m", 15)
-    PaperText("$voices of $VoiceCount voices", 14, Muted)
+    if (description != null && session.shows(ScenePart.Kind)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SceneKind.entries.forEach { kind -> Chip(kind.label, selected = kind == description.kind) { session.sceneKind(kind) } }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+    if (description != null && session.shows(ScenePart.Place)) {
+        PlacePart(session, description.space)
+        Spacer(Modifier.height(8.dp))
+    }
+    if (session.shows(ScenePart.Voices)) PaperText("$voices of $VoiceCount voices", 14, Muted)
 
-    Part("Weather")
-    WeatherPart(session)
+    if (session.shows(ScenePart.Weather)) {
+        Part("Weather")
+        WeatherPart(session)
+    }
 
-    if (description != null) {
+    if (description != null && session.shows(ScenePart.Air)) {
         Part("Air")
         val temperature = description.temperatureC
         val humidity = description.humidityPct
@@ -161,6 +182,7 @@ private fun SceneInspector(session: Session, scene: SceneFile, voices: Int) {
         PaperText("How fast sound travels, and how much treble the air takes from a distant sound.", 14, Muted)
     }
 
+    if (!session.shows(ScenePart.Listening)) return
     Part("Listen")
     ListenPart(session)
 
@@ -177,6 +199,24 @@ private fun SceneInspector(session: Session, scene: SceneFile, voices: Int) {
         },
         15,
     )
+}
+
+/**
+ * The place the scene plays in, [current], among Dry and every environment file, with a line on the
+ * one chosen. Choosing another builds the scene again there, with a short gap in the sound.
+ */
+@Composable
+private fun PlacePart(session: Session, current: String?) {
+    val places = remember { runCatching { listPlaces(EnvironmentDirectory) }.getOrDefault(emptyList()) }
+    PaperText("Place", 13, Muted)
+    Spacer(Modifier.height(6.dp))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        places.forEach { place -> Chip(spaceLabel(place.space), selected = place.space == current) { session.place(place.space) } }
+    }
+    Spacer(Modifier.height(6.dp))
+    val chosen = places.firstOrNull { it.space == current }
+    PaperText(chosen?.let(::placeLine) ?: "${spaceLabel(current)}: the scene file's own environment", 14, Muted)
+    session.placeFailure?.let { PaperText(it, 14, Muted) }
 }
 
 @Composable

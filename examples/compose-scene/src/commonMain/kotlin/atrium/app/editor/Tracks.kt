@@ -35,7 +35,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import atrium.app.session.Clip
 import atrium.app.ui.Foreground
 import atrium.app.ui.Hairline
 import atrium.app.ink.LocalInkTint
@@ -154,9 +153,11 @@ private fun BottomTabs(selected: BottomTab, onSelect: (BottomTab) -> Unit) {
  * Every voice of the engine as a track, the way a multitrack editor shows
  * them: a header with the voice's number and the sound in it, the past as
  * clips, each named after its take and outlined by its level, and right of
- * the "now" line the takes the plan has already decided, drawn open. Above
- * the voices, the place's conditions as lanes, past and future alike. An
- * empty voice is a free track a sound can be added to.
+ * the "now" line the takes the plan has already decided, drawn open. A sound
+ * with layers has a sub-lane under its track for each, with its name and its
+ * own level, folded away with the triangle in its header. Above the voices,
+ * the place's conditions as lanes, past and future alike, where the scene's
+ * kind shows them. An empty voice is a free track a sound can be added to.
  */
 @Composable
 private fun TrackLanes(
@@ -186,9 +187,12 @@ private fun TrackLanes(
     // Where a moment on the session's clock lies across the strip, 0 to 1.
     fun along(seconds: Double) = ((seconds - (now - shown)) / span).toFloat()
     val nowAt = (shown / span).toFloat()
+    // The sounds whose layers are folded away; every sound's layers show until folded.
+    var folded by remember { mutableStateOf(emptySet<String>()) }
+    val conditionLanes = if (session.shows(ScenePart.ConditionLanes)) Condition.entries else emptyList()
     // The lanes and the voices scroll together under the fixed ruler when the panel is short.
     ScrollArea(modifier) {
-        for (condition in Condition.entries) {
+        for (condition in conditionLanes) {
             Row(Modifier.fillMaxWidth().height(LaneHeight), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.width(HeaderWidth).padding(start = 36.dp), verticalAlignment = Alignment.CenterVertically) {
                     PaperText(condition.label, 11, Muted)
@@ -229,7 +233,20 @@ private fun TrackLanes(
                         12,
                         if (sound != null) Foreground else Muted,
                         if (chosen) FontWeight.Bold else FontWeight.Normal,
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
                     )
+                    if (sound != null && sound.layers.isNotEmpty()) {
+                        val open = sound.id !in folded
+                        PaperText(
+                            if (open) "▾" else "▸",
+                            11,
+                            Muted,
+                            modifier = Modifier.clickable(role = Role.Button) {
+                                folded = if (open) folded + sound.id else folded - sound.id
+                            }.padding(horizontal = 6.dp),
+                        )
+                    }
                 }
                 Canvas(Modifier.weight(1f).fillMaxHeight().padding(end = 14.dp)) {
                     history.version
@@ -247,7 +264,7 @@ private fun TrackLanes(
                             val right = (size.width * along(clip.end)).coerceAtLeast(left + 2f)
                             val alpha = if (clip.muted) .18f else if (chosen) .9f else .55f
                             drawRoundRect(color.copy(alpha = alpha * .35f), Offset(left, top), Size(right - left, height), CornerRadius(3.dp.toPx()))
-                            drawOutline(clip, left, right, top, height, color.copy(alpha = alpha))
+                            drawOutline(clip.levels, left, right, top, height, color.copy(alpha = alpha))
                             drawTakeName(sound?.takes?.getOrNull(clip.take)?.name, left, right, top, text, ink)
                         }
                         // What the plan has decided, still to come: open clips right of now.
@@ -264,6 +281,30 @@ private fun TrackLanes(
                         }
                     }
                     drawLine(ink.copy(alpha = .5f), Offset(size.width * nowAt, 0f), Offset(size.width * nowAt, size.height), 1.dp.toPx())
+                }
+            }
+            val layers = if (sound == null || sound.id in folded) emptyList() else sound.layers
+            val layerColor = if (chosen) tint ?: parseColor(sound.color) else ink
+            layers.forEachIndexed { index, layer ->
+                val branch = if (index == layers.lastIndex) "└" else "├"
+                Row(Modifier.fillMaxWidth().height(LayerHeight), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.width(HeaderWidth).padding(start = 36.dp), verticalAlignment = Alignment.CenterVertically) {
+                        PaperText("$branch ${layer.name}", 11, if (layer.mute && !layer.solo) Muted else Foreground, singleLine = true)
+                    }
+                    Canvas(Modifier.weight(1f).fillMaxHeight().padding(end = 14.dp)) {
+                        history.version
+                        val top = 1.dp.toPx()
+                        val height = size.height - 2 * top
+                        clipRect {
+                            for (clip in history.clipsOf(slot)) {
+                                val left = size.width * along(clip.start)
+                                val right = (size.width * along(clip.end)).coerceAtLeast(left + 2f)
+                                val levels = clip.layers.map { it.getOrElse(index) { 0f } }
+                                drawOutline(levels, left, right, top, height, layerColor.copy(alpha = if (clip.muted) .18f else .45f))
+                            }
+                        }
+                        drawLine(ink.copy(alpha = .5f), Offset(size.width * nowAt, 0f), Offset(size.width * nowAt, size.height), 1.dp.toPx())
+                    }
                 }
             }
         }
@@ -286,16 +327,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawTakeName(
     }
 }
 
-/** The level outline inside a clip, rising from its foot like a waveform's upper half. */
+/** A level outline inside a clip, from [levels] across it, rising from its foot like a waveform's upper half. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawOutline(
-    clip: Clip,
+    levels: List<Float>,
     left: Float,
     right: Float,
     top: Float,
     height: Float,
     color: androidx.compose.ui.graphics.Color,
 ) {
-    val levels = clip.levels
     if (levels.size < 2) return
     val foot = top + height
     val outline = Path().apply {
@@ -341,6 +381,7 @@ private fun Ruler(shown: Double, ahead: Double, modifier: Modifier) {
 
 private val TrackHeight = 17.dp
 private val LaneHeight = 14.dp
+private val LayerHeight = 13.dp
 /** The width of the lanes' names, left of the strip that lines up with the ruler. */
 internal val HeaderWidth = 150.dp
 

@@ -9,10 +9,10 @@ import androidx.compose.ui.unit.dp
 import atrium.app.SettingsStore
 
 /**
- * How the editor's panels are laid out: which show, and how big each is.
- * Kept in [store] and restored at the next launch, the way an editor keeps
- * its workspace. Sizes stay inside sensible limits however far a border is
- * dragged.
+ * How the editor's panels are laid out: which show, how big each is, and
+ * which of the library's folders are open. Kept in [store] and restored at
+ * the next launch, the way an editor keeps its workspace. Sizes stay inside
+ * sensible limits however far a border is dragged.
  */
 @Stable
 internal class Workspace(private val store: SettingsStore) {
@@ -26,6 +26,15 @@ internal class Workspace(private val store: SettingsStore) {
 
     /** What the bottom panel shows under its timeline. */
     var bottomTab by remembered("bottom.tab", BottomTab.Tracks)
+
+    /** The library's open folders, by their path under the presets' folder; every other one is folded. */
+    var libraryOpen by remembered("library.open", emptySet<String>())
+        private set
+
+    /** Open the library's folder at [path], or fold it when it is open. */
+    fun toggleLibraryFolder(path: String) {
+        libraryOpen = if (path in libraryOpen) libraryOpen - path else libraryOpen + path
+    }
 
     /** Whether any panel shows. */
     val anyShown: Boolean get() = leftShown || rightShown || bottomShown
@@ -48,6 +57,12 @@ internal class Workspace(private val store: SettingsStore) {
         "$Prefix$key",
         store.read("$Prefix$key")?.let { saved -> BottomTab.entries.firstOrNull { it.name == saved } } ?: default,
         write = { store.write("$Prefix$key", it.name) },
+    )
+
+    private fun remembered(key: String, default: Set<String>) = Stored(
+        "$Prefix$key",
+        store.read("$Prefix$key")?.split('\n')?.filter { it.isNotEmpty() }?.toSet() ?: default,
+        write = { store.write("$Prefix$key", it.sorted().joinToString("\n")) },
     )
 
     private fun remembered(key: String, default: Dp, limits: ClosedFloatingPointRange<Float>) = Stored(

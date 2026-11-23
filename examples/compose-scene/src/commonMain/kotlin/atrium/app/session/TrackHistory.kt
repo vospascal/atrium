@@ -10,9 +10,18 @@ import kotlin.math.log10
 /**
  * One stretch of time a voice was sounding: from [start] to [end] seconds on
  * the session's clock, uttering [take] (counted from 0), with its level over
- * that time as [levels], 0 to 1, one every [LevelStep] seconds.
+ * that time as [levels], 0 to 1, one every [LevelStep] seconds, and beside
+ * each the level of each of its sound's layers as [layers] (empty for a
+ * sound of one stream).
  */
-internal data class Clip(val start: Double, var end: Double, val take: Int, val muted: Boolean, val levels: MutableList<Float>)
+internal data class Clip(
+    val start: Double,
+    var end: Double,
+    val take: Int,
+    val muted: Boolean,
+    val levels: MutableList<Float>,
+    val layers: MutableList<List<Float>> = mutableListOf(),
+)
 
 /** How often a clip keeps its level (s): enough for an outline, few enough to draw cheaply. */
 internal const val LevelStep = .1
@@ -45,11 +54,12 @@ internal class TrackHistory(private val window: Double = TrackMemory) {
                     open.end = now
                     if (now - lastLevelAt[slot] >= LevelStep) {
                         open.levels += levelOf(source)
+                        open.layers += layerLevelsOf(source)
                         lastLevelAt[slot] = now
                     }
                 }
                 else -> {
-                    track += Clip(now, now, take, source.muted, mutableListOf(levelOf(source)))
+                    track += Clip(now, now, take, source.muted, mutableListOf(levelOf(source)), mutableListOf(layerLevelsOf(source)))
                     lastLevelAt[slot] = now
                 }
             }
@@ -77,6 +87,17 @@ internal class TrackHistory(private val window: Double = TrackMemory) {
 /** A voice's own level as a clip outline shows it, 0 to 1: its measured loudness over 36 dB. */
 private fun levelOf(source: SourceTelemetry): Float {
     val rms = source.signal?.relativeRms ?: return .7f
+    return outlineOf(rms)
+}
+
+/** Each layer's level as its sub-lane's outline shows it, on the same scale as the voice's; none for one stream. */
+private fun layerLevelsOf(source: SourceTelemetry): List<Float> {
+    val layers = source.signal?.layerRms ?: return emptyList()
+    return if (layers.size < 2) emptyList() else layers.map(::outlineOf)
+}
+
+/** An RMS as an outline's height, 0 to 1: 36 dB below the calibrated level up to it; silence is 0. */
+private fun outlineOf(rms: Float): Float {
     if (rms <= 0f) return 0f
     return ((20f * log10(rms) + 36f) / 36f).coerceIn(.08f, 1f)
 }

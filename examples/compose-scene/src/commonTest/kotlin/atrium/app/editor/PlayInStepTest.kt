@@ -14,7 +14,7 @@ class PlayInStepTest {
     private fun sound(id: String, slot: Int, loops: Boolean) = SourceDescription(
         id, slot.toUShort(), 360f, -60f, id.replaceFirstChar { it.uppercase() }, null, "#000000", Position(0f, 0f, 0f), 65f, 1f,
         EmitterKind.OBJECT, null, 0f, 360f, Position(1f, 0f, 0f),
-        if (loops) listOf(Take("Take", 1f)) else emptyList(), if (loops) null else Gap(3f, 8f), loops, Bout(1u, 1u), emptyList(),
+        if (loops) listOf(Take("Take", 1f)) else emptyList(), if (loops) null else Gap(3f, 8f), loops, Bout(1u, 1u), emptyList(), emptyList(),
     )
 
     private val bass = sound("bass", 0, loops = true)

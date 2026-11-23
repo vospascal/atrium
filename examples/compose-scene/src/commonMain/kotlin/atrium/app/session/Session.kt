@@ -15,6 +15,8 @@ import atrium.engine.Preset
 import atrium.engine.Probe
 import atrium.engine.SceneDescription
 import atrium.engine.SceneFile
+import atrium.engine.SceneKind
+import atrium.engine.SoundLayer
 import atrium.engine.SourceDescription
 import atrium.engine.Telemetry
 import atrium.engine.listPresets
@@ -177,6 +179,17 @@ internal class Session(private val store: SettingsStore) {
 
     fun play(scene: SceneFile) {
         request = PlayRequest(scene, ++requests)
+    }
+
+    /**
+     * Start an empty scene of [kind] with no file yet: a nature scene in the meadow, a listening session
+     * in the dry space; its place is chosen in the World panel after. It opens unsaved; saving names it,
+     * as Save as does, in [directory].
+     */
+    fun playNew(kind: SceneKind, directory: String) {
+        val title = if (kind == SceneKind.LISTENING) "Untitled listening session" else "Untitled nature scene"
+        val untitled = SceneFile("untitled", "$directory/untitled.yaml", title, kind, savedByEditor = false, sounds = emptyList())
+        request = PlayRequest(untitled, ++requests, NewScene(kind))
     }
 
     fun stop() {
@@ -442,6 +455,54 @@ internal class Session(private val store: SettingsStore) {
         }
     }
 
+    /**
+     * Make the playing scene a nature scene or a listening session. Its weather and air stay in its file
+     * either way: a listening session only stops running them, so switching back brings them back.
+     */
+    fun sceneKind(kind: SceneKind) {
+        val running = engine ?: return
+        step(if (kind == SceneKind.LISTENING) "Listening session" else "Nature scene", "kind")
+        runCatching { running.setSceneKind(kind) }
+        description = running.scene()
+        weather = running.weather()
+        unsaved = true
+    }
+
+    /**
+     * Mix [layer] of [sound]: [levelDb] against the layer as its generator makes it, heard alone with
+     * [solo], left out with [mute]. A fader dragged is one step.
+     */
+    fun layer(sound: SourceDescription, layer: SoundLayer, levelDb: Float, solo: Boolean, mute: Boolean) {
+        val running = engine ?: return
+        step("Layer · ${sound.name} · ${layer.name}", "layer:${sound.slot}:${layer.key}")
+        runCatching { running.setSourceLayer(sound.slot, layer.key, levelDb, solo, mute) }
+        description = running.scene()
+        unsaved = true
+    }
+
+    /** Why the last change of place did not work; null once one does. */
+    var placeFailure by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * Play the scene in [space], an environment file, or with null in the dry space; it is saved with the
+     * scene and undone like any edit. The engine builds the scene again there with every sound as it is,
+     * which takes a moment and leaves a short gap in the sound, so this runs off the UI thread.
+     */
+    fun place(space: String?) {
+        val running = engine ?: return
+        if (description?.space == space) return
+        step("Place", "place:$space")
+        building.launch {
+            placeFailure = runCatching { running.setPlace(space) }.exceptionOrNull()?.message
+            if (engine !== running) return@launch
+            description = running.scene()
+            outputs = running.outputs()
+            history = running.history()
+            unsaved = true
+        }
+    }
+
     /** Give the place air at [temperature] °C and [humidity] % relative humidity; it is saved with the scene. */
     fun atmosphere(temperature: Float, humidity: Float) {
         val running = engine ?: return
@@ -493,7 +554,7 @@ internal class Session(private val store: SettingsStore) {
         saves++
         val directory = path.substringBeforeLast('/', ".")
         val written = runCatching { listScenes(directory) }.getOrNull()?.firstOrNull { it.path == path }
-        if (written != null) request = playing.copy(scene = written)
+        if (written != null) request = playing.copy(scene = written, new = null)
     }
 
     /** The steps that can be undone and redone in the playing scene; null with nothing playing. */
@@ -542,6 +603,8 @@ internal class Session(private val store: SettingsStore) {
             description = running.scene()
             weather = running.weather()
             history = running.history()
+            // A step that changed the place built the scene again, on the device as it is now.
+            outputs = running.outputs()
             unsaved = true
             // A sound brought back is built anew, without the listener's mute.
             description?.sources?.forEach { sound ->
@@ -599,7 +662,11 @@ internal class Session(private val store: SettingsStore) {
     }
 }
 
-internal data class PlayRequest(val scene: SceneFile, val number: Int)
+/** The scene asked for, and when it is a new one with no file yet, what to start it as. */
+internal data class PlayRequest(val scene: SceneFile, val number: Int, val new: NewScene? = null)
+
+/** An empty scene to start, of [kind]: the engine decides where it starts. */
+internal data class NewScene(val kind: SceneKind)
 
 /** How many sounds the engine can play at once. */
 internal const val VoiceCount = 16
@@ -611,6 +678,9 @@ private const val AuditionVoice = 15
 private val BuildingTakes = 1.5.seconds
 
 /** Where the presets are, relative to the working directory, like the scenes. */
-private const val PresetDirectory = "sources"
+internal const val PresetDirectory = "sources"
+
+/** Where the environments a scene can play in are, relative to the working directory, like the scenes. */
+internal const val EnvironmentDirectory = "environments"
 
 private const val OutputKey = "output"

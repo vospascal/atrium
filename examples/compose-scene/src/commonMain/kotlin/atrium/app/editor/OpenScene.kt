@@ -23,7 +23,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.FlowRow
 import atrium.engine.SceneFile
+import atrium.engine.SceneKind
+import atrium.app.ui.Chip
 import atrium.app.ui.Muted
 import atrium.app.ui.PaperText
 import atrium.app.ui.ScrollArea
@@ -50,7 +53,9 @@ internal fun SceneList(scenes: List<SceneFile>, open: SceneFile?, onOpen: (Scene
                 Column(Modifier.weight(1f)) {
                     PaperText(scene.title, 17, weight = if (current) FontWeight.Bold else FontWeight.Normal)
                     PaperText(
-                        scene.path.substringAfterLast('/') + if (scene.savedByEditor) " · saved by the editor" else "",
+                        scene.path.substringAfterLast('/') +
+                            (if (scene.kind == SceneKind.LISTENING) " · listening session" else "") +
+                            if (scene.savedByEditor) " · saved by the editor" else "",
                         12,
                         Muted,
                     )
@@ -71,20 +76,31 @@ internal fun mustAskBeforeOpening(scene: SceneFile, open: SceneFile?, unsaved: B
     unsaved && open != null && scene.path != open.path
 
 /**
- * Open another scene from the editor. The scene open now stops and the
- * chosen one starts; the editor stays. With unsaved changes it asks first.
+ * Open another scene from the editor, or start a new one. The scene open now
+ * stops and the chosen one starts; the editor stays. With unsaved changes it
+ * asks first.
  */
 @Composable
-internal fun OpenDialog(scenes: List<SceneFile>, session: Session, open: SceneFile?, onDone: () -> Unit) {
-    var asking by remember { mutableStateOf<SceneFile?>(null) }
+internal fun OpenDialog(scenes: List<SceneFile>, session: Session, open: SceneFile?, directory: String, onDone: () -> Unit) {
+    // What would open, by its title, and how to open it, while the person is asked about their changes.
+    var asking by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
     val choose = { scene: SceneFile ->
         when {
             scene.path == open?.path -> onDone()
-            mustAskBeforeOpening(scene, open, session.unsaved) -> asking = scene
+            mustAskBeforeOpening(scene, open, session.unsaved) -> asking = scene.title to { session.play(scene) }
             else -> {
                 session.play(scene)
                 onDone()
             }
+        }
+    }
+    val startNew = { kind: SceneKind ->
+        val start = { session.playNew(kind, directory) }
+        if (session.unsaved && open != null) {
+            asking = "a new ${kind.label.lowercase()}" to start
+        } else {
+            start()
+            onDone()
         }
     }
     Sheet(width = 520.dp) {
@@ -92,7 +108,9 @@ internal fun OpenDialog(scenes: List<SceneFile>, session: Session, open: SceneFi
         if (waiting == null) {
             PaperText("Open a scene", 22, weight = FontWeight.Bold)
             Spacer(Modifier.height(12.dp))
-            SceneList(scenes, open, choose, Modifier.fillMaxWidth().heightIn(max = 420.dp))
+            SceneList(scenes, open, choose, Modifier.fillMaxWidth().heightIn(max = 360.dp))
+            Spacer(Modifier.height(16.dp))
+            NewScenePart(startNew)
             Spacer(Modifier.height(16.dp))
             Row(Modifier.fillMaxWidth()) {
                 Spacer(Modifier.weight(1f))
@@ -101,13 +119,13 @@ internal fun OpenDialog(scenes: List<SceneFile>, session: Session, open: SceneFi
         } else {
             PaperText("Discard your changes?", 22, weight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            PaperText("${open?.title ?: "This scene"} has changes that are not saved. Opening ${waiting.title} throws them away.", 15)
+            PaperText("${open?.title ?: "This scene"} has changes that are not saved. Opening ${waiting.first} throws them away.", 15)
             Spacer(Modifier.height(20.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Spacer(Modifier.weight(1f))
                 ToolButton("Cancel", onClick = { asking = null })
                 ToolButton("Discard and open", strong = true) {
-                    session.play(waiting)
+                    waiting.second()
                     onDone()
                 }
             }
@@ -117,18 +135,44 @@ internal fun OpenDialog(scenes: List<SceneFile>, session: Session, open: SceneFi
 
 /**
  * The editor with no scene open, like a picture editor with no document: the
- * scenes to open one from. Opening one plays it.
+ * scenes to open one from, and a new one to start. Opening one plays it.
  */
 @Composable
-internal fun StartScreen(scenes: List<SceneFile>, session: Session, modifier: Modifier = Modifier) {
+internal fun StartScreen(scenes: List<SceneFile>, session: Session, directory: String, modifier: Modifier = Modifier) {
     Box(modifier, contentAlignment = Alignment.Center) {
         Column(Modifier.widthIn(max = 560.dp).fillMaxSize().padding(vertical = 40.dp)) {
             PaperText("Open a scene", 28, weight = FontWeight.Bold)
             PaperText("It starts playing, and you can change it while you listen.", 15, Muted)
             Spacer(Modifier.height(16.dp))
             SceneList(scenes, null, onOpen = session::play, Modifier.fillMaxWidth().weight(1f))
+            Spacer(Modifier.height(16.dp))
+            NewScenePart { kind -> session.playNew(kind, directory) }
         }
     }
+}
+
+/**
+ * A new, empty scene: only its kind is asked. A nature scene starts in the meadow, a listening
+ * session in the dry space; the place is chosen in the scene, in the World panel. It opens unsaved.
+ */
+@Composable
+internal fun NewScenePart(onNew: (kind: SceneKind) -> Unit) {
+    var kind by remember { mutableStateOf(SceneKind.NATURE) }
+    PaperText("NEW SCENE", 12, Muted, FontWeight.SemiBold, spacing = 2f)
+    Spacer(Modifier.height(8.dp))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SceneKind.entries.forEach { choice -> Chip(choice.label, selected = choice == kind) { kind = choice } }
+    }
+    Spacer(Modifier.height(8.dp))
+    PaperText(newSceneNote(kind), 13, Muted)
+    Spacer(Modifier.height(10.dp))
+    ToolButton("New ${kind.label.lowercase()}", strong = true) { onNew(kind) }
+}
+
+/** Where a new scene of [kind] starts, and where its place is changed. */
+internal fun newSceneNote(kind: SceneKind): String = when (kind) {
+    SceneKind.NATURE -> "Starts in the meadow, on a calm day. Choose another place in the World panel."
+    SceneKind.LISTENING -> "Starts dry: no room, direct sound only, and no weather, daylight or air. Choose a place in the World panel."
 }
 
 /** While a scene is starting, or why it did not. */

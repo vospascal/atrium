@@ -1,6 +1,7 @@
 package atrium.app.session
 
 import atrium.engine.Position
+import atrium.engine.SourceSignal
 import atrium.engine.SourceTelemetry
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -37,6 +38,27 @@ class TrackHistoryTest {
         assertTrue(history.clipsOf(0).last().muted)
         history.record(30.0, listOf(voice(0, 1)))
         assertEquals(1, history.clipsOf(0).size, "only what is inside the window is kept")
+    }
+
+    /** A sound with layers keeps each layer's level beside the voice's, on the same scale; a muted layer is flat. */
+    @Test
+    fun eachLayerKeepsItsOwnLevel() {
+        val history = TrackHistory()
+        var now = 0.0
+        val signal = SourceSignal(1f, .3f, .3f, listOf(1f, .5f, 0f))
+        repeat(30) {
+            history.record(now, listOf(SourceTelemetry(2u, Position(0f, 0f, 0f), 0f, false, Position(1f, 0f, 0f), signal, 0u)))
+            now += 1.0 / 60
+        }
+        val clip = history.clipsOf(2).single()
+        assertEquals(clip.levels.size, clip.layers.size, "a level of each layer at every step")
+        val (whole, half, silent) = clip.layers.first()
+        assertEquals(1f, whole)
+        assertEquals((36f - 6.0206f) / 36f, half, 1e-3f)
+        assertEquals(0f, silent)
+        val oneStream = SourceSignal(1f, .3f, .3f, listOf(1f))
+        history.record(now + 1, listOf(SourceTelemetry(4u, Position(0f, 0f, 0f), 0f, false, Position(1f, 0f, 0f), oneStream, 0u)))
+        assertEquals(listOf(emptyList()), history.clipsOf(4).single().layers, "one stream has no layers")
     }
 }
 

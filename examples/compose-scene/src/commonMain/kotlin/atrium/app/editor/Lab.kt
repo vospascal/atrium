@@ -64,6 +64,7 @@ import atrium.app.ui.Muted
 import atrium.app.ui.PaperLevel
 import atrium.app.ui.PaperText
 import atrium.app.ui.ScrollArea
+import atrium.app.ui.SmallChip
 import atrium.engine.LabCandidate
 import atrium.engine.LabFader
 import atrium.engine.LabLayer
@@ -525,24 +526,6 @@ private fun KeptField(value: String, placeholder: String, modifier: Modifier = M
             focused = it.isFocused
         },
     )
-}
-
-/** A compact choice chip for the Lab's bars: filled when [selected], faint when not [enabled]. */
-@Composable
-private fun SmallChip(label: String, selected: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(50)
-    Box(
-        Modifier.border(1.dp, if (selected) Foreground else Hairline, shape)
-            .background(if (selected) Foreground else Backdrop, shape)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 3.dp),
-    ) {
-        PaperText(label, 12, when {
-            selected -> Backdrop
-            enabled -> Foreground
-            else -> Muted
-        }, singleLine = true)
-    }
 }
 
 @Composable

@@ -26,7 +26,10 @@ internal fun RunSession(session: Session) {
         // not be abandoned half-way, or the started engine would play on
         // until garbage collection; so it always completes and is closed below.
         val started = withContext(Dispatchers.Default + NonCancellable) {
-            runCatching { Engine(request.scene.path) }
+            runCatching {
+                val new = request.new
+                if (new == null) Engine(request.scene.path) else Engine.newScene(new.kind)
+            }
         }
         val running = started.getOrElse { failure ->
             session.failure = failure.message ?: failure.toString()
@@ -51,8 +54,16 @@ internal fun RunSession(session: Session) {
             // tracker's port, so this one can take it.
             if (session.headTracker != null) session.followHeadTracker(running)
             var lastPlanned = 0L
+            var space = session.description?.space
             while (true) {
                 val frame = withFrameMillis { it }
+                // A new place builds the scene again, and its sounds may take other voices: what the
+                // tracks heard under each voice no longer belongs to it.
+                val placed = session.description?.space
+                if (placed != space) {
+                    space = placed
+                    session.tracks.clear()
+                }
                 if (frame - lastPlanned >= PlannedEveryMillis) {
                     session.planned = running.planned(PlannedAhead)
                     lastPlanned = frame

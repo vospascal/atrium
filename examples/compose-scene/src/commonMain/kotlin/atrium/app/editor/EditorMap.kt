@@ -321,7 +321,7 @@ internal fun EditorMap(
         }
         val north = text.measure("N", TextStyle(color = colors.muted, fontSize = 11.sp))
         drawText(north, topLeft = Offset(centre.x - north.size.width / 2f, density * 6f))
-        session.weather?.let { drawWind(it.windFrom, colors, text) }
+        if (session.shows(ScenePart.WindOnMap)) session.weather?.let { drawWind(it.windFrom, colors, text) }
 
         // Ambient washes first, so points and wedges stay readable on top of them.
         markers.filter { it.ambient }.forEach { drawAmbient(it, listenerAt, view, colors, text, it.id in selection, beat) }

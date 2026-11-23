@@ -64,7 +64,7 @@ import atrium.app.ink.plumesFor
  * same parts are tabs.
  */
 @Composable
-internal fun Editor(open: SceneFile?, scenes: List<SceneFile>, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit) {
+internal fun Editor(open: SceneFile?, scenes: List<SceneFile>, sceneDirectory: String, session: Session, look: Look, workspace: Workspace, onBack: () -> Unit) {
     var opening by remember { mutableStateOf(false) }
     PlayerTheme(look.appearance) {
         Box(
@@ -79,7 +79,7 @@ internal fun Editor(open: SceneFile?, scenes: List<SceneFile>, session: Session,
                 open == null -> Column(Modifier.fillMaxSize()) {
                     TopBar(null, session, null, onBack, onSave = {}, onSaveAs = {}, onOpen = { opening = true })
                     Rule()
-                    StartScreen(scenes, session, Modifier.weight(1f).fillMaxWidth())
+                    StartScreen(scenes, session, sceneDirectory, Modifier.weight(1f).fillMaxWidth())
                 }
                 session.engine == null -> Column(Modifier.fillMaxSize()) {
                     TopBar(open, session, null, onBack, onSave = {}, onSaveAs = {}, onOpen = { opening = true })
@@ -88,7 +88,7 @@ internal fun Editor(open: SceneFile?, scenes: List<SceneFile>, session: Session,
                 }
                 else -> SceneEditor(open, session, look, workspace, onBack, onOpen = { opening = true })
             }
-            if (opening) OpenDialog(scenes, session, open, onDone = { opening = false })
+            if (opening) OpenDialog(scenes, session, open, sceneDirectory, onDone = { opening = false })
         }
     }
 }
@@ -99,6 +99,8 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
     var picked by remember(session.engine) { mutableStateOf(Selection()) }
     var panel by remember { mutableStateOf(Panel.Layers) }
     var naming by remember { mutableStateOf(false) }
+    // Whether the library's search has the keys: then Space and Tab are typed, not taken by the editor.
+    var typing by remember { mutableStateOf(false) }
     // A preset dragged from the library to the map.
     val carry = remember { Carry<atrium.engine.Preset>() }
     // Save writes over the editor's own file; a hand-written scene is saved as a copy, so it asks for a name.
@@ -152,9 +154,9 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                         val command = event.isMetaPressed || event.isCtrlPressed
                         when {
                             command && event.key == Key.S -> if (event.isShiftPressed) naming = true else save()
-                            !command && event.key == Key.Tab -> workspace.toggleAll()
+                            !command && event.key == Key.Tab && !typing -> workspace.toggleAll()
                             // With the Lab focused, space plays and pauses the Lab instead.
-                            !command && event.key == Key.Spacebar && !session.lab.focused -> session.togglePause()
+                            !command && event.key == Key.Spacebar && !session.lab.focused && !typing -> session.togglePause()
                             command && event.key == Key.Z -> if (event.isShiftPressed) session.redo() else session.undo()
                             command && event.key == Key.Y -> session.redo()
                             command && event.key == Key.D -> duplicateChosen()
@@ -177,7 +179,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                     Rule()
                                     ScrollArea(Modifier.weight(1f)) {
                                         when (list) {
-                                            Panel.Library -> Library(session, carry, onAdded = { id ->
+                                            Panel.Library -> Library(session, workspace, carry, onTyping = { typing = it }, onAdded = { id ->
                                                 picked = Selection(setOf(id))
                                                 panel = Panel.Layers
                                             })
@@ -220,7 +222,7 @@ private fun SceneEditor(scene: SceneFile, session: Session, look: Look, workspac
                                 LayerActions(canChange = chosen.isNotEmpty(), onAdd = { panel = Panel.Library }, onDuplicate = duplicateChosen, onPlayInStep = playInStepChosen, onDelete = deleteChosen)
                             }
                             Panel.Library -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                                Library(session, carry, onAdded = { id ->
+                                Library(session, workspace, carry, onTyping = { typing = it }, onAdded = { id ->
                                     picked = Selection(setOf(id))
                                     panel = Panel.Map
                                 })

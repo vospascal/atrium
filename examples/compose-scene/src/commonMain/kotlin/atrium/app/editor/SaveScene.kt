@@ -84,7 +84,9 @@ internal fun saveTarget(title: String, directory: String, scenes: List<SceneFile
 internal fun SaveAsDialog(scene: SceneFile, session: Session, onDone: () -> Unit) {
     val directory = scene.path.substringBeforeLast('/', ".")
     val scenes = remember(directory) { runCatching { listScenes(directory) }.getOrDefault(emptyList()) }
-    var title by remember { mutableStateOf(if (scene.savedByEditor) scene.title else "${scene.title} edit") }
+    // A new scene starts from its own title ("Untitled listening session"); a hand-written one is saved as a copy.
+    val new = session.request?.new != null
+    var title by remember { mutableStateOf(if (scene.savedByEditor || new) scene.title else "${scene.title} edit") }
     val target = saveTarget(title, directory, scenes)
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }

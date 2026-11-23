@@ -34,7 +34,7 @@ internal fun AtriumApp(sceneDirectory: String, onEditing: (Boolean) -> Unit = {}
     // The editor opens with or without a scene: without one it offers the scenes to open.
     LaunchedEffect(editing) { onEditing(editing) }
     if (editing) {
-        Editor(session.request?.scene, scenes.getOrNull().orEmpty(), session, look, workspace, onBack = { editing = false })
+        Editor(session.request?.scene, scenes.getOrNull().orEmpty(), sceneDirectory, session, look, workspace, onBack = { editing = false })
     } else {
         Player(scenes, session, look, onEdit = { editing = true })
     }

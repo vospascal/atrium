@@ -187,6 +187,24 @@ internal fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+/** A compact choice chip, for a bar of small actions: filled when [selected], faint when not [enabled]. */
+@Composable
+internal fun SmallChip(label: String, selected: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    Box(
+        Modifier.border(1.dp, if (selected) Foreground else Hairline, shape)
+            .background(if (selected) Foreground else Backdrop, shape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+    ) {
+        PaperText(label, 12, when {
+            selected -> Backdrop
+            enabled -> Foreground
+            else -> Muted
+        }, singleLine = true)
+    }
+}
+
 /**
  * A thin 0–1 level on paper: tap or drag to set it. Once pressed it takes the
  * arrow keys, moving by [step] a press and ten times that with Shift.

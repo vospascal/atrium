@@ -43,7 +43,10 @@ depth from tone instead of hue.
 
 **The editor** is opened from Settings, with or without a scene playing. Without one it lists the
 scenes to open; Open… (⌘O) in its top bar switches to another scene at any time, and asks first
-when the one open has changes that are not saved. It is in the player's paper style,
+when the one open has changes that are not saved. Under the list, **New scene** asks only the
+kind and starts an empty one: **Nature** starts in the meadow, **Listening session** in the dry
+space, where nothing reflects or rings; the place is chosen afterwards in the World panel. It
+opens unsaved, and Save asks for its name. It is in the player's paper style,
 and on desktop the window widens for it. It has three panels; in a narrow window they are tabs.
 
 The editor works like other editors. The layers and library on the left, the inspector on the
@@ -57,9 +60,18 @@ panel or list gets them by using it.
   it and brings it back, like the eye in a picture editor's layer list; a group's ear does it
   for the whole group. The line shows how strongly each layer reaches you. The bar underneath
   has the actions: plus opens the library, and the bin deletes the selected layer.
-- **Library** lists the presets in `sources/`. The play button in front of one plays it just
-  ahead of you until you press it again; the sound starts about half a second after the press.
-  Add puts it in the scene there, as a new layer.
+- **Library** lists the presets in `sources/` in the folders they lie in there: Creatures,
+  Weather, Water, Fire, Music and Tones on top, a sub-folder (Creatures › Birds, Tones ›
+  Solfeggio) inside its folder. Each folder shows how many presets it holds, starts folded, and
+  opens or folds with a press; which are open is kept between launches. Within a folder names
+  go by number where they start with one, so 111 Hz comes before 1111 Hz. The search on top
+  filters as you type, on name, Hz, group, folder or the words of a preset's note, and opens
+  the folders holding a match without changing which stay open once it is cleared; Escape or
+  Clear empties it. Preview plays a preset just ahead of you until you press it again, showing
+  its note; the sound starts about half a second after the press. Add puts it in the scene
+  there, as a new layer, or drag its name onto the map. The top folders' order (what lives
+  before what is made) is the one thing written into `PresetTree.kt` rather than read from disk;
+  a folder it does not name follows them alphabetically.
 - **Save** is in the bar at the top, next to the scene's name and file; a dot after the name
   means there are changes that are not saved. ⌘S saves and ⇧⌘S saves under a new name. A scene
   from the repository is written by hand and keeps its comments, so its first save asks for a
@@ -72,8 +84,11 @@ panel or list gets them by using it.
   sound in it, or Empty, and the last minutes as clips: where it sounded, which take, and how
   loud the take itself was. A sound that rests leaves gaps; one that loops is one long clip; a
   muted one is faint. Right of the "now" line are the takes the plan has already decided, drawn
-  open. Above the voices, wind, rain, storm and daylight are lanes, the past and what the weather
-  story will do next. Click a track to select its sound. It zooms to 30 s, 2 min or 10 min.
+  open. A sound with layers (a tone's lines, a binaural beat's two ears, a wind's bands, rain's
+  hiss and drops) has a sub-lane under its track for each, with its name and its own level; the
+  triangle in the track's header folds them away. Above the voices, in a nature scene, wind,
+  rain, storm and daylight are lanes, the past and what the weather story will do next. Click a
+  track to select its sound. It zooms to 30 s, 2 min or 10 min.
 - **Analysis** is what the output sounded like, measured as it played by the same analyser as
   `analyse` (`crates/analysis`), so a live number and a report's agree: a column every 50 ms.
   The header gives LAeq, L90, L10, width and onsets a minute over the span shown. Under it the
@@ -156,6 +171,29 @@ panel or list gets them by using it.
 
 A scene can set `title:`. Without it, the player makes one from the file name.
 
+**A scene's kind** decides what the editor shows of it. A nature scene has weather, daylight and
+air; a listening session (`kind: listening`, for tones and binaural beats) runs no weather and
+keeps standard air, and shows none of what only means something with them: no weather, air or
+condition lanes, no weather on the timeline or weather speed, no wind on the map and no
+Follows. The kind is at the top of the World panel, and switching it keeps the weather and the
+air in the file, so switching back brings them back. What each kind shows is listed in one
+place, `editor/SceneParts.kt`; a part not listed there is not shown, so a new part stays out of
+listening sessions until a kind lists it.
+
+**The place** is chosen in the World panel of either kind, under **Place**: Dry, then every
+file in `environments/` by name (atrium, cathedral, meadow, riverside, small atrium), the current
+one marked. The line under it says what it is: Dry "No room: direct sound only", an environment
+its size and whether the sky is open ("60 × 60 × 30 m, open sky", "14 × 10 × 9 m, enclosed").
+Choosing another builds the scene again there: the sound stops for a moment and comes back with
+every sound, its settings and layer mixes, the weather and the clock where they were, and your
+mutes, Listen choice, volume, output and head tracking. The tracks start again, since a sound may
+play from another voice. The place is saved in the scene file (`environment:`, no line for Dry)
+and undone like any edit.
+
+**A sound's layers** are in the inspector under its level, as faders from −60 to +12 dB with
+**S** (solo) and **M** (mute) each. 0 dB is the layer as its generator makes it, so a sound with
+every fader at 0 sounds as before. They are saved with the scene and undone like any edit.
+
 ## Layout
 
 | Source set   | Holds                                                                           |
@@ -186,6 +224,10 @@ program argument.
 
 ## Known gaps
 
+- **A new place is a gap in the sound.** A place cannot change while a scene plays (its room's
+  pipelines are built with it), so the scene is built again, which takes as long as opening it.
+  Loops start from their beginning and a take under way starts again, as after moving the
+  playhead.
 - **No iOS host app yet.** The framework (`AtriumApp`, static) builds and its tests run on the
   simulator. An Xcode app still has to bundle the scene files and start in their directory.
   See `crates/ffi/README.md`.
