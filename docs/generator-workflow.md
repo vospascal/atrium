@@ -43,7 +43,7 @@ Pascal writes, in his own words, what makes the sound real and what would make i
 | Both | Recorded takes, with a generator filling in between | Rain bed recorded, drops generated |
 
 Recordings already fit the model: a kind plays its takes with rests, chosen by the plan, and
-follows the weather like any other sound (`sources/blackbird.yaml`).
+follows the weather like any other sound (`sources/creatures/birds/blackbird.yaml`).
 
 **A limit.** If a generator still does not convince after three listening rounds, switch it to
 recordings instead of tuning further.

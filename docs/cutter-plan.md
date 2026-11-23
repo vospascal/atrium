@@ -8,7 +8,7 @@ sound with a repertoire needs: its takes as files, the rests between them, its b
 preset that uses them, all measured from the recording, not guessed.
 
 Why it matters now: every `rests` rule in `sources/` has its gap "a first guess by ear, not
-measured" (the blackbird's own comment), and `sources/frog.yaml` plays its whole 78 s chorus as
+measured" (the blackbird's own comment), and `sources/creatures/frog.yaml` plays its whole 78 s chorus as
 one take with a guessed gap of 5–20 s.
 
 ## The first real case, measured by hand

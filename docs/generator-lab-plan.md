@@ -80,7 +80,7 @@ captured details are worth carrying into later stages.
 
 ### 1. Tune soft wind in the Lab
 
-Start with `sources/soft-wind.yaml` and a real wind recording chosen by Pascal. Put the
+Start with `sources/weather/wind/soft-wind.yaml` and a real wind recording chosen by Pascal. Put the
 recording and listening brief in `assets/reference/soft-wind/` and choose a second recording
 for the follow-up listen.
 
@@ -223,7 +223,7 @@ baseline. Promotion to the shipped preset is a separate decision.
   why: the gust fades more slowly, so it no longer drops away
   changed:
     gust_brightness: [0.18, 0.30]
-  preset:          # the whole source, as in sources/soft-wind.yaml
+  preset:          # the whole source, as in sources/weather/wind/soft-wind.yaml
     name: Soft wind
     # …
   ```
@@ -247,6 +247,11 @@ baseline. Promotion to the shipped preset is a separate decision.
   with the candidates alone.
 
 ### 4. Extend the mixer to other generators (feature 27)
+
+Partly built 2026-11-23 ([sessions-and-layers-plan.md](sessions-and-layers-plan.md), part 2):
+every generator that already summed distinct parts names them as layers, and the shared mix
+(level, solo and mute per layer) plays them in the scene, the Tracks and the Inspector. Drivers,
+described settings and moving the Lab onto the shared mix are still to come.
 
 Decided with Pascal 2026-11-22: every generator's algorithm is different (drops with bubble
 resonance, gusting wind, thunder rolling through space). Use the soft-wind session to decide
@@ -326,8 +331,8 @@ its description, like a plugin host drawing a panel from a parameter list.
 ## Deferred work
 
 - Broader generator tuning after the first soft-wind session.
-- **Focus tones.** A standalone generator for sustained pitches with overtones and a slow
-  shimmer. The nine Solfeggio pitches span 174–963 Hz.
+- **Focus tones.** Built as `focus_tone`, an octave stack with a slowly turning emphasis,
+  with presets in `sources/tones/` ([focus-tones.md](focus-tones.md)). Not yet in the lab.
   [UI design plan, Beyond nature](ui-design-plan.md#beyond-nature)
 - MUSHRA, and listening panels of several people.
 - Changing settings in the middle of a run (from the cue on), to hear a timing setting on the
