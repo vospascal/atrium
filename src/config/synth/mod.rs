@@ -6,6 +6,7 @@ mod binaural_beat;
 mod canopy_wind;
 mod field_wind;
 mod focus_tone;
+mod noise_colour;
 mod rain;
 mod rain_v2;
 mod river;
@@ -27,6 +28,7 @@ use binaural_beat::BinauralBeatSynthParams;
 use canopy_wind::CanopyWindSynthParams;
 use field_wind::FieldWindSynthParams;
 use focus_tone::FocusToneSynthParams;
+use noise_colour::NoiseColourSynthParams;
 use rain::RainSynthParams;
 use rain_v2::RainV2SynthParams;
 use river::RiverSynthParams;
@@ -54,6 +56,7 @@ pub(in crate::config) enum SynthSpec {
     Wisp(WispSynthParams),
     FocusTone(FocusToneSynthParams),
     BinauralBeat(BinauralBeatSynthParams),
+    NoiseColour(NoiseColourSynthParams),
 }
 
 impl SynthSpec {
@@ -71,6 +74,7 @@ impl SynthSpec {
             SynthSpec::Wisp(_) => "wisp",
             SynthSpec::FocusTone(_) => "focus_tone",
             SynthSpec::BinauralBeat(_) => "binaural_beat",
+            SynthSpec::NoiseColour(_) => "noise_colour",
         }
     }
 
@@ -104,6 +108,7 @@ impl SynthSpec {
             SynthSpec::Wisp(params) => params.build_generator(position, default_seed),
             SynthSpec::FocusTone(params) => params.build_generator(position, default_seed),
             SynthSpec::BinauralBeat(params) => params.build_generator(),
+            SynthSpec::NoiseColour(params) => params.build_generator(position, default_seed),
         }
     }
 
@@ -131,6 +136,7 @@ impl SynthSpec {
             SynthSpec::Thunder(_) => Vec::new(),
             SynthSpec::FocusTone(params) => params.layers(),
             SynthSpec::BinauralBeat(params) => params.layers(),
+            SynthSpec::NoiseColour(params) => params.layers(),
         }
     }
 

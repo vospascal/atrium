@@ -10,6 +10,7 @@ use super::SynthNode;
 use crate::synth::canopy_wind::CanopyWindSource;
 use crate::synth::field_wind::FieldWindSource;
 use crate::synth::focus_tone::{FocusToneSettings, FocusToneSource};
+use crate::synth::noise_colour::{NoiseColour, NoiseColourSettings, NoiseColourSource};
 use crate::synth::rain::RainSource;
 use crate::synth::rain_v2::RainSourceV2;
 use crate::synth::river::RiverSource;
@@ -49,7 +50,9 @@ fn focus_tone() -> FocusToneSource {
 /// Each layered generator, made afresh, with its name, how many layers it
 /// has, and the fingerprint of its first three seconds taken from the
 /// generators before they handed their layers over (the tree of 2026-11-23,
-/// commit 28aed92 with its uncommitted work).
+/// commit 28aed92 with its uncommitted work). Orange noise was made with its
+/// layers; its fingerprint is of its first three seconds as made
+/// (2026-11-23).
 type Made = Box<dyn Fn() -> Box<dyn SoundSource>>;
 fn layered() -> Vec<(&'static str, usize, u64, Made)> {
     let place = Vec3::ZERO;
@@ -107,6 +110,21 @@ fn layered() -> Vec<(&'static str, usize, u64, Made)> {
             3,
             0x18435f3038b433b8,
             Box::new(move || Box::new(WaveSource::new(place, 8.0, 0.3, SEED))),
+        ),
+        (
+            "orange noise",
+            2,
+            0x90c6bd248eae4418,
+            Box::new(move || {
+                Box::new(NoiseColourSource::new(
+                    place,
+                    NoiseColourSettings {
+                        colour: NoiseColour::Orange,
+                        master_gain: 1.0,
+                    },
+                    SEED,
+                ))
+            }),
         ),
         (
             "wisp",

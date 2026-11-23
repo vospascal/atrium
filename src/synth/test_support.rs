@@ -212,6 +212,7 @@ mod conformance {
     use crate::synth::canopy_wind::CanopyWindSource;
     use crate::synth::field_wind::FieldWindSource;
     use crate::synth::focus_tone::{FocusToneSettings, FocusToneSource};
+    use crate::synth::noise_colour::{NoiseColour, NoiseColourSettings, NoiseColourSource};
     use crate::synth::rain::RainSource;
     use crate::synth::rain_v2::RainSourceV2;
     use crate::synth::river::RiverSource;
@@ -279,6 +280,20 @@ mod conformance {
                     Box::new(BinauralToneSource::new(
                         Ear::Right,
                         BinauralBeatSettings::default(),
+                    ))
+                }),
+            ),
+            (
+                // The two-layer colour: shaped in blocks, both layers.
+                "noise_colour",
+                Box::new(|| {
+                    Box::new(NoiseColourSource::new(
+                        Vec3::ZERO,
+                        NoiseColourSettings {
+                            colour: NoiseColour::Orange,
+                            master_gain: 1.0,
+                        },
+                        42,
                     ))
                 }),
             ),

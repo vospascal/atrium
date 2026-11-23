@@ -13,6 +13,7 @@ pub mod canopy_wind;
 pub mod field_wind;
 pub mod focus_tone;
 pub mod noise;
+pub mod noise_colour;
 pub mod rain;
 pub mod rain_v2;
 pub mod river;
