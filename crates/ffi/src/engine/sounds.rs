@@ -164,7 +164,7 @@ impl Engine {
             return Ok(());
         };
         let mut built = self
-            .sounds
+            .sounds()
             .build(&id, &entity, slot as usize)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         if scene.muted.contains(&slot) {
@@ -179,7 +179,7 @@ impl Engine {
             amplitude: built.amplitude,
         })?;
         // After the new voice is on its way, so no utterance reaches the old one.
-        self.planner
+        self.planner()
             .add_voice(slot as usize, id.as_str(), rhythm, follows);
         if let Some(source) = sound_in(&mut scene.description, slot) {
             *source = built.description.into();
@@ -228,7 +228,7 @@ impl Engine {
             })
             .ok_or(EngineError::NoFreeVoice)?;
         let built = self
-            .sounds
+            .sounds()
             .build(id, entity, slot)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         edits.send(SceneEdit::AddSource {
@@ -237,7 +237,7 @@ impl Engine {
             bands: built.bands,
             amplitude: built.amplitude,
         })?;
-        self.planner
+        self.planner()
             .add_voice(slot, id.as_str(), built.rhythm, built.follows);
         let added: SourceDescription = built.description.into();
         scene.description.sources.push(added.clone());
@@ -255,7 +255,7 @@ impl Engine {
             slot,
             filler: SoundBuilder::silence(),
         })?;
-        self.planner.remove_voice(slot as usize);
+        self.planner().remove_voice(slot as usize);
         scene
             .description
             .sources
@@ -280,6 +280,7 @@ impl Engine {
                 preset: Some(preset),
                 audio: None,
                 level: None,
+                layers: Default::default(),
             },
             shape: Shape::default(),
             place: self.place_ahead(),

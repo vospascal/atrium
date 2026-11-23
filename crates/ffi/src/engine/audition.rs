@@ -40,7 +40,7 @@ impl Engine {
         let mut previewed = self.sound_ahead(preset, None, None);
         previewed.sound.level = Some(level.min(PREVIEW_LEVEL_LIMIT));
         let built = self
-            .sounds
+            .sounds()
             .build(&id, &previewed, AUDITION_SLOT)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         edits.send(SceneEdit::AddSource {
@@ -51,7 +51,7 @@ impl Engine {
         })?;
         // A kind that rests is told by the plan when to speak; heard on its
         // own it speaks at once.
-        self.planner.preview_voice(AUDITION_SLOT, built.rhythm);
+        self.planner().preview_voice(AUDITION_SLOT, built.rhythm);
         edits.auditioned = true;
         Ok(())
     }
@@ -99,7 +99,7 @@ impl Engine {
         entity.shape.width = Some(ALL_ROUND);
         entity.moves = Moves::Still;
         let built = self
-            .sounds
+            .sounds()
             .build_take(&id, &entity, take as usize, AUDITION_SLOT)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         edits.send(SceneEdit::AddSource {
@@ -120,7 +120,7 @@ impl Engine {
     pub(super) fn end_audition(&self, edits: &mut Edits) -> Result<(), EngineError> {
         if edits.auditioned {
             edits.stop_audition()?;
-            self.planner.remove_voice(AUDITION_SLOT);
+            self.planner().remove_voice(AUDITION_SLOT);
         }
         Ok(())
     }
@@ -156,7 +156,7 @@ mod tests {
         // chorus lasts over a minute and is rarely in the plan's window.
         for copy in 2..=atrium_core::telemetry::MAX_SOURCES {
             let mut placed = frog.clone();
-            placed.sound.preset = Some("sources/robin.yaml".into());
+            placed.sound.preset = Some("sources/creatures/birds/robin.yaml".into());
             placed.place.x += copy as f32;
             scene
                 .sounds
@@ -194,7 +194,7 @@ mod tests {
             "stopping nothing dropped the last robin's plan"
         );
         assert!(matches!(
-            engine.audition(Some("sources/frog.yaml".into())),
+            engine.audition(Some("sources/creatures/frog.yaml".into())),
             Err(EngineError::NoFreeVoice)
         ));
         assert!(matches!(
@@ -239,7 +239,7 @@ mod tests {
             false
         };
         engine
-            .audition(Some("sources/robin.yaml".into()))
+            .audition(Some("sources/creatures/birds/robin.yaml".into()))
             .expect("the robin builds");
         assert!(
             heard_within(2),

@@ -54,7 +54,7 @@ impl Engine {
         if loops_after {
             return Ok(());
         }
-        self.planner.set_gap(slot as usize, shortest, longest);
+        self.planner().set_gap(slot as usize, shortest, longest);
         if let Some(source) = sound_in(&mut scene.description, slot) {
             source.gap = Some(Gap { shortest, longest });
         }
@@ -75,7 +75,7 @@ impl Engine {
         if source.gap.is_none() {
             return Ok(());
         }
-        self.planner.set_bout(slot as usize, fewest, most);
+        self.planner().set_bout(slot as usize, fewest, most);
         source.bout = Bout { fewest, most };
         if let Some(entity) = scene.entity_in(slot) {
             entity.when.bout = Some([fewest, most]);
@@ -110,7 +110,7 @@ impl Engine {
         if chance == 0.0 && !others_can_be_chosen {
             return Ok(());
         }
-        self.planner
+        self.planner()
             .set_chance(slot as usize, take as usize, chance);
         source.takes[take as usize].chance = chance;
         if let Some(entity) = scene.entity_in(slot) {
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(gap_of(0).map(|gap| gap.longest), Some(2.0));
 
         let cricket = engine
-            .add_sound("sources/cricket.yaml".into(), None)
+            .add_sound("sources/creatures/cricket.yaml".into(), None)
             .expect("a cricket builds");
         assert!(cricket.takes.len() > 1);
         for take in 0..cricket.takes.len() as u16 {

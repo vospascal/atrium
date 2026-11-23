@@ -4,12 +4,16 @@
 //! the step's name. Going back puts an earlier version in place while it plays:
 //! the world crate says, sound by sound, the smallest changes that get there
 //! ([`atrium_world::changes`]), and each is played the way the edit that made
-//! it was. Only what the scene file holds and the editor changes is kept:
-//! the sounds, the weather, the air and where the listener stands. Mutes,
+//! it was. A step that changed the place builds the scene again there
+//! instead, as `set_place` does. Only what the scene file holds and the
+//! editor changes is kept: the scene's kind and place, the sounds and their
+//! layers, the weather, the air and where the listener stands. Mutes,
 //! volume, output and head tracking belong to the listener, and stay as they
 //! are.
 
-use atrium::config::{name_and_color, yaw_for_bearing, Atmosphere, ListenerConfig, WeatherConfig};
+use atrium::config::{
+    name_and_color, yaw_for_bearing, Atmosphere, ListenerConfig, SceneKind, WeatherConfig,
+};
 use atrium::head_tracking::Pose;
 use atrium_world::{changes, Change, Entities};
 
@@ -20,25 +24,25 @@ use crate::api::{EditHistory, EngineError};
 /// What undo puts back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Version {
+    kind: SceneKind,
+    /// The environment file it plays in; none for the dry space.
+    space: Option<String>,
     sounds: Entities,
     weather: Option<WeatherConfig>,
     listener: ListenerConfig,
-    /// The air as the scene file names it, and as it then is (°C, %).
+    /// The air as the scene file names it.
     atmosphere: Option<Atmosphere>,
-    air: (f32, f32),
 }
 
 impl Version {
     fn of(scene: &Live) -> Self {
         Self {
+            kind: scene.document.kind,
+            space: scene.document.environment.clone(),
             sounds: scene.document.sounds.clone(),
             weather: scene.document.weather.clone(),
             listener: scene.document.listener.clone(),
             atmosphere: scene.document.atmosphere.clone(),
-            air: (
-                scene.description.temperature_c,
-                scene.description.humidity_pct,
-            ),
         }
     }
 }
@@ -93,12 +97,37 @@ impl Engine {
         let mut edits = lock(&self.edits);
         self.end_audition(&mut edits)?;
         let mut scene = lock(&self.scene);
+        if scene.document.environment != version.space {
+            let mut document = scene.document.clone();
+            document.kind = version.kind;
+            document.environment = version.space;
+            document.sounds = version.sounds;
+            document.weather = version.weather;
+            document.atmosphere = version.atmosphere;
+            document.listener = version.listener;
+            return self.play_place(&mut edits, &mut scene, document);
+        }
         let found = changes(&scene.document.sounds, &version.sounds);
         // First, so a sound built again is built as it was.
         scene.document.sounds = version.sounds;
-        if scene.document.weather != version.weather {
-            self.play_weather(version.weather.as_ref())?;
-            scene.document.weather = version.weather;
+        let new_kind = scene.document.kind != version.kind;
+        let new_weather = scene.document.weather != version.weather;
+        let new_air = scene.document.atmosphere != version.atmosphere;
+        scene.document.weather = version.weather;
+        scene.document.atmosphere = version.atmosphere;
+        if new_kind {
+            self.play_kind(&mut scene, version.kind)?;
+        } else {
+            if new_weather {
+                self.play_weather(&scene.document)?;
+            }
+            if new_air {
+                let air = scene
+                    .document
+                    .air()
+                    .map_err(|error| EngineError::Scene(error.to_string()))?;
+                self.play_air(&mut scene, air.temperature_c, air.humidity_pct)?;
+            }
         }
         if scene.document.listener != version.listener {
             let place = atrium_world::Place {
@@ -107,15 +136,11 @@ impl Engine {
                 z: version.listener.position[2],
             };
             let pose = Pose {
-                position: self.sounds.world_at(place),
+                position: self.sounds().world_at(place),
                 yaw: version.listener.yaw_degrees.to_radians(),
             };
             self.play_listener(&mut scene, pose)?;
             scene.document.listener = version.listener;
-        }
-        if scene.document.atmosphere != version.atmosphere {
-            self.play_air(&mut scene, version.air.0, version.air.1)?;
-            scene.document.atmosphere = version.atmosphere;
         }
         for change in found {
             self.play_change(&mut edits, &mut scene, change)?;
@@ -163,13 +188,18 @@ impl Engine {
             }
             Change::Moved { id, place } => {
                 if let Some(slot) = slot_of(scene, &id) {
-                    let position = self.sounds.world_at(place).into();
+                    let position = self.sounds().world_at(place).into();
                     self.play_position(scene, slot, position)?;
                 }
             }
             Change::Level { id, level } => {
                 if let Some(slot) = slot_of(scene, &id) {
                     self.play_level(scene, slot, level)?;
+                }
+            }
+            Change::Layers { id, layers } => {
+                if let Some(slot) = slot_of(scene, &id) {
+                    self.play_layers(scene, slot, &layers)?;
                 }
             }
             Change::Beam { id, width, behind } => {
@@ -285,7 +315,7 @@ mod tests {
         });
         step("Add", &|engine| {
             engine
-                .add_sound("sources/cricket.yaml".into(), None)
+                .add_sound("sources/creatures/cricket.yaml".into(), None)
                 .expect("add");
         });
         step("Rename", &|engine| {
@@ -304,7 +334,7 @@ mod tests {
         step("Drop", &|engine| {
             let dropped = engine
                 .add_sound(
-                    "sources/frog.yaml".into(),
+                    "sources/creatures/frog.yaml".into(),
                     Some(Position {
                         x: -5.0,
                         y: 6.0,

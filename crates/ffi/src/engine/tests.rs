@@ -29,7 +29,7 @@ fn layers_and_library_change_the_playing_scene() {
 
     // Hearing a preset before placing it: it plays, and is not in the scene.
     engine
-        .audition(Some("sources/cricket.yaml".into()))
+        .audition(Some("sources/creatures/cricket.yaml".into()))
         .expect("the cricket builds");
     telemetry_when(&engine, |telemetry| playing(telemetry, AUDITION_SLOT));
     assert_eq!(
@@ -43,14 +43,14 @@ fn layers_and_library_change_the_playing_scene() {
     // Adding one: the next voice, an id from the preset's name, its group,
     // and a place 2 m ahead of a listener who faces north.
     let added = engine
-        .add_sound("sources/frog.yaml".into(), None)
+        .add_sound("sources/creatures/frog.yaml".into(), None)
         .expect("the frog builds");
     assert_eq!((added.id.as_str(), added.name.as_str()), ("frog", "Frog"));
     assert_eq!(added.group.as_deref(), Some("Creatures"));
     assert!((added.position.y - scene.listener.y - 2.0).abs() < 1e-3);
     assert!((added.position.x - scene.listener.x).abs() < 1e-3);
     let second = engine
-        .add_sound("sources/frog.yaml".into(), None)
+        .add_sound("sources/creatures/frog.yaml".into(), None)
         .expect("a second frog builds");
     assert_eq!(second.id, "frog-2", "ids stay unique");
     assert_eq!(engine.scene().sources.len(), 3);
@@ -92,7 +92,7 @@ fn layers_and_library_change_the_playing_scene() {
         .remove_sound(1)
         .expect("an empty voice is left alone");
     let again = engine
-        .add_sound("sources/frog.yaml".into(), None)
+        .add_sound("sources/creatures/frog.yaml".into(), None)
         .expect("a frog builds again");
     assert_eq!((again.id.as_str(), again.slot), ("frog", 1));
     telemetry_when(&engine, |telemetry| playing(telemetry, 1));
@@ -163,7 +163,7 @@ fn layers_and_library_change_the_playing_scene() {
     assert_eq!(frogs.shape.width, Some(180.0));
     assert_eq!(frogs.shape.facing, Some(0.0), "north");
     let (_, frog) = written.sounds.iter().nth(2).expect("frog");
-    let expected = engine.sounds.place_at(moved.into());
+    let expected = engine.sounds().place_at(moved.into());
     assert!((frog.place.x - expected.x).abs() < 0.01 && (frog.place.y - expected.y).abs() < 0.01);
     let rebuilt = written.build().expect("the saved scene builds");
     assert_eq!(rebuilt.description.sources.len(), 3);

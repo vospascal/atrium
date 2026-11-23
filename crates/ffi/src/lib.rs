@@ -15,13 +15,14 @@ mod scenes;
 
 pub use api::{
     AnalysisColumn, AnalysisScale, Band, Bout, Conditions, EditHistory, EmitterKind, EngineError,
-    Follow, Gap, LoudnessMap, PlannedTake, Position, Probe, SceneDescription, SourceDescription,
-    SourceSignal, SourceTelemetry, Speaker, Story, Take, Telemetry, Weather,
+    Follow, Gap, LoudnessMap, PlannedTake, Position, Probe, SceneDescription, SceneKind,
+    SoundLayer, SourceDescription, SourceSignal, SourceTelemetry, Speaker, Story, Take, Telemetry,
+    Weather,
 };
 pub use engine::Engine;
 pub use head_tracking::{head_trackers, HeadTracker, HeadTrackingStatus};
 pub use library::{list_presets, Preset};
 pub use output::{ChannelMode, Output, RenderMode};
-pub use scenes::{list_scenes, SceneFile, SoundSummary};
+pub use scenes::{list_places, list_scenes, PlaceChoice, SceneFile, SoundSummary};
 
 uniffi::setup_scaffolding!();

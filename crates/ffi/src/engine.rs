@@ -14,9 +14,12 @@ mod analysis;
 mod audition;
 mod device;
 mod edits;
+mod kind;
 mod lab;
+mod layers;
 mod listener;
 mod loudness;
+mod place;
 mod rhythm;
 mod shape;
 mod sounds;
@@ -31,7 +34,7 @@ mod weather;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use atrium::audio::distance::DistanceModel;
-use atrium::config::{SceneConfig, SoundBuilder};
+use atrium::config::{BuildResult, SceneConfig, SoundBuilder};
 use atrium::head_tracking::{HeadTracking, Placement, Pose};
 use atrium::plan::Planner;
 use atrium_core::commands::Command;
@@ -62,14 +65,19 @@ const AUDITION_SLOT: usize = MAX_SOURCES - 1;
 /// Audio plays from construction until the object is destroyed (Kotlin
 /// `close()`). Telemetry is pulled, not pushed: the UI asks for the newest
 /// frame when it draws, so nothing calls into Kotlin from an engine thread.
+///
+/// What is built from the scene's place (the audio thread's scene, the rings
+/// to it, the plan, the way a sound is built) is replaced whole when the
+/// place changes (`set_place`), so those fields are each behind a lock of
+/// their own; the object, its scene file and its history stay.
 #[derive(uniffi::Object)]
 pub struct Engine {
     /// The scene as it is now, as a UI shows it and as a file saves it.
     scene: Mutex<Live>,
-    /// What this scene can play on the opened device; fixed for its lifetime.
-    outputs: Vec<Output>,
+    /// What this scene can play on the opened device.
+    outputs: Mutex<Vec<Output>>,
     /// Shared with head tracking, which steers the listener from its own
-    /// thread.
+    /// thread; a new place puts a new ring in it.
     commands: Arc<Mutex<rtrb::Producer<Command>>>,
     telemetry: Mutex<rtrb::Consumer<TelemetryFrame>>,
     /// What the output plays, measured as it plays.
@@ -80,11 +88,14 @@ pub struct Engine {
     /// The running tracker, if any.
     head_tracking: Mutex<Option<HeadTracking>>,
     /// Builds one more sound for this scene, as its own sounds were built.
-    sounds: SoundBuilder,
-    /// How the scene's sounds fade with distance; fixed for its lifetime.
+    sounds: Mutex<SoundBuilder>,
+    /// How the scene's sounds fade with distance; fixed for its lifetime,
+    /// since the scene file's distance model is not the place's.
     distance: DistanceModel,
-    /// The session's plan: what every voice with takes will do, decided ahead.
-    planner: Planner,
+    /// The session's plan: what every voice with takes will do, decided
+    /// ahead. Handed out as an `Arc`, so a call keeps the plan it started
+    /// with while a new place replaces it.
+    planner: Mutex<Arc<Planner>>,
     /// Whether the scene was last paused; the audio thread keeps its own.
     paused: std::sync::atomic::AtomicBool,
     edits: Mutex<Edits>,
@@ -93,7 +104,7 @@ pub struct Engine {
     /// Earlier and later versions of the scene, for undo and redo.
     history: Mutex<History<undo::Version>>,
     /// Dropped last; dropping it stops the audio.
-    _output: OutputThread,
+    output: Mutex<OutputThread>,
 }
 
 #[uniffi::export]
@@ -104,60 +115,16 @@ impl Engine {
     pub fn new(scene_path: String) -> Result<Arc<Self>, EngineError> {
         let document = SceneConfig::load(&scene_path)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
-        let mut built = document
-            .clone()
-            .build()
-            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        Self::start(document)
+    }
 
-        let (telemetry_producer, telemetry) = rtrb::RingBuffer::new(TELEMETRY_CAPACITY);
-        built.scene.telemetry_out = Some(telemetry_producer);
-        let (commands, command_consumer) = rtrb::RingBuffer::new(COMMAND_CAPACITY);
-        let (to_audio, edit_consumer) = rtrb::RingBuffer::new(EDIT_CAPACITY);
-        let (retired_producer, retired) = rtrb::RingBuffer::new(EDIT_CAPACITY);
-        built.scene.scene_edits = Some(edit_consumer);
-        built.scene.retired_out = Some(retired_producer);
-        let layout_channels = built.scene.speaker_layout.total_channels();
-        // The device opens with the layout's channels or fewer.
-        let (tap, tap_reader) =
-            atrium::engine::tap::output_tap(layout_channels, Analysis::tap_frames());
-        built.scene.output_tap = Some(tap);
-        let clock = built.scene.clock.clone();
-        let distance = built.scene.distance_model;
-        let placement = Placement::new(Pose {
-            position: built.scene.listener.position,
-            yaw: built.scene.listener.yaw,
-        });
-        let output = OutputThread::start(built.scene, command_consumer)?;
-        let analysis = Analysis::new(
-            tap_reader,
-            clock,
-            output.sample_rate,
-            output.device_channels,
-            document.normalization.full_scale_db_spl(),
-        );
-
-        Ok(Arc::new(Self {
-            scene: Mutex::new(Live {
-                description: built.description.into(),
-                document,
-                muted: Default::default(),
-                probe: atrium_core::probe::Probe::WHOLE,
-            }),
-            outputs: playable_outputs(layout_channels, output.device_channels),
-            commands: Arc::new(Mutex::new(commands)),
-            telemetry: Mutex::new(telemetry),
-            analysis: Mutex::new(analysis),
-            placement,
-            head_tracking: Mutex::new(None),
-            sounds: built.sounds,
-            distance,
-            planner: built.planner,
-            paused: std::sync::atomic::AtomicBool::new(false),
-            edits: Mutex::new(Edits::new(to_audio, retired)),
-            lab: Mutex::new(lab::Lab::new(output.sample_rate)),
-            history: Mutex::new(History::default()),
-            _output: output,
-        }))
+    /// Start an empty scene of `kind`, with no file yet: no sounds, the
+    /// listener in the middle; a nature scene in the meadow, a listening
+    /// session in the dry space. `set_place` gives it another place. Saving
+    /// it names its file.
+    #[uniffi::constructor]
+    pub fn new_scene(kind: crate::api::SceneKind) -> Result<Arc<Self>, EngineError> {
+        Self::start(SceneConfig::empty(kind.into()))
     }
 
     /// The scene as it is now: as built, with every level set since.
@@ -187,10 +154,54 @@ impl Engine {
 }
 
 impl Engine {
+    /// Build `document` and start playing it.
+    fn start(document: SceneConfig) -> Result<Arc<Self>, EngineError> {
+        let built = document
+            .clone()
+            .build()
+            .map_err(|error| EngineError::Scene(error.to_string()))?;
+        let playing = Playing::start(built, &document, &[])?;
+
+        Ok(Arc::new(Self {
+            scene: Mutex::new(Live {
+                description: playing.description,
+                document,
+                muted: Default::default(),
+                probe: atrium_core::probe::Probe::WHOLE,
+                volume: None,
+                output: None,
+            }),
+            outputs: Mutex::new(playing.outputs),
+            commands: Arc::new(Mutex::new(playing.commands)),
+            telemetry: Mutex::new(playing.telemetry),
+            analysis: Mutex::new(playing.analysis),
+            placement: Placement::new(playing.listener),
+            head_tracking: Mutex::new(None),
+            sounds: Mutex::new(playing.sounds),
+            distance: playing.distance,
+            planner: Mutex::new(Arc::new(playing.planner)),
+            paused: std::sync::atomic::AtomicBool::new(false),
+            edits: Mutex::new(playing.edits),
+            lab: Mutex::new(lab::Lab::new(playing.output.sample_rate)),
+            history: Mutex::new(History::default()),
+            output: Mutex::new(playing.output),
+        }))
+    }
+
+    /// The session's plan as it is now.
+    fn planner(&self) -> Arc<Planner> {
+        lock(&self.planner).clone()
+    }
+
+    /// What builds one more sound for this scene, in its place as it is now.
+    fn sounds(&self) -> SoundBuilder {
+        lock(&self.sounds).clone()
+    }
+
     /// Where `position` is in the scene file, to the centimetre: plenty for
     /// a place, and it keeps a saved file short.
     fn place_rounded(&self, position: Position) -> Place {
-        let place = self.sounds.place_at(position.into());
+        let place = self.sounds().place_at(position.into());
         Place {
             x: rounded(place.x, 100.0),
             y: rounded(place.y, 100.0),
@@ -202,6 +213,79 @@ impl Engine {
         lock(&self.commands)
             .push(command)
             .map_err(|_| EngineError::CommandQueueFull)
+    }
+}
+
+/// A built scene playing on the output device, and the rings to it: what a
+/// scene starts with, and what a new place builds again.
+struct Playing {
+    output: OutputThread,
+    commands: rtrb::Producer<Command>,
+    telemetry: rtrb::Consumer<TelemetryFrame>,
+    edits: Edits,
+    analysis: Analysis,
+    outputs: Vec<Output>,
+    planner: Planner,
+    sounds: SoundBuilder,
+    distance: DistanceModel,
+    description: SceneDescription,
+    /// Where the scene puts the listener in the world of its place.
+    listener: Pose,
+}
+
+impl Playing {
+    /// Wire `built`, the scene `document` built, to new rings and start it
+    /// on the output device. The audio thread takes `first` before it renders
+    /// anything.
+    fn start(
+        mut built: BuildResult,
+        document: &SceneConfig,
+        first: &[Command],
+    ) -> Result<Self, EngineError> {
+        let (telemetry_producer, telemetry) = rtrb::RingBuffer::new(TELEMETRY_CAPACITY);
+        built.scene.telemetry_out = Some(telemetry_producer);
+        let (mut commands, command_consumer) = rtrb::RingBuffer::new(COMMAND_CAPACITY);
+        for command in first {
+            commands
+                .push(*command)
+                .map_err(|_| EngineError::CommandQueueFull)?;
+        }
+        let (to_audio, edit_consumer) = rtrb::RingBuffer::new(EDIT_CAPACITY);
+        let (retired_producer, retired) = rtrb::RingBuffer::new(EDIT_CAPACITY);
+        built.scene.scene_edits = Some(edit_consumer);
+        built.scene.retired_out = Some(retired_producer);
+        let layout_channels = built.scene.speaker_layout.total_channels();
+        // The device opens with the layout's channels or fewer.
+        let (tap, tap_reader) =
+            atrium::engine::tap::output_tap(layout_channels, Analysis::tap_frames());
+        built.scene.output_tap = Some(tap);
+        let clock = built.scene.clock.clone();
+        let distance = built.scene.distance_model;
+        let listener = Pose {
+            position: built.scene.listener.position,
+            yaw: built.scene.listener.yaw,
+        };
+        let output = OutputThread::start(built.scene, command_consumer)?;
+        let analysis = Analysis::new(
+            tap_reader,
+            clock,
+            output.sample_rate,
+            output.device_channels,
+            document.normalization.full_scale_db_spl(),
+        );
+        Ok(Self {
+            outputs: playable_outputs(layout_channels, output.device_channels),
+            output,
+            commands,
+            telemetry,
+            edits: Edits::new(to_audio, retired),
+            analysis,
+            planner: built.planner,
+            sounds: built.sounds,
+            distance,
+            description: built.description.into(),
+            listener,
+        })
     }
 }
 
@@ -225,6 +309,11 @@ struct Live {
     /// Which parts of the render the listener is hearing: everything, unless
     /// they are listening to one alone. Theirs too, and never saved.
     probe: atrium_core::probe::Probe,
+    /// The volume the listener set, if they set one; the scene's own until
+    /// then. Kept, like the output, so a new place plays as loud.
+    volume: Option<f32>,
+    /// The output the listener chose, if they chose one.
+    output: Option<Output>,
 }
 
 impl Live {

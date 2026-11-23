@@ -6,10 +6,14 @@ Kotlin can reach is declared here:
 - `list_scenes(directory)`: the scene files a player can pick from. Each comes with its title and,
   for each sound, its name, color and direction from the listener. They are read from the YAML
   alone, with no audio decoded.
-- `list_presets(directory)`: the presets a sound can be made from, with a name, a group and
+- `list_presets(directory)`: the presets a sound can be made from, in the directory and the
+  folders inside it, with a name, a group, a note when the preset has one (`about`) and
   whether each is a recording or a generator.
 - `head_trackers()`: the head trackers that can work on this platform.
-- `Engine`: load a scene and play it. Its methods are `scene()`, `outputs()`, `set_output`,
+- `list_places(directory)`: the places a scene can play in, Dry first and then each environment
+  file, with its size and whether the sky is open (`PlaceChoice`).
+- `Engine`: load a scene and play it, or start an empty one of a kind (`Engine::new_scene`). Its
+  methods are `scene()`, `outputs()`, `set_output`, `set_scene_kind`, `set_place`, `set_source_layer`,
   `set_volume`, `set_source_position`, `set_source_facing`, `set_source_beam`,
   `set_source_muted`, `set_source_level`, `set_source_gap`, `set_source_bout`, `set_take_chance`, `audition`, `audition_take`,
   `add_sound`, `remove_sound`, `save_scene`, `weather`, `set_weather`, `conditions`, `planned`, `set_head_tracker`, `latest_telemetry()`, `analysis()` and `analysis_scale()`;
@@ -94,6 +98,18 @@ runs Cargo itself. There is nothing to build here by hand.
   through to listen to them alone (the engine's README, "Listening to one part"). It is the
   listener's: `Live` holds it next to the muted voices, the scene file never sees it, and undo
   leaves it as it is.
+- **A new place rebuilds the playing half inside the same `Engine`.** An environment is built
+  into the audio thread's scene (its pipelines, loudspeakers, where sounds stand), so
+  `set_place` builds the scene file again with the new `environment:` and swaps the output
+  stream, the rings, the plan and the sound builder; those are the fields behind their own locks.
+  Making a new `Engine` instead would have left undo with a step it cannot take back, and the
+  app with the listener's state to carry by hand. The rebuild uses the playing session's seed (on a
+  copy: the file keeps its own), `Planner::carry_on_from` puts the moment and the weather clock
+  where they stood, and the listener's mutes (by id; voices are handed out again in file order),
+  probe, volume, output and pause go to the new stream before it renders, which is why `Live`
+  now keeps the volume and output too. The new stream starts before the old one is dropped, so a
+  failure leaves the old place playing. Cost to learn: a paused scene restarted with a `SetPaused`
+  command ran its clock 35 ms through the fade; it is now built already faded out.
 - **Every edit is two halves: what is heard and what the file records.** A `set_` call writes
   the scene file and calls a `play_` helper; undo writes the whole earlier file at once and calls
   the same helpers. Undoing a sound that was removed builds it again in the lowest free voice,

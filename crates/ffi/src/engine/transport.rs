@@ -32,14 +32,14 @@ impl Engine {
     /// Seconds into the scene: what a timeline's playhead shows. It stands
     /// still while the scene is paused, and jumps when it is moved.
     pub fn scene_time(&self) -> f32 {
-        self.planner.now() as f32
+        self.planner().now() as f32
     }
 
     /// Move the scene to `seconds`, as a playhead is dragged along its
     /// timeline: every sound and the weather are as they would be there, a
     /// take under way starts partway, and it plays on from that moment.
     pub fn seek(&self, seconds: f32) {
-        self.planner.seek(seconds as f64);
+        self.planner().seek(seconds as f64);
         lock(&self.analysis).seek();
     }
 
@@ -66,7 +66,7 @@ impl Engine {
     /// The takes the plan has decided for the next `seconds`, at most a
     /// minute ahead.
     pub fn planned(&self, seconds: f32) -> Vec<PlannedTake> {
-        self.planner
+        self.planner()
             .upcoming(seconds.clamp(0.0, MAX_PLANNED_SECONDS) as f64)
             .into_iter()
             .map(|(slot, planned)| PlannedTake {
@@ -186,7 +186,7 @@ mod tests {
             .play_in_step(1, vec![0, 2])
             .expect("the campfire leads the djembe and the purring");
         let frog = engine
-            .add_sound("sources/frog.yaml".into(), None)
+            .add_sound("sources/creatures/frog.yaml".into(), None)
             .expect("the frog builds");
         assert!(!frog.loops);
         match engine.play_in_step(frog.slot, vec![0, 1]) {
@@ -291,7 +291,10 @@ mod tests {
                 wind_from: 225.0,
             })
             .expect("weather");
-        assert_eq!(engine.weather().story, Story::PassingStorm);
+        assert_eq!(
+            engine.weather().expect("weather").story,
+            Story::PassingStorm
+        );
         let hour = engine.conditions(-3600.0, 3600.0, 721);
         assert_eq!(hour.len(), 721);
         assert!(hour.iter().all(|now| (0.0..=1.0).contains(&now.wind)));

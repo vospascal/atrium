@@ -1,6 +1,6 @@
 //! The scenes a player can choose from.
 
-use atrium::config::{saved_by_editor, SceneConfig};
+use atrium::config::{saved_by_editor, EnvironmentSummary, SceneConfig};
 
 use crate::api::{EngineError, Position};
 
@@ -13,6 +13,8 @@ pub struct SceneFile {
     pub path: String,
     /// The scene's `title`, else one made from the file name.
     pub title: String,
+    /// What the scene is: a nature scene or a listening session.
+    pub kind: crate::api::SceneKind,
     /// Whether the editor wrote this file, so that saving may replace it. A
     /// hand-written scene is saved under a new name instead.
     pub saved_by_editor: bool,
@@ -58,6 +60,7 @@ pub fn list_scenes(directory: String) -> Result<Vec<SceneFile>, EngineError> {
                 saved_by_editor: saved_by_editor(&path),
                 path,
                 title: summary.title,
+                kind: summary.kind.into(),
                 sounds: summary
                     .sounds
                     .into_iter()
@@ -72,6 +75,55 @@ pub fn list_scenes(directory: String) -> Result<Vec<SceneFile>, EngineError> {
         .collect();
     scenes.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(scenes)
+}
+
+/// A place a scene can play in, as a list of them shows it.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PlaceChoice {
+    /// The environment file, as `Engine::set_place` takes it and
+    /// `SceneDescription::space` reports it; nothing for the dry space.
+    pub space: Option<String>,
+    /// Its size along x, y and z (m).
+    pub width: f32,
+    pub depth: f32,
+    pub height: f32,
+    /// Whether nothing is overhead, as in a meadow; otherwise it is enclosed.
+    pub open_sky: bool,
+}
+
+/// The places a scene can play in: the dry space first, then each
+/// environment file directly in `directory` (`.yaml`), sorted by name. A
+/// file that is not an environment is left out, with a warning on stderr.
+#[uniffi::export]
+pub fn list_places(directory: String) -> Result<Vec<PlaceChoice>, EngineError> {
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|error| EngineError::Scene(format!("{directory}: {error}")))?;
+    let mut paths: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "yaml")
+        })
+        .filter_map(|path| path.to_str().map(str::to_owned))
+        .collect();
+    paths.sort();
+    Ok(std::iter::once(None)
+        .chain(paths.into_iter().map(Some))
+        .filter_map(|space| match EnvironmentSummary::of(space.as_deref()) {
+            Ok(summary) => Some(PlaceChoice {
+                space,
+                width: summary.width,
+                depth: summary.depth,
+                height: summary.height,
+                open_sky: summary.open_sky,
+            }),
+            Err(error) => {
+                eprintln!("not an environment, left out: {error}");
+                None
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -101,6 +153,42 @@ mod tests {
             "the repository's scenes are written by hand"
         );
         assert!(!frogs.sounds.is_empty());
+    }
+
+    /// Dry first, then every environment file by name, each with its size
+    /// and whether the sky is open above it.
+    #[test]
+    fn lists_the_places_a_scene_can_play_in() {
+        let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../environments");
+        let places = list_places(directory.into()).expect("places list");
+        let named: Vec<(Option<&str>, [f32; 3], bool)> = places
+            .iter()
+            .map(|place| {
+                (
+                    place
+                        .space
+                        .as_deref()
+                        .and_then(|space| space.rsplit('/').next()),
+                    [place.width, place.depth, place.height],
+                    place.open_sky,
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (None, [20.0, 20.0, 10.0], true),
+                (Some("atrium.yaml"), [14.0, 10.0, 9.0], false),
+                (Some("cathedral.yaml"), [40.0, 25.0, 20.0], false),
+                (Some("meadow.yaml"), [60.0, 60.0, 30.0], true),
+                (Some("riverside.yaml"), [100.0, 100.0, 50.0], true),
+                (Some("small_atrium.yaml"), [6.0, 4.0, 3.0], false),
+            ]
+        );
+        assert!(places
+            .iter()
+            .filter_map(|place| place.space.as_deref())
+            .all(|space| std::path::Path::new(space).is_file()));
     }
 
     #[test]

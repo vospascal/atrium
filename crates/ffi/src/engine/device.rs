@@ -17,25 +17,24 @@ use crate::output::Output;
 impl Engine {
     /// The outputs this scene can play on the opened device.
     pub fn outputs(&self) -> Vec<Output> {
-        self.outputs.clone()
+        lock(&self.outputs).clone()
     }
 
     /// Switch to `output` while playing. Both halves take effect in the same
     /// audio callback, so no buffer is rendered with a mismatched pair.
     pub fn set_output(&self, output: Output) -> Result<(), EngineError> {
-        if !self.outputs.contains(&output) {
+        if !lock(&self.outputs).contains(&output) {
             return Err(EngineError::UnplayableOutput);
         }
+        let mut scene = lock(&self.scene);
         let mut commands = lock(&self.commands);
         if commands.slots() < 2 {
             return Err(EngineError::CommandQueueFull);
         }
-        let _ = commands.push(Command::SetChannelMode {
-            mode: output.channel_mode.into(),
-        });
-        let _ = commands.push(Command::SetRenderMode {
-            mode: output.render_mode.into(),
-        });
+        for command in output_commands(output) {
+            let _ = commands.push(command);
+        }
+        scene.output = Some(output);
         Ok(())
     }
 
@@ -46,9 +45,12 @@ impl Engine {
         } else {
             0.0
         };
+        let mut scene = lock(&self.scene);
         lock(&self.commands)
             .push(Command::SetMasterGain { gain })
-            .map_err(|_| EngineError::CommandQueueFull)
+            .map_err(|_| EngineError::CommandQueueFull)?;
+        scene.volume = Some(gain);
+        Ok(())
     }
 
     /// Let only the parts of the render `probe` names reach the output, to
@@ -88,6 +90,19 @@ impl Engine {
         };
         Some(report)
     }
+}
+
+/// The two commands that switch the audio thread to `output`, in the order
+/// they must arrive.
+pub(super) fn output_commands(output: Output) -> [Command; 2] {
+    [
+        Command::SetChannelMode {
+            mode: output.channel_mode.into(),
+        },
+        Command::SetRenderMode {
+            mode: output.render_mode.into(),
+        },
+    ]
 }
 
 /// The thread that owns the audio stream.

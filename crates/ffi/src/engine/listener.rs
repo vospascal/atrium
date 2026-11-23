@@ -82,6 +82,7 @@ impl Engine {
     /// 50, and relative `humidity` in %. They decide how fast sound travels
     /// and how much treble the air takes from a distant sound. `scene()`
     /// reports them from then on, and the scene file keeps them as its own.
+    /// A listening session keeps standard air and refuses it.
     pub fn set_atmosphere(&self, temperature: f32, humidity: f32) -> Result<(), EngineError> {
         if !(temperature.is_finite() && humidity.is_finite()) {
             return Ok(());
@@ -89,6 +90,11 @@ impl Engine {
         let temperature = rounded(temperature.clamp(COLDEST, WARMEST), 2.0);
         let humidity = rounded(humidity.clamp(0.0, 100.0), 1.0);
         let mut scene = lock(&self.scene);
+        if scene.document.kind == atrium::config::SceneKind::Listening {
+            return Err(EngineError::Scene(
+                "a listening session keeps standard air".to_string(),
+            ));
+        }
         scene
             .document
             .set_air(temperature, humidity)
@@ -103,7 +109,7 @@ impl Engine {
     pub(super) fn place_ahead(&self) -> Place {
         let pose = self.placement.get();
         let ahead = Vec3::new(pose.yaw.cos(), pose.yaw.sin(), 0.0);
-        self.sounds
+        self.sounds()
             .place_at(pose.position + ahead * AHEAD_OF_LISTENER)
     }
 

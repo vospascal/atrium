@@ -38,7 +38,7 @@ impl Engine {
     /// it every display frame: what is not read within a few seconds is
     /// dropped, and the analysis starts again after the gap.
     pub fn analysis(&self) -> Vec<AnalysisColumn> {
-        lock(&self.analysis).columns(&self.planner)
+        lock(&self.analysis).columns(&self.planner())
     }
 
     /// How to read `analysis`: the spectrum's dB range and rows, and the

@@ -37,7 +37,7 @@ use records::{
 };
 
 /// The sound stage 1 tunes, its preset and the name its lab folder takes.
-const PRESET: &str = "sources/soft-wind.yaml";
+const PRESET: &str = "sources/weather/wind/soft-wind.yaml";
 const SOUND: &str = "soft-wind";
 /// How long a seeded run is (s): the soft wind moves every half minute to a
 /// minute and a half, so five minutes hold several gusts to choose from.
@@ -456,7 +456,7 @@ impl Engine {
         };
         let entity = self.lab_entity();
         let built = self
-            .sounds
+            .sounds()
             .build(&EntityId::unused("lab", []), &entity, AUDITION_SLOT)
             .map_err(|error| EngineError::Scene(error.to_string()))?;
         let preset = soft_wind_of(&entity, parts.seed as u64)
@@ -687,6 +687,7 @@ impl Lab {
                     preset: Some(PRESET.into()),
                     audio: None,
                     level: None,
+                    layers: Default::default(),
                 },
                 shape: Default::default(),
                 place: atrium_world::Place {

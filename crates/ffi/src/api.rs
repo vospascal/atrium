@@ -43,9 +43,45 @@ pub struct EditHistory {
     pub redoable: Vec<String>,
 }
 
+/// What a scene is, which decides what of it runs and what a UI shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SceneKind {
+    /// A place: its weather moves its sounds; it has daylight, air and a
+    /// space of its own.
+    Nature,
+    /// Sounds to listen to, such as tones and binaural beats: no weather
+    /// story runs, the conditions stay at their defaults, the air keeps
+    /// standard conditions and is still.
+    Listening,
+}
+
+impl From<atrium::config::SceneKind> for SceneKind {
+    fn from(kind: atrium::config::SceneKind) -> Self {
+        match kind {
+            atrium::config::SceneKind::Nature => Self::Nature,
+            atrium::config::SceneKind::Listening => Self::Listening,
+        }
+    }
+}
+
+impl From<SceneKind> for atrium::config::SceneKind {
+    fn from(kind: SceneKind) -> Self {
+        match kind {
+            SceneKind::Nature => Self::Nature,
+            SceneKind::Listening => Self::Listening,
+        }
+    }
+}
+
 /// The scene the engine is playing.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SceneDescription {
+    /// What the scene is: `Engine::set_scene_kind` changes it.
+    pub kind: SceneKind,
+    /// The environment file it plays in, such as
+    /// `environments/meadow.yaml`; nothing for the dry space, where nothing
+    /// reflects or rings.
+    pub space: Option<String>,
     /// Environment floor size along x (m).
     pub width: f32,
     /// Environment floor size along y (m).
@@ -129,6 +165,39 @@ pub struct SourceDescription {
     pub bout: Bout,
     /// How it follows the place's conditions.
     pub follows: Vec<Follow>,
+    /// Its layers, in the order the generator hands them over, each as it
+    /// is mixed; none for a sound that is one stream. Telemetry's
+    /// `SourceSignal::layer_rms` measures them in the same order.
+    pub layers: Vec<SoundLayer>,
+}
+
+/// One layer of a sound and how it is mixed: `Engine::set_source_layer`
+/// changes it.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SoundLayer {
+    /// What the scene file calls it, and what `set_source_layer` takes:
+    /// `body`, `right`, `octave-1`.
+    pub key: String,
+    /// What a UI shows: "body", "right ear 109.618 Hz", "264 Hz".
+    pub name: String,
+    /// dB against the layer as the generator makes it; 0 leaves it as made.
+    pub level_db: f32,
+    /// Heard alone, with any other soloed layer of the sound.
+    pub solo: bool,
+    /// Not heard, unless soloed.
+    pub mute: bool,
+}
+
+impl From<atrium::config::LayerDescription> for SoundLayer {
+    fn from(layer: atrium::config::LayerDescription) -> Self {
+        Self {
+            key: layer.key,
+            name: layer.name,
+            level_db: layer.setting.level_db,
+            solo: layer.setting.solo,
+            mute: layer.setting.mute,
+        }
+    }
 }
 
 /// A setting tied to a condition: `from` when the condition is 0, `to` when
@@ -189,6 +258,8 @@ impl From<atrium_core::source::EmitterKind> for EmitterKind {
 impl From<atrium::config::SceneDescription> for SceneDescription {
     fn from(scene: atrium::config::SceneDescription) -> Self {
         Self {
+            kind: scene.kind.into(),
+            space: scene.space,
             width: scene.width,
             depth: scene.depth,
             temperature_c: scene.temperature_c,
@@ -262,6 +333,7 @@ impl From<atrium::config::SourceDescription> for SourceDescription {
                     ),
                 })
                 .collect(),
+            layers: source.layers.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -400,6 +472,9 @@ pub struct SourceSignal {
     pub low_share: f32,
     /// Fraction above roughly 2.4 kHz. The remainder is midrange.
     pub high_share: f32,
+    /// Each of its layers' RMS on the scale of `relative_rms`, in the order
+    /// of `SourceDescription::layers`; one value for a sound of one stream.
+    pub layer_rms: Vec<f32>,
 }
 
 impl From<&TelemetryFrame> for Telemetry {
@@ -433,6 +508,9 @@ impl From<&TelemetryFrame> for Telemetry {
                             relative_rms: signal.relative_rms,
                             low_share: signal.low_share,
                             high_share: signal.high_share,
+                            layer_rms: signal.layer_rms
+                                [..(signal.layer_count as usize).min(signal.layer_rms.len())]
+                                .to_vec(),
                         }),
                         take: source.sounding_take,
                     }
