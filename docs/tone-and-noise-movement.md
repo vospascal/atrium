@@ -84,8 +84,9 @@ the sound itself. The three kinds differ physically:
   model in Bolin 2006, KTH thesis), which is 9–11 dB per doubling. Measured 1-s LA varied
   with σ 2.6–5.2 dB, roughly Gaussian in dB, at turbulence intensity about 0.3. A conifer's
   spectral peak sits at f = 0.2·U/needle diameter, so it moves up with the wind. Gusts
-  follow the Kaimal spectrum: flat up to about 0.02 Hz at 10 m and 5 m/s, then −5/3. That is
-  swells of tens of seconds.
+  follow the Kaimal (1972) spectrum, flat up to about 0.02 Hz at 10 m and 5 m/s, then −5/3:
+  swells of tens of seconds. (The corner is computed here from Kaimal's formula, not read
+  from a measurement.)
 - **Surf darkens when it breaks.** Every third octave from 40 Hz to 2.5 kHz rose 5–12 dB at a
   break, most (12 dB) at 50 Hz, with ±10 dB from wave to wave (Dallas & Tollefsen 2015,
   Canadian Acoustics). No measurement of the break's envelope shape was found.
@@ -99,7 +100,8 @@ the sound itself. The three kinds differ physically:
 
 A physically driven colour, as a proposal: a wind speed U(t) = Ū·(1 + I·x(t)), with x a
 Kaimal process (integral time 10–40 s) plus a 1/f layer over minutes, and I = 0.15 in the
-open to 0.3 near trees. The level follows 10·n·log10(U/Ū) with n = 3–3.6 for foliage
+open (unverified: a textbook value, 0.1–0.2, not read from a source here) to 0.3 near trees
+(Bolin's measurement). The level follows 10·n·log10(U/Ū) with n = 3–3.6 for foliage
 (σ_L ≈ 4.34·n·I, 2.9 dB for n = 3.3 and I = 0.2, inside Bolin's range). For a Strouhal-type
 sound the spectrum shifts by log2(U/Ū) octaves. To keep the 50 dB(A) presets level, lower
 the base by 0.115·σ² dB (+1.0 dB at σ = 3). Keep periodic movement out of 0.5–4 Hz.
