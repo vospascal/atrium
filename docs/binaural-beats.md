@@ -170,7 +170,8 @@ become wholly monaural (reasoned, not measured).
   plan (stage 3): mixed after the scene and before the output, left to the left ear only.
   Head tracking must not move it.
 - **Headphones only.** On the 5.1 speakers both ears hear both tones; a monaural beat (the two
-  tones mixed, so the level itself swells) is the speaker version.
+  tones mixed, so the level itself swells) is the speaker version. Monaural, AM and isochronic
+  beats compared, and what a room does to them: `tone-and-noise-movement.md`.
 - **A long, slow change.** A session moves its beat linearly over nine hours and stops; that
   fits the future timeline mode (cues at set times) better than the dynamic mode.
 - **Rates, not pitches.** 1.618 and 7.83 Hz are beat rates here; neither is heard as a pitch.

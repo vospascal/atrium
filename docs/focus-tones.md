@@ -217,4 +217,5 @@ layer in the Lab's mixer, a colour setting on the tone, and the scene's own dist
 reverb. Pascal, 2026-11-22: "we can do them in a bit, not yet, we need some research
 first". Questions for that research: where string recordings could come from (and their
 licence), or whether a string pad is a generator; what "warmth" should be physically; and
-whether "space" needs one control or is just placement.
+whether "space" needs one control or is just placement. Research on warmth, ensemble
+spread, bowl doublets, and seven ambient pieces measured: `tone-and-noise-movement.md`.

@@ -82,4 +82,6 @@ orange within 1.2 dB of the example. Grey's `reference_spl` is 57.2, blue's 53.4
 ## Open
 
 - Independent ears, via the straight-to-the-ears path.
-- Slow variation (the harmonance "drift"): none in the examples, none built.
+- Slow variation (the harmonance "drift"): none in the examples, none built. How real noise
+  moves (one driver, wind gusts, surf) and a proposed wind-speed driver:
+  `tone-and-noise-movement.md`.
