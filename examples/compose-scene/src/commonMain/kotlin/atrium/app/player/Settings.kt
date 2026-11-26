@@ -96,6 +96,9 @@ internal fun Settings(session: Session, look: Look, onEdit: () -> Unit) {
                             HeadTracker.SONY ->
                                 "In the Sony app, set Bluetooth Connection Quality to Prioritize Stable " +
                                     "Connection. Then forget the headphones on this Mac and pair them again."
+                            HeadTracker.AIR_PODS ->
+                                "Put the AirPods in your ears and check they are connected to this Mac. " +
+                                    "The first time, allow AirPodsBridge to use motion when macOS asks."
                             else -> "Start your tracker and point it at port 4242 on this machine."
                         }
                     else -> "For headphones. Turn your head and the place stays where it is."
@@ -142,6 +145,7 @@ internal val RenderMode.label
 private val HeadTracker.label
     get() = when (this) {
         HeadTracker.SONY -> "Sony headphones"
+        HeadTracker.AIR_PODS -> "AirPods"
         HeadTracker.EXTERNAL -> "OpenTrack"
     }
 

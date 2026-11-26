@@ -1,27 +1,33 @@
-//! Sony headphone tracker: runs `scripts/sony-head-tracker.sh` as a child.
+//! A tracker's bridge: a script that turns one brand's sensor into OpenTrack
+//! UDP, run as a child for as long as head tracking is on.
 //!
-//! The script owns everything Sony-specific (building the pinned
-//! `sony-head-tracker` bridge, wrapping it as an app for macOS permissions,
-//! starting it). It streams OpenTrack UDP to the listener in `opentrack.rs`, so
-//! this file only starts and stops it.
+//! Each script owns everything brand-specific (building its bridge program,
+//! wrapping it as an app for macOS permissions, starting it). It streams
+//! OpenTrack UDP to the listener in `opentrack.rs`, so this file only starts
+//! and stops it. Every bridge script has the same shape — a TERM trap that
+//! stops the app, then a log pipeline that never ends — which is what the
+//! stop below is written for.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-/// The bridge script, located from the crate root so it works from any
-/// working directory.
-fn script_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/sony-head-tracker.sh")
+/// A bridge script under `scripts/`, located from the crate root so it works
+/// from any working directory.
+fn script_path(script_name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join(script_name)
 }
 
-/// A running Sony bridge. Dropping it stops the bridge.
-pub(super) struct SonyBridge {
+/// A running bridge. Dropping it stops the bridge.
+pub(super) struct Bridge {
     child: Child,
 }
 
-impl SonyBridge {
-    pub(super) fn start() -> std::io::Result<Self> {
-        Self::start_script(&script_path())
+impl Bridge {
+    /// Start `scripts/<script_name>`.
+    pub(super) fn start(script_name: &str) -> std::io::Result<Self> {
+        Self::start_script(&script_path(script_name))
     }
 
     fn start_script(script: &Path) -> std::io::Result<Self> {
@@ -30,7 +36,7 @@ impl SonyBridge {
     }
 }
 
-impl Drop for SonyBridge {
+impl Drop for Bridge {
     fn drop(&mut self) {
         let script = self.child.id().to_string();
         // SIGTERM, not `Child::kill` (SIGKILL): the script traps TERM to stop
@@ -68,7 +74,7 @@ mod tests {
     #[test]
     fn dropping_the_bridge_ends_a_script_blocked_in_its_log_pipeline() {
         let directory =
-            std::env::temp_dir().join(format!("atrium-sony-bridge-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("atrium-bridge-test-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("a temporary directory");
         let script = directory.join("stand-in.sh");
         let log = directory.join("bridge.log");
@@ -89,7 +95,7 @@ mod tests {
         )
         .expect("the stand-in script is written");
 
-        let bridge = SonyBridge::start_script(&script).expect("sh starts");
+        let bridge = Bridge::start_script(&script).expect("sh starts");
         let deadline = Instant::now() + Duration::from_secs(5);
         while !reached_pipeline.exists() {
             assert!(Instant::now() < deadline, "the stand-in never started");

@@ -44,6 +44,9 @@ same host. To point it elsewhere: `http://localhost:6006/?engine=nuc.local:3333`
 Your head turn steers the listener, so the world stays put when you turn.
 
 ```sh
+# AirPods Pro / AirPods 3rd-4th gen / AirPods Max (macOS 14+) — the engine starts the AirPods bridge
+cargo run --release -- --head-tracking=airpods scenes/frog.yaml
+
 # Sony WH/WF-1000XM5/XM6 — one command, the engine starts the Sony bridge too
 cargo run --release -- --head-tracking=sony scenes/frog.yaml
 cargo run --release -- --head-tracking=sony --headphones scenes/wisp.yaml
@@ -57,8 +60,27 @@ turn your head right and the frog moves to straight ahead.
 The wisp scene is the harder test: it flies around and overhead, so turn your
 head to follow it and it should stay where it is in the world.
 
-The app in `examples/compose-scene` has the same two choices under
+The app in `examples/compose-scene` has the same choices under
 Settings → Head tracking, and switches them while a scene plays.
+
+### AirPods setup
+
+Nothing to set up on the AirPods. They only need to be in your ears and
+connected to the Mac. The first run builds `AirPodsBridge.app` into
+`target/airpods-head-tracker/` from `scripts/airpods-head-tracker.swift`
+(needs Xcode's command line tools), and macOS asks once to allow it motion
+access. It reads Apple's own headphone motion API (CoreMotion), so there is
+no pairing trick.
+
+```sh
+sh scripts/airpods-head-tracker.sh probe     # does motion arrive? expect "N samples in 5 s"
+sh scripts/airpods-head-tracker.sh rebuild   # fresh build of the bridge
+```
+
+The bridge log is `$TMPDIR/atrium-airpods-bridge.log`. If the sound turns
+twice as far as your head, or lags, set Spatial Audio to Off for the app
+playing Atrium (Control Centre → Sound → AirPods): Apple's own head tracking
+would be turning the sound as well.
 
 ### Sony setup (once, and after firmware or setting changes)
 

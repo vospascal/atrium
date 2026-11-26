@@ -7,13 +7,15 @@
 //! headphone sensors all emit it. A brand only appears here as an optional
 //! convenience — starting its bridge for you — selected on the command line:
 //!
-//! - `--head-tracking`        listen; start your tracker yourself
-//! - `--head-tracking=sony`   listen and start the Sony bridge (WH/WF-1000XM5/XM6)
+//! - `--head-tracking`          listen; start your tracker yourself
+//! - `--head-tracking=sony`     listen and start the Sony bridge (WH/WF-1000XM5/XM6)
+//! - `--head-tracking=airpods`  listen and start the AirPods bridge (macOS 14+)
 //!
-//! Adding a brand: one file that starts its bridge, one `Tracker` variant.
+//! Adding a brand: one bridge script under `scripts/` that sends OpenTrack
+//! UDP with a left turn as negative yaw, and one `Tracker` variant naming it.
 
+mod bridge;
 mod opentrack;
-mod sony;
 #[cfg(test)]
 mod test_support;
 
@@ -29,6 +31,21 @@ pub enum Tracker {
     External,
     /// Sony headphones via `scripts/sony-head-tracker.sh`.
     Sony,
+    /// Apple headphones with head tracking (AirPods Pro, AirPods 3rd/4th
+    /// generation, AirPods Max) via `scripts/airpods-head-tracker.sh`.
+    AirPods,
+}
+
+impl Tracker {
+    /// The bridge script the engine starts for this tracker, or `None` when
+    /// the user starts the tracker.
+    fn bridge_script(self) -> Option<&'static str> {
+        match self {
+            Self::External => None,
+            Self::Sony => Some("sony-head-tracker.sh"),
+            Self::AirPods => Some("airpods-head-tracker.sh"),
+        }
+    }
 }
 
 /// Read the `--head-tracking[=tracker]` flag. `Ok(None)` when it is absent.
@@ -39,8 +56,10 @@ pub fn tracker_from_args(args: &[String]) -> Result<Option<Tracker>, String> {
     match flag.as_str() {
         "--head-tracking" => Ok(Some(Tracker::External)),
         "--head-tracking=sony" => Ok(Some(Tracker::Sony)),
+        "--head-tracking=airpods" => Ok(Some(Tracker::AirPods)),
         other => Err(format!(
-            "unknown head tracker in `{other}` — use --head-tracking or --head-tracking=sony"
+            "unknown head tracker in `{other}` — use --head-tracking, \
+             --head-tracking=sony or --head-tracking=airpods"
         )),
     }
 }
@@ -83,7 +102,7 @@ impl Placement {
 /// started, stops listening, frees the port and turns the listener back to
 /// the scene's heading, all before the drop returns.
 pub struct HeadTracking {
-    sony_bridge: Option<sony::SonyBridge>,
+    bridge: Option<bridge::Bridge>,
     listener: Option<opentrack::OpenTrackListener>,
     producer: Arc<Mutex<rtrb::Producer<Command>>>,
     placement: Placement,
@@ -104,7 +123,7 @@ impl Drop for HeadTracking {
     fn drop(&mut self) {
         // Sender first, then receiver, so no packet can turn the head again
         // after the pose below.
-        self.sony_bridge = None;
+        self.bridge = None;
         self.listener = None;
         if let Ok(mut producer) = self.producer.lock() {
             // Without this the listener would keep the last tracked heading:
@@ -137,12 +156,12 @@ fn start_on(
     // Listen first: a bridge sending before the port is bound would lose packets,
     // and a port already in use should fail before a bridge is started.
     let listener = opentrack::spawn(port, producer.clone(), placement.clone())?;
-    let sony_bridge = match tracker {
-        Tracker::External => None,
-        Tracker::Sony => Some(sony::SonyBridge::start()?),
-    };
+    let bridge = tracker
+        .bridge_script()
+        .map(bridge::Bridge::start)
+        .transpose()?;
     Ok(HeadTracking {
-        sony_bridge,
+        bridge,
         listener: Some(listener),
         producer,
         placement,
@@ -171,6 +190,28 @@ mod tests {
             tracker_from_args(&args(&["atrium", "--head-tracking=sony"])),
             Ok(Some(Tracker::Sony))
         );
+        assert_eq!(
+            tracker_from_args(&args(&["atrium", "--head-tracking=airpods"])),
+            Ok(Some(Tracker::AirPods))
+        );
+    }
+
+    /// A script name that does not exist would only show as a bridge that
+    /// never sends, so check every one is in `scripts/`.
+    #[test]
+    fn every_bridge_script_exists() {
+        for tracker in [Tracker::External, Tracker::Sony, Tracker::AirPods] {
+            if let Some(script) = tracker.bridge_script() {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("scripts")
+                    .join(script);
+                assert!(
+                    path.is_file(),
+                    "{tracker:?} names a missing {}",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

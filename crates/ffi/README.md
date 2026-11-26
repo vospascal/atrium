@@ -173,7 +173,7 @@ runs Cargo itself. There is nothing to build here by hand.
   `tail -f` never does. Before 2026-11-20 the engine sent TERM to the script alone. That was
   never noticed because the engine binary only stops at exit, usually by Ctrl+C, which signals
   the whole group. From an app that keeps running, the stop hung forever and left the bridge app
-  running. `sony.rs` records the measurement and a test with a script of the same shape guards it.
+  running. `src/head_tracking/bridge.rs` records the measurement and a test with a script of the same shape guards it. The AirPods bridge script has the same shape and is stopped the same way.
 - **Switching head tracking off turns the listener back to the scene's heading.** Otherwise the
   place would stay turned the way the head last pointed until the scene was restarted. The engine
   does this when its tracker is dropped, so the binding has nothing to remember.
@@ -293,7 +293,7 @@ runs Cargo itself. There is nothing to build here by hand.
 - **`Waiting` does not say why.** Headphones that are off, a missing Input Monitoring grant and a
   sensor the headphones do not offer all look the same: nothing arrives. The app shows the Sony
   setup step that has been the cause so far. The bridge's own log is in
-  `$TMPDIR/atrium-sony-bridge.log`.
+  `$TMPDIR/atrium-sony-bridge.log` (AirPods: `$TMPDIR/atrium-airpods-bridge.log`).
 - **The first Sony start on a machine builds the bridge.** The script clones a pinned commit from
   GitHub and compiles it into `target/sony-head-tracker/`. The script's path is fixed when the
   engine is compiled, so a build moved away from this repository cannot find it.

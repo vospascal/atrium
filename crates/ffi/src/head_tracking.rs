@@ -9,6 +9,9 @@ pub enum HeadTracker {
     /// Sony WH/WF-1000XM5 or XM6 headphones. The engine starts and stops
     /// their bridge.
     Sony,
+    /// Apple headphones with head tracking (AirPods Pro, AirPods 3rd/4th
+    /// generation, AirPods Max). The engine starts and stops their bridge.
+    AirPods,
     /// Any tracker that sends OpenTrack UDP to this machine. The user starts
     /// it; the engine only listens.
     External,
@@ -31,6 +34,7 @@ impl From<HeadTracker> for Tracker {
     fn from(tracker: HeadTracker) -> Self {
         match tracker {
             HeadTracker::Sony => Self::Sony,
+            HeadTracker::AirPods => Self::AirPods,
             HeadTracker::External => Self::External,
         }
     }
@@ -38,13 +42,18 @@ impl From<HeadTracker> for Tracker {
 
 /// The trackers that can work on this platform, in the order a UI lists them.
 ///
-/// The Sony bridge is a macOS program. Nothing is offered on iOS: the engine
+/// The Sony and AirPods bridges are macOS programs. Nothing is offered on iOS
+/// yet: the engine
 /// accepts tracker packets from the same device only, and no tracker on an
 /// iPhone sends them.
 #[uniffi::export]
 pub fn head_trackers() -> Vec<HeadTracker> {
     if cfg!(target_os = "macos") {
-        vec![HeadTracker::Sony, HeadTracker::External]
+        vec![
+            HeadTracker::AirPods,
+            HeadTracker::Sony,
+            HeadTracker::External,
+        ]
     } else if cfg!(target_os = "ios") {
         Vec::new()
     } else {
@@ -57,17 +66,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sony_is_offered_only_where_its_bridge_runs() {
-        assert_eq!(
-            head_trackers().contains(&HeadTracker::Sony),
-            cfg!(target_os = "macos")
-        );
+    fn bridged_trackers_are_offered_only_where_their_bridges_run() {
+        for tracker in [HeadTracker::Sony, HeadTracker::AirPods] {
+            assert_eq!(
+                head_trackers().contains(&tracker),
+                cfg!(target_os = "macos")
+            );
+        }
     }
 
     #[test]
     fn each_tracker_is_offered_at_most_once() {
         let offered = head_trackers();
-        for tracker in [HeadTracker::Sony, HeadTracker::External] {
+        for tracker in [
+            HeadTracker::Sony,
+            HeadTracker::AirPods,
+            HeadTracker::External,
+        ] {
             assert!(offered.iter().filter(|entry| **entry == tracker).count() <= 1);
         }
     }

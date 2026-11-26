@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = CpalOutput.start(result.scene, consumer)?;
     let producer = Arc::new(Mutex::new(producer));
 
-    // Head tracking (--head-tracking[=sony]): any tracker that sends OpenTrack
+    // Head tracking (--head-tracking[=sony|airpods]): any tracker that sends OpenTrack
     // UDP. Held until exit so a bridge the engine started stops with it.
     let _head_tracking = match head_tracker {
         Some(tracker) => Some(atrium::head_tracking::start(
