@@ -7,3 +7,5 @@ web/dist
 .idea
 temp/*
 .claude/worktrees/*
+# Stretches of other people's recordings, sampled by scripts/clip.sh
+/assets/clips/
