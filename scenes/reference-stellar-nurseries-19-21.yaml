@@ -1,0 +1,76 @@
+# Reference: Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00)
+# Cryo Chamber, 19:00 to 21:00 of https://www.youtube.com/watch?v=Yk2bpo5paPw
+#
+# One rich low tone on D#1 (38.9 Hz) with its harmonics (the 2nd to the 6th
+# and the 15th), its pitch wandering 5 to 8 cents, over heavy rumble below
+# 60 Hz. Two higher notes (C#4, G#4) come and go. The colour darkens as it
+# swells; no events.
+#
+# The recording's two channels from where stereo speakers stand, 30 degrees
+# left and right of the listener, 2 m away, in the dry space, so it sounds as
+# the record does on speakers. Each ear hears both channels, as with real
+# speakers, so on headphones it is narrower than the record played straight
+# into the ears (width 0.15-0.25 lower; 0.34 against 0.57 for "it wasn't
+# always empty"). Someone else's recording: not in git. Fetch it first:
+#   sh scripts/clip.sh https://www.youtube.com/watch?v=Yk2bpo5paPw 19:00 21:00
+# Taken apart in docs/ambient-recipes.md.
+#   cargo run --release -- scenes/reference-stellar-nurseries-19-21.yaml --headphones
+
+title: "reference: Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00)"
+
+kind: listening
+
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: '5.1'
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c: [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+  dbap_rolloff_db: 6.0
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  left:
+    name: "Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00) · left"
+    group: References
+    sound:
+      preset: sources/references/stellar-nurseries-19-21-left.yaml
+      level: 58.0
+    place: [-1.0, 1.732, 1.2]
+  right:
+    name: "Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00) · right"
+    group: References
+    sound:
+      preset: sources/references/stellar-nurseries-19-21-right.yaml
+      level: 58.0
+    place: [1.0, 1.732, 1.2]
+
+hrtf: assets/hrtf/default.sofa
+
+weather:
+  story: held
+  wind: 0.0
+  rain: 0.0
+  storm: 0.0
+  daylight: 1.0

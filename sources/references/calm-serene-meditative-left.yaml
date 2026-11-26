@@ -1,0 +1,31 @@
+# Reference: Calm | Serene Meditative Music for Late Nights (Astral Ambience), 31:00-33:00, left channel.
+# https://www.youtube.com/watch?v=caAVbyTCptw
+# One channel of a stretch of someone else's recording, played with its
+# other channel as a stereo pair (the engine's recordings are mono). The
+# file is not in git; fetch it, and both channels, with:
+#   sh scripts/clip.sh https://www.youtube.com/watch?v=caAVbyTCptw 31:00 33:00
+# The level is a quiet listening level chosen for all the references alike,
+# not a measurement: the seven measure 51-59 dB SPL at the listener on
+# headphones (41-57 dB(A): these pieces are mostly bass).
+
+name: "Calm | Serene Meditative Music for Late Nights · left"
+group: References
+about: >-
+  Calm | Serene Meditative Music for Late Nights, by Astral Ambience, 31:00
+  to 33:00 of https://www.youtube.com/watch?v=caAVbyTCptw: the recording's
+  left channel, played with the right one as a stereo pair in
+  scenes/reference-calm-serene-meditative.yaml. C major or A minor: a pad of
+  D2, A2, C3, D3, E3, G3, A3 and C4 in two groups that take turns about
+  every 14 s (a 27 s cycle). Several notes are doubled by two voices 27
+  cents either side, a quarter tone apart: a wide chorus, whose voices about
+  1 Hz apart beat gently at 1 Hz. Each note swells 20 to 30 dB as its group
+  comes in; no events. Someone else's recording, kept as a reference to
+  listen to and measure against (docs/ambient-recipes.md); it is not in the
+  repository: sh scripts/clip.sh https://www.youtube.com/watch?v=caAVbyTCptw
+  31:00 33:00
+takes:
+  - { file: "assets/clips/channels/caAVbyTCptw-1860-1980-left.wav", name: "Left" }
+rule: loops
+reference_spl: 58.0        # dB SPL at 1 m, while it sounds
+width: 360
+spread: 0.0

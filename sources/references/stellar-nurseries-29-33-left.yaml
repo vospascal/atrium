@@ -1,0 +1,32 @@
+# Reference: Dark Space Music for Stellar Nurseries and Molecular Clouds (29:00-33:00) (Cryo Chamber), 29:00-33:00, left channel.
+# https://www.youtube.com/watch?v=Yk2bpo5paPw
+# One channel of a stretch of someone else's recording, played with its
+# other channel as a stereo pair (the engine's recordings are mono). The
+# file is not in git; fetch it, and both channels, with:
+#   sh scripts/clip.sh https://www.youtube.com/watch?v=Yk2bpo5paPw 29:00 33:00
+# The level is a quiet listening level chosen for all the references alike,
+# not a measurement: the seven measure 51-59 dB SPL at the listener on
+# headphones (41-57 dB(A): these pieces are mostly bass).
+
+name: "Dark Space Music for Stellar Nurseries and Molecular Clouds (29:00-33:00) · left"
+group: References
+about: >-
+  Dark Space Music for Stellar Nurseries and Molecular Clouds (29:00-33:00),
+  by Cryo Chamber, 29:00 to 33:00 of
+  https://www.youtube.com/watch?v=Yk2bpo5paPw: the recording's left channel,
+  played with the right one as a stereo pair in
+  scenes/reference-stellar-nurseries-29-33.yaml. A busier stretch of the
+  same piece: a low tone near 29 and 59 Hz that throbs every 8 s, its bass
+  notes wandering 14 to 30 cents; a three-note chord (about C#4, F4 and C#5,
+  tuned some 40 cents off concert pitch) returning every 42 s for about 17
+  s; the level moving 12 dB. Several notes detuned between the ears by 0.4
+  to 1 Hz, which turns the image slowly. Someone else's recording, kept as a
+  reference to listen to and measure against (docs/ambient-recipes.md); it
+  is not in the repository: sh scripts/clip.sh
+  https://www.youtube.com/watch?v=Yk2bpo5paPw 29:00 33:00
+takes:
+  - { file: "assets/clips/channels/Yk2bpo5paPw-1740-1980-left.wav", name: "Left" }
+rule: loops
+reference_spl: 58.0        # dB SPL at 1 m, while it sounds
+width: 360
+spread: 0.0

@@ -1,0 +1,30 @@
+# Reference: it wasn't always empty (spiritual brother Sci-Fi), 20:00-23:00, left channel.
+# https://www.youtube.com/watch?v=gP3BBaoU0_E
+# One channel of a stretch of someone else's recording, played with its
+# other channel as a stereo pair (the engine's recordings are mono). The
+# file is not in git; fetch it, and both channels, with:
+#   sh scripts/clip.sh https://www.youtube.com/watch?v=gP3BBaoU0_E 20:00 23:00
+# The level is a quiet listening level chosen for all the references alike,
+# not a measurement: the seven measure 51-59 dB SPL at the listener on
+# headphones (41-57 dB(A): these pieces are mostly bass).
+
+name: "it wasn't always empty · left"
+group: References
+about: >-
+  it wasn't always empty, by spiritual brother Sci-Fi, 20:00 to 23:00 of
+  https://www.youtube.com/watch?v=gP3BBaoU0_E: the recording's left channel,
+  played with the right one as a stereo pair in
+  scenes/reference-it-wasnt-always-empty.yaml. E major over a pure E2 pedal
+  (82.41 Hz) that holds almost dead still. Above it a pad on the scale's
+  notes from E3 to B4, each note rising and falling on its own over tens of
+  seconds; soft single bell notes (E5, F#5, B5, C#6) every 2 to 17 s, each
+  fading over 2 to 6 s; and faint air at 2 to 12 kHz swelling on a regular
+  22 s cycle. Someone else's recording, kept as a reference to listen to and
+  measure against (docs/ambient-recipes.md); it is not in the repository: sh
+  scripts/clip.sh https://www.youtube.com/watch?v=gP3BBaoU0_E 20:00 23:00
+takes:
+  - { file: "assets/clips/channels/gP3BBaoU0_E-1200-1380-left.wav", name: "Left" }
+rule: loops
+reference_spl: 58.0        # dB SPL at 1 m, while it sounds
+width: 360
+spread: 0.0

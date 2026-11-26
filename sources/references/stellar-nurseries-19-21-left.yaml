@@ -1,0 +1,30 @@
+# Reference: Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00) (Cryo Chamber), 19:00-21:00, left channel.
+# https://www.youtube.com/watch?v=Yk2bpo5paPw
+# One channel of a stretch of someone else's recording, played with its
+# other channel as a stereo pair (the engine's recordings are mono). The
+# file is not in git; fetch it, and both channels, with:
+#   sh scripts/clip.sh https://www.youtube.com/watch?v=Yk2bpo5paPw 19:00 21:00
+# The level is a quiet listening level chosen for all the references alike,
+# not a measurement: the seven measure 51-59 dB SPL at the listener on
+# headphones (41-57 dB(A): these pieces are mostly bass).
+
+name: "Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00) · left"
+group: References
+about: >-
+  Dark Space Music for Stellar Nurseries and Molecular Clouds (19:00-21:00),
+  by Cryo Chamber, 19:00 to 21:00 of
+  https://www.youtube.com/watch?v=Yk2bpo5paPw: the recording's left channel,
+  played with the right one as a stereo pair in
+  scenes/reference-stellar-nurseries-19-21.yaml. One rich low tone on D#1
+  (38.9 Hz) with its harmonics (the 2nd to the 6th and the 15th), its pitch
+  wandering 5 to 8 cents, over heavy rumble below 60 Hz. Two higher notes
+  (C#4, G#4) come and go. The colour darkens as it swells; no events.
+  Someone else's recording, kept as a reference to listen to and measure
+  against (docs/ambient-recipes.md); it is not in the repository: sh
+  scripts/clip.sh https://www.youtube.com/watch?v=Yk2bpo5paPw 19:00 21:00
+takes:
+  - { file: "assets/clips/channels/Yk2bpo5paPw-1140-1260-left.wav", name: "Left" }
+rule: loops
+reference_spl: 58.0        # dB SPL at 1 m, while it sounds
+width: 360
+spread: 0.0

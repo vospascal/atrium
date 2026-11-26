@@ -1,0 +1,30 @@
+# Reference: i must rest here a moment (spiritual brother), 15:00-17:00, right channel.
+# https://www.youtube.com/watch?v=IXsWr2CK4SI
+# One channel of a stretch of someone else's recording, played with its
+# other channel as a stereo pair (the engine's recordings are mono). The
+# file is not in git; fetch it, and both channels, with:
+#   sh scripts/clip.sh https://www.youtube.com/watch?v=IXsWr2CK4SI 15:00 17:00
+# The level is a quiet listening level chosen for all the references alike,
+# not a measurement: the seven measure 51-59 dB SPL at the listener on
+# headphones (41-57 dB(A): these pieces are mostly bass).
+
+name: "i must rest here a moment · right"
+group: References
+about: >-
+  i must rest here a moment, by spiritual brother, 15:00 to 17:00 of
+  https://www.youtube.com/watch?v=IXsWr2CK4SI: the recording's right
+  channel, played with the left one as a stereo pair in
+  scenes/reference-i-must-rest-here-a-moment.yaml. E minor (or G major)
+  notes in the mids (E, D, A, G, B, F#) over a B-flat and F in the bass,
+  most of it a broad soft texture rather than clear notes (only a third of
+  the power is in distinct partials). The whole swells together on a cycle
+  of about 39 s. As wide as a recording gets (the ears almost unrelated); no
+  events. Someone else's recording, kept as a reference to listen to and
+  measure against (docs/ambient-recipes.md); it is not in the repository: sh
+  scripts/clip.sh https://www.youtube.com/watch?v=IXsWr2CK4SI 15:00 17:00
+takes:
+  - { file: "assets/clips/channels/IXsWr2CK4SI-900-1020-right.wav", name: "Right" }
+rule: loops
+reference_spl: 58.0        # dB SPL at 1 m, while it sounds
+width: 360
+spread: 0.0

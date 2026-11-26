@@ -165,8 +165,11 @@ minus `gain_decibels`. Leave it off for files you will measure against each othe
 To measure an example from YouTube (or any site `yt-dlp` reads), take only a
 stretch of it: `scripts/clip.sh` fetches just that range, never the whole video, and
 writes a WAV with the source's sample rate and both channels to `assets/clips/` (kept
-out of git: other people's recordings). It prints the `analyse` line for the file.
-Needs `brew install yt-dlp ffmpeg`.
+out of git: other people's recordings), and its left and right channels as mono files in
+`assets/clips/channels/`, which the reference scenes play (`scenes/reference-*.yaml`: each
+piece's two channels from where stereo speakers stand, its link, minutes and description in
+the presets in `sources/references/`). It prints the `analyse` line for the file. Needs
+`brew install yt-dlp ffmpeg`.
 
 ```sh
 sh scripts/clip.sh "https://www.youtube.com/watch?v=<id>" 1:30 2:30 bowl
