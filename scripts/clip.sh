@@ -11,15 +11,17 @@
 # Usage: sh scripts/clip.sh <url> <from> <to> [name]
 #   <from>, <to>   seconds (90) or minutes:seconds (1:30) or h:m:s (1:01:30)
 #   [name]         the file's name; default the video's id
-# Writes assets/clips/<name>-<from>-<to>.wav (times in whole seconds) and
-# prints the analyse line for it.
+# Writes assets/clips/<name>-<from>-<to>.wav (times in whole seconds), its
+# left and right channels as mono files in assets/clips/channels/ (what the
+# reference scenes play: the engine's recordings are mono), and prints the
+# analyse line for it.
 #
 # Needs yt-dlp and ffmpeg: brew install yt-dlp ffmpeg
 
 set -eu
 
 usage() {
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     exit "$1"
 }
 
@@ -67,6 +69,14 @@ path=$(yt-dlp \
     --output "$root/assets/clips/$name-$from_seconds-$to_seconds.%(ext)s" \
     --no-simulate --print after_move:filepath \
     "$url")
+
+# The two channels apart, each a mono file, for the reference scenes.
+mkdir -p "$root/assets/clips/channels"
+stem=$(basename "$path" .wav)
+ffmpeg -loglevel error -y -i "$path" \
+    -filter_complex "channelsplit=channel_layout=stereo[left][right]" \
+    -map "[left]" "$root/assets/clips/channels/$stem-left.wav" \
+    -map "[right]" "$root/assets/clips/channels/$stem-right.wav"
 
 echo "$path"
 echo "cargo run --release --bin analyse -- \"${path#"$root"/}\" --picture"
