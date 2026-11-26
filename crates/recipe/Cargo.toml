@@ -1,0 +1,12 @@
+[package]
+name = "atrium-recipe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Recipes: what a piece is made of (chords, how they change, how long they hold, how they swell) and a seeded planner that decides it, without audio"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_yaml = "0.9"

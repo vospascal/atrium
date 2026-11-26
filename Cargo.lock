@@ -119,6 +119,7 @@ version = "0.1.0"
 dependencies = [
  "atrium-analysis",
  "atrium-core",
+ "atrium-recipe",
  "atrium-tui",
  "atrium-world",
  "cpal",
@@ -161,6 +162,14 @@ dependencies = [
  "atrium-world",
  "rtrb",
  "uniffi",
+]
+
+[[package]]
+name = "atrium-recipe"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@ members = [
     "crates/analysis",
     "crates/core",
     "crates/ffi",
+    "crates/recipe",
     "crates/tui",
     "crates/world",
 ]
@@ -18,6 +19,7 @@ default-run = "atrium"
 [dependencies]
 atrium-analysis = { path = "crates/analysis" }
 atrium-core = { path = "crates/core" }
+atrium-recipe = { path = "crates/recipe" }
 atrium-world = { path = "crates/world" }
 cpal = "0.15"
 rtrb = "0.3"
