@@ -1,0 +1,49 @@
+# Recipe: Calm a minor third up, in F and E-flat: the same idea in other
+# tones. Every interval, the shared colour note and the timing are Calm's
+# (sources/recipes/calm.yaml); only the notes move up three semitones.
+
+name: Calm in F
+group: Recipes
+about: >-
+  Calm's idea in other tones: F and E-flat rocking slowly back and forth, a
+  minor third above the original. Open fifths without a third, a soft
+  colour note on top (A-flat in both), each chord holding 10 to 14 seconds
+  and fading over the next, every note five voices spread 27 cents either
+  side, the notes of a chord blooming one after another, a soft ping on one
+  of the chord's notes now and then, ringing out, and now and then a hush of noise swelling
+  high in the middle. It begins once on C minor 7, as Calm begins on A
+  minor 7.
+synth: recipe
+chords:
+  - { name: Cm7, colour_level: -10, notes: [C3, G3, Bb3, Eb4], colour: [Eb5, F5] }
+  - { name: F, colour_level: -20, notes: [F2, C3, F3, C4, F4], colour: [G4, Ab4, F5, G5] }
+  - { name: Eb, colour_level: -6, notes: [Bb2, Eb3, Bb3, Eb4], colour: [F4, Ab4, Eb5, Bb5] }
+start: Cm7
+change: { Cm7: { F: 1 }, F: { Eb: 1 }, Eb: { F: 1 } }
+hold: { Cm7: 12 s, F: 12..14 s, Eb: 10..12 s }
+swell: { in: 2..6 s, out: 5..24 s, stagger: 0..3 s }   # notes bloom one by one
+pings:                    # struck notes on the chord, ringing out: the clip's tings
+  - range: [Eb4, C5]          # lower ones: one now and then, maybe another some seconds later
+    every: 5..12 s
+    ring: 1.5..3 s         # to fall 20 dB: they ring out
+    level: -9
+  - range: [Eb5, Bb5]          # higher, cleaner ones, fewer and softer
+    every: 9..20 s
+    ring: 2..4 s
+    level: -14
+swoosh:                   # a soft swell of noise high in the middle band, now and then
+  every: 15..40 s
+  rise: 1.5..5.5 s
+  fall: 1.5..5 s
+  band: 1500..4000 Hz
+  level: -32
+voice:
+  voices: 5                # spread across ±27 cents: a wide note, not two lines
+  detune: 27 cents
+  drift: 2..11 cents       # the clip's notes wander 2-11 cents ...
+  drift_over: 0.5..3 s     # ... and keep moving: the shimmer
+  wander: 8                # each note rising and falling on its own (dB)
+  wander_over: 8..20 s
+  brightness: 0.3
+  cutoff: 400 Hz           # warm: the clip's pad falls away steeply above about 400 Hz
+reference_spl: 55.0        # dB SPL at 1 m: a quiet listening level, chosen

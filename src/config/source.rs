@@ -58,6 +58,12 @@ pub(super) fn resolve(entity: &Entity) -> Result<ResolvedSource, Box<dyn std::er
         }
         None => None,
     };
+    if let (Some(SourceDef::Synth(synth)), Some(path)) = (&def, &entity.sound.preset) {
+        synth
+            .spec
+            .check()
+            .map_err(|error| format!("{path}: {error}"))?;
+    }
 
     // Split the def into its sound identity + intrinsic defaults.
     let def_follows = match &def {

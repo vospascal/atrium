@@ -1,0 +1,62 @@
+# Recipe: Calm, after Astral Ambience "Calm | Serene Meditative Music for Late
+# Nights" (https://www.youtube.com/watch?v=caAVbyTCptw), 31:00-33:00, as
+# measured in docs/ambient-recipes.md and written in docs/recipe-design.md.
+# Two chords a whole step apart rock back and forth; every number below is
+# the clip's. Each chord carries its note an octave up (C5 over C, D5 over
+# D), quiet: the clip's high tones, 12-28 dB under the whole. The pings are
+# as Pascal hears the clip's: lower and higher ones, each ringing out, one
+# now and then; their level stands 6-9 dB over its band as the clip's do
+# (through Atrium), and they fall 20 dB in about 2 s as its clearest does.
+# Swooshes stand 11-13 dB over 1.5-4 kHz, as the clip's. The level is a
+# quiet listening level, chosen, not measured.
+
+name: Calm
+group: Recipes
+about: >-
+  Two chords a whole step apart, D and C, rocking slowly back and forth,
+  after Astral Ambience's "Calm" (measured from 31:00 to 33:00). Each chord
+  is an open fifth stacked in octaves, with no third, so it is neither happy
+  nor sad; a soft colour note sits on top, F in both. Each holds 10 to 14
+  seconds and fades over the next, so a change has no edge, and every note
+  is five voices spread 27 cents either side whose pitch keeps moving and
+  whose level rises and falls on its own, which gives the shimmer. Each
+  chord carries its note an octave up, clear over C and nearly gone over D;
+  a chord's notes bloom one after another. Now and then a soft ping strikes
+  one of the chord's notes and rings out, lower ones more often, higher and
+  cleaner ones less, and now and then a hush of noise swells high in the
+  middle. It begins once on A minor 7, as the clip does,
+  and never plays the same way twice.
+synth: recipe
+chords:
+  - { name: Am7, colour_level: -10, notes: [A2, E3, G3, C4], colour: [C5, D5] }
+  - { name: D, colour_level: -20, notes: [D2, A2, D3, A3, D4], colour: [E4, F4, D5, E5] }
+  - { name: C, colour_level: -6, notes: [G2, C3, G3, C4], colour: [D4, F4, C5, G5] }
+start: Am7
+change: { Am7: { D: 1 }, D: { C: 1 }, C: { D: 1 } }
+hold: { Am7: 12 s, D: 12..14 s, C: 10..12 s }
+swell: { in: 2..6 s, out: 5..24 s, stagger: 0..3 s }   # notes bloom one by one
+pings:                    # struck notes on the chord, ringing out: the clip's tings
+  - range: [C4, A4]          # lower ones: one now and then, maybe another some seconds later
+    every: 5..12 s
+    ring: 1.5..3 s         # to fall 20 dB: they ring out
+    level: -9
+  - range: [C5, G5]          # higher, cleaner ones, fewer and softer
+    every: 9..20 s
+    ring: 2..4 s
+    level: -14
+swoosh:                   # a soft swell of noise high in the middle band, now and then
+  every: 15..40 s
+  rise: 1.5..5.5 s
+  fall: 1.5..5 s
+  band: 1500..4000 Hz
+  level: -32
+voice:
+  voices: 5                # spread across ±27 cents: a wide note, not two lines
+  detune: 27 cents
+  drift: 2..11 cents       # the clip's notes wander 2-11 cents ...
+  drift_over: 0.5..3 s     # ... and keep moving: the shimmer
+  wander: 8                # each note rising and falling on its own (dB)
+  wander_over: 8..20 s
+  brightness: 0.3
+  cutoff: 400 Hz           # warm: the clip's pad falls away steeply above about 400 Hz
+reference_spl: 55.0        # dB SPL at 1 m: a quiet listening level, chosen

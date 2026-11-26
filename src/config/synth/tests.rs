@@ -8,7 +8,7 @@ use crate::config::scene::NormalizationConfig;
 use crate::config::source::{SourceDef, SynthSourceDef};
 
 /// Every synth kind, as its smallest file.
-const EVERY_SYNTH: [(&str, &str); 13] = [
+const EVERY_SYNTH: [(&str, &str); 14] = [
             (
                 "synth: canopy_wind\nmin_speed: 2\nmax_speed: 8\nfoliage_density: 1\nreference_spl: 48\n",
                 "canopy_wind",
@@ -54,6 +54,10 @@ const EVERY_SYNTH: [(&str, &str); 13] = [
             (
                 "synth: noise_colour\ncolour: orange\nmaster_gain: 1\nseed: 3\nreference_spl: 55\n",
                 "noise_colour",
+            ),
+            (
+                "synth: recipe\nchords: [{ name: D, notes: [D3, A3] }, { name: C, notes: [C3, G3] }]\nhold: 12\nseed: 3\nreference_spl: 55\n",
+                "recipe",
             ),
 ];
 
@@ -744,4 +748,37 @@ fn every_noise_colour_is_heard_at_fifty_decibels_a() {
         );
         assert!(peak(samples) < 1.0, "{path}");
     }
+}
+
+/// A recipe with a mistake is refused when its preset is resolved, the
+/// error naming the preset and the field; a valid one resolves.
+#[test]
+fn a_recipe_with_a_wrong_note_is_refused_by_name() {
+    let directory = std::env::temp_dir().join("atrium-recipe-check");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let wrong = directory.join("wrong.yaml");
+    std::fs::write(
+        &wrong,
+        "synth: recipe\nchords: [{ name: D, notes: [D3, H3] }]\nreference_spl: 55\n",
+    )
+    .expect("written");
+    let entity = |path: &std::path::Path| -> atrium_world::Entity {
+        serde_yaml::from_str(&format!(
+            "sound: {{ preset: \"{}\" }}\nplace: [0, 2, 0]\n",
+            path.to_str().expect("utf-8")
+        ))
+        .expect("an entity")
+    };
+    let error = crate::config::source::resolve(&entity(&wrong))
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(
+        error.contains("wrong.yaml") && error.contains("chords[0].notes[1]"),
+        "{error}"
+    );
+    assert!(crate::config::source::resolve(&entity(std::path::Path::new(
+        "sources/recipes/calm.yaml"
+    )))
+    .is_ok());
 }

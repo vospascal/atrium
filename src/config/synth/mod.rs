@@ -9,6 +9,7 @@ mod focus_tone;
 mod noise_colour;
 mod rain;
 mod rain_v2;
+mod recipe;
 mod river;
 mod soft_wind;
 mod storm_wind;
@@ -31,6 +32,7 @@ use focus_tone::FocusToneSynthParams;
 use noise_colour::NoiseColourSynthParams;
 use rain::RainSynthParams;
 use rain_v2::RainV2SynthParams;
+use recipe::RecipeSynthParams;
 use river::RiverSynthParams;
 use soft_wind::SoftWindSynthParams;
 use storm_wind::StormWindSynthParams;
@@ -57,6 +59,9 @@ pub(in crate::config) enum SynthSpec {
     FocusTone(FocusToneSynthParams),
     BinauralBeat(BinauralBeatSynthParams),
     NoiseColour(NoiseColourSynthParams),
+    // Boxed: a recipe holds its chords and spans inline, far more than any
+    // other synth's few numbers, and every `SynthSpec` would be its size.
+    Recipe(Box<RecipeSynthParams>),
 }
 
 impl SynthSpec {
@@ -75,6 +80,7 @@ impl SynthSpec {
             SynthSpec::FocusTone(_) => "focus_tone",
             SynthSpec::BinauralBeat(_) => "binaural_beat",
             SynthSpec::NoiseColour(_) => "noise_colour",
+            SynthSpec::Recipe(_) => "recipe",
         }
     }
 
@@ -109,6 +115,7 @@ impl SynthSpec {
             SynthSpec::FocusTone(params) => params.build_generator(position, default_seed),
             SynthSpec::BinauralBeat(params) => params.build_generator(),
             SynthSpec::NoiseColour(params) => params.build_generator(position, default_seed),
+            SynthSpec::Recipe(params) => params.build_generator(position, default_seed),
         }
     }
 
@@ -137,6 +144,17 @@ impl SynthSpec {
             SynthSpec::FocusTone(params) => params.layers(),
             SynthSpec::BinauralBeat(params) => params.layers(),
             SynthSpec::NoiseColour(params) => params.layers(),
+            SynthSpec::Recipe(params) => params.layers(),
+        }
+    }
+
+    /// What is wrong with the generator's settings, for one that can be wrong
+    /// in ways it cannot clamp: a recipe naming a note or chord that is not
+    /// there. Every other synth clamps what it is given.
+    pub(in crate::config) fn check(&self) -> Result<(), String> {
+        match self {
+            SynthSpec::Recipe(params) => params.check(),
+            _ => Ok(()),
         }
     }
 

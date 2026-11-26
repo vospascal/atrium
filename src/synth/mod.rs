@@ -16,6 +16,7 @@ pub mod noise;
 pub mod noise_colour;
 pub mod rain;
 pub mod rain_v2;
+pub mod recipe;
 pub mod river;
 pub mod soft_wind;
 pub mod storm_wind;

@@ -1,0 +1,77 @@
+# Recipe: Calm in F, played by the recipe voice (sources/recipes/calm-in-f.yaml).
+# Heard all round in the dry space, to set beside the original:
+#   cargo run --release -- scenes/recipe-calm-in-f.yaml --headphones
+#   cargo run --release -- scenes/reference-calm-serene-meditative.yaml --headphones
+
+title: "recipe: Calm in F"
+
+kind: listening
+
+atrium: rooms/atrium_6x4.yaml
+
+listener:
+  position: [0.0, 0.0, 1.2]
+  yaw_degrees: 90.0
+
+master_gain: 1.0
+
+distance_model:
+  model: inverse
+  ref_distance: 1.0
+  max_distance: 40.0
+  rolloff: 1.0
+
+speakers:
+  layout: '5.1'
+  render_mode: vbap
+  positions:
+    fl: [-3.0, 2.0, 0.0]
+    fr: [3.0, 2.0, 0.0]
+    c: [0.0, 2.0, 0.0]
+    rl: [-3.0, -2.0, 0.0]
+    rr: [3.0, -2.0, 0.0]
+  dbap_rolloff_db: 6.0
+
+normalization:
+  target_rms: 0.1
+  spl_reference: 94.0
+  spl_threshold: 0.0
+
+sounds:
+  pad:
+    name: "Calm in F"
+    group: Recipes
+    sound:
+      preset: sources/recipes/calm-in-f.yaml
+      level: 55.0
+    place: [0.0, 2.0, 1.2]
+
+  # The original's faint hiss above 2 kHz, about 45 dB under the whole in
+  # 4-12 kHz: pink noise, flat in third octaves (blue rose 9-24 dB too bright
+  # above 8 kHz, where the original's hiss falls away).
+  air:
+    name: Air
+    group: Bed
+    sound:
+      preset: sources/noise/pink.yaml
+      level: 17.9
+    place: [0.0, 2.0, 1.2]
+
+  # The original's rumble under 60 Hz, about 28 dB under the whole: brown
+  # noise, whose power is mostly below 60 Hz.
+  rumble:
+    name: Rumble
+    group: Bed
+    sound:
+      preset: sources/noise/brown.yaml
+      level: 29.8
+    place: [0.0, 2.0, 1.2]
+
+hrtf: assets/hrtf/default.sofa
+
+weather:
+  story: held
+  wind: 0.0
+  rain: 0.0
+  storm: 0.0
+  daylight: 1.0

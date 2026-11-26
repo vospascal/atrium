@@ -213,6 +213,24 @@ mod tests {
         assert!(session.about.unwrap().contains("115 Hz moving to 113 Hz"));
     }
 
+    /// The recipes: generators grouped together, each with a note that says
+    /// what it is and where it comes from.
+    #[test]
+    fn every_recipe_is_grouped_and_has_a_note() {
+        let presets = list_presets("sources").expect("the presets read");
+        let recipes: Vec<&PresetSummary> = presets
+            .iter()
+            .filter(|preset| preset.path.starts_with("sources/recipes/"))
+            .collect();
+        assert!(recipes.len() >= 2);
+        for recipe in &recipes {
+            assert_eq!(recipe.group.as_deref(), Some("Recipes"), "{}", recipe.path);
+            assert!(recipe.generated, "{} is a generator", recipe.path);
+            let about = recipe.about.as_deref().unwrap_or("");
+            assert!(about.len() > 200, "{} has no note", recipe.path);
+        }
+    }
+
     /// The noise colours: one preset per colour, grouped together, each with
     /// a note; the colours without an agreed definition say so and that
     /// theirs follows an example recording, and red and brown say how they

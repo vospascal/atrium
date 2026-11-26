@@ -215,6 +215,7 @@ mod conformance {
     use crate::synth::noise_colour::{NoiseColour, NoiseColourSettings, NoiseColourSource};
     use crate::synth::rain::RainSource;
     use crate::synth::rain_v2::RainSourceV2;
+    use crate::synth::recipe::RecipeSource;
     use crate::synth::river::RiverSource;
     use crate::synth::soft_wind::SoftWindSource;
     use crate::synth::storm_wind::StormWindSource;
@@ -310,6 +311,22 @@ mod conformance {
                         skip_seconds: 0.0,
                     });
                     Box::new(thunder)
+                }),
+            ),
+            (
+                // Calm's two chords, a pair of drifting voices per note.
+                "recipe",
+                Box::new(|| {
+                    let recipe = serde_yaml::from_str::<atrium_recipe::RecipeDef>(
+                        "chords: [{ name: D, notes: [D2, A2, D3, A3, D4], colour: [E4, F4] }, \
+                         { name: C, notes: [G2, C3, G3, C4], colour: [D4, F4] }]\n\
+                         hold: 3..4 s\nswell: { in: 0.5..2 s, out: 2..6 s }\n\
+                         voice: { voices: 2, detune: 27 cents, drift: 2..11 cents }",
+                    )
+                    .expect("parses")
+                    .resolve()
+                    .expect("valid");
+                    Box::new(RecipeSource::new(Vec3::ZERO, &recipe, 1.0, 42))
                 }),
             ),
         ]
@@ -440,6 +457,13 @@ mod conformance {
             // 118 Hz (the binaural beat) nothing of them reaches 6-10 kHz but
             // rounding, so there is no density to scale.
             if name == "focus_tone" || name == "binaural_beat" {
+                continue;
+            }
+            // Nor the recipe: its notes' harmonics stop at 8 times the
+            // highest note (2.8 kHz for F4), so in 6-10 kHz there is only the
+            // wavetable's interpolation error, which depends on the rate by its
+            // nature: 75-77 dB under the whole in a 20 s render of Calm.
+            if name == "recipe" {
                 continue;
             }
             let delta = density_6_to_10_khz(&make, 96_000.0) - density_6_to_10_khz(&make, 48_000.0);

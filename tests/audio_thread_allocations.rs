@@ -298,6 +298,8 @@ fn audio_callback_never_touches_the_heap() {
         ("scenes/wisp.yaml", None),
         // Two voices that are one sound's two layers.
         ("scenes/binaural-beat-test.yaml", None),
+        // A recipe: its planner asked for the next chord on the audio thread.
+        ("scenes/recipe-calm.yaml", None),
     ] {
         violations.extend(violations_in(path, arc_degrees));
     }
