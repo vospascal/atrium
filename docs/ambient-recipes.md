@@ -9,6 +9,8 @@ tells), plus one-off reads of note names, of when each note sounds, and of wheth
 repeats (autocorrelation of its level in 2 s frames every 0.5 s). One stretch of each piece
 is not the whole piece.
 
+The seven written as recipes, the format Atrium could make such pieces from: `recipe-design.md`.
+
 Each piece has a listening scene, `scenes/reference-<name>.yaml`, playing the stretch's two
 channels from where stereo speakers stand (presets in `sources/references/`; the YouTube
 link, the minutes and a description are in each preset's `about`). Fetch the clip first
@@ -161,6 +163,16 @@ take turns. No pedal, no events.
 | Air | noise, 2–12 kHz | 41 dB under the whole | 5.8 dB sd, every 40 s (0.39) | |
 
 The whole moves 1.7 dB (sd), darker as it gets louder (−0.48).
+
+Read as music (the loudest notes in each 4 s, every 2 s): after an opening A minor 7 (A, E,
+C, G; 4–16 s), **a D chord and a C chord take turns**, each held 12–14 s, the pair every
+27 s (D at 18–30, 44–58, 72–86 and 100–110 s; C at 32–42, 60–70, 86–98 and 112–120 s).
+Each chord is an **open fifth stacked in octaves, without a third**, so neither major nor
+minor: D2 A2 D3 A3 D4, and G2 C3 G3 C4. A faint colour sits on top: E4 and F4 over D, D4 and
+F4 over C, F4 shared by both. The step down from D to C and back, a note held in common and
+the swells overlapping by a few seconds, make every change soft. So the idea to keep, in
+other tones: two chords a whole step apart, open fifths low, a shared colour note high,
+overlapping swells every 14 s, every note a detuned pair of voices.
 
 ## Across the seven
 
