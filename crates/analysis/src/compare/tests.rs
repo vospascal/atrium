@@ -358,3 +358,83 @@ fn the_summary_reads_alone() {
         assert!(text.contains(label), "{label}:\n{text}");
     }
 }
+
+/// `seconds` of a tone at `frequency` whose pitch swings `cents` either
+/// side at 0.2 Hz.
+fn wandering(frequency: f64, cents: f64, seconds: f64) -> Vec<f32> {
+    let mut phase = 0.0f64;
+    (0..(seconds * RATE as f64) as usize)
+        .map(|index| {
+            let time = index as f64 / RATE as f64;
+            let swing = (std::f64::consts::TAU * 0.2 * time).sin();
+            phase +=
+                std::f64::consts::TAU * frequency * 2f64.powf(cents * swing / 1200.0) / RATE as f64;
+            (0.2 * phase.sin()) as f32
+        })
+        .collect()
+}
+
+/// A steady 100 Hz and 300 Hz against the same 100 Hz with the 300 Hz
+/// wandering ±10 cents: both partials pair up, the 100 Hz one the same, the
+/// 300 Hz one 10/√2 = 7.07 cents more wander and a wider band. Neither
+/// pulses; nothing is detuned (one channel each, so not even asked).
+#[test]
+fn a_steady_tone_against_a_wandering_one() {
+    let seconds = 40.0;
+    let low = crate::test_signals::sine(100.0, 0.3, seconds);
+    let mix = |high: Vec<f32>| -> Vec<f32> { low.iter().zip(&high).map(|(a, b)| a + b).collect() };
+    let steady = report(&mix(wandering(300.0, 0.0, seconds)), 1, None);
+    let moving = report(&mix(wandering(300.0, 10.0, seconds)), 1, None);
+    let comparison = compare(
+        &compared("steady", &steady, None),
+        &[compared("wandering", &moving, None)],
+    );
+    let movement = &comparison.others[0].movement;
+    assert_eq!(movement.matched_partials.len(), 2, "{movement:#?}");
+    let low_pair = &movement.matched_partials[0];
+    let high_pair = &movement.matched_partials[1];
+    assert!((low_pair.frequency_hertz.reference - 100.0).abs() < 0.05);
+    let low_wander = low_pair
+        .pitch_standard_deviation_cents
+        .expect("long")
+        .difference;
+    assert!(low_wander.abs() < 0.2, "{low_wander}");
+    let high_wander = high_pair
+        .pitch_standard_deviation_cents
+        .expect("long")
+        .difference;
+    assert!((high_wander - 7.07).abs() < 0.5, "{high_wander}");
+    assert!(high_pair.width_hertz.difference > 1.5, "{high_pair:?}");
+    assert!(movement.partials.detuned.is_none());
+    assert!(movement.pulse.reference.is_none() && movement.pulse.other.is_none());
+    let text = comparison_summary(&comparison);
+    assert!(text.contains("median pitch sd (cents)"), "{text}");
+    assert!(text.contains("same partials, file - ref"), "{text}");
+}
+
+/// A steady 500 Hz tone against the same tone swung ±50 % at 4 Hz: only the
+/// other pulses, at 4 Hz, so the pulse's differences are not taken.
+#[test]
+fn a_tone_against_its_pulsed_twin() {
+    let seconds = 20.0;
+    let tone = crate::test_signals::sine(500.0, 0.3, seconds);
+    let pulsed: Vec<f32> = tone
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            let time = index as f64 / RATE as f64;
+            (*sample as f64 * (1.0 + 0.5 * (std::f64::consts::TAU * 4.0 * time).sin())) as f32
+        })
+        .collect();
+    let first = report(&tone, 1, None);
+    let second = report(&pulsed, 1, None);
+    let comparison = compare(
+        &compared("steady", &first, None),
+        &[compared("pulsed", &second, None)],
+    );
+    let pulse = &comparison.others[0].movement.pulse;
+    assert!(pulse.reference.is_none(), "{pulse:?}");
+    let found = pulse.other.as_ref().expect("the twin pulses");
+    assert!((found.rate_hertz - 4.0).abs() < 0.01, "{found:?}");
+    assert!(pulse.rate_hertz.is_none());
+}

@@ -51,6 +51,16 @@ pub(crate) fn octaves(nyquist: f64) -> Vec<Band> {
         .collect()
 }
 
+/// The octaves from 63 Hz to 8 kHz that lie wholly below `nyquist`: the
+/// space's octaves and the one below, where drones sit.
+pub(crate) fn octaves_from_63(nyquist: f64) -> Vec<Band> {
+    let lowest = band(63.0, -12, 3.0 / 20.0);
+    std::iter::once(lowest)
+        .filter(|band| band.high <= nyquist)
+        .chain(octaves(nyquist))
+        .collect()
+}
+
 fn band(nominal: f64, index: i32, half_width_decades: f64) -> Band {
     let centre = 1000.0 * 10f64.powf(index as f64 / 10.0);
     Band {

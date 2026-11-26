@@ -4,13 +4,14 @@
 //!
 //! - `comparison`: the types the comparison JSON holds
 //! - one file per group: `level`, `colour`, `texture`, `events`, `space`,
-//!   `over_time`
+//!   `movement`, `over_time`
 //! - `summary`: the one-screen text
 
 mod colour;
 mod comparison;
 mod events;
 mod level;
+mod movement;
 mod over_time;
 mod space;
 mod summary;
@@ -20,10 +21,12 @@ mod texture;
 mod tests;
 
 pub use comparison::{
-    AbsoluteLevels, BandDifference, ClassDifference, ColourDifferences, Comparison, Difference,
-    Differences, EventDifferences, FileFacts, LevelDifferences, Moment, OctaveDifference,
-    OffsetDifference, OverTimeDifferences, PercentileDifference, Place, RateDifference, Ratio,
-    SpaceDifferences, TextureClass, TextureDifferences,
+    AbsoluteLevels, BandDifference, BeatLists, ClassDifference, ColourDifferences, Comparison,
+    Difference, Differences, EventDifferences, FileFacts, LevelDifferences, Moment,
+    MovementDifferences, OctaveDifference, OffsetDifference, OverTimeDifferences,
+    PartialDifference, PartialsDifferences, PercentileDifference, Place, PulseDifferences,
+    RateDifference, Ratio, SlowBandDifference, SlowDifferences, SpaceDifferences, SwellDifferences,
+    TextureClass, TextureDifferences,
 };
 pub use summary::comparison_summary;
 
@@ -95,6 +98,7 @@ fn differences(reference: &Compared, other: &Compared) -> Differences {
         texture: texture::compare(reference, other),
         events: events::compare(first, second),
         space: space::compare(first, second),
+        movement: movement::compare(first, second),
         over_time: over_time::compare(first, second, lines_up),
     }
 }

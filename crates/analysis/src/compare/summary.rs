@@ -23,6 +23,8 @@ const VALUE: usize = 9;
 const DIFFERENCE: usize = 9;
 /// The name in front of a curve's row.
 const ROW: usize = 12;
+/// The matched partials shown per file (the JSON has them all).
+const SHOWN_MATCHES: usize = 4;
 
 /// The comparison as one screen of text.
 pub fn comparison_summary(comparison: &Comparison) -> String {
@@ -75,6 +77,7 @@ pub fn comparison_summary(comparison: &Comparison) -> String {
     write_texture(&mut text, comparison);
     write_events(&mut text, comparison);
     write_space(&mut text, comparison);
+    write_movement(&mut text, comparison);
     write_over_time(&mut text, comparison);
     text
 }
@@ -709,6 +712,273 @@ fn write_space(text: &mut String, comparison: &Comparison) {
             })
             .collect();
         curve(text, name, &columns, 7, &rows, &reference, digits);
+    }
+}
+
+fn write_movement(text: &mut String, comparison: &Comparison) {
+    let others = &comparison.others;
+    type Pick = fn(&Differences) -> Option<Difference>;
+    let rows: [(&str, &str, Pick, usize); 16] = [
+        (
+            "movement",
+            "share in partials",
+            |other| Some(other.movement.tonal_share),
+            2,
+        ),
+        (
+            "",
+            "partials found",
+            |other| Some(other.movement.partials.count),
+            0,
+        ),
+        (
+            "",
+            "  median lines (voices)",
+            |other| other.movement.partials.lines_median,
+            1,
+        ),
+        (
+            "",
+            "  median width (Hz)",
+            |other| other.movement.partials.width_median_hertz,
+            1,
+        ),
+        (
+            "",
+            "  median level p10-p90 (dB)",
+            |other| other.movement.partials.level_p10_p90_median_decibels,
+            1,
+        ),
+        (
+            "",
+            "  median pitch sd (cents)",
+            |other| {
+                other
+                    .movement
+                    .partials
+                    .pitch_standard_deviation_median_cents
+            },
+            1,
+        ),
+        (
+            "",
+            "  detuned between the ears",
+            |other| other.movement.partials.detuned,
+            0,
+        ),
+        (
+            "",
+            "broadband level sd (dB)",
+            |other| Some(other.movement.slow.broadband_standard_deviation_decibels),
+            1,
+        ),
+        (
+            "",
+            "broadband mod. slope",
+            |other| other.movement.slow.broadband_modulation_slope,
+            2,
+        ),
+        (
+            "",
+            "octaves move together",
+            |other| other.movement.slow.all_pairs_correlation,
+            2,
+        ),
+        (
+            "",
+            "centroid sd (octaves)",
+            |other| Some(other.movement.slow.centroid_standard_deviation_octaves),
+            2,
+        ),
+        (
+            "",
+            "centroid against level",
+            |other| other.movement.slow.centroid_level_correlation,
+            2,
+        ),
+        (
+            "",
+            "swells per minute",
+            |other| Some(other.movement.swells.per_minute),
+            1,
+        ),
+        (
+            "",
+            "  rise median (s)",
+            |other| other.movement.swells.rise_median_seconds,
+            1,
+        ),
+        (
+            "",
+            "  decay median (s)",
+            |other| other.movement.swells.decay_median_seconds,
+            1,
+        ),
+        (
+            "",
+            "  skew of level change",
+            |other| other.movement.swells.rate_of_change_skewness,
+            2,
+        ),
+    ];
+    for (group, measure, pick, digits) in rows {
+        row(
+            text,
+            group,
+            measure,
+            others,
+            &|other| pick(other).map(|found| (found, false)),
+            digits,
+        );
+    }
+    let _ = writeln!(
+        text,
+        "{:<GROUP$}detuned: the ears' phase turns at 0.3 Hz or more, steadily from one 10 s to the next; octaves move together: mean correlation of their 1 s levels; slope over 0.01-0.5 Hz (-1 = 1/f)",
+        ""
+    );
+
+    if let Some(first) = others.first() {
+        let columns: Vec<String> = first
+            .movement
+            .slow
+            .octave_bands
+            .iter()
+            .map(|band| frequency_label(band.centre_hertz))
+            .collect();
+        type Band = fn(&super::comparison::SlowBandDifference) -> Option<Difference>;
+        for (name, pick, digits) in [
+            (
+                "level sd Hz",
+                (|band| Some(band.standard_deviation_decibels)) as Band,
+                1,
+            ),
+            ("mod. slope", |band| band.modulation_slope, 2),
+        ] {
+            let reference: Vec<Option<f64>> = first
+                .movement
+                .slow
+                .octave_bands
+                .iter()
+                .map(|band| pick(band).map(|found| found.reference))
+                .collect();
+            let rows: Vec<CurveRow> = others
+                .iter()
+                .map(|other| {
+                    let bands: Vec<Option<Difference>> = first
+                        .movement
+                        .slow
+                        .octave_bands
+                        .iter()
+                        .map(|wanted| {
+                            other
+                                .movement
+                                .slow
+                                .octave_bands
+                                .iter()
+                                .find(|band| band.centre_hertz == wanted.centre_hertz)
+                                .and_then(pick)
+                        })
+                        .collect();
+                    (
+                        bands.iter().map(|found| found.map(|f| f.other)).collect(),
+                        bands
+                            .iter()
+                            .map(|found| found.map(|f| f.difference))
+                            .collect(),
+                    )
+                })
+                .collect();
+            curve(text, name, &columns, 7, &rows, &reference, digits);
+        }
+    }
+
+    let pulse = |found: &Option<crate::report::Pulse>| {
+        found.as_ref().map_or("none".to_owned(), |pulse| {
+            format!(
+                "{:.2} Hz, depth {:.2}, rise {:.0} ms, decay {:.0} ms",
+                pulse.rate_hertz,
+                pulse.depth,
+                1000.0 * pulse.rise_seconds,
+                1000.0 * pulse.decay_seconds
+            )
+        })
+    };
+    let beats = |list: &[f64]| {
+        if list.is_empty() {
+            "none".to_owned()
+        } else {
+            list.iter()
+                .map(|beat| format!("{beat:+.2} Hz"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    if let Some(first) = others.first() {
+        let _ = writeln!(
+            text,
+            "{:<GROUP$}{:<MEASURE$}ref: {} | binaural beats: {}",
+            "",
+            "pulse",
+            pulse(&first.movement.pulse.reference),
+            beats(&first.movement.binaural_beats.reference)
+        );
+    }
+    for (index, other) in others.iter().enumerate() {
+        let _ = writeln!(
+            text,
+            "{:<GROUP$}{:<MEASURE$}{}: {} | binaural beats: {}",
+            "",
+            "",
+            index + 1,
+            pulse(&other.movement.pulse.other),
+            beats(&other.movement.binaural_beats.other)
+        );
+    }
+    for (index, other) in others.iter().enumerate() {
+        let pairs = &other.movement.matched_partials;
+        let shown: Vec<String> = pairs
+            .iter()
+            .take(SHOWN_MATCHES)
+            .map(|pair| {
+                let signed = |value: Option<Difference>, digits: usize| {
+                    value.map_or("-".to_owned(), |found| {
+                        format!("{:+.digits$}", found.difference)
+                    })
+                };
+                format!(
+                    "{:.1} Hz: level {} dB, wander {} dB, pitch sd {} c, width {} Hz",
+                    pair.frequency_hertz.reference,
+                    signed(Some(pair.relative_decibels), 1),
+                    signed(pair.level_p10_p90_decibels, 1),
+                    signed(pair.pitch_standard_deviation_cents, 1),
+                    signed(Some(pair.width_hertz), 1)
+                )
+            })
+            .collect();
+        let _ = writeln!(
+            text,
+            "{:<GROUP$}{:<MEASURE$}{}: {}",
+            "",
+            if index == 0 {
+                "same partials, file - ref"
+            } else {
+                ""
+            },
+            index + 1,
+            if shown.is_empty() {
+                "none within 3 %".to_owned()
+            } else {
+                format!(
+                    "{}{}",
+                    shown.join("; "),
+                    if pairs.len() > SHOWN_MATCHES {
+                        format!("; and {} more", pairs.len() - SHOWN_MATCHES)
+                    } else {
+                        String::new()
+                    }
+                )
+            }
+        );
     }
 }
 

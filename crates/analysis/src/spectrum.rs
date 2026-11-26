@@ -145,7 +145,7 @@ impl Spectrum {
 /// The smallest transform at least a quarter second longer than `length`
 /// whose bin spacing divides [`ENVELOPE_RATE`]: a multiple of
 /// `sample_rate / gcd(sample_rate, 400)` times a power of two, and even.
-fn transform_size(length: usize, sample_rate: u32) -> usize {
+pub(crate) fn transform_size(length: usize, sample_rate: u32) -> usize {
     let step = (sample_rate / greatest_common_divisor(sample_rate, ENVELOPE_RATE)) as usize;
     let needed = length + (GUARD_SECONDS * sample_rate as f64).ceil() as usize;
     let mut size = step * 2;

@@ -6,13 +6,16 @@
 
 use std::fmt::Write;
 
-use crate::report::{Report, Subband};
+use crate::report::{Movement, Report, Subband};
 
 /// Labels are this wide, so every row's values start in the same column.
 const LABEL: usize = 12;
 
 /// The subbands the texture rows show: low, low-mid, presence, air.
 const SHOWN_SUBBANDS: [f64; 4] = [125.0, 500.0, 2000.0, 8000.0];
+
+/// The partials the movement rows show (the report keeps up to 12).
+const SHOWN_PARTIALS: usize = 6;
 
 /// The summary of `report`, under `heading` (the file and how it was made).
 pub fn summary(heading: &str, report: &Report) -> String {
@@ -133,6 +136,7 @@ pub fn summary(heading: &str, report: &Report) -> String {
     );
 
     write_space(&mut text, report);
+    write_movement(&mut text, report);
     write_strip(&mut text, report);
     text
 }
@@ -294,6 +298,108 @@ fn write_space(text: &mut String, report: &Report) {
     }
 }
 
+fn write_movement(text: &mut String, report: &Report) {
+    let movement: &Movement = &report.movement;
+    let number = |value: Option<f64>, digits: usize| {
+        value.map_or("-".to_owned(), |value| format!("{value:.digits$}"))
+    };
+    let beats: Vec<String> = movement
+        .binaural_beats
+        .iter()
+        .map(|beat| {
+            format!(
+                "{:.2} L / {:.2} R = {:+.2} Hz",
+                beat.left_hertz, beat.right_hertz, beat.beat_hertz
+            )
+        })
+        .collect();
+    let _ = writeln!(
+        text,
+        "{:<LABEL$}partials hold {:.0} % of the power ({} found; lines within 2 Hz are one); binaural beats: {}",
+        "movement",
+        100.0 * movement.tonal_share,
+        movement.partials.len(),
+        if beats.is_empty() { "none".to_owned() } else { beats.join(", ") }
+    );
+    let _ = writeln!(
+        text,
+        "{:>LABEL$}{:>6}{:>8}{:>7}{:>8}{:>7}{:>11}{:>10}{:>9}{:>8}{:>8}   (level, pitch: how far they move; L-R Hz: the",
+        "Hz", "lines", "apart", "width", "dB/Leq", "over", "level dB", "pitch c", "L-R Hz", "+/-", "ILD"
+    );
+    let _ = writeln!(
+        text,
+        "{:>LABEL$}{:>6}{:>8}{:>7}{:>8}{:>7}{:>11}{:>10}{:>9}{:>8}{:>8}    ears' phase turning, +/- its spread per 10 s)",
+        "", "", "Hz", "Hz", "", "floor", "p10-p90", "sd", "", "per 10s", "R-L dB"
+    );
+    for partial in movement.partials.iter().take(SHOWN_PARTIALS) {
+        let ears = partial.interaural.as_ref();
+        let _ = writeln!(
+            text,
+            "{:>LABEL$.2}{:>6}{:>8}{:>7.1}{:>8.1}{:>7.1}{:>11}{:>10}{:>9}{:>8}{:>8}",
+            partial.frequency_hertz,
+            partial.lines,
+            number(partial.line_spacing_hertz, 2),
+            partial.high_hertz - partial.low_hertz,
+            partial.relative_decibels,
+            partial.prominence_decibels,
+            number(partial.level_p10_p90_decibels, 1),
+            number(partial.pitch_standard_deviation_cents, 1),
+            number(ears.map(|ears| ears.rotation_hertz), 2),
+            number(ears.and_then(|ears| ears.rotation_spread_hertz), 2),
+            number(ears.map(|ears| ears.level_difference_decibels), 1),
+        );
+    }
+
+    let slow = &movement.slow;
+    let mut header = format!("{:>LABEL$}", "octaves Hz");
+    let mut spread = format!("{:>LABEL$}", "level sd dB");
+    let mut slope = format!("{:>LABEL$}", "mod. slope");
+    for band in &slow.octave_bands {
+        let _ = write!(header, "{:>7}", frequency_label(band.centre_hertz));
+        let _ = write!(spread, "{:>7.1}", band.standard_deviation_decibels);
+        let _ = write!(slope, "{:>7}", number(band.modulation_slope, 2));
+    }
+    let _ = writeln!(
+        text,
+        "{:<LABEL$}1 s levels: how much each octave moves, and the slope of that movement over 0.01-0.5 Hz (0 even, -1 = 1/f, -2 = random walk)\n{header}\n{spread}\n{slope}",
+        "slow"
+    );
+    let _ = writeln!(
+        text,
+        "{:>LABEL$}broadband sd {:.1} dB, slope {} | octaves move together: neighbours {}, all pairs {} | centroid sd {:.2} oct, against level {} (+ louder is brighter)",
+        "",
+        slow.broadband_standard_deviation_decibels,
+        number(slow.broadband_modulation_slope, 2),
+        number(slow.neighbour_correlation, 2),
+        number(slow.all_pairs_correlation, 2),
+        slow.centroid_standard_deviation_octaves,
+        number(slow.centroid_level_correlation, 2)
+    );
+    let swells = &movement.swells;
+    let _ = writeln!(
+        text,
+        "{:<LABEL$}{} rising and falling 3 dB or more: rise median {} s, decay median {} s | skew of the level's change {} (+ quick rise, slow fall)",
+        "swells",
+        swells.count,
+        number(swells.rise_median_seconds, 1),
+        number(swells.decay_median_seconds, 1),
+        number(swells.rate_of_change_skewness, 2)
+    );
+    let pulse = match &movement.pulse {
+        Some(pulse) => format!(
+            "{:.2} Hz ({:.0} dB over the median rate), depth {:.2} ({:.1} dB peak to trough), rise 10-90 % {:.1} ms, decay 90-10 % {:.1} ms",
+            pulse.rate_hertz,
+            pulse.prominence_decibels,
+            pulse.depth,
+            20.0 * ((1.0 + pulse.depth) / (1.0 - pulse.depth).max(1e-6)).log10(),
+            1000.0 * pulse.rise_seconds,
+            1000.0 * pulse.decay_seconds
+        ),
+        None => "none from 1 to 50 Hz".to_owned(),
+    };
+    let _ = writeln!(text, "{:<LABEL$}{pulse}", "pulse");
+}
+
 fn write_strip(text: &mut String, report: &Report) {
     let strip = &report.over_time.strip;
     let step = strip
@@ -414,13 +520,17 @@ mod tests {
             "start s",
             "LAeq",
             "onsets",
+            "octaves Hz",
+            "level sd dB",
+            "mod. slope",
         ] {
             assert_eq!(rows(&first, label), rows(&second, label), "{label}");
             assert!(rows(&first, label).is_some(), "{label}");
         }
         assert!(second.contains("IACC"));
         assert!(first.contains("none: one channel"));
-        assert!(first.lines().count() <= 45, "one screen:\n{first}");
-        assert!(second.lines().count() <= 45, "one screen:\n{second}");
+        assert!(first.contains("pulse"));
+        assert!(first.lines().count() <= 52, "one screen:\n{first}");
+        assert!(second.lines().count() <= 52, "one screen:\n{second}");
     }
 }

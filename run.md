@@ -160,11 +160,33 @@ at −1 dBFS, one gain for all channels so nothing moves, and `-normalised` is a
 the default name. The levels in its sidecar are the file's; the engine's own are those
 minus `gain_decibels`. Leave it off for files you will measure against each other.
 
+## Sample a clip
+
+To measure an example from YouTube (or any site `yt-dlp` reads), take only a
+stretch of it: `scripts/clip.sh` fetches just that range, never the whole video, and
+writes a WAV with the source's sample rate and both channels to `assets/clips/` (kept
+out of git: other people's recordings). It prints the `analyse` line for the file.
+Needs `brew install yt-dlp ffmpeg`.
+
+```sh
+sh scripts/clip.sh "https://www.youtube.com/watch?v=<id>" 1:30 2:30 bowl
+#   → assets/clips/bowl-90-150.wav
+```
+
+Online audio is lossy (YouTube about 128–160 kbps): fine for envelopes, beat rates,
+modulation and partials up to about 16 kHz, not for the top octave. A binaural beat
+needs left and right to differ; check that per clip (the summary's width and ILD)
+before reading a beat into it.
+
 ## Analyse a file
 
-`analyse` measures recordings and renders the same way: level, colour, texture, events
-and, for two or more channels, space. For each file it writes a JSON report
-(`target/analysis/<stem>.json`, `report_version` 1, for the comparison tool), prints a
+`analyse` measures recordings and renders the same way: level, colour, texture, events,
+movement and, for two or more channels, space. Movement is how the tones and noise move:
+each partial's width, level and pitch wander and, at the ears, its phase turning (a binaural
+detune); binaural beats; how much each octave moves over seconds to minutes; the shape of
+the swells; and a periodic pulse from 1 to 50 Hz (what each tells:
+`docs/tone-and-noise-movement.md`). For each file it writes a JSON report
+(`target/analysis/<stem>.json`, `report_version` 2, for the comparison tool), prints a
 one-screen summary, and with `--picture` draws a 1600 px PNG: spectrogram, LAF with L10,
 L50 and L90, onsets, and for two channels width and ILD, on one time axis. A render's
 sidecar beside it gives the channel names and the calibration, so levels are in dB SPL
@@ -194,12 +216,14 @@ included.
 
 `analyse --compare` puts a reference and one or more other files side by side and says where
 the others differ: level shape (and absolute level when both are calibrated), colour, texture,
-events, space and the distributions over time. The first file is the reference; each file is
-audio (analysed as above, its sidecar read) or a report JSON `analyse` wrote. It prints a
-one-screen comparison (the reference's value, each file's value and its difference), writes a
-comparison JSON (`comparison_version` 1) and with `--picture` a 1600 px PNG of overlays, the
-reference black and thick, each other file in its colour, each named in the legend. It reports
-differences; only listening judges which version is better.
+events, space, movement and the distributions over time. Movement compares the partials as a
+whole (medians of their voices, width and wander), one to one where both files have a partial
+at the same pitch (within 3 %), and the slow movement, swells and pulse. The first file is
+the reference; each file is audio (analysed as above, its sidecar read) or a report JSON
+`analyse` wrote. It prints a one-screen comparison (the reference's value, each file's value
+and its difference), writes a comparison JSON (`comparison_version` 2) and with `--picture` a
+1600 px PNG of overlays, the reference black and thick, each other file in its colour, each
+named in the legend. It reports differences; only listening judges which version is better.
 
 ```sh
 cargo run --release --bin analyse -- --compare "research papers/soft wind.mp3@0-28" \

@@ -7,10 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::report::LevelUnit;
+use crate::report::{LevelUnit, Pulse};
 
 /// The layout of [`Comparison`] this crate writes.
-pub(crate) const COMPARISON_VERSION: u32 = 1;
+pub(crate) const COMPARISON_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Comparison {
@@ -72,6 +72,7 @@ pub struct Differences {
     pub events: EventDifferences,
     /// Both files two channels only.
     pub space: Option<SpaceDifferences>,
+    pub movement: MovementDifferences,
     pub over_time: OverTimeDifferences,
 }
 
@@ -323,4 +324,96 @@ pub struct Moment {
     /// The start of the step or frame (s).
     pub seconds: f64,
     pub values: Difference,
+}
+
+/// How the tones and noise move, compared. Two files' partials seldom sit
+/// at the same frequencies, so they are compared as a whole (medians over
+/// each file's partials) and, where both have a partial at the same pitch,
+/// one to one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MovementDifferences {
+    /// The share of the power in the partials, 0 to 1.
+    pub tonal_share: Difference,
+    pub partials: PartialsDifferences,
+    /// Partials within 3 % of each other's frequency, nearest first, lowest
+    /// reference frequency first.
+    pub matched_partials: Vec<PartialDifference>,
+    /// Each file's binaural beats (Hz, right minus left).
+    pub binaural_beats: BeatLists,
+    pub slow: SlowDifferences,
+    pub swells: SwellDifferences,
+    pub pulse: PulseDifferences,
+}
+
+/// Medians over each file's partials. None when either file has none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PartialsDifferences {
+    pub count: Difference,
+    pub lines_median: Option<Difference>,
+    /// The −20 dB width (Hz).
+    pub width_median_hertz: Option<Difference>,
+    pub level_p10_p90_median_decibels: Option<Difference>,
+    pub pitch_standard_deviation_median_cents: Option<Difference>,
+    /// How many partials are detuned between the ears: the phase between
+    /// them turns at 0.3 Hz or more, varying by less than half that from one
+    /// 10 s stretch to the next. None unless both files have an ear pair.
+    pub detuned: Option<Difference>,
+}
+
+/// One partial in both files.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PartialDifference {
+    pub frequency_hertz: Difference,
+    /// Its power relative to its own file's (dB).
+    pub relative_decibels: Difference,
+    pub width_hertz: Difference,
+    pub level_p10_p90_decibels: Option<Difference>,
+    pub pitch_standard_deviation_cents: Option<Difference>,
+    /// Left minus right (Hz), when both files have an ear pair.
+    pub rotation_hertz: Option<Difference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BeatLists {
+    pub reference: Vec<f64>,
+    pub other: Vec<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowDifferences {
+    /// The octaves both files have.
+    pub octave_bands: Vec<SlowBandDifference>,
+    pub broadband_standard_deviation_decibels: Difference,
+    pub broadband_modulation_slope: Option<Difference>,
+    pub neighbour_correlation: Option<Difference>,
+    pub all_pairs_correlation: Option<Difference>,
+    pub centroid_standard_deviation_octaves: Difference,
+    pub centroid_level_correlation: Option<Difference>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowBandDifference {
+    pub centre_hertz: f64,
+    pub standard_deviation_decibels: Difference,
+    pub modulation_slope: Option<Difference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SwellDifferences {
+    /// Swells a minute: files of different lengths compare.
+    pub per_minute: Difference,
+    pub rise_median_seconds: Option<Difference>,
+    pub decay_median_seconds: Option<Difference>,
+    pub rate_of_change_skewness: Option<Difference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PulseDifferences {
+    pub reference: Option<Pulse>,
+    pub other: Option<Pulse>,
+    /// None unless both files pulse.
+    pub rate_hertz: Option<Difference>,
+    pub depth: Option<Difference>,
+    pub rise_seconds: Option<Difference>,
+    pub decay_seconds: Option<Difference>,
 }

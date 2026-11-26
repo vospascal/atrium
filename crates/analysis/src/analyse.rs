@@ -4,6 +4,7 @@
 
 use crate::bands::{band_powers, third_octaves};
 use crate::level::{block_powers, levels, LevelInputs};
+use crate::movement::MovementBuilder;
 use crate::onsets::onsets;
 use crate::over_time::{over_time, Series};
 use crate::report::{
@@ -21,8 +22,8 @@ use crate::weighting::{a_weighting, c_weighting, fast};
 const CENTROID_LOW: f64 = 20.0;
 const CENTROID_HIGH: f64 = 20_000.0;
 
-/// Analyse `signal`: levels, colour, texture, events and, for two or more
-/// channels, space.
+/// Analyse `signal`: levels, colour, texture, events, movement and, for two
+/// or more channels, space.
 ///
 /// # Panics
 ///
@@ -40,17 +41,21 @@ pub fn analyse(signal: &Signal, settings: &Settings) -> Report {
     let third_octave_bands = third_octaves(nyquist);
     let pair = pair_of(&names);
 
+    let channel_samples: Vec<Vec<f32>> = (0..signal.channels)
+        .map(|index| signal.channel(index))
+        .collect();
+    let mut movement = MovementBuilder::new(&channel_samples, rate, pair);
+
     let mut channel_inputs = Vec::with_capacity(signal.channels);
-    let mut channel_samples = Vec::with_capacity(signal.channels);
     let mut channel_band_powers = Vec::with_capacity(signal.channels);
     let mut channel_laf_steps = Vec::with_capacity(signal.channels);
     let mut textures = Vec::with_capacity(signal.channels);
     let mut pair_envelopes = (Vec::new(), Vec::new());
     let mut a_weighted_power = vec![0.0f64; frames];
     let (mut centroid_moment, mut centroid_power) = (0.0, 0.0);
-    for index in 0..signal.channels {
-        let samples = signal.channel(index);
-        let spectrum = Spectrum::of(&samples, rate);
+    for (index, samples) in channel_samples.iter().enumerate() {
+        let spectrum = Spectrum::of(samples, rate);
+        movement.add_channel(index, &spectrum);
         let a_weighted: Vec<f64> = spectrum
             .filtered(a_weighting)
             .iter()
@@ -65,7 +70,7 @@ pub fn analyse(signal: &Signal, settings: &Settings) -> Report {
         let (moment, power) = spectrum.frequency_moments(CENTROID_LOW, CENTROID_HIGH);
         centroid_moment += moment;
         centroid_power += power;
-        let channel_power = mean_square(&samples);
+        let channel_power = mean_square(samples);
         textures.push((channel_texture(&spectrum), channel_power));
         if let Some((left, right)) = pair {
             if index == left {
@@ -78,13 +83,12 @@ pub fn analyse(signal: &Signal, settings: &Settings) -> Report {
             mean_square: channel_power,
             a_weighted_mean_square: spectrum.mean_square(0.0, f64::INFINITY, a_weighting),
             c_weighted_mean_square: spectrum.mean_square(0.0, f64::INFINITY, c_weighting),
-            blocks: block_powers(&samples, rate),
+            blocks: block_powers(samples, rate),
             fast: time_weighted,
             peak: samples
                 .iter()
                 .fold(0.0f64, |peak, sample| peak.max(sample.abs() as f64)),
         });
-        channel_samples.push(samples);
     }
     let scale = combination.scale(signal.channels);
     a_weighted_power
@@ -220,6 +224,7 @@ pub fn analyse(signal: &Signal, settings: &Settings) -> Report {
         texture,
         events,
         space,
+        movement: movement.finish(),
         over_time,
     }
 }

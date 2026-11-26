@@ -1,7 +1,7 @@
 # atrium-analysis
 
-One report for a recording or a render: level, colour, texture, events and space, each from
-a published definition. The same measures for a field recording and for what the engine
+One report for a recording or a render: level, colour, texture, events, movement and space,
+each from a published definition. The same measures for a field recording and for what the engine
 renders, so the two can be compared. Measurements report differences; only listening judges.
 
 ```rust
@@ -35,8 +35,8 @@ live.push(&block, clock_sample);       // what the output played, from that cloc
 let columns = live.take_columns();     // 50 ms each: spectrum, LAeq and LAF, onset, width, ILD
 ```
 
-`report` serialises to JSON (`report_version: 1`), which the comparison reads back as it is;
-`Comparison` serialises to JSON too (`comparison_version: 1`), and `Cut` (`cut_version: 1`). The
+`report` serialises to JSON (`report_version: 2`; 2 added `movement`), which the comparison reads back as it is;
+`Comparison` serialises to JSON too (`comparison_version: 2`; 2 added `movement`), and `Cut` (`cut_version: 1`). The
 binary that decodes files, reads a render's sidecar and writes all three is `src/bin/analyse.rs`;
 see run.md, "Analyse a file". The cutter's is `src/bin/cut.rs` ("Cut a recording"), and the
 draft preset it writes is the engine's (`atrium::config::draft_preset`): this crate knows no
@@ -62,6 +62,11 @@ engine they measure, and every one is tested against a signal whose answer is kn
 | | Envelope coherence per octave | Correlation of the two ears' Hilbert band envelopes |
 | | ILD per octave, ITD 88 Hz–1.4 kHz | Level difference; lag of the correlation peak |
 | | 5.1 front against surround | L C R against Ls Rs |
+| Movement | Partials: frequency, lines, width, level and pitch movement | Ours (see below), from 16 s spectra and each partial's band at baseband |
+| | Partials at the ears: ILD, rotation of the interaural phase and its spread per 10 s; binaural beats | Ours: a binaural detune turns the phase at the frequency difference |
+| | Each octave's level movement, its slope over 0.01–0.5 Hz, co-movement, centroid against level | 1 s frames; the slope as in Voss and Clarke 1975 |
+| | Swells: rise, decay, skew of the level's change | Ours: topographic prominence ≥ 3 dB on a 2 s smoothed level |
+| | Pulse 1–50 Hz: rate, depth, 10–90 % rise, 90–10 % decay | Ours: the power envelope's strongest rate, folded into its average cycle |
 
 ## Layout
 
@@ -79,10 +84,16 @@ src/
   texture/         McDermott and Simoncelli: filters.rs (cochlear and modulation banks), statistics.rs
   onsets.rs        spectral flux and librosa's peak picker
   space.rs         IACC, width, envelope coherence, ILD, ITD
+  movement/        how tones and noise move: mod.rs (MovementBuilder: samples first, then each
+                   channel's spectrum, then the report), one file per measure: lines.rs (lines,
+                   clusters, widths), baseband.rs (a band at 400 Hz, complex), partials.rs (level,
+                   pitch, interaural), beats.rs, slow.rs, swells.rs, pulse.rs; short_time.rs
+                   (Hann frames)
   over_time.rs     the series the strip and the picture draw
   summary.rs       the one-screen text
   compare/         the comparison: mod.rs (Compared, compare), comparison.rs (the serde types),
-                   one file per group (level, colour, texture, events, space, over_time),
+                   one file per group (level, colour, texture, events, space, movement,
+                   over_time),
                    summary.rs (its one-screen text), tests.rs (the acceptance checks)
   cut/             the cutter: mod.rs (cut, the steps in order), record.rs (the serde types),
                    one file per step: band.rs, bed.rs, events.rs, criterion.rs, edges.rs,
@@ -162,6 +173,59 @@ src/
 - **The picture draws text with a 5×7 bitmap font in the crate**, not a font crate or file: no
   dependency, the same pixels everywhere, and readable at twice its size in a 1600 px image.
 
+### Decisions that look wrong and are right, movement
+
+What each movement measure tells, and the literature it answers to, is in
+docs/tone-and-noise-movement.md; the definitions are in each file's header.
+
+- **A line counts only if the spectrum dips 6 dB before any higher point within 2 Hz.**
+  Without it, ambient pads read as clusters of 25 to 77 voices 0.25–0.36 Hz apart: the ripple
+  on one partial whose pitch wanders, smeared into a hump by the 16 s frames (a mean of 14
+  frames scatters about 1.2 dB, four to six bins apart). A throwaway script without the rule
+  reported "every partial a cluster 0.45–0.8 Hz apart" for seven pieces; with it most are one
+  wandering partial 2–9 Hz wide.
+- **Lines more than 20 dB under their cluster's strongest are not voices.** A pure 82.41 Hz pedal
+  tone read as six lines from its −28 dB sidebands, and chains of faint lines joined separate
+  partials into one.
+- **A partial's band is its −20 dB width, 0.75 to 2 Hz past its outer lines.** With a fixed
+  ±0.75 Hz a wandering partial's shoulders fell outside its band: pitch wander read 2–4 cents
+  where the whole hump gives 6–15.
+- **The band's edges roll off over 0.5 Hz, and the partial measures leave out 2 s at each end.**
+  A hard-edged band rings as 1/t: a steady sine wandered by 1 % in level two seconds into the
+  file. The roll-off takes about 1/0.5 Hz = 2 s to settle where the file starts and stops (0.75 %
+  off 1.5 s from the end, under 0.08 % from 2.5 s).
+- **The interaural reading is a rotation rate and its spread per 10 s, not a coherence over the
+  whole file.** A real 0.46 Hz detune (one ear's voice steadily higher) drifts a little over
+  four minutes; a whole-file coherence piled those drifts into radians and read 0.01, the same as
+  unrelated voices. Local coherence within 10 s did not separate them either, because voices
+  beating inside the band break the phase up. What a detune keeps is its rate from stretch to
+  stretch.
+- **Binaural beats are pairs of one-ear partials, besides the rotation.** A beat over 2 Hz puts
+  its two tones in different clusters, each mostly in one ear, so a rotation within one band
+  never sees it.
+- **A partial more than 60 dB under the whole file is dropped.** A clean render has no noise
+  floor: a 100 Hz sine's rounding products at 1.5–7.3 kHz, 140 dB down, stood 10 dB over their
+  surroundings and filled ten of the twelve partials.
+- **The pulse's rate is found on the power envelope; the amplitude is used only for the
+  cycle.** The square root that turns power into amplitude makes harmonics that fold back at
+  400 Hz: a harmonic tone on 39 Hz showed a 49 Hz "pulse" (351 Hz folded). A boxcar envelope
+  would alias the squared carrier instead (a steady 210 Hz tone pulsing at 20 Hz), so the power
+  is lowpassed at 200 Hz on the whole file's transform.
+- **A pulse needs an absolute depth as well as 20 dB over the median rate.** A clean render has
+  no noise floor, so the median says nothing: a pure harmonic tone passed at 21 Hz, 75 dB over a
+  median of rounding error. The rate's line must modulate the power by 0.06 (an amplitude depth
+  of 0.03, half the smallest heard on noise) and the folded cycle be at least 0.03 deep.
+- **Rates within 5 % of a partial are its pitch, not a pulse.** A harmonic tone repeats at its
+  fundamental: a 38.9 Hz drone read as a 38.65 Hz pulse, and at 2 % its detuned second voices
+  still gave 37.87 Hz (116.20 − 78.25).
+- **The swells' 2 s smoothing shifts their corners, and the tests say by how much.** A swell
+  rising in 2 s and falling in 8 reads 3.2 s and 6.8 s: the smoothed trough lands 0.4 s late, the
+  peak 1.6 s late. Still plainly quick up and slow down; the skew of the change says the same
+  without the shift.
+- **Movement runs on every analysis, not behind a flag.** It adds about 20 % (6.3 s for three
+  minutes of stereo at 48 kHz, from 5.2 s); the engine's own tests call `analyse` on short
+  renders, where it costs less.
+
 ## The comparison
 
 `compare` takes a reference and any number of other files, each a `Compared`: its report, a
@@ -178,6 +242,7 @@ listening says which is better.
 | Texture | M1, M2, M3, M4, C, modulation power, C1 | Per class the paper's SNR, 10·log10(Σ s² / Σ (s − s′)²), s the reference's; whether ≥ 20 dB (the paper's "converged"); a scatter floor (below); the three places (subbands, pairs, modulation rates) holding most of the error |
 | Events | Onsets per minute, interval median, 10 % and 90 % | Differences and the rate's ratio |
 | Space | Two two-channel files: IACC, envelope coherence, ILD spread per octave; width | Differences; width marked beyond 0.075, the JND of IACC (Cox, Davies & Lam 1993) |
+| Movement | Partials as a whole: count, and medians of lines, width, level and pitch wander; partials detuned between the ears; partials at the same pitch one to one; binaural beats; each octave's movement and slope; swells a minute, their rise and decay; the pulse | Differences; the medians and the one-to-one pairs explained below |
 | Over time | The 25 ms LAF series and the width per 100 ms frame | Distributions (L95 … L5; width exceeded 90, 50, 10 %), and for two files on one timeline the largest difference and when |
 
 The picture overlays, on one set of axes per panel: the third-octave colour and the difference
@@ -229,6 +294,18 @@ coherence per octave; and each file's spectrogram as a strip.
 - **The spectrogram strips share one time scale, the longest file spanning the width, and each is
   relative to its own loudest cell.** A 3 s blackbird take is then a short strip beside a minute
   of wind, which is what they are; and an uncalibrated recording's cells have no level to share.
+
+- **Movement compares partials as a whole and one to one, not in order.** Two files' strongest
+  partials are seldom the same tones: a focus tone at 528 Hz against a pad on C. The whole is
+  the median over each file's partials (lines, width, level and pitch wander); the one-to-one
+  pairs are partials within 3 % of each other's frequency, nearest first, which is what a
+  generator against a recording of the same note needs.
+- **A partial counts as detuned between the ears at 0.3 Hz or more, its rate varying by less
+  than half of it from one 10 s stretch to the next.** It is the line that separated the Cryo
+  Chamber piece's 58.9 Hz detune (0.37 ± 0.15 Hz) from partials whose ears merely wander
+  (turning at 0.0–0.1 Hz, ± about as much); set on those seven pieces, not on a published
+  threshold.
+- **Swells are compared a minute**, not as a count: the clips are two to four minutes long.
 
 ## The cutter
 
@@ -336,6 +413,17 @@ reads it both ways: every 100 ms width and ILD identical, every 3 s LAeq identic
   splice into FAST and the flux. The columns still waiting are lost with it.
 
 ## Known gaps
+
+- **Movement has no just-noticeable differences.** Its differences are plain numbers, none
+  marked: no published JND for a partial's wander, a band's modulation slope or a swell's rise
+  was found. Pairs of takes of one sound, as the texture's scatter floor uses, would say how
+  far two stretches of one piece differ by chance.
+- **Movement's thresholds were set on seven pieces of ambient music** (the 6 dB dip, the 20 dB
+  voice and width limits, the 5 % pitch tolerance) and on signals with known answers. Field
+  recordings of bowls, choirs or wind may need them revisited.
+- **Lines need 16 s frames to separate voices a few tenths of a hertz apart**; a file under 40 s
+  gets shorter frames (four of them) and coarser lines.
+- **The pulse covers 1–50 Hz.** Slower movement is the swells'; faster is roughness and pitch.
 
 - **The scatter floor's margin was set on one pair of white-noise takes** (SNR within 1.2 dB
   below to 3.4 dB above the floor, so 3 dB of margin). Takes of a recorded wind or rain whose

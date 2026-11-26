@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// The layout of [`Report`] this crate writes. A report JSON with another
 /// `report_version` is not this layout, and `analyse --compare` refuses it.
-pub const REPORT_VERSION: u32 = 1;
+pub const REPORT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Report {
@@ -23,6 +23,7 @@ pub struct Report {
     pub events: Events,
     /// None for one channel.
     pub space: Option<Space>,
+    pub movement: Movement,
     pub over_time: OverTime,
 }
 
@@ -222,6 +223,138 @@ pub struct Distribution {
     /// Ls and Rs together.
     pub surround: f64,
     pub front_minus_surround_decibels: f64,
+}
+
+/// How the file's tones and noise move: its partials and how each one's
+/// level, pitch and interaural phase move, the slow swells of each octave,
+/// their shape, and a periodic pulse if there is one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Movement {
+    /// The share of the power (20 Hz to Nyquist) in the partials' bands, 0 to 1.
+    pub tonal_share: f64,
+    /// The strongest partials, strongest first, at most 12.
+    pub partials: Vec<Partial>,
+    /// Pairs of partials heard one in each ear: a binaural beat. Empty
+    /// without an ear pair.
+    pub binaural_beats: Vec<BinauralBeat>,
+    pub slow: SlowMovement,
+    pub swells: Swells,
+    /// None when the envelope has no periodic pulse from 1 to 50 Hz.
+    pub pulse: Option<Pulse>,
+}
+
+/// A spectral line standing at least 10 dB over its surroundings, with the
+/// lines within 2 Hz and 20 dB of it that dip 6 dB apart: one tone, a
+/// cluster of detuned voices, or a tone and its vibrato sidebands.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Partial {
+    /// The strongest line (Hz), from 16 s spectra.
+    pub frequency_hertz: f64,
+    /// The band the partial fills (Hz): from 0.75 to 2 Hz past its outer
+    /// lines, to where the spectrum falls 20 dB under its strongest line. A
+    /// steady tone is 1.5 Hz wide; a wandering one a hump of a few hertz; a
+    /// dense ensemble or a narrow noise band reaches the 2 Hz limit.
+    pub low_hertz: f64,
+    pub high_hertz: f64,
+    pub lines: usize,
+    /// The median gap between neighbouring lines (Hz); None for one line.
+    pub line_spacing_hertz: Option<f64>,
+    /// The cluster's power relative to the whole file's (dB, so re Leq).
+    pub relative_decibels: f64,
+    /// The strongest line over the median of the spectrum around it (dB).
+    pub prominence_decibels: f64,
+    /// How far the cluster's level moves over the file: its 90th percentile
+    /// minus its 10th (dB), on a 0.25 s smoothed level. None for a file too
+    /// short to say.
+    pub level_p10_p90_decibels: Option<f64>,
+    /// How its frequency wanders: the standard deviation of the
+    /// instantaneous frequency, 0.25 s smoothed, around its median (cents).
+    pub pitch_standard_deviation_cents: Option<f64>,
+    pub pitch_p10_p90_cents: Option<f64>,
+    /// None without an ear pair.
+    pub interaural: Option<PartialInteraural>,
+}
+
+/// The partial at the two ears.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PartialInteraural {
+    /// Right minus left (dB).
+    pub level_difference_decibels: f64,
+    /// The rate the phase between the ears turns at: the left ear's
+    /// frequency minus the right's (Hz), within ±5 Hz.
+    pub rotation_hertz: f64,
+    /// How much that rate varies between 10 s stretches: the power-weighted
+    /// standard deviation of their rates (Hz). Small beside the rate for a
+    /// binaural detune (one ear's voice steadily higher); as large as the
+    /// rate or larger for voices that wander apart at the two ears. None for
+    /// a file with fewer than two stretches.
+    pub rotation_spread_hertz: Option<f64>,
+}
+
+/// A partial mostly in the left ear and one mostly in the right, within
+/// 45 Hz: what a binaural beat is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BinauralBeat {
+    pub left_hertz: f64,
+    pub right_hertz: f64,
+    /// Right minus left (Hz).
+    pub beat_hertz: f64,
+}
+
+/// The level of each octave on 1 s frames every 0.5 s: how much it moves,
+/// how its movement is spread over 0.01–0.5 Hz, and whether the bands move
+/// together.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowMovement {
+    pub octave_bands: Vec<SlowBand>,
+    /// The whole spectrum's level, 20 Hz to Nyquist.
+    pub broadband_standard_deviation_decibels: f64,
+    pub broadband_modulation_slope: Option<f64>,
+    /// The mean correlation of neighbouring octaves' levels, and of all pairs.
+    pub neighbour_correlation: Option<f64>,
+    pub all_pairs_correlation: Option<f64>,
+    /// The spectral centroid per frame: its spread (octaves) and its
+    /// correlation with the broadband level (+ louder is brighter).
+    pub centroid_standard_deviation_octaves: f64,
+    pub centroid_level_correlation: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlowBand {
+    pub centre_hertz: f64,
+    pub standard_deviation_decibels: f64,
+    /// The slope of the level's power spectrum against modulation rate,
+    /// 0.01 (or two cycles of the file) to 0.5 Hz, log-log: 0 for movement
+    /// spread evenly over the rates, −1 for 1/f, −2 for a random walk. None
+    /// for a file too short to give four third-octave rate bands.
+    pub modulation_slope: Option<f64>,
+}
+
+/// Slow swells of the broadband level, 2 s smoothed, rising and falling at
+/// least 3 dB.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Swells {
+    pub count: usize,
+    /// From the trough before to the peak, and from the peak to the trough
+    /// after (s), medians over the swells.
+    pub rise_median_seconds: Option<f64>,
+    pub decay_median_seconds: Option<f64>,
+    /// The skewness of the level's rate of change: + for quick rises and
+    /// slow falls (damped), − for slow rises and quick falls (ramped).
+    pub rate_of_change_skewness: Option<f64>,
+}
+
+/// A periodic pulse in the envelope: the average cycle at its rate.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pulse {
+    pub rate_hertz: f64,
+    /// The rate's modulation power over the median from 1 to 50 Hz (dB).
+    pub prominence_decibels: f64,
+    /// (max − min) / (max + min) of the average cycle's amplitude.
+    pub depth: f64,
+    /// 10 to 90 % of the way up, and 90 to 10 % down (s).
+    pub rise_seconds: f64,
+    pub decay_seconds: f64,
 }
 
 /// The file over time: what the summary's strip and the picture draw.

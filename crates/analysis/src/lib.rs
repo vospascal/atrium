@@ -1,5 +1,5 @@
-//! One report for a recording or a render: level, colour, texture, events
-//! and space, each from a published definition, as numbers (`Report`, JSON
+//! One report for a recording or a render: level, colour, texture, events,
+//! movement and space, each from a published definition, as numbers (`Report`, JSON
 //! for the comparison tool), as a one-screen text (`summary`) and as a
 //! picture (`picture`). Reports side by side, where the others differ from a
 //! reference (`compare`, `comparison_summary`, `comparison_picture`). A long
@@ -19,6 +19,7 @@ mod envelope;
 mod frequency_rows;
 mod level;
 mod live;
+mod movement;
 mod onsets;
 mod over_time;
 mod picture;
@@ -36,11 +37,12 @@ mod test_signals;
 
 pub use analyse::analyse;
 pub use compare::{
-    compare, comparison_summary, AbsoluteLevels, BandDifference, ClassDifference,
+    compare, comparison_summary, AbsoluteLevels, BandDifference, BeatLists, ClassDifference,
     ColourDifferences, Compared, Comparison, Difference, Differences, EventDifferences, FileFacts,
-    LevelDifferences, Moment, OctaveDifference, OffsetDifference, OverTimeDifferences,
-    PercentileDifference, Place, RateDifference, Ratio, SpaceDifferences, TextureClass,
-    TextureDifferences,
+    LevelDifferences, Moment, MovementDifferences, OctaveDifference, OffsetDifference,
+    OverTimeDifferences, PartialDifference, PartialsDifferences, PercentileDifference, Place,
+    PulseDifferences, RateDifference, Ratio, SlowBandDifference, SlowDifferences, SpaceDifferences,
+    SwellDifferences, TextureClass, TextureDifferences,
 };
 pub use cut::{
     cut, cut_summary, BandSpread, BoutCriterion, Bouts, CriterionDecision, Cut, CutSettings,
@@ -51,9 +53,10 @@ pub use level::power_while_sounding;
 pub use live::{Column, Live};
 pub use picture::{comparison_picture, cut_picture, picture};
 pub use report::{
-    BandLevel, Binaural, BinauralBand, Colour, Distribution, Events, Level, LevelUnit, Levels,
-    ModulationCorrelation, OverTime, Report, Segment, SignalFacts, Space, Subband,
-    SubbandCorrelation, Texture, REPORT_VERSION,
+    BandLevel, Binaural, BinauralBand, BinauralBeat, Colour, Distribution, Events, Level,
+    LevelUnit, Levels, ModulationCorrelation, Movement, OverTime, Partial, PartialInteraural,
+    Pulse, Report, Segment, SignalFacts, SlowBand, SlowMovement, Space, Subband,
+    SubbandCorrelation, Swells, Texture, REPORT_VERSION,
 };
 pub use signal::{Settings, Signal};
 pub use summary::summary;
