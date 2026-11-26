@@ -200,6 +200,8 @@ What they have in common:
   and 19.3 per minute in `hVFaaUEIpzE` (median 2 s apart), where something plays over the
   drone.
 
+Each piece taken apart into its layers, as a recipe: `ambient-recipes.md`.
+
 What this suggests for a focus tone (an idea, not a decision): keep one steady pure line as
 the anchor. Let every other line's pitch wander a little (5–15 cents) and its level wander
 independently by 10 dB or more over tens of seconds, never periodically, while the total
