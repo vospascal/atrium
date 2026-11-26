@@ -100,6 +100,21 @@ sh scripts/sony-head-tracker.sh           # bridge on its own (rarely needed)
 
 The bridge log is `$TMPDIR/atrium-sony-bridge.log`.
 
+## Play a recipe
+
+A recipe is a preset of chords, how they change, how long each holds and how it swells,
+played by the engine's `recipe` voice (`docs/recipe-design.md`, `crates/recipe`). Calm, after
+Astral Ambience, and the same idea in F:
+
+```sh
+cargo run --release -- scenes/recipe-calm.yaml --headphones
+cargo run --release -- scenes/recipe-calm-in-f.yaml --headphones
+cargo run --release -- scenes/reference-calm-serene-meditative.yaml --headphones   # the original
+```
+
+The same seed plays the same piece; a scene's `seed:` pins it. To measure it against the
+original: render it and `analyse --compare` the clip with the render.
+
 ## Render a scene to a file
 
 `render` plays a scene into a WAV file instead of the speakers, through the real

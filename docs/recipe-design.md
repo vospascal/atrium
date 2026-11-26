@@ -1,6 +1,8 @@
 # Recipes: a design sketch
 
-A design draft, 2026-11-26. Nothing here is built. It describes a way to make tones and
+A design draft, 2026-11-26. The chord layer is built (`crates/recipe`, the engine's `recipe`
+synth, `sources/recipes/calm.yaml` and `calm-in-f.yaml`, scenes `recipe-calm` and
+`recipe-calm-in-f`); the rest is not. It describes a way to make tones and
 ambient music in Atrium that you can repeat and vary: a **recipe**, a preset that says what a
 piece is made of, where every part can be fixed or alive. It grew out of taking seven
 reference pieces apart (`ambient-recipes.md`): the same few building blocks, set differently,
@@ -243,6 +245,11 @@ whole: { level: moves 12 dB, swells: { up: about 12 s, down: about 14 s } }
 - **Space is per note, not per piece**: a voice to one side, a note detuned between the ears.
 
 ## Open
+
+- Built so far: chords, change, hold, swell (with a stagger), per-chord colour levels, the
+  chorus voice with drift, wander and a cutoff, and two kinds of events, pings (struck notes
+  of the chord sounding, ringing out, of one or more kinds such as lower and higher) and swooshes (a swell of noise in a band). What the
+  comparisons with Calm found: `crates/recipe/README.md`.
 
 - The syntax: the YAML above is for reading; the real form is decided when building, with
   the app's controls in mind.
